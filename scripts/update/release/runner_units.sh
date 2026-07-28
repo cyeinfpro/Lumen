@@ -91,14 +91,14 @@ refresh_update_runner_units() {
     lumen_ensure_backup_service_user "${backup_root}"
 
     if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update.path"; then
-        log_warn "[refresh_update_runner] 安装 lumen-update.path 失败，面板一键更新可能不可用。"
+        log_error "[refresh_update_runner] 安装 lumen-update.path 失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
-        return 0
+        return 1
     fi
     if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-runner.service" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-runner.service"; then
-        log_warn "[refresh_update_runner] 安装 lumen-update-runner.service 失败，面板一键更新可能不可用。"
+        log_error "[refresh_update_runner] 安装 lumen-update-runner.service 失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
-        return 0
+        return 1
     fi
     if [ -f "${tmp_dir}/lumen-update-warm.path" ] && [ -f "${tmp_dir}/lumen-update-warm.service" ]; then
         if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update-warm.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update-warm.path"; then
@@ -125,14 +125,14 @@ refresh_update_runner_units() {
     lumen_run_as_root install -d -m 0770 -o root -g "${storage_gid}" /var/lib/lumen-storage \
         || log_warn "[refresh_update_runner] 创建 /var/lib/lumen-storage 失败，API 可能无法写入触发文件。"
     if ! lumen_run_as_root systemctl daemon-reload; then
-        log_warn "[refresh_update_runner] systemctl daemon-reload 失败，面板一键更新可能不可用。"
+        log_error "[refresh_update_runner] systemctl daemon-reload 失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
-        return 0
+        return 1
     fi
     if ! lumen_run_as_root systemctl enable --now lumen-update.path; then
-        log_warn "[refresh_update_runner] 启用 lumen-update.path 失败，面板一键更新将不可用；可稍后手动执行 systemctl enable --now lumen-update.path。"
+        log_error "[refresh_update_runner] 启用 lumen-update.path 失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
-        return 0
+        return 1
     fi
     if [ -f "${tmp_dir}/lumen-update-warm.path" ]; then
         if ! lumen_run_as_root systemctl enable --now lumen-update-warm.path; then

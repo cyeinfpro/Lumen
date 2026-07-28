@@ -29,7 +29,7 @@ from lumen_core.vision_tagging import (
 )
 
 from ..provider_runtime.errors import UpstreamError
-from ..provider_runtime.upstream_services import upstream_services
+from ..provider_runtime.http_headers import upstream_auth_headers
 from ..storage import storage
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ async def _call_upstream_one(
             proxy=proxy,
             purpose="model_library_tagging",
             instructions=_TAGGING_INSTRUCTIONS,
-            auth_headers=upstream_services().core.auth_headers(api_key),
+            auth_headers=upstream_auth_headers(api_key),
         )
     except VisionTaggingUpstreamError as exc:
         raise UpstreamError(

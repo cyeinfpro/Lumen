@@ -2,6 +2,7 @@ export const REALTIME_SCHEMA_VERSION = 1 as const;
 
 export const CONTROL_EVENT_NAMES = [
   "replay_truncated",
+  "recovery_required",
   "server_epoch_changed",
   "auth_invalidated",
   "heartbeat",
@@ -16,6 +17,15 @@ export type ReplayTruncatedEvent = {
   reason: string;
   cursor?: string;
   limit?: number;
+};
+
+export type RecoveryRequiredEvent = {
+  kind: "control";
+  type: "recovery_required";
+  version: typeof REALTIME_SCHEMA_VERSION;
+  reason: string;
+  message?: string;
+  cursor?: string;
 };
 
 export type ServerEpochChangedEvent = {
@@ -41,6 +51,7 @@ export type StreamHeartbeatEvent = {
 
 export type RealtimeControlEvent =
   | ReplayTruncatedEvent
+  | RecoveryRequiredEvent
   | ServerEpochChangedEvent
   | AuthInvalidatedEvent
   | StreamHeartbeatEvent;
@@ -64,6 +75,7 @@ export type ParsedRealtimeEvent =
 
 export type RecoveryReason =
   | { kind: "replay_gap"; reason: string; cursor?: string }
+  | { kind: "recovery_required"; reason: string; cursor?: string }
   | { kind: "server_epoch_changed"; epoch: string; cursor?: string };
 
 export function isControlEventName(

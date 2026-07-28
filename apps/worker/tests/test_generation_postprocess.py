@@ -11,23 +11,17 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
+from lumen_core.constants import GenerationErrorCode as EC
 
-
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
-
-
+from app.background_removal import TransparentPipelineFailure
+from app.provider_runtime.errors import UpstreamError
+from app.tasks.generation_parts import composition_support as support
+from app.tasks.generation_parts import image_artifact_contracts as artifacts
 from app.tasks.generation_parts import postprocess
+from app.tasks.generation_parts.runtime import ImagePostprocessRuntime
+
+
+postprocess_runtime = ImagePostprocessRuntime()
 
 
 def _png_bytes(size: tuple[int, int] = (32, 24)) -> bytes:
@@ -40,9 +34,9 @@ def _variant_bundle(
     payload_bytes: bytes = b"x",
     *,
     engine: str = "pil",
-) -> generation._ImageVariantBundle:
-    payload = generation._VariantPayload(payload_bytes, (1, 1))
-    return generation._ImageVariantBundle(
+) -> artifacts.ImageVariantBundle:
+    payload = artifacts.VariantPayload(payload_bytes, (1, 1))
+    return artifacts.ImageVariantBundle(
         orig_format="PNG",
         width=1,
         height=1,
@@ -57,15 +51,17 @@ def _variant_bundle(
 async def test_postprocess_generated_image_inline_builds_variants() -> None:
     raw = _png_bytes()
 
-    result = await generation._postprocess_raw_generated_image(
+    result = await support.postprocess_raw_generated_image(
         raw,
         prompt="test image",
         transparent_requested=False,
         mode="inline",
+        runtime=postprocess_runtime,
     )
 
+    assert type(result) is artifacts.PostprocessedGeneratedImage
     assert result.raw_image == raw
-    assert result.sha256 == generation._sha256(raw)
+    assert result.sha256 == artifacts.sha256(raw)
     assert result.orig_format == "PNG"
     assert (result.width, result.height) == (32, 24)
     assert result.display.size == (32, 24)
@@ -79,12 +75,13 @@ async def test_postprocess_generated_image_inline_builds_variants() -> None:
 
 @pytest.mark.asyncio
 async def test_postprocess_generated_image_rejects_invalid_bytes() -> None:
-    with pytest.raises(generation.UpstreamError, match="pillow could not decode"):
-        await generation._postprocess_raw_generated_image(
+    with pytest.raises(UpstreamError, match="pillow could not decode"):
+        await support.postprocess_raw_generated_image(
             b"not an image",
             prompt="bad",
             transparent_requested=False,
             mode="inline",
+            runtime=postprocess_runtime,
         )
 
 
@@ -94,10 +91,10 @@ async def test_postprocess_variants_thread_mode_is_dispatchable(
 ) -> None:
     calls: list[bytes] = []
 
-    def fake_make_variants(raw_image: bytes) -> generation._ImageVariantBundle:
+    def fake_make_variants(raw_image: bytes) -> artifacts.ImageVariantBundle:
         calls.append(raw_image)
-        payload = generation._VariantPayload(b"x", (1, 1))
-        return generation._ImageVariantBundle(
+        payload = artifacts.VariantPayload(b"x", (1, 1))
+        return artifacts.ImageVariantBundle(
             orig_format="PNG",
             width=1,
             height=1,
@@ -107,11 +104,12 @@ async def test_postprocess_variants_thread_mode_is_dispatchable(
             engine="pil",
         )
 
-    monkeypatch.setattr(generation, "_make_image_variants_sync", fake_make_variants)
+    monkeypatch.setattr(support, "make_image_variants_sync", fake_make_variants)
 
-    variants, mode = await generation._postprocess_image_variants(
+    variants, mode = await support.postprocess_image_variants(
         b"raw",
         mode="thread",
+        runtime=postprocess_runtime,
     )
 
     assert mode == "thread"
@@ -129,13 +127,13 @@ async def test_process_pool_failure_falls_back_to_pil_only_thread(
 
     calls: list[bytes] = []
 
-    def fail_if_retried(raw_image: bytes) -> generation._ImageVariantBundle:
+    def fail_if_retried(raw_image: bytes) -> artifacts.ImageVariantBundle:
         raise AssertionError("libvips-capable helper must not run in fallback thread")
 
-    def fake_pil_only(raw_image: bytes) -> generation._ImageVariantBundle:
+    def fake_pil_only(raw_image: bytes) -> artifacts.ImageVariantBundle:
         calls.append(raw_image)
-        payload = generation._VariantPayload(b"pil", (1, 1))
-        return generation._ImageVariantBundle(
+        payload = artifacts.VariantPayload(b"pil", (1, 1))
+        return artifacts.ImageVariantBundle(
             orig_format="PNG",
             width=1,
             height=1,
@@ -145,13 +143,22 @@ async def test_process_pool_failure_falls_back_to_pil_only_thread(
             engine="pil",
         )
 
-    monkeypatch.setattr(generation, "_get_image_postprocess_executor", BrokenExecutor)
-    monkeypatch.setattr(generation, "_make_image_variants_sync", fail_if_retried)
-    monkeypatch.setattr(generation, "_make_image_variants_pil_only_sync", fake_pil_only)
+    monkeypatch.setattr(
+        support,
+        "get_image_postprocess_executor",
+        lambda _runtime: BrokenExecutor(),
+    )
+    monkeypatch.setattr(support, "make_image_variants_sync", fail_if_retried)
+    monkeypatch.setattr(
+        support,
+        "make_image_variants_pil_only_sync",
+        fake_pil_only,
+    )
 
-    variants, mode = await generation._postprocess_image_variants(
+    variants, mode = await support.postprocess_image_variants(
         b"raw",
         mode="process_pool",
+        runtime=postprocess_runtime,
     )
 
     assert mode == "thread"
@@ -173,9 +180,9 @@ async def test_broken_process_pool_resets_cached_executor(
 
     shutdown_calls: list[dict[str, Any]] = []
 
-    def fake_pil_only(raw_image: bytes) -> generation._ImageVariantBundle:
-        payload = generation._VariantPayload(raw_image, (1, 1))
-        return generation._ImageVariantBundle(
+    def fake_pil_only(raw_image: bytes) -> artifacts.ImageVariantBundle:
+        payload = artifacts.VariantPayload(raw_image, (1, 1))
+        return artifacts.ImageVariantBundle(
             orig_format="PNG",
             width=1,
             height=1,
@@ -186,13 +193,18 @@ async def test_broken_process_pool_resets_cached_executor(
         )
 
     executor = BrokenExecutor()
-    runtime = generation.DEFAULT_GENERATION_RUNTIME.postprocess_runtime
+    runtime = postprocess_runtime
     monkeypatch.setattr(runtime, "executor", executor)
-    monkeypatch.setattr(generation, "_make_image_variants_pil_only_sync", fake_pil_only)
+    monkeypatch.setattr(
+        support,
+        "make_image_variants_pil_only_sync",
+        fake_pil_only,
+    )
 
-    variants, mode = await generation._postprocess_image_variants(
+    variants, mode = await support.postprocess_image_variants(
         b"raw",
         mode="process_pool",
+        runtime=postprocess_runtime,
     )
 
     assert mode == "thread"
@@ -209,27 +221,27 @@ def test_cached_postprocess_executor_does_not_resolve_workers(
     def fail_worker_resolution() -> int:
         raise AssertionError("cached executor must not resolve workers again")
 
-    runtime = generation.DEFAULT_GENERATION_RUNTIME.postprocess_runtime
+    runtime = postprocess_runtime
     monkeypatch.setattr(runtime, "executor", executor)
     monkeypatch.setattr(
-        generation,
-        "_resolve_image_postprocess_workers",
+        support,
+        "resolve_image_postprocess_workers",
         fail_worker_resolution,
     )
 
-    assert generation._get_image_postprocess_executor() is executor
+    assert support.get_image_postprocess_executor(runtime) is executor
 
 
-def test_process_pool_variant_facade_is_importable_and_picklable() -> None:
-    restored = pickle.loads(pickle.dumps(generation._make_image_variants_sync))
+def test_process_pool_variant_support_is_importable_and_picklable() -> None:
+    restored = pickle.loads(pickle.dumps(support.make_image_variants_sync))
 
-    assert restored is generation._make_image_variants_sync
-    assert restored.__module__ == "app.tasks.generation_parts.default_runtime"
-    assert generation._IMAGE_POSTPROCESS_MODES is postprocess._IMAGE_POSTPROCESS_MODES
+    assert restored is support.make_image_variants_sync
+    assert restored.__module__ == "app.tasks.generation_parts.composition_support"
+    assert support.IMAGE_POSTPROCESS_MODES == postprocess._IMAGE_POSTPROCESS_MODES
 
 
 @pytest.mark.asyncio
-async def test_variant_orchestration_facade_uses_late_bound_generation_hooks(
+async def test_variant_orchestration_uses_late_bound_support_hooks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _variant_bundle(b"late-bound", engine="facade")
@@ -238,16 +250,16 @@ async def test_variant_orchestration_facade_uses_late_bound_generation_hooks(
     def resolve_mode(_mode: str | None = None) -> str:
         return "inline"
 
-    def get_executor() -> Executor:
-        raise AssertionError("executor should not be called by facade probe")
+    def get_executor(_runtime: object) -> Executor:
+        raise AssertionError("executor should not be called by support probe")
 
-    def reset_executor() -> None:
+    def reset_executor(_runtime: object) -> None:
         reset_calls.append(None)
 
-    def make_variants(_raw_image: bytes) -> generation._ImageVariantBundle:
+    def make_variants(_raw_image: bytes) -> artifacts.ImageVariantBundle:
         return result
 
-    def make_pil_variants(_raw_image: bytes) -> generation._ImageVariantBundle:
+    def make_pil_variants(_raw_image: bytes) -> artifacts.ImageVariantBundle:
         return result
 
     async def extracted(
@@ -256,46 +268,59 @@ async def test_variant_orchestration_facade_uses_late_bound_generation_hooks(
         mode: str | None,
         hooks: postprocess.ImageVariantExecutionHooks,
         logger: Any,
-    ) -> tuple[generation._ImageVariantBundle, str]:
+    ) -> tuple[artifacts.ImageVariantBundle, str]:
         assert raw_image == b"raw"
         assert mode == "thread"
-        assert logger is generation.logger
+        assert logger is support.logger
         assert hooks.resolve_mode is resolve_mode
-        assert hooks.get_executor is get_executor
-        assert hooks.reset_executor is reset_executor
+        with pytest.raises(
+            AssertionError,
+            match="executor should not be called",
+        ):
+            hooks.get_executor()
+        hooks.reset_executor()
         assert hooks.make_variants_sync is make_variants
         assert hooks.make_variants_pil_only_sync is make_pil_variants
-        assert hooks.broken_process_pool_type is generation.BrokenProcessPool
+        assert hooks.broken_process_pool_type is BrokenProcessPool
         return result, "thread"
 
-    monkeypatch.setattr(generation, "_resolve_image_postprocess_mode", resolve_mode)
-    monkeypatch.setattr(generation, "_get_image_postprocess_executor", get_executor)
-    monkeypatch.setattr(generation, "_reset_image_postprocess_executor", reset_executor)
-    monkeypatch.setattr(generation, "_make_image_variants_sync", make_variants)
+    monkeypatch.setattr(support, "resolve_image_postprocess_mode", resolve_mode)
     monkeypatch.setattr(
-        generation,
-        "_make_image_variants_pil_only_sync",
+        support,
+        "get_image_postprocess_executor",
+        get_executor,
+    )
+    monkeypatch.setattr(
+        support,
+        "reset_image_postprocess_executor",
+        reset_executor,
+    )
+    monkeypatch.setattr(support, "make_image_variants_sync", make_variants)
+    monkeypatch.setattr(
+        support,
+        "make_image_variants_pil_only_sync",
         make_pil_variants,
     )
     monkeypatch.setattr(postprocess, "_postprocess_image_variants", extracted)
 
-    variants, mode = await generation._postprocess_image_variants(
+    variants, mode = await support.postprocess_image_variants(
         b"raw",
         mode="thread",
+        runtime=postprocess_runtime,
     )
 
     assert variants is result
     assert mode == "thread"
-    assert reset_calls == []
+    assert reset_calls == [None]
 
 
 @pytest.mark.asyncio
-async def test_raw_postprocess_facade_uses_late_bound_generation_hooks(
+async def test_raw_postprocess_uses_late_bound_support_hooks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw = _png_bytes()
     variants = _variant_bundle(b"processed", engine="facade")
-    expected = generation._PostprocessedGeneratedImage(
+    expected = artifacts.PostprocessedGeneratedImage(
         raw_image=raw,
         sha256="sha",
         orig_format="PNG",
@@ -309,14 +334,14 @@ async def test_raw_postprocess_facade_uses_late_bound_generation_hooks(
 
     def inspect(
         _raw_image: bytes,
-    ) -> generation._GeneratedImageInspection:
-        return generation._GeneratedImageInspection("PNG", 1, 1, False)
+    ) -> artifacts.GeneratedImageInspection:
+        return artifacts.GeneratedImageInspection("PNG", 1, 1, False)
 
     def sha256(_raw_image: bytes) -> str:
         return "sha"
 
     async def transparent_request(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("transparent hook should not run by facade probe")
+        raise AssertionError("transparent hook should not run by support probe")
 
     def sanitize(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
@@ -325,14 +350,16 @@ async def test_raw_postprocess_facade_uses_late_bound_generation_hooks(
         _raw_image: bytes,
         *,
         mode: str | None = None,
-    ) -> tuple[generation._ImageVariantBundle, str]:
+        runtime: object,
+    ) -> tuple[artifacts.ImageVariantBundle, str]:
+        assert runtime is postprocess_runtime
         return variants, mode or "inline"
 
     def compute_blurhash(_image: PILImage.Image) -> str:
         return "blur"
 
-    def decode_error(exc: Exception) -> generation.UpstreamError:
-        return generation.UpstreamError(str(exc))
+    def decode_error(exc: Exception) -> UpstreamError:
+        return UpstreamError(str(exc))
 
     async def extracted(
         raw_image: bytes,
@@ -341,7 +368,7 @@ async def test_raw_postprocess_facade_uses_late_bound_generation_hooks(
         transparent_requested: bool,
         mode: str | None,
         hooks: postprocess.GeneratedImagePostprocessHooks,
-    ) -> generation._PostprocessedGeneratedImage:
+    ) -> artifacts.PostprocessedGeneratedImage:
         assert raw_image == raw
         assert prompt == "prompt"
         assert transparent_requested is True
@@ -349,44 +376,50 @@ async def test_raw_postprocess_facade_uses_late_bound_generation_hooks(
         assert hooks.inspect_generated_image_sync is inspect
         assert hooks.sha256 is sha256
         assert hooks.process_transparent_request is transparent_request
-        assert (
-            hooks.transparent_pipeline_failure_type
-            is generation.TransparentPipelineFailure
-        )
+        assert hooks.transparent_pipeline_failure_type is TransparentPipelineFailure
         assert hooks.sanitize_transparent_qc_payload is sanitize
-        assert hooks.postprocess_image_variants is process_variants
+        variant_result, variant_mode = await hooks.postprocess_image_variants(
+            raw_image,
+            mode=mode,
+        )
+        assert variant_result is variants
+        assert variant_mode == "inline"
         assert hooks.compute_blurhash is compute_blurhash
         assert hooks.image_decode_upstream_error is decode_error
-        assert hooks.upstream_error_type is generation.UpstreamError
-        assert hooks.bad_response_error_code == generation.EC.BAD_RESPONSE.value
+        assert hooks.upstream_error_type is UpstreamError
+        assert hooks.bad_response_error_code == EC.BAD_RESPONSE.value
         assert (
-            hooks.generated_image_inspection_type
-            is generation._GeneratedImageInspection
-        )
-        assert (
-            hooks.postprocessed_generated_image_type
-            is generation._PostprocessedGeneratedImage
+            hooks.generated_image_inspection_type is artifacts.GeneratedImageInspection
         )
         return expected
 
-    monkeypatch.setattr(generation, "_inspect_generated_image_sync", inspect)
-    monkeypatch.setattr(generation, "_sha256", sha256)
+    monkeypatch.setattr(support.artifacts, "inspect_generated_image_sync", inspect)
+    monkeypatch.setattr(support.artifacts, "sha256", sha256)
     monkeypatch.setattr(
-        generation,
+        support,
         "process_transparent_request",
         transparent_request,
     )
-    monkeypatch.setattr(generation, "_sanitize_transparent_qc_payload", sanitize)
-    monkeypatch.setattr(generation, "_postprocess_image_variants", process_variants)
-    monkeypatch.setattr(generation, "_compute_blurhash", compute_blurhash)
-    monkeypatch.setattr(generation, "_image_decode_upstream_error", decode_error)
+    monkeypatch.setattr(
+        support,
+        "sanitize_transparent_qc_payload",
+        sanitize,
+    )
+    monkeypatch.setattr(
+        support,
+        "postprocess_image_variants",
+        process_variants,
+    )
+    monkeypatch.setattr(support.artifacts, "compute_blurhash", compute_blurhash)
+    monkeypatch.setattr(support, "image_decode_upstream_error", decode_error)
     monkeypatch.setattr(postprocess, "_postprocess_raw_generated_image", extracted)
 
-    result = await generation._postprocess_raw_generated_image(
+    result = await support.postprocess_raw_generated_image(
         raw,
         prompt="prompt",
         transparent_requested=True,
         mode="inline",
+        runtime=postprocess_runtime,
     )
 
     assert result is expected

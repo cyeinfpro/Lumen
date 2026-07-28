@@ -5,7 +5,9 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
@@ -429,11 +431,12 @@ def test_install_and_update_transactions_include_host_artifact_snapshots() -> No
     assert "lumen_restore_operations_host_artifacts" in update
 
 
-def test_image_job_install_copies_all_python_runtime_modules() -> None:
+def test_image_job_install_copies_package_and_removes_legacy_modules() -> None:
     text = LUMENCTL.read_text(encoding="utf-8")
 
-    for module in (
-        "app.py",
+    assert '"${ROOT}/image-job/app.py" "${app_dir}/app.py"' in text
+
+    legacy_modules = (
         "image_artifacts.py",
         "image_candidates.py",
         "image_url_security.py",
@@ -441,23 +444,97 @@ def test_image_job_install_copies_all_python_runtime_modules() -> None:
         "payload_helpers.py",
         "request_bodies.py",
         "upstream_runtime.py",
+    )
+    for module in legacy_modules:
+        assert f'"${{ROOT}}/image-job/{module}"' not in text
+        assert f'"${{app_dir}}/{module}"' in text
+
+    for module in (
+        "artifacts.py",
+        "candidates.py",
+        "http_bodies.py",
+        "payloads.py",
+        "persistence.py",
+        "upstream.py",
+        "url_security.py",
     ):
-        assert f'"${{ROOT}}/image-job/{module}" "${{app_dir}}/{module}"' in text
+        assert (ROOT / "image-job" / "image_job" / module).is_file()
 
     # runtime_config.py 已删除（死代码，配置实际由 image_job/config.py 提供）。
     # 部署脚本不许再装它，也必须清掉旧版本留在机器上的残件。
     assert "image-job/runtime_config.py" not in text
     assert 'as_sudo rm -f "${app_dir}/runtime_config.py"' in text
 
-    assert 'cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"' in text
-    assert (
-        'find "${app_dir}/image_job" -type d -name __pycache__ -prune -exec rm -rf {} +'
-    ) in text
-    assert "find \"${app_dir}/image_job\" -type f -name '*.pyc' -delete" in text
-    assert 'find "${app_dir}/image_job" -type d -exec chmod 0755 {} +' in text
-    assert (
-        "find \"${app_dir}/image_job\" -type f -name '*.py' -exec chmod 0644 {} +"
-    ) in text
+    assert "stage_image_job_package" in text
+    assert 'cp -R "${ROOT}/image-job/image_job/."' in text
+    assert "replace_image_job_package" in text
+    assert "systemctl restart image-job" in text
+    assert "systemctl enable --now image-job" in text
+
+
+def test_image_job_install_package_only_layout_imports(tmp_path: Path) -> None:
+    app_dir = tmp_path / "image-job"
+    app_dir.mkdir()
+    shutil.copy2(ROOT / "image-job" / "app.py", app_dir / "app.py")
+    shutil.copytree(
+        ROOT / "image-job" / "image_job",
+        app_dir / "image_job",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from app import app; assert app.title == 'sub2api image job sidecar'",
+        ],
+        cwd=app_dir,
+        env={
+            **os.environ,
+            "IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID": "test-v1",
+            "IMAGE_JOB_CREDENTIAL_MASTER_SECRET": "test-master-secret-" + "x" * 32,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in app_dir.glob("*.py")) == ["app.py"]
+
+
+def test_image_job_package_swap_restores_previous_directory_on_failure(
+    tmp_path: Path,
+) -> None:
+    app_dir = tmp_path / "image-job"
+    current = app_dir / "image_job"
+    stage = app_dir / ".image_job.stage.test"
+    current.mkdir(parents=True)
+    stage.mkdir()
+    (current / "sentinel.py").write_text("OLD = True\n", encoding="utf-8")
+    (stage / "sentinel.py").write_text("NEW = True\n", encoding="utf-8")
+
+    result = run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LUMENCTL))}
+        app_dir={shlex.quote(str(app_dir))}
+        stage={shlex.quote(str(stage))}
+        as_sudo() {{
+            if [ "$1" = "mv" ] && [ "$2" = "$stage" ]; then
+                return 1
+            fi
+            command "$@"
+        }}
+        rc=0
+        replace_image_job_package "$app_dir" "$stage" || rc=$?
+        test "$rc" -eq 1
+        grep -q 'OLD = True' "$app_dir/image_job/sentinel.py"
+        test ! -e "$app_dir/.image_job.previous.$$"
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync is not installed")
@@ -1607,7 +1684,13 @@ def test_update_failure_restores_env_bytes_and_removes_staged_release(
     shutil.copytree(ROOT / "scripts", current / "scripts")
     previous.mkdir(parents=True)
     (current / "docker-compose.yml").write_text(
-        "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+        "services:\n"
+        "  api:\n"
+        "    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n"
+        "  worker:\n"
+        "    image: example.invalid/lumen-worker:${LUMEN_IMAGE_TAG}\n"
+        "  web:\n"
+        "    image: example.invalid/lumen-web:${LUMEN_IMAGE_TAG}\n",
         encoding="utf-8",
     )
     (current / "VERSION").write_text("1.2.44\n", encoding="utf-8")
@@ -1622,7 +1705,13 @@ def test_update_failure_restores_env_bytes_and_removes_staged_release(
     shutil.copytree(ROOT / "scripts", main_image_root / "scripts")
     (main_image_root / "deploy").mkdir()
     (main_image_root / "docker-compose.yml").write_text(
-        "services:\n  api:\n    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n",
+        "services:\n"
+        "  api:\n"
+        "    image: example.invalid/lumen-api:${LUMEN_IMAGE_TAG}\n"
+        "  worker:\n"
+        "    image: example.invalid/lumen-worker:${LUMEN_IMAGE_TAG}\n"
+        "  web:\n"
+        "    image: example.invalid/lumen-web:${LUMEN_IMAGE_TAG}\n",
         encoding="utf-8",
     )
     (main_image_root / "VERSION").write_text("1.2.99\n", encoding="utf-8")
@@ -1666,10 +1755,7 @@ def test_update_failure_restores_env_bytes_and_removes_staged_release(
 set -u
 args=" $* "
 if [ "${1:-}" = "pull" ]; then
-  case "${2:-}" in
-    *:v1.2.45) exit 42 ;;
-    *) exit 0 ;;
-  esac
+  exit 0
 fi
 if [ "${1:-}" = "create" ]; then
   printf 'cid-main\\n'
@@ -1687,6 +1773,47 @@ fi
 if [ "${1:-}" = "rm" ]; then
   exit 0
 fi
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
+  shift 2
+  if [ "${1:-}" = "--format" ]; then
+    format="${2:-}"
+    image="${3:-}"
+    case "${format}" in
+      *org.opencontainers.image.revision*)
+        printf '%s\\n' "${TEST_MAIN_IMAGE_COMMIT:?}"
+        ;;
+      *RepoDigests*)
+        repository="${image%:*}"
+        service="${repository##*/}"
+        service="${service#lumen-}"
+        case "${service}" in
+          api) hex="$(printf 'a%.0s' {1..64})" ;;
+          worker) hex="$(printf 'b%.0s' {1..64})" ;;
+          web) hex="$(printf 'c%.0s' {1..64})" ;;
+          *) exit 1 ;;
+        esac
+        printf '%s@sha256:%s\\n' "${repository}" "${hex}"
+        ;;
+      *'.Id'*)
+        printf '%s\\n' "${image}"
+        ;;
+    esac
+    exit 0
+  fi
+  image="${*: -1}"
+  repository="${image%:*}"
+  service="${repository##*/}"
+  service="${service#lumen-}"
+  case "${service}" in
+    api) hex="$(printf 'a%.0s' {1..64})" ;;
+    worker) hex="$(printf 'b%.0s' {1..64})" ;;
+    web) hex="$(printf 'c%.0s' {1..64})" ;;
+    *) exit 1 ;;
+  esac
+  printf '[{"Id":"sha256:%s","RepoDigests":["%s@sha256:%s"],"Config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}]\\n' \
+    "${hex}" "${repository}" "${hex}" "${TEST_MAIN_IMAGE_COMMIT:?}"
+  exit 0
+fi
 case "$*" in
   "info"|*"compose version"*)
     exit 0
@@ -1696,6 +1823,8 @@ case "$*" in
     ;;
   *"config --images"*)
     printf 'example.invalid/lumen-api:%s\\n' "${LUMEN_IMAGE_TAG:?}"
+    printf 'example.invalid/lumen-worker:%s\\n' "${LUMEN_IMAGE_TAG:?}"
+    printf 'example.invalid/lumen-web:%s\\n' "${LUMEN_IMAGE_TAG:?}"
     exit 0
     ;;
   *"alembic heads"*|*"alembic current"*)
@@ -1752,8 +1881,8 @@ exit 0
             "LUMEN_APP_UID": str(os.getuid()),
             "LUMEN_APP_GID": str(os.getgid()),
             "LUMEN_APP_STORAGE_GID": str(os.getgid()),
-            "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.45",
-            "LUMEN_UPDATE_FALLBACK_MAIN": "1",
+            "LUMEN_UPDATE_RESOLVED_TAG": "main",
+            "LUMEN_UPDATE_GIT_PULL": "1",
             "LUMEN_UPDATE_FAST_EXPLICIT_PULL": "1",
             "LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY": "1",
             "LUMEN_UPDATE_SKIP_BACKUP": "1",
@@ -1762,6 +1891,7 @@ exit 0
             "TEST_DOCKER_FAIL_STATE": str(tmp_path / "docker-failed-once"),
             "TEST_FALLBACK_SOURCE_STATE": str(tmp_path / "fallback-source-state"),
             "TEST_MAIN_IMAGE_ROOT": str(main_image_root),
+            "TEST_MAIN_IMAGE_COMMIT": "f" * 40,
         }
     )
     result = subprocess.run(
@@ -2320,7 +2450,8 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     # --pull missing --wait --force-recreate "${_svc}"; done。fast 模式通过
     # compose_up_service helper 加 --no-deps，standard 保留原重建语义。
     assert "for _svc in worker web api" in text
-    assert 'compose_up_service "${CURRENT_LINK}" "${_svc}"' in text
+    assert 'lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"' in text
+    assert 'compose_up_service "${compose_dir}" "${service}"' in text
     assert "compose_up_service_fast()" in text
     assert "--no-deps" in text
     # release 切换走 atomic switch
@@ -2482,11 +2613,13 @@ def test_update_script_pulls_tgbot_image_when_telegram_configured() -> None:
         "pull_images must explicitly pull the profile=tgbot image so "
         "restart_services doesn't reuse the cached pre-update digest"
     )
-    # Failure is warn-only by default so api/worker/web updates are not blocked
-    # by a non-core profile image.
-    assert "tgbot pull 失败" in text
-    assert "LUMEN_UPDATE_REQUIRE_TGBOT" in code
-    assert "跳过 tgbot 更新" in text
+    # Once enabled, tgbot belongs to the immutable deployment target. Pull
+    # failure must fail closed instead of mixing a stale bot image with the
+    # newly bound api/worker/web image set.
+    assert "tgbot 已启用但 pull 失败" in text
+    assert "LUMEN_UPDATE_REQUIRE_TGBOT" not in code
+    assert "跳过 tgbot 更新" not in text
+    assert "lumen_update_bind_immutable_images" in code
     assert 'tgbot_pull "warn_skipped"' not in code
 
 
@@ -2897,9 +3030,134 @@ def test_install_image_job_persists_required_sidecar_token() -> None:
 
     assert 'env_file="${config_dir}/image-job.env"' in source
     assert "secrets.token_urlsafe(48)" in source
+    assert "prepare_image_job_credential_env" in source
+    assert source.index("prepare_image_job_credential_env") < source.index(
+        "replace_image_job_package"
+    )
     assert 'as_sudo install -m 0600 "${tmp_env}" "${env_file}"' in source
     assert "EnvironmentFile=${env_file}" in source
     assert "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1" not in source
+
+
+def test_image_job_env_upsert_keeps_secret_off_process_args_and_mode_0600(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "image-job.env"
+    argv_file = tmp_path / "awk-argv.txt"
+    secret = "secret-process-argument-sentinel"
+    env_file.write_text("EXISTING=value\n", encoding="utf-8")
+    env_file.chmod(0o644)
+
+    result = run_bash(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        awk() {{
+            printf '%s\\n' "$@" > {shlex.quote(str(argv_file))}
+            command awk "$@"
+        }}
+        image_job_upsert_env_value \
+            {shlex.quote(str(env_file))} \
+            IMAGE_JOB_CREDENTIAL_MASTER_SECRET \
+            {shlex.quote(secret)}
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert secret not in argv_file.read_text(encoding="utf-8")
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert env_file.read_text(encoding="utf-8").endswith(
+        f"IMAGE_JOB_CREDENTIAL_MASTER_SECRET={secret}\n"
+    )
+
+
+def test_prepare_image_job_credential_env_generates_and_preserves_secret(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "image-job.env"
+    db_path = tmp_path / "jobs.sqlite3"
+    env_file.write_text("", encoding="utf-8")
+
+    generated = run_bash(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        as_sudo() {{ command "$@"; }}
+        prepare_image_job_credential_env \
+            {shlex.quote(str(env_file))} \
+            {shlex.quote(str(db_path))} \
+            {shlex.quote(sys.executable)}
+        """
+    )
+    assert generated.returncode == 0, generated.stderr + generated.stdout
+    values = dict(
+        line.split("=", 1)
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    generated_secret = values["IMAGE_JOB_CREDENTIAL_MASTER_SECRET"]
+    assert values["IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID"] == "v1"
+    assert len(generated_secret.encode("utf-8")) >= 32
+    assert env_file.stat().st_mode & 0o777 == 0o600
+
+    env_file.write_text(
+        "IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID=rotate-2\n"
+        f"IMAGE_JOB_CREDENTIAL_MASTER_SECRET={generated_secret}\n",
+        encoding="utf-8",
+    )
+    preserved = run_bash(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        as_sudo() {{ command "$@"; }}
+        prepare_image_job_credential_env \
+            {shlex.quote(str(env_file))} \
+            {shlex.quote(str(db_path))} \
+            {shlex.quote(sys.executable)}
+        """
+    )
+    assert preserved.returncode == 0, preserved.stderr + preserved.stdout
+    assert env_file.read_text(encoding="utf-8") == (
+        "IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID=rotate-2\n"
+        f"IMAGE_JOB_CREDENTIAL_MASTER_SECRET={generated_secret}\n"
+    )
+    assert env_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_prepare_image_job_credential_env_rejects_random_rotation(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "image-job.env"
+    env_file.write_text("", encoding="utf-8")
+    db_path = tmp_path / "jobs.sqlite3"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                auth_ciphertext BLOB
+            );
+            INSERT INTO jobs(job_id, auth_ciphertext)
+            VALUES ('queued-job', X'010203');
+            """
+        )
+    finally:
+        conn.close()
+
+    result = run_bash(
+        f"""
+        . {shlex.quote(str(LUMENCTL))}
+        as_sudo() {{ command "$@"; }}
+        prepare_image_job_credential_env \
+            {shlex.quote(str(env_file))} \
+            {shlex.quote(str(db_path))} \
+            {shlex.quote(sys.executable)}
+        """
+    )
+
+    assert result.returncode != 0
+    assert "数据库已有加密凭据" in result.stderr
+    assert "IMAGE_JOB_CREDENTIAL_MASTER_SECRET=" not in env_file.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
@@ -3067,6 +3325,12 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
   # 真 alembic 会输出 "<rev_id> (head)"；mock 给同 rev_id 让 verify 通过。
   rest="$*"
   case "${rest}" in
+    *"config --images"*)
+      printf 'ghcr.io/cyeinfpro/lumen-api:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
+      printf 'ghcr.io/cyeinfpro/lumen-worker:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
+      printf 'ghcr.io/cyeinfpro/lumen-web:%s\\n' "${LUMEN_IMAGE_TAG:-main}"
+      exit 0
+      ;;
     *"alembic heads"*)
       printf '0021_test_head\\n'
       exit 0
@@ -3078,8 +3342,54 @@ if [ "$#" -ge 1 ] && [ "$1" = "compose" ]; then
   esac
   exit 0
 fi
+if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  shift 2
+  if [ "${1:-}" = "--format" ]; then
+    format="${2:-}"
+    image="${3:-}"
+    case "${format}" in
+      *org.opencontainers.image.revision*)
+        printf '%s\\n' "${TEST_IMAGE_COMMIT:?}"
+        ;;
+      *RepoDigests*)
+        repository="${image%:*}"
+        service="${repository##*/}"
+        service="${service#lumen-}"
+        case "${service}" in
+          api) hex="$(printf 'a%.0s' {1..64})" ;;
+          worker) hex="$(printf 'b%.0s' {1..64})" ;;
+          web) hex="$(printf 'c%.0s' {1..64})" ;;
+          *) exit 1 ;;
+        esac
+        printf '%s@sha256:%s\\n' "${repository}" "${hex}"
+        ;;
+      *'.Id'*)
+        printf '%s\\n' "${image}"
+        ;;
+    esac
+    exit 0
+  fi
+  image="${*: -1}"
+  repository="${image%:*}"
+  service="${repository##*/}"
+  service="${service#lumen-}"
+  case "${service}" in
+    api) hex="$(printf 'a%.0s' {1..64})" ;;
+    worker) hex="$(printf 'b%.0s' {1..64})" ;;
+    web) hex="$(printf 'c%.0s' {1..64})" ;;
+    *) exit 1 ;;
+  esac
+  printf '[{"Id":"sha256:%s","RepoDigests":["%s@sha256:%s"],"Config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}]\\n' \
+    "${hex}" "${repository}" "${hex}" "${TEST_IMAGE_COMMIT:?}"
+  exit 0
+fi
 if [ "$#" -ge 1 ] && [ "$1" = "inspect" ]; then
-  printf 'healthy\\n'
+  case "$*" in
+    *'{{.Image}}'*lumen-api*) printf 'sha256:%s\\n' "$(printf 'a%.0s' {1..64})" ;;
+    *'{{.Image}}'*lumen-worker*) printf 'sha256:%s\\n' "$(printf 'b%.0s' {1..64})" ;;
+    *'{{.Image}}'*lumen-web*) printf 'sha256:%s\\n' "$(printf 'c%.0s' {1..64})" ;;
+    *) printf 'healthy\\n' ;;
+  esac
   exit 0
 fi
 if [ "$#" -ge 2 ] && [ "$1" = "image" ] && [ "$2" = "prune" ]; then
@@ -3227,6 +3537,7 @@ esac
     : > "${{LOG_DIR}}/docker.log"
     : > "${{LOG_DIR}}/curl.log"
     export TEST_DOCKER_STATE="${{SIM_ROOT}}/docker-state"
+    export TEST_IMAGE_COMMIT="$(git -C {shlex.quote(str(ROOT))} rev-parse HEAD)"
     mkdir -p "${{SIM_ROOT}}"
     printf 'lastsave=1\\n' > "${{TEST_DOCKER_STATE}}"
     export PATH={shlex.quote(str(fakebin))}:$PATH
@@ -3245,10 +3556,8 @@ esac
     # update.sh 的 check_storage phase 检查 LUMEN_DATA_ROOT 是否挂载；CI 临时目录
     # 跟测试无关，跳过避免 false fail。
     export SKIP_STORAGE_CHECK=1
-    # update.sh 的 image-extract fallback (try_image_extract_release) 会真去
-    # docker pull GHCR；CI runner 里那个 image 真的能拉到，会让本测试本意的
-    # "host 不是 git repo → fallback 到当前快照" 路径走不到。这里强制禁用，
-    # 让测试只验证 legacy snapshot-only 行为。
+    # 使用当前 checkout 的 immutable HEAD 作为源码 proof；镜像 proof 由 fake
+    # Docker 返回同一 revision、Image ID 与 RepoDigest。
     export LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT=1
     # lumenctl 入口会触发 lumen_self_update_scripts 从 GitHub raw 拉最新 scripts。
     # 紧贴 release 之后跑（< 5 分钟）会撞上 raw.githubusercontent 缓存，把 install
@@ -3262,6 +3571,15 @@ esac
     test -f "${{DEPLOY_ROOT}}/shared/.env"
     grep -q '^LUMEN_IMAGE_TAG=old$' "${{DEPLOY_ROOT}}/shared/.env"
 
+    # 将刚安装的完整 working-tree release 固化成测试 commit，确保更新器拿到
+    # 的源码 proof 与后续 source tree 完全一致（包括本轮新增的 updater 文件）。
+    git -C "${{DEPLOY_ROOT}}/current" init -q
+    git -C "${{DEPLOY_ROOT}}/current" config user.email test@example.com
+    git -C "${{DEPLOY_ROOT}}/current" config user.name "Lumen Test"
+    git -C "${{DEPLOY_ROOT}}/current" add -A
+    git -C "${{DEPLOY_ROOT}}/current" commit -qm "test source snapshot"
+    export TEST_IMAGE_COMMIT="$(git -C "${{DEPLOY_ROOT}}/current" rev-parse HEAD)"
+
     if grep -q '^LUMEN_UPDATE_CHANNEL=' "${{DEPLOY_ROOT}}/shared/.env"; then
       sed -i.bak 's/^LUMEN_UPDATE_CHANNEL=.*/LUMEN_UPDATE_CHANNEL=main/' "${{DEPLOY_ROOT}}/shared/.env"
       rm -f "${{DEPLOY_ROOT}}/shared/.env.bak"
@@ -3269,12 +3587,12 @@ esac
       printf 'LUMEN_UPDATE_CHANNEL=main\\n' >> "${{DEPLOY_ROOT}}/shared/.env"
     fi
 
-    LUMEN_UPDATE_GIT_PULL=1 bash "${{DEPLOY_ROOT}}/current/scripts/lumenctl.sh" update-lumen > "${{LOG_DIR}}/update.out" 2> "${{LOG_DIR}}/update.err"
+    LUMEN_REPO_DIR="${{DEPLOY_ROOT}}/current" LUMEN_UPDATE_GIT_PULL=0 bash "${{DEPLOY_ROOT}}/current/scripts/lumenctl.sh" update-lumen > "${{LOG_DIR}}/update.out" 2> "${{LOG_DIR}}/update.err"
     test -L "${{DEPLOY_ROOT}}/current"
     test -f "${{DEPLOY_ROOT}}/current/docker-compose.yml"
     grep -q '^LUMEN_IMAGE_TAG=main$' "${{DEPLOY_ROOT}}/shared/.env"
     test "$(find "${{DEPLOY_ROOT}}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -ge 2
-    grep -q '非正式/rolling 更新未取得 image source；按显式兼容语义使用当前快照' "${{LOG_DIR}}/update.err"
+    grep -q 'phase=fetch_release status=done' "${{LOG_DIR}}/update.out"
     grep -q 'phase=migrate_db status=done' "${{LOG_DIR}}/update.out"
     grep -q 'phase=restart_services status=done' "${{LOG_DIR}}/update.out"
     grep -q 'phase=health_check status=done' "${{LOG_DIR}}/update.out"
@@ -3456,7 +3774,7 @@ def test_update_blue_green_starts_target_worker_before_green_api_traffic() -> No
     )
     shift_traffic = text.index("emit_start shift_traffic_50", start_green_api)
     start_target_worker = text.index(
-        'compose_up_service "${CURRENT_LINK}" worker',
+        'lumen_update_start_bound_service "${CURRENT_LINK}" worker',
         blue_green_start,
     )
 

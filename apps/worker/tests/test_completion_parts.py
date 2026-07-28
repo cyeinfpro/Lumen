@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import ast
 import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts import (
     artifact_codec,
@@ -18,6 +20,13 @@ from app.tasks.completion_parts import (
     tool_images,
     tool_state,
 )
+from app.tasks.completion_parts.image_storage_runtime import (
+    CompletionToolImageService,
+)
+
+
+def _fake_image_upstream_runtime() -> ImageUpstreamRuntime:
+    return ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
 
 
 def test_completion_facade_preserves_tool_state_identity() -> None:
@@ -153,21 +162,16 @@ def test_completion_facade_preserves_extracted_wrapper_signatures() -> None:
         "chat_model",
         "account_mode",
     )
-    assert tuple(
-        inspect.signature(
-            completion._store_and_publish_completion_tool_image
-        ).parameters
-    ) == (
-        "redis",
-        "user_id",
-        "channel",
-        "task_id",
-        "message_id",
-        "attempt",
-        "attempt_epoch",
-        "b64_image",
-        "revised_prompt",
-        "reserved_tool_image_micro",
+    runtime = completion.build_completion_runtime(
+        image_upstream_runtime=_fake_image_upstream_runtime(),
+    )
+    assert isinstance(
+        runtime.ports.tools.tool_image_service,
+        CompletionToolImageService,
+    )
+    assert not hasattr(
+        runtime.ports.tools,
+        "_store_and_publish_completion_tool_image",
     )
     assert tuple(
         inspect.signature(completion._iter_completion_stream_with_abort).parameters
@@ -178,6 +182,44 @@ def test_completion_facade_preserves_extracted_wrapper_signatures() -> None:
         "tool_tracker",
         "tool_idle_timeout_s",
     )
+
+
+def test_completion_runtime_binds_injected_tool_image_storage() -> None:
+    class StorageWrites:
+        async def write_files(
+            self,
+            _files: list[tuple[str, bytes]],
+        ) -> list[str]:
+            return []
+
+        @asynccontextmanager
+        async def cleanup_on_error(self, _keys: list[str]):
+            yield
+
+    storage_writes = StorageWrites()
+    runtime = completion.build_completion_runtime(
+        image_upstream_runtime=_fake_image_upstream_runtime(),
+        storage_writes=storage_writes,  # type: ignore[arg-type]
+    )
+    service = runtime.ports.tools.tool_image_service
+
+    assert service.storage.write_files.__self__ is storage_writes
+    assert service.storage.cleanup_on_error.__self__ is storage_writes
+
+
+def test_completion_runtime_binds_explicit_image_upstream_runtime() -> None:
+    image_upstream_runtime = _fake_image_upstream_runtime()
+
+    runtime = completion.build_completion_runtime(
+        image_upstream_runtime=image_upstream_runtime,
+    )
+    bound_stream = runtime.ports.upstream.stream_completion
+
+    assert runtime.image_upstream_runtime is image_upstream_runtime
+    assert bound_stream.func is completion.stream_completion  # type: ignore[attr-defined]
+    assert bound_stream.keywords == {  # type: ignore[attr-defined]
+        "runtime": image_upstream_runtime,
+    }
 
 
 @pytest.mark.asyncio

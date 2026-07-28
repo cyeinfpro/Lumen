@@ -79,11 +79,13 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 /opt/image-job/image_job/adapters/
 /opt/image-job/image_job/domain/
 /opt/image-job/image_job/ports/
-/opt/image-job/image_artifacts.py
-/opt/image-job/image_url_security.py
-/opt/image-job/job_persistence.py
-/opt/image-job/payload_helpers.py
-/opt/image-job/request_bodies.py
+/opt/image-job/image_job/artifacts.py
+/opt/image-job/image_job/candidates.py
+/opt/image-job/image_job/http_bodies.py
+/opt/image-job/image_job/payloads.py
+/opt/image-job/image_job/persistence.py
+/opt/image-job/image_job/upstream.py
+/opt/image-job/image_job/url_security.py
 /opt/image-job/README.md
 /opt/image-job/image-job.md
 ```
@@ -92,6 +94,8 @@ rsync -av --delete ./image-job/ <SSH_USER>@<SERVER_HOST>:/opt/image-job/
 `image_job.app_factory.create_app()` 创建。探针和 metrics 只允许从
 `127.0.0.1:8091` 访问，公网 nginx 配置会对
 `/health`、`/livez`、`/ready`、`/readyz`、`/metrics` 返回 404。
+除 `app.py` 外，生产 Python 实现全部位于 `image_job` 包内；升级脚本会删除
+旧版本遗留在 `/opt/image-job/*.py` 的同名实现，避免意外加载过期代码。
 
 数据目录需要服务进程可写：
 
@@ -124,6 +128,8 @@ IMAGE_JOB_DATA_DIR=/opt/image-job/data
 IMAGE_JOB_STATE_DIR=/var/lib/image-job/state
 IMAGE_JOB_DB_PATH=/var/lib/image-job/state/image_jobs.sqlite3
 IMAGE_JOB_SIDECAR_TOKEN=<至少32字符的独立随机值>
+IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID=v1
+IMAGE_JOB_CREDENTIAL_MASTER_SECRET=<至少32字节的独立随机值，升级时必须保留>
 IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=0
 IMAGE_JOB_CONCURRENCY=2
 IMAGE_JOB_UPSTREAM_TIMEOUT_S=1800
@@ -153,6 +159,10 @@ IMAGE_JOB_PUBLIC_BASE_URL    返回给调用方的公网域名，不带末尾 /
 IMAGE_JOB_DATA_DIR           临时图片落盘目录的根目录
 IMAGE_JOB_DB_PATH            任务状态 SQLite 文件，必须放本机磁盘
 IMAGE_JOB_SIDECAR_TOKEN      Lumen worker 访问 sidecar 的独立服务凭证，至少 32 字符
+IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID
+                             新写入 Authorization 密文使用的 key id
+IMAGE_JOB_CREDENTIAL_MASTER_SECRET
+                             AES-GCM master secret，至少 32 字节，升级/恢复时必须保留原值
 IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH
                              仅滚动升级期间临时设为 1，默认 0
 IMAGE_JOB_CONCURRENCY        同时处理的图片任务数
@@ -173,6 +183,11 @@ IMAGE_JOB_MAX_UPSTREAM_RESPONSE_BYTES
 `IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED` 默认必须保持 `0`。sidecar
 始终把持久 `job_id` 派生出的稳定 `Idempotency-Key` 发给上游，但只有上游网关
 明确承诺同 key 不重复执行、不重复扣费时，才能把该配置设为 `1`。
+
+queued/running 作业的上游 Authorization 不以明文写入 SQLite，而是保存
+AES-GCM `ciphertext + nonce + key_id`；AAD 绑定 `job_id + owner hash`。
+服务缺少 active key 或 master secret 时拒绝启动。旧版 `auth_header` 行会在
+启动迁移中加密并清空旧列；不要删除或随机重建已有安装的 master secret。
 
 不要把真实 API Key、Bearer token、数据库密码写进环境变量示例、文档或日志。
 `IMAGE_JOB_SIDECAR_TOKEN` 必须与供应商 API Key 完全独立生成。

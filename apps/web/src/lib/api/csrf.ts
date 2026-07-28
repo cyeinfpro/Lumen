@@ -86,12 +86,12 @@ export class DefaultCsrfService implements CsrfService {
     try {
       const response = await executeFetch(
         `${API_BASE.replace(/\/$/, "")}/auth/csrf`,
-        {
+        () => ({
           method: "GET",
           credentials: "include",
           cache: "no-store",
           signal: deadline.signal,
-        },
+        }),
         { retryMode: "query" },
       );
       deadline.throwIfAborted();

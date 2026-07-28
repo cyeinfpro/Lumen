@@ -20,6 +20,7 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         "apps/worker",
         "apps/tgbot",
         "apps/web",
+        "image-job",
         "packages/core/lumen_core",
     ):
         (root / path).mkdir(parents=True, exist_ok=True)
@@ -31,6 +32,7 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         "apps/api/pyproject.toml",
         "apps/worker/pyproject.toml",
         "apps/tgbot/pyproject.toml",
+        "image-job/pyproject.toml",
         "packages/core/pyproject.toml",
     ):
         (root / rel).write_text(
@@ -46,14 +48,15 @@ def _write_minimal_version_tree(tmp_path: Path, version: str = "1.2.3") -> Path:
         encoding="utf-8",
     )
     (root / "apps/web/package-lock.json").write_text(
-        json.dumps({"version": version, "packages": {"": {"version": version}}})
-        + "\n",
+        json.dumps({"version": version, "packages": {"": {"version": version}}}) + "\n",
         encoding="utf-8",
     )
     return root
 
 
-def _run_check(root: Path, *, allow_rolling: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_check(
+    root: Path, *, allow_rolling: bool = False
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     if allow_rolling:
         env["LUMEN_ALLOW_ROLLING_TAG"] = "1"
@@ -128,6 +131,10 @@ version = "1.2.43"
 
 [[package]]
 name = "lumen-worker"
+version = "1.2.43"
+
+[[package]]
+name = "lumen-image-job"
 version = "1.2.43"
 """.lstrip(),
         encoding="utf-8",

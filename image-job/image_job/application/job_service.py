@@ -12,10 +12,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import job_persistence
-import payload_helpers
-import request_bodies
-
+from .. import http_bodies, payloads, persistence
 from ..config import ImageJobSettings
 from ..contracts import (
     ALLOWED_FIXED_ENDPOINTS,
@@ -27,6 +24,7 @@ from ..contracts import (
     IMAGE_OUTPUT_FORMATS,
     JobFailure,
 )
+from ..credential_vault import CredentialVault, CredentialVaultError
 from ..domain.identity import CallerIdentity, UpstreamCredential
 from ..observability import current_request_id
 from ..payloads import json_dump, request_hash
@@ -63,16 +61,19 @@ class JobService:
         repository: Any,
         upstream: Any,
         queue: Any,
+        credential_vault: CredentialVault,
     ) -> None:
         self.settings = settings
         self.repository = repository
         self.upstream = upstream
         self.queue = queue
-        self.persistence = job_persistence.JobPersistenceFacade(
+        self.credential_vault = credential_vault
+        self.persistence = persistence.JobPersistenceFacade(
             db_exec=lambda sql, params=(): repository.execute(sql, params),
             enqueue_job=queue.enqueue,
             now_iso=_utc_iso,
             auth_hash=credential_hash,
+            credential_vault=credential_vault,
             json_dump=json_dump,
             upstream_base_url=lambda: settings.upstream_base_url,
             upstream_idempotency_guaranteed=(
@@ -80,12 +81,13 @@ class JobService:
             ),
             error_class_internal=lambda: ERROR_CLASS_INTERNAL,
             error_class_network=lambda: ERROR_CLASS_NETWORK,
+            job_ttl_days=lambda: settings.job_ttl_days,
             log=LOG,
         )
         # H-17：RetentionFacade 过去只在测试脚手架里被实例化过，生产链路根本
         # 没人构造它，`retention_sweep_interval_s` 形同虚设，过期图片和 jobs
         # 行会无限堆积。这里把它接到真正的 runtime 上。
-        self.retention = job_persistence.RetentionFacade(
+        self.retention = persistence.RetentionFacade(
             data_dir=lambda: settings.data_dir,
             refs_dir=lambda: settings.refs_dir,
             db_exec_sync=lambda sql, params: repository._execute_sync(sql, params),
@@ -114,7 +116,7 @@ class JobService:
         self.outcomes["upstream_latency_ms_total"] += elapsed_ms
 
     def parse_payload(self, raw: bytes) -> tuple[Any, dict[str, Any]]:
-        limits = request_bodies.JsonShapeLimits(
+        limits = http_bodies.JsonShapeLimits(
             max_depth=self.settings.max_json_depth,
             max_array_items=self.settings.max_json_array_items,
             max_object_items=self.settings.max_json_object_items,
@@ -122,8 +124,8 @@ class JobService:
             max_key_chars=self.settings.max_json_key_chars,
             max_string_chars=self.settings.max_json_string_chars,
         )
-        raw_payload = request_bodies.load_json_bytes(raw, limits)
-        policy = payload_helpers.PayloadPolicy(
+        raw_payload = http_bodies.load_json_bytes(raw, limits)
+        policy = payloads.PayloadPolicy(
             allowed_fixed_endpoints=ALLOWED_FIXED_ENDPOINTS,
             allowed_prefix_endpoints=ALLOWED_PREFIX_ENDPOINTS,
             image_output_formats=frozenset(IMAGE_OUTPUT_FORMATS),
@@ -137,7 +139,7 @@ class JobService:
             default_retention_days=self.settings.default_retention_days,
             max_retention_days=self.settings.max_retention_days,
         )
-        return raw_payload, payload_helpers.validate_payload(raw_payload, policy)
+        return raw_payload, payloads.validate_payload(raw_payload, policy)
 
     def idempotency_key(
         self,
@@ -322,8 +324,18 @@ class JobService:
             )
             if fresh is None:
                 return
+            try:
+                authorization = self.credential_vault.decrypt_job_row(fresh)
+            except CredentialVaultError as exc:
+                raise JobFailure(
+                    "stored Authorization credential is unavailable",
+                    error_class=ERROR_CLASS_INTERNAL,
+                ) from exc
             upstream_dispatched = True
-            status, images = await self.upstream.call(fresh)
+            status, images = await self.upstream.call(
+                fresh,
+                authorization=authorization,
+            )
             elapsed_ms = int((time.monotonic() - started) * 1000)
             await self.persistence.mark_succeeded(
                 job_id,
@@ -389,7 +401,15 @@ class JobService:
 
     async def reconcile(self) -> None:
         rows = await self.repository.all(
-            "SELECT job_id FROM jobs WHERE status = 'queued' ORDER BY created_at"
+            """
+            SELECT job_id
+            FROM jobs
+            WHERE status = 'queued'
+              AND auth_ciphertext IS NOT NULL
+              AND auth_nonce IS NOT NULL
+              AND auth_key_id IS NOT NULL
+            ORDER BY created_at
+            """
         )
         for row in rows:
             if await self.queue.enqueue(str(row["job_id"])) == "full":

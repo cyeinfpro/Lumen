@@ -52,6 +52,8 @@ _LUMEN_UPDATE_INPUT_APP_STORAGE_GID="${LUMEN_APP_STORAGE_GID-}"
 . "${UPDATE_MODULE_DIR}/backup/preflight.sh"
 # shellcheck source=update/release/fetch.sh
 . "${UPDATE_MODULE_DIR}/release/fetch.sh"
+# shellcheck source=update/release/digest.sh
+. "${UPDATE_MODULE_DIR}/release/digest.sh"
 # shellcheck source=update/release/activate.sh
 . "${UPDATE_MODULE_DIR}/release/activate.sh"
 # shellcheck source=update/backup/phases.sh
@@ -107,6 +109,12 @@ lumen_acquire_lock "${ROOT}" "update.sh"
 lumen_update_journal_init
 if [ "${LUMEN_UPDATE_JOURNAL_RESUMED}" = "1" ]; then
     log_info "恢复 update journal：operation_id=${OPERATION_ID}"
+    if ! validate_resumed_update_state; then
+        lumen_update_journal_failed resume_validation 78 || true
+        trap - ERR
+        trap 'lumen_release_lock' EXIT
+        exit 78
+    fi
 fi
 trap 'rc=$?; [ "$rc" -ne 0 ] && on_err "$rc" || true; lumen_release_lock' EXIT
 

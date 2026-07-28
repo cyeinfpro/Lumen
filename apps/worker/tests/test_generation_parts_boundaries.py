@@ -1,32 +1,20 @@
 from __future__ import annotations
 
-# ruff: noqa: E402
-
 import asyncio
 import inspect
+from collections.abc import Sequence
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from lumen_core.constants import GenerationErrorCode
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
-
-
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
-
+from lumen_core.constants import GenerationErrorCode, MessageStatus
+from lumen_core.models import Generation, Message
 
 from app.tasks.generation_parts import (
+    composition,
+    composition_ports,
     failure,
     lease,
     lifecycle,
@@ -40,31 +28,140 @@ from app.tasks.generation_parts import (
     runtime,
     success,
 )
+from app.tasks.generation_parts.services import (
+    GenerationProviderContext,
+    GenerationProviderRequest,
+    RunGenerationDeps,
+)
+from app.upstream_parts.image_execution import ImageExecutionRequest
 
 
-def test_generation_facade_keeps_extracted_private_symbols() -> None:
-    assert generation._acquire_lease is lease.acquire_lease
-    assert generation._ready_queued_generation_ids is queue.ready_queued_generation_ids
-    assert generation._reserve_image_queue_slot is queue_claim.reserve_image_queue_slot
-    assert generation._image_request_options is request_options.image_request_options
-    assert generation._retry_delay_seconds is retry_state.retry_delay_seconds
-    assert generation._write_generation_files is persistence.write_generation_files
-    assert (
-        generation._raise_if_generation_interrupted
-        is lifecycle.raise_if_generation_interrupted
+def _generation_deps(**overrides: Any) -> RunGenerationDeps:
+    return replace(composition.build_generation_runtime().deps, **overrides)
+
+
+def test_generation_runtime_composes_typed_semantic_services() -> None:
+    generation_runtime = composition.build_generation_runtime()
+    deps = generation_runtime.deps
+
+    assert isinstance(generation_runtime, runtime.GenerationRuntime)
+    assert isinstance(deps, RunGenerationDeps)
+    assert generation_runtime.runner is runner.run_generation
+    assert not hasattr(generation_runtime, "ports")
+    assert tuple(field.name for field in fields(deps)) == (
+        "store",
+        "artifacts",
+        "billing",
+        "events",
+        "provider",
+        "queue",
+        "lease",
+        "credentials",
+        "workflows",
     )
-    assert (
-        generation._settle_existing_generated_image
-        is lifecycle.settle_existing_generated_image
+    assert isinstance(deps.store, composition_ports.DefaultGenerationStore)
+    assert isinstance(deps.artifacts, composition_ports.DefaultGenerationArtifacts)
+    assert isinstance(deps.billing, composition_ports.DefaultGenerationBilling)
+    assert isinstance(deps.events, composition_ports.DefaultGenerationEvents)
+    assert isinstance(deps.provider, composition_ports.DefaultGenerationProvider)
+    assert isinstance(deps.queue, composition_ports.DefaultGenerationQueue)
+    assert isinstance(deps.lease, composition_ports.DefaultGenerationLease)
+    assert isinstance(deps.credentials, composition_ports.DefaultGenerationCredentials)
+    assert isinstance(deps.workflows, composition_ports.DefaultGenerationWorkflows)
+
+
+def test_runner_builds_explicit_generation_provider_context() -> None:
+    captured: list[GenerationProviderRequest] = []
+    image_iter = object()
+
+    class Provider:
+        def generate(self, request: GenerationProviderRequest) -> object:
+            captured.append(request)
+            return image_iter
+
+    state = SimpleNamespace(
+        image_request_options={
+            "render_quality": "high",
+            "output_format": "png",
+            "output_compression": None,
+            "background": "auto",
+            "moderation": "low",
+            "responses_model": "gpt-image",
+        },
+        is_dual_race=False,
+        reserved_provider=None,
+        prompt_for_upstream="draw",
+        resolved=SimpleNamespace(size="1024x1024"),
+        requested_image_count=1,
+        progress_publisher=None,
+        user_id="user-1",
+        trace_id="gen-trace",
+        attempt=3,
+        task_id="generation-1",
+        action="generate",
+        services=SimpleNamespace(provider=Provider()),
     )
+
+    assert runner._build_image_iterator(state) is image_iter
+    assert captured[0].context == GenerationProviderContext(
+        trace_id="gen-trace",
+        retry_attempt=3,
+        quota_task_id="generation-1",
+        quota_attempt_epoch=3,
+    )
+
+
+def test_generation_provider_adapter_forwards_typed_upstream_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    image_iter = object()
+
+    def fake_generate_image(request: ImageExecutionRequest) -> object:
+        captured["request"] = request
+        return image_iter
+
+    monkeypatch.setattr(composition_ports, "generate_image", fake_generate_image)
+    provider = composition.build_generation_runtime().deps.provider
+    request = GenerationProviderRequest(
+        prompt="draw",
+        size="1024x1024",
+        n=1,
+        quality="high",
+        output_format="png",
+        output_compression=None,
+        background="auto",
+        moderation="low",
+        model="gpt-image",
+        progress_callback=None,
+        provider_override=None,
+        user_id="user-1",
+        context=GenerationProviderContext(
+            trace_id="gen-trace",
+            retry_attempt=3,
+            quota_task_id="generation-1",
+            quota_attempt_epoch=3,
+        ),
+    )
+
+    assert provider.generate(request) is image_iter
+    upstream_request = captured["request"]
+    assert isinstance(upstream_request, ImageExecutionRequest)
+    assert upstream_request.upstream_runtime is not None
+    request_context = upstream_request.request_context
+    assert request_context.upstream_runtime is upstream_request.upstream_runtime
+    assert request_context.trace_id == "gen-trace"
+    assert request_context.retry_attempt == 3
     assert (
-        generation._finalize_running_generation_cancel
-        is lifecycle.finalize_running_generation_cancel
+        request_context.next_quota_member("provider-a", "responses")
+        == "generation-1:3:1:provider-a:responses"
     )
 
 
 def test_generation_parts_do_not_reverse_import_generation_module() -> None:
     for module in (
+        composition,
+        composition_ports,
         lease,
         lifecycle,
         persistence,
@@ -84,8 +181,8 @@ def test_generation_parts_do_not_reverse_import_generation_module() -> None:
 
 
 def test_generation_module_size_budgets() -> None:
-    generation_path = Path(generation.__file__)
-    parts_dir = generation_path.with_name("generation_parts")
+    parts_dir = Path(runtime.__file__).parent
+    generation_path = parts_dir.parent / "generation.py"
 
     assert len(generation_path.read_text().splitlines()) <= 1500
     oversized_parts = {
@@ -97,7 +194,7 @@ def test_generation_module_size_budgets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lease_part_reads_facade_constants_at_call_time(
+async def test_lease_service_reads_concrete_module_ttl_at_call_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, dict[str, Any]]] = []
@@ -112,9 +209,13 @@ async def test_lease_part_reads_facade_constants_at_call_time(
             calls.append((key, value, kwargs))
             return True
 
-    monkeypatch.setattr(generation, "_LEASE_TTL_S", 17)
+    monkeypatch.setattr(lease, "LEASE_TTL_S", 17)
 
-    await lease.acquire_lease(Redis(), "gen-1", "worker:token")
+    await _generation_deps().lease.acquire(
+        Redis(),
+        "gen-1",
+        "worker:token",
+    )
 
     assert calls == [
         (
@@ -128,26 +229,32 @@ async def test_lease_part_reads_facade_constants_at_call_time(
 def test_queue_and_request_parts_resolve_monkeypatches_at_call_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(generation, "_IMAGE_QUEUE_LANE_WEIGHTS", {"lane-a": 7})
+    monkeypatch.setattr(queue, "IMAGE_QUEUE_LANE_WEIGHTS", {"lane-a": 7})
     monkeypatch.setattr(
-        generation,
-        "_aspect_ratio_prompt_constraint",
+        request_options,
+        "aspect_ratio_prompt_constraint",
         lambda _ratio: "\ncustom-constraint",
     )
 
-    assert queue.queue_lane_weight("lane-a") == 7
+    assert (
+        queue.queue_lane_weight(
+            "lane-a",
+            services=_generation_deps(),
+        )
+        == 7
+    )
     assert (
         request_options.prompt_with_aspect_ratio_constraint("prompt", "1:1")
         == "prompt\ncustom-constraint"
     )
 
 
-def test_retry_part_resolves_facade_helper_at_call_time(
+def test_retry_part_resolves_concrete_helper_at_call_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        generation,
-        "_base_retry_backoff_seconds",
+        retry_state,
+        "base_retry_backoff_seconds",
         lambda _attempt: 10.0,
     )
     monkeypatch.setattr(retry_state.random, "uniform", lambda _low, high: high)
@@ -165,8 +272,8 @@ async def test_lifecycle_checkpoint_uses_late_bound_exception_identity(
     async def cancelled(_redis: Any, _task_id: str) -> bool:
         return True
 
-    monkeypatch.setattr(generation, "_TaskCancelled", LateBoundCancelled)
-    monkeypatch.setattr(generation, "_is_cancelled", cancelled)
+    monkeypatch.setattr(lifecycle, "TaskCancelled", LateBoundCancelled)
+    monkeypatch.setattr(lifecycle, "is_cancelled", cancelled)
 
     with pytest.raises(LateBoundCancelled, match="post-result guard"):
         await lifecycle.raise_if_generation_interrupted(
@@ -179,30 +286,27 @@ async def test_lifecycle_checkpoint_uses_late_bound_exception_identity(
 
 def test_lifecycle_settlement_preserves_transaction_order() -> None:
     existing_source = inspect.getsource(lifecycle.settle_existing_generated_image)
-    success_start = existing_source.index("generation_events_ports().logger.info(")
+    success_start = existing_source.index("logger.info(")
     cancelled = existing_source[:success_start]
     succeeded = existing_source[success_start:]
 
-    cancel_update = cancelled.index("._generation_attempt_update(")
+    cancel_update = cancelled.index("generation_attempt_update(")
     cancel_release = cancelled.index(
-        "await generation_billing_ports().worker_billing.release_generation(",
+        "await services.billing.release(",
         cancel_update,
     )
     cancel_stage = cancelled.index(
-        "failure_delivery = generation_events_ports()._stage_generation_event(",
+        "failure_delivery = stage_generation_event(",
         cancel_release,
     )
-    cancel_event = cancelled.index(
-        "generation_events_ports().EV_GEN_FAILED",
-        cancel_stage,
-    )
+    cancel_event = cancelled.index("EV_GEN_FAILED", cancel_stage)
     cancel_commit = cancelled.index("await session.commit()", cancel_event)
     cancel_flush = cancelled.index(
-        "worker_billing.flush_balance_cache_refreshes(",
+        "await services.billing.flush_after_commit(",
         cancel_commit,
     )
     cancel_deliver = cancelled.index(
-        "await generation_events_ports()._deliver_generation_event(",
+        "await services.events.deliver(",
         cancel_flush,
     )
     assert (
@@ -215,26 +319,23 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
         < cancel_deliver
     )
 
-    success_update = succeeded.index("._generation_attempt_update(")
+    success_update = succeeded.index("generation_attempt_update(")
     success_settle = succeeded.index(
-        "await generation_billing_ports().worker_billing.settle_generation(",
+        "await services.billing.settle(",
         success_update,
     )
     success_stage = succeeded.index(
-        "success_delivery = generation_events_ports()._stage_generation_event(",
+        "success_delivery = stage_generation_event(",
         success_settle,
     )
-    success_event = succeeded.index(
-        "generation_events_ports().EV_GEN_SUCCEEDED",
-        success_stage,
-    )
+    success_event = succeeded.index("EV_GEN_SUCCEEDED", success_stage)
     success_commit = succeeded.index("await session.commit()", success_event)
     success_flush = succeeded.index(
-        "worker_billing.flush_balance_cache_refreshes(",
+        "await services.billing.flush_after_commit(",
         success_commit,
     )
     success_deliver = succeeded.index(
-        "await generation_events_ports()._deliver_generation_event(",
+        "await services.events.deliver(",
         success_flush,
     )
     assert (
@@ -248,26 +349,23 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
     )
 
     cancel_source = inspect.getsource(lifecycle.finalize_running_generation_cancel)
-    running_update = cancel_source.index("._generation_attempt_update(")
+    running_update = cancel_source.index("generation_attempt_update(")
     running_release = cancel_source.index(
-        "await generation_billing_ports().worker_billing.release_generation(",
+        "await services.billing.release(",
         running_update,
     )
     running_stage = cancel_source.index(
-        "failure_delivery = generation_events_ports()._stage_generation_event(",
+        "failure_delivery = stage_generation_event(",
         running_release,
     )
-    running_event = cancel_source.index(
-        "generation_events_ports().EV_GEN_FAILED",
-        running_stage,
-    )
+    running_event = cancel_source.index("EV_GEN_FAILED", running_stage)
     running_commit = cancel_source.index("await session.commit()", running_event)
     running_flush = cancel_source.index(
-        "worker_billing.flush_balance_cache_refreshes(",
+        "await services.billing.flush_after_commit(",
         running_commit,
     )
     running_deliver = cancel_source.index(
-        "await generation_events_ports()._deliver_generation_event(",
+        "await services.events.deliver(",
         running_flush,
     )
     assert (
@@ -283,24 +381,22 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_failure_releases_billing_reservation() -> None:
-    message_model = object()
-    generation_model = object()
     message = SimpleNamespace(status=None)
     generation_row = SimpleNamespace(id="gen-1")
     release_calls: list[tuple[Any, Any, str]] = []
 
     class Session:
         async def get(self, model: Any, object_id: str) -> Any:
-            if model is message_model:
+            if model is Message:
                 assert object_id == "msg-1"
                 return message
-            if model is generation_model:
+            if model is Generation:
                 assert object_id == "gen-1"
                 return generation_row
             raise AssertionError("unexpected model")
 
     class Billing:
-        async def release_generation(
+        async def release(
             self,
             session: Any,
             generation: Any,
@@ -311,23 +407,16 @@ async def test_terminal_failure_releases_billing_reservation() -> None:
 
     session = Session()
     state = SimpleNamespace(message_id="msg-1", task_id="gen-1")
-    ports = SimpleNamespace(
-        persistence=SimpleNamespace(
-            Message=message_model,
-            Generation=generation_model,
-        ),
-        domain=SimpleNamespace(MessageStatus=generation.MessageStatus),
-        billing=SimpleNamespace(worker_billing=Billing()),
-    )
+    deps = _generation_deps(billing=Billing())
 
     await failure._mark_message_and_release_billing(
         session,
         state,
         "provider_failure",
-        ports,
+        deps,
     )
 
-    assert message.status == generation.MessageStatus.FAILED
+    assert message.status == MessageStatus.FAILED
     assert release_calls == [(session, generation_row, "provider_failure")]
 
 
@@ -344,8 +433,6 @@ async def test_terminal_failure_settles_when_upstream_cost_is_unknown(
     error_code: str,
 ) -> None:
     """Post-dispatch uncertainty settles the hold instead of refunding cost."""
-    message_model = object()
-    generation_model = object()
     message = SimpleNamespace(status=None)
     generation_row = SimpleNamespace(id="gen-1", upstream_request={})
     release_calls: list[Any] = []
@@ -353,42 +440,33 @@ async def test_terminal_failure_settles_when_upstream_cost_is_unknown(
 
     class Session:
         async def get(self, model: Any, object_id: str) -> Any:
-            if model is message_model:
+            if model is Message:
                 return message
-            if model is generation_model:
+            if model is Generation:
                 return generation_row
             raise AssertionError("unexpected model")
 
     class Billing:
-        async def release_generation(
-            self, session: Any, generation: Any, *, reason: str
-        ) -> None:
+        async def release(self, session: Any, generation: Any, *, reason: str) -> None:
             release_calls.append((session, generation, reason))
 
-        async def settle_generation_unknown_upstream(
+        async def settle_unknown_upstream(
             self, session: Any, generation: Any, *, reason: str, knowledge: str
         ) -> None:
             settle_calls.append((session, generation, reason, knowledge))
 
     session = Session()
     state = SimpleNamespace(message_id="msg-1", task_id="gen-1")
-    ports = SimpleNamespace(
-        persistence=SimpleNamespace(
-            Message=message_model,
-            Generation=generation_model,
-        ),
-        domain=SimpleNamespace(MessageStatus=generation.MessageStatus),
-        billing=SimpleNamespace(worker_billing=Billing()),
-    )
+    deps = _generation_deps(billing=Billing())
 
     await failure._mark_message_and_release_billing(
         session,
         state,
         error_code,
-        ports,
+        deps,
     )
 
-    assert message.status == generation.MessageStatus.FAILED
+    assert message.status == MessageStatus.FAILED
     assert release_calls == []
     assert settle_calls == [
         (session, generation_row, error_code, "unknown"),
@@ -414,10 +492,14 @@ async def test_queue_claim_cleanup_preserves_release_order(
     async def release_lease(*_args: Any, **_kwargs: Any) -> None:
         calls.append("lease")
 
-    monkeypatch.setattr(generation, "_release_image_queue_slot", release_slot)
-    monkeypatch.setattr(generation, "_inflight_clear", clear_inflight)
-    monkeypatch.setattr(generation, "_clear_avoided_providers", clear_avoided)
-    monkeypatch.setattr(generation, "_release_lease", release_lease)
+    monkeypatch.setattr(queue_claim, "release_image_queue_slot", release_slot)
+    monkeypatch.setattr(queue_claim, "inflight_clear", clear_inflight)
+    monkeypatch.setattr(
+        queue_claim,
+        "clear_task_avoided_providers",
+        clear_avoided,
+    )
+    monkeypatch.setattr(queue_claim, "release_lease", release_lease)
 
     await queue_claim.release_generation_runtime_resources(
         object(),
@@ -425,28 +507,25 @@ async def test_queue_claim_cleanup_preserves_release_order(
         lease_token="worker:token",
         provider_name="provider-1",
         clear_avoided_providers=True,
+        services=_generation_deps(),
     )
 
     assert calls == ["slot", "inflight", "avoided", "lease"]
 
 
 @pytest.mark.asyncio
-async def test_persistence_cleanup_uses_facade_delete_hook(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_persistence_cleanup_uses_artifact_service() -> None:
     deleted: list[list[str]] = []
 
-    async def delete_storage_keys(keys: list[str]) -> None:
-        deleted.append(keys)
-
-    monkeypatch.setattr(
-        generation,
-        "_delete_storage_keys",
-        delete_storage_keys,
-    )
+    class Artifacts:
+        async def delete_files(self, keys: Sequence[str]) -> None:
+            deleted.append(list(keys))
 
     with pytest.raises(ValueError, match="write failed"):
-        async with persistence.cleanup_storage_on_error(["orig", "preview"]):
+        async with persistence.cleanup_storage_on_error(
+            ["orig", "preview"],
+            services=_generation_deps(artifacts=Artifacts()),
+        ):
             raise ValueError("write failed")
 
     assert deleted == [["orig", "preview"]]
@@ -456,35 +535,29 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     # 审计 D-1：settle 已从行写入事务里移出去，必须排在 commit 之后并自成事务，
     # 否则 commit 前的异常会把钱包流水连同已产出的上游图一起回滚（平台吸收成本）。
     persistence_source = inspect.getsource(persistence._persist_bonus_generation)
-    assert (
-        "generation_billing_ports().worker_billing.settle_generation"
-        not in persistence_source
-    )
     stage = persistence_source.index("_stage_bonus_events(")
     commit = persistence_source.index("await session.commit()", stage)
     settle = persistence_source.index("_settle_bonus_billing(", commit)
     assert stage < commit < settle
 
     settle_source = inspect.getsource(persistence._settle_bonus_billing)
-    settle_call = settle_source.index(
-        "generation_billing_ports().worker_billing.settle_generation"
-    )
+    settle_call = settle_source.index("context.services.billing.settle(")
     settle_commit = settle_source.index("await session.commit()", settle_call)
-    flush = settle_source.index("flush_balance_cache_refreshes", settle_commit)
+    flush = settle_source.index(
+        "context.services.billing.flush_after_commit(",
+        settle_commit,
+    )
     assert settle_call < settle_commit < flush
 
     stage_source = inspect.getsource(persistence._stage_bonus_events)
-    attached = stage_source.index("generation_events_ports().EV_GEN_ATTACHED")
-    succeeded = stage_source.index(
-        "generation_events_ports().EV_GEN_SUCCEEDED",
-        attached,
-    )
+    attached = stage_source.index("EV_GEN_ATTACHED")
+    succeeded = stage_source.index("EV_GEN_SUCCEEDED", attached)
     assert attached < succeeded
 
-    facade_source = inspect.getsource(persistence.handle_dual_race_bonus_image)
-    persist = facade_source.index("_persist_bonus_generation(")
-    deliver = facade_source.index(
-        "await generation_events_ports()._deliver_generation_events",
+    entrypoint_source = inspect.getsource(persistence.handle_dual_race_bonus_image)
+    persist = entrypoint_source.index("_persist_bonus_generation(")
+    deliver = entrypoint_source.index(
+        "await context.services.events.deliver_many(",
         persist,
     )
     assert persist < deliver

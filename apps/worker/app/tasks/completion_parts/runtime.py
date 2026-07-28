@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ...task_runtime import RuntimeSlot
+from ...provider_runtime.upstream_services import ImageUpstreamRuntime
+from .image_storage_runtime import CompletionToolImageService
+
+
+class CompletionStream(Protocol):
+    def __call__(
+        self,
+        body: dict[str, Any],
+        *,
+        runtime_override: Any | None = None,
+    ) -> AsyncIterator[dict[str, Any]]: ...
+
+
+class CompletionRunner(Protocol):
+    async def __call__(
+        self,
+        ctx: dict[str, Any],
+        task_id: str,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +51,7 @@ class CompletionToolsPorts:
     _extract_response_revised_prompt: Any
     _publish_completion_tool_progress: Any
     _publish_completion_tool_updates: Any
-    _store_and_publish_completion_tool_image: Any
+    tool_image_service: CompletionToolImageService
     _summarize_tool_error: Any
     _tool_image_dedupe_key: Any
     _tool_limited_completion_body: Any
@@ -67,7 +87,7 @@ class CompletionUpstreamPorts:
     _normalize_reasoning_effort_for_upstream: Any
     _raise_for_terminal_response_event: Any
     _record_completion_upstream_metadata: Any
-    stream_completion: Any
+    stream_completion: CompletionStream
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,17 +179,6 @@ _COMPLETION_RETRY_PORTS: RuntimeSlot[CompletionRetryPorts] = RuntimeSlot(
 )
 
 
-def install_completion_ports(ports: CompletionPorts) -> None:
-    _COMPLETION_PORTS.install_default(ports)
-    _COMPLETION_CONTEXT_PORTS.install_default(ports.context)
-    _COMPLETION_TOOLS_PORTS.install_default(ports.tools)
-    _COMPLETION_PERSISTENCE_PORTS.install_default(ports.persistence)
-    _COMPLETION_UPSTREAM_PORTS.install_default(ports.upstream)
-    _COMPLETION_BILLING_PORTS.install_default(ports.billing)
-    _COMPLETION_EVENTS_PORTS.install_default(ports.events)
-    _COMPLETION_RETRY_PORTS.install_default(ports.retry)
-
-
 def completion_ports() -> CompletionPorts:
     return _COMPLETION_PORTS.current()
 
@@ -205,7 +214,8 @@ def completion_retry_ports() -> CompletionRetryPorts:
 @dataclass(frozen=True, slots=True)
 class CompletionRuntime:
     ports: CompletionPorts
-    runner: Any
+    runner: CompletionRunner
+    image_upstream_runtime: ImageUpstreamRuntime
 
     async def run(self, ctx: dict[str, Any], task_id: str) -> None:
         with ExitStack() as stack:

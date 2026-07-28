@@ -20,6 +20,7 @@ export type ConnectionEvent =
   | { type: "hidden" }
   | { type: "visible" }
   | { type: "replay_gap"; reason: string; cursor?: string }
+  | { type: "recovery_required"; reason: string; cursor?: string }
   | { type: "epoch_change"; epoch: string; cursor?: string }
   | { type: "snapshot_success"; cursor?: string }
   | { type: "snapshot_failure" }
@@ -112,19 +113,31 @@ function recoveryTransition(
       [{ kind: "openSource", cursor: nextCursor }],
     );
   }
-  if (event.type !== "replay_gap" && event.type !== "epoch_change") return null;
+  if (
+    event.type !== "replay_gap" &&
+    event.type !== "recovery_required" &&
+    event.type !== "epoch_change"
+  ) {
+    return null;
+  }
   const reason: RecoveryReason =
-    event.type === "replay_gap"
+    event.type === "epoch_change"
       ? {
-          kind: "replay_gap",
-          reason: event.reason,
-          cursor: event.cursor ?? cursor,
-        }
-      : {
           kind: "server_epoch_changed",
           epoch: event.epoch,
           cursor: event.cursor ?? cursor,
-        };
+        }
+      : event.type === "recovery_required"
+        ? {
+            kind: "recovery_required",
+            reason: event.reason,
+            cursor: event.cursor ?? cursor,
+          }
+        : {
+            kind: "replay_gap",
+            reason: event.reason,
+            cursor: event.cursor ?? cursor,
+          };
   return publish(
     { kind: "recovering", reason, cursor },
     [

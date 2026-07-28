@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar, Token
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 from lumen_core.byok import (
@@ -16,7 +14,41 @@ from lumen_core.byok import (
     extract_response_output_text,
     extract_sse_output_text,
 )
-from lumen_core.providers import endpoint_kind_allowed, resolve_provider_proxy_url
+from lumen_core.providers import (
+    ProviderProxyDefinition,
+    endpoint_kind_allowed,
+    resolve_provider_proxy_url,
+)
+
+from .contracts import ProviderConfig
+
+
+class ProbeResponse(Protocol):
+    status_code: int
+    text: str
+
+    def json(self) -> object: ...
+
+
+class ProbeHttpClient(Protocol):
+    async def __aenter__(self) -> ProbeHttpClient: ...
+
+    async def __aexit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> None: ...
+
+    async def post(self, url: str, **kwargs: object) -> ProbeResponse: ...
+
+
+class ProbeHttpClientFactory(Protocol):
+    def __call__(self, **kwargs: object) -> ProbeHttpClient: ...
+
+
+class ProbeTimeoutFactory(Protocol):
+    def __call__(self, timeout: float) -> object: ...
 
 
 def ewma(previous: float | None, sample: float, alpha: float) -> float:
@@ -30,13 +62,16 @@ class ProviderProbeRuntime:
     monotonic: Callable[[], float]
     wall_time: Callable[[], float]
     logger: logging.Logger
-    async_client_factory: Callable[..., Any]
-    timeout_factory: Callable[..., Any]
+    async_client_factory: ProbeHttpClientFactory
+    timeout_factory: ProbeTimeoutFactory
     build_probe_request: Callable[[], dict[str, Any]]
-    extract_response_text: Callable[[Any], str]
+    extract_response_text: Callable[[object], str]
     extract_sse_text: Callable[[str], str]
-    endpoint_allowed: Callable[..., bool]
-    resolve_proxy_url: Callable[..., Any]
+    endpoint_allowed: Callable[[ProviderConfig, str | None], bool]
+    resolve_proxy_url: Callable[
+        [ProviderProxyDefinition],
+        Awaitable[str | None],
+    ]
     ewma: Callable[[float | None, float, float], float]
     circuit_failure_threshold: int = 3
     circuit_cooldown_base_s: float = 30.0
@@ -57,59 +92,29 @@ class ProviderProbeRuntime:
     image_probe_min_b64_len: int = 1000
 
 
-DEFAULT_PROVIDER_PROBE_RUNTIME = ProviderProbeRuntime(
-    monotonic=time.monotonic,
-    wall_time=time.time,
-    logger=logging.getLogger("app.provider_pool"),
-    async_client_factory=httpx.AsyncClient,
-    timeout_factory=httpx.Timeout,
-    build_probe_request=build_provider_probe_request,
-    extract_response_text=extract_response_output_text,
-    extract_sse_text=extract_sse_output_text,
-    endpoint_allowed=endpoint_kind_allowed,
-    resolve_proxy_url=resolve_provider_proxy_url,
-    ewma=ewma,
-)
-
-_PROBE_RUNTIME_OVERRIDE: ContextVar[ProviderProbeRuntime | None] = ContextVar(
-    "provider_probe_runtime_override",
-    default=None,
-)
-
-
-def provider_probe_runtime() -> ProviderProbeRuntime:
-    return _PROBE_RUNTIME_OVERRIDE.get() or DEFAULT_PROVIDER_PROBE_RUNTIME
-
-
-def bind_provider_probe_runtime(
-    runtime: ProviderProbeRuntime,
-) -> Token[ProviderProbeRuntime | None]:
-    return _PROBE_RUNTIME_OVERRIDE.set(runtime)
-
-
-def reset_provider_probe_runtime(
-    token: Token[ProviderProbeRuntime | None],
-) -> None:
-    _PROBE_RUNTIME_OVERRIDE.reset(token)
-
-
-@contextmanager
-def use_provider_probe_runtime(
-    runtime: ProviderProbeRuntime,
-) -> Iterator[ProviderProbeRuntime]:
-    token = bind_provider_probe_runtime(runtime)
-    try:
-        yield runtime
-    finally:
-        reset_provider_probe_runtime(token)
+def build_provider_probe_runtime() -> ProviderProbeRuntime:
+    """Build probe dependencies for one provider-pool instance."""
+    return ProviderProbeRuntime(
+        monotonic=time.monotonic,
+        wall_time=time.time,
+        logger=logging.getLogger("app.provider_pool"),
+        async_client_factory=httpx.AsyncClient,
+        timeout_factory=httpx.Timeout,
+        build_probe_request=build_provider_probe_request,
+        extract_response_text=extract_response_output_text,
+        extract_sse_text=extract_sse_output_text,
+        endpoint_allowed=endpoint_kind_allowed,
+        resolve_proxy_url=resolve_provider_proxy_url,
+        ewma=ewma,
+    )
 
 
 __all__ = [
-    "DEFAULT_PROVIDER_PROBE_RUNTIME",
+    "ProbeHttpClient",
+    "ProbeHttpClientFactory",
+    "ProbeResponse",
+    "ProbeTimeoutFactory",
     "ProviderProbeRuntime",
-    "bind_provider_probe_runtime",
+    "build_provider_probe_runtime",
     "ewma",
-    "provider_probe_runtime",
-    "reset_provider_probe_runtime",
-    "use_provider_probe_runtime",
 ]

@@ -11,15 +11,23 @@ import socket
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
-import job_persistence
-import payload_helpers
-import request_bodies
 from fastapi import HTTPException, Request
 from PIL import Image
+from image_job import (
+    artifacts,
+    candidates,
+    http_bodies,
+    payloads,
+    persistence,
+    url_security,
+)
 from image_job.application.auth import credential_hash
 from image_job.config import ImageJobSettings
+from image_job.config import SecretText
+from image_job.credential_vault import CredentialVault
 from image_job.adapters.sqlite_jobs import SQLiteJobRepository
 from image_job.contracts import (
     ALLOWED_FIXED_ENDPOINTS,
@@ -33,8 +41,8 @@ from image_job.contracts import (
 )
 from image_job.payloads import json_dump, request_hash
 from image_job.processing import ImageProcessing
-from image_candidates import ImageCandidate
-from job_persistence import ReferencePersistenceFacade, RetentionFacade
+from image_job.candidates import ImageCandidate
+from image_job.persistence import ReferencePersistenceFacade, RetentionFacade
 
 
 class ImageJobHarness:
@@ -73,30 +81,45 @@ class ImageJobHarness:
         "DB_PATH": "db_path",
         "DATA_DIR": "data_dir",
         "REFS_DIR": "refs_dir",
+        "CREDENTIAL_ACTIVE_KEY_ID": "credential_active_key_id",
+        "CREDENTIAL_MASTER_SECRET": "credential_master_secret",
     }
 
     def __init__(self) -> None:
-        object.__setattr__(self, "settings", ImageJobSettings.from_env())
+        settings = replace(
+            ImageJobSettings.from_env(),
+            credential_active_key_id="test-v1",
+            credential_master_secret=SecretText("test-master-secret-" + "x" * 32),
+        )
+        object.__setattr__(self, "settings", settings)
         object.__setattr__(self, "http_client", None)
         object.__setattr__(self, "touch_running", self._noop)
         object.__setattr__(self, "log", logging.getLogger("image-job.test"))
+        credential_vault = CredentialVault(
+            active_key_id=settings.credential_active_key_id,
+            master_secret=settings.credential_master_secret.get_secret_value(),
+        )
+        object.__setattr__(self, "_credential_vault", credential_vault)
         repository = SQLiteJobRepository(self.settings)
         object.__setattr__(self, "repository", repository)
         processing = ImageProcessing(
             self.settings,
             http_client=lambda: self.http_client,
-            touch_running=lambda job_id: self.touch_running(job_id),
+            heartbeat=SimpleNamespace(
+                touch_running=lambda job_id: self.touch_running(job_id)
+            ),
             logger=self.log,
         )
         object.__setattr__(self, "processing", processing)
         object.__setattr__(
             self,
             "_persistence",
-            job_persistence.JobPersistenceFacade(
+            persistence.JobPersistenceFacade(
                 db_exec=lambda sql, params=(): self.db_exec(sql, params),
                 enqueue_job=lambda job_id: self.enqueue_job(job_id),
                 now_iso=lambda: self.iso(),
                 auth_hash=credential_hash,
+                credential_vault=credential_vault,
                 json_dump=json_dump,
                 upstream_base_url=lambda: self.settings.upstream_base_url,
                 upstream_idempotency_guaranteed=(
@@ -104,10 +127,11 @@ class ImageJobHarness:
                 ),
                 error_class_internal=lambda: ERROR_CLASS_INTERNAL,
                 error_class_network=lambda: ERROR_CLASS_NETWORK,
+                job_ttl_days=lambda: self.settings.job_ttl_days,
                 log=self.log,
             ),
         )
-        object.__setattr__(self, "_job_persistence_module", job_persistence)
+        object.__setattr__(self, "_job_persistence_module", persistence)
         object.__setattr__(self, "_queued_ids", set())
         object.__setattr__(self, "_inflight", set())
         object.__setattr__(
@@ -153,11 +177,14 @@ class ImageJobHarness:
                     ),
                 )
             elif field_name == "sidecar_token":
-                from image_job.config import SecretText
-
                 self.settings = replace(
                     self.settings,
                     sidecar_token=SecretText(str(value)),
+                )
+            elif field_name == "credential_master_secret":
+                self.settings = replace(
+                    self.settings,
+                    credential_master_secret=SecretText(str(value)),
                 )
             else:
                 self.settings = replace(self.settings, **{field_name: value})
@@ -210,19 +237,19 @@ class ImageJobHarness:
                 return self.settings.sidecar_token.get_secret_value()
             return getattr(self.settings, field_name)
         if name == "require_auth":
-            return payload_helpers.require_auth
+            return payloads.require_auth
         if name == "validate_sidecar_auth_config":
-            return payload_helpers.validate_sidecar_auth_config
+            return payloads.validate_sidecar_auth_config
         if name == "_read_request_body_bounded":
-            return request_bodies.read_request_body_bounded
+            return http_bodies.read_request_body_bounded
         if name == "_try_parse_sse_data":
-            return self.processing.try_parse_sse_data
+            return self.processing.candidate_facade.try_parse_sse_data
         if name == "_is_responses_success_terminal":
-            return self.processing.is_responses_success_terminal
+            return self.processing.candidate_facade.is_responses_success_terminal
         if name == "_is_responses_error_terminal":
-            return self.processing.is_responses_error_terminal
+            return self.processing.candidate_facade.is_responses_error_terminal
         if name == "_first_stream_error":
-            return self.processing.first_stream_error
+            return self.processing.candidate_facade.first_stream_error
         if name == "_new_pinned_image_download_client":
             return self.processing.new_pinned_download_client
         if name == "_extract_non_stream_response_images":
@@ -240,15 +267,19 @@ class ImageJobHarness:
         if name == "socket":
             return socket
         if name == "pinned_async_http_transport":
-            from image_url_security import pinned_async_http_transport
-
-            return pinned_async_http_transport
+            return url_security.pinned_async_http_transport
         if name == "PublicImageDownloadTarget":
-            from image_url_security import PublicImageDownloadTarget
-
-            return PublicImageDownloadTarget
+            return url_security.PublicImageDownloadTarget
         if name == "request_hash":
             return request_hash
+        if name == "parse_json_bytes":
+            return http_bodies.parse_json_bytes
+        if name == "upstream_idempotency_key":
+            return payloads.upstream_idempotency_key
+        if name == "resolve_public_image_download_target":
+            return (
+                self.processing.candidate_facade.resolve_public_image_download_target
+            )
         if name == "_db_all_sync":
             return self._db_all_sync
         if name == "_db_exec_sync":
@@ -256,7 +287,7 @@ class ImageJobHarness:
         if name == "_db_one_sync":
             return self._db_one_sync
         if name == "_payload_helpers":
-            return payload_helpers
+            return payloads
         if name.startswith("ERROR_CLASS_"):
             from image_job import contracts
 
@@ -264,9 +295,7 @@ class ImageJobHarness:
         if name == "ImageCandidate":
             return ImageCandidate
         if name == "ImageDownloadResolutionError":
-            from image_url_security import ImageDownloadResolutionError
-
-            return ImageDownloadResolutionError
+            return url_security.ImageDownloadResolutionError
         if name == "JobFailure":
             return JobFailure
         if name == "_call_upstream_once":
@@ -276,13 +305,9 @@ class ImageJobHarness:
         if name == "_upstream":
             return self.processing.upstream_facade
         if name == "_image_candidates_module":
-            import image_candidates
-
-            return image_candidates
+            return candidates
         if name == "_image_artifacts_module":
-            import image_artifacts
-
-            return image_artifacts
+            return artifacts
         if hasattr(self.processing, name):
             return getattr(self.processing, name)
         if hasattr(self._persistence, name):
@@ -305,12 +330,13 @@ class ImageJobHarness:
         return self.repository._open()
 
     def init_storage_sync(self) -> None:
-        job_persistence.init_storage(
+        persistence.init_storage(
             data_dir=self.settings.data_dir,
             refs_dir=self.settings.refs_dir,
             db_path=self.settings.db_path,
             open_conn=self._open_conn,
             auth_hash=credential_hash,
+            credential_vault=self._credential_vault,
         )
 
     def _db_one_sync(self, sql: str, params: tuple[Any, ...] = ()):
@@ -336,14 +362,14 @@ class ImageJobHarness:
         return "enqueued"
 
     def request_idempotency_key(self, request: Request, raw_payload: Any):
-        return payload_helpers.request_idempotency_key(
+        return payloads.request_idempotency_key(
             request,
             raw_payload,
             max_bytes=self.settings.max_idempotency_key_bytes,
         )
 
     def load_image_job_json(self, data: bytes) -> Any:
-        limits = request_bodies.JsonShapeLimits(
+        limits = http_bodies.JsonShapeLimits(
             max_depth=self.settings.max_json_depth,
             max_array_items=self.settings.max_json_array_items,
             max_object_items=self.settings.max_json_object_items,
@@ -351,10 +377,10 @@ class ImageJobHarness:
             max_key_chars=self.settings.max_json_key_chars,
             max_string_chars=self.settings.max_json_string_chars,
         )
-        return request_bodies.load_json_bytes(data, limits)
+        return http_bodies.load_json_bytes(data, limits)
 
     def validate_json_shape(self, value: Any) -> None:
-        limits = request_bodies.JsonShapeLimits(
+        limits = http_bodies.JsonShapeLimits(
             max_depth=self.settings.max_json_depth,
             max_array_items=self.settings.max_json_array_items,
             max_object_items=self.settings.max_json_object_items,
@@ -362,11 +388,11 @@ class ImageJobHarness:
             max_key_chars=self.settings.max_json_key_chars,
             max_string_chars=self.settings.max_json_string_chars,
         )
-        request_bodies.validate_json_shape(value, limits)
+        http_bodies.validate_json_shape(value, limits)
 
     def validate_payload(self, payload: Any) -> dict[str, Any]:
         self.validate_json_shape(payload)
-        policy = payload_helpers.PayloadPolicy(
+        policy = payloads.PayloadPolicy(
             allowed_fixed_endpoints=ALLOWED_FIXED_ENDPOINTS,
             allowed_prefix_endpoints=ALLOWED_PREFIX_ENDPOINTS,
             image_output_formats=frozenset(IMAGE_OUTPUT_FORMATS),
@@ -378,10 +404,10 @@ class ImageJobHarness:
             default_retention_days=self.settings.default_retention_days,
             max_retention_days=self.settings.max_retention_days,
         )
-        return payload_helpers.validate_payload(payload, policy)
+        return payloads.validate_payload(payload, policy)
 
     def authenticate_caller(self, request: Request) -> tuple[str, bool]:
-        return payload_helpers.require_sidecar_auth(
+        return payloads.require_sidecar_auth(
             request,
             expected_token=self.settings.sidecar_token.get_secret_value(),
             allow_legacy=self.settings.allow_legacy_bearer,
@@ -439,12 +465,12 @@ class ImageJobHarness:
 
     async def create_image_job(self, request: Request) -> dict[str, Any]:
         owner, legacy_auth = self.authenticate_caller(request)
-        upstream = payload_helpers.require_upstream_auth(
+        upstream = payloads.require_upstream_auth(
             request,
             caller_auth_header=owner,
             legacy_auth=legacy_auth,
         )
-        raw = await request_bodies.read_request_body_bounded(
+        raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=self.settings.max_request_bytes,
         )
@@ -521,6 +547,23 @@ class ImageJobHarness:
         row = await self.db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         return self.row_to_response(row)
 
+    async def call_upstream(
+        self,
+        row: Any,
+        *,
+        authorization: str | None = None,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        resolved = authorization
+        if resolved is None:
+            try:
+                resolved = self._credential_vault.decrypt_job_row(row)
+            except Exception:
+                resolved = row["auth_header"]
+        return await self.processing.call_upstream(
+            row,
+            authorization=resolved,
+        )
+
     async def get_image_job(self, job_id: str, request: Request) -> dict[str, Any]:
         owner, legacy_auth = self.authenticate_caller(request)
         row = await self.db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
@@ -528,7 +571,7 @@ class ImageJobHarness:
             raise HTTPException(status_code=404, detail="image job not found")
         candidate_hashes = [credential_hash(owner)]
         if not legacy_auth:
-            upstream = payload_helpers.optional_upstream_auth(request)
+            upstream = payloads.optional_upstream_auth(request)
             if upstream is not None:
                 candidate_hashes.append(credential_hash(upstream))
         if not any(
@@ -543,7 +586,7 @@ class ImageJobHarness:
 
     async def upload_reference(self, request: Request) -> dict[str, Any]:
         owner, _legacy_auth = self.authenticate_caller(request)
-        raw = await request_bodies.read_request_body_bounded(
+        raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=self.settings.max_ref_bytes,
         )

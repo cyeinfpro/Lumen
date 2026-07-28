@@ -10,23 +10,21 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException, Request, UploadFile
-from PIL import Image as PILImage
 from lumen_core.schemas import VideoCreateIn, VideoPriceOptionOut, VideoReferenceMediaIn
 from lumen_core.video_providers import VideoProviderDefinition
 
+from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
 from app.routes import events, videos
 from app.services.video import submission as video_submission
 from app.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
-from app.video_reference_images import (
-    VIDEO_REFERENCE_IMAGE_KIND,
-    VideoReferenceImageError,
-    make_video_reference_jpeg,
-)
 from app.video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,
     _fit_even_dimensions,
 )
+
+
+VIDEO_REFERENCE_IMAGE_KIND = VIDEO_REFERENCE_VARIANT
 
 
 def _request(headers: list[tuple[bytes, bytes]] | None = None) -> Request:
@@ -1541,42 +1539,6 @@ def test_reference_image_public_url_sets_video_reference_token() -> None:
     assert isinstance(image.metadata_jsonb["video_reference_access_token"], str)
 
 
-def test_video_reference_jpeg_downsizes_and_flattens_alpha(tmp_path: Path) -> None:
-    source = tmp_path / "source.png"
-    PILImage.new("RGBA", (3000, 1000), (255, 0, 0, 128)).save(source)
-
-    rendered = make_video_reference_jpeg(source)
-
-    assert rendered.width == 2048
-    assert rendered.height == 683
-    with PILImage.open(io.BytesIO(rendered.data)) as out:
-        assert out.format == "JPEG"
-        assert out.mode == "RGB"
-        assert out.size == (2048, 683)
-
-
-def test_video_reference_jpeg_retries_without_optimize(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    PILImage.new("RGB", (64, 32), (10, 20, 30)).save(source)
-    original_save = PILImage.Image.save
-
-    def flaky_save(self, fp, format=None, **params):  # noqa: ANN001, ANN002
-        if params.get("optimize") is True:
-            raise OSError("encoder optimize failed")
-        return original_save(self, fp, format=format, **params)
-
-    monkeypatch.setattr(PILImage.Image, "save", flaky_save)
-
-    rendered = make_video_reference_jpeg(source)
-
-    with PILImage.open(io.BytesIO(rendered.data)) as out:
-        assert out.format == "JPEG"
-        assert out.size == (64, 32)
-
-
 def _video_provider(kind: str) -> VideoProviderDefinition:
     return VideoProviderDefinition(
         name=f"{kind}-provider",
@@ -2114,15 +2076,23 @@ async def test_reference_media_snapshots_refreshes_legacy_video_public_url(
     assert snapshots[0]["upstream_reference_storage_key"].endswith("video-1.safe.mp4")
 
 
+@pytest.mark.parametrize(
+    ("storage_key", "mime"),
+    [
+        ("u/user-1/uploads/image-1.png", "image/png"),
+        ("u/user-1/uploads/image-1.webp", "image/webp"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_adds_public_url_for_image(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_reference_media_snapshots_adds_lazy_public_url_for_image(
+    storage_key: str,
+    mime: str,
 ) -> None:
     image = SimpleNamespace(
         id="image-1",
-        storage_key="u/user-1/uploads/image-1.jpg",
+        storage_key=storage_key,
         sha256="sha",
-        mime="image/jpeg",
+        mime=mime,
         metadata_jsonb={},
         deleted_at=None,
     )
@@ -2134,20 +2104,6 @@ async def test_reference_media_snapshots_adds_public_url_for_image(
     class Db:
         async def execute(self, _statement):
             return Result()
-
-    ensured: list[str] = []
-
-    async def fake_ensure(_db, image_arg, *, storage_root: str):
-        ensured.append(image_arg.id)
-        return SimpleNamespace(
-            image_id=image_arg.id,
-            kind=VIDEO_REFERENCE_IMAGE_KIND,
-            storage_key="u/user-1/uploads/image-1.video_ref_2048_jpg.jpg",
-            width=2048,
-            height=1024,
-        )
-
-    monkeypatch.setattr(videos, "ensure_video_reference_image_variant", fake_ensure)
 
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
@@ -2169,15 +2125,18 @@ async def test_reference_media_snapshots_adds_public_url_for_image(
     assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
     assert snapshots[0]["label"] == "商品图"
     assert snapshots[0]["ref_id"] == "ref:image:2"
+    assert snapshots[0]["storage_key"] == storage_key
+    assert snapshots[0]["mime"] == mime
     assert "video_reference_access_token" in image.metadata_jsonb
     assert "video_reference_access_token_expires_at" in image.metadata_jsonb
-    assert ensured == ["image-1"]
+    assert snapshots[0]["upstream_reference_mime"] == "image/jpeg"
+    assert "upstream_reference_storage_key" not in snapshots[0]
+    assert "upstream_reference_width" not in snapshots[0]
+    assert "upstream_reference_height" not in snapshots[0]
 
 
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_reference_media_snapshots_refreshes_legacy_image_public_url() -> None:
     image = SimpleNamespace(
         id="image-1",
         storage_key="u/user-1/uploads/image-1.png",
@@ -2194,17 +2153,6 @@ async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
     class Db:
         async def execute(self, _statement):
             return Result()
-
-    async def fake_ensure(_db, image_arg, *, storage_root: str):
-        return SimpleNamespace(
-            image_id=image_arg.id,
-            kind=VIDEO_REFERENCE_IMAGE_KIND,
-            storage_key="u/user-1/uploads/image-1.video_ref_2048_jpg.jpg",
-            width=2048,
-            height=2048,
-        )
-
-    monkeypatch.setattr(videos, "ensure_video_reference_image_variant", fake_ensure)
 
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
@@ -2231,9 +2179,7 @@ async def test_reference_media_snapshots_refreshes_legacy_image_public_url(
 
 
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_falls_back_to_inline_when_variant_optional(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_reference_media_snapshots_defers_optional_variant_render() -> None:
     image = SimpleNamespace(
         id="image-1",
         storage_key="u/user-1/uploads/image-1.png",
@@ -2250,11 +2196,6 @@ async def test_reference_media_snapshots_falls_back_to_inline_when_variant_optio
     class Db:
         async def execute(self, _statement):
             return Result()
-
-    async def fail_ensure(*_args, **_kwargs):
-        raise VideoReferenceImageError("invalid_image", "unreadable image", 400)
-
-    monkeypatch.setattr(videos, "ensure_video_reference_image_variant", fail_ensure)
 
     snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
         Db(),  # type: ignore[arg-type]
@@ -2263,15 +2204,13 @@ async def test_reference_media_snapshots_falls_back_to_inline_when_variant_optio
         reference_public_base_url="https://lumen.example",
     )
 
-    assert snapshots[0]["url"] is None
-    assert snapshots[0]["upstream_reference_variant"] is None
-    assert snapshots[0]["upstream_reference_variant_error"]["code"] == "invalid_image"
+    assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["upstream_reference_variant"] == VIDEO_REFERENCE_IMAGE_KIND
+    assert "upstream_reference_variant_error" not in snapshots[0]
 
 
 @pytest.mark.asyncio
-async def test_reference_media_snapshots_raises_when_variant_required(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_reference_media_snapshots_defers_required_variant_render() -> None:
     image = SimpleNamespace(
         id="image-1",
         storage_key="u/user-1/uploads/image-1.png",
@@ -2289,22 +2228,16 @@ async def test_reference_media_snapshots_raises_when_variant_required(
         async def execute(self, _statement):
             return Result()
 
-    async def fail_ensure(*_args, **_kwargs):
-        raise VideoReferenceImageError("invalid_image", "unreadable image", 400)
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
+        reference_public_base_url="https://lumen.example",
+        required_public_media=True,
+    )
 
-    monkeypatch.setattr(videos, "ensure_video_reference_image_variant", fail_ensure)
-
-    with pytest.raises(HTTPException) as excinfo:
-        await videos._reference_media_snapshots(  # noqa: SLF001
-            Db(),  # type: ignore[arg-type]
-            user_id="user-1",
-            items=[VideoReferenceMediaIn(kind="image", image_id="image-1")],
-            reference_public_base_url="https://lumen.example",
-            required_public_media=True,
-        )
-
-    assert excinfo.value.status_code == 400
-    assert excinfo.value.detail["error"]["code"] == "invalid_image"
+    assert f"variant={VIDEO_REFERENCE_IMAGE_KIND}" in snapshots[0]["url"]
+    assert snapshots[0]["upstream_reference_variant"] == VIDEO_REFERENCE_IMAGE_KIND
 
 
 def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:

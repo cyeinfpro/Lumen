@@ -139,7 +139,9 @@ worker 通过 sidecar 把参考图转成短 URL，避免 base64 内联到上游�
 它必须绑定一个已运行的 sub2api/OpenAI 兼容上游；`scripts/lumenctl.sh install-image-job`
 会让你填写实际上游 base URL，例如本机常见默认值 `http://127.0.0.1:8081`，也可以是其他端口、内网地址或公网反代地址；脚本会探测你填写的地址，不可达时会中止安装。
 
-**源码唯一真相**：仓库根 `image-job/*.py`，包括请求解析和固定解析下载安全模块。`deploy/image-job/` 只放部署模板。
+**源码唯一真相**：仓库根 `image-job/app.py` 是部署入口，其余生产实现全部位于
+`image-job/image_job/` 包内，包括请求解析和固定解析下载安全模块。
+`deploy/image-job/` 只放部署模板。
 
 发布步骤：
 

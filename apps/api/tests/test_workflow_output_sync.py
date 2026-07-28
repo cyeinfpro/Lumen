@@ -8,7 +8,8 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.routes import workflows
-from app.workflow_services import output_sync, output_values
+from app.workflows.adapters import output_sync
+from app.workflows.application import output_values
 
 
 class _Result:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..provider_runtime.upstream_services import service_name, upstream_services
-
 import asyncio
 import inspect
 import json
@@ -13,22 +11,27 @@ import re
 import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    UpstreamServices,
+    resolve_image_upstream_services,
+    service_name,
+)
 from .sse_transport import CurlSSEEventParser, CurlSSEProcess, decode_sse_event
 
-ImageProgressCallback = Callable[[dict[str, Any]], Any]
+ImageProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 _CURL_TEMP_FILE_MODE = 0o600
 _CURL_STDERR_MAX_BYTES = 64 * 1024
 _DEFAULT_JSON_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
 _DEFAULT_ERROR_RESPONSE_MAX_BYTES = 64 * 1024
-_AMBIENT_PINNED_TARGET = object()
 
 
 class _CurlOutputTooLarge(Exception):
@@ -37,6 +40,10 @@ class _CurlOutputTooLarge(Exception):
         self.label = label
         self.max_bytes = max_bytes
         self.received_bytes = received_bytes
+
+
+def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
+    return resolve_image_upstream_services(runtime)
 
 
 def _curl_timeout_arg(timeout_s: float) -> str:
@@ -105,29 +112,19 @@ def _curl_secret_config_bytes(
     return "".join(lines).encode("utf-8")
 
 
-def _current_byok_http_target(
-    *,
-    url: str,
-    proxy_url: str | None,
-) -> Any | None:
-    if proxy_url is not None:
-        return None
-    from ..provider_runtime.byok_context import current_byok_http_target
-
-    return current_byok_http_target(url)
-
-
 async def _stage_curl_secret_config(
     *,
     url: str,
     headers: dict[str, str],
     proxy_url: str | None,
     pinned_target: Any | None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> str:
+    services = _runtime_services(runtime)
     effective_target = (
         None
         if proxy_url is not None
-        else upstream_services().requests.validated_byok_target_for_request(
+        else services.requests.validated_byok_target_for_request(
             pinned_target, url
         )
     )
@@ -154,24 +151,37 @@ async def _stage_curl_secret_config(
     return config_path
 
 
-def _configured_limit(name: str, default: int) -> int:
+def _configured_limit(
+    name: str,
+    default: int,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> int:
+    services = _runtime_services(runtime)
     try:
-        value = int(getattr(upstream_services().core, service_name(name)))
+        value = int(getattr(services.core, service_name(name)))
     except (AttributeError, TypeError, ValueError):
         return default
     return max(0, value)
 
 
-def _json_response_limit() -> int:
+def _json_response_limit(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> int:
     return _configured_limit(
         "_NON_SSE_JSON_MAX_BYTES",
         _DEFAULT_JSON_RESPONSE_MAX_BYTES,
+        runtime=runtime,
     )
 
 
-def _error_response_limit() -> int:
+def _error_response_limit(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> int:
     return min(
-        _json_response_limit(),
+        _json_response_limit(runtime=runtime),
         _DEFAULT_ERROR_RESPONSE_MAX_BYTES,
     )
 
@@ -299,8 +309,11 @@ async def _terminate_curl_proc_group(
 
 async def _stage_multipart_bytes_to_tmp(
     files: list[tuple[str, tuple[str, bytes, str]]],
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[list[tuple[str, str, str, str]], list[str]]:
     """Stage multipart byte payloads once so retries reuse the same files."""
+    services = _runtime_services(runtime)
     staged: list[tuple[str, str, str, str]] = []
     tmpfiles: list[str] = []
     try:
@@ -312,7 +325,7 @@ async def _stage_multipart_bytes_to_tmp(
             tmpfiles.append(tmp_path)
             try:
                 await asyncio.to_thread(
-                    upstream_services().transport.write_bytes_file, fd, raw
+                    services.transport.write_bytes_file, fd, raw
                 )
             finally:
                 os.close(fd)
@@ -333,9 +346,11 @@ async def _curl_post_multipart_using_paths(
     headers: dict[str, str],
     timeout_s: float,
     proxy_url: str | None = None,
-    pinned_target: Any = _AMBIENT_PINNED_TARGET,
+    pinned_target: Any | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Curl multipart POST against caller-owned, pre-staged file paths."""
+    services = _runtime_services(runtime)
     proc: asyncio.subprocess.Process | None = None
     config_path: str | None = None
     try:
@@ -347,25 +362,20 @@ async def _curl_post_multipart_using_paths(
                 "--form",
                 f"{field_name}=@{tmp_path};filename={filename};type={mime}",
             ]
-        effective_target = pinned_target
-        if effective_target is _AMBIENT_PINNED_TARGET:
-            effective_target = _current_byok_http_target(
-                url=url,
-                proxy_url=proxy_url,
-            )
         config_path = await _stage_curl_secret_config(
             url=url,
             headers=headers,
             proxy_url=proxy_url,
-            pinned_target=effective_target,
+            pinned_target=pinned_target,
+            runtime=runtime,
         )
         status_marker = "\n__HTTP_STATUS__:"
         status_marker_b = status_marker.encode("ascii")
         cmd = [
-            upstream_services().core.CURL_BIN,
+            services.core.CURL_BIN,
             "-sS",
             "-m",
-            upstream_services().transport.curl_timeout_arg(timeout_s),
+            services.transport.curl_timeout_arg(timeout_s),
             "-w",
             f"{status_marker}%{{http_code}}",
             "--config",
@@ -382,10 +392,10 @@ async def _curl_post_multipart_using_paths(
             )
         except OSError as exc:
             raise httpx.ConnectError(
-                f"curl executable failed to start: {upstream_services().core.CURL_BIN!r}: {exc}"
+                f"curl executable failed to start: {services.core.CURL_BIN!r}: {exc}"
             ) from exc
         curl_timeout_s = float(
-            upstream_services().transport.curl_timeout_arg(timeout_s)
+            services.transport.curl_timeout_arg(timeout_s)
         )
         guard_timeout_s = curl_timeout_s + min(
             5.0,
@@ -396,7 +406,9 @@ async def _curl_post_multipart_using_paths(
                 _collect_curl_output(
                     proc,
                     stdout_max_bytes=(
-                        _json_response_limit() + len(status_marker_b) + 16
+                        _json_response_limit(runtime=runtime)
+                        + len(status_marker_b)
+                        + 16
                     ),
                 ),
                 timeout=guard_timeout_s,
@@ -427,10 +439,10 @@ async def _curl_post_multipart_using_paths(
                 f"curl output missing status marker (head={stdout_b[:200]!r})"
             )
         body_b, _, status_b = stdout_b.rpartition(status_marker_b)
-        if len(body_b) > _json_response_limit():
+        if len(body_b) > _json_response_limit(runtime=runtime):
             raise httpx.HTTPError(
                 "curl multipart response exceeded its byte limit "
-                f"max_bytes={_json_response_limit()} "
+                f"max_bytes={_json_response_limit(runtime=runtime)} "
                 f"received_bytes={len(body_b)}"
             )
         body_s = body_b.decode("utf-8", "replace")
@@ -442,7 +454,7 @@ async def _curl_post_multipart_using_paths(
     except asyncio.CancelledError:
         raise
     finally:
-        await upstream_services().transport.terminate_curl_proc_group(proc)
+        await services.transport.terminate_curl_proc_group(proc)
         if config_path is not None:
             with suppress(OSError):
                 os.unlink(config_path)
@@ -457,6 +469,7 @@ async def _curl_post_multipart(
     timeout_s: float,
     proxy_url: str | None = None,
     pinned_target: Any | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Stage multipart bytes, send them with curl, and always unlink them."""
     staged: list[tuple[str, str, str, str]] = []
@@ -465,8 +478,8 @@ async def _curl_post_multipart(
         (
             staged,
             tmpfiles,
-        ) = await upstream_services().transport.stage_multipart_bytes_to_tmp(files)
-        return await upstream_services().transport.curl_post_multipart_using_paths(
+        ) = await _stage_multipart_bytes_to_tmp(files, runtime=runtime)
+        return await _curl_post_multipart_using_paths(
             url=url,
             data=data,
             staged_files=staged,
@@ -474,6 +487,7 @@ async def _curl_post_multipart(
             timeout_s=timeout_s,
             proxy_url=proxy_url,
             pinned_target=pinned_target,
+            runtime=runtime,
         )
     finally:
         for path in tmpfiles:
@@ -489,8 +503,10 @@ class _CurlSSEReader:
         stream: Any,
         *,
         idle_timeout_s: float,
+        services: UpstreamServices,
     ) -> None:
         self._stream = stream
+        self._services = services
         self._idle_timeout_s = max(0.001, float(idle_timeout_s))
         self._buffer = bytearray()
         self._search_from = 0
@@ -522,44 +538,44 @@ class _CurlSSEReader:
                     timeout=self._idle_timeout_s,
                 )
             except asyncio.TimeoutError as exc:
-                raise upstream_services().infrastructure.UpstreamError(
+                raise self._services.infrastructure.UpstreamError(
                     f"curl sse idle timeout after {self._idle_timeout_s:.0f}s",
-                    error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
+                    error_code=self._services.infrastructure.EC.SSE_CURL_FAILED.value,
                     status_code=None,
                 ) from exc
             if not chunk:
                 self._stream_eof = True
                 continue
             self._byte_count += len(chunk)
-            if self._byte_count > upstream_services().core.SSE_MAX_BYTES:
-                raise upstream_services().infrastructure.UpstreamError(
+            if self._byte_count > self._services.core.SSE_MAX_BYTES:
+                raise self._services.infrastructure.UpstreamError(
                     "sse exceeded max bytes",
-                    error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+                    error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
                     status_code=200,
                 )
             self._buffer.extend(chunk)
             if (
-                len(self._buffer) > upstream_services().core.SSE_MAX_LINE_BYTES
+                len(self._buffer) > self._services.core.SSE_MAX_LINE_BYTES
                 and b"\n" not in self._buffer
             ):
-                raise upstream_services().infrastructure.UpstreamError(
+                raise self._services.infrastructure.UpstreamError(
                     "sse exceeded max line bytes",
-                    error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+                    error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
                     status_code=200,
                 )
 
     def _record_line(self, line: bytes) -> None:
         self._line_count += 1
-        if len(line) > upstream_services().core.SSE_MAX_LINE_BYTES:
-            raise upstream_services().infrastructure.UpstreamError(
+        if len(line) > self._services.core.SSE_MAX_LINE_BYTES:
+            raise self._services.infrastructure.UpstreamError(
                 "sse exceeded max line bytes",
-                error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+                error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
                 status_code=200,
             )
-        if self._line_count > upstream_services().core.SSE_MAX_LINES:
-            raise upstream_services().infrastructure.UpstreamError(
+        if self._line_count > self._services.core.SSE_MAX_LINES:
+            raise self._services.infrastructure.UpstreamError(
                 "sse exceeded max lines",
-                error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+                error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
                 status_code=200,
             )
 
@@ -611,10 +627,10 @@ class _CurlSSEReader:
     ) -> None:
         if len(body) <= max_bytes:
             return
-        raise upstream_services().infrastructure.UpstreamError(
+        raise self._services.infrastructure.UpstreamError(
             f"{label} exceeds max bytes",
             status_code=status_code or None,
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
             payload={
                 "path": "responses",
                 "method": "POST",
@@ -649,12 +665,14 @@ async def _read_curl_stderr(stream: Any) -> bytes:
 
 async def _read_curl_response_head(
     reader: _CurlSSEReader,
+    *,
+    services: UpstreamServices,
 ) -> tuple[int, dict[str, str]]:
     status_line = await reader.next_line()
     if not status_line:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "curl sse empty response",
-            error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
+            error_code=services.infrastructure.EC.SSE_CURL_FAILED.value,
             status_code=0,
         )
     status_text = status_line.decode("utf-8", "replace").strip()
@@ -673,6 +691,8 @@ async def _read_curl_response_head(
 
 async def _iter_curl_sse_events(
     reader: _CurlSSEReader,
+    *,
+    services: UpstreamServices,
 ) -> AsyncIterator[dict[str, Any]]:
     parser = CurlSSEEventParser()
     while True:
@@ -681,12 +701,12 @@ async def _iter_curl_sse_events(
             break
         event = parser.feed_line(raw)
         if event is not None:
-            upstream_services().transport.maybe_record_usage_from_event(event)
+            _maybe_record_usage_from_event(event, services=services)
             yield event
 
     event = parser.finish()
     if event is not None:
-        upstream_services().transport.maybe_record_usage_from_event(event)
+        _maybe_record_usage_from_event(event, services=services)
         yield event
 
 
@@ -706,13 +726,15 @@ async def _iter_sse_curl(
     proxy_url: str | None = None,
     pinned_target: Any | None = None,
     allow_non_sse_payload: bool = False,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream a curl POST and parse bounded SSE or an allowed JSON fallback.
 
     Runtime bindings supply stream limits, trace and usage recording, log
     context, curl binary selection, and process cleanup.
     """
-    trace_id = headers.get("x-trace-id") or upstream_services().core.generate_trace_id()
+    services = _runtime_services(runtime)
+    trace_id = headers.get("x-trace-id") or services.core.generate_trace_id()
     fd, body_path = _secure_mkstemp(
         prefix="lumen_sse_body_",
         suffix=".json",
@@ -725,7 +747,7 @@ async def _iter_sse_curl(
     try:
         try:
             await asyncio.to_thread(
-                upstream_services().transport.write_json_body_file, fd, json_body
+                services.transport.write_json_body_file, fd, json_body
             )
         finally:
             process.close_body_fd()
@@ -736,10 +758,11 @@ async def _iter_sse_curl(
                 headers={**headers, "Content-Type": "application/json"},
                 proxy_url=proxy_url,
                 pinned_target=pinned_target,
+                runtime=runtime,
             )
         )
         cmd = [
-            upstream_services().core.CURL_BIN,
+            services.core.CURL_BIN,
             "-sS",
             "-N",
             "-i",
@@ -752,9 +775,9 @@ async def _iter_sse_curl(
         try:
             proc = await process.start(cmd, stderr_reader=_read_curl_stderr)
         except OSError as exc:
-            raise upstream_services().infrastructure.UpstreamError(
-                f"curl sse executable failed to start: {upstream_services().core.CURL_BIN!r}: {exc}",
-                error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
+            raise services.infrastructure.UpstreamError(
+                f"curl sse executable failed to start: {services.core.CURL_BIN!r}: {exc}",
+                error_code=services.infrastructure.EC.SSE_CURL_FAILED.value,
                 status_code=None,
             ) from exc
         assert proc.stdout is not None
@@ -762,20 +785,24 @@ async def _iter_sse_curl(
         reader = _CurlSSEReader(
             proc.stdout,
             idle_timeout_s=timeout_s,
+            services=services,
         )
-        status_code, response_headers = await _read_curl_response_head(reader)
+        status_code, response_headers = await _read_curl_response_head(
+            reader,
+            services=services,
+        )
         final_status = status_code
 
         if not 200 <= status_code < 300:
             err_raw = await reader.drain(
-                max_bytes=_error_response_limit(),
+                max_bytes=_error_response_limit(runtime=runtime),
                 label="upstream error payload",
                 status_code=status_code,
                 url=url,
                 trace_id=trace_id,
             )
             err_text = err_raw.decode("utf-8", "replace")
-            upstream_services().infrastructure.logger.warning(
+            services.infrastructure.logger.warning(
                 "curl sse non-2xx status=%s url=%s body=%.1000s "
                 "trace_id=%s x_request_id=%s",
                 status_code,
@@ -788,8 +815,8 @@ async def _iter_sse_curl(
                 payload = json.loads(err_text)
             except Exception:  # noqa: BLE001
                 payload = {"raw": err_text[:2000]}
-            raise upstream_services().core.with_error_context(
-                upstream_services().core.parse_error(
+            raise services.core.with_error_context(
+                services.core.parse_error(
                     payload if isinstance(payload, dict) else {},
                     status_code or 0,
                 ),
@@ -802,7 +829,7 @@ async def _iter_sse_curl(
             content_type = response_headers.get("content-type", "")
             if "text/event-stream" not in content_type.lower():
                 body_bytes = await reader.drain(
-                    max_bytes=_json_response_limit(),
+                    max_bytes=_json_response_limit(runtime=runtime),
                     label="non-sse json payload",
                     status_code=status_code,
                     url=url,
@@ -812,10 +839,10 @@ async def _iter_sse_curl(
                 try:
                     json_payload = json.loads(body_text)
                 except Exception as exc:  # noqa: BLE001
-                    raise upstream_services().infrastructure.UpstreamError(
+                    raise services.infrastructure.UpstreamError(
                         f"non-sse payload is not valid JSON: {exc}",
                         status_code=status_code,
-                        error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+                        error_code=services.infrastructure.EC.BAD_RESPONSE.value,
                         payload={
                             "path": "responses",
                             "method": "POST",
@@ -826,38 +853,38 @@ async def _iter_sse_curl(
                         },
                     ) from exc
                 yield {
-                    "type": upstream_services().core.JSON_PAYLOAD_SENTINEL_TYPE,
+                    "type": services.core.JSON_PAYLOAD_SENTINEL_TYPE,
                     "payload": json_payload,
                     "content_type": content_type,
                 }
                 rc = await process.wait()
                 if rc != 0:
                     stderr_s = await _curl_stderr_text(process.stderr_task)
-                    upstream_services().infrastructure.logger.debug(
+                    services.infrastructure.logger.debug(
                         "curl json fallback exited rc=%s stderr=%.500s",
                         rc,
                         stderr_s,
                     )
                 return
 
-        async for event in _iter_curl_sse_events(reader):
+        async for event in _iter_curl_sse_events(reader, services=services):
             yield event
 
         rc = await process.wait()
         if rc != 0:
             stderr_s = await _curl_stderr_text(process.stderr_task)
-            raise upstream_services().infrastructure.UpstreamError(
+            raise services.infrastructure.UpstreamError(
                 f"curl sse exited rc={rc} stderr={stderr_s[:500]}",
-                error_code=upstream_services().infrastructure.EC.SSE_CURL_FAILED.value,
+                error_code=services.infrastructure.EC.SSE_CURL_FAILED.value,
                 status_code=200,
             )
     except asyncio.CancelledError:
         raise
     finally:
-        await process.cleanup(upstream_services().transport.terminate_curl_proc_group)
+        await process.cleanup(services.transport.terminate_curl_proc_group)
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
-            upstream_services().core.log_upstream_call(
+            services.core.log_upstream_call(
                 endpoint="responses",
                 status=final_status,
                 duration_ms=duration_ms,
@@ -865,21 +892,27 @@ async def _iter_sse_curl(
                 response_headers=response_headers,
             )
         except Exception:  # noqa: BLE001
-            upstream_services().infrastructure.logger.debug(
+            services.infrastructure.logger.debug(
                 "failed to log upstream call meta", exc_info=True
             )
 
 
-def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
+def _maybe_record_usage_from_event(
+    event: dict[str, Any],
+    *,
+    services: UpstreamServices | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> None:
     """Record terminal usage and warn about unknown response output types."""
+    services = services or _runtime_services(runtime)
     usage = event.get("usage")
     if not isinstance(usage, dict):
         response = event.get("response")
         if isinstance(response, dict):
             usage = response.get("usage")
     if isinstance(usage, dict):
-        upstream_services().core.record_usage(usage)
-    if upstream_services().core.is_responses_success_terminal(event.get("type")):
+        services.core.record_usage(usage)
+    if services.core.is_responses_success_terminal(event.get("type")):
         response = event.get("response")
         if isinstance(response, dict):
             outputs = response.get("output")
@@ -890,9 +923,9 @@ def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
                         if (
                             isinstance(item_type, str)
                             and item_type
-                            not in upstream_services().core.KNOWN_OUTPUT_ITEM_TYPES
+                            not in services.core.KNOWN_OUTPUT_ITEM_TYPES
                         ):
-                            upstream_services().infrastructure.logger.warning(
+                            services.infrastructure.logger.warning(
                                 "upstream output item with unknown type=%r; skipping",
                                 item_type,
                             )
@@ -901,17 +934,20 @@ def _maybe_record_usage_from_event(event: dict[str, Any]) -> None:
 async def _emit_image_progress(
     progress_callback: ImageProgressCallback | None,
     event_type: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
     **payload: Any,
 ) -> None:
     if progress_callback is None:
         return
     event = {"type": event_type, **payload}
+    services = _runtime_services(runtime)
     try:
         result = progress_callback(event)
         if inspect.isawaitable(result):
             await result
     except Exception:  # noqa: BLE001
-        upstream_services().infrastructure.logger.warning(
+        services.infrastructure.logger.warning(
             "image progress callback failed", exc_info=True
         )
 

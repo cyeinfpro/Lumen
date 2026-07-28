@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any
 from types import MappingProxyType
+from typing import Any
 
 
 class ArtifactStatus(StrEnum):
@@ -132,6 +132,34 @@ class StagedArtifact:
     path: str
     identity: ArtifactIdentity
     modified_at: float | None = None
+    created_at: float | None = None
+    metadata_path: str | None = None
+
+
+@dataclass(frozen=True)
+class StagedSweepBudget:
+    max_files_per_pass: int
+    max_bytes_hashed_per_pass: int
+    max_seconds_per_pass: float
+
+    def __post_init__(self) -> None:
+        if self.max_files_per_pass <= 0:
+            raise ValueError("staged sweep file budget must be positive")
+        if self.max_bytes_hashed_per_pass <= 0:
+            raise ValueError("staged sweep hash budget must be positive")
+        if self.max_seconds_per_pass <= 0:
+            raise ValueError("staged sweep time budget must be positive")
+
+
+@dataclass(frozen=True)
+class StagedSweepResult:
+    scanned: int = 0
+    hashed_bytes: int = 0
+    deleted: int = 0
+    deferred: int = 0
+    quarantined: int = 0
+    budget_exhausted: bool = False
+    next_cursor: str | None = None
 
 
 @dataclass(frozen=True)

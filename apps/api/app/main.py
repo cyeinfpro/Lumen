@@ -10,7 +10,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +277,7 @@ def _feature_disabled_response(feature: str) -> JSONResponse:
 # short enough that an admin toggling a flag sees it apply within seconds
 # (each worker process converges independently, so the TTL is the SLA).
 _NAV_FEATURE_CACHE_TTL_SECONDS = 5.0
+_NAV_FEATURE_FAILURE_CACHE_TTL_SECONDS = 0.75
 
 
 class _NavFeatureFlagCache:
@@ -292,11 +293,14 @@ class _NavFeatureFlagCache:
     def __init__(
         self,
         ttl_seconds: float = _NAV_FEATURE_CACHE_TTL_SECONDS,
+        failure_ttl_seconds: float = _NAV_FEATURE_FAILURE_CACHE_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ttl_seconds = ttl_seconds
+        self._failure_ttl_seconds = failure_ttl_seconds
         self._clock = clock
         self._entries: dict[str, tuple[float, str | None]] = {}
+        self._failure_expires_at = 0.0
         self._lock = asyncio.Lock()
 
     def _cached(self, setting_keys: tuple[str, ...]) -> dict[str, str | None] | None:
@@ -314,26 +318,36 @@ class _NavFeatureFlagCache:
         """Resolve guard flags, hitting the database at most once per TTL.
 
         Keys without a registered spec are omitted from the result so the caller
-        keeps its existing "unknown key" branch. Read failures are deliberately
-        not cached: the caller fails closed on the exception, and caching that
-        would keep a recovered database locked out for the rest of the TTL.
+        keeps its existing "unknown key" branch. Read failures are cached for a
+        sub-second window so an outage cannot serialize every protected request
+        through the database connection pool.
         """
         known = tuple(key for key in setting_keys if get_spec(key) is not None)
+        if self._failure_expires_at > self._clock():
+            raise RuntimeError("feature guard setting read temporarily unavailable")
         cached = self._cached(known)
         if cached is not None:
             return cached
         async with self._lock:
             # Double-check: a concurrent flood collapses onto the first waiter.
+            if self._failure_expires_at > self._clock():
+                raise RuntimeError("feature guard setting read temporarily unavailable")
             cached = self._cached(known)
             if cached is not None:
                 return cached
             values: dict[str, str | None] = {}
-            async with SessionLocal() as session:
-                for key in known:
-                    spec = get_spec(key)
-                    if spec is None:  # pragma: no cover - filtered above
-                        continue
-                    values[key] = await get_setting(session, spec)
+            try:
+                async with SessionLocal() as session:
+                    for key in known:
+                        spec = get_spec(key)
+                        if spec is None:  # pragma: no cover - filtered above
+                            continue
+                        values[key] = await get_setting(session, spec)
+            except Exception:
+                self._failure_expires_at = self._clock() + self._failure_ttl_seconds
+                http_errors_total.labels(code="feature_guard_setting_read_failed").inc()
+                raise
+            self._failure_expires_at = 0.0
             expires_at = self._clock() + self._ttl_seconds
             for key, value in values.items():
                 self._entries[key] = (expires_at, value)
@@ -512,47 +526,53 @@ async def lifespan(app: FastAPI):
                 await session.commit()
     except Exception:  # noqa: BLE001
         logger.warning("runtime settings image route migration failed", exc_info=True)
-    # 提前建立 redis 连接（失败早暴露）
-    r = get_redis()
-    await r.ping()
-    billing_cache = BillingCacheService(redis=r)
-    await billing_cache.start_workers()
-    try:
-        from .routes import billing as billing_routes
+    async with AsyncExitStack() as stack:
+        # Register each resource immediately after it becomes usable. If any
+        # later startup step fails, already-acquired resources are unwound in
+        # reverse order instead of relying on the lifespan reaching ``yield``.
+        r = get_redis()
+        await r.ping()
+        stack.push_async_callback(r.aclose)
 
-        billing_routes.configure_billing_cache(billing_cache)
-    except Exception:  # noqa: BLE001
-        logger.warning("billing cache route wiring failed", exc_info=True)
-    # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
-    await get_arq_pool()
-    from .images.application.reconcile_runtime import (
-        image_artifact_reconciler_loop,
-    )
+        billing_cache = BillingCacheService(redis=r)
+        await billing_cache.start_workers()
+        stack.push_async_callback(billing_cache.stop_workers)
 
-    image_reconcile_stop = asyncio.Event()
-    image_reconcile_task = asyncio.create_task(
-        image_artifact_reconciler_loop(image_reconcile_stop),
-        name="image-artifact-reconciler",
-    )
-    # Opportunistic only: if tiktoken's cache is cold and the metadata download is
-    # slow, token counting falls back to a local estimate instead of blocking API
-    # request handlers.
-    logger.info("api.tiktoken_warm loaded=%s", warm_tiktoken(timeout_sec=0.2))
-    try:
-        yield
-    finally:
-        image_reconcile_stop.set()
-        image_reconcile_task.cancel()
-        await asyncio.gather(image_reconcile_task, return_exceptions=True)
-        await billing_cache.stop_workers()
         try:
             from .routes import billing as billing_routes
 
-            billing_routes.configure_billing_cache(None)
+            billing_routes.configure_billing_cache(billing_cache)
         except Exception:  # noqa: BLE001
-            pass
-        await close_arq_pool()
-        await r.aclose()
+            logger.warning("billing cache route wiring failed", exc_info=True)
+        else:
+            stack.callback(billing_routes.configure_billing_cache, None)
+
+        # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
+        await get_arq_pool()
+        stack.push_async_callback(close_arq_pool)
+
+        from .images.application.reconcile_runtime import (
+            image_artifact_reconciler_loop,
+        )
+
+        image_reconcile_stop = asyncio.Event()
+        image_reconcile_task = asyncio.create_task(
+            image_artifact_reconciler_loop(image_reconcile_stop),
+            name="image-artifact-reconciler",
+        )
+
+        async def _stop_image_reconciler() -> None:
+            image_reconcile_stop.set()
+            image_reconcile_task.cancel()
+            await asyncio.gather(image_reconcile_task, return_exceptions=True)
+
+        stack.push_async_callback(_stop_image_reconciler)
+
+        # Opportunistic only: if tiktoken's cache is cold and the metadata download is
+        # slow, token counting falls back to a local estimate instead of blocking API
+        # request handlers.
+        logger.info("api.tiktoken_warm loaded=%s", warm_tiktoken(timeout_sec=0.2))
+        yield
 
 
 def _cors_allow_origins() -> list[str]:
@@ -578,6 +598,9 @@ def _lumen_version() -> str:
 
 def build_app() -> FastAPI:
     app = FastAPI(title="Lumen API", version=_lumen_version(), lifespan=lifespan)
+    from .workflows.composition import build_workflow_application
+
+    app.state.workflow_application = build_workflow_application(include_http=True)
 
     app.add_middleware(
         CORSMiddleware,

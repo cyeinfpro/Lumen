@@ -762,13 +762,16 @@ def test_retention_pass_uses_each_job_expiry_not_file_mtime(
 def test_runtime_instances_do_not_share_queue_state(tmp_path: Path) -> None:
     from image_job.runtime import create_runtime
 
-    first = create_runtime()
-    second = create_runtime()
-    first.settings = first.settings.__class__(
-        **{**first.settings.__dict__, "db_path": tmp_path / "first.sqlite3"}
+    app = load_app_module()
+    first = create_runtime(
+        app.settings.__class__(
+            **{**app.settings.__dict__, "db_path": tmp_path / "first.sqlite3"}
+        )
     )
-    second.settings = second.settings.__class__(
-        **{**second.settings.__dict__, "db_path": tmp_path / "second.sqlite3"}
+    second = create_runtime(
+        app.settings.__class__(
+            **{**app.settings.__dict__, "db_path": tmp_path / "second.sqlite3"}
+        )
     )
 
     assert first.queue.queue is not second.queue.queue

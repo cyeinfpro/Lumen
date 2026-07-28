@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -25,7 +26,21 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.capacity_leases import (
+    CapacityLeaseGuard,
+    CapacityLeaseLost,
+    maintained_capacity_lease,
+    race_with_capacity_lease,
+)
 from lumen_core.models import Image, ImageVariant, Video
+from lumen_core.storage_capacity import (
+    StorageCapacityExceeded,
+    StorageCapacityPort,
+    StorageCapacityUnavailable,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 VOLCANO_ASSET_IMAGE_KIND = "volcano_asset_img_v1"
@@ -111,6 +126,13 @@ class VolcanoAssetVideoMp4:
     sha256: str
 
 
+@dataclass(frozen=True)
+class VolcanoAssetInstallReceipt:
+    storage_key: str
+    size_bytes: int
+    sha256: str
+
+
 def _storage_path(storage_root: str, storage_key: str) -> Path:
     root = Path(storage_root).resolve()
     if not storage_key or "\x00" in storage_key:
@@ -191,7 +213,7 @@ def _install_file_atomic(
     data: bytes,
     *,
     sha256: str,
-) -> None:
+) -> bool:
     size_bytes = len(data)
     if hashlib.sha256(data).hexdigest() != sha256:
         raise VolcanoAssetMediaError(
@@ -200,9 +222,10 @@ def _install_file_atomic(
             503,
         )
     path.parent.mkdir(parents=True, exist_ok=True)
+    existed_before = path.exists()
     for _attempt in range(3):
         if _file_matches(path, size_bytes=size_bytes, sha256=sha256):
-            return
+            return False
         tmp: Path | None = None
         try:
             tmp = _write_temp_file(path, data)
@@ -218,12 +241,127 @@ def _install_file_atomic(
             if tmp is not None:
                 tmp.unlink(missing_ok=True)
         if _file_matches(path, size_bytes=size_bytes, sha256=sha256):
-            return
+            return not existed_before
     raise VolcanoAssetMediaError(
         "volcano_asset_media_storage_conflict",
         "normalized asset media changed while it was being stored",
         503,
     )
+
+
+async def _wait_for_started_install(task: asyncio.Task[bool]) -> bool:
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
+def _delete_install_if_unchanged(
+    storage_root: str,
+    receipt: VolcanoAssetInstallReceipt,
+) -> bool:
+    path = _storage_path(storage_root, receipt.storage_key)
+    if not _file_matches(
+        path,
+        size_bytes=receipt.size_bytes,
+        sha256=receipt.sha256,
+    ):
+        return False
+    path.unlink()
+    _fsync_directory(path.parent)
+    return True
+
+
+async def delete_volcano_asset_install(
+    storage_root: str,
+    receipt: VolcanoAssetInstallReceipt | None,
+) -> bool:
+    if receipt is None:
+        return False
+    return await asyncio.to_thread(
+        _delete_install_if_unchanged,
+        storage_root,
+        receipt,
+    )
+
+
+async def _cleanup_install_best_effort(
+    storage_root: str,
+    receipt: VolcanoAssetInstallReceipt | None,
+) -> None:
+    try:
+        await delete_volcano_asset_install(storage_root, receipt)
+    except OSError:
+        logger.warning(
+            "Volcano asset media cleanup failed key=%s",
+            None if receipt is None else receipt.storage_key,
+            exc_info=True,
+        )
+
+
+async def _install_rendered_media(
+    *,
+    storage_root: str,
+    storage_key: str,
+    data: bytes,
+    sha256: str,
+    guard: CapacityLeaseGuard,
+) -> VolcanoAssetInstallReceipt | None:
+    destination = _storage_path(storage_root, storage_key)
+    install_task = asyncio.create_task(
+        asyncio.to_thread(
+            _install_file_atomic,
+            destination,
+            data,
+            sha256=sha256,
+        )
+    )
+    created = False
+    try:
+        created = bool(
+            await race_with_capacity_lease(
+                asyncio.shield(install_task),
+                guard,
+            )
+        )
+    except BaseException:
+        try:
+            created = await _wait_for_started_install(install_task)
+        except BaseException:
+            created = False
+        if created:
+            await _cleanup_install_best_effort(
+                storage_root,
+                VolcanoAssetInstallReceipt(
+                    storage_key=storage_key,
+                    size_bytes=len(data),
+                    sha256=sha256,
+                ),
+            )
+        raise
+    if not created:
+        return None
+    return VolcanoAssetInstallReceipt(
+        storage_key=storage_key,
+        size_bytes=len(data),
+        sha256=sha256,
+    )
+
+
+async def _reserve_media_capacity(
+    storage_capacity: StorageCapacityPort,
+    size_bytes: int,
+) -> Any:
+    try:
+        return await storage_capacity.reserve(2 * max(0, size_bytes))
+    except (StorageCapacityExceeded, StorageCapacityUnavailable) as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_media_storage_capacity",
+            "normalized asset media storage capacity is unavailable",
+            503,
+        ) from exc
 
 
 def _video_transcode_semaphore() -> asyncio.Semaphore:
@@ -474,7 +612,9 @@ async def ensure_volcano_asset_image_variant(
     image: Image,
     *,
     storage_root: str,
-) -> ImageVariant:
+    storage_capacity: StorageCapacityPort,
+    storage_lease_ttl_seconds: float,
+) -> tuple[ImageVariant, VolcanoAssetInstallReceipt | None]:
     current_image = (
         await db.execute(
             select(Image).where(
@@ -505,7 +645,7 @@ async def ensure_volcano_asset_image_variant(
             width=existing.width,
             height=existing.height,
         ):
-            return existing
+            return existing, None
 
     source_path = _storage_path(storage_root, image.storage_key)
     if not source_path.is_file():
@@ -514,87 +654,122 @@ async def ensure_volcano_asset_image_variant(
         make_volcano_asset_image_jpeg,
         source_path,
     )
-    current_image = (
-        await db.execute(
-            select(Image)
-            .where(
-                Image.id == image.id,
-                Image.deleted_at.is_(None),
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if current_image is None:
-        raise VolcanoAssetMediaError("not_found", "image was deleted", 404)
-    image = current_image
-    existing = (
-        await db.execute(
-            select(ImageVariant)
-            .where(
-                ImageVariant.image_id == image.id,
-                ImageVariant.kind == VOLCANO_ASSET_IMAGE_KIND,
-            )
-            .order_by(ImageVariant.created_at.desc())
-            .limit(1)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        existing_path = _storage_path(storage_root, existing.storage_key)
-        if await asyncio.to_thread(
-            _image_variant_file_is_valid,
-            existing_path,
-            width=existing.width,
-            height=existing.height,
-        ):
-            return existing
-
-    key = volcano_asset_image_key(image)
-    destination = _storage_path(storage_root, key)
-    await asyncio.to_thread(
-        _install_file_atomic,
-        destination,
-        rendered.data,
-        sha256=rendered.sha256,
-    )
-    if existing is not None:
-        existing.storage_key = key
-        existing.width = rendered.width
-        existing.height = rendered.height
-        return existing
-
-    variant = ImageVariant(
-        image_id=image.id,
-        kind=VOLCANO_ASSET_IMAGE_KIND,
-        storage_key=key,
-        width=rendered.width,
-        height=rendered.height,
-    )
     try:
-        async with db.begin_nested():
-            db.add(variant)
-            await db.flush()
-    except IntegrityError:
-        if variant in db:
-            db.expunge(variant)
-        winner = (
-            await db.execute(
-                select(ImageVariant)
-                .where(
-                    ImageVariant.image_id == image.id,
-                    ImageVariant.kind == VOLCANO_ASSET_IMAGE_KIND,
+        storage_lease = await _reserve_media_capacity(
+            storage_capacity,
+            rendered.size_bytes,
+        )
+        async with maintained_capacity_lease(
+            storage_lease,
+            ttl_seconds=storage_lease_ttl_seconds,
+        ) as guard:
+            current_image = (
+                await race_with_capacity_lease(
+                    db.execute(
+                        select(Image)
+                        .where(
+                            Image.id == image.id,
+                            Image.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    ),
+                    guard,
                 )
-                .order_by(ImageVariant.created_at.desc())
-                .limit(1)
+            ).scalar_one_or_none()
+            if current_image is None:
+                raise VolcanoAssetMediaError("not_found", "image was deleted", 404)
+            image = current_image
+            existing = (
+                await race_with_capacity_lease(
+                    db.execute(
+                        select(ImageVariant)
+                        .where(
+                            ImageVariant.image_id == image.id,
+                            ImageVariant.kind == VOLCANO_ASSET_IMAGE_KIND,
+                        )
+                        .order_by(ImageVariant.created_at.desc())
+                        .limit(1)
+                        .with_for_update()
+                    ),
+                    guard,
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                existing_path = _storage_path(storage_root, existing.storage_key)
+                is_valid = await race_with_capacity_lease(
+                    asyncio.to_thread(
+                        _image_variant_file_is_valid,
+                        existing_path,
+                        width=existing.width,
+                        height=existing.height,
+                    ),
+                    guard,
+                )
+                if is_valid:
+                    return existing, None
+
+            key = volcano_asset_image_key(image)
+            receipt = await _install_rendered_media(
+                storage_root=storage_root,
+                storage_key=key,
+                data=rendered.data,
+                sha256=rendered.sha256,
+                guard=guard,
             )
-        ).scalar_one_or_none()
-        if winner is not None:
-            winner.storage_key = key
-            winner.width = rendered.width
-            winner.height = rendered.height
-            return winner
-        raise
-    return variant
+            try:
+                if existing is not None:
+                    existing.storage_key = key
+                    existing.width = rendered.width
+                    existing.height = rendered.height
+                    await guard.assert_owned()
+                    return existing, receipt
+
+                variant = ImageVariant(
+                    image_id=image.id,
+                    kind=VOLCANO_ASSET_IMAGE_KIND,
+                    storage_key=key,
+                    width=rendered.width,
+                    height=rendered.height,
+                )
+                try:
+                    async with db.begin_nested():
+                        db.add(variant)
+                        await db.flush()
+                except IntegrityError:
+                    if variant in db:
+                        db.expunge(variant)
+                    winner = (
+                        await race_with_capacity_lease(
+                            db.execute(
+                                select(ImageVariant)
+                                .where(
+                                    ImageVariant.image_id == image.id,
+                                    ImageVariant.kind == VOLCANO_ASSET_IMAGE_KIND,
+                                )
+                                .order_by(ImageVariant.created_at.desc())
+                                .limit(1)
+                            ),
+                            guard,
+                        )
+                    ).scalar_one_or_none()
+                    if winner is not None:
+                        winner.storage_key = key
+                        winner.width = rendered.width
+                        winner.height = rendered.height
+                        await guard.assert_owned()
+                        return winner, receipt
+                    raise
+                await guard.assert_owned()
+                return variant, receipt
+            except BaseException:
+                await _cleanup_install_best_effort(storage_root, receipt)
+                raise
+    except CapacityLeaseLost as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_media_storage_capacity",
+            "normalized asset media storage capacity lease was lost",
+            503,
+        ) from exc
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -1033,7 +1208,9 @@ async def ensure_volcano_asset_video_variant(
     video: Video,
     *,
     storage_root: str,
-) -> dict[str, Any]:
+    storage_capacity: StorageCapacityPort,
+    storage_lease_ttl_seconds: float,
+) -> tuple[dict[str, Any], VolcanoAssetInstallReceipt | None]:
     current_video = (
         await db.execute(
             select(Video).where(
@@ -1056,7 +1233,7 @@ async def ensure_volcano_asset_video_variant(
             existing_path,
             existing,
         ):
-            return existing
+            return existing, None
 
     source_path = _storage_path(storage_root, video.storage_key)
     if not source_path.is_file():
@@ -1066,56 +1243,83 @@ async def ensure_volcano_asset_video_variant(
             make_volcano_asset_video_mp4,
             source_path,
         )
-    current_video = (
-        await db.execute(
-            select(Video)
-            .where(
-                Video.id == video.id,
-                Video.deleted_at.is_(None),
-            )
-            .with_for_update()
+    try:
+        storage_lease = await _reserve_media_capacity(
+            storage_capacity,
+            rendered.size_bytes,
         )
-    ).scalar_one_or_none()
-    if current_video is None:
-        raise VolcanoAssetMediaError("not_found", "video was deleted", 404)
-    video = current_video
-    existing = volcano_asset_video_variant_metadata(video)
-    if existing is not None:
-        existing_path = _storage_path(
-            storage_root,
-            str(existing["storage_key"]),
-        )
-        if await asyncio.to_thread(
-            _video_variant_file_is_valid,
-            existing_path,
-            existing,
-        ):
-            return existing
+        async with maintained_capacity_lease(
+            storage_lease,
+            ttl_seconds=storage_lease_ttl_seconds,
+        ) as guard:
+            current_video = (
+                await race_with_capacity_lease(
+                    db.execute(
+                        select(Video)
+                        .where(
+                            Video.id == video.id,
+                            Video.deleted_at.is_(None),
+                        )
+                        .with_for_update()
+                    ),
+                    guard,
+                )
+            ).scalar_one_or_none()
+            if current_video is None:
+                raise VolcanoAssetMediaError("not_found", "video was deleted", 404)
+            video = current_video
+            existing = volcano_asset_video_variant_metadata(video)
+            if existing is not None:
+                existing_path = _storage_path(
+                    storage_root,
+                    str(existing["storage_key"]),
+                )
+                is_valid = await race_with_capacity_lease(
+                    asyncio.to_thread(
+                        _video_variant_file_is_valid,
+                        existing_path,
+                        existing,
+                    ),
+                    guard,
+                )
+                if is_valid:
+                    return existing, None
 
-    key = volcano_asset_video_key(video)
-    destination = _storage_path(storage_root, key)
-    await asyncio.to_thread(
-        _install_file_atomic,
-        destination,
-        rendered.data,
-        sha256=rendered.sha256,
-    )
-    variant = {
-        "kind": VOLCANO_ASSET_VIDEO_KIND,
-        "storage_key": key,
-        "mime": VOLCANO_ASSET_VIDEO_MIME,
-        "width": rendered.width,
-        "height": rendered.height,
-        "duration_ms": rendered.duration_ms,
-        "fps": rendered.fps,
-        "has_audio": rendered.has_audio,
-        "size_bytes": rendered.size_bytes,
-        "sha256": rendered.sha256,
-    }
-    metadata = dict(video.metadata_jsonb or {})
-    metadata[VOLCANO_ASSET_VIDEO_METADATA_KEY] = variant
-    video.metadata_jsonb = metadata
-    return variant
+            key = volcano_asset_video_key(video)
+            receipt = await _install_rendered_media(
+                storage_root=storage_root,
+                storage_key=key,
+                data=rendered.data,
+                sha256=rendered.sha256,
+                guard=guard,
+            )
+            try:
+                variant = {
+                    "kind": VOLCANO_ASSET_VIDEO_KIND,
+                    "storage_key": key,
+                    "mime": VOLCANO_ASSET_VIDEO_MIME,
+                    "width": rendered.width,
+                    "height": rendered.height,
+                    "duration_ms": rendered.duration_ms,
+                    "fps": rendered.fps,
+                    "has_audio": rendered.has_audio,
+                    "size_bytes": rendered.size_bytes,
+                    "sha256": rendered.sha256,
+                }
+                metadata = dict(video.metadata_jsonb or {})
+                metadata[VOLCANO_ASSET_VIDEO_METADATA_KEY] = variant
+                video.metadata_jsonb = metadata
+                await guard.assert_owned()
+                return variant, receipt
+            except BaseException:
+                await _cleanup_install_best_effort(storage_root, receipt)
+                raise
+    except CapacityLeaseLost as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_media_storage_capacity",
+            "normalized asset media storage capacity lease was lost",
+            503,
+        ) from exc
 
 
 __all__ = [
@@ -1139,8 +1343,10 @@ __all__ = [
     "VOLCANO_ASSET_VIDEO_MIN_PIXELS",
     "VOLCANO_ASSET_VIDEO_TARGET_LONG_SIDE",
     "VolcanoAssetImageJpeg",
+    "VolcanoAssetInstallReceipt",
     "VolcanoAssetMediaError",
     "VolcanoAssetVideoMp4",
+    "delete_volcano_asset_install",
     "ensure_volcano_asset_image_variant",
     "ensure_volcano_asset_video_variant",
     "make_volcano_asset_image_jpeg",

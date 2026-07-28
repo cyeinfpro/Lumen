@@ -21,6 +21,7 @@ from lumen_core.models import new_uuid7
 from ... import runtime_settings, video_submit_cache
 from ...db import SessionLocal
 from ...storage import storage
+from ...storage_writes import StorageWriteCoordinator
 from ...video_artifacts import (
     copy_video_file_exclusive_result,
     postprocess_video_bytes as _postprocess_video_bytes,
@@ -171,7 +172,11 @@ _NON_RESUBMIT_STATUSES = frozenset(
 )
 
 
-def build_video_generation_runtime() -> VideoGenerationRuntime:
+def build_video_generation_runtime(
+    *,
+    storage_writes: StorageWriteCoordinator | None = None,
+    install_default: bool = False,
+) -> VideoGenerationRuntime:
     ports = VideoGenerationPorts(
         SessionLocal=SessionLocal,
         _EXTENDED_POLL_INTERVAL_S=_EXTENDED_POLL_INTERVAL_S,
@@ -282,10 +287,12 @@ def build_video_generation_runtime() -> VideoGenerationRuntime:
         resolve_video_billing=resolve_video_billing,
         runtime_settings=runtime_settings,
         storage=storage,
+        storage_writes=storage_writes,
         time=time,
         worker_flush_balance_cache=worker_flush_balance_cache,
     )
-    install_video_generation_ports(ports)
+    if install_default:
+        install_video_generation_ports(ports)
     return VideoGenerationRuntime(
         ports=ports,
         submission=run_video_generation,
@@ -294,4 +301,4 @@ def build_video_generation_runtime() -> VideoGenerationRuntime:
     )
 
 
-DEFAULT_VIDEO_GENERATION_RUNTIME = build_video_generation_runtime()
+DEFAULT_VIDEO_GENERATION_RUNTIME = build_video_generation_runtime(install_default=True)

@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-from .runtime import (
-    generation_domain_ports,
-    generation_persistence_ports,
-    generation_billing_ports,
-    generation_events_ports,
-    generation_lease_ports,
-)
 import asyncio
 import binascii
 import io
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -17,6 +11,37 @@ from datetime import datetime, timezone
 from typing import Any
 
 from PIL import Image as PILImage
+from sqlalchemy import select
+
+from lumen_core.constants import (
+    EV_GEN_ATTACHED,
+    EV_GEN_SUCCEEDED,
+    GenerationAction,
+    GenerationStage,
+    GenerationStatus,
+    ImageSource,
+)
+from lumen_core.model_image_metadata import (
+    build_model_image_metadata,
+    model_image_filename,
+    save_image_with_model_metadata,
+)
+from lumen_core.models import (
+    Conversation,
+    Generation,
+    Image,
+    ImageVariant,
+    Message,
+    new_uuid7,
+)
+
+from .errors import TaskCancelled
+from .event_delivery import stage_generation_event
+from .image_artifact_contracts import decode_upstream_image_b64, sha256
+from .services import RunGenerationDeps
+
+
+logger = logging.getLogger(__name__)
 
 
 def clean_model_style_tags(value: Any) -> list[str]:
@@ -52,10 +77,10 @@ def model_image_metadata_from_request(
     appearance_direction = request_value.get(
         "workflow_model_library_appearance_direction"
     )
-    style_tags = generation_persistence_ports()._clean_model_style_tags(
+    style_tags = clean_model_style_tags(
         request_value.get("workflow_model_library_style_tags") or []
     )
-    payload = generation_persistence_ports().build_model_image_metadata(
+    payload = build_model_image_metadata(
         age_segment=age_segment if isinstance(age_segment, str) else None,
         gender=gender if isinstance(gender, str) else None,
         appearance_direction=(
@@ -72,7 +97,7 @@ def model_image_metadata_from_request(
         extension = "jpg" if mime == "image/jpeg" else mime.removeprefix("image/")
     return {
         "model_library": payload,
-        "suggested_filename": generation_persistence_ports().model_image_filename(
+        "suggested_filename": model_image_filename(
             image_id=image_id,
             ext=extension,
             age_segment=payload.get("age_segment"),
@@ -108,7 +133,7 @@ def maybe_embed_model_image_metadata_bytes(
     if fmt.upper() != "PNG" or not isinstance(payload, dict) or not payload:
         return raw_image
     output = io.BytesIO()
-    generation_persistence_ports().save_image_with_model_metadata(
+    save_image_with_model_metadata(
         image,
         output,
         fmt="PNG",
@@ -125,12 +150,11 @@ async def find_existing_generated_image(
 ) -> Any | None:
     row = (
         await session.execute(
-            generation_persistence_ports()
-            .select(generation_persistence_ports().Image)
+            select(Image)
             .where(
-                generation_persistence_ports().Image.owner_generation_id == task_id,
-                generation_persistence_ports().Image.user_id == user_id,
-                generation_persistence_ports().Image.deleted_at.is_(None),
+                Image.owner_generation_id == task_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
             )
             .with_for_update()
             .limit(1)
@@ -139,7 +163,7 @@ async def find_existing_generated_image(
     if row is None:
         return None
     if getattr(row, "user_id", None) != user_id:
-        generation_events_ports().logger.error(
+        logger.error(
             "short-circuit guard: image %s user mismatch expect=%s got=%s — ignoring",
             getattr(row, "id", "?"),
             user_id,
@@ -148,9 +172,9 @@ async def find_existing_generated_image(
         return None
     if (
         getattr(row, "source", None)
-        != generation_domain_ports().ImageSource.GENERATED.value
+        != ImageSource.GENERATED.value
     ):
-        generation_events_ports().logger.error(
+        logger.error(
             "short-circuit guard: image %s source mismatch got=%s — ignoring",
             getattr(row, "id", "?"),
             getattr(row, "source", None),
@@ -162,7 +186,7 @@ async def find_existing_generated_image(
     except (TypeError, ValueError):
         width = height = 0
     if width <= 0 or height <= 0:
-        generation_events_ports().logger.error(
+        logger.error(
             "short-circuit guard: image %s invalid dimensions %sx%s — ignoring",
             getattr(row, "id", "?"),
             getattr(row, "width", None),
@@ -180,27 +204,23 @@ async def ensure_generation_conversation_alive(
     lock: bool = False,
 ) -> str:
     statement = (
-        generation_persistence_ports()
-        .select(generation_persistence_ports().Conversation.id)
+        select(Conversation.id)
         .join(
-            generation_persistence_ports().Message,
-            generation_persistence_ports().Message.conversation_id
-            == generation_persistence_ports().Conversation.id,
+            Message,
+            Message.conversation_id == Conversation.id,
         )
         .where(
-            generation_persistence_ports().Message.id == message_id,
-            generation_persistence_ports().Message.deleted_at.is_(None),
-            generation_persistence_ports().Conversation.user_id == user_id,
-            generation_persistence_ports().Conversation.deleted_at.is_(None),
+            Message.id == message_id,
+            Message.deleted_at.is_(None),
+            Conversation.user_id == user_id,
+            Conversation.deleted_at.is_(None),
         )
     )
     if lock:
-        statement = statement.with_for_update(
-            of=generation_persistence_ports().Conversation
-        )
+        statement = statement.with_for_update(of=Conversation)
     conversation_id = (await session.execute(statement)).scalar_one_or_none()
     if conversation_id is None:
-        raise generation_lease_ports()._TaskCancelled(
+        raise TaskCancelled(
             "conversation or message was deleted"
         )
     return str(conversation_id)
@@ -219,36 +239,19 @@ async def _wait_for_storage_task(task: asyncio.Future[Any]) -> Any:
 def _log_storage_cleanup_results(
     keys: list[str],
     results: list[bool | BaseException],
+    services: RunGenerationDeps,
 ) -> None:
     for key, result in zip(keys, results, strict=False):
         if isinstance(result, BaseException):
-            generation_events_ports().logger.warning(
+            logger.warning(
                 "storage cleanup failed key=%s err=%s",
                 key,
                 result,
             )
 
 
-async def delete_storage_keys(keys: list[str]) -> None:
-    unique_keys = list(dict.fromkeys(keys))
-    if not unique_keys:
-        return
-    cleanup: asyncio.Future[list[bool | BaseException]] = asyncio.ensure_future(
-        asyncio.gather(
-            *(
-                asyncio.to_thread(generation_persistence_ports().storage.delete, key)
-                for key in unique_keys
-            ),
-            return_exceptions=True,
-        )
-    )
-    try:
-        results = await asyncio.shield(cleanup)
-    except BaseException:
-        results = await _wait_for_storage_task(cleanup)
-        _log_storage_cleanup_results(unique_keys, results)
-        raise
-    _log_storage_cleanup_results(unique_keys, results)
+async def delete_storage_keys(keys: list[str], *, services: RunGenerationDeps) -> None:
+    await services.artifacts.delete_files(keys)
 
 
 def _storage_write_outcome(
@@ -268,50 +271,21 @@ def _storage_write_outcome(
 
 async def write_generation_files(
     files: list[tuple[str, bytes]],
+    services: RunGenerationDeps,
 ) -> list[str]:
-    async def put_one(key: str, data: bytes) -> tuple[str, bool]:
-        result = await asyncio.to_thread(
-            generation_persistence_ports().storage.put_bytes_result,
-            key,
-            data,
-        )
-        return key, bool(result.created)
-
-    writes: asyncio.Future[list[tuple[str, bool] | BaseException]] = (
-        asyncio.ensure_future(
-            asyncio.gather(
-                *(put_one(key, data) for key, data in files),
-                return_exceptions=True,
-            )
-        )
-    )
-    try:
-        results = await asyncio.shield(writes)
-    except BaseException:
-        results = await _wait_for_storage_task(writes)
-        created_keys, _first_exc = _storage_write_outcome(results)
-        cleanup = asyncio.ensure_future(
-            generation_persistence_ports()._delete_storage_keys(created_keys)
-        )
-        await _wait_for_storage_task(cleanup)
-        raise
-
-    created_keys, first_exc = _storage_write_outcome(results)
-    if first_exc is not None:
-        await generation_persistence_ports()._delete_storage_keys(created_keys)
-        raise first_exc
-    return created_keys
+    return await services.artifacts.write_files(files)
 
 
 @asynccontextmanager
 async def cleanup_storage_on_error(
     keys: list[str],
+    services: RunGenerationDeps,
 ) -> AsyncIterator[None]:
     try:
         yield
     except BaseException:
         cleanup = asyncio.ensure_future(
-            generation_persistence_ports()._delete_storage_keys(keys)
+            services.artifacts.delete_files(keys)
         )
         await _wait_for_storage_task(cleanup)
         raise
@@ -319,6 +293,7 @@ async def cleanup_storage_on_error(
 
 @dataclass(slots=True)
 class BonusGenerationContext:
+    services: RunGenerationDeps
     redis: Any
     user_id: str
     channel: str
@@ -377,67 +352,9 @@ class BonusImageArtifact:
 
 
 async def handle_dual_race_bonus_image(
-    *,
-    redis: Any,
-    user_id: str,
-    channel: str,
-    parent_task_id: str,
-    parent_idempotency_key: str,
-    parent_upstream_request: dict[str, Any] | None,
-    message_id: str,
-    action: str,
-    model: str,
-    prompt: str,
-    size_requested: str,
-    aspect_ratio: str,
-    input_image_ids: list[str],
-    primary_input_image_id: str | None,
-    references: list[tuple[str, bytes]],
-    image_request_options: dict[str, Any],
-    b64_result: str,
-    revised_prompt: str | None,
-    upstream_provider: str | None = None,
-    upstream_actual_route: str | None = None,
-    upstream_actual_source: str | None = None,
-    upstream_actual_endpoint: str | None = None,
-    billing_meta: dict[str, Any] | None = None,
-    idempotency_suffix: str = ":b",
-    extra_upstream_fields: dict[str, Any] | None = None,
-    record_model_library_candidate: bool = True,
-    settle_billing: bool = False,
-    log_label: str = "dual_race bonus",
+    context: BonusGenerationContext,
 ) -> bool:
     """Persist and publish a separately billed bonus generation."""
-    context = BonusGenerationContext(
-        redis=redis,
-        user_id=user_id,
-        channel=channel,
-        parent_task_id=parent_task_id,
-        parent_idempotency_key=parent_idempotency_key,
-        parent_upstream_request=parent_upstream_request,
-        message_id=message_id,
-        action=action,
-        model=model,
-        prompt=prompt,
-        size_requested=size_requested,
-        aspect_ratio=aspect_ratio,
-        input_image_ids=input_image_ids,
-        primary_input_image_id=primary_input_image_id,
-        references=references,
-        image_request_options=image_request_options,
-        b64_result=b64_result,
-        revised_prompt=revised_prompt,
-        upstream_provider=upstream_provider,
-        upstream_actual_route=upstream_actual_route,
-        upstream_actual_source=upstream_actual_source,
-        upstream_actual_endpoint=upstream_actual_endpoint,
-        billing_meta=billing_meta,
-        idempotency_suffix=idempotency_suffix,
-        extra_upstream_fields=extra_upstream_fields,
-        record_model_library_candidate=record_model_library_candidate,
-        settle_billing=settle_billing,
-        log_label=log_label,
-    )
     artifact = await _prepare_bonus_artifact(context)
     if artifact is None:
         return False
@@ -451,11 +368,11 @@ async def handle_dual_race_bonus_image(
     )
     if deliveries is None:
         return False
-    await generation_events_ports()._deliver_generation_events(redis, deliveries)
-    generation_events_ports().logger.info(
+    await context.services.events.deliver_many(context.redis, deliveries)
+    logger.info(
         "%s image done: parent=%s bonus=%s",
-        log_label,
-        parent_task_id,
+        context.log_label,
+        context.parent_task_id,
         artifact.bonus_generation_id,
     )
     return True
@@ -482,11 +399,11 @@ def _decode_bonus_image(
     context: BonusGenerationContext,
 ) -> bytes | None:
     try:
-        return generation_persistence_ports()._decode_upstream_image_b64(
+        return decode_upstream_image_b64(
             context.b64_result
         )
     except binascii.Error:
-        generation_events_ports().logger.warning(
+        logger.warning(
             "%s base64 decode failed parent=%s",
             context.log_label,
             context.parent_task_id,
@@ -504,10 +421,10 @@ def _bonus_sha_echoed(
     # 带参考图的 action 时自动继承这道防线。
     if not context.references:
         return False
-    sha = generation_persistence_ports()._sha256(raw_image)
+    sha = sha256(raw_image)
     echoed = any(sha == reference_sha for reference_sha, _raw in context.references)
     if echoed:
-        generation_events_ports().logger.info(
+        logger.info(
             "%s sha echoed reference parent=%s; skip",
             context.log_label,
             context.parent_task_id,
@@ -520,7 +437,7 @@ async def _postprocess_bonus_image(
     raw_image: bytes,
 ) -> Any | None:
     try:
-        return await generation_persistence_ports()._postprocess_raw_generated_image(
+        return await context.services.provider.postprocess(
             raw_image,
             prompt=context.prompt,
             transparent_requested=(
@@ -528,7 +445,7 @@ async def _postprocess_bonus_image(
             ),
         )
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "%s pillow decode failed parent=%s err=%r",
             context.log_label,
             context.parent_task_id,
@@ -551,7 +468,7 @@ def _bonus_billing_meta(
         }
     )
     if result.get("billing_free") is not True and not context.settle_billing:
-        generation_events_ports().logger.warning(
+        logger.warning(
             "%s missing settle_billing for billable image parent=%s",
             context.log_label,
             context.parent_task_id,
@@ -565,10 +482,10 @@ def _build_bonus_artifact(
     processed: Any,
     billing_meta: dict[str, Any],
 ) -> BonusImageArtifact:
-    bonus_generation_id = generation_domain_ports().new_uuid7()
-    image_id = generation_domain_ports().new_uuid7()
+    bonus_generation_id = new_uuid7()
+    image_id = new_uuid7()
     extension, mime = _bonus_format(processed.orig_format)
-    model_metadata = generation_persistence_ports()._model_image_metadata_from_request(
+    model_metadata = model_image_metadata_from_request(
         image_id=image_id,
         mime=mime,
         request=context.parent_upstream_request,
@@ -632,16 +549,16 @@ def _embed_bonus_metadata(
         with PILImage.open(io.BytesIO(raw_image)) as image:
             image.load()
             raw_image = (
-                generation_persistence_ports()._maybe_embed_model_image_metadata_bytes(
+                maybe_embed_model_image_metadata_bytes(
                     image=image,
                     fmt=orig_format,
                     raw_image=raw_image,
                     metadata=model_metadata,
                 )
             )
-        return raw_image, generation_persistence_ports()._sha256(raw_image)
+        return raw_image, sha256(raw_image)
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.info(
+        logger.info(
             "%s model metadata embed skipped parent=%s err=%s",
             context.log_label,
             context.parent_task_id,
@@ -655,7 +572,7 @@ async def _write_bonus_files(
     artifact: BonusImageArtifact,
 ) -> list[str] | None:
     try:
-        return await generation_persistence_ports()._write_generation_files(
+        return await context.services.artifacts.write_files(
             [
                 (artifact.key_orig, artifact.raw_image),
                 (artifact.key_display, artifact.display_bytes),
@@ -664,7 +581,7 @@ async def _write_bonus_files(
             ]
         )
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "%s storage write failed parent=%s err=%r",
             context.log_label,
             context.parent_task_id,
@@ -679,10 +596,10 @@ async def _persist_bonus_generation(
     created_storage_keys: list[str],
 ) -> list[Any] | None:
     try:
-        async with generation_persistence_ports()._cleanup_storage_on_error(
+        async with context.services.artifacts.cleanup_on_error(
             created_storage_keys
         ):
-            async with generation_persistence_ports().SessionLocal() as session:
+            async with context.services.store.session() as session:
                 upstream_request = _bonus_upstream_request(context, artifact)
                 _add_bonus_rows(
                     session,
@@ -707,7 +624,7 @@ async def _persist_bonus_generation(
                 )
                 await session.commit()
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "%s DB write failed parent=%s err=%r",
             context.log_label,
             context.parent_task_id,
@@ -733,9 +650,9 @@ async def _settle_bonus_billing(
     流水」的 generation，可被对账捡起来重扣，不会静默变成免费图。
     """
     try:
-        async with generation_persistence_ports().SessionLocal() as session:
+        async with context.services.store.session() as session:
             bonus_row = await session.get(
-                generation_persistence_ports().Generation,
+                Generation,
                 artifact.bonus_generation_id,
             )
             if bonus_row is None:
@@ -743,7 +660,7 @@ async def _settle_bonus_billing(
                     f"bonus generation missing after commit: "
                     f"{artifact.bonus_generation_id}"
                 )
-            await generation_billing_ports().worker_billing.settle_generation(
+            await context.services.billing.settle(
                 session,
                 bonus_row,
                 width=artifact.width,
@@ -752,12 +669,12 @@ async def _settle_bonus_billing(
             )
             await session.commit()
             await (
-                generation_billing_ports().worker_billing.flush_balance_cache_refreshes(
+                context.services.billing.flush_after_commit(
                     session
                 )
             )
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.error(
+        logger.error(
             "%s bonus settle failed parent=%s bonus=%s err=%r "
             "upstream cost already incurred, pending reconciliation",
             context.log_label,
@@ -829,7 +746,7 @@ def _add_bonus_rows(
     upstream_request: dict[str, Any],
 ) -> Any:
     now = datetime.now(timezone.utc)
-    bonus_row = generation_persistence_ports().Generation(
+    bonus_row = Generation(
         id=artifact.bonus_generation_id,
         message_id=context.message_id,
         user_id=context.user_id,
@@ -841,8 +758,8 @@ def _add_bonus_rows(
         input_image_ids=list(context.input_image_ids),
         primary_input_image_id=context.primary_input_image_id,
         upstream_request=upstream_request,
-        status=generation_domain_ports().GenerationStatus.SUCCEEDED.value,
-        progress_stage=generation_domain_ports().GenerationStage.FINALIZING.value,
+        status=GenerationStatus.SUCCEEDED.value,
+        progress_stage=GenerationStage.FINALIZING.value,
         attempt=0,
         idempotency_key=_bonus_idempotency_key(context),
         started_at=now,
@@ -851,15 +768,15 @@ def _add_bonus_rows(
     )
     session.add(bonus_row)
     session.add(
-        generation_persistence_ports().Image(
+        Image(
             id=artifact.image_id,
             user_id=context.user_id,
             owner_generation_id=artifact.bonus_generation_id,
-            source=generation_domain_ports().ImageSource.GENERATED.value,
+            source=ImageSource.GENERATED.value,
             parent_image_id=(
                 context.primary_input_image_id
                 if context.action
-                == generation_domain_ports().GenerationAction.EDIT.value
+                == GenerationAction.EDIT.value
                 else None
             ),
             storage_key=artifact.key_orig,
@@ -873,7 +790,7 @@ def _add_bonus_rows(
             metadata_jsonb=artifact.image_metadata,
         )
     )
-    _add_bonus_variants(session, artifact)
+    _add_bonus_variants(session, context, artifact)
     return bonus_row
 
 
@@ -885,6 +802,7 @@ def _bonus_idempotency_key(context: BonusGenerationContext) -> str:
 
 def _add_bonus_variants(
     session: Any,
+    context: BonusGenerationContext,
     artifact: BonusImageArtifact,
 ) -> None:
     for kind, storage_key, size in (
@@ -893,7 +811,7 @@ def _add_bonus_variants(
         ("thumb256", artifact.key_thumb, artifact.thumb_size),
     ):
         session.add(
-            generation_persistence_ports().ImageVariant(
+            ImageVariant(
                 image_id=artifact.image_id,
                 kind=kind,
                 storage_key=storage_key,
@@ -909,7 +827,7 @@ async def _attach_bonus_image_to_message(
     artifact: BonusImageArtifact,
 ) -> None:
     message = await session.get(
-        generation_persistence_ports().Message, context.message_id
+        Message, context.message_id
     )
     if message is None:
         return
@@ -930,7 +848,7 @@ def _bonus_image_payload(
         "width": artifact.width,
         "height": artifact.height,
         "mime": artifact.orig_mime,
-        "url": generation_persistence_ports().storage.public_url(artifact.key_orig),
+        "url": context.services.artifacts.public_url(artifact.key_orig),
         "display_url": (f"/api/images/{artifact.image_id}/variants/display2048"),
         "preview_url": (f"/api/images/{artifact.image_id}/variants/preview1024"),
         "thumb_url": f"/api/images/{artifact.image_id}/variants/thumb256",
@@ -947,18 +865,16 @@ async def _record_bonus_model_candidate(
     if not context.record_model_library_candidate:
         return
     try:
-        await (
-            generation_persistence_ports()._maybe_record_model_library_candidate_image(
-                session=session,
-                user_id=context.user_id,
-                parent_upstream_request=(context.parent_upstream_request or {}),
-                bonus_image_id=image_id,
-            )
+        await context.services.workflows.record_model_library_candidate_image(
+            session=session,
+            user_id=context.user_id,
+            parent_upstream_request=(context.parent_upstream_request or {}),
+            bonus_image_id=image_id,
         )
     except (TimeoutError, asyncio.CancelledError):
         raise
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "model_library candidate hook failed parent=%s err=%s",
             context.parent_task_id,
             exc,
@@ -970,11 +886,11 @@ def _stage_bonus_events(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
 ) -> list[Any]:
-    attached = generation_events_ports()._stage_generation_event(
+    attached = stage_generation_event(
         session,
         context.user_id,
         context.channel,
-        generation_events_ports().EV_GEN_ATTACHED,
+        EV_GEN_ATTACHED,
         {
             "message_id": context.message_id,
             "generation_id": artifact.bonus_generation_id,
@@ -988,11 +904,11 @@ def _stage_bonus_events(
             **artifact.billing_meta,
         },
     )
-    succeeded = generation_events_ports()._stage_generation_event(
+    succeeded = stage_generation_event(
         session,
         context.user_id,
         context.channel,
-        generation_events_ports().EV_GEN_SUCCEEDED,
+        EV_GEN_SUCCEEDED,
         {
             "generation_id": artifact.bonus_generation_id,
             "message_id": context.message_id,

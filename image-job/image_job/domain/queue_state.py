@@ -11,6 +11,7 @@ class QueueState:
     shutdown: bool
     queue_size: int
     queue_max: int
+    reserved: int
     queued_known: int
     inflight: int
     workers_alive: int

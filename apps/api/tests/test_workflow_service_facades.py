@@ -7,11 +7,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
 from lumen_core.schemas import ApparelModelLibrarySyncOut
 
 from app.routes import workflows
-from app.workflow_services import (
+from app.workflows.adapters import (
     library_github,
     library_items,
     library_lease,
@@ -21,10 +20,11 @@ from app.workflow_services import (
     showcase_context,
     showcase_inputs,
     showcase_orchestration,
-    showcase_prompts,
-    showcase_scene_policy,
-    showcase_shots,
 )
+from app.workflows.application.errors import WorkflowRequestError
+from app.workflows.application import showcase_prompts
+from app.workflows.application.runtime_state import WorkflowRuntimeState
+from app.workflows.domain import showcase_scene_policy, showcase_shots
 
 
 def test_route_does_not_reexport_library_service_internals() -> None:
@@ -157,7 +157,8 @@ def test_library_service_owners_are_leaf_modules() -> None:
             "_read_json_file",
             "_load_global_library_index",
             "_remove_user_library_item_from_legacy_index",
-            "_library_binary_response",
+            "_open_library_storage_file",
+            "_stream_file",
             "_write_bytes_replace",
         ),
         library_items: (
@@ -189,7 +190,7 @@ def test_library_service_owners_are_leaf_modules() -> None:
         inspect.signature(
             library_sync.sync_library_presets_from_github_folder
         ).parameters
-    ) == ("contents_url", "proxy_url")
+    ) == ("contents_url", "dependencies", "proxy_url")
     assert library_github.ModelLibrarySyncLimitExceeded.__module__ == (
         library_github.__name__
     )
@@ -261,7 +262,7 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
     assert [item["id"] for item in saved["items"]] == ["user:keep"]
 
     monkeypatch.setattr(library_storage, "MODEL_LIBRARY_MAX_INDEX_BYTES", 4)
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(WorkflowRequestError) as excinfo:
         library_storage.read_json_file(index_path, {})
     assert excinfo.value.detail["error"]["code"] == "invalid_index"
 
@@ -271,6 +272,10 @@ async def test_library_sync_service_direct_entry_uses_patched_collaborators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = library_storage.default_sync_state()
+    runtime = WorkflowRuntimeState()
+    dependencies = library_sync.ApparelLibrarySyncDependencies(
+        runtime.library_sync_lock
+    )
 
     async def fake_claim() -> tuple[str, dict[str, Any]]:
         return "lease-token", state
@@ -288,13 +293,13 @@ async def test_library_sync_service_direct_entry_uses_patched_collaborators(
         assert lease_token == "lease-token"
         return ApparelModelLibrarySyncOut(status="ok")
 
-    dependencies = library_sync.APPAREL_LIBRARY_SYNC_DEPENDENCIES
     monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
     monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_sync)
 
     result = await library_sync.sync_library_presets_from_github_folder(
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
-        "assets/apparel-model-presets?ref=main"
+        "assets/apparel-model-presets?ref=main",
+        dependencies=dependencies,
     )
 
     assert result.status == "ok"
@@ -331,6 +336,7 @@ async def test_showcase_preflight_service_runs_directly() -> None:
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
     )
 
     assert result["planning"]["planner"] == "rules_fallback"

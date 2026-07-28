@@ -74,9 +74,6 @@ from ..volcano_asset_media import (
     VOLCANO_ASSET_VIDEO_MIME,
     volcano_asset_video_variant_metadata,
 )
-from ..video_reference_images import (
-    ensure_video_reference_image_variant,
-)
 from ..video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_MIME,
@@ -205,7 +202,6 @@ async def _reference_image_upstream_public_url(
         image,
         public_base_url,
         required=required,
-        variant_loader=ensure_video_reference_image_variant,
     )
 
 

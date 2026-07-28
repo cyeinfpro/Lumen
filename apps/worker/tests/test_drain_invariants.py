@@ -18,7 +18,8 @@ from typing import Any
 
 import pytest
 
-from app.tasks.generation_parts import default_runtime as generation
+from app.tasks.generation_parts.errors import LeaseLost, TaskCancelled
+from app.tasks.generation_parts.retry_state import await_with_lease_guard
 
 
 class _FakeRedis:
@@ -43,7 +44,7 @@ async def test_lease_guard_returns_work_result_when_no_cancel_or_lease_lost() ->
         await asyncio.sleep(0.01)
         return "done"
 
-    result = await generation._await_with_lease_guard(
+    result = await await_with_lease_guard(
         work(),
         lease_lost,
         redis=redis,
@@ -75,8 +76,8 @@ async def test_lease_guard_raises_task_cancelled_when_redis_cancel_set() -> None
 
     asyncio.create_task(trigger_cancel_after_delay())
 
-    with pytest.raises(generation._TaskCancelled):
-        await generation._await_with_lease_guard(
+    with pytest.raises(TaskCancelled):
+        await await_with_lease_guard(
             work(),
             lease_lost,
             redis=redis,
@@ -109,8 +110,8 @@ async def test_lease_guard_raises_lease_lost_when_event_set() -> None:
 
     asyncio.create_task(lose_lease_after_delay())
 
-    with pytest.raises(generation._LeaseLost):
-        await generation._await_with_lease_guard(
+    with pytest.raises(LeaseLost):
+        await await_with_lease_guard(
             work(),
             lease_lost,
             redis=redis,
@@ -132,8 +133,8 @@ async def test_lease_guard_pre_check_lease_lost_raises_immediately() -> None:
 
     coro = work()
     try:
-        with pytest.raises(generation._LeaseLost):
-            await generation._await_with_lease_guard(
+        with pytest.raises(LeaseLost):
+            await await_with_lease_guard(
                 coro,
                 lease_lost,
                 redis=redis,
@@ -160,7 +161,7 @@ async def test_lease_guard_external_cancel_propagates() -> None:
             raise
 
     async def runner() -> Any:
-        return await generation._await_with_lease_guard(
+        return await await_with_lease_guard(
             work(),
             lease_lost,
             redis=redis,

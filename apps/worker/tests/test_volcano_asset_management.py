@@ -791,6 +791,7 @@ async def test_concurrent_source_urls_share_one_locked_token(
     ensure_name: str,
 ) -> None:
     from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_source_media
 
     source = SimpleNamespace(id="source-1", metadata_jsonb={})
     row_lock = asyncio.Lock()
@@ -825,12 +826,12 @@ async def test_concurrent_source_urls_share_one_locked_token(
                 row_lock.release()
                 self.owns_lock = False
 
-    async def ensure_variant(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    async def ensure_variant(*_args: Any, **_kwargs: Any) -> tuple[None, None]:
+        return None, None
 
-    monkeypatch.setattr(volcano_assets, "SessionLocal", _Session)
+    monkeypatch.setattr(volcano_asset_source_media, "SessionLocal", _Session)
     monkeypatch.setattr(
-        volcano_assets,
+        volcano_asset_source_media,
         ensure_name,
         ensure_variant,
     )
@@ -841,9 +842,19 @@ async def test_concurrent_source_urls_share_one_locked_token(
         "public_base_url": "https://lumen.example",
     }
 
+    storage_writes = SimpleNamespace(
+        capacity=object(),
+        lease_ttl_seconds=30,
+    )
     first, second = await asyncio.gather(
-        volcano_assets._normalized_source_url(dict(operation)),
-        volcano_assets._normalized_source_url(dict(operation)),
+        volcano_assets._normalized_source_url(
+            dict(operation),
+            storage_writes=storage_writes,
+        ),
+        volcano_assets._normalized_source_url(
+            dict(operation),
+            storage_writes=storage_writes,
+        ),
     )
 
     assert first[0] == second[0]

@@ -362,7 +362,8 @@ export function useLumenRealtime(): void {
   );
 
   const recoverSnapshot = useCallback<SnapshotAdapter>(
-    async (scopes) => {
+    async (scopes, _reason, signal) => {
+      signal.throwIfAborted();
       const store = useChatStore.getState();
       const results = await Promise.allSettled([
         store.hydrateActiveTasks(),
@@ -380,6 +381,7 @@ export function useLumenRealtime(): void {
           "realtime snapshot recovery failed",
         );
       }
+      signal.throwIfAborted();
       lastSnapshotAt.current = Date.now();
       return { syncedAt: lastSnapshotAt.current };
     },
@@ -390,15 +392,18 @@ export function useLumenRealtime(): void {
     recoverSnapshot,
     onOpen: () => {
       if (Date.now() - lastSnapshotAt.current > RECENT_SNAPSHOT_WINDOW_MS) {
+        const signal = new AbortController().signal;
         void recoverSnapshot([
           "identity",
           "conversations",
           "activeTasks",
           "wallet",
           "runtimeDefaults",
-        ], { kind: "replay_gap", reason: "connection_open" }).catch((error) => {
-          logError(error, { scope: "sse-open-snapshot" });
-        });
+        ], { kind: "replay_gap", reason: "connection_open" }, signal).catch(
+          (error) => {
+            logError(error, { scope: "sse-open-snapshot" });
+          },
+        );
       }
     },
   });

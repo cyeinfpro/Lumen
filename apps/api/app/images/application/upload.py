@@ -10,11 +10,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image as PILImage
-
+from lumen_core.capacity_leases import (
+    CapacityLeaseGuard,
+    CapacityLeaseLost,
+    assert_capacity_leases_owned,
+    maintained_capacity_lease,
+    race_with_capacity_leases,
+)
 from lumen_core.constants import ImageSource, ImageVisibility
 from lumen_core.model_base import new_uuid7
 from lumen_core.models import Image
+from lumen_core.storage_capacity import (
+    StorageCapacityExceeded,
+    StorageCapacityPort,
+    StorageCapacityUnavailable,
+)
 
 from ..adapters.filesystem_store import ArtifactStoreError
 from ..adapters.local_capacity import (
@@ -34,8 +44,11 @@ from ..domain.artifact import (
 from ..domain.resource_estimate import ImageResourceEstimate
 from ..ports.artifact_store import ArtifactStorePort
 from ..ports.capacity import CapacityPort
-from ..processing.service import ImageProcessor, PreparedUpload, ProcessingError
-from .transactions import CapacityLeaseLost, maintained_capacity_lease
+from ..ports.image_processing import (
+    ImageProcessingExecutorPort,
+    ImageProcessingRequest,
+)
+from ..processing.service import PreparedUpload, ProcessingError
 
 
 logger = logging.getLogger(__name__)
@@ -137,13 +150,24 @@ class UploadCommandService:
         *,
         artifacts: ArtifactStorePort,
         capacity: CapacityPort,
+        storage_capacity: StorageCapacityPort,
         repository: SQLAlchemyImageRepository,
-        processor: ImageProcessor | None = None,
+        processing_executor: ImageProcessingExecutorPort,
+        storage_lease_ttl_seconds: float | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.capacity = capacity
+        self.storage_capacity = storage_capacity
         self.repository = repository
-        self.processor = processor or ImageProcessor()
+        self.processing_executor = processing_executor
+        self.storage_lease_ttl_seconds = (
+            CapacityLimits.from_env().lease_ttl_seconds
+            if storage_lease_ttl_seconds is None
+            else storage_lease_ttl_seconds
+        )
+
+    async def aclose(self) -> None:
+        await self.processing_executor.aclose()
 
     async def _source_chunks(self, upload_file: Any) -> AsyncIterator[bytes]:
         while chunk := await upload_file.read(256 * 1024):
@@ -186,6 +210,7 @@ class UploadCommandService:
         upload_file: Any,
         policy: UploadPolicy,
         storage_guard: Callable[[int], None] | None,
+        storage_lease_guard: CapacityLeaseGuard | None,
     ) -> Any:
         ttl_seconds = CapacityLimits.from_env().lease_ttl_seconds
         staging_lease = await self.capacity.reserve(
@@ -201,156 +226,200 @@ class UploadCommandService:
         async with maintained_capacity_lease(
             staging_lease,
             ttl_seconds=ttl_seconds,
-        ):
-            state.staged = await self.artifacts.stage(
-                state.ticket,
-                self._source_chunks(upload_file),
-                max_bytes=policy.max_bytes,
+        ) as lease_guard:
+            guards = tuple(
+                guard
+                for guard in (lease_guard, storage_lease_guard)
+                if guard is not None
+            )
+            state.staged = await race_with_capacity_leases(
+                self.artifacts.stage(
+                    state.ticket,
+                    self._source_chunks(upload_file),
+                    max_bytes=policy.max_bytes,
+                ),
+                guards,
             )
             if storage_guard is not None:
                 storage_guard(state.staged.identity.size_bytes)
-            return await asyncio.to_thread(
-                self.processor.inspect,
-                Path(state.staged.path),
-                upload_bytes=state.staged.identity.size_bytes,
-                allowed_mime=policy.allowed_mime,
-                normalizable_mime=policy.normalizable_mime,
-                max_pixels=policy.max_pixels,
-                max_long_side=policy.max_long_side,
+            return await race_with_capacity_leases(
+                self.processing_executor.inspect(
+                    Path(state.staged.path),
+                    upload_bytes=state.staged.identity.size_bytes,
+                    allowed_mime=policy.allowed_mime,
+                    normalizable_mime=policy.normalizable_mime,
+                    max_pixels=policy.max_pixels,
+                    max_long_side=policy.max_long_side,
+                ),
+                guards,
             )
 
     async def _process_and_persist(
         self,
         state: _UploadExecutionState,
         *,
+        lease_guard: CapacityLeaseGuard,
         user_id: str,
         filename: str | None,
         inspection: Any,
         policy: UploadPolicy,
-        metadata_reader: Callable[[PILImage.Image, str | None], dict[str, Any]] | None,
+        metadata_profile: str | None,
         metadata_finalizer: Callable[[str, str, dict[str, Any]], None] | None,
         storage_guard: Callable[[int], None] | None,
+        storage_lease_guard: CapacityLeaseGuard | None,
+        storage_reservation_bytes: int | None,
     ) -> tuple[ArtifactKey, ArtifactKey, PreparedUpload]:
         assert state.staged is not None
-        ttl_seconds = CapacityLimits.from_env().lease_ttl_seconds
-        lease = await self.capacity.reserve(inspection.estimate)
-        async with maintained_capacity_lease(
-            lease,
-            ttl_seconds=ttl_seconds,
-        ):
-            state.image_id = new_uuid7()
-            extension = policy.extensions[inspection.output_mime]
-            original_key = ArtifactKey(
-                f"u/{user_id}/uploads/{state.image_id}.{extension}"
-            )
-            normalized_key = ArtifactKey(
-                f"u/{user_id}/uploads/{state.image_id}.ref.webp"
-            )
-            image = Image(
-                id=state.image_id,
-                user_id=user_id,
-                source=ImageSource.UPLOADED.value,
-                storage_key=original_key.value,
-                mime=inspection.output_mime,
-                width=inspection.width,
-                height=inspection.height,
-                size_bytes=state.staged.identity.size_bytes,
-                sha256=state.staged.identity.sha256,
-                blurhash=None,
-                visibility=ImageVisibility.PRIVATE.value,
-                metadata_jsonb={},
-                artifact_status=ArtifactStatus.STAGING.value,
-                artifact_manifest_jsonb=_planned_manifest(
-                    state.ticket,
-                    original_key,
-                    normalized_key,
-                ),
-                publish_attempt=0,
-            )
-            await self.repository.create_staging(image)
-            await self.repository.transition(
-                state.image_id,
-                expected=[ArtifactStatus.STAGING],
-                target=ArtifactStatus.PROCESSING,
-            )
-            state.processing_stage = _ProcessingStage(state.staged)
-            prepared = await asyncio.to_thread(
-                self.processor.process,
-                state.processing_stage,
-                filename,
-                allowed_mime=policy.allowed_mime,
-                normalizable_mime=policy.normalizable_mime,
-                max_bytes=policy.max_bytes,
-                max_pixels=policy.max_pixels,
-                max_long_side=policy.max_long_side,
-                mask_requested=policy.mask_requested,
-                reference_size=policy.reference_size,
-                metadata_reader=metadata_reader,
-            )
-            metadata = dict(prepared.metadata)
-            if storage_guard is not None:
-                storage_guard(
-                    prepared.size_bytes + int(prepared.normalized_ref_meta["bytes"])
-                )
-            metadata["normalized_ref"] = {
-                **prepared.normalized_ref_meta,
-                "storage_key": normalized_key.value,
-            }
-            if metadata_finalizer is not None:
-                metadata_finalizer(state.image_id, extension, metadata)
-            manifest = _published_manifest(
+        guards = tuple(
+            guard for guard in (lease_guard, storage_lease_guard) if guard is not None
+        )
+        state.image_id = new_uuid7()
+        extension = policy.extensions[inspection.output_mime]
+        original_key = ArtifactKey(f"u/{user_id}/uploads/{state.image_id}.{extension}")
+        normalized_key = ArtifactKey(f"u/{user_id}/uploads/{state.image_id}.ref.webp")
+        image = Image(
+            id=state.image_id,
+            user_id=user_id,
+            source=ImageSource.UPLOADED.value,
+            storage_key=original_key.value,
+            mime=inspection.output_mime,
+            width=inspection.width,
+            height=inspection.height,
+            size_bytes=state.staged.identity.size_bytes,
+            sha256=state.staged.identity.sha256,
+            blurhash=None,
+            visibility=ImageVisibility.PRIVATE.value,
+            metadata_jsonb={},
+            artifact_status=ArtifactStatus.STAGING.value,
+            artifact_manifest_jsonb=_planned_manifest(
                 state.ticket,
-                ArtifactManifestItem(
-                    key=original_key,
-                    identity=prepared.original_identity,
-                    mime=prepared.mime,
-                ),
-                ArtifactManifestItem(
-                    key=normalized_key,
-                    identity=prepared.normalized_ref_identity,
-                    mime=str(prepared.normalized_ref_meta["mime"]),
-                ),
+                original_key,
+                normalized_key,
+            ),
+            publish_attempt=0,
+        )
+        await assert_capacity_leases_owned(guards)
+        await self.repository.create_staging(image)
+        await assert_capacity_leases_owned(guards)
+        await self.repository.transition(
+            state.image_id,
+            expected=[ArtifactStatus.STAGING],
+            target=ArtifactStatus.PROCESSING,
+        )
+        state.processing_stage = _ProcessingStage(state.staged)
+        output_paths: list[Path] = []
+        if inspection.mime in policy.normalizable_mime:
+            output_paths.append(
+                state.processing_stage.new_temp_path(suffix=".normalized.jpg")
             )
-            await self.repository.transition(
-                state.image_id,
-                expected=[ArtifactStatus.PROCESSING],
-                target=ArtifactStatus.PUBLISHING,
-                values={
-                    "storage_key": original_key.value,
-                    "mime": prepared.mime,
-                    "width": prepared.width,
-                    "height": prepared.height,
-                    "size_bytes": prepared.size_bytes,
-                    "sha256": prepared.sha256,
-                    "metadata_jsonb": metadata,
-                    "artifact_manifest_jsonb": manifest,
-                    "publish_attempt": 1,
-                    "reconcile_after": datetime.now(timezone.utc)
-                    + timedelta(minutes=2),
-                    "last_artifact_error": None,
-                },
+        output_paths.append(state.processing_stage.new_temp_path(suffix=".ref.webp"))
+        prepared = await race_with_capacity_leases(
+            self.processing_executor.process(
+                ImageProcessingRequest(
+                    source_path=Path(state.staged.path),
+                    source_size_bytes=state.staged.identity.size_bytes,
+                    source_sha256=state.staged.identity.sha256,
+                    filename=filename,
+                    allowed_mime=frozenset(policy.allowed_mime),
+                    normalizable_mime=frozenset(policy.normalizable_mime),
+                    max_bytes=policy.max_bytes,
+                    max_pixels=policy.max_pixels,
+                    max_long_side=policy.max_long_side,
+                    mask_requested=policy.mask_requested,
+                    reference_size=policy.reference_size,
+                    metadata_profile=metadata_profile,
+                    output_paths=tuple(output_paths),
+                )
+            ),
+            guards,
+        )
+        transient_bytes = state.staged.identity.size_bytes + 2 * (
+            prepared.size_bytes + int(prepared.normalized_ref_meta["bytes"])
+        )
+        if (
+            storage_reservation_bytes is not None
+            and transient_bytes > storage_reservation_bytes
+        ):
+            raise StorageCapacityExceeded(
+                "image processing exceeded its storage reservation"
             )
-            state.publishing_started = True
-            return original_key, normalized_key, prepared
+        metadata = dict(prepared.metadata)
+        if storage_guard is not None:
+            storage_guard(
+                prepared.size_bytes + int(prepared.normalized_ref_meta["bytes"])
+            )
+        metadata["normalized_ref"] = {
+            **prepared.normalized_ref_meta,
+            "storage_key": normalized_key.value,
+        }
+        if metadata_finalizer is not None:
+            metadata_finalizer(state.image_id, extension, metadata)
+        manifest = _published_manifest(
+            state.ticket,
+            ArtifactManifestItem(
+                key=original_key,
+                identity=prepared.original_identity,
+                mime=prepared.mime,
+            ),
+            ArtifactManifestItem(
+                key=normalized_key,
+                identity=prepared.normalized_ref_identity,
+                mime=str(prepared.normalized_ref_meta["mime"]),
+            ),
+        )
+        await assert_capacity_leases_owned(guards)
+        await self.repository.transition(
+            state.image_id,
+            expected=[ArtifactStatus.PROCESSING],
+            target=ArtifactStatus.PUBLISHING,
+            values={
+                "storage_key": original_key.value,
+                "mime": prepared.mime,
+                "width": prepared.width,
+                "height": prepared.height,
+                "size_bytes": prepared.size_bytes,
+                "sha256": prepared.sha256,
+                "metadata_jsonb": metadata,
+                "artifact_manifest_jsonb": manifest,
+                "publish_attempt": 1,
+                "reconcile_after": datetime.now(timezone.utc) + timedelta(minutes=2),
+                "last_artifact_error": None,
+            },
+        )
+        state.publishing_started = True
+        return original_key, normalized_key, prepared
 
     async def _publish_and_mark_ready(
         self,
         state: _UploadExecutionState,
         *,
+        lease_guard: CapacityLeaseGuard,
         original_key: ArtifactKey,
         normalized_key: ArtifactKey,
         prepared: PreparedUpload,
+        storage_lease_guard: CapacityLeaseGuard | None,
     ) -> Image:
         assert state.image_id is not None
-        original = await self.artifacts.publish_path(
-            prepared.original_path,
-            original_key,
-            expected=prepared.original_identity,
+        guards = tuple(
+            guard for guard in (lease_guard, storage_lease_guard) if guard is not None
         )
-        normalized_ref = await self.artifacts.publish_path(
-            prepared.normalized_ref_path,
-            normalized_key,
-            expected=prepared.normalized_ref_identity,
+        await assert_capacity_leases_owned(guards)
+        original = await race_with_capacity_leases(
+            self.artifacts.publish_path(
+                prepared.original_path,
+                original_key,
+                expected=prepared.original_identity,
+            ),
+            guards,
+        )
+        await assert_capacity_leases_owned(guards)
+        normalized_ref = await race_with_capacity_leases(
+            self.artifacts.publish_path(
+                prepared.normalized_ref_path,
+                normalized_key,
+                expected=prepared.normalized_ref_identity,
+            ),
+            guards,
         )
         await self._verify_published(original.key, original.identity)
         await self._verify_published(normalized_ref.key, normalized_ref.identity)
@@ -367,6 +436,7 @@ class UploadCommandService:
                 mime=str(prepared.normalized_ref_meta["mime"]),
             ),
         )
+        await assert_capacity_leases_owned(guards)
         return await self.repository.transition(
             state.image_id,
             expected=[ArtifactStatus.PUBLISHING],
@@ -415,17 +485,18 @@ class UploadCommandService:
                     state.ticket.value,
                 )
 
-    async def execute(
+    async def _execute_reserved(
         self,
         *,
         user_id: str,
         upload_file: Any,
         filename: str | None,
         policy: UploadPolicy,
-        metadata_reader: Callable[[PILImage.Image, str | None], dict[str, Any]]
-        | None = None,
+        metadata_profile: str | None = None,
         metadata_finalizer: Callable[[str, str, dict[str, Any]], None] | None = None,
         storage_guard: Callable[[int], None] | None = None,
+        storage_lease_guard: CapacityLeaseGuard | None = None,
+        storage_reservation_bytes: int | None = None,
     ) -> Image:
         state = _UploadExecutionState(ticket=UploadTicket(new_uuid7()))
         try:
@@ -434,28 +505,58 @@ class UploadCommandService:
                 upload_file=upload_file,
                 policy=policy,
                 storage_guard=storage_guard,
+                storage_lease_guard=storage_lease_guard,
             )
-            original_key, normalized_key, prepared = await self._process_and_persist(
-                state,
-                user_id=user_id,
-                filename=filename,
-                inspection=inspection,
-                policy=policy,
-                metadata_reader=metadata_reader,
-                metadata_finalizer=metadata_finalizer,
-                storage_guard=storage_guard,
-            )
-            return await self._publish_and_mark_ready(
-                state,
-                original_key=original_key,
-                normalized_key=normalized_key,
-                prepared=prepared,
-            )
+            ttl_seconds = CapacityLimits.from_env().lease_ttl_seconds
+            processing_lease = await self.capacity.reserve(inspection.estimate)
+            async with maintained_capacity_lease(
+                processing_lease,
+                ttl_seconds=ttl_seconds,
+            ) as lease_guard:
+                (
+                    original_key,
+                    normalized_key,
+                    prepared,
+                ) = await self._process_and_persist(
+                    state,
+                    lease_guard=lease_guard,
+                    user_id=user_id,
+                    filename=filename,
+                    inspection=inspection,
+                    policy=policy,
+                    metadata_profile=metadata_profile,
+                    metadata_finalizer=metadata_finalizer,
+                    storage_guard=storage_guard,
+                    storage_lease_guard=storage_lease_guard,
+                    storage_reservation_bytes=storage_reservation_bytes,
+                )
+                return await self._publish_and_mark_ready(
+                    state,
+                    lease_guard=lease_guard,
+                    original_key=original_key,
+                    normalized_key=normalized_key,
+                    prepared=prepared,
+                    storage_lease_guard=storage_lease_guard,
+                )
         except (CapacityExceeded, CapacityUnavailable, CapacityLeaseLost) as exc:
             await self._handle_failure(state, exc)
             raise UploadCommandError(
                 "upload_capacity_exceeded",
                 "image upload capacity is temporarily exhausted",
+                503,
+            ) from exc
+        except StorageCapacityExceeded as exc:
+            await self._handle_failure(state, exc)
+            raise UploadCommandError(
+                "storage_insufficient_space",
+                "image processing exceeded available storage",
+                507,
+            ) from exc
+        except StorageCapacityUnavailable as exc:
+            await self._handle_failure(state, exc)
+            raise UploadCommandError(
+                "storage_capacity_unavailable",
+                "image storage capacity is temporarily unavailable",
                 503,
             ) from exc
         except ProcessingError as exc:
@@ -482,6 +583,58 @@ class UploadCommandService:
             raise
         finally:
             await self._cleanup_state(state)
+
+    async def execute(
+        self,
+        *,
+        user_id: str,
+        upload_file: Any,
+        filename: str | None,
+        policy: UploadPolicy,
+        metadata_profile: str | None = None,
+        metadata_finalizer: Callable[[str, str, dict[str, Any]], None] | None = None,
+        storage_guard: Callable[[int], None] | None = None,
+    ) -> Image:
+        # Worst case on filesystems without hard-link support:
+        # staged input + two processed outputs + two destination copies.
+        reserved_bytes = policy.max_bytes * 5
+        try:
+            storage_lease = await self.storage_capacity.reserve(reserved_bytes)
+        except StorageCapacityExceeded as exc:
+            raise UploadCommandError(
+                "storage_insufficient_space",
+                "not enough free storage to accept this upload",
+                507,
+            ) from exc
+        except StorageCapacityUnavailable as exc:
+            raise UploadCommandError(
+                "storage_capacity_unavailable",
+                "image storage capacity is temporarily unavailable",
+                503,
+            ) from exc
+
+        try:
+            async with maintained_capacity_lease(
+                storage_lease,
+                ttl_seconds=self.storage_lease_ttl_seconds,
+            ) as storage_lease_guard:
+                return await self._execute_reserved(
+                    user_id=user_id,
+                    upload_file=upload_file,
+                    filename=filename,
+                    policy=policy,
+                    metadata_profile=metadata_profile,
+                    metadata_finalizer=metadata_finalizer,
+                    storage_guard=storage_guard,
+                    storage_lease_guard=storage_lease_guard,
+                    storage_reservation_bytes=reserved_bytes,
+                )
+        except CapacityLeaseLost as exc:
+            raise UploadCommandError(
+                "storage_capacity_unavailable",
+                "image storage capacity lease was lost",
+                503,
+            ) from exc
 
     async def _verify_published(
         self,

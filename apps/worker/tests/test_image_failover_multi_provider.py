@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import base64
 import io as _io
 from typing import Any
@@ -19,8 +17,37 @@ import pytest
 from PIL import Image as _PILImage
 
 from app import provider_pool, upstream
+from app.upstream_parts.image_execution import ImageExecutionRequest
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 PNG_B64 = base64.b64encode(b"fake-png-bytes").decode("ascii")
+
+
+def _image_request(**changes: Any) -> ImageExecutionRequest:
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "test",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "high",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "upstream_runtime": TEST_UPSTREAM_RUNTIME,
+    }
+    values.update(changes)
+    return ImageExecutionRequest(**values)
 
 
 def _make_tiny_png() -> bytes:
@@ -119,27 +146,15 @@ def _make_per_provider_stream(
     """给每个 provider api_key 注入不同行为：'success' / '429' / 'server_error' / 'policy'."""
 
     async def fake_stream_with_retry(
+        request: ImageExecutionRequest,
         *,
-        prompt: str,
-        size: str,
-        action: str,
-        images: list[bytes] | None,
-        quality: str,
-        model: str | None = None,
-        progress_callback: Any = None,
         use_httpx: bool = False,
         base_url_override: str | None = None,
         api_key_override: str | None = None,
         **_kwargs: Any,
     ) -> tuple[str, str | None]:
         _ = (
-            prompt,
-            size,
-            action,
-            images,
-            quality,
-            model,
-            progress_callback,
+            request,
             use_httpx,
             base_url_override,
         )
@@ -174,7 +189,7 @@ def _make_per_provider_stream(
         raise AssertionError(f"unknown behavior: {beh}")
 
     monkeypatch.setattr(
-        upstream_services().retry,
+        TEST_UPSTREAM_SERVICES.retry,
         "responses_image_stream_with_retry",
         fake_stream_with_retry,
     )
@@ -230,13 +245,8 @@ async def test_first_account_rate_limited_failover_to_second(
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     _make_per_provider_stream(monkeypatch, {"acc1": "429", "acc2": "success"})
 
-    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=None,
+    b64, _ = await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(),
         use_httpx=False,
     )
     assert b64 == PNG_B64
@@ -259,13 +269,8 @@ async def test_first_account_server_error_failover_to_second(
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     _make_per_provider_stream(monkeypatch, {"acc1": "server_error", "acc2": "success"})
 
-    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=None,
+    b64, _ = await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(),
         use_httpx=False,
     )
     assert b64 == PNG_B64
@@ -293,13 +298,8 @@ async def test_policy_error_failovers_to_second_provider(
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     _make_per_provider_stream(monkeypatch, {"acc1": error_code, "acc2": "success"})
 
-    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=None,
+    b64, _ = await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(),
         use_httpx=False,
     )
     assert b64 == PNG_B64
@@ -324,13 +324,8 @@ async def test_all_providers_fail_raises_all_providers_failed(
     )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().direct.responses_image_stream_with_failover(
-            prompt="test",
-            size="1024x1024",
-            action="generate",
-            images=None,
-            quality="high",
-            progress_callback=None,
+        await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+            _image_request(),
             use_httpx=False,
         )
     assert exc_info.value.error_code == "all_providers_failed"
@@ -368,22 +363,16 @@ async def test_failover_keeps_progress_callback_for_second_provider(
         return pool
 
     async def fake_stream_with_retry(
+        request: ImageExecutionRequest,
         *,
-        prompt: str,
-        size: str,
-        action: str,
-        images: list[bytes] | None,
-        quality: str,
-        model: str | None = None,
-        progress_callback: Any = None,
         use_httpx: bool = False,
         base_url_override: str | None = None,
         api_key_override: str | None = None,
         **_kwargs: Any,
     ) -> tuple[str, str | None]:
-        _ = (prompt, size, action, images, quality, model, use_httpx, base_url_override)
+        _ = (request, use_httpx, base_url_override)
         name = (api_key_override or "").removeprefix("sk-")
-        seen_callbacks[name] = progress_callback is not None
+        seen_callbacks[name] = request.progress_callback is not None
         if name == "acc1":
             raise upstream.UpstreamError(
                 "temporary failure",
@@ -394,18 +383,13 @@ async def test_failover_keeps_progress_callback_for_second_provider(
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(
-        upstream_services().retry,
+        TEST_UPSTREAM_SERVICES.retry,
         "responses_image_stream_with_retry",
         fake_stream_with_retry,
     )
 
-    await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=lambda event: None,
+    await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(progress_callback=lambda event: None),
         use_httpx=False,
     )
 
@@ -439,13 +423,8 @@ async def test_all_accounts_failed_propagates_when_pool_select_raises(
     # 不需要 _make_per_provider_stream，永远到不了
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().direct.responses_image_stream_with_failover(
-            prompt="test",
-            size="1024x1024",
-            action="generate",
-            images=None,
-            quality="high",
-            progress_callback=None,
+        await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+            _image_request(),
             use_httpx=False,
         )
     assert exc_info.value.error_code == "all_accounts_failed"
@@ -476,13 +455,8 @@ async def test_failover_emits_provider_failover_progress_event(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=cb,
+    b64, _ = await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(progress_callback=cb),
         use_httpx=False,
     )
     assert b64 == PNG_B64
@@ -519,13 +493,8 @@ async def test_failover_does_not_emit_when_first_provider_succeeds(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=cb,
+    await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(progress_callback=cb),
         use_httpx=False,
     )
     assert all(e.get("type") != "provider_failover" for e in progress_events)
@@ -554,13 +523,8 @@ async def test_failover_emitted_on_policy_error(
     async def cb(event: dict[str, Any]) -> None:
         progress_events.append(event)
 
-    b64, _ = await upstream_services().direct.responses_image_stream_with_failover(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=cb,
+    b64, _ = await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+        _image_request(progress_callback=cb),
         use_httpx=False,
     )
     assert b64 == PNG_B64
@@ -593,13 +557,8 @@ async def test_failover_not_emitted_on_last_provider_failure(
         progress_events.append(event)
 
     with pytest.raises(upstream.UpstreamError):
-        await upstream_services().direct.responses_image_stream_with_failover(
-            prompt="test",
-            size="1024x1024",
-            action="generate",
-            images=None,
-            quality="high",
-            progress_callback=cb,
+        await TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover(
+            _image_request(progress_callback=cb),
             use_httpx=False,
         )
     # acc1 失败 → 切到 acc2（1 个 failover 事件）→ acc2 失败 → 没有下一个
@@ -624,6 +583,7 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
     attempts: list[tuple[str, str]] = []
 
     async def fake_run_once(
+        _request: ImageExecutionRequest,
         *,
         endpoint: str,
         api_key: str,
@@ -637,22 +597,16 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_run_once", fake_run_once
     )
     monkeypatch.setattr(
-        upstream_services().direct, "resolve_image_job_base_url", _resolved_job_base
+        TEST_UPSTREAM_SERVICES.direct, "resolve_image_job_base_url", _resolved_job_base
     )
 
     progress_events: list[dict[str, Any]] = []
 
-    b64, _ = await upstream_services().image_jobs.image_job_with_failover(
-        action="generate",
-        prompt="test",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        progress_callback=progress_events.append,
+    b64, _ = await TEST_UPSTREAM_SERVICES.image_jobs.image_job_with_failover(
+        _image_request(progress_callback=progress_events.append)
     )
 
     assert b64 == PNG_B64
@@ -692,6 +646,7 @@ async def test_image_jobs_no_image_does_not_failover_to_second_provider(
     attempts: list[tuple[str, str]] = []
 
     async def fake_run_once(
+        _request: ImageExecutionRequest,
         *,
         endpoint: str,
         api_key: str,
@@ -702,22 +657,16 @@ async def test_image_jobs_no_image_does_not_failover_to_second_provider(
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_run_once", fake_run_once
     )
     monkeypatch.setattr(
-        upstream_services().direct, "resolve_image_job_base_url", _resolved_job_base
+        TEST_UPSTREAM_SERVICES.direct, "resolve_image_job_base_url", _resolved_job_base
     )
 
     progress_events: list[dict[str, Any]] = []
     with pytest.raises(upstream.UpstreamError) as excinfo:
-        await upstream_services().image_jobs.image_job_with_failover(
-            action="generate",
-            prompt="test",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            progress_callback=progress_events.append,
+        await TEST_UPSTREAM_SERVICES.image_jobs.image_job_with_failover(
+            _image_request(progress_callback=progress_events.append)
         )
 
     assert excinfo.value.error_code == "no_image_returned"
@@ -727,5 +676,9 @@ async def test_image_jobs_no_image_does_not_failover_to_second_provider(
     assert not [e for e in progress_events if e.get("type") == "endpoint_failover"]
 
 
-async def _resolved_job_base() -> str:
+async def _resolved_job_base(
+    *,
+    runtime: Any | None = None,
+) -> str:
+    _ = runtime
     return "https://image-job.example"

@@ -4,29 +4,51 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Protocol
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from lumen_core.models import (
+    PosterMaster,
+    PosterRender,
+    PosterStyleItem,
+    WorkflowRun,
+    WorkflowStep,
+    new_uuid7,
+)
+from lumen_core.vision_tagging import AutoTagResult, PosterStyleAutoTagResult
 
 
-AsyncTagger = Callable[..., Awaitable[Any]]
+logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class WorkflowHookDependencies:
-    select: Callable[..., Any]
-    workflow_run_model: Any
-    workflow_step_model: Any
-    poster_style_item_model: Any
-    poster_master_model: Any
-    poster_render_model: Any
-    new_uuid7: Callable[[], Any]
-    logger: logging.Logger
-    utcnow: Callable[[], datetime]
-    load_model_library_tagger: Callable[[], AsyncTagger]
-    load_poster_style_tagger: Callable[[], AsyncTagger]
-    model_library_requested_count: Callable[[Any], int]
+class ModelLibraryTagger(Protocol):
+    async def __call__(
+        self,
+        session: AsyncSession,
+        *,
+        image_id: str,
+        user_id: str,
+    ) -> AutoTagResult: ...
+
+
+class PosterStyleTagger(Protocol):
+    async def __call__(
+        self,
+        session: AsyncSession,
+        *,
+        image_id: str,
+        user_id: str,
+    ) -> PosterStyleAutoTagResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowHookServices:
+    model_library_tagger: ModelLibraryTagger
+    poster_style_tagger: PosterStyleTagger
 
 
 @dataclass(frozen=True)
@@ -67,7 +89,7 @@ async def maybe_record_model_library_generate_image(
     user_id: str,
     generation: Any,
     image_id: str,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> None:
     req = (
         generation.upstream_request
@@ -82,11 +104,11 @@ async def maybe_record_model_library_generate_image(
     if not isinstance(run_id, str) or not run_id:
         return
 
-    run_model = deps.workflow_run_model
-    step_model = deps.workflow_step_model
+    run_model = WorkflowRun
+    step_model = WorkflowStep
     run = (
         await session.execute(
-            deps.select(run_model).where(
+            select(run_model).where(
                 run_model.id == run_id,
                 run_model.user_id == user_id,
                 run_model.deleted_at.is_(None),
@@ -97,7 +119,7 @@ async def maybe_record_model_library_generate_image(
         return
     step = (
         await session.execute(
-            deps.select(step_model)
+            select(step_model)
             .where(
                 step_model.workflow_run_id == run.id,
                 step_model.step_key == "model_library_generate",
@@ -115,12 +137,12 @@ async def maybe_record_model_library_generate_image(
 
     input_json = step.input_json if isinstance(step.input_json, dict) else {}
     auto_tag = bool(input_json.get("auto_tag", False))
-    requested = deps.model_library_requested_count(step)
+    requested = model_library_requested_count_from_step(step)
 
     output_json = dict(step.output_json or {})
     if auto_tag:
         try:
-            result = await deps.load_model_library_tagger()(
+            result = await services.model_library_tagger(
                 session,
                 image_id=image_id,
                 user_id=user_id,
@@ -139,7 +161,7 @@ async def maybe_record_model_library_generate_image(
         except (TimeoutError, asyncio.CancelledError):
             raise
         except Exception as exc:  # noqa: BLE001
-            deps.logger.info(
+            logger.info(
                 "model_library_generate tagging skipped run=%s image=%s err=%s",
                 run.id,
                 image_id,
@@ -160,7 +182,7 @@ async def maybe_record_poster_style_library_generate_image(
     user_id: str,
     generation: Any,
     image_id: str,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> None:
     run_id = _poster_style_run_id(generation)
     if run_id is None:
@@ -169,7 +191,7 @@ async def maybe_record_poster_style_library_generate_image(
         session,
         user_id=user_id,
         run_id=run_id,
-        deps=deps,
+        services=services,
     )
     if loaded is None:
         return
@@ -182,7 +204,7 @@ async def maybe_record_poster_style_library_generate_image(
         image_id=image_id,
         run=run,
         input_value=input_value,
-        deps=deps,
+        services=services,
     )
     if input_value.auto_tag:
         await _auto_tag_poster_style_item(
@@ -191,7 +213,7 @@ async def maybe_record_poster_style_library_generate_image(
             image_id=image_id,
             run=run,
             target_item=target_item,
-            deps=deps,
+            services=services,
         )
     _complete_poster_style_step(run, step, input_value)
 
@@ -215,12 +237,12 @@ async def _load_poster_style_run_step(
     *,
     user_id: str,
     run_id: str,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> tuple[Any, Any] | None:
-    run_model = deps.workflow_run_model
+    run_model = WorkflowRun
     run = (
         await session.execute(
-            deps.select(run_model).where(
+            select(run_model).where(
                 run_model.id == run_id,
                 run_model.user_id == user_id,
                 run_model.deleted_at.is_(None),
@@ -229,10 +251,10 @@ async def _load_poster_style_run_step(
     ).scalar_one_or_none()
     if run is None:
         return None
-    step_model = deps.workflow_step_model
+    step_model = WorkflowStep
     step = (
         await session.execute(
-            deps.select(step_model)
+            select(step_model)
             .where(
                 step_model.workflow_run_id == run.id,
                 step_model.step_key == "poster_style_library_generate",
@@ -295,12 +317,12 @@ async def _find_or_create_poster_style_item(
     image_id: str,
     run: Any,
     input_value: PosterStyleInput,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> Any:
-    item_model = deps.poster_style_item_model
+    item_model = PosterStyleItem
     existing = (
         await session.execute(
-            deps.select(item_model)
+            select(item_model)
             .where(
                 item_model.user_id == user_id,
                 item_model.cover_image_id == image_id,
@@ -311,7 +333,7 @@ async def _find_or_create_poster_style_item(
     if existing is not None:
         return existing
     item = item_model(
-        id=f"user:{deps.new_uuid7()}",
+        id=f"user:{new_uuid7()}",
         user_id=user_id,
         source="generated",
         cover_image_id=image_id,
@@ -342,19 +364,19 @@ async def _auto_tag_poster_style_item(
     image_id: str,
     run: Any,
     target_item: Any,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> None:
     try:
-        result = await deps.load_poster_style_tagger()(
+        result = await services.poster_style_tagger(
             session,
             image_id=image_id,
             user_id=user_id,
         )
-        _apply_poster_style_tag_result(target_item, result, deps)
+        _apply_poster_style_tag_result(target_item, result)
     except (TimeoutError, asyncio.CancelledError):
         raise
     except Exception as exc:  # noqa: BLE001
-        deps.logger.info(
+        logger.info(
             "poster_style_library_generate tagging skipped run=%s image=%s err=%s",
             run.id,
             image_id,
@@ -363,9 +385,8 @@ async def _auto_tag_poster_style_item(
 
 
 def _apply_poster_style_tag_result(
-    target_item: Any,
-    result: Any,
-    deps: WorkflowHookDependencies,
+    target_item: PosterStyleItem,
+    result: PosterStyleAutoTagResult,
 ) -> None:
     if result.category and target_item.category in (None, "", "user_favorites"):
         target_item.category = result.category
@@ -377,7 +398,7 @@ def _apply_poster_style_tag_result(
         )[:8]
     if result.palette and not target_item.palette:
         target_item.palette = list(result.palette)[:8]
-    target_item.auto_tagged_at = deps.utcnow()
+    target_item.auto_tagged_at = datetime.now(timezone.utc)
     target_item.auto_tag_notes = result.notes
     metadata = dict(target_item.metadata_jsonb or {})
     metadata["auto_tag_raw"] = {
@@ -412,7 +433,7 @@ async def maybe_record_model_library_candidate_image(
     user_id: str,
     parent_upstream_request: dict[str, Any],
     bonus_image_id: str,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> None:
     if parent_upstream_request.get("workflow_action") != "model_library_generate":
         return
@@ -422,11 +443,11 @@ async def maybe_record_model_library_candidate_image(
     if not isinstance(run_id, str) or not run_id:
         return
 
-    run_model = deps.workflow_run_model
-    step_model = deps.workflow_step_model
+    run_model = WorkflowRun
+    step_model = WorkflowStep
     run = (
         await session.execute(
-            deps.select(run_model).where(
+            select(run_model).where(
                 run_model.id == run_id,
                 run_model.user_id == user_id,
                 run_model.deleted_at.is_(None),
@@ -437,7 +458,7 @@ async def maybe_record_model_library_candidate_image(
         return
     step = (
         await session.execute(
-            deps.select(step_model)
+            select(step_model)
             .where(
                 step_model.workflow_run_id == run.id,
                 step_model.step_key == "model_library_generate",
@@ -462,7 +483,7 @@ async def maybe_record_poster_workflow_image(
     user_id: str,
     generation: Any,
     image_id: str,
-    deps: WorkflowHookDependencies,
+    services: WorkflowHookServices,
 ) -> None:
     req = (
         generation.upstream_request
@@ -483,10 +504,10 @@ async def maybe_record_poster_workflow_image(
     if not isinstance(run_id, str) or not run_id:
         return
 
-    run_model = deps.workflow_run_model
+    run_model = WorkflowRun
     run = (
         await session.execute(
-            deps.select(run_model).where(
+            select(run_model).where(
                 run_model.id == run_id,
                 run_model.user_id == user_id,
                 run_model.deleted_at.is_(None),
@@ -499,7 +520,7 @@ async def maybe_record_poster_workflow_image(
     if action == "poster_master":
         master_id = req.get("workflow_master_id")
         if isinstance(master_id, str) and master_id:
-            master = await session.get(deps.poster_master_model, master_id)
+            master = await session.get(PosterMaster, master_id)
             if master is not None and master.workflow_run_id == run.id:
                 if not master.image_id:
                     master.image_id = image_id
@@ -508,7 +529,7 @@ async def maybe_record_poster_workflow_image(
     else:
         render_id = req.get("workflow_render_id")
         if isinstance(render_id, str) and render_id:
-            render = await session.get(deps.poster_render_model, render_id)
+            render = await session.get(PosterRender, render_id)
             if render is not None and render.workflow_run_id == run.id:
                 render.image_id = image_id
                 if render.status in {"generating", "revising"}:

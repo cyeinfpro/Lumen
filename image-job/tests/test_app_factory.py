@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import sys
 import zlib
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -25,6 +27,7 @@ from image_job.config import (  # noqa: E402
     ImageJobTimeouts,
     SecretText,
 )
+from image_job.domain.identity import CallerIdentity, UpstreamCredential  # noqa: E402
 from image_job.runtime import create_runtime  # noqa: E402
 
 
@@ -43,6 +46,8 @@ def _settings(tmp_path: Path) -> ImageJobSettings:
         upstream_base_url="http://127.0.0.1:8081",
         public_base_url="https://images.example.test",
         timeouts=ImageJobTimeouts(graceful_shutdown_s=0),
+        credential_active_key_id="test-v1",
+        credential_master_secret=SecretText("test-master-secret-" + "x" * 32),
         stuck_reconcile_interval_s=60,
         retention_sweep_interval_s=60,
     )
@@ -61,6 +66,8 @@ def test_create_app_keeps_runtime_state_per_instance(tmp_path: Path) -> None:
     assert (
         runtime_a.repository.settings.db_path != runtime_b.repository.settings.db_path
     )
+    assert runtime_a.upstream.processing.heartbeat.repository is runtime_a.repository
+    assert not hasattr(runtime_a.upstream.processing, "touch_running")
 
 
 def test_settings_hide_secrets_and_reject_missing_identity(tmp_path: Path) -> None:
@@ -168,6 +175,66 @@ async def test_readiness_fails_when_runtime_is_shutting_down(
     assert "queue_not_accepting" in failures
 
 
+def test_sqlite_readiness_probe_uses_read_only_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = create_runtime(_settings(tmp_path)).repository
+    statements: list[str] = []
+
+    class Result:
+        @staticmethod
+        def fetchone() -> tuple[int]:
+            return (1,)
+
+    class Connection:
+        def execute(self, sql: str) -> Result:
+            statements.append(" ".join(sql.split()))
+            return Result()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(repository, "_open_readonly", Connection)
+
+    assert repository._readiness_probe_sync() is True  # noqa: SLF001
+    assert statements == ["SELECT 1"]
+
+
+def test_sqlite_readiness_connection_opens_database_in_ro_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = create_runtime(_settings(tmp_path)).repository
+    repository.settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(repository.settings.db_path).close()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class Connection:
+        row_factory: Any = None
+
+        @staticmethod
+        def execute(_sql: str) -> None:
+            return None
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    def connect(database: str, **kwargs: Any) -> Connection:
+        calls.append((database, kwargs))
+        return Connection()
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+    repository._open_readonly().close()  # noqa: SLF001
+
+    assert calls[0][0].endswith("?mode=ro")
+    assert calls[0][1]["uri"] is True
+    assert calls[0][1]["isolation_level"] is None
+
+
 @pytest.mark.asyncio
 async def test_queue_supervisor_replaces_crashed_worker() -> None:
     crashed = asyncio.Event()
@@ -199,6 +266,10 @@ async def test_queue_supervisor_replaces_crashed_worker() -> None:
         assert queue.workers[1] is not original
         assert queue.metrics["worker_failures_total"] == 1
         assert queue.metrics["worker_restarts_total"] == 1
+        assert queue.metrics["attempts_finished_total"] == 1
+        assert queue.metrics["processor_success_total"] == 0
+        assert queue.metrics["processor_crash_total"] == 1
+        assert queue.metrics["jobs_completed_total"] == 0
     finally:
         await queue.shutdown()
 
@@ -291,6 +362,53 @@ async def test_persistence_crash_after_success_marks_job_uncertain(
 
 
 @pytest.mark.asyncio
+async def test_submit_reconciles_row_persisted_during_shutdown(
+    tmp_path: Path,
+) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.repository.initialize()
+    persistence = runtime.jobs.persistence
+
+    class _ShutdownAfterInsert:
+        def __getattr__(self, name: str):
+            return getattr(persistence, name)
+
+        async def insert_job(self, *args, **kwargs) -> None:
+            await persistence.insert_job(*args, **kwargs)
+            runtime.queue.shutdown_event.set()
+
+    runtime.jobs.persistence = _ShutdownAfterInsert()
+    result = await runtime.jobs.submit(
+        caller=CallerIdentity(
+            service_id="test",
+            owner_hash="owner-hash",
+            authorization="Bearer owner",
+        ),
+        upstream=UpstreamCredential("Bearer upstream"),
+        payload={
+            "request_type": "generations",
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+            "retention_days": 1,
+        },
+        idempotency_key=None,
+    )
+
+    assert result["status"] == "queued"
+    assert runtime.queue.queue.empty()
+    row = await runtime.repository.one(
+        "SELECT job_id, status FROM jobs WHERE job_id = ?",
+        (result["job_id"],),
+    )
+    assert row is not None
+    assert row["status"] == "queued"
+
+    runtime.queue.shutdown_event.clear()
+    await runtime.jobs.reconcile()
+    assert await runtime.queue.queue.get() == result["job_id"]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_closes_http_client_when_startup_never_finished(
     tmp_path: Path,
 ) -> None:
@@ -306,6 +424,33 @@ async def test_shutdown_closes_http_client_when_startup_never_finished(
 
     assert runtime.upstream.client is None
     assert client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_upstream_when_queue_startup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    clients: list[httpx.AsyncClient] = []
+
+    async def fail_startup() -> None:
+        client = runtime.upstream.client
+        assert client is not None
+        clients.append(client)
+        raise RuntimeError("queue startup failed")
+
+    monkeypatch.setattr(runtime.queue, "startup", fail_startup)
+    app = create_app(runtime=runtime)
+
+    with pytest.raises(RuntimeError, match="queue startup failed"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    assert runtime.upstream.client is None
+    assert len(clients) == 1
+    assert clients[0].is_closed
+    assert runtime.started is False
 
 
 @pytest.mark.asyncio

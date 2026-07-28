@@ -42,7 +42,10 @@ def _module_string_assignment(path: Path, name: str) -> str | None:
             if node.target.id == name:
                 value = node.value
         elif isinstance(node, ast.Assign):
-            if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            if any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets
+            ):
                 value = node.value
         if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return value.value
@@ -98,7 +101,6 @@ def test_github_workflow_actions_are_pinned_to_commit_sha() -> None:
     assert floating == []
 
 
-
 def test_bug_audit_infra_scripts_parse_with_bash_n() -> None:
     result = subprocess.run(
         [
@@ -150,6 +152,15 @@ def test_compose_healthchecks_are_local_and_hardened() -> None:
     assert "LUMEN_ULIMIT_NOFILE_SOFT" in bluegreen
 
 
+def test_api_worker_count_is_shared_by_uvicorn_and_capacity_scaling() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    api = compose["services"]["api"]
+
+    worker_flag = api["command"].index("--workers")
+    assert api["command"][worker_flag + 1] == "${LUMEN_API_WORKERS:-2}"
+    assert api["environment"]["LUMEN_API_WORKERS"] == "${LUMEN_API_WORKERS:-2}"
+
+
 def test_compose_one_shot_profiles_do_not_auto_restart() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
 
@@ -181,9 +192,9 @@ def test_storage_mount_cleans_smb_credentials_on_hard_failures() -> None:
     assert "trap - EXIT" in text
 
 
-def test_storage_mount_config_parser_does_not_execute_conf_shell(tmp_path: Path) -> (
-    None
-):
+def test_storage_mount_config_parser_does_not_execute_conf_shell(
+    tmp_path: Path,
+) -> None:
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     pwned = tmp_path / "pwned"

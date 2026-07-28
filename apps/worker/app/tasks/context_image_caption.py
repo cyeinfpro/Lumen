@@ -23,7 +23,7 @@ from lumen_core.models import Image
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
 
 from ..provider_runtime.errors import UpstreamError
-from ..provider_runtime.upstream_services import upstream_services
+from ..provider_runtime.http_headers import upstream_auth_headers
 from ..storage import storage
 
 logger = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ async def _call_upstream_one(
                 _responses_url(base_url),
                 json=body,
                 headers={
-                    **upstream_services().core.auth_headers(api_key),
+                    **upstream_auth_headers(api_key),
                     "content-type": "application/json",
                 },
             )

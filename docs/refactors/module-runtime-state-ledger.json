@@ -1,5 +1,5 @@
 {
-  "max_total": 24,
+  "max_total": 21,
   "modules": [
     {
       "max_instances": 1,
@@ -46,6 +46,20 @@
     {
       "max_instances": 1,
       "owner": "api",
+      "path": "apps/api/app/services/poster_styles/library.py",
+      "retirement_condition": "Poster style library synchronization is owned by an application-scoped service.",
+      "symbols": ["_SYNC_LOCK"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/services/poster_styles/workflow_lookup.py",
+      "retirement_condition": "Poster workflow bootstrap synchronization is owned by an application-scoped service.",
+      "symbols": ["_LOCAL_BOOTSTRAP_LOCK"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
       "path": "apps/api/app/sse_publish.py",
       "retirement_condition": "SSE timestamp state is owned by an application event publisher instance.",
       "symbols": ["_sse_publish_state"]
@@ -77,13 +91,6 @@
       "path": "apps/api/app/routes/prompts.py",
       "retirement_condition": "Prompt enhancement runtime is constructed by application composition.",
       "symbols": ["_prompt_runtime_state"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/workflow_domain/apparel_scene_planner.py",
-      "retirement_condition": "Provider round-robin counters move behind the workflow application runtime.",
-      "symbols": ["_PROVIDER_ROUND_ROBIN"]
     },
     {
       "max_instances": 1,
@@ -121,11 +128,18 @@
       "symbols": ["_RUNTIME"]
     },
     {
-      "max_instances": 1,
+      "max_instances": 2,
       "owner": "worker",
-      "path": "apps/worker/app/tasks/generation_parts/queue.py",
-      "retirement_condition": "Generation queue cooldown state is owned by the generation runtime.",
-      "symbols": ["QUEUE_RUNTIME"]
+      "path": "apps/worker/app/upstream_parts/upstream_impl.py",
+      "retirement_condition": "Worker-owned upstream client lifecycle owns both client synchronization locks.",
+      "symbols": ["_client_lock", "_images_client_lock"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "image-job",
+      "path": "image-job/image_job/adapters/filesystem_artifacts.py",
+      "retirement_condition": "Image verification global lock is owned by the sidecar runtime.",
+      "symbols": ["_IMAGE_VERIFY_LOCK"]
     }
   ],
   "version": 1

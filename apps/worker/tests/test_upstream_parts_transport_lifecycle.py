@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 from collections import OrderedDict
 from pathlib import Path
@@ -10,18 +8,37 @@ from typing import Any
 import httpx
 import pytest
 
-from app import byok_runtime, upstream
+from app import upstream
 from app.upstream_parts import client_lifecycle, errors, transport
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.url_security import PublicHttpTarget
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 def test_upstream_facade_exports_extracted_contracts_without_state_aliases() -> None:
     assert upstream.UpstreamError is errors.UpstreamError
     assert (
-        upstream_services().infrastructure.UpstreamCancelled is errors.UpstreamCancelled
+        TEST_UPSTREAM_SERVICES.infrastructure.UpstreamCancelled is errors.UpstreamCancelled
     )
-    assert upstream_services().lifecycle.get_client is client_lifecycle._get_client
-    assert upstream_services().transport.iter_sse_curl is transport._iter_sse_curl
+    assert (
+        TEST_UPSTREAM_SERVICES.lifecycle.get_client.func
+        is client_lifecycle._get_client
+    )
+    assert (
+        TEST_UPSTREAM_SERVICES.lifecycle.get_client.keywords["runtime"]
+        is TEST_UPSTREAM_RUNTIME
+    )
+    assert (
+        TEST_UPSTREAM_SERVICES.transport.iter_sse_curl.func
+        is transport._iter_sse_curl
+    )
+    assert (
+        TEST_UPSTREAM_SERVICES.transport.iter_sse_curl.keywords["runtime"]
+        is TEST_UPSTREAM_RUNTIME
+    )
 
     for state_name in (
         "client",
@@ -31,7 +48,7 @@ def test_upstream_facade_exports_extracted_contracts_without_state_aliases() -> 
         "retired_client_close_tasks",
         "retired_clients",
     ):
-        assert hasattr(upstream_services().core, state_name)
+        assert hasattr(TEST_UPSTREAM_SERVICES.core, state_name)
         assert not hasattr(upstream, f"_{state_name}")
         assert not hasattr(client_lifecycle, state_name)
 
@@ -59,17 +76,17 @@ def test_client_builders_read_late_bound_facade_transport_policy(
             calls.append(kwargs)
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "TrackedAsyncClient", FakeTrackedClient
+        TEST_UPSTREAM_SERVICES.lifecycle, "TrackedAsyncClient", FakeTrackedClient
     )
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=40.0, write=5.0
     )
 
-    json_client = upstream_services().lifecycle.build_client(
+    json_client = TEST_UPSTREAM_SERVICES.lifecycle.build_client(
         timeout_config,
         proxy_url="socks5://proxy.example:1080",
     )
-    images_client = upstream_services().lifecycle.build_images_client(
+    images_client = TEST_UPSTREAM_SERVICES.lifecycle.build_images_client(
         timeout_config,
         proxy_url="http://proxy.example:8080",
     )
@@ -106,16 +123,16 @@ def test_direct_pinned_client_uses_validated_transport_without_proxy(
             calls.append(kwargs)
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "TrackedAsyncClient", FakeTrackedClient
+        TEST_UPSTREAM_SERVICES.lifecycle, "TrackedAsyncClient", FakeTrackedClient
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure,
+        TEST_UPSTREAM_SERVICES.infrastructure,
         "pinned_async_http_transport",
         lambda current: pinned_transport if current is target else None,
     )
 
-    client = upstream_services().lifecycle.build_client(
-        upstream_services().lifecycle.TimeoutConfig(connect=3.0, read=40.0, write=5.0),
+    client = TEST_UPSTREAM_SERVICES.lifecycle.build_client(
+        TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(connect=3.0, read=40.0, write=5.0),
         pinned_target=target,
     )
 
@@ -134,16 +151,16 @@ async def test_explicit_byok_target_pins_direct_images_but_not_proxy(
         "https://byok.example/v1",
         ("203.0.113.10",),
     )
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=40.0, write=5.0
     )
     built: list[dict[str, Any]] = []
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         return timeout_config
 
     def fake_build_images_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
         pinned_target: Any | None = None,
@@ -159,20 +176,20 @@ async def test_explicit_byok_target_pins_direct_images_but_not_proxy(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
     )
     monkeypatch.setattr(
-        upstream_services().core, "proxied_images_clients", OrderedDict()
+        TEST_UPSTREAM_SERVICES.core, "proxied_images_clients", OrderedDict()
     )
     client_lifecycle._pinned_images_clients.clear()
     try:
-        direct_client = await upstream_services().lifecycle.get_images_client(
+        direct_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client(
             pinned_target=target
         )
-        proxy_client = await upstream_services().lifecycle.get_images_client(
+        proxy_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client(
             "http://proxy-user:proxy-pass@proxy.example:8080"
         )
     finally:
@@ -198,16 +215,16 @@ async def test_ambient_byok_target_does_not_pollute_later_unpinned_origin(
         "https://byok.example/v1",
         ("203.0.113.10",),
     )
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=40.0, write=5.0
     )
     built: list[dict[str, Any]] = []
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         return timeout_config
 
     def fake_build_images_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
         pinned_target: Any | None = None,
@@ -223,22 +240,20 @@ async def test_ambient_byok_target_does_not_pollute_later_unpinned_origin(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
     )
-    monkeypatch.setattr(upstream_services().core, "images_client", None)
-    monkeypatch.setattr(upstream_services().core, "images_client_timeout_config", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None)
     client_lifecycle._pinned_images_clients.clear()
-    token = byok_runtime.bind_byok_http_target(target)
     try:
-        byok_client = await upstream_services().lifecycle.get_images_client(
+        byok_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client(
             pinned_target=target
         )
-        internal_client = await upstream_services().lifecycle.get_images_client()
+        internal_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client()
     finally:
-        byok_runtime.reset_byok_http_target(token)
         client_lifecycle._pinned_images_clients.clear()
 
     assert byok_client is not internal_client
@@ -253,17 +268,17 @@ async def test_concurrent_client_selection_keeps_byok_targets_isolated(
         PublicHttpTarget("https://a.example/v1", ("203.0.113.10",)),
         PublicHttpTarget("https://b.example/v1", ("203.0.113.11",)),
     )
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=40.0, write=5.0
     )
     built: list[dict[str, Any]] = []
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         await asyncio.sleep(0)
         return timeout_config
 
     def fake_build_images_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
         pinned_target: Any | None = None,
@@ -279,28 +294,23 @@ async def test_concurrent_client_selection_keeps_byok_targets_isolated(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
     )
-    monkeypatch.setattr(upstream_services().core, "images_client", None)
-    monkeypatch.setattr(upstream_services().core, "images_client_timeout_config", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None)
     client_lifecycle._pinned_images_clients.clear()
 
     async def select_clients(
         target: PublicHttpTarget,
-    ) -> tuple[object, object, PublicHttpTarget | None]:
-        token = byok_runtime.bind_byok_http_target(target)
-        try:
-            pinned_client = await upstream_services().lifecycle.get_images_client(
-                pinned_target=target
-            )
-            unpinned_client = await upstream_services().lifecycle.get_images_client()
-            observed_target = byok_runtime.current_byok_http_target()
-        finally:
-            byok_runtime.reset_byok_http_target(token)
-        return pinned_client, unpinned_client, observed_target
+    ) -> tuple[object, object]:
+        pinned_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client(
+            pinned_target=target
+        )
+        unpinned_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client()
+        return pinned_client, unpinned_client
 
     try:
         results = await asyncio.gather(*(select_clients(target) for target in targets))
@@ -309,8 +319,6 @@ async def test_concurrent_client_selection_keeps_byok_targets_isolated(
 
     assert results[0][0] is not results[1][0]
     assert results[0][1] is results[1][1]
-    assert [result[2] for result in results] == list(targets)
-    assert byok_runtime.current_byok_http_target() is None
     assert {entry["pinned_target"] for entry in built if entry["pinned_target"]} == set(
         targets
     )
@@ -321,19 +329,19 @@ async def test_concurrent_client_selection_keeps_byok_targets_isolated(
 async def test_client_facade_uses_rebound_proxy_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=1.0, read=2.0, write=3.0
     )
     rebound_cache: OrderedDict[
-        tuple[upstream_services().lifecycle.TimeoutConfig, str], Any
+        tuple[TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig, str], Any
     ] = OrderedDict()
     built: list[object] = []
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         return timeout_config
 
     def fake_build_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
     ) -> object:
@@ -343,14 +351,14 @@ async def test_client_facade_uses_rebound_proxy_cache(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_client", fake_build_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_client", fake_build_client
     )
-    monkeypatch.setattr(upstream_services().core, "proxied_clients", rebound_cache)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "proxied_clients", rebound_cache)
 
-    client = await upstream_services().lifecycle.get_client("http://proxy.example:8080")
+    client = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy.example:8080")
 
     assert client is built[0]
     assert rebound_cache[(timeout_config, "http://proxy.example:8080")] is client
@@ -366,7 +374,7 @@ async def test_sse_cancellation_uses_facade_cleanup_and_unlinks_body_file(
     created_paths: list[Path] = []
     terminated: list[object | None] = []
     create_kwargs: dict[str, Any] = {}
-    real_mkstemp = upstream_services().core.tempfile.mkstemp
+    real_mkstemp = TEST_UPSTREAM_SERVICES.core.tempfile.mkstemp
 
     class BlockingStdout:
         async def read(self, _size: int) -> bytes:
@@ -397,23 +405,23 @@ async def test_sse_cancellation_uses_facade_cleanup_and_unlinks_body_file(
     async def fake_terminate(received: object | None) -> None:
         terminated.append(received)
 
-    monkeypatch.setattr(upstream_services().core.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core.tempfile, "mkstemp", fake_mkstemp)
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio,
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
     monkeypatch.setattr(
-        upstream_services().transport, "terminate_curl_proc_group", fake_terminate
+        TEST_UPSTREAM_SERVICES.transport, "terminate_curl_proc_group", fake_terminate
     )
     monkeypatch.setattr(
-        upstream_services().core, "generate_trace_id", lambda: "trace-test"
+        TEST_UPSTREAM_SERVICES.core, "generate_trace_id", lambda: "trace-test"
     )
     monkeypatch.setattr(
-        upstream_services().core, "log_upstream_call", lambda **_kwargs: None
+        TEST_UPSTREAM_SERVICES.core, "log_upstream_call", lambda **_kwargs: None
     )
 
-    stream = upstream_services().transport.iter_sse_curl(
+    stream = TEST_UPSTREAM_SERVICES.transport.iter_sse_curl(
         url="https://upstream.example/v1/responses",
         json_body={"stream": True},
         headers={"authorization": "Bearer test"},

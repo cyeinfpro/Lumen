@@ -48,6 +48,8 @@ _MUTABLE_FACTORIES = frozenset(
         "weakref.WeakSet",
     }
 )
+_CONTEXTVAR_FACTORIES = frozenset({"ContextVar", "contextvars.ContextVar"})
+_TEST_FILE_NAMES = frozenset({"conftest.py"})
 
 
 @dataclass(frozen=True, order=True)
@@ -116,6 +118,137 @@ def _mutable_assignment(node: ast.AST) -> bool:
     return False
 
 
+def _contextvar_assignment(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _call_name(node.func) in (
+        _CONTEXTVAR_FACTORIES
+    )
+
+
+def _is_test_source(path: Path) -> bool:
+    return (
+        any(part in {"test", "tests"} for part in path.parts)
+        or path.name in _TEST_FILE_NAMES
+        or path.name.startswith("test_")
+        or path.name.endswith("_test.py")
+    )
+
+
+def _is_constant_attribute(name: str) -> bool:
+    if name.startswith("__") and name.endswith("__"):
+        return True
+    normalized = name.strip("_")
+    return bool(normalized) and normalized.isupper()
+
+
+def _module_path_exists(path: Path) -> bool:
+    return path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()
+
+
+def _source_top_level_modules(source_root: Path) -> frozenset[str]:
+    if not source_root.is_dir():
+        return frozenset()
+    modules: set[str] = set()
+    for child in source_root.iterdir():
+        if child.is_file() and child.suffix == ".py" and child.name != "__init__.py":
+            modules.add(child.stem)
+        elif child.is_dir() and (child / "__init__.py").is_file():
+            modules.add(child.name)
+    return frozenset(modules)
+
+
+def _containing_top_level_package(
+    source_path: Path,
+    source_root: Path,
+) -> str | None:
+    if (source_root / "__init__.py").is_file():
+        return None
+    try:
+        relative = source_path.relative_to(source_root)
+    except ValueError:
+        return None
+    if len(relative.parts) < 2:
+        return None
+    candidate = source_root / relative.parts[0]
+    if (candidate / "__init__.py").is_file():
+        return relative.parts[0]
+    return None
+
+
+def _is_package_internal_source(
+    source_path: Path,
+    source_root: Path,
+) -> bool:
+    if (source_root / "__init__.py").is_file():
+        return True
+    return _containing_top_level_package(source_path, source_root) is not None
+
+
+def _function_has_parameters(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    arguments = node.args
+    return bool(
+        arguments.posonlyargs
+        or arguments.args
+        or arguments.vararg
+        or arguments.kwonlyargs
+        or arguments.kwarg
+    )
+
+
+def _unwrap_await(node: ast.AST | None) -> ast.AST | None:
+    return node.value if isinstance(node, ast.Await) else node
+
+
+class _ConstructedReturnVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.constructed_names: set[str] = set()
+        self.found = False
+
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        if isinstance(_unwrap_await(node.value), ast.Call):
+            for target in node.targets:
+                self.constructed_names.update(_target_names(target))
+        self.generic_visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        if isinstance(_unwrap_await(node.value), ast.Call):
+            self.constructed_names.update(_target_names(node.target))
+        if node.value is not None:
+            self.generic_visit(node.value)
+
+    def visit_Return(self, node: ast.Return) -> None:  # noqa: N802
+        value = _unwrap_await(node.value)
+        if isinstance(value, ast.Call):
+            self.found = True
+        elif isinstance(value, ast.Name) and value.id in self.constructed_names:
+            self.found = True
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self,
+        node: ast.AsyncFunctionDef,
+    ) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _returns_constructed_value(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    visitor = _ConstructedReturnVisitor()
+    for statement in node.body:
+        visitor.visit(statement)
+    return visitor.found
+
+
 def _static_all(tree: ast.Module) -> list[str] | None:
     for statement in tree.body:
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
@@ -145,10 +278,35 @@ def _static_all(tree: ast.Module) -> list[str] | None:
 
 
 class RuntimeCouplingVisitor(ast.NodeVisitor):
-    def __init__(self, relative_path: str) -> None:
+    def __init__(
+        self,
+        relative_path: str,
+        *,
+        source_path: Path | None = None,
+        source_root: Path | None = None,
+    ) -> None:
         self.relative_path = relative_path
         self.findings: list[RuntimeCouplingFinding] = []
         self._scope_depth = 0
+        self._source_path = source_path
+        self._source_root = source_root
+        self._module_references: set[str] = set()
+        self._lru_cache_references: set[str] = set()
+        self._top_level_modules = (
+            _source_top_level_modules(source_root)
+            if source_root is not None
+            else frozenset()
+        )
+        self._containing_package = (
+            _containing_top_level_package(source_path, source_root)
+            if source_path is not None and source_root is not None
+            else None
+        )
+        self._package_internal = bool(
+            source_path is not None
+            and source_root is not None
+            and _is_package_internal_source(source_path, source_root)
+        )
 
     def _add(
         self,
@@ -167,9 +325,127 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
             )
         )
 
+    def _from_import_base(self, node: ast.ImportFrom) -> Path | None:
+        if self._source_path is None or self._source_root is None:
+            return None
+        if node.level:
+            base = self._source_path.parent
+            for _ in range(node.level - 1):
+                base = base.parent
+        else:
+            base = (
+                self._source_root.parent
+                if (self._source_root / "__init__.py").is_file()
+                else self._source_root
+            )
+        if node.module:
+            base = base.joinpath(*node.module.split("."))
+        return base
+
+    def _from_import_is_module(
+        self,
+        node: ast.ImportFrom,
+        alias: ast.alias,
+    ) -> bool:
+        if alias.name == "*":
+            return False
+        base = self._from_import_base(node)
+        return (
+            base is not None
+            and base.is_dir()
+            and _module_path_exists(base / alias.name)
+        )
+
+    def _is_module_reference(self, node: ast.AST) -> bool:
+        name = _call_name(node)
+        return bool(name) and name in self._module_references
+
+    def _add_module_replacement(
+        self,
+        node: ast.AST,
+        target: ast.Attribute,
+        value: ast.AST | None,
+    ) -> None:
+        if not self._is_module_reference(target.value) or _is_constant_attribute(
+            target.attr
+        ):
+            return
+        self._add(
+            "module-attribute-replacement",
+            node,
+            _call_name(target),
+            _call_name(value) if value is not None else "<dynamic>",
+        )
+
+    def _add_top_level_sibling_import(
+        self,
+        node: ast.AST,
+        imported_module: str,
+        symbol: str,
+    ) -> None:
+        top_level = imported_module.split(".", 1)[0]
+        if (
+            not self._package_internal
+            or top_level not in self._top_level_modules
+            or top_level == self._containing_package
+        ):
+            return
+        self._add(
+            "top-level-sibling-import",
+            node,
+            symbol,
+            imported_module,
+        )
+
+    def _lru_cache_decorator(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> str | None:
+        for decorator in node.decorator_list:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            name = _call_name(target)
+            if name not in self._lru_cache_references:
+                continue
+            if isinstance(decorator, ast.Call):
+                maxsize = decorator.args[0] if decorator.args else None
+                for keyword in decorator.keywords:
+                    if keyword.arg == "maxsize":
+                        maxsize = keyword.value
+                if isinstance(maxsize, ast.Constant) and maxsize.value == 0:
+                    continue
+            return name
+        return None
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for alias in node.names:
+            if alias.asname:
+                reference = alias.asname
+                self._module_references.add(reference)
+            else:
+                reference = alias.name.split(".", 1)[0]
+                self._module_references.add(reference)
+                self._module_references.add(alias.name)
+            if alias.name == "functools":
+                self._lru_cache_references.add(f"{reference}.lru_cache")
+            self._add_top_level_sibling_import(
+                node,
+                alias.name,
+                alias.asname or alias.name,
+            )
+        self.generic_visit(node)
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         module = ("." * node.level) + (node.module or "")
         for alias in node.names:
+            reference = alias.asname or alias.name
+            if self._from_import_is_module(node, alias):
+                self._module_references.add(reference)
+            if (
+                node.level == 0
+                and node.module == "functools"
+                and alias.name == "lru_cache"
+            ):
+                self._lru_cache_references.add(reference)
             if alias.name.startswith("_") and not alias.name.startswith("__"):
                 self._add(
                     "private-cross-module-import",
@@ -177,6 +453,12 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
                     alias.asname or alias.name,
                     f"{module}:{alias.name}",
                 )
+        if node.level == 0 and node.module:
+            self._add_top_level_sibling_import(
+                node,
+                node.module,
+                f"from {node.module}",
+            )
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
@@ -196,6 +478,27 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
                 f"sys.modules.{node.func.attr}",
                 target,
             )
+        if (
+            name == "setattr"
+            and len(node.args) >= 2
+            and self._is_module_reference(node.args[0])
+        ):
+            attribute = _literal_string(node.args[1])
+            if attribute == "<dynamic>" or not _is_constant_attribute(attribute):
+                module_name = _call_name(node.args[0])
+                replacement = (
+                    _call_name(node.args[2]) if len(node.args) >= 3 else "<dynamic>"
+                )
+                self._add(
+                    "module-setattr",
+                    node,
+                    (
+                        f"{module_name}.{attribute}"
+                        if attribute != "<dynamic>"
+                        else f"{module_name}.<dynamic>"
+                    ),
+                    replacement,
+                )
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
@@ -207,12 +510,20 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
                     "sys.modules[]=",
                     _literal_string(target.slice),
                 )
+            if isinstance(target, ast.Attribute):
+                self._add_module_replacement(node, target, node.value)
         if self._scope_depth == 0 and _mutable_assignment(node.value):
             for target in node.targets:
                 for name in _target_names(target):
                     if name == "__all__":
                         continue
                     self._add("module-mutable-state", node, name)
+        if self._scope_depth == 0 and _contextvar_assignment(node.value):
+            for target in node.targets:
+                for name in _target_names(target):
+                    self._add(
+                        "module-contextvar", node, name, _call_name(node.value.func)
+                    )
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
@@ -223,6 +534,8 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
                 "sys.modules[]=",
                 _literal_string(node.target.slice),
             )
+        if node.value is not None and isinstance(node.target, ast.Attribute):
+            self._add_module_replacement(node, node.target, node.value)
         if (
             self._scope_depth == 0
             and node.value is not None
@@ -232,6 +545,14 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
                 if name == "__all__":
                     continue
                 self._add("module-mutable-state", node, name)
+        if self._scope_depth == 0 and _contextvar_assignment(node.value):
+            for name in _target_names(node.target):
+                self._add(
+                    "module-contextvar",
+                    node,
+                    name,
+                    _call_name(node.value.func),
+                )
         self.generic_visit(node)
 
     def visit_Delete(self, node: ast.Delete) -> None:  # noqa: N802
@@ -255,12 +576,38 @@ class RuntimeCouplingVisitor(ast.NodeVisitor):
         self._scope_depth -= 1
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        decorator = self._lru_cache_decorator(node)
+        if (
+            self._scope_depth == 0
+            and decorator is not None
+            and not _function_has_parameters(node)
+            and _returns_constructed_value(node)
+        ):
+            self._add(
+                "lru-cache-service-singleton",
+                node,
+                node.name,
+                decorator,
+            )
         self._visit_scoped(node)
 
     def visit_AsyncFunctionDef(  # noqa: N802
         self,
         node: ast.AsyncFunctionDef,
     ) -> None:
+        decorator = self._lru_cache_decorator(node)
+        if (
+            self._scope_depth == 0
+            and decorator is not None
+            and not _function_has_parameters(node)
+            and _returns_constructed_value(node)
+        ):
+            self._add(
+                "lru-cache-service-singleton",
+                node,
+                node.name,
+                decorator,
+            )
         self._visit_scoped(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
@@ -271,13 +618,16 @@ def iter_python_sources(
     roots: Iterable[Path] = DEFAULT_SOURCE_ROOTS,
 ) -> Iterable[Path]:
     for root in roots:
+        if not root.exists():
+            raise FileNotFoundError(f"architecture scan root is missing: {root}")
         if root.is_file() and root.suffix == ".py":
-            yield root
+            if not _is_test_source(root):
+                yield root
             continue
         if not root.exists():
             continue
         for path in sorted(root.rglob("*.py")):
-            if "__pycache__" not in path.parts and "tests" not in path.parts:
+            if "__pycache__" not in path.parts and not _is_test_source(path):
                 yield path
 
 
@@ -285,13 +635,19 @@ def collect_runtime_findings(
     roots: Iterable[Path] = DEFAULT_SOURCE_ROOTS,
 ) -> dict[str, RuntimeCouplingFinding]:
     findings: dict[str, RuntimeCouplingFinding] = {}
-    for path in iter_python_sources(roots):
-        relative = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        visitor = RuntimeCouplingVisitor(relative)
-        visitor.visit(tree)
-        for finding in visitor.findings:
-            findings[finding.key] = finding
+    for root in roots:
+        source_root = root if root.is_dir() else root.parent
+        for path in iter_python_sources((root,)):
+            relative = path.relative_to(ROOT).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            visitor = RuntimeCouplingVisitor(
+                relative,
+                source_path=path,
+                source_root=source_root,
+            )
+            visitor.visit(tree)
+            for finding in visitor.findings:
+                findings[finding.key] = finding
     return dict(sorted(findings.items()))
 
 
@@ -365,6 +721,10 @@ def compare_inventory(
     baseline_public_api: dict[str, list[str]],
 ) -> list[str]:
     errors = [f"new runtime coupling: {key}" for key in sorted(current - baseline)]
+    errors.extend(
+        f"runtime coupling inventory is stale: {key}"
+        for key in sorted(baseline - current)
+    )
     for path, expected in baseline_public_api.items():
         actual = current_public_api.get(path)
         if actual is None:
@@ -438,10 +798,9 @@ def main() -> int:
         )
         return 1
 
-    removed = len(baseline - set(findings))
     print(
         "Runtime coupling budget passed: "
-        f"{len(findings)} grandfathered findings, {removed} removed; "
+        f"{len(findings)} grandfathered findings; "
         f"{len(public_api)} facade APIs verified."
     )
     return 0

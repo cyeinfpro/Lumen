@@ -72,7 +72,7 @@ from ..services.poster_styles import serialization as poster_style_serialization
 from ..services.poster_styles import sync as poster_style_sync
 from ..services.poster_styles import tagging as poster_style_tagging
 from ..services.poster_styles import storage as poster_style_storage
-from ..workflow_services.library_sync_operation import (
+from ..workflows.adapters.library_sync_operation import (
     do_poster_style_sync as _do_poster_style_sync,
 )
 from .messages import (

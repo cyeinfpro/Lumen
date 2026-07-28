@@ -21,21 +21,23 @@ echo "==> scripts/uninstall"
 bash -n scripts/lib.sh scripts/lib/*.sh scripts/uninstall.sh scripts/test_uninstall.sh
 bash scripts/test_uninstall.sh
 
-echo
-echo "==> python ruff"
-uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests
+if [ "${LUMEN_TEST_SKIP_GOVERNANCE:-0}" != "1" ]; then
+    echo
+    echo "==> python ruff"
+    uv run ruff check packages/core apps/api apps/worker apps/tgbot image-job tests
 
-echo
-echo "==> python complexity budget"
-uv run python scripts/check_complexity.py
+    echo
+    echo "==> python complexity budget"
+    uv run python scripts/check_complexity.py
 
-echo
-echo "==> python architecture budget"
-uv run python scripts/check_architecture.py
+    echo
+    echo "==> python architecture budget"
+    uv run python scripts/check_architecture.py
 
-echo
-echo "==> python module runtime state budget"
-uv run python scripts/module_runtime_state_audit.py
+    echo
+    echo "==> python module runtime state budget"
+    uv run python scripts/module_runtime_state_audit.py
+fi
 
 ensure_web_deps() {
     if [ -x "apps/web/node_modules/.bin/eslint" ] &&
@@ -82,35 +84,37 @@ echo
 echo "==> tests (operations scripts)"
 uv run pytest tests "$@"
 
-ensure_web_deps
+if [ "${LUMEN_TEST_SKIP_WEB:-0}" != "1" ]; then
+    ensure_web_deps
 
-echo
-echo "==> apps/web tests"
-(
-    cd apps/web
-    npm test
-)
+    echo
+    echo "==> apps/web tests"
+    (
+        cd apps/web
+        npm test
+    )
 
-echo
-echo "==> apps/web lint"
-(
-    cd apps/web
-    npm run lint
-)
+    echo
+    echo "==> apps/web lint"
+    (
+        cd apps/web
+        npm run lint
+    )
 
-echo
-echo "==> apps/web type-check"
-(
-    cd apps/web
-    npm run type-check
-)
+    echo
+    echo "==> apps/web type-check"
+    (
+        cd apps/web
+        npm run type-check
+    )
 
-echo
-echo "==> apps/web build"
-(
-    cd apps/web
-    npm run build
-)
+    echo
+    echo "==> apps/web build"
+    (
+        cd apps/web
+        npm run build
+    )
+fi
 
 echo
 echo "==> all suites passed"

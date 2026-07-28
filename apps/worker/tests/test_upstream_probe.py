@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 
 import pytest
 
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.jobs import upstream_probe
 from app.jobs.upstream_probe import EXPECTED_FIELDS, probe_upstream
 from app import upstream as upstream_mod
@@ -47,7 +48,12 @@ def _completed_event(model: str, *, drop: tuple[str, ...] = ()) -> dict[str, Any
 def _make_stream(events: list[dict[str, Any]]):
     """工厂：返回 monkeypatchable async generator function。"""
 
-    async def _stream(_body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    async def _stream(
+        _body: dict[str, Any],
+        *,
+        runtime: ImageUpstreamRuntime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        assert isinstance(runtime, ImageUpstreamRuntime)
         for ev in events:
             yield ev
 
@@ -55,12 +61,25 @@ def _make_stream(events: list[dict[str, Any]]):
 
 
 def _make_failing_stream(exc: BaseException):
-    async def _stream(_body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    async def _stream(
+        _body: dict[str, Any],
+        *,
+        runtime: ImageUpstreamRuntime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        assert isinstance(runtime, ImageUpstreamRuntime)
         for event in ():
             yield event
         raise exc
 
     return _stream
+
+
+def _probe_context() -> dict[str, Any]:
+    return {
+        "image_upstream_runtime": ImageUpstreamRuntime(
+            services=cast(Any, object()),
+        )
+    }
 
 
 # pytest fixture：让每个用例都拿到 isolated probe model（避免依赖 settings 真值）
@@ -82,15 +101,24 @@ def probe_model(monkeypatch: pytest.MonkeyPatch) -> str:
 async def test_probe_ok_when_completed_frame_full(
     monkeypatch: pytest.MonkeyPatch, probe_model: str
 ) -> None:
-    monkeypatch.setattr(
-        upstream_mod,
-        "stream_completion",
-        _make_stream([_completed_event(probe_model)]),
-    )
+    ctx = _probe_context()
+    expected_runtime = ctx["image_upstream_runtime"]
+    seen_runtime: list[ImageUpstreamRuntime] = []
 
-    result = await probe_upstream({})
+    async def stream_with_runtime(
+        _body: dict[str, Any],
+        *,
+        runtime: ImageUpstreamRuntime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        seen_runtime.append(runtime)
+        yield _completed_event(probe_model)
+
+    monkeypatch.setattr(upstream_mod, "stream_completion", stream_with_runtime)
+
+    result = await probe_upstream(ctx)
 
     assert result["ok"] is True
+    assert seen_runtime == [expected_runtime]
     assert result["status"] == 200
     assert result["model"] == probe_model
     assert result["got_model"] == probe_model
@@ -115,7 +143,7 @@ async def test_probe_schema_drift_when_field_missing(
         _make_stream([_completed_event(probe_model, drop=("usage",))]),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["schema_drift"] is True
@@ -136,7 +164,7 @@ async def test_probe_schema_drift_when_multiple_fields_missing(
         ),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["schema_drift"] is True
@@ -159,7 +187,7 @@ async def test_probe_schema_drift_when_model_swapped(
         _make_stream([swapped]),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["schema_drift"] is True
@@ -188,7 +216,7 @@ async def test_probe_failure_on_upstream_5xx(
         ),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["schema_drift"] is True  # 没拿到完成帧也算 drift
@@ -208,10 +236,20 @@ async def test_probe_failure_on_unexpected_exception(
         _make_failing_stream(RuntimeError("boom")),
     )
 
+    result = await probe_upstream(_probe_context())
+
+    assert result["ok"] is False
+    assert result["status"] == 500
+    assert result["schema_drift"] is True
+
+
+@pytest.mark.asyncio
+async def test_probe_missing_runtime_is_a_soft_failure(probe_model: str) -> None:
     result = await probe_upstream({})
 
     assert result["ok"] is False
     assert result["status"] == 500
+    assert result["model"] == probe_model
     assert result["schema_drift"] is True
 
 
@@ -235,7 +273,7 @@ async def test_probe_failure_when_no_completed_frame(
         ),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["schema_drift"] is True
@@ -253,7 +291,12 @@ async def test_probe_failure_when_no_completed_frame(
 async def test_probe_timeout(monkeypatch: pytest.MonkeyPatch, probe_model: str) -> None:
     """探针超过 _PROBE_TIMEOUT_S 应被 wait_for 切断，状态记为 504。"""
 
-    async def _slow_stream(_body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    async def _slow_stream(
+        _body: dict[str, Any],
+        *,
+        runtime: ImageUpstreamRuntime,
+    ) -> AsyncIterator[dict[str, Any]]:
+        assert isinstance(runtime, ImageUpstreamRuntime)
         await asyncio.sleep(10)  # 远超我们要 patch 的超时
         for event in ():
             yield event
@@ -262,7 +305,7 @@ async def test_probe_timeout(monkeypatch: pytest.MonkeyPatch, probe_model: str) 
     # 把超时缩到很短，避免测试本身慢
     monkeypatch.setattr(upstream_probe, "_PROBE_TIMEOUT_S", 0.05)
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is False
     assert result["status"] == 504
@@ -300,7 +343,7 @@ async def test_probe_runs_without_metrics_upstream(
         _make_stream([_completed_event(probe_model)]),
     )
 
-    result = await probe_upstream({})
+    result = await probe_upstream(_probe_context())
 
     assert result["ok"] is True
     assert "req" in calls and "dur" in calls

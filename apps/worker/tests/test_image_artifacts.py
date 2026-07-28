@@ -10,7 +10,7 @@ from PIL import Image as PILImage
 
 from app import image_artifacts
 from app.tasks.completion_parts import default_runtime as completion
-from app.tasks.generation_parts import default_runtime as generation
+from app.tasks.generation_parts import composition_support as generation
 
 
 def _image_bytes(
@@ -267,7 +267,7 @@ def test_make_image_variants_falls_back_when_libvips_is_unavailable(
     assert result.display.size == (32, 24)
 
 
-def test_generation_facade_preserves_type_and_leaf_function_identity() -> None:
+def test_generation_support_does_not_mirror_artifact_private_symbols() -> None:
     identity_names = (
         "_ALLOWED_UPSTREAM_IMAGE_FORMATS",
         "_GeneratedImageInspection",
@@ -293,7 +293,7 @@ def test_generation_facade_preserves_type_and_leaf_function_identity() -> None:
     )
 
     for name in identity_names:
-        assert getattr(generation, name) is getattr(image_artifacts, name)
+        assert not hasattr(generation, name)
 
     tiny = PILImage.new("RGB", (2, 2))
     assert completion._generation_compute_blurhash(tiny) is None
@@ -347,21 +347,21 @@ def test_generation_variant_facades_resolve_extracted_functions_at_call_time(
         return pil_only
 
     monkeypatch.setattr(
-        generation,
-        "_inspect_generated_image_sync",
+        generation.artifacts,
+        "inspect_generated_image_sync",
         lambda _raw_image: inspection,
     )
     monkeypatch.setattr(
-        generation._image_artifacts,
+        generation.artifacts,
         "make_variants_with_vips_sync",
         fake_standard,
     )
     monkeypatch.setattr(
-        generation._image_artifacts,
+        generation.artifacts,
         "make_variants_with_pil_sync",
         fake_pil_only,
     )
 
-    assert generation._make_image_variants_sync(b"a") is standard
-    assert generation._make_image_variants_pil_only_sync(b"b") is pil_only
+    assert generation.make_image_variants_sync(b"a") is standard
+    assert generation.make_image_variants_pil_only_sync(b"b") is pil_only
     assert calls == [("standard", b"a"), ("pil-only", b"b")]

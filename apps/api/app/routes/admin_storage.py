@@ -27,12 +27,15 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.models import Image
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     StorageApplyResponseOut,
@@ -475,11 +478,33 @@ async def sweep_image_orphans_endpoint(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     dry_run: bool = Query(default=True),
+    cursor: str | None = Query(default=None, max_length=1024),
+    max_files: int = Query(default=500, ge=1, le=5_000),
+    max_entries: int = Query(default=5_000, ge=1, le=50_000),
+    max_bytes: int = Query(
+        default=10 * 1024 * 1024 * 1024,
+        ge=1,
+        le=1024 * 1024 * 1024 * 1024,
+    ),
+    max_seconds: float = Query(default=2.0, gt=0, le=30),
+    minimum_age_seconds: float = Query(default=3600.0, ge=0, le=604800),
 ) -> dict:
+    if max_entries < max_files:
+        raise _http(
+            "invalid_sweep_budget",
+            "max_entries must be greater than or equal to max_files",
+            422,
+        )
     result = await sweep_orphan_image_files(
         db,
         storage_root=settings.storage_root,
         dry_run=dry_run,
+        cursor=cursor,
+        max_files=max_files,
+        max_entries=max_entries,
+        max_bytes=max_bytes,
+        max_seconds=max_seconds,
+        minimum_age_seconds=minimum_age_seconds,
     )
     await write_audit(
         db,
@@ -492,10 +517,100 @@ async def sweep_image_orphans_endpoint(
             "scanned": result.get("scanned", 0),
             "orphan_count": len(result.get("orphans", [])),
             "deleted": result.get("deleted", 0),
+            "budget_exhausted": result.get("budget_exhausted", False),
+            "next_cursor": result.get("next_cursor"),
         },
     )
     await db.commit()
     return result
+
+
+@router.get("/image-reconcile-quarantine")
+async def list_image_reconcile_quarantine(
+    _admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict]:
+    rows = (
+        await db.execute(
+            select(Image)
+            .where(Image.quarantined_at.is_not(None))
+            .order_by(Image.quarantined_at.asc(), Image.id.asc())
+            .limit(limit)
+        )
+    ).scalars()
+    return [
+        {
+            "image_id": row.id,
+            "artifact_status": row.artifact_status,
+            "reconcile_attempts": row.reconcile_attempts,
+            "last_reconcile_error_code": row.last_reconcile_error_code,
+            "last_artifact_error": row.last_artifact_error,
+            "last_reconcile_error_at": row.last_reconcile_error_at,
+            "quarantined_at": row.quarantined_at,
+        }
+        for row in rows
+    ]
+
+
+@router.post(
+    "/image-reconcile-quarantine/{image_id}/retry",
+    dependencies=[Depends(verify_csrf)],
+)
+async def retry_image_reconcile_quarantine(
+    image_id: str,
+    request: Request,
+    admin: AdminUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    row = (
+        await db.execute(
+            select(Image)
+            .where(
+                Image.id == image_id,
+                Image.quarantined_at.is_not(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise _http(
+            "image_reconcile_quarantine_not_found",
+            "quarantined image artifact was not found",
+            404,
+        )
+    if row.artifact_status not in {"publishing", "ready"}:
+        raise _http(
+            "image_reconcile_status_not_repairable",
+            "only publishing or ready image artifacts can be retried",
+            409,
+        )
+    now = datetime.now(timezone.utc)
+    row.reconcile_attempts = 0
+    row.reconcile_fence = 0
+    row.reconcile_after = now
+    row.last_reconcile_error_code = None
+    row.last_reconcile_error_at = None
+    row.quarantined_at = None
+    row.updated_at = now
+    await write_audit(
+        db,
+        event_type="admin.storage.image_reconcile_retry",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=request_ip_hash(request),
+        details={
+            "image_id": row.id,
+            "artifact_status": row.artifact_status,
+        },
+    )
+    await db.commit()
+    return {
+        "image_id": row.id,
+        "artifact_status": row.artifact_status,
+        "reconcile_after": row.reconcile_after,
+        "quarantined": False,
+    }
 
 
 @router.put(

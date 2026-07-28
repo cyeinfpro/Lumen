@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 import time
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,8 +18,15 @@ from app.tasks import (
     model_library_tagging,
     poster_style_tagging,
 )
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 
 
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+TEST_RESPONSES_CALL = partial(
+    upstream.responses_call,
+    runtime=TEST_UPSTREAM_RUNTIME,
+)
 _TASK_CASES = ("auto_title", "caption", "model_tagging", "poster_tagging")
 
 
@@ -507,12 +513,12 @@ async def test_upstream_responses_call_reports_success(
         return {"output_text": "ok"}
 
     monkeypatch.setattr(
-        upstream_services().responses,
+        TEST_UPSTREAM_SERVICES.responses,
         "responses_client_call",
         fake_call,
     )
 
-    assert await upstream.responses_call({"model": "gpt-test"}) == {"output_text": "ok"}
+    assert await TEST_RESPONSES_CALL({"model": "gpt-test"}) == {"output_text": "ok"}
     assert seen["base_url_override"] == "https://provider-0.example/v1"
     assert seen["api_key_override"] == "sk-provider-0"
     assert health.consecutive_failures == 0
@@ -539,11 +545,11 @@ async def test_upstream_responses_call_reports_provider_failure(
         )
 
     monkeypatch.setattr(
-        upstream_services().core.upstream_responses_client, "responses_call", fail_call
+        TEST_UPSTREAM_SERVICES.core.upstream_responses_client, "responses_call", fail_call
     )
 
     with pytest.raises(upstream.UpstreamError):
-        await upstream.responses_call({"model": "gpt-test"})
+        await TEST_RESPONSES_CALL({"model": "gpt-test"})
 
     assert health.consecutive_failures == 4
     assert health.total_requests == 1
@@ -573,22 +579,22 @@ async def test_upstream_single_provider_continues_after_local_error_and_cancel(
         return outcome
 
     monkeypatch.setattr(
-        upstream_services().responses,
+        TEST_UPSTREAM_SERVICES.responses,
         "responses_client_call",
         fake_call,
     )
 
     with pytest.raises(ValueError, match="local validation"):
-        await upstream.responses_call({"model": "gpt-test"})
+        await TEST_RESPONSES_CALL({"model": "gpt-test"})
     assert health.total_requests == 0
     _assert_released(health)
 
     with pytest.raises(asyncio.CancelledError):
-        await upstream.responses_call({"model": "gpt-test"})
+        await TEST_RESPONSES_CALL({"model": "gpt-test"})
     assert health.total_requests == 0
     _assert_released(health)
 
-    assert await upstream.responses_call({"model": "gpt-test"}) == {
+    assert await TEST_RESPONSES_CALL({"model": "gpt-test"}) == {
         "output_text": "recovered"
     }
     assert health.total_requests == 1

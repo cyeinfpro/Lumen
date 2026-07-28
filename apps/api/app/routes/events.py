@@ -35,6 +35,7 @@ from lumen_core.models import (
     WorkflowRun,
 )
 
+from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser
 from ..redis_client import get_redis
@@ -72,6 +73,37 @@ _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
 
 
 _LAST_EVENT_ID_MAX_AGE_MS = 24 * 60 * 60 * 1000  # 24h replay window cap
+
+_ACQUIRE_SSE_SLOT_LUA = """
+local server_time = redis.call('TIME')
+local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
+local ttl_seconds = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local token = ARGV[3]
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+local count = redis.call('ZCARD', KEYS[1])
+if count >= limit then
+  redis.call('EXPIRE', KEYS[1], ttl_seconds)
+  return 0
+end
+redis.call('ZADD', KEYS[1], now_ms + ttl_seconds * 1000, token)
+redis.call('EXPIRE', KEYS[1], ttl_seconds)
+return 1
+"""
+
+_REFRESH_SSE_SLOT_LUA = """
+local server_time = redis.call('TIME')
+local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
+local token = ARGV[1]
+local ttl_seconds = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
+if redis.call('ZSCORE', KEYS[1], token) then
+  redis.call('ZADD', KEYS[1], now_ms + ttl_seconds * 1000, token)
+  redis.call('EXPIRE', KEYS[1], ttl_seconds)
+  return 1
+end
+return 0
+"""
 
 
 async def _redis_time_ms(redis: object) -> int | None:
@@ -155,29 +187,14 @@ async def _acquire_sse_connection_slot(
 ) -> SseConnectionSlot | None:
     key = _sse_connection_key(user_id)
     token = uuid.uuid4().hex
-    now = time.time()
-    expires_at = now + ttl_seconds
-    script = (
-        "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); "
-        "local count = redis.call('zcard', KEYS[1]); "
-        "if count >= tonumber(ARGV[3]) then "
-        "redis.call('expire', KEYS[1], ARGV[2]); "
-        "return 0; "
-        "end; "
-        "redis.call('zadd', KEYS[1], ARGV[4], ARGV[5]); "
-        "redis.call('expire', KEYS[1], ARGV[2]); "
-        "return 1"
-    )
     try:
         acquired = int(
             await redis.eval(
-                script,
+                _ACQUIRE_SSE_SLOT_LUA,
                 1,
                 key,
-                now,
                 ttl_seconds,
                 limit,
-                expires_at,
                 token,
             )
         )
@@ -192,6 +209,17 @@ async def _acquire_sse_connection_slot(
         raise
     except Exception:  # noqa: BLE001
         logger.warning("sse connection limiter unavailable", exc_info=True)
+        if settings.app_env.strip().lower() not in {
+            "dev",
+            "development",
+            "local",
+            "test",
+        }:
+            raise _http(
+                "sse_connection_limiter_unavailable",
+                "event stream connection limiter is unavailable",
+                503,
+            ) from None
         return None
     return key, token
 
@@ -201,23 +229,23 @@ async def _refresh_sse_connection_slot(
     slot: SseConnectionSlot,
     *,
     ttl_seconds: int = SSE_CONNECTION_TTL_SECONDS,
-) -> None:
+) -> bool:
     key, token = slot
-    now = time.time()
-    expires_at = now + ttl_seconds
-    script = (
-        "redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1]); "
-        "if redis.call('zscore', KEYS[1], ARGV[3]) then "
-        "redis.call('zadd', KEYS[1], ARGV[4], ARGV[3]); "
-        "redis.call('expire', KEYS[1], ARGV[2]); "
-        "return 1; "
-        "end; "
-        "return 0"
-    )
     try:
-        await redis.eval(script, 1, key, now, ttl_seconds, token, expires_at)
+        renewed = await redis.eval(
+            _REFRESH_SSE_SLOT_LUA,
+            1,
+            key,
+            token,
+            ttl_seconds,
+        )
+        if int(renewed or 0) != 1:
+            logger.warning("sse connection slot was lost key=%s token=%s", key, token)
+            return False
+        return True
     except Exception:  # noqa: BLE001
         logger.warning("sse connection limiter refresh failed", exc_info=True)
+        return False
 
 
 async def _release_sse_connection_slot(redis, slot: SseConnectionSlot) -> None:
@@ -584,6 +612,16 @@ async def _replay_connection_events(
             stream_key,
             exc_info=True,
         )
+        yield {
+            "event": "recovery_required",
+            "data": json.dumps(
+                {
+                    "reason": "replay_unavailable",
+                    "message": "event replay failed; fetch a fresh snapshot before reconnecting",
+                },
+                separators=(",", ":"),
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -607,6 +645,7 @@ class _EventStreamState:
     connection_slot: SseConnectionSlot | None
     last_keepalive: float = field(default_factory=time.monotonic)
     last_upstream: float = field(default_factory=time.monotonic)
+    connection_slot_lost: bool = False
     pending_compaction: dict[str, tuple[float, dict]] = field(default_factory=dict)
     replayed_sse_ids: set[str] = field(default_factory=set)
 
@@ -722,14 +761,23 @@ async def _cleanup_pubsub(
     *,
     subscription_started: bool,
 ) -> None:
-    if subscription_started:
+    try:
+        if subscription_started:
+            try:
+                await pubsub.unsubscribe(*subscribed)
+            except Exception:
+                logger.warning("sse pubsub unsubscribe failed", exc_info=True)
+    finally:
         try:
-            await pubsub.unsubscribe(*subscribed)
+            await pubsub.aclose()
         except Exception:
-            logger.warning("sse pubsub unsubscribe failed", exc_info=True)
-    await pubsub.aclose()
-    if state.connection_slot is not None:
-        await _release_sse_connection_slot(state.redis, state.connection_slot)
+            logger.warning("sse pubsub close failed", exc_info=True)
+        finally:
+            if state.connection_slot is not None:
+                await _release_sse_connection_slot(
+                    state.redis,
+                    state.connection_slot,
+                )
 
 
 def _expired_compaction_events(state: _EventStreamState) -> list[dict]:
@@ -930,7 +978,24 @@ async def _heartbeat_events(state: _EventStreamState) -> list[dict]:
     if now - state.last_keepalive >= _KEEPALIVE_INTERVAL_SECONDS:
         state.last_keepalive = now
         if state.connection_slot is not None:
-            await _refresh_sse_connection_slot(state.redis, state.connection_slot)
+            if not await _refresh_sse_connection_slot(
+                state.redis,
+                state.connection_slot,
+            ):
+                state.connection_slot_lost = True
+                events.append(
+                    {
+                        "event": "recovery_required",
+                        "data": json.dumps(
+                            {
+                                "reason": "connection_slot_lost",
+                                "message": "event stream quota lease expired; reconnect after snapshot recovery",
+                            },
+                            separators=(",", ":"),
+                        ),
+                    }
+                )
+                return events
         events.append({"event": "keepalive", "data": "{}"})
     if now - state.last_upstream >= _IDLE_HEARTBEAT_INTERVAL_SECONDS:
         state.last_upstream = now
@@ -989,11 +1054,16 @@ async def _event_stream(state: _EventStreamState) -> AsyncIterator[dict]:
             replayed_sse_ids=state.replayed_sse_ids,
         ):
             yield event
-            if event.get("event") == "replay_truncated":
+            if event.get("event") in {
+                "replay_truncated",
+                "recovery_required",
+            }:
                 continue_with_live_events = False
         if continue_with_live_events:
             async for event in _live_events(state, pubsub, bridge_channels):
                 yield event
+                if event.get("event") == "recovery_required":
+                    break
     except asyncio.CancelledError:
         raise
     finally:

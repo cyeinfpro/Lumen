@@ -30,6 +30,7 @@ class QueueSupervisor:
         self.retention_interval_s = retention_interval_s
         self.queued_ids: set[str] = set()
         self.inflight: set[str] = set()
+        self._reservations: dict[str, object] = {}
         self.lock = asyncio.Lock()
         self.shutdown_event = asyncio.Event()
         self.workers: dict[int, asyncio.Task[None]] = {}
@@ -45,6 +46,9 @@ class QueueSupervisor:
             "worker_failures_total": 0,
             "jobs_started_total": 0,
             "jobs_completed_total": 0,
+            "attempts_finished_total": 0,
+            "processor_success_total": 0,
+            "processor_crash_total": 0,
         }
 
     def bind(
@@ -66,10 +70,61 @@ class QueueSupervisor:
                 return "queued"
             if job_id in self.inflight:
                 return "inflight"
+            if job_id in self._reservations:
+                return "queued"
+            if not self._has_capacity_locked():
+                return "full"
             try:
                 self.queue.put_nowait(job_id)
             except asyncio.QueueFull:
                 return "full"
+            self.queued_ids.add(job_id)
+            return "enqueued"
+
+    def _has_capacity_locked(self) -> bool:
+        return self.queue.qsize() + len(self._reservations) < self.queue.maxsize
+
+    async def _try_reserve(self, job_id: str) -> tuple[str, object | None]:
+        async with self.lock:
+            if self.shutdown_event.is_set():
+                return "full", None
+            if job_id in self.queued_ids:
+                return "queued", None
+            if job_id in self.inflight:
+                return "inflight", None
+            if job_id in self._reservations:
+                return "queued", None
+            if not self._has_capacity_locked():
+                return "full", None
+            token = object()
+            self._reservations[job_id] = token
+            return "reserved", token
+
+    async def _release_reservation(self, job_id: str, token: object) -> None:
+        async with self.lock:
+            if self._reservations.get(job_id) is token:
+                self._reservations.pop(job_id, None)
+
+    async def _commit_reservation(self, job_id: str, token: object) -> str:
+        async with self.lock:
+            if self._reservations.get(job_id) is not token:
+                if job_id in self.queued_ids:
+                    return "queued"
+                if job_id in self.inflight:
+                    return "inflight"
+                return "persisted"
+            self._reservations.pop(job_id, None)
+            if self.shutdown_event.is_set():
+                return "persisted"
+            try:
+                self.queue.put_nowait(job_id)
+            except asyncio.QueueFull:
+                LOG.error(
+                    "reserved image-job queue slot disappeared for %s; "
+                    "leaving the durable row for reconciliation",
+                    job_id,
+                )
+                return "persisted"
             self.queued_ids.add(job_id)
             return "enqueued"
 
@@ -78,13 +133,15 @@ class QueueSupervisor:
         job_id: str,
         persist: Callable[[], Awaitable[None]],
     ) -> str:
-        async with self.lock:
-            if self.shutdown_event.is_set() or self.queue.full():
-                return "full"
+        status, token = await self._try_reserve(job_id)
+        if token is None:
+            return status
+        try:
             await persist()
-            self.queue.put_nowait(job_id)
-            self.queued_ids.add(job_id)
-            return "enqueued"
+        except BaseException:
+            await asyncio.shield(self._release_reservation(job_id, token))
+            raise
+        return await asyncio.shield(self._commit_reservation(job_id, token))
 
     async def startup(self) -> None:
         if self.started:
@@ -157,11 +214,19 @@ class QueueSupervisor:
             self.metrics["jobs_started_total"] += 1
             try:
                 await self.processor(job_id)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                self.metrics["processor_crash_total"] += 1
+                raise
+            else:
+                self.metrics["processor_success_total"] += 1
+                self.metrics["jobs_completed_total"] += 1
             finally:
                 async with self.lock:
                     self.inflight.discard(job_id)
                 self.queue.task_done()
-                self.metrics["jobs_completed_total"] += 1
+                self.metrics["attempts_finished_total"] += 1
 
     async def _run_reconcile(self) -> None:
         assert self.reconcile_callback is not None
@@ -211,6 +276,8 @@ class QueueSupervisor:
         async with self.lock:
             inflight = len(self.inflight)
             queued_known = len(self.queued_ids)
+            reserved = len(self._reservations)
+            has_capacity = self._has_capacity_locked()
         workers_alive = sum(not task.done() for task in self.workers.values())
         background_alive = sum(not task.done() for task in self.background.values())
         shutdown = self.shutdown_event.is_set()
@@ -218,12 +285,13 @@ class QueueSupervisor:
             accepting=(
                 self.started
                 and not shutdown
-                and not self.queue.full()
+                and has_capacity
                 and workers_alive == self.concurrency
             ),
             shutdown=shutdown,
             queue_size=self.queue.qsize(),
             queue_max=self.queue.maxsize,
+            reserved=reserved,
             queued_known=queued_known,
             inflight=inflight,
             workers_alive=workers_alive,

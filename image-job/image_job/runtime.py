@@ -8,11 +8,12 @@ from typing import Any
 
 from .adapters.filesystem_artifacts import FilesystemArtifactStore
 from .adapters.http_upstream import HttpUpstreamGateway
-from .adapters.sqlite_jobs import SQLiteJobRepository
+from .adapters.sqlite_jobs import SQLiteJobHeartbeat, SQLiteJobRepository
 from .application.job_service import JobService
 from .application.queue_supervisor import QueueSupervisor
 from .application.reference_service import ReferenceService
 from .config import ImageJobSettings
+from .credential_vault import CredentialVault
 
 
 LOG = logging.getLogger("image-job.runtime")
@@ -27,24 +28,29 @@ class ImageJobRuntime:
     repository: SQLiteJobRepository
     upstream: HttpUpstreamGateway
     artifacts: FilesystemArtifactStore
+    credential_vault: CredentialVault
     legacy_auth_requests_total: int = 0
     started: bool = False
 
     async def startup(self) -> None:
         if self.started:
             return
-        self.settings.validate()
-        if self.settings.allow_legacy_bearer:
-            LOG.warning(
-                "legacy Bearer authentication is enabled; remove it before v%s",
-                self.settings.legacy_auth_removal_version,
-            )
-        await self.repository.initialize()
-        await self.jobs.fail_interrupted()
-        await self.upstream.startup()
-        await self.jobs.reconcile()
-        await self.queue.startup()
-        self.started = True
+        try:
+            self.settings.validate()
+            if self.settings.allow_legacy_bearer:
+                LOG.warning(
+                    "legacy Bearer authentication is enabled; remove it before v%s",
+                    self.settings.legacy_auth_removal_version,
+                )
+            await self.repository.initialize()
+            await self.jobs.fail_interrupted()
+            await self.upstream.startup()
+            await self.jobs.reconcile()
+            await self.queue.startup()
+            self.started = True
+        except BaseException:
+            await self.shutdown()
+            raise
 
     async def shutdown(self) -> None:
         # H-16：不能因为 started=False 就提前返回。startup() 是分步的，
@@ -76,6 +82,7 @@ class ImageJobRuntime:
         values: dict[str, Any] = {
             "image_job_queue_size": state.queue_size,
             "image_job_queue_capacity": state.queue_max,
+            "image_job_queue_reserved": state.reserved,
             "image_job_queued_known": state.queued_known,
             "image_job_inflight": state.inflight,
             "image_job_workers_alive": state.workers_alive,
@@ -96,9 +103,16 @@ def create_runtime(
     settings: ImageJobSettings | None = None,
 ) -> ImageJobRuntime:
     resolved = settings or ImageJobSettings.from_env()
-    repository = SQLiteJobRepository(resolved)
+    credential_vault = CredentialVault(
+        active_key_id=resolved.credential_active_key_id,
+        master_secret=resolved.credential_master_secret.get_secret_value(),
+    )
+    repository = SQLiteJobRepository(resolved, credential_vault)
     artifacts = FilesystemArtifactStore(resolved, repository)
-    upstream = HttpUpstreamGateway(resolved)
+    upstream = HttpUpstreamGateway(
+        resolved,
+        heartbeat=SQLiteJobHeartbeat(repository),
+    )
     queue = QueueSupervisor(
         queue_max=resolved.queue_max,
         concurrency=resolved.concurrency,
@@ -106,8 +120,13 @@ def create_runtime(
         reconcile_interval_s=resolved.stuck_reconcile_interval_s,
         retention_interval_s=resolved.retention_sweep_interval_s,
     )
-    jobs = JobService(resolved, repository, upstream, queue)
-    upstream.processing.touch_running = jobs.persistence.touch_running
+    jobs = JobService(
+        resolved,
+        repository,
+        upstream,
+        queue,
+        credential_vault,
+    )
     references = ReferenceService(artifacts, resolved.max_ref_bytes)
     queue.bind(
         processor=jobs.process,
@@ -124,4 +143,5 @@ def create_runtime(
         repository=repository,
         upstream=upstream,
         artifacts=artifacts,
+        credential_vault=credential_vault,
     )

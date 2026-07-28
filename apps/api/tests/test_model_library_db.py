@@ -16,12 +16,12 @@ from typing import Any
 
 import pytest
 
-from app.workflow_services import (
+from app.workflows.adapters import (
     library_items,
     library_materialization,
     library_storage,
-    model_library_endpoints,
 )
+from app.workflows.adapters.operations import model_library as model_library_endpoints
 from lumen_core.models import ModelLibraryItem
 
 

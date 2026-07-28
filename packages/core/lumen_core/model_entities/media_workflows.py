@@ -56,6 +56,20 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
             "publish_attempt >= 0",
             name="ck_images_publish_attempt",
         ),
+        CheckConstraint(
+            "reconcile_attempts >= 0",
+            name="ck_images_reconcile_attempts",
+        ),
+        CheckConstraint(
+            "reconcile_fence >= 0",
+            name="ck_images_reconcile_fence",
+        ),
+        Index(
+            "ix_images_artifact_quarantine",
+            "quarantined_at",
+            "artifact_status",
+            "updated_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid7)
@@ -100,6 +114,30 @@ class Image(Base, TimestampMixin, SoftDeleteMixin):
         DateTime(timezone=True), nullable=True
     )
     last_artifact_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reconcile_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    reconcile_fence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_reconcile_error_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    last_reconcile_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    quarantined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     ready_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -164,6 +202,11 @@ class Video(Base, TimestampMixin, SoftDeleteMixin):
 class ImageVariant(Base, TimestampMixin):
     __tablename__ = "image_variants"
     __table_args__ = (
+        UniqueConstraint(
+            "image_id",
+            "kind",
+            name="uq_image_variants_image_kind",
+        ),
         UniqueConstraint("storage_key", name="uq_image_variants_storage_key"),
     )
 
@@ -176,6 +219,50 @@ class ImageVariant(Base, TimestampMixin):
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ImageVariantClaim(Base, TimestampMixin):
+    __tablename__ = "image_variant_claims"
+    __table_args__ = (
+        Index("ix_image_variant_claims_lease", "lease_until", "retry_at"),
+    )
+
+    image_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("images.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    lease_until: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class ImageReconcileEpoch(Base):
+    __tablename__ = "image_reconcile_epochs"
+    __table_args__ = (
+        CheckConstraint(
+            "value >= 0",
+            name="ck_image_reconcile_epochs_value",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
 
 
 # ---------- Structured Workflows ----------

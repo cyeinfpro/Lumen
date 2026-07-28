@@ -299,6 +299,12 @@ lumen_systemd_has_any_units() {
 }
 
 lumen_systemctl() {
+    case "${1:-}" in
+        is-active|is-enabled|list-unit-files|show|status)
+            systemctl "$@"
+            return
+            ;;
+    esac
     if [ "${EUID:-$(id -u)}" -eq 0 ]; then
         systemctl "$@"
     elif command -v sudo >/dev/null 2>&1; then

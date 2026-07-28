@@ -81,6 +81,7 @@ class _CreateAssetState:
     operation: dict[str, Any]
     operation_id: str
     persistence: Any
+    storage_writes: Any = None
     provider: Any = None
     client: Any = None
     quota_key: Any = None
@@ -316,6 +317,7 @@ async def _prepare_source_url(state: _CreateAssetState) -> str:
     return await runtime._source_url_for_submit(
         state.persistence,
         state.operation,
+        state.storage_writes,
     )
 
 
@@ -547,6 +549,7 @@ async def _process_create_asset(
     failure: Any | None,
     *,
     persistence: Any,
+    storage_writes: Any = None,
 ) -> dict[str, Any]:
     runtime = _runtime()
     state = _CreateAssetState(
@@ -554,6 +557,7 @@ async def _process_create_asset(
         operation=operation,
         operation_id=str(operation.get("id") or ""),
         persistence=persistence,
+        storage_writes=storage_writes,
     )
     try:
         try:

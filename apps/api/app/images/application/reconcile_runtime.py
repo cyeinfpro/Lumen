@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
+from lumen_core.storage_capacity import build_storage_capacity
 
 from ...config import settings
 from ...db import SessionLocal
 from ...redis_client import get_redis
 from ..adapters.filesystem_store import FileSystemArtifactStore
 from ..adapters.sqlalchemy_repository import SQLAlchemyImageRepository
-from .reconcile_policy import ImageArtifactReconciler
+from .reconcile_policy import ImageArtifactReconciler, ReconcileLeaseLost
 
 
 logger = logging.getLogger(__name__)
@@ -36,10 +40,98 @@ return 0
 """
 
 
+@dataclass
+class ReconcileLeaseGuard:
+    token: str
+    fence: int
+    ttl_seconds: float
+    safety_seconds: float
+    lost: asyncio.Event
+    _renew: Callable[[], Awaitable[bool]]
+    _monotonic: Callable[[], float]
+    _last_confirmed_at: float
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        token: str,
+        fence: int,
+        ttl_seconds: float,
+        renew: Callable[[], Awaitable[bool]],
+        safety_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> ReconcileLeaseGuard:
+        if ttl_seconds <= 0:
+            raise ValueError("reconcile lease TTL must be positive")
+        if fence <= 0:
+            raise ValueError("reconcile lease fence must be positive")
+        safety = ttl_seconds / 4 if safety_seconds is None else safety_seconds
+        if safety < 0 or safety >= ttl_seconds:
+            raise ValueError("reconcile lease safety must be within the TTL")
+        return cls(
+            token=token,
+            fence=fence,
+            ttl_seconds=ttl_seconds,
+            safety_seconds=safety,
+            lost=asyncio.Event(),
+            _renew=renew,
+            _monotonic=monotonic,
+            _last_confirmed_at=monotonic(),
+        )
+
+    def mark_lost(self) -> None:
+        self.lost.set()
+
+    async def wait_lost(self) -> None:
+        await self.lost.wait()
+
+    def _remaining_seconds(self) -> float:
+        deadline = self._last_confirmed_at + self.ttl_seconds - self.safety_seconds
+        return deadline - self._monotonic()
+
+    async def assert_owned(self) -> None:
+        if self.lost.is_set():
+            raise ReconcileLeaseLost("image artifact reconcile lease was lost")
+        remaining = self._remaining_seconds()
+        if remaining <= 0:
+            self.mark_lost()
+            raise ReconcileLeaseLost("image artifact reconcile lease expired")
+        try:
+            owned = await asyncio.wait_for(self._renew(), timeout=remaining)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.mark_lost()
+            raise ReconcileLeaseLost(
+                "image artifact reconcile lease could not be confirmed"
+            ) from exc
+        if not owned:
+            self.mark_lost()
+            raise ReconcileLeaseLost("image artifact reconcile lease ownership changed")
+        if self.lost.is_set():
+            raise ReconcileLeaseLost("image artifact reconcile lease was lost")
+        self._last_confirmed_at = self._monotonic()
+
+
 def build_image_artifact_reconciler() -> ImageArtifactReconciler:
+    redis = get_redis()
+    configured_policy = settings.image_upload_capacity_degraded_policy.strip()
+    degraded_policy = configured_policy or (
+        "scaled_local"
+        if settings.app_env.strip().lower() in {"dev", "development", "local", "test"}
+        else "fail_closed"
+    )
     return ImageArtifactReconciler(
         repository=SQLAlchemyImageRepository(SessionLocal),
         artifacts=FileSystemArtifactStore(settings.storage_root),
+        storage_capacity=build_storage_capacity(
+            redis,
+            settings.storage_root,
+            minimum_free_bytes=settings.minimum_storage_free_bytes,
+            lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
+            degraded_policy=degraded_policy,
+        ),
     )
 
 
@@ -52,6 +144,10 @@ async def _acquire_reconcile_lease(redis: Any) -> str | None:
         nx=True,
     )
     return token if acquired else None
+
+
+async def _next_reconcile_fence() -> int:
+    return await SQLAlchemyImageRepository(SessionLocal).next_reconcile_fence()
 
 
 async def _renew_reconcile_lease(redis: Any, token: str) -> bool:
@@ -75,21 +171,41 @@ async def _release_reconcile_lease(redis: Any, token: str) -> None:
 
 
 @asynccontextmanager
-async def _reconcile_lease(redis: Any) -> AsyncIterator[bool]:
+async def _reconcile_lease(
+    redis: Any,
+) -> AsyncIterator[ReconcileLeaseGuard | None]:
     try:
         token = await _acquire_reconcile_lease(redis)
     except Exception:
         # Fail closed: running independently in every Uvicorn worker is worse
         # than delaying repair until Redis coordination recovers.
         logger.warning("image artifact reconcile lease unavailable", exc_info=True)
-        yield False
+        yield None
         return
     if token is None:
-        yield False
+        yield None
+        return
+    try:
+        fence = await _next_reconcile_fence()
+    except Exception:
+        logger.warning("image artifact reconcile fence unavailable", exc_info=True)
+        try:
+            await _release_reconcile_lease(redis, token)
+        except Exception:
+            logger.warning(
+                "image artifact reconcile lease release failed",
+                exc_info=True,
+            )
+        yield None
         return
 
     stop = asyncio.Event()
-    lost = asyncio.Event()
+    guard = ReconcileLeaseGuard.create(
+        token=token,
+        fence=fence,
+        ttl_seconds=_RECONCILE_LEASE_TTL_SECONDS,
+        renew=lambda: _renew_reconcile_lease(redis, token),
+    )
 
     async def renew_loop() -> None:
         while not stop.is_set():
@@ -102,15 +218,8 @@ async def _reconcile_lease(redis: Any) -> AsyncIterator[bool]:
             except TimeoutError:
                 pass
             try:
-                if not await _renew_reconcile_lease(redis, token):
-                    lost.set()
-                    return
-            except Exception:
-                lost.set()
-                logger.warning(
-                    "image artifact reconcile lease renewal failed",
-                    exc_info=True,
-                )
+                await guard.assert_owned()
+            except ReconcileLeaseLost:
                 return
 
     renew_task = asyncio.create_task(
@@ -118,7 +227,7 @@ async def _reconcile_lease(redis: Any) -> AsyncIterator[bool]:
         name="image-artifact-reconcile-lease-renew",
     )
     try:
-        yield True
+        yield guard
     finally:
         stop.set()
         await asyncio.gather(renew_task, return_exceptions=True)
@@ -129,24 +238,40 @@ async def _reconcile_lease(redis: Any) -> AsyncIterator[bool]:
                 "image artifact reconcile lease release failed",
                 exc_info=True,
             )
-        if lost.is_set():
-            logger.error("image artifact reconcile lease was lost during a sweep")
+        if guard.lost.is_set():
+            logger.error("image artifact reconcile sweep stopped after lease loss")
 
 
 async def run_image_artifact_reconciler_once() -> int:
     redis = get_redis()
-    async with _reconcile_lease(redis) as acquired:
-        if not acquired:
+    async with _reconcile_lease(redis) as lease_guard:
+        if lease_guard is None:
             return 0
-        stats = await build_image_artifact_reconciler().run_once()
+        try:
+            stats = await build_image_artifact_reconciler().run_once(
+                lease_guard=lease_guard,
+            )
+        except ReconcileLeaseLost:
+            return 0
         repaired = stats.marked_ready + stats.marked_failed + stats.rebuilt_reference
-        if repaired or stats.deleted_staged or stats.deferred:
+        quarantined_staged = getattr(stats, "quarantined_staged", 0)
+        quarantined_rows = getattr(stats, "quarantined_rows", 0)
+        if (
+            repaired
+            or stats.deleted_staged
+            or quarantined_staged
+            or quarantined_rows
+            or stats.deferred
+        ):
             logger.info(
                 "image artifact reconciliation scanned=%d repaired=%d "
-                "deleted_staged=%d deferred=%d",
+                "deleted_staged=%d quarantined_staged=%d quarantined_rows=%d "
+                "deferred=%d",
                 stats.scanned,
                 repaired,
                 stats.deleted_staged,
+                quarantined_staged,
+                quarantined_rows,
                 stats.deferred,
             )
         return repaired

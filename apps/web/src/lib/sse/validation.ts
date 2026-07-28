@@ -37,7 +37,17 @@ function controlEvent(
       limit:
         typeof payload.limit === "number" && Number.isFinite(payload.limit)
           ? payload.limit
-          : undefined,
+      : undefined,
+    };
+  }
+  if (name === "recovery_required") {
+    return {
+      kind: "control",
+      type: name,
+      version: REALTIME_SCHEMA_VERSION,
+      reason: text(payload.reason) ?? "recovery_required",
+      message: text(payload.message),
+      cursor: text(payload.cursor) ?? cursor,
     };
   }
   if (name === "server_epoch_changed") {

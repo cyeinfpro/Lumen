@@ -1,7 +1,60 @@
 {
-  "category_counts": {},
-  "findings": [],
+  "category_counts": {
+    "module-contextvar": 3
+  },
+  "findings": [
+    {
+      "category": "module-contextvar",
+      "line": 9,
+      "path": "apps/api/app/routes/billing_parts/compat.py",
+      "symbol": "_runtime_provider",
+      "target": "ContextVar"
+    },
+    {
+      "category": "module-contextvar",
+      "line": 93,
+      "path": "apps/tgbot/app/listener.py",
+      "symbol": "_LISTENER_RUNTIME",
+      "target": "ContextVar"
+    },
+    {
+      "category": "module-contextvar",
+      "line": 26,
+      "path": "image-job/image_job/observability.py",
+      "symbol": "_REQUEST_ID",
+      "target": "ContextVar"
+    }
+  ],
   "public_api": {
+    "apps/api/app/routes/images.py": [
+      "ALLOWED_MIME",
+      "ALLOWED_VARIANTS",
+      "DISPLAY_VARIANT",
+      "EXT_BY_MIME",
+      "MAX_BYTES",
+      "MAX_IMAGE_PIXELS",
+      "MAX_LONG_SIDE",
+      "NORMALIZABLE_UPLOAD_MIME",
+      "PILImage",
+      "UPLOADS_LIMITER",
+      "VARIANT_MEDIA_TYPE",
+      "VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE",
+      "delete_image",
+      "get_image_binary",
+      "get_image_by_key",
+      "get_image_meta",
+      "get_image_signed",
+      "get_image_variant",
+      "os",
+      "reference_image_binary",
+      "reference_image_binary_named",
+      "router",
+      "settings",
+      "shutil",
+      "sweep_orphan_image_files",
+      "upload_image",
+      "upload_image_impl"
+    ],
     "apps/api/app/volcano_asset_media.py": [
       "VOLCANO_ASSET_ALLOWED_CONTENT_TYPES",
       "VOLCANO_ASSET_ALLOWED_EXTENSIONS",
@@ -51,9 +104,6 @@
     "apps/worker/app/tasks/completion.py": [
       "run_completion"
     ],
-    "apps/worker/app/tasks/generation.py": [
-      "run_generation"
-    ],
     "apps/worker/app/tasks/video_generation.py": [
       "cron_jobs",
       "reconcile_video_tasks",
@@ -99,6 +149,7 @@
       "Generation",
       "Image",
       "ImageVariant",
+      "ImageVariantClaim",
       "InviteLink",
       "MemoryAudit",
       "MemoryExtractionRun",

@@ -121,6 +121,10 @@ def resolve_internal_module(
 
 
 def build_package_graph(spec: PackageSpec) -> PackageGraph:
+    if not spec.root.is_dir():
+        raise FileNotFoundError(
+            f"architecture package root is missing: {spec.name}: {spec.root}"
+        )
     modules = {
         module_name(spec, path): path
         for path in spec.root.rglob("*.py")
@@ -232,6 +236,52 @@ LAYER_RULES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
     ),
 )
 
+FORBIDDEN_DEPENDENCY_RULES: tuple[
+    tuple[str, str, tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        "api",
+        "workflow-v2-to-legacy",
+        (
+            "app.main",
+            "app.routes",
+            "app.services",
+            "app.workflows",
+        ),
+        (
+            "app.workflow_services",
+            "app.workflow_domain",
+        ),
+    ),
+    (
+        "api",
+        "workflow-domain-layering",
+        ("app.workflows.domain",),
+        (
+            "app.routes",
+            "app.workflows.adapters",
+            "app.workflows.application",
+            "app.workflows.composition",
+            "app.workflows.transport",
+        ),
+    ),
+    (
+        "api",
+        "workflow-http-to-adapters",
+        (
+            "app.routes.workflow_routes",
+            "app.workflows.transport",
+        ),
+        ("app.workflows.adapters",),
+    ),
+)
+
+
+def _matches_module_prefix(module: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        module == prefix or module.startswith(f"{prefix}.") for prefix in prefixes
+    )
+
 
 def boundary_rule(
     spec_name: str,
@@ -244,6 +294,13 @@ def boundary_rule(
         target_module == "app" or target_module.startswith("app.")
     ):
         return "core-to-application"
+    for package, rule, source_prefixes, target_prefixes in FORBIDDEN_DEPENDENCY_RULES:
+        if (
+            package == spec_name
+            and _matches_module_prefix(source_module, source_prefixes)
+            and _matches_module_prefix(target_module, target_prefixes)
+        ):
+            return rule
     for package, rule, lower_prefixes, upper_prefixes in LAYER_RULES:
         if package != spec_name:
             continue
@@ -300,11 +357,23 @@ def load_baseline(path: Path) -> tuple[set[str], set[str]]:
 
 
 def compare_violations(current: set[str], baseline: set[str]) -> list[str]:
-    return [f"new architecture violation: {key}" for key in sorted(current - baseline)]
+    errors = [
+        f"new architecture violation: {key}" for key in sorted(current - baseline)
+    ]
+    errors.extend(
+        f"architecture violation baseline is stale: {key}"
+        for key in sorted(baseline - current)
+    )
+    return errors
 
 
 def compare_cycles(current: set[str], baseline: set[str]) -> list[str]:
-    return [f"new architecture cycle: {key}" for key in sorted(current - baseline)]
+    errors = [f"new architecture cycle: {key}" for key in sorted(current - baseline)]
+    errors.extend(
+        f"architecture cycle baseline is stale: {key}"
+        for key in sorted(baseline - current)
+    )
+    return errors
 
 
 def write_baseline(
@@ -364,14 +433,11 @@ def main() -> int:
         )
         return 1
 
-    removed_violations = len(baseline_violations - set(violations))
-    removed_cycles = len(baseline_cycles - current_cycles)
     print(
         "Architecture budget passed: "
         f"{len(current_cycles)} grandfathered cycles, "
         f"{len(violations)} grandfathered boundary violations; "
-        f"{len(runtime_findings)} runtime-coupling findings; "
-        f"{removed_cycles} cycles and {removed_violations} violations removed."
+        f"{len(runtime_findings)} runtime-coupling findings."
     )
     return 0
 

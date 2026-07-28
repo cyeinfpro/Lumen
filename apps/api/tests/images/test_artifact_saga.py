@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
 from datetime import datetime, timedelta, timezone
@@ -23,11 +24,20 @@ from app.images.adapters.local_capacity import (
 from app.images.adapters.redis_capacity import RedisCapacity
 from app.images.adapters.sqlalchemy_repository import SQLAlchemyImageRepository
 from app.images.application.reconcile_policy import ImageArtifactReconciler
-from app.images.application.upload import UploadCommandService, UploadPolicy
+from app.images.application.upload import (
+    UploadCommandError,
+    UploadCommandService,
+    UploadPolicy,
+)
+from lumen_core.capacity_leases import (
+    CapacityLeaseGuard,
+    race_with_capacity_lease,
+)
 from app.images.domain.artifact import (
     ArtifactKey,
     ArtifactStatus,
     InvalidArtifactTransition,
+    StagedSweepBudget,
     UploadTicket,
     ensure_artifact_transition,
 )
@@ -35,6 +45,8 @@ from app.images.domain.resource_estimate import (
     ImageResourceEstimate,
     estimate_image_resources,
 )
+from app.images.processing.isolated import IsolatedImageProcessingExecutor
+from app.images.processing.service import ImageProcessor
 from lumen_core.models import Image
 
 
@@ -97,7 +109,9 @@ class _Repository:
         expected: list[ArtifactStatus],
         target: ArtifactStatus,
         values: dict[str, Any] | None = None,
+        reconcile_fence: int | None = None,
     ) -> Image:
+        del reconcile_fence
         row = self.rows[image_id]
         assert ArtifactStatus(row.artifact_status) in expected
         for key, value in (values or {}).items():
@@ -122,7 +136,9 @@ class _Repository:
         image_id: str,
         *,
         values: dict[str, Any],
+        reconcile_fence: int | None = None,
     ) -> Image:
+        del reconcile_fence
         row = self.rows[image_id]
         assert row.artifact_status == ArtifactStatus.READY.value
         for key, value in values.items():
@@ -132,7 +148,10 @@ class _Repository:
     async def list_reconcile_candidates(self, **_kwargs: Any) -> list[Image]:
         return list(self.rows.values())
 
-    async def active_upload_tickets(self) -> set[str]:
+    async def active_upload_tickets(
+        self,
+        candidate_tickets: set[str] | None = None,
+    ) -> set[str]:
         tickets: set[str] = set()
         for row in self.rows.values():
             if row.artifact_status not in {
@@ -144,7 +163,8 @@ class _Repository:
             manifest = row.artifact_manifest_jsonb or {}
             ticket = manifest.get("ticket")
             if isinstance(ticket, str):
-                tickets.add(ticket)
+                if candidate_tickets is None or ticket in candidate_tickets:
+                    tickets.add(ticket)
         return tickets
 
 
@@ -167,10 +187,11 @@ class _FakeRedis:
     def __init__(self) -> None:
         self.weights: dict[str, int] = {}
         self.expiries: dict[str, int] = {}
+        self.now_ms = 1_000_000
 
     async def eval(self, script: str, _keys: int, *args: str) -> Any:
         if "ZRANGEBYSCORE" in script:
-            now_ms = int(args[2])
+            now_ms = self.now_ms
             expired = [
                 lease_id
                 for lease_id, expiry in self.expiries.items()
@@ -179,21 +200,22 @@ class _FakeRedis:
             for lease_id in expired:
                 self.expiries.pop(lease_id, None)
                 self.weights.pop(lease_id, None)
-            lease_id = args[4]
-            weight = int(args[5])
-            max_count = int(args[6])
-            max_weight = int(args[7])
+            lease_id = args[2]
+            weight = int(args[3])
+            max_count = int(args[4])
+            max_weight = int(args[5])
+            ttl_ms = int(args[6])
             used = sum(self.weights.values())
             if len(self.weights) >= max_count or used + weight > max_weight:
                 return [0, len(self.weights), used]
-            self.expiries[lease_id] = int(args[3])
+            self.expiries[lease_id] = now_ms + ttl_ms
             self.weights[lease_id] = weight
             return [1, len(self.weights), sum(self.weights.values())]
         if "HEXISTS" in script:
             lease_id = args[2]
             if lease_id not in self.weights:
                 return 0
-            self.expiries[lease_id] = int(args[3])
+            self.expiries[lease_id] = self.now_ms + int(args[3])
             return 1
         lease_id = args[2]
         self.expiries.pop(lease_id, None)
@@ -236,7 +258,7 @@ def _load_migration() -> ModuleType:
 
 
 @pytest.mark.asyncio
-async def test_artifact_store_lists_and_identity_deletes_crash_leftovers(
+async def test_artifact_store_persists_metadata_and_identity_deletes_staged_file(
     tmp_path: Path,
 ) -> None:
     store = FileSystemArtifactStore(tmp_path)
@@ -249,10 +271,24 @@ async def test_artifact_store_lists_and_identity_deletes_crash_leftovers(
         source=source(),
         max_bytes=100,
     )
-    leftovers = await store.list_staged()
-    assert leftovers == [staged]
-    assert await store.delete_staged(leftovers[0]) is True
-    assert await store.list_staged() == []
+    assert Path(staged.path).name.startswith("artifact-v1-")
+    assert staged.created_at is not None
+    assert staged.metadata_path is not None
+    assert Path(staged.metadata_path).is_file()
+    assert await store.delete_staged(staged) is True
+    assert not Path(staged.path).exists()
+    assert not Path(staged.metadata_path).exists()
+
+    result = await store.sweep_staged(
+        active_tickets=set(),
+        stale_before=float("inf"),
+        budget=StagedSweepBudget(
+            max_files_per_pass=1,
+            max_bytes_hashed_per_pass=100,
+            max_seconds_per_pass=1,
+        ),
+    )
+    assert result.deleted == 0
 
 
 @pytest.mark.asyncio
@@ -329,6 +365,13 @@ async def test_redis_capacity_is_shared_and_expired_lease_is_reclaimed() -> None
     await lease.release()
 
 
+def test_redis_capacity_uses_redis_server_time_in_lease_scripts() -> None:
+    from app.images.adapters import redis_capacity
+
+    assert "redis.call('TIME')" in redis_capacity._RESERVE_LUA
+    assert "redis.call('TIME')" in redis_capacity._RENEW_LUA
+
+
 @pytest.mark.asyncio
 async def test_partial_publish_converges_to_ready_via_reconciler(
     tmp_path: Path,
@@ -339,7 +382,9 @@ async def test_partial_publish_converges_to_ready_via_reconciler(
     service = UploadCommandService(
         artifacts=failing_store,  # type: ignore[arg-type]
         capacity=_Capacity(),
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
     )
     with pytest.raises(OSError, match="crash after original publish"):
         await service.execute(
@@ -358,6 +403,7 @@ async def test_partial_publish_converges_to_ready_via_reconciler(
     stats = await ImageArtifactReconciler(
         repository=repository,  # type: ignore[arg-type]
         artifacts=store,
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
     ).run_once(stale_after=timedelta(seconds=0))
 
     assert stats.rebuilt_reference == 1
@@ -374,7 +420,9 @@ async def test_successful_upload_publishes_verified_ready_artifacts(
     service = UploadCommandService(
         artifacts=FileSystemArtifactStore(tmp_path),
         capacity=_Capacity(),
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
         repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
     )
     row = await service.execute(
         user_id="user-1",
@@ -389,6 +437,164 @@ async def test_successful_upload_publishes_verified_ready_artifacts(
     assert original.is_file()
     assert Path(tmp_path, normalized_key).is_file()
     assert list((tmp_path / ".upload-tmp").rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_ready_commit_is_not_overridden_by_post_commit_lease_failure(
+    tmp_path: Path,
+) -> None:
+    repository = _Repository()
+
+    class _FailAfterReadyLease(_Lease):
+        async def renew(self) -> bool:
+            return not any(
+                row.artifact_status == ArtifactStatus.READY.value
+                for row in repository.rows.values()
+            )
+
+    class _ReadyAwareCapacity:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def reserve(self, _estimate: ImageResourceEstimate) -> _Lease:
+            self.calls += 1
+            return _Lease() if self.calls == 1 else _FailAfterReadyLease()
+
+    service = UploadCommandService(
+        artifacts=FileSystemArtifactStore(tmp_path),
+        capacity=_ReadyAwareCapacity(),  # type: ignore[arg-type]
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
+    )
+
+    row = await service.execute(
+        user_id="user-1",
+        upload_file=_Upload(_png_bytes()),
+        filename="upload.png",
+        policy=_policy(),
+    )
+
+    assert row.artifact_status == ArtifactStatus.READY.value
+    assert row.ready_at is not None
+
+
+@pytest.mark.asyncio
+async def test_capacity_race_cancels_children_when_caller_is_cancelled() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    guard = CapacityLeaseGuard.create(_Lease(), ttl_seconds=30)
+    task = asyncio.create_task(race_with_capacity_lease(work(), guard))
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancelled.is_set()
+    assert not any(
+        pending.get_name() == "image-capacity-lease-lost" and not pending.done()
+        for pending in asyncio.all_tasks()
+    )
+
+
+@pytest.mark.asyncio
+async def test_processing_lease_loss_cancels_work_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SequencedLease:
+        def __init__(self, renewals: list[bool] | None = None) -> None:
+            self.renewals = list(renewals or [])
+            self.released = False
+
+        async def renew(self) -> bool:
+            if self.renewals:
+                return self.renewals.pop(0)
+            return True
+
+        async def release(self) -> None:
+            self.released = True
+
+    class SequencedCapacity:
+        def __init__(self) -> None:
+            self.leases = [
+                SequencedLease(),
+                SequencedLease([True, True, False]),
+            ]
+
+        async def reserve(
+            self,
+            _estimate: ImageResourceEstimate,
+        ) -> SequencedLease:
+            return self.leases.pop(0)
+
+    class BlockingExecutor:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def inspect(self, source_path: Path, **kwargs: Any):
+            return ImageProcessor().inspect(source_path, **kwargs)
+
+        async def process(self, _request: Any):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        CapacityLimits,
+        "from_env",
+        classmethod(
+            lambda _cls: CapacityLimits(
+                max_concurrency=1,
+                max_peak_bytes=1024 * 1024,
+                lease_ttl_seconds=0.2,  # type: ignore[arg-type]
+            )
+        ),
+    )
+    repository = _Repository()
+    executor = BlockingExecutor()
+    service = UploadCommandService(
+        artifacts=FileSystemArtifactStore(tmp_path),
+        capacity=SequencedCapacity(),  # type: ignore[arg-type]
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        processing_executor=executor,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(UploadCommandError) as exc_info:
+        await asyncio.wait_for(
+            service.execute(
+                user_id="user-1",
+                upload_file=_Upload(_png_bytes()),
+                filename="upload.png",
+                policy=_policy(),
+            ),
+            timeout=2,
+        )
+
+    assert getattr(exc_info.value, "code", None) == "upload_capacity_exceeded"
+    assert executor.started.is_set()
+    assert executor.cancelled.is_set()
+    row = next(iter(repository.rows.values()))
+    assert row.artifact_status == ArtifactStatus.FAILED.value
+    assert list((tmp_path / ".upload-tmp").rglob("*")) == []
+    assert list((tmp_path / "u").rglob("*")) == []
 
 
 @pytest.mark.asyncio

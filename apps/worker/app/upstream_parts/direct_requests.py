@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
-from ..provider_runtime.upstream_services import upstream_services
-
 from typing import Any, Awaitable, Callable
 
+import httpx
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+
+from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    UpstreamServices,
+    resolve_image_upstream_services,
+)
+from .image_execution import (
+    ImageExecutionRequest,
+    ImageRequestContext,
+    ensure_image_request_context,
+)
+
+
+def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
+    return resolve_image_upstream_services(runtime)
+
+
+def _context_services(context: ImageRequestContext) -> UpstreamServices:
+    return _runtime_services(context.upstream_runtime)
 
 
 async def _download_result_url_bytes(
@@ -17,38 +35,42 @@ async def _download_result_url_bytes(
     log_endpoint: str,
     description: str,
     allowed_base_url: str | None = None,
+    request_context: ImageRequestContext | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> bytes:
-    started = upstream_services().infrastructure.time.monotonic()
-    trace_id = upstream_services().core.generate_trace_id()
+    context = ensure_image_request_context(request_context)
+    services = _runtime_services(runtime or context.upstream_runtime)
+    started = services.infrastructure.time.monotonic()
+    trace_id = context.trace_id
     try:
-        response = await upstream_services().infrastructure.download_public_http_url(
+        response = await services.infrastructure.download_public_http_url(
             image_url,
-            max_bytes=upstream_services().core.IMAGE_JOB_DOWNLOAD_MAX_BYTES,
+            max_bytes=services.core.IMAGE_JOB_DOWNLOAD_MAX_BYTES,
             max_redirects=5,
             allow_http=True,
             allowed_private_origins=((allowed_base_url,) if allowed_base_url else ()),
             dns_timeout_s=2.0,
-            timeout=upstream_services().infrastructure.httpx.Timeout(
-                connect=upstream_services().infrastructure.settings.upstream_connect_timeout_s,
-                read=upstream_services().infrastructure.settings.upstream_read_timeout_s,
-                write=upstream_services().infrastructure.settings.upstream_write_timeout_s,
-                pool=upstream_services().infrastructure.settings.upstream_connect_timeout_s,
+            timeout=services.infrastructure.httpx.Timeout(
+                connect=services.infrastructure.settings.upstream_connect_timeout_s,
+                read=services.infrastructure.settings.upstream_read_timeout_s,
+                write=services.infrastructure.settings.upstream_write_timeout_s,
+                pool=services.infrastructure.settings.upstream_connect_timeout_s,
             ),
             headers={"User-Agent": "lumen-worker"},
         )
-    except upstream_services().infrastructure.PublicHttpBodyTooLarge as exc:
-        upstream_services().core.log_upstream_call(
+    except services.infrastructure.PublicHttpBodyTooLarge as exc:
+        services.core.log_upstream_call(
             endpoint=log_endpoint,
             status=exc.status_code or 0,
-            duration_ms=(upstream_services().infrastructure.time.monotonic() - started)
+            duration_ms=(services.infrastructure.time.monotonic() - started)
             * 1000.0,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{description} exceeded max bytes",
             status_code=exc.status_code,
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=services.infrastructure.EC.STREAM_TOO_LARGE.value,
             payload={
                 "url": image_url,
                 "path": path,
@@ -58,49 +80,49 @@ async def _download_result_url_bytes(
             },
         ) from exc
     except ValueError as exc:
-        upstream_services().core.log_upstream_call(
+        services.core.log_upstream_call(
             endpoint=log_endpoint,
             status=0,
-            duration_ms=(upstream_services().infrastructure.time.monotonic() - started)
+            duration_ms=(services.infrastructure.time.monotonic() - started)
             * 1000.0,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"unsafe image result URL: {exc}",
             status_code=400,
-            error_code=upstream_services().infrastructure.EC.INVALID_VALUE.value,
+            error_code=services.infrastructure.EC.INVALID_VALUE.value,
             payload={"url": image_url, "path": path, "method": "GET"},
         ) from exc
-    except (upstream_services().infrastructure.httpx.HTTPError, OSError) as exc:
-        upstream_services().core.log_upstream_call(
+    except (services.infrastructure.httpx.HTTPError, OSError) as exc:
+        services.core.log_upstream_call(
             endpoint=log_endpoint,
             status=0,
-            duration_ms=(upstream_services().infrastructure.time.monotonic() - started)
+            duration_ms=(services.infrastructure.time.monotonic() - started)
             * 1000.0,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{description} failed: {exc}",
             status_code=0,
-            error_code=upstream_services().infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+            error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
             payload={"url": image_url, "path": path, "method": "GET"},
         ) from exc
 
-    upstream_services().core.log_upstream_call(
+    services.core.log_upstream_call(
         endpoint=log_endpoint,
         status=response.status_code,
-        duration_ms=(upstream_services().infrastructure.time.monotonic() - started)
+        duration_ms=(services.infrastructure.time.monotonic() - started)
         * 1000.0,
         trace_id=trace_id,
         response_headers=response.headers,
     )
     if not 200 <= response.status_code < 300:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{description} http {response.status_code}",
             status_code=response.status_code,
-            error_code=upstream_services().infrastructure.EC.UPSTREAM_ERROR.value,
+            error_code=services.infrastructure.EC.UPSTREAM_ERROR.value,
             payload={
                 "url": image_url,
                 "final_url": response.url,
@@ -109,10 +131,10 @@ async def _download_result_url_bytes(
             },
         )
     if not response.body:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{description} returned empty body",
             status_code=response.status_code,
-            error_code=upstream_services().infrastructure.EC.NO_IMAGE_RETURNED.value,
+            error_code=services.infrastructure.EC.NO_IMAGE_RETURNED.value,
             payload={
                 "url": image_url,
                 "final_url": response.url,
@@ -127,6 +149,8 @@ async def _fetch_image_url_as_bytes(
     image_url: str,
     *,
     proxy_url: str | None = None,
+    request_context: ImageRequestContext | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> bytes:
     """下载 images API 在 data[].url 里返回的图片，转成原始字节。
 
@@ -136,48 +160,69 @@ async def _fetch_image_url_as_bytes(
     边界。
     """
     _ = proxy_url
-    return await upstream_services().direct.download_result_url_bytes(
+    context = ensure_image_request_context(request_context)
+    services = _runtime_services(runtime or context.upstream_runtime)
+    return await services.direct.download_result_url_bytes(
         image_url,
         path="images/result",
         log_endpoint="image_url_download",
         description="image url download",
+        request_context=context,
     )
 
 
-async def _resolve_image_job_base_url() -> str:
+async def _resolve_image_job_base_url(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
     try:
-        raw = await upstream_services().infrastructure.resolve("image.job_base_url")
+        raw = await services.infrastructure.resolve("image.job_base_url")
     except Exception as exc:  # noqa: BLE001
-        upstream_services().infrastructure.logger.debug(
+        services.infrastructure.logger.debug(
             "image job base URL setting fallback err=%s", exc
         )
         raw = None
-    return upstream_services().requests.validate_image_job_base_url(
-        raw or upstream_services().core.DEFAULT_IMAGE_JOB_BASE_URL
+    return services.requests.validate_image_job_base_url(
+        raw or services.core.DEFAULT_IMAGE_JOB_BASE_URL
     )
 
 
-def _minimum_image_read_timeout(size: str) -> float:
-    pixels = upstream_services().requests.parse_size_pixels(size)
-    if pixels is not None and pixels > upstream_services().core.IMAGE_4K_PIXELS:
-        return upstream_services().core.IMAGE_READ_TIMEOUT_4K_S
-    return upstream_services().core.IMAGE_READ_TIMEOUT_MIN_S
+def _minimum_image_read_timeout(
+    size: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> float:
+    services = _runtime_services(runtime)
+    pixels = services.requests.parse_size_pixels(size)
+    if pixels is not None and pixels > services.core.IMAGE_4K_PIXELS:
+        return services.core.IMAGE_READ_TIMEOUT_4K_S
+    return services.core.IMAGE_READ_TIMEOUT_MIN_S
 
 
-def _select_image_read_timeout(size: str) -> float:
+def _select_image_read_timeout(
+    size: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> float:
     """Select the image read timeout from pixel tier and runtime settings."""
+    services = _runtime_services(runtime)
     return max(
-        upstream_services().infrastructure.settings.upstream_read_timeout_s,
-        _minimum_image_read_timeout(size),
+        services.infrastructure.settings.upstream_read_timeout_s,
+        _minimum_image_read_timeout(size, runtime=runtime),
     )
 
 
 async def _image_request_timeout(
     size: str,
-) -> tuple[upstream_services().infrastructure.httpx.Timeout, float]:
-    timeout_config = await upstream_services().lifecycle.resolve_timeout_config()
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> tuple[httpx.Timeout, float]:
+    services = _runtime_services(runtime)
+    timeout_config = await services.lifecycle.resolve_timeout_config()
     read_timeout_s = max(
-        timeout_config.read, upstream_services().direct.minimum_image_read_timeout(size)
+        timeout_config.read,
+        _minimum_image_read_timeout(size, runtime=runtime),
     )
     return timeout_config.to_httpx(read=read_timeout_s), read_timeout_s
 
@@ -190,15 +235,17 @@ def _direct_image_result_unknown_error(
     url: str,
     trace_id: str,
     timeout_s: float,
-) -> upstream_services().infrastructure.UpstreamError:
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    services = _runtime_services(runtime)
     exc_type = type(exc).__name__
-    return upstream_services().infrastructure.UpstreamError(
+    return services.infrastructure.UpstreamError(
         (
             f"{path} timed out after {timeout_s:.0f}s; upstream result is unknown. "
             "The request may already have been accepted, so it was not retried automatically."
         ),
         status_code=0,
-        error_code=upstream_services().infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+        error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
         payload={
             "path": path,
             "method": method,
@@ -211,7 +258,11 @@ def _direct_image_result_unknown_error(
     )
 
 
-def _is_direct_image_result_unknown(exc: BaseException) -> bool:
+def _is_direct_image_result_unknown(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
     """True 表示这次失败发生在上游 2xx 之后（上游可能已经计费）。
 
     命中即禁止自动换 provider / 重试，否则一次用户请求会产生第二笔上游成本。
@@ -221,22 +272,16 @@ def _is_direct_image_result_unknown(exc: BaseException) -> bool:
     已扣费所以照结，重试侧却以为可以安全重试」——用户被扣两次。同一个判断只允许
     有一个事实来源。
     """
+    services = _runtime_services(runtime)
     return (
-        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        isinstance(exc, services.infrastructure.UpstreamError)
         and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
     )
 
 
 async def _direct_generate_image_once(
+    request: ImageExecutionRequest,
     *,
-    prompt: str,
-    size: str,
-    n: int,
-    quality: str,
-    output_format: str | None,
-    output_compression: int | None,
-    background: str | None,
-    moderation: str | None,
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
@@ -244,52 +289,63 @@ async def _direct_generate_image_once(
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
-    proxy_url = await upstream_services().infrastructure.resolve_provider_proxy_url(
+    runtime = request.upstream_runtime
+    services = _runtime_services(runtime)
+    prompt = request.prompt
+    size = request.size
+    n = request.n
+    quality = request.quality
+    output_format = request.output_format
+    output_compression = request.output_compression
+    background = request.background
+    moderation = request.moderation
+    context = ensure_image_request_context(request.request_context)
+    proxy_url = await services.infrastructure.resolve_provider_proxy_url(
         proxy_override
     )
-    url = upstream_services().requests.image_generations_url(base_url_override)
+    url = services.requests.image_generations_url(base_url_override)
     pinned_target = (
         None
         if proxy_url
-        else upstream_services().requests.validated_byok_target_for_request(
+        else services.requests.validated_byok_target_for_request(
             pinned_target_override, url
         )
     )
     if proxy_url:
-        client = await upstream_services().lifecycle.get_images_client(proxy_url)
+        client = await services.lifecycle.get_images_client(proxy_url)
     elif pinned_target is not None:
-        client = await upstream_services().lifecycle.get_images_client(
+        client = await services.lifecycle.get_images_client(
             pinned_target=pinned_target
         )
     else:
-        client = await upstream_services().lifecycle.get_images_client()
+        client = await services.lifecycle.get_images_client()
     # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
     # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
-    assert upstream_services().infrastructure.UPSTREAM_MODEL, "model must be set"
+    assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
     prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        upstream_services().core.transparent_matte_upstream_options(
+        services.core.transparent_matte_upstream_options(
             prompt=prompt,
             output_format=output_format,
             background=background,
         )
     )
     body: dict[str, Any] = {
-        "model": upstream_services().infrastructure.UPSTREAM_MODEL,
+        "model": services.infrastructure.UPSTREAM_MODEL,
         "prompt": prompt_for_upstream,
         "size": size,
         "n": n,
-        "quality": upstream_services().core.normalize_image_quality(quality),
+        "quality": services.core.normalize_image_quality(quality),
     }
-    upstream_services().core.add_image_output_options(
+    services.core.add_image_output_options(
         body,
         output_format=output_format_for_upstream,
         output_compression=output_compression,
         background=background_for_upstream,
         moderation=moderation,
     )
-    trace_id = upstream_services().core.generate_trace_id()
-    headers = upstream_services().core.auth_headers(api_key_override, trace_id=trace_id)
-    upstream_services().core.attach_image_idempotency_key(
+    trace_id = context.trace_id
+    headers = services.core.auth_headers(api_key_override, trace_id=trace_id)
+    services.core.attach_image_idempotency_key(
         headers,
         trace_id=trace_id,
         endpoint="images/generations",
@@ -298,10 +354,10 @@ async def _direct_generate_image_once(
     (
         request_timeout,
         read_timeout_s,
-    ) = await upstream_services().direct.image_request_timeout(size)
-    started = upstream_services().infrastructure.time.monotonic()
+    ) = await _image_request_timeout(size, runtime=runtime)
+    started = services.infrastructure.time.monotonic()
     try:
-        resp = await upstream_services().core.post_with_retry(
+        resp = await services.core.post_with_retry(
             client=client,
             url=url,
             headers=headers,
@@ -310,40 +366,41 @@ async def _direct_generate_image_once(
             retry_httpx_exceptions=False,
             before_attempt=before_attempt,
         )
-    except upstream_services().infrastructure.httpx.TimeoutException as exc:
+    except services.infrastructure.httpx.TimeoutException as exc:
         duration_ms = (
-            upstream_services().infrastructure.time.monotonic() - started
+            services.infrastructure.time.monotonic() - started
         ) * 1000.0
-        upstream_services().core.log_upstream_call(
+        services.core.log_upstream_call(
             endpoint="images_generations",
             status=0,
             duration_ms=duration_ms,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().direct.direct_image_result_unknown_error(
+        raise _direct_image_result_unknown_error(
             exc,
             path="images/generations",
             method="POST",
             url=url,
             trace_id=trace_id,
             timeout_s=read_timeout_s,
+            runtime=runtime,
         ) from exc
-    except upstream_services().core.RETRY_HTTPX_EXC as exc:
+    except services.core.RETRY_HTTPX_EXC as exc:
         duration_ms = (
-            upstream_services().infrastructure.time.monotonic() - started
+            services.infrastructure.time.monotonic() - started
         ) * 1000.0
-        upstream_services().core.log_upstream_call(
+        services.core.log_upstream_call(
             endpoint="images_generations",
             status=0,
             duration_ms=duration_ms,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"direct image request failed: {exc}",
             status_code=0,
-            error_code=upstream_services().infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+            error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
             payload={
                 "path": "images/generations",
                 "method": "POST",
@@ -353,9 +410,9 @@ async def _direct_generate_image_once(
         ) from exc
 
     duration_ms = (
-        upstream_services().infrastructure.time.monotonic() - started
+        services.infrastructure.time.monotonic() - started
     ) * 1000.0
-    upstream_services().core.log_upstream_call(
+    services.core.log_upstream_call(
         endpoint="images_generations",
         status=resp.status_code,
         duration_ms=duration_ms,
@@ -366,10 +423,10 @@ async def _direct_generate_image_once(
     try:
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "upstream returned invalid JSON",
             status_code=resp.status_code,
-            error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
             payload={
                 "path": "images/generations",
                 "method": "POST",
@@ -379,8 +436,8 @@ async def _direct_generate_image_once(
         ) from exc
 
     if resp.status_code >= 400:
-        raise upstream_services().core.with_error_context(
-            upstream_services().core.parse_error(
+        raise services.core.with_error_context(
+            services.core.parse_error(
                 payload if isinstance(payload, dict) else {}, resp.status_code
             ),
             path="images/generations",
@@ -389,13 +446,20 @@ async def _direct_generate_image_once(
         )
     # JSON 响应里的 usage（如有）也走标准埋点。
     if isinstance(payload, dict):
-        upstream_services().core.record_usage(payload.get("usage"))
-    return await upstream_services().core.extract_image_results(
-        payload, resp.status_code, proxy_url=proxy_url
+        services.core.record_usage(payload.get("usage"))
+    return await services.core.extract_image_results(
+        payload,
+        resp.status_code,
+        proxy_url=proxy_url,
+        request_context=context,
     )
 
 
-def _wrap_inpaint_prompt(user_intent: str) -> str:
+def _wrap_inpaint_prompt(
+    user_intent: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
     """局部 inpaint 的 prompt 包装。
 
     OpenAI /v1/images/edits + mask 字段必须用 invariant 模板才能正确 inpaint：
@@ -408,21 +472,13 @@ def _wrap_inpaint_prompt(user_intent: str) -> str:
     第四行 "Blend ..." 让模型在 remove / replace 类指令下知道用周围像素自然过渡填充
     （否则 "Inside the masked region, remove the apple." 模型常困惑该填什么 → 填黑/灰色）。
     """
-    return upstream_services().requests.wrap_inpaint_prompt(user_intent)
+    services = _runtime_services(runtime)
+    return services.requests.wrap_inpaint_prompt(user_intent)
 
 
 async def _direct_edit_image_once(
+    request: ImageExecutionRequest,
     *,
-    prompt: str,
-    size: str,
-    images: list[bytes],
-    mask: bytes | None = None,
-    n: int,
-    quality: str,
-    output_format: str | None,
-    output_compression: int | None,
-    background: str | None,
-    moderation: str | None,
     base_url_override: str,
     api_key_override: str,
     proxy_override: ProviderProxyDefinition | None = None,
@@ -439,27 +495,40 @@ async def _direct_edit_image_once(
     inpaint 路径（圆外像素级保留，已 spike 验证）。mask 为 None 时不带这个字段，
     走纯图生图路径，保持现有 i2i 行为。
     """
-    url = upstream_services().requests.image_edits_url(base_url_override)
-    assert upstream_services().infrastructure.UPSTREAM_MODEL, "model must be set"
+    runtime = request.upstream_runtime
+    services = _runtime_services(runtime)
+    prompt = request.prompt
+    size = request.size
+    images = request.images
+    mask = request.mask
+    n = request.n
+    quality = request.quality
+    output_format = request.output_format
+    output_compression = request.output_compression
+    background = request.background
+    moderation = request.moderation
+    context = ensure_image_request_context(request.request_context)
+    url = services.requests.image_edits_url(base_url_override)
+    assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
     prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
-        upstream_services().core.transparent_matte_upstream_options(
+        services.core.transparent_matte_upstream_options(
             prompt=prompt,
             output_format=output_format,
             background=background,
         )
     )
-    bg = upstream_services().core.normalize_image_background(background_for_upstream)
-    fmt = upstream_services().core.normalize_image_output_format(
+    bg = services.core.normalize_image_background(background_for_upstream)
+    fmt = services.core.normalize_image_output_format(
         output_format_for_upstream
     )
-    compression = upstream_services().core.normalize_image_output_compression(
+    compression = services.core.normalize_image_output_compression(
         output_compression, output_format=fmt
     )
-    mod_value = upstream_services().core.normalize_image_moderation(moderation)
-    quality_normalized = upstream_services().core.normalize_image_quality(quality)
+    mod_value = services.core.normalize_image_moderation(moderation)
+    quality_normalized = services.core.normalize_image_quality(quality)
 
     data: dict[str, str] = {
-        "model": upstream_services().infrastructure.UPSTREAM_MODEL,
+        "model": services.infrastructure.UPSTREAM_MODEL,
         "prompt": prompt_for_upstream,
         "size": size,
         "n": str(n),
@@ -481,27 +550,27 @@ async def _direct_edit_image_once(
     if mask is not None:
         files.append(("mask", ("mask.png", mask, "image/png")))
 
-    trace_id = upstream_services().core.generate_trace_id()
-    headers = upstream_services().core.auth_headers(api_key_override, trace_id=trace_id)
-    upstream_services().core.attach_image_idempotency_key(
+    trace_id = context.trace_id
+    headers = services.core.auth_headers(api_key_override, trace_id=trace_id)
+    services.core.attach_image_idempotency_key(
         headers,
         trace_id=trace_id,
         endpoint="images/edits",
         body=data,
         files=files,
     )
-    proxy_url = await upstream_services().infrastructure.resolve_provider_proxy_url(
+    proxy_url = await services.infrastructure.resolve_provider_proxy_url(
         proxy_override
     )
     pinned_target = (
         None
         if proxy_url
-        else upstream_services().requests.validated_byok_target_for_request(
+        else services.requests.validated_byok_target_for_request(
             pinned_target_override, url
         )
     )
-    started = upstream_services().infrastructure.time.monotonic()
-    _, read_timeout_s = await upstream_services().direct.image_request_timeout(size)
+    started = services.infrastructure.time.monotonic()
+    _, read_timeout_s = await _image_request_timeout(size, runtime=runtime)
     try:
         request_kwargs: dict[str, Any] = {
             "url": url,
@@ -513,48 +582,49 @@ async def _direct_edit_image_once(
         }
         if pinned_target is not None:
             request_kwargs["pinned_target"] = pinned_target
-        status, payload = await upstream_services().transport.curl_post_multipart(
+        status, payload = await services.transport.curl_post_multipart(
             **request_kwargs
         )
-    except upstream_services().infrastructure.httpx.TimeoutException as exc:
+    except services.infrastructure.httpx.TimeoutException as exc:
         duration_ms = (
-            upstream_services().infrastructure.time.monotonic() - started
+            services.infrastructure.time.monotonic() - started
         ) * 1000.0
-        upstream_services().core.log_upstream_call(
+        services.core.log_upstream_call(
             endpoint="images_edits",
             status=0,
             duration_ms=duration_ms,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().direct.direct_image_result_unknown_error(
+        raise _direct_image_result_unknown_error(
             exc,
             path="images/edits",
             method="POST",
             url=url,
             trace_id=trace_id,
             timeout_s=read_timeout_s,
+            runtime=runtime,
         ) from exc
     except (
-        upstream_services().infrastructure.asyncio.CancelledError,
-        upstream_services().infrastructure.UpstreamCancelled,
+        services.infrastructure.asyncio.CancelledError,
+        services.infrastructure.UpstreamCancelled,
     ):
         raise
     except Exception as exc:  # noqa: BLE001
         duration_ms = (
-            upstream_services().infrastructure.time.monotonic() - started
+            services.infrastructure.time.monotonic() - started
         ) * 1000.0
-        upstream_services().core.log_upstream_call(
+        services.core.log_upstream_call(
             endpoint="images_edits",
             status=0,
             duration_ms=duration_ms,
             trace_id=trace_id,
             response_headers=None,
         )
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"direct edit request failed: {exc}",
             status_code=0,
-            error_code=upstream_services().infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+            error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
             payload={
                 "path": "images/edits",
                 "method": "POST",
@@ -564,9 +634,9 @@ async def _direct_edit_image_once(
         ) from exc
 
     duration_ms = (
-        upstream_services().infrastructure.time.monotonic() - started
+        services.infrastructure.time.monotonic() - started
     ) * 1000.0
-    upstream_services().core.log_upstream_call(
+    services.core.log_upstream_call(
         endpoint="images_edits",
         status=status,
         duration_ms=duration_ms,
@@ -575,8 +645,8 @@ async def _direct_edit_image_once(
     )
 
     if status >= 400:
-        raise upstream_services().core.with_error_context(
-            upstream_services().core.parse_error(
+        raise services.core.with_error_context(
+            services.core.parse_error(
                 payload if isinstance(payload, dict) else {}, status
             ),
             path="images/edits",
@@ -584,9 +654,12 @@ async def _direct_edit_image_once(
             url=url,
         )
     if isinstance(payload, dict):
-        upstream_services().core.record_usage(payload.get("usage"))
-    return await upstream_services().core.extract_image_results(
-        payload, status, proxy_url=proxy_url
+        services.core.record_usage(payload.get("usage"))
+    return await services.core.extract_image_results(
+        payload,
+        status,
+        proxy_url=proxy_url,
+        request_context=context,
     )
 
 

@@ -5,6 +5,7 @@ import hashlib
 import io
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -48,6 +49,51 @@ class _Session:
 
     async def flush(self) -> None:
         return None
+
+
+class _StorageLease:
+    async def renew(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        return None
+
+
+class _StorageCapacity:
+    def __init__(self) -> None:
+        self.requests: list[int] = []
+
+    async def reserve(self, bytes_required: int) -> _StorageLease:
+        self.requests.append(bytes_required)
+        return _StorageLease()
+
+
+class _TrackingStorageLease:
+    def __init__(self) -> None:
+        self.release_calls = 0
+
+    async def renew(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        self.release_calls += 1
+
+
+class _TrackingStorageCapacity:
+    def __init__(
+        self,
+        *,
+        events: list[str] | None = None,
+    ) -> None:
+        self.events = events
+        self.requests: list[int] = []
+        self.lease = _TrackingStorageLease()
+
+    async def reserve(self, bytes_required: int) -> _TrackingStorageLease:
+        self.requests.append(bytes_required)
+        if self.events is not None:
+            self.events.append("reserve")
+        return self.lease
 
 
 def _jpeg_bytes(size: tuple[int, int] = (300, 300)) -> bytes:
@@ -180,13 +226,18 @@ async def test_image_variant_repairs_invalid_existing_file_without_commit(
     )
     session = _Session(image, existing, image, existing)
 
-    result = await volcano_asset_media.ensure_volcano_asset_image_variant(
+    capacity = _StorageCapacity()
+    result, receipt = await volcano_asset_media.ensure_volcano_asset_image_variant(
         session,
         image,
         storage_root=str(tmp_path),
+        storage_capacity=capacity,
+        storage_lease_ttl_seconds=30,
     )
 
     assert result is existing
+    assert receipt is None
+    assert capacity.requests == [2 * len(rendered_data)]
     assert destination.read_bytes() == rendered_data
     session.commit.assert_not_awaited()
 
@@ -237,13 +288,18 @@ async def test_video_variant_repairs_hash_mismatch_without_commit(
     )
     session = _Session(video, video)
 
-    result = await volcano_asset_media.ensure_volcano_asset_video_variant(
+    capacity = _StorageCapacity()
+    result, receipt = await volcano_asset_media.ensure_volcano_asset_video_variant(
         session,
         video,
         storage_root=str(tmp_path),
+        storage_capacity=capacity,
+        storage_lease_ttl_seconds=30,
     )
 
     assert result["sha256"] == rendered.sha256
+    assert receipt is None
+    assert capacity.requests == [2 * len(rendered_data)]
     assert destination.read_bytes() == rendered_data
     assert (
         video.metadata_jsonb[volcano_asset_media.VOLCANO_ASSET_VIDEO_METADATA_KEY]
@@ -265,3 +321,122 @@ def test_video_transcode_semaphore_is_scoped_to_running_loop() -> None:
     assert first is first_again
     assert second is second_again
     assert first is not second
+
+
+@pytest.mark.asyncio
+async def test_image_capacity_is_reserved_before_first_for_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_key = "images/source.png"
+    source = tmp_path / storage_key
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    image = _image(storage_key)
+    rendered_data = _jpeg_bytes()
+    rendered = volcano_asset_media.VolcanoAssetImageJpeg(
+        data=rendered_data,
+        width=300,
+        height=300,
+        size_bytes=len(rendered_data),
+        sha256=hashlib.sha256(rendered_data).hexdigest(),
+    )
+    events: list[str] = []
+
+    class OrderedSession(_Session):
+        async def execute(self, statement: object) -> _ScalarResult:
+            if "FOR UPDATE" in str(statement):
+                events.append("for_update")
+            return await super().execute(statement)
+
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "make_volcano_asset_image_jpeg",
+        lambda _source: rendered,
+    )
+    capacity = _TrackingStorageCapacity(events=events)
+    session = OrderedSession(image, None, image, None)
+
+    _variant, receipt = await volcano_asset_media.ensure_volcano_asset_image_variant(
+        session,
+        image,
+        storage_root=str(tmp_path),
+        storage_capacity=capacity,
+        storage_lease_ttl_seconds=30,
+    )
+
+    assert events[:2] == ["reserve", "for_update"]
+    assert receipt is not None
+    assert capacity.requests == [2 * len(rendered_data)]
+    assert capacity.lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_install_waits_for_thread_then_cleans_before_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_key = "images/source.png"
+    source = tmp_path / storage_key
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    image = _image(storage_key)
+    rendered_data = _jpeg_bytes()
+    rendered = volcano_asset_media.VolcanoAssetImageJpeg(
+        data=rendered_data,
+        width=300,
+        height=300,
+        size_bytes=len(rendered_data),
+        sha256=hashlib.sha256(rendered_data).hexdigest(),
+    )
+    started = threading.Event()
+    finish = threading.Event()
+
+    def blocking_install(
+        path: Path,
+        data: bytes,
+        *,
+        sha256: str,
+    ) -> bool:
+        assert hashlib.sha256(data).hexdigest() == sha256
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        started.set()
+        assert finish.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "make_volcano_asset_image_jpeg",
+        lambda _source: rendered,
+    )
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "_install_file_atomic",
+        blocking_install,
+    )
+    capacity = _TrackingStorageCapacity()
+    session = _Session(image, None, image, None)
+    destination = tmp_path / volcano_asset_media.volcano_asset_image_key(image)
+    task = asyncio.create_task(
+        volcano_asset_media.ensure_volcano_asset_image_variant(
+            session,
+            image,
+            storage_root=str(tmp_path),
+            storage_capacity=capacity,
+            storage_lease_ttl_seconds=30,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert destination.exists()
+    assert capacity.lease.release_calls == 0
+
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not destination.exists()
+    assert capacity.lease.release_calls == 1

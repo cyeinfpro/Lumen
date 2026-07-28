@@ -20,7 +20,7 @@ from ..config import ImageJobSettings
 
 # `Image.MAX_IMAGE_PIXELS` 与 `warnings.catch_warnings()` 都是进程级全局状态，
 # 而 _inspect 跑在 asyncio.to_thread 的线程池里，可能并发进入。用锁把
-# 「改全局 → 解码 → 还原」串起来，语义与 image_artifacts.image_metadata 一致。
+# 「改全局 → 解码 → 还原」串起来，语义与 artifacts.ImageArtifactFacade 一致。
 _IMAGE_VERIFY_LOCK = threading.RLock()
 
 

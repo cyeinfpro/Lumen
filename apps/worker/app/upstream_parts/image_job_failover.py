@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ..provider_runtime.upstream_services import upstream_services
-
 import asyncio
 import time
 from dataclasses import dataclass
@@ -12,8 +10,19 @@ from typing import Any, Awaitable, Callable
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
-from .image_execution import ImageExecutionRequest, ImageResult
-from .transport import ImageProgressCallback
+from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    UpstreamServices,
+    resolve_image_upstream_services,
+)
+from .image_execution import (
+    ImageExecutionRequest,
+    ImageResult,
+)
+
+
+def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
+    return resolve_image_upstream_services(runtime)
 
 
 def _image_jobs_endpoint_fallback_chain(primary: str) -> list[str]:
@@ -32,15 +41,20 @@ def _image_job_error_class(exc: BaseException) -> str | None:
     return None
 
 
-def _upstream_cost_already_incurred(exc: BaseException) -> bool:
+def _upstream_cost_already_incurred(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
     """这次失败是否发生在上游 2xx 之后（钱已经花出去了）。
 
     命中后**任何**形式的重跑都必须停：换 endpoint 是同一家供应商的第二次调用，
     换 provider 是另一家的第一次调用——两者都会新增一笔上游成本，而这次生成只
     hold 了一份钱，多出来的部分无处转嫁，只能由平台吸收。
     """
+    services = _runtime_services(runtime)
     return (
-        isinstance(exc, upstream_services().infrastructure.UpstreamError)
+        isinstance(exc, services.infrastructure.UpstreamError)
         and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
     )
 
@@ -49,96 +63,72 @@ def _should_continue_image_job_failover(
     exc: BaseException,
     *,
     retriable: bool,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> bool:
     """Return whether endpoint or provider failover can recover the job."""
-    if upstream_services().providers.is_quota_accounting_unavailable(exc):
+    services = _runtime_services(runtime)
+    if services.providers.is_quota_accounting_unavailable(exc):
         return False
     # 必须在 `retriable` 之前：成本已经发生这件事不该被「可重试」翻盘。
-    if _upstream_cost_already_incurred(exc):
+    if _upstream_cost_already_incurred(exc, runtime=runtime):
         return False
     if retriable:
         return True
-    error_class = upstream_services().image_jobs.image_job_error_class(exc)
-    if error_class in upstream_services().core.IMAGE_JOB_FAILOVER_CLASSES:
+    error_class = services.image_jobs.image_job_error_class(exc)
+    if error_class in services.core.IMAGE_JOB_FAILOVER_CLASSES:
         return True
-    if isinstance(exc, upstream_services().infrastructure.UpstreamError):
+    if isinstance(exc, services.infrastructure.UpstreamError):
         if exc.status_code == 429:
             return True
         if exc.status_code is not None and 500 <= exc.status_code < 600:
             return True
         # NO_IMAGE_RETURNED 已由上面的「上游已产生成本」守卫拦下，不再列在这里。
         if exc.error_code in {
-            upstream_services().infrastructure.EC.UPSTREAM_TIMEOUT.value,
-            upstream_services().infrastructure.EC.TIMEOUT.value,
-            upstream_services().infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+            services.infrastructure.EC.UPSTREAM_TIMEOUT.value,
+            services.infrastructure.EC.TIMEOUT.value,
+            services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
         }:
             return True
-    return isinstance(exc, upstream_services().core.RETRY_HTTPX_EXC)
+    return isinstance(exc, services.core.RETRY_HTTPX_EXC)
 
 
 async def _image_job_run_once(
+    request: ImageExecutionRequest,
     *,
-    action: str,
     endpoint: str,
-    prompt: str,
-    size: str,
-    images: list[bytes] | None,
-    mask: bytes | None = None,
-    n: int,
-    quality: str,
-    output_format: str | None,
-    output_compression: int | None,
-    background: str | None,
-    moderation: str | None,
-    model: str | None,
     api_key: str,
     base_url: str,
     proxy: ProviderProxyDefinition | None,
-    progress_callback: ImageProgressCallback | None,
     image_edit_input_transport: str = "url",
-    user_id: str | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[str, str | None]:
     """Dispatch one sidecar request by action and endpoint kind."""
+    services = _runtime_services(request.upstream_runtime)
     common: dict[str, Any] = {
-        "prompt": prompt,
-        "size": size,
-        "n": n,
-        "quality": quality,
-        "output_format": output_format,
-        "output_compression": output_compression,
-        "background": background,
-        "moderation": moderation,
         "api_key_override": api_key,
         "base_url_override": base_url or None,
-        "progress_callback": progress_callback,
         "before_attempt": before_attempt,
     }
     if proxy is not None:
         common["proxy_override"] = proxy
     if endpoint == "responses":
-        return await upstream_services().image_jobs.image_job_responses_once(
-            action=action,
-            images=images,
-            user_id=user_id,
-            model=model,
+        return await services.image_jobs.image_job_responses_once(
+            request,
             **common,
         )
-    if action == "edit":
-        if not images:
-            raise upstream_services().infrastructure.UpstreamError(
+    if request.action == "edit":
+        if not request.images:
+            raise services.infrastructure.UpstreamError(
                 "edit action requires at least one reference image",
-                error_code=upstream_services().infrastructure.EC.MISSING_INPUT_IMAGES.value,
+                error_code=services.infrastructure.EC.MISSING_INPUT_IMAGES.value,
                 status_code=400,
             )
-        return await upstream_services().image_jobs.image_job_edit_once(
-            images=images,
-            mask=mask,
+        return await services.image_jobs.image_job_edit_once(
+            request,
             image_edit_input_transport=image_edit_input_transport,
-            user_id=user_id,
             **common,
         )
-    return await upstream_services().image_jobs.image_job_generate_once(**common)
+    return await services.image_jobs.image_job_generate_once(request, **common)
 
 
 @dataclass(frozen=True)
@@ -183,10 +173,12 @@ def _provider_image_job_plan(
     fallback_base_url: str,
     endpoint_override: str | None,
     endpoint_preference: str | None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> _ImageJobProviderPlan:
+    services = _runtime_services(runtime)
     configured = getattr(provider, "image_jobs_endpoint", "auto")
     try:
-        endpoint_locked = upstream_services().infrastructure.parse_provider_bool(
+        endpoint_locked = services.infrastructure.parse_provider_bool(
             getattr(provider, "image_jobs_endpoint_lock", False),
             default=False,
         )
@@ -198,12 +190,12 @@ def _provider_image_job_plan(
         endpoint_preference,
     )
     if requested_kind is not None:
-        unavailable = upstream_services().providers.provider_endpoint_unavailable_error(
+        unavailable = services.providers.provider_endpoint_unavailable_error(
             provider,
             requested_kind,
         )
         if unavailable is not None:
-            upstream_services().infrastructure.logger.info(
+            services.infrastructure.logger.info(
                 "image_jobs skip provider=%s configured=%s requested_kind=%s reason=%s",
                 getattr(provider, "name", "unknown"),
                 configured,
@@ -216,7 +208,7 @@ def _provider_image_job_plan(
     elif endpoint_locked:
         endpoints = [configured]
     elif endpoint_preference is not None:
-        endpoints = upstream_services().image_jobs.image_jobs_endpoint_fallback_chain(
+        endpoints = services.image_jobs.image_jobs_endpoint_fallback_chain(
             endpoint_preference
         )
     else:
@@ -224,14 +216,14 @@ def _provider_image_job_plan(
     allowed = tuple(
         endpoint
         for endpoint in endpoints
-        if upstream_services().providers.provider_allows_image_endpoint(
+        if services.providers.provider_allows_image_endpoint(
             provider, endpoint
         )
     )
     if not allowed:
-        error = upstream_services().infrastructure.UpstreamError(
+        error = services.infrastructure.UpstreamError(
             f"provider {provider.name} has no supported image-job endpoint",
-            error_code=upstream_services().infrastructure.EC.NO_PROVIDERS.value,
+            error_code=services.infrastructure.EC.NO_PROVIDERS.value,
             status_code=503,
             payload={
                 "provider": provider.name,
@@ -241,10 +233,10 @@ def _provider_image_job_plan(
         return _ImageJobProviderPlan((), "", error)
     raw_base_url = getattr(provider, "image_jobs_base_url", "") or fallback_base_url
     try:
-        base_url = upstream_services().requests.validate_image_job_base_url(
+        base_url = services.requests.validate_image_job_base_url(
             raw_base_url
         )
-    except upstream_services().infrastructure.UpstreamError as exc:
+    except services.infrastructure.UpstreamError as exc:
         return _ImageJobProviderPlan((), "", exc)
     return _ImageJobProviderPlan(allowed, base_url)
 
@@ -253,6 +245,7 @@ def _classify_image_job_attempt(
     exc: BaseException,
     *,
     duration_ms: float,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> _ImageJobAttemptFailure:
     from ..retry import is_retriable as classify_retriable
 
@@ -261,7 +254,8 @@ def _classify_image_job_attempt(
         getattr(exc, "status_code", None),
         error_message=str(exc),
     )
-    error_class = upstream_services().image_jobs.image_job_error_class(exc)
+    services = _runtime_services(runtime)
+    error_class = services.image_jobs.image_job_error_class(exc)
     return _ImageJobAttemptFailure(
         error=exc,
         error_class=error_class,
@@ -284,26 +278,27 @@ async def _emit_image_job_success(
     inflight_endpoint_kind: str | None,
     source_label: str,
 ) -> None:
-    if not upstream_services().providers.is_byok_provider(provider):
+    services = _runtime_services(request.upstream_runtime)
+    if not services.providers.is_byok_provider(provider):
         pool.record_endpoint_success(
             provider.name,
             endpoint,
             latency_ms=latency_ms,
         )
-        upstream_services().providers.pool_report_image_success(
+        services.providers.pool_report_image_success(
             pool,
             provider.name,
             endpoint_kind=inflight_endpoint_kind,
             record_endpoint=False,
         )
-    await upstream_services().transport.emit_image_progress(
+    await services.transport.emit_image_progress(
         request.progress_callback,
         "provider_used",
         provider=provider.name,
         route="image_jobs",
         source=source_label,
         endpoint=f"image-jobs:{endpoint}",
-        **upstream_services().providers.provider_attempt_context(
+        **services.providers.provider_attempt_context(
             provider,
             attempt=provider_index + 1,
             endpoint_attempt=endpoint_index + 1,
@@ -311,13 +306,13 @@ async def _emit_image_job_success(
             status="succeeded",
         ),
     )
-    await upstream_services().transport.emit_image_progress(
+    await services.transport.emit_image_progress(
         request.progress_callback,
         "final_image",
         source=source_label,
         endpoint_used=endpoint,
     )
-    await upstream_services().transport.emit_image_progress(
+    await services.transport.emit_image_progress(
         request.progress_callback,
         "completed",
         source=source_label,
@@ -337,34 +332,38 @@ async def _run_image_job_endpoint(
     inflight_endpoint_kind: str | None,
     source_label: str,
 ) -> ImageResult | _ImageJobAttemptFailure:
+    runtime = request.upstream_runtime
+    services = _runtime_services(runtime)
     started = time.monotonic()
     try:
-        result = await upstream_services().image_jobs.image_job_run_once(
-            **request.job_run_kwargs(),
+        result = await services.image_jobs.image_job_run_once(
+            request,
             endpoint=endpoint,
             api_key=provider.api_key,
             base_url=plan.base_url,
-            proxy=upstream_services().core.provider_proxy(provider),
+            proxy=services.core.provider_proxy(provider),
             image_edit_input_transport=provider.image_edit_input_transport,
-            before_attempt=upstream_services().providers.image_request_attempt_claim(
+            before_attempt=services.providers.image_request_attempt_claim(
                 pool,
                 provider,
                 route=f"image_jobs:{endpoint}",
+                request_context=request.request_context,
             ),
         )
     except (
         asyncio.CancelledError,
-        upstream_services().infrastructure.UpstreamCancelled,
+        services.infrastructure.UpstreamCancelled,
     ):
         raise
     except Exception as exc:  # noqa: BLE001
-        if not upstream_services().providers.is_byok_provider(provider):
+        if not services.providers.is_byok_provider(provider):
             pool.record_endpoint_failure(provider.name, endpoint)
         failure = _classify_image_job_attempt(
             exc,
             duration_ms=(time.monotonic() - started) * 1000,
+            runtime=runtime,
         )
-        upstream_services().infrastructure.logger.warning(
+        services.infrastructure.logger.warning(
             "image job %s/%s endpoint=%s error_class=%s decision=%s: %r",
             request.action,
             provider.name,
@@ -399,7 +398,8 @@ async def _emit_image_job_endpoint_failover(
     endpoint_index: int,
     remaining: int,
 ) -> None:
-    await upstream_services().transport.emit_image_progress(
+    services = _runtime_services(request.upstream_runtime)
+    await services.transport.emit_image_progress(
         request.progress_callback,
         "endpoint_failover",
         provider=provider.name,
@@ -407,7 +407,7 @@ async def _emit_image_job_endpoint_failover(
         remaining=remaining,
         reason=failure.failover_reason,
         route="image_jobs",
-        **upstream_services().providers.provider_attempt_context(
+        **services.providers.provider_attempt_context(
             provider,
             attempt=provider_index + 1,
             endpoint_attempt=endpoint_index + 1,
@@ -429,6 +429,8 @@ async def _run_image_job_provider(
     inflight_endpoint_kind: str | None,
     source_label: str,
 ) -> _ImageJobProviderOutcome:
+    runtime = request.upstream_runtime
+    services = _runtime_services(runtime)
     for endpoint_index, endpoint in enumerate(plan.endpoints):
         outcome = await _run_image_job_endpoint(
             request,
@@ -446,7 +448,10 @@ async def _run_image_job_provider(
         remaining = len(plan.endpoints) - endpoint_index - 1
         # endpoint 切换此前是无条件的：只要还有下一个 endpoint 就重跑，不看错误
         # 类型。上游已回 2xx 时这等于在同一家供应商上再买一次，第二笔无处转嫁。
-        if remaining > 0 and not _upstream_cost_already_incurred(outcome.error):
+        if remaining > 0 and not _upstream_cost_already_incurred(
+            outcome.error,
+            runtime=runtime,
+        ):
             await _emit_image_job_endpoint_failover(
                 request,
                 outcome,
@@ -458,14 +463,16 @@ async def _run_image_job_provider(
             )
             continue
         provider_retriable = (
-            upstream_services().retry.should_continue_image_provider_failover(
+            services.retry.should_continue_image_provider_failover(
                 outcome.error,
                 retriable=outcome.retriable,
+                runtime=runtime,
             )
         )
-        if not upstream_services().image_jobs.should_continue_image_job_failover(
+        if not services.image_jobs.should_continue_image_job_failover(
             outcome.error,
             retriable=provider_retriable,
+            runtime=runtime,
         ):
             raise outcome.error
         return _ImageJobProviderOutcome(error=outcome.error)
@@ -481,34 +488,35 @@ async def _record_image_job_provider_failure(
     provider_count: int,
     pool: Any,
 ) -> None:
+    services = _runtime_services(request.upstream_runtime)
     is_rate_limited, retry_after = (
-        upstream_services().providers.is_image_rate_limit_error(error)
+        services.providers.is_image_rate_limit_error(error)
     )
-    if not upstream_services().providers.is_byok_provider(provider):
+    if not services.providers.is_byok_provider(provider):
         if is_rate_limited:
             pool.report_image_rate_limited(
                 provider.name,
                 retry_after_s=retry_after,
             )
         else:
-            upstream_services().providers.pool_report_image_failure(pool, provider.name)
+            services.providers.pool_report_image_failure(pool, provider.name)
     remaining = provider_count - provider_index - 1
     if remaining <= 0:
         return
-    upstream_services().infrastructure.logger.warning(
+    services.infrastructure.logger.warning(
         "image job provider_failover: from=%s remaining=%d action=%s",
         provider.name,
         remaining,
         request.action,
     )
-    await upstream_services().transport.emit_image_progress(
+    await services.transport.emit_image_progress(
         request.progress_callback,
         "provider_failover",
         from_provider=provider.name,
         remaining=remaining,
         reason="image_job_failed",
         route="image_jobs",
-        **upstream_services().providers.provider_attempt_context(
+        **services.providers.provider_attempt_context(
             provider,
             attempt=provider_index + 1,
             duration_ms=None,
@@ -520,82 +528,56 @@ async def _record_image_job_provider_failure(
 
 
 async def _image_job_with_failover(
+    request: ImageExecutionRequest,
     *,
-    action: str,
-    prompt: str,
-    size: str,
-    images: list[bytes] | None,
-    mask: bytes | None = None,
-    n: int,
-    quality: str,
-    output_format: str | None = None,
-    output_compression: int | None = None,
-    background: str | None = None,
-    moderation: str | None = None,
-    model: str | None = None,
-    progress_callback: ImageProgressCallback | None,
-    provider_override: Any | None = None,
-    user_id: str | None = None,
     endpoint_override: str | None = None,
     endpoint_preference: str | None = None,
 ) -> tuple[str, str | None]:
     """Fail over across image-job endpoints and providers."""
-    upstream_services().image_jobs.image_job_sidecar_token()
-    pool = await upstream_services().infrastructure.provider_pool.get_pool()
+    runtime = request.upstream_runtime
+    services = _runtime_services(runtime)
+    services.image_jobs.image_job_sidecar_token()
+    pool = await services.infrastructure.provider_pool.get_pool()
     forced_kind = _requested_image_job_kind(endpoint_override, endpoint_preference)
-    lane_owns_inflight = provider_override is None
+    lane_owns_inflight = request.provider_override is None
     providers = (
-        [provider_override]
-        if provider_override is not None
-        else await upstream_services().providers.pool_select_compat(
+        [request.provider_override]
+        if request.provider_override is not None
+        else await services.providers.pool_select_compat(
             pool,
             route="image_jobs",
             ignore_cooldown=True,
             endpoint_kind=forced_kind,
-            requires_mask=mask is not None,
+            requires_mask=request.mask is not None,
         )
     )
-    request = ImageExecutionRequest(
-        action,
-        prompt,
-        size,
-        images,
-        mask,
-        n,
-        quality,
-        output_format,
-        output_compression,
-        background,
-        moderation,
-        model,
-        progress_callback,
-        provider_override,
-        user_id,
-    )
     errors: list[BaseException] = []
-    source_label = "image_jobs" if action == "generate" else "image_jobs_edit"
+    source_label = (
+        "image_jobs" if request.action == "generate" else "image_jobs_edit"
+    )
     fallback_base_url = ""
     if any(
         not str(getattr(provider, "image_jobs_base_url", "") or "").strip()
         for provider in providers
     ):
         fallback_base_url = (
-            await upstream_services().direct.resolve_image_job_base_url()
+            await services.direct.resolve_image_job_base_url()
         )
 
     for provider_index, provider in enumerate(providers):
         if lane_owns_inflight and provider_index > 0:
-            upstream_services().providers.pool_acquire_inflight(
+            services.providers.pool_acquire_inflight(
                 pool, provider.name, forced_kind
             )
         try:
             plan = _provider_image_job_plan(
                 provider,
-                action=action,
+                action=request.action,
                 pool=pool,
                 fallback_base_url=fallback_base_url,
                 endpoint_override=endpoint_override,
                 endpoint_preference=endpoint_preference,
+                runtime=runtime,
             )
             if plan.error is not None:
                 errors.append(plan.error)
@@ -624,21 +606,23 @@ async def _image_job_with_failover(
             )
         finally:
             if lane_owns_inflight:
-                upstream_services().providers.pool_release_inflight(
+                services.providers.pool_release_inflight(
                     pool,
                     provider.name,
                     forced_kind,
                 )
 
-    merged = upstream_services().retry.merge_fallback_errors(
+    merged = services.retry.merge_fallback_errors(
         errors,
-        error_code=upstream_services().infrastructure.EC.ALL_DIRECT_IMAGE_PROVIDERS_FAILED.value,
+        error_code=services.infrastructure.EC.ALL_DIRECT_IMAGE_PROVIDERS_FAILED.value,
         message=f"all {len(providers)} image job providers failed",
+        runtime=runtime,
     )
     merged.payload["provider_errors"] = (
-        upstream_services().retry.provider_error_details(
+        services.retry.provider_error_details(
             providers,
             errors,
+            runtime=runtime,
         )
     )
     raise merged

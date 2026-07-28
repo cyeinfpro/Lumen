@@ -114,6 +114,11 @@ if TARGET_VERSION_FROM_TAG="$(semver_from_image_tag "${TARGET_TAG}" 2>/dev/null 
         && [ -n "${TARGET_VERSION_FROM_TAG}" ]; then
     export LUMEN_VERSION="${TARGET_VERSION_FROM_TAG}"
 fi
+if ! lumen_update_journal_bind_request; then
+    log_error "[check] update request 与 journal 中已绑定的不可变请求冲突。"
+    emit_fail check 1
+    exit 1
+fi
 
 RUNNING_API_TAG=""
 if command -v docker >/dev/null 2>&1; then
@@ -139,7 +144,11 @@ emit_info check data_root     "${LUMEN_DATA_ROOT}"
 emit_info check db_root       "${LUMEN_DB_ROOT}"
 emit_info check web_bind_host "${CURRENT_WEB_BIND_HOST:-<default>}"
 emit_info check update_mode "${LUMEN_UPDATE_MODE}"
-emit_info check idempotency_key "${LUMEN_UPDATE_IDEMPOTENCY_KEY:-<none>}"
+if [ -n "${LUMEN_UPDATE_IDEMPOTENCY_KEY}" ]; then
+    emit_info check idempotency_key "configured"
+else
+    emit_info check idempotency_key "<none>"
+fi
 emit_info check resolved_tag_source "${LUMEN_UPDATE_RESOLVED_TAG_SOURCE}"
 emit_info check force_redeploy "${LUMEN_UPDATE_FORCE_REDEPLOY}"
 if [ -n "${LUMEN_PROXY_URL}" ]; then
@@ -164,8 +173,8 @@ if [ "${LUMEN_UPDATE_FORCE_REDEPLOY}" != "1" ] \
         && [ "${NOOP_BY_TAG_NAME}" -eq 1 ]; then
     log_info "[check] 当前 tag ${CURRENT_TAG} 已是目标版本，跳过中间阶段，仅做 cleanup。"
     emit_info check action "noop_already_latest"
-    emit_done  check 0
     SKIP_TO_CLEANUP=1
+    emit_done  check 0
 else
     if [ "${NOOP_BY_TAG_NAME}" -eq 0 ] \
             && [ -n "${CURRENT_TAG}" ] \

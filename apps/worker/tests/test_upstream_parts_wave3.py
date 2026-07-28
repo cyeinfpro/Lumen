@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +19,22 @@ from app.upstream_parts import (
 )
 
 
+TEST_UPSTREAM_RUNTIME = upstream.build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+
+
+def _assert_runtime_bound(actual: Any, expected: Any) -> None:
+    if "runtime" not in inspect.signature(expected).parameters:
+        assert actual is expected
+        return
+    assert actual.func is expected
+    assert actual.keywords["runtime"] is TEST_UPSTREAM_RUNTIME
+
+
 def test_wave3_modules_are_owned_by_public_service_groups() -> None:
     exports = [
         (
-            upstream_services().retry,
+            TEST_UPSTREAM_SERVICES.retry,
             retry_policy,
             (
                 "_summarize_exception",
@@ -41,7 +52,7 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
             ),
         ),
         (
-            upstream_services().providers,
+            TEST_UPSTREAM_SERVICES.providers,
             provider_selection,
             (
                 "_provider_pool_redis",
@@ -67,7 +78,7 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
             ),
         ),
         (
-            upstream_services().direct,
+            TEST_UPSTREAM_SERVICES.direct,
             direct_failover,
             (
                 "_direct_generate_image_with_failover",
@@ -76,7 +87,7 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
             ),
         ),
         (
-            upstream_services().image_jobs,
+            TEST_UPSTREAM_SERVICES.image_jobs,
             image_job_failover,
             (
                 "_image_jobs_endpoint_fallback_chain",
@@ -87,7 +98,7 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
             ),
         ),
         (
-            upstream_services().race,
+            TEST_UPSTREAM_SERVICES.race,
             image_race,
             (
                 "_drain_task_group_result",
@@ -98,7 +109,7 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
             ),
         ),
         (
-            upstream_services().dispatch,
+            TEST_UPSTREAM_SERVICES.dispatch,
             image_dispatch,
             (
                 "_image_jobs_endpoint_for_engine",
@@ -114,7 +125,10 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
 
     for service, module, names in exports:
         for name in names:
-            assert getattr(service, name.lstrip("_")) is getattr(module, name)
+            _assert_runtime_bound(
+                getattr(service, name.lstrip("_")),
+                getattr(module, name),
+            )
 
     assert upstream.generate_image is image_dispatch.generate_image
     assert upstream.edit_image is image_dispatch.edit_image
@@ -156,7 +170,7 @@ def test_retry_budget_classification_survives_extraction(
     )
 
     assert (
-        upstream_services().retry.max_attempts_for_exception(exc) == expected_attempts
+        TEST_UPSTREAM_SERVICES.retry.max_attempts_for_exception(exc) == expected_attempts
     )
 
 
@@ -164,14 +178,14 @@ def test_quota_accounting_unavailable_stops_all_failover() -> None:
     exc = upstream.UpstreamError(
         "quota reservation unavailable",
         status_code=503,
-        error_code=upstream_services().infrastructure.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
+        error_code=TEST_UPSTREAM_SERVICES.infrastructure.EC.QUOTA_ACCOUNTING_UNAVAILABLE.value,
     )
 
-    assert not upstream_services().retry.should_continue_image_provider_failover(
+    assert not TEST_UPSTREAM_SERVICES.retry.should_continue_image_provider_failover(
         exc,
         retriable=True,
     )
-    assert not upstream_services().image_jobs.should_continue_image_job_failover(
+    assert not TEST_UPSTREAM_SERVICES.image_jobs.should_continue_image_job_failover(
         exc,
         retriable=True,
     )
@@ -191,13 +205,13 @@ async def test_race_cancel_timeout_is_read_from_late_bound_facade(
     async def pending_lane() -> None:
         await asyncio.sleep(60)
 
-    monkeypatch.setattr(upstream_services().core, "RACE_CANCEL_WAIT_S", 1.25)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "RACE_CANCEL_WAIT_S", 1.25)
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio, "wait_for", fake_wait_for
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "wait_for", fake_wait_for
     )
 
     task = asyncio.create_task(pending_lane())
-    await upstream_services().race.cancel_and_wait_tasks([task], label="wave3 test")
+    await TEST_UPSTREAM_SERVICES.race.cancel_and_wait_tasks([task], label="wave3 test")
 
     assert observed_timeouts == [1.25]
     assert task.cancelled()
@@ -215,6 +229,7 @@ async def _finish_job_with_status(status: str) -> Exception:
             proxy_url=None,
             job_id="job-1",
             progress_callback=None,
+            runtime=TEST_UPSTREAM_RUNTIME,
         )
     return excinfo.value
 
@@ -230,10 +245,10 @@ async def test_uncertain_image_job_raises_result_unknown_code() -> None:
 
     assert (
         exc.error_code
-        == upstream_services().infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
     )
     assert exc.payload["upstream_result_unknown"] is True
-    assert upstream_services().direct.is_direct_image_result_unknown(exc) is True
+    assert TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(exc) is True
 
 
 @pytest.mark.asyncio
@@ -243,9 +258,9 @@ async def test_failed_image_job_stays_refundable() -> None:
 
     assert (
         exc.error_code
-        != upstream_services().infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+        != TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
     )
-    assert upstream_services().direct.is_direct_image_result_unknown(exc) is False
+    assert TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(exc) is False
 
 
 @pytest.mark.asyncio
@@ -253,4 +268,4 @@ async def test_unknown_image_job_status_is_bad_response() -> None:
     # 既不是终态也不是 uncertain 的状态仍按协议错误处理。
     exc = await _finish_job_with_status("weird")
 
-    assert exc.error_code == upstream_services().infrastructure.EC.BAD_RESPONSE.value
+    assert exc.error_code == TEST_UPSTREAM_SERVICES.infrastructure.EC.BAD_RESPONSE.value

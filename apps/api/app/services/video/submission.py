@@ -27,7 +27,9 @@ from lumen_core.video_billing import (
 from ...billing_cache_state import (
     invalidate_balance_cache as _invalidate_balance_cache,
 )
-from ...video_reference_images import VIDEO_REFERENCE_IMAGE_KIND
+from ...images.domain.variants import (
+    VIDEO_REFERENCE_VARIANT as VIDEO_REFERENCE_IMAGE_KIND,
+)
 from ...video_reference_videos import VIDEO_REFERENCE_VIDEO_KIND
 from ..video_publish import publish_video_queued
 from .errors import video_http_error

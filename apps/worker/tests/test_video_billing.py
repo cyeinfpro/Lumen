@@ -229,6 +229,55 @@ async def test_resolve_video_billing_falls_back_when_pricing_missing(
 
 
 @pytest.mark.asyncio
+async def test_resolve_video_billing_rejects_invalid_usage_instead_of_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+
+    async def held_amount_for_ref(
+        _session, _user_id: str, _ref_type: str, _ref_id: str
+    ) -> int:
+        return 1_000
+
+    async def settle_cost(_session, **_kwargs) -> int:
+        raise video_billing.VideoBillingError(
+            "video_cost_factor_out_of_range",
+            "video billing factor total_tokens exceeds limit",
+            500,
+        )
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def fail_settle(*_args, **_kwargs) -> None:
+        raise AssertionError("invalid upstream usage must not be billed by fallback")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing, "settle_video_cost", settle_cost)
+    monkeypatch.setattr(video_billing.billing_core, "settle", fail_settle)
+
+    with pytest.raises(video_billing.VideoBillingError) as exc:
+        await video_billing.resolve_video_billing(
+            session,  # type: ignore[arg-type]
+            _generation(),
+            poll_result={"status": "succeeded", "usage_total_tokens": 42_000},
+            reason="succeeded",
+        )
+
+    assert exc.value.code == "video_cost_factor_out_of_range"
+    assert exc.value.status_code == 500
+
+
+@pytest.mark.asyncio
 async def test_resolve_video_billing_uses_reference_video_pricing_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

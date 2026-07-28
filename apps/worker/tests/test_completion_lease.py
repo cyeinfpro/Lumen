@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from app import sse_publish
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.tasks.completion_parts import default_runtime as completion
 from .task_parts_runtime_testing import synchronize_module_ports
 from lumen_core.constants import (
@@ -24,12 +25,21 @@ from lumen_core.constants import (
 def _sync_completion_ports(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    runtime = completion.build_completion_runtime(
+        image_upstream_runtime=ImageUpstreamRuntime(
+            services=object(),  # type: ignore[arg-type]
+        ),
+    )
     with synchronize_module_ports(
         monkeypatch,
         completion,
-        completion.DEFAULT_COMPLETION_RUNTIME.ports,
+        runtime.ports,
     ):
-        yield
+        async def run_completion(ctx: dict[str, Any], task_id: str) -> None:
+            await runtime.run(ctx, task_id)
+
+        monkeypatch.setattr(completion, "run_completion", run_completion)
+        yield runtime
 
 
 from lumen_core.models import OutboxEvent

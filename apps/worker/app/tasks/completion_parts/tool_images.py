@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import binascii
 import hashlib
 import io
 import json
@@ -12,7 +11,6 @@ from typing import Any
 
 from PIL import Image as PILImage
 
-from lumen_core.constants import ImageSource
 from lumen_core.context_window import count_tokens
 from lumen_core.pricing import UsageTokens
 
@@ -347,155 +345,6 @@ async def _record_completion_tool_image_usage(
         int(getattr(completion, "tokens_out", 0) or 0),
         image_tokens,
     )
-
-
-@dataclass(frozen=True)
-class ToolImageStorageHooks:
-    image_format_and_meta: Callable[..., tuple[Any, ...]]
-    new_uuid7: Callable[[], str]
-    sha256: Callable[[bytes], str]
-    write_generation_files: Callable[[list[tuple[str, bytes]]], Awaitable[list[str]]]
-    cleanup_storage_on_error: Callable[[list[str]], Any]
-    record_image_usage: Callable[..., Awaitable[None]]
-    image_model: Any
-    image_variant_model: Any
-    message_model: Any
-    storage_public_url: Callable[[str], str]
-
-
-async def _store_completion_tool_image(
-    *,
-    session: Any,
-    task_id: str,
-    attempt_epoch: int,
-    user_id: str,
-    message_id: str,
-    raw_image: bytes,
-    revised_prompt: str | None,
-    billing_budget_micro: int,
-    hooks: ToolImageStorageHooks,
-) -> dict[str, Any]:
-    (
-        orig_ext,
-        orig_mime,
-        width,
-        height,
-        blurhash_str,
-        display_bytes,
-        display_size,
-        preview_bytes,
-        preview_size,
-        thumb_bytes,
-        thumb_size,
-    ) = hooks.image_format_and_meta(raw_image)
-    image_id = hooks.new_uuid7()
-    sha = hooks.sha256(raw_image)
-    key_prefix = f"u/{user_id}/completion-tools/{task_id}/{image_id}"
-    key_orig = f"{key_prefix}/orig.{orig_ext}"
-    key_display = f"{key_prefix}/display2048.webp"
-    key_preview = f"{key_prefix}/preview1024.webp"
-    key_thumb = f"{key_prefix}/thumb256.jpg"
-
-    created_storage_keys = await hooks.write_generation_files(
-        [
-            (key_orig, raw_image),
-            (key_display, display_bytes),
-            (key_preview, preview_bytes),
-            (key_thumb, thumb_bytes),
-        ]
-    )
-    async with hooks.cleanup_storage_on_error(created_storage_keys):
-        image = hooks.image_model(
-            id=image_id,
-            user_id=user_id,
-            owner_generation_id=None,
-            source=ImageSource.GENERATED,
-            parent_image_id=None,
-            storage_key=key_orig,
-            mime=orig_mime,
-            width=width,
-            height=height,
-            size_bytes=len(raw_image),
-            sha256=sha,
-            blurhash=blurhash_str,
-            visibility="private",
-            metadata_jsonb={
-                "source": "completion_tool",
-                "completion_id": task_id,
-                **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-            },
-        )
-        session.add(image)
-        session.add(
-            hooks.image_variant_model(
-                image_id=image_id,
-                kind="display2048",
-                storage_key=key_display,
-                width=display_size[0],
-                height=display_size[1],
-            )
-        )
-        session.add(
-            hooks.image_variant_model(
-                image_id=image_id,
-                kind="preview1024",
-                storage_key=key_preview,
-                width=preview_size[0],
-                height=preview_size[1],
-            )
-        )
-        session.add(
-            hooks.image_variant_model(
-                image_id=image_id,
-                kind="thumb256",
-                storage_key=key_thumb,
-                width=thumb_size[0],
-                height=thumb_size[1],
-            )
-        )
-
-        message = await session.get(hooks.message_model, message_id)
-        if message is not None:
-            content = dict(message.content or {})
-            images_list = list(content.get("images") or [])
-            images_list.append(
-                {
-                    "image_id": image_id,
-                    "from_completion_id": task_id,
-                    "width": width,
-                    "height": height,
-                    "mime": orig_mime,
-                    "url": hooks.storage_public_url(key_orig),
-                    "display_url": f"/api/images/{image_id}/variants/display2048",
-                    "preview_url": f"/api/images/{image_id}/variants/preview1024",
-                    "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                    **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-                }
-            )
-            content["images"] = images_list
-            message.content = content
-
-        await hooks.record_image_usage(
-            session=session,
-            task_id=task_id,
-            attempt_epoch=attempt_epoch,
-            budget_micro=billing_budget_micro,
-        )
-        image_payload = {
-            "image_id": image_id,
-            "from_completion_id": task_id,
-            "actual_size": f"{width}x{height}",
-            "mime": orig_mime,
-            "url": hooks.storage_public_url(key_orig),
-            "display_url": f"/api/images/{image_id}/variants/display2048",
-            "preview_url": f"/api/images/{image_id}/variants/preview1024",
-            "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-            **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-        }
-        # Keep the DB commit inside the storage cleanup scope. A failed or
-        # cancelled commit must remove only the objects created by this attempt.
-        await session.commit()
-        return image_payload
 
 
 @dataclass
@@ -934,73 +783,6 @@ async def _ensure_completion_tool_image_wallet_budget(
                 "completion_id": task_id,
             },
         )
-
-
-@dataclass(frozen=True)
-class ToolImagePublishHooks:
-    ensure_wallet_budget: Callable[..., Awaitable[int]]
-    decode_upstream_image_b64: Callable[[str], bytes]
-    session_factory: Callable[[], Any]
-    store_tool_image: Callable[..., Awaitable[dict[str, Any]]]
-    publish_event: Callable[..., Awaitable[None]]
-    upstream_error_type: type[UpstreamError]
-    bad_response_error_code: str
-    image_event: str
-
-
-async def _store_and_publish_completion_tool_image(
-    *,
-    redis: Any,
-    user_id: str,
-    channel: str,
-    task_id: str,
-    message_id: str,
-    attempt: int,
-    attempt_epoch: int,
-    b64_image: str,
-    revised_prompt: str | None,
-    reserved_tool_image_micro: int = 0,
-    hooks: ToolImagePublishHooks,
-) -> tuple[dict[str, Any] | None, int]:
-    budget_reserved_micro = await hooks.ensure_wallet_budget(
-        user_id=user_id,
-        task_id=task_id,
-        reserved_micro=reserved_tool_image_micro,
-    )
-    try:
-        raw_image = hooks.decode_upstream_image_b64(b64_image)
-    except binascii.Error as exc:
-        raise hooks.upstream_error_type(
-            f"bad base64 from image_generation tool: {exc}",
-            error_code=hooks.bad_response_error_code,
-            status_code=200,
-        ) from exc
-    async with hooks.session_factory() as session:
-        image_payload = await hooks.store_tool_image(
-            session=session,
-            task_id=task_id,
-            attempt_epoch=attempt_epoch,
-            user_id=user_id,
-            message_id=message_id,
-            raw_image=raw_image,
-            revised_prompt=revised_prompt,
-            billing_budget_micro=budget_reserved_micro,
-        )
-
-    await hooks.publish_event(
-        redis,
-        user_id,
-        channel,
-        hooks.image_event,
-        {
-            "completion_id": task_id,
-            "message_id": message_id,
-            "attempt": attempt,
-            "attempt_epoch": attempt_epoch,
-            "images": [image_payload],
-        },
-    )
-    return image_payload, budget_reserved_micro
 
 
 # Public contract consumed by the Completion runtime modules.

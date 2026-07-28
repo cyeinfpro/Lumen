@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 import inspect
 import logging
@@ -28,11 +26,17 @@ from app.tasks.completion_parts.runtime import (
     completion_ports,
 )
 from app.tasks.generation_parts import event_delivery as generation_event_delivery
-from app.tasks.generation_parts import default_runtime as generation_runtime
-from app.tasks.generation_parts.runtime import (
-    GenerationRuntime,
-    generation_ports,
-)
+from app.tasks.generation_parts import failure as generation_failure
+from app.tasks.generation_parts import lease as generation_lease
+from app.tasks.generation_parts import queue_claim as generation_queue_claim
+from app.tasks.generation_parts import queue_lock as generation_queue_lock
+from app.tasks.generation_parts import retry_state as generation_retry_state
+from app.tasks.generation_parts import runner as generation_runner
+from app.tasks.generation_parts import success as generation_success
+from app.tasks.generation_parts.errors import LeaseLost
+from app.tasks.generation_parts.default_runtime import build_generation_runtime
+from app.tasks.generation_parts.runtime import GenerationRuntime
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from app.tasks.video_generation_parts import default_runtime as video_runtime
 from app.video_provider_slots import VIDEO_PROVIDER_SLOT_TTL_S
 from app.video_upstream_parts.contracts import (
@@ -42,7 +46,14 @@ from app.video_upstream_parts.contracts import (
 )
 
 
-class _RuntimePortsProxy:
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+TEST_COMPLETION_RUNTIME = completion_runtime.build_completion_runtime(
+    image_upstream_runtime=TEST_UPSTREAM_RUNTIME
+)
+
+
+class _TaskServicesHarness:
     def __init__(self, module: Any, ports: Any, **extras: Any) -> None:
         object.__setattr__(self, "_module", module)
         object.__setattr__(self, "_ports", ports)
@@ -85,15 +96,11 @@ class _RuntimePortsProxy:
         return None
 
 
-completion = _RuntimePortsProxy(
+completion = _TaskServicesHarness(
     completion_runtime,
-    completion_runtime.DEFAULT_COMPLETION_RUNTIME.ports,
+    TEST_COMPLETION_RUNTIME.ports,
 )
-generation = _RuntimePortsProxy(
-    generation_runtime,
-    generation_runtime.DEFAULT_GENERATION_RUNTIME.ports,
-)
-video_generation = _RuntimePortsProxy(
+video_generation = _TaskServicesHarness(
     video_runtime,
     video_runtime.DEFAULT_VIDEO_GENERATION_RUNTIME.ports,
     PollResult=PollResult,
@@ -105,42 +112,55 @@ video_generation = _RuntimePortsProxy(
 
 @pytest.mark.asyncio
 async def test_completion_runtime_scopes_explicit_ports() -> None:
-    process_ports = completion_runtime.DEFAULT_COMPLETION_RUNTIME.ports
+    process_ports = TEST_COMPLETION_RUNTIME.ports
     seen: list[Any] = []
 
     async def runner(ctx: dict[str, Any], task_id: str) -> None:
         seen.extend((completion_ports(), ctx, task_id))
 
-    runtime = CompletionRuntime(ports=process_ports, runner=runner)
+    runtime = CompletionRuntime(
+        ports=process_ports,
+        runner=runner,
+        image_upstream_runtime=TEST_UPSTREAM_RUNTIME,
+    )
     ctx = {"redis": object()}
     await runtime.run(ctx, "comp-1")
 
     assert seen == [process_ports, ctx, "comp-1"]
-    assert completion_ports() is process_ports
+    with pytest.raises(RuntimeError, match="task runtime is not configured"):
+        completion_ports()
 
 
 @pytest.mark.asyncio
-async def test_generation_runtime_scopes_explicit_ports() -> None:
-    process_ports = generation_runtime.DEFAULT_GENERATION_RUNTIME.ports
+async def test_generation_runtime_scopes_explicit_services() -> None:
+    default_runtime = build_generation_runtime()
+    process_services = default_runtime.deps
     seen: list[Any] = []
 
-    async def runner(ctx: dict[str, Any], task_id: str) -> None:
-        seen.extend((generation_ports(), ctx, task_id))
+    async def runner(
+        ctx: dict[str, Any],
+        task_id: str,
+        services: object,
+    ) -> None:
+        seen.extend((services, ctx, task_id))
 
-    runtime = GenerationRuntime(ports=process_ports, runner=runner)
+    runtime = GenerationRuntime(
+        deps=process_services,
+        runner=runner,
+        postprocess_runtime=default_runtime.postprocess_runtime,
+    )
     ctx = {"redis": object()}
     await runtime.run(ctx, "gen-1")
 
-    assert seen == [process_ports, ctx, "gen-1"]
-    assert generation_ports() is process_ports
+    assert seen == [process_services, ctx, "gen-1"]
 
 
 def test_generation_success_event_is_staged_before_commit_and_delivered_after() -> None:
-    source = inspect.getsource(generation.run_generation)
-    stage_idx = source.index("success_delivery = _stage_generation_success_event(")
+    source = inspect.getsource(generation_success._persist_generation_success)
+    stage_idx = source.index("success_delivery = _stage_success_event(")
     commit_idx = source.index("await session.commit()", stage_idx)
     deliver_idx = source.index(
-        "await _deliver_generation_event(redis, success_delivery)",
+        "await g.events.deliver(state.redis, success_delivery)",
         commit_idx,
     )
 
@@ -170,11 +190,11 @@ async def test_generation_sse_failure_is_deferred_without_failing_task(
         persist_for_retry,
     )
 
-    await generation.publish_event(
+    await generation_event_delivery.publish_event(
         object(),
         "user-1",
         "task:gen-1",
-        generation.EV_GEN_STARTED,
+        "generation.started",
         {"generation_id": "gen-1", "message_id": "msg-1"},
     )
 
@@ -182,7 +202,7 @@ async def test_generation_sse_failure_is_deferred_without_failing_task(
         {
             "user_id": "user-1",
             "channel": "task:gen-1",
-            "event_name": generation.EV_GEN_STARTED,
+            "event_name": "generation.started",
             "data": {"generation_id": "gen-1", "message_id": "msg-1"},
         }
     ]
@@ -489,12 +509,12 @@ def test_completion_tool_image_budget_converts_to_image_tokens() -> None:
 
 
 def test_generation_retry_delay_is_jittered() -> None:
-    helper_source = inspect.getsource(generation._retry_delay_seconds)  # noqa: SLF001
-    runner_source = inspect.getsource(generation.run_generation)
+    helper_source = inspect.getsource(generation_retry_state.retry_delay_seconds)
+    runner_source = inspect.getsource(generation_failure._retry_generation)
 
     assert "jitter" in helper_source.lower()
     assert "random.uniform" in helper_source
-    assert "_retry_delay_seconds(attempt)" in runner_source
+    assert "retry_delay_seconds(state.attempt)" in runner_source
 
 
 def test_provider_pool_weighted_round_robin_honors_weights() -> None:
@@ -1578,7 +1598,7 @@ async def test_cancel_checks_fail_closed_for_completion_when_redis_errors() -> N
 
     # Redis is the authoritative cancellation channel for both task types. If the
     # read path is unavailable, fail closed so a cancellation cannot be missed.
-    assert await generation._is_cancelled(redis, "gen-1") is True
+    assert await generation_lease.is_cancelled(redis, "gen-1") is True
     assert await completion._is_cancelled(redis, "comp-1") is True
     assert redis.calls >= 4
 
@@ -1606,8 +1626,12 @@ async def test_generation_lease_acquire_uses_nx() -> None:
 
     redis = Redis()
 
-    with pytest.raises(generation._LeaseLost):  # noqa: SLF001
-        await generation._acquire_lease(redis, "gen-1", "worker-1:token-1")  # noqa: SLF001
+    with pytest.raises(LeaseLost):
+        await generation_lease.acquire_lease(
+            redis,
+            "gen-1",
+            "worker-1:token-1",
+        )
 
     assert redis.args == ("task:gen-1:lease", "worker-1:token-1")
     assert redis.kwargs is not None
@@ -1626,7 +1650,11 @@ async def test_generation_release_lease_uses_worker_token_cas() -> None:
 
     redis = Redis()
 
-    await generation._release_lease(redis, "gen-1", "worker-1:token-1")  # noqa: SLF001
+    await generation_lease.release_lease(
+        redis,
+        "gen-1",
+        "worker-1:token-1",
+    )
 
     assert redis.eval_args is not None
     assert redis.eval_args[1] == 1
@@ -1649,17 +1677,20 @@ async def test_generation_release_lease_requires_atomic_cas() -> None:
 
     redis = RedisWithoutEval()
 
-    await generation._release_lease(redis, "gen-1", "worker-1")
+    await generation_lease.release_lease(redis, "gen-1", "worker-1")
 
     assert redis.deleted == []
 
 
 def test_run_generation_uses_unique_lease_token_for_owner_cas() -> None:
-    source = inspect.getsource(generation.run_generation)
+    state_source = inspect.getsource(generation_runner._new_run_state)
+    acquire_source = inspect.getsource(
+        generation_runner._acquire_generation_lease
+    )
 
-    assert 'lease_token = f"{worker_id}:' in source
-    assert "_acquire_lease(redis, task_id, lease_token)" in source
-    assert "_release_lease(redis, task_id, lease_token)" in source
+    assert 'lease_token=f"{worker_id}:{new_uuid7()}"' in state_source
+    assert "await acquire_lease(" in acquire_source
+    assert "state.lease_token" in acquire_source
 
 
 @pytest.mark.asyncio
@@ -1673,29 +1704,60 @@ async def test_generation_runtime_resource_cleanup_releases_every_fence(
         *,
         task_id: str,
         provider_name: str | None,
+        services: Any,
     ) -> None:
+        _ = services
         calls.append((f"slot:{task_id}", provider_name))
 
-    async def clear_inflight(_redis: Any, task_id: str) -> None:
+    async def clear_inflight(
+        _redis: Any,
+        task_id: str,
+        *,
+        services: Any,
+    ) -> None:
+        _ = services
         calls.append((f"inflight:{task_id}", None))
 
-    async def clear_avoided(_redis: Any, task_id: str) -> None:
+    async def clear_avoided(
+        _redis: Any,
+        task_id: str,
+        *,
+        services: Any,
+    ) -> None:
+        _ = services
         calls.append((f"avoided:{task_id}", None))
 
     async def release_lease(_redis: Any, task_id: str, token: str) -> None:
         calls.append((f"lease:{task_id}", token))
 
-    monkeypatch.setattr(generation, "_release_image_queue_slot", release_slot)
-    monkeypatch.setattr(generation, "_inflight_clear", clear_inflight)
-    monkeypatch.setattr(generation, "_clear_avoided_providers", clear_avoided)
-    monkeypatch.setattr(generation, "_release_lease", release_lease)
+    monkeypatch.setattr(
+        generation_queue_claim,
+        "release_image_queue_slot",
+        release_slot,
+    )
+    monkeypatch.setattr(
+        generation_queue_claim,
+        "inflight_clear",
+        clear_inflight,
+    )
+    monkeypatch.setattr(
+        generation_queue_claim,
+        "clear_task_avoided_providers",
+        clear_avoided,
+    )
+    monkeypatch.setattr(
+        generation_queue_claim,
+        "release_lease",
+        release_lease,
+    )
 
-    await generation._release_generation_runtime_resources(  # noqa: SLF001
+    await generation_queue_claim.release_generation_runtime_resources(
         object(),
         task_id="gen-1",
         lease_token="worker-1:lease",
         provider_name="provider-1",
         clear_avoided_providers=True,
+        services=build_generation_runtime().deps,
     )
 
     assert calls == [
@@ -1707,26 +1769,21 @@ async def test_generation_runtime_resource_cleanup_releases_every_fence(
 
 
 def test_generation_setup_failure_is_inside_runtime_cleanup_guard() -> None:
-    source = inspect.getsource(generation.run_generation)
-    start = source.index("renewer = asyncio.create_task(")
-    end = source.index("has_partial =", start)
-    setup = source[start:end]
+    setup = inspect.getsource(generation_runner._start_generation_attempt)
+    cleanup = inspect.getsource(generation_runner._cleanup_generation_run)
 
     assert "except BaseException:" in setup
-    assert "_cancel_renewer_task(renewer)" in setup
-    assert "_release_generation_runtime_resources(" in setup
-    assert "await asyncio.shield(cleanup_future)" in setup
+    assert "await _cleanup_failed_setup(state)" in setup
+    assert "asyncio.ensure_future(_critical_release_cleanup(state))" in cleanup
+    assert "await asyncio.shield(cleanup)" in cleanup
 
 
 def test_generation_lease_lost_max_attempts_fails_without_requeue() -> None:
-    source = inspect.getsource(generation.run_generation)
-    start = source.rindex("except _LeaseLost as exc:")
-    end = source.index("except _StaleGenerationAttempt", start)
-    lease_branch = source[start:end]
+    lease_branch = inspect.getsource(generation_failure.handle_lease_lost)
 
-    max_idx = lease_branch.index("if attempt >= _MAX_ATTEMPTS:")
-    fail_idx = lease_branch.index("_mark_generation_attempt_failed")
-    retry_idx = lease_branch.index("_mark_generation_attempt_retrying")
+    max_idx = lease_branch.index("if state.attempt >= MAX_ATTEMPTS:")
+    fail_idx = lease_branch.index("mark_generation_attempt_failed")
+    retry_idx = lease_branch.index("mark_generation_attempt_retrying")
 
     assert max_idx < fail_idx < retry_idx
     assert "retriable=False" in lease_branch[fail_idx:retry_idx]
@@ -1738,7 +1795,7 @@ def test_generation_attempt_update_can_guard_current_status() -> None:
     from lumen_core.constants import GenerationStatus
 
     rendered = str(
-        generation._generation_attempt_update(  # noqa: SLF001
+        generation_retry_state.generation_attempt_update(
             "gen-1",
             2,
             statuses=(GenerationStatus.RUNNING.value,),
@@ -1754,16 +1811,11 @@ def test_generation_attempt_update_can_guard_current_status() -> None:
 
 
 def test_generation_success_write_requires_running_status() -> None:
-    source = inspect.getsource(generation.run_generation)
-    marker = "parent_upstream_request_for_bonus = dict(upstream_req)"
-    start = source.index(
-        "status=GenerationStatus.SUCCEEDED.value", source.index(marker)
+    success_update = inspect.getsource(
+        generation_success._mark_generation_succeeded
     )
-    update_start = source.rindex("_generation_attempt_update(", 0, start)
-    update_end = source.index(").values(", update_start)
-    success_update = source[update_start:update_end]
 
-    assert "statuses=_RUNNING_GENERATION_STATUSES" in success_update
+    assert "statuses=RUNNING_GENERATION_STATUSES" in success_update
 
 
 def test_completion_terminal_writes_require_streaming_status() -> None:
@@ -1773,16 +1825,13 @@ def test_completion_terminal_writes_require_streaming_status() -> None:
 
 
 def test_generation_max_attempts_failure_releases_hold() -> None:
-    source = inspect.getsource(generation.run_generation)
-    start = source.index('err_code = "max_attempts_exceeded"')
-    end = source.index("return", start)
-    branch = source[start:end]
+    branch = inspect.getsource(generation_runner._fail_queued_generation)
 
-    assert "_generation_attempt_update(" in branch
+    assert "generation_attempt_update(" in branch
     assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
-    assert "worker_billing.release_generation(" in branch
-    assert "reason=err_code" in branch
-    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
+    assert "state.services.billing.release(" in branch
+    assert "reason=code" in branch
+    assert "state.services.billing.flush_after_commit(" in branch
 
 
 @pytest.mark.asyncio
@@ -1838,17 +1887,14 @@ async def test_zero_usage_failed_completion_releases_hold(
 
 
 def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:
-    source = inspect.getsource(generation.run_generation)
-    start = source.index("byok_error = classify_user_credential_error(exc)")
-    end = source.index("await publish_event(", start)
-    branch = source[start:end]
+    branch = inspect.getsource(generation_runner._persist_user_runtime_failure)
 
-    assert "_generation_attempt_update(" in branch
+    assert "generation_attempt_update(" in branch
     assert "GenerationStatus.QUEUED.value" in branch
     assert "GenerationStatus.RUNNING.value" in branch
-    assert "worker_billing.release_generation(" in branch
-    assert "reason=err_code" in branch
-    assert "worker_billing.flush_balance_cache_refreshes(session)" in branch
+    assert "state.services.billing.release(" in branch
+    assert "reason=error_code" in branch
+    assert "state.services.billing.flush_after_commit(" in branch
 
 
 def test_sse_timestamp_lock_is_eagerly_initialized() -> None:
@@ -1999,19 +2045,19 @@ async def test_proxied_client_cache_is_lru_bounded(
     getter_name: str,
     builder_name: str,
 ) -> None:
-    await upstream.close_client()
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=1.0, read=2.0, write=3.0
     )
     built: list[_FakeClosableClient] = []
-    cache = getattr(upstream_services().core, cache_name.lstrip("_"))
+    cache = getattr(TEST_UPSTREAM_SERVICES.core, cache_name.lstrip("_"))
     cache.clear()
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         return timeout_config
 
     def fake_builder(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig | None = None,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig | None = None,
         *,
         proxy_url: str | None = None,
     ) -> _FakeClosableClient:
@@ -2021,31 +2067,31 @@ async def test_proxied_client_cache_is_lru_bounded(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle,
+        TEST_UPSTREAM_SERVICES.lifecycle,
         builder_name.lstrip("_"),
         fake_builder,
     )
     monkeypatch.setattr(
-        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
+        TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
     )
 
-    limit = int(upstream_services().core.PROXIED_CLIENT_CACHE_MAX)
-    getter = getattr(upstream_services().lifecycle, getter_name.lstrip("_"))
+    limit = int(TEST_UPSTREAM_SERVICES.core.PROXIED_CLIENT_CACHE_MAX)
+    getter = getattr(TEST_UPSTREAM_SERVICES.lifecycle, getter_name.lstrip("_"))
     try:
         for idx in range(limit + 5):
             await getter(f"http://proxy-{idx}.example:8080")
 
         assert len(cache) <= limit
         assert not any(client.closed for client in built[:5])
-        assert len(upstream_services().core.retired_client_close_tasks) == 5  # noqa: SLF001
+        assert len(TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks) == 5  # noqa: SLF001
         await asyncio.sleep(0.05)
         assert any(client.closed for client in built[:5])
-        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
+        assert not TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
     finally:
-        await upstream.close_client()
+        await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
 
 
 @pytest.mark.asyncio
@@ -2063,7 +2109,7 @@ async def test_delayed_client_close_waits_until_idle() -> None:
 
     client = BusyClient()
     close_task = asyncio.create_task(
-        upstream_services().lifecycle.delayed_aclose(client, delay=0)
+        TEST_UPSTREAM_SERVICES.lifecycle.delayed_aclose(client, delay=0)
     )  # noqa: SLF001
     await asyncio.sleep(0.01)
 
@@ -2076,27 +2122,27 @@ async def test_delayed_client_close_waits_until_idle() -> None:
 
 @pytest.mark.asyncio
 async def test_close_client_closes_retired_clients_without_delay() -> None:
-    await upstream.close_client()
+    await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
     client = _FakeClosableClient()
-    close_task = upstream_services().lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
+    close_task = TEST_UPSTREAM_SERVICES.lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
 
-    assert close_task in upstream_services().core.retired_client_close_tasks  # noqa: SLF001
+    assert close_task in TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
 
     try:
-        await upstream.close_client()
+        await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
 
         assert client.closed is True
-        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
-        assert not upstream_services().core.retired_clients  # noqa: SLF001
+        assert not TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
+        assert not TEST_UPSTREAM_SERVICES.core.retired_clients  # noqa: SLF001
     finally:
-        await upstream.close_client()
+        await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
 
 
 @pytest.mark.asyncio
 async def test_close_retired_clients_waits_out_cancelled_aclose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await upstream.close_client()
+    await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
 
     class CancelSensitiveClient:
         def __init__(self) -> None:
@@ -2123,15 +2169,15 @@ async def test_close_retired_clients_waits_out_cancelled_aclose(
             self.closed = True
 
     monkeypatch.setattr(
-        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0
+        TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0
     )
     client = CancelSensitiveClient()
-    upstream_services().lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
+    TEST_UPSTREAM_SERVICES.lifecycle.schedule_delayed_aclose(client)  # noqa: SLF001
     try:
         await asyncio.wait_for(client.started.wait(), timeout=1.0)
 
         closer = asyncio.create_task(
-            upstream_services().lifecycle.close_retired_clients_now()
+            TEST_UPSTREAM_SERVICES.lifecycle.close_retired_clients_now()
         )  # noqa: SLF001
         await asyncio.sleep(0.01)
         assert not closer.done()
@@ -2141,11 +2187,11 @@ async def test_close_retired_clients_waits_out_cancelled_aclose(
         assert client.closed is True
         assert client.cancelled is False
         assert client.calls >= 1
-        assert not upstream_services().core.retired_client_close_tasks  # noqa: SLF001
-        assert not upstream_services().core.retired_clients  # noqa: SLF001
+        assert not TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
+        assert not TEST_UPSTREAM_SERVICES.core.retired_clients  # noqa: SLF001
     finally:
         client.release.set()
-        await upstream.close_client()
+        await upstream.close_client(runtime=TEST_UPSTREAM_RUNTIME)
 
 
 @pytest.mark.asyncio
@@ -2159,13 +2205,15 @@ async def test_startup_failure_closes_upstream_clients(
     def raise_startup_error(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("otel boom")
 
-    async def fake_close_client() -> None:
+    async def fake_close_client(*, runtime: object) -> None:
+        assert runtime is not None
         cleanup_calls.append("upstream")
 
     async def fake_billing_shutdown() -> None:
         cleanup_calls.append("billing")
 
-    async def valid_image_job_configuration() -> None:
+    async def valid_image_job_configuration(*, runtime: object) -> None:
+        assert runtime is not None
         return None
 
     monkeypatch.setattr(
@@ -2236,7 +2284,7 @@ async def test_image_queue_lock_release_uses_owner_cas() -> None:
 
     redis = Redis()
 
-    async with generation._image_queue_lock(redis):
+    async with generation_queue_lock.image_queue_lock(redis):
         redis.store["generation:image_queue:lock"] = "new-owner"
 
     assert redis.eval_args is not None
@@ -2256,14 +2304,17 @@ async def test_image_queue_lock_acquisition_failure_is_fail_closed() -> None:
 
     entered = False
     with pytest.raises(
-        generation.UpstreamError,
+        generation_queue_lock.UpstreamError,
         match="image queue lock acquisition unavailable",
     ) as exc_info:
-        async with generation._image_queue_lock(Redis()):
+        async with generation_queue_lock.image_queue_lock(Redis()):
             entered = True
 
     assert entered is False
-    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert (
+        exc_info.value.error_code
+        == generation_queue_lock.EC.LOCAL_QUEUE_FULL.value
+    )
     assert exc_info.value.payload["retry_after"] > 0
 
 
@@ -2342,7 +2393,7 @@ async def test_image_queue_lock_transaction_does_not_delete_new_owner() -> None:
     redis = Redis()
 
     async def acquire_and_release() -> None:
-        async with generation._image_queue_lock(redis):
+        async with generation_queue_lock.image_queue_lock(redis):
             pass
 
     release_task = asyncio.create_task(acquire_and_release())
@@ -2356,14 +2407,14 @@ async def test_image_queue_lock_transaction_does_not_delete_new_owner() -> None:
 
 
 def test_image_queue_reserve_has_atomic_lua_path() -> None:
-    source = inspect.getsource(generation._reserve_image_queue_slot)
+    source = inspect.getsource(generation_queue_claim._reserve_provider_slot)
 
-    assert "_RESERVE_IMAGE_SLOT_LUA" in source
+    assert "RESERVE_IMAGE_SLOT_LUA" in source
     assert "lock.eval_fenced(" in source
     assert "lost_result=-1" in source
     assert (
         "redis.call('GET', lock_key) ~= lock_token"
-        in generation._RESERVE_IMAGE_SLOT_LUA
+        in generation_queue_claim.RESERVE_IMAGE_SLOT_LUA
     )
 
 

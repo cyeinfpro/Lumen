@@ -37,7 +37,7 @@ import httpx
 
 from ..db import SessionLocal, affected_rows
 from ..provider_runtime.errors import UpstreamError
-from ..provider_runtime.upstream_services import upstream_services
+from ..provider_runtime.http_headers import upstream_auth_headers
 from ..sse_publish import publish_event
 
 logger = logging.getLogger(__name__)
@@ -356,7 +356,7 @@ async def _call_upstream_one(
         "store": False,
     }
     headers = {
-        **upstream_services().core.auth_headers(api_key),
+        **upstream_auth_headers(api_key),
         "content-type": "application/json",
     }
     try:

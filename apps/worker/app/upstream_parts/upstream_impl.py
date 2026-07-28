@@ -1,5 +1,4 @@
 """上游 HTTP 客户端。
-
 生图主路径走 OpenAI Images API 风格的同步端点：
 - 文生图: POST /v1/images/generations (application/json)
 - 图生图: POST /v1/images/edits       (multipart/form-data, 字段名 image[])
@@ -8,7 +7,6 @@
 如果主路径报错或返回无图，会自动降级到 `/v1/responses` + `image_generation`
 工具，并用 SSE 抽取最终 `response.output_item.done.item.result`。fallback 的
 `partial_image` 事件只用于轻量进度显示，不向前端发布 base64。
-
 Completion（聊天）路径仍走 POST /v1/responses 的 SSE 流式协议，事件名在 `event:` 行、
 数据在 `data:` 行里，空行切分事件；关注 `response.output_text.delta` /
 `response.completed`。
@@ -31,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import base64  # noqa: F401 - late-bound image-job facade
-import contextvars
 import hashlib  # noqa: F401 - late-bound image-job facade
 import logging
 import os
@@ -41,8 +38,10 @@ import tempfile  # noqa: F401 - compatibility facade for transport tests/hooks
 import time  # noqa: F401 - late-bound request facade
 import uuid
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from functools import partial
+from typing import Any
 import httpx
 from PIL import (
     Image as PILImage,
@@ -72,25 +71,21 @@ from lumen_core.url_security import (
 
 from .. import http_retry, provider_pool, upstream_image_requests
 from ..config import (
-    settings,
-    validate_image_job_sidecar_token,  # noqa: F401 - late-bound image-job facade
-)
-from ..provider_runtime.composition import build_upstream_runtime
-from ..provider_runtime.runtime import (
-    get_upstream_runtime,
-    install_upstream_runtime,
+    settings,  # noqa: F401 - explicit upstream composition dependency
+    validate_image_job_sidecar_token,  # noqa: F401 - composed image-job dependency
 )
 from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
     UpstreamLifecycleState,
+    UpstreamServices,
     build_upstream_services,
-    install_upstream_services,
-    upstream_services,
+    resolve_image_upstream_services,
 )
+from ..provider_runtime.http_headers import upstream_auth_headers
 from ..runtime_settings import (
     resolve,  # noqa: F401 - composed infrastructure dependency
     resolve_db,  # noqa: F401 - composed core dependency
 )
-from ..upstream_clients.image_job_client import ImageJobClient
 from . import (
     client_lifecycle as upstream_client_lifecycle,
     direct_failover as upstream_direct_failover,
@@ -110,6 +105,7 @@ from . import (
     retry_policy as upstream_retry_policy,
     transport as upstream_transport,
 )
+from .image_execution import ImageRequestContext
 
 # Referenced by the composed public service graph below.
 _COMPOSED_INFRASTRUCTURE_DEPENDENCIES = (
@@ -170,108 +166,13 @@ except Exception:  # noqa: BLE001
 logger = logging.getLogger(__name__)
 
 
-# ---- 上游标识 / trace ----
-
-
-def _resolve_lumen_version() -> str:
-    """resolve "lumen-prod-{ver}" originator 用的版本号。
-
-    优先级：
-    1. env LUMEN_VERSION（部署脚本灌入）
-    2. lumen_core.__version__（如有）
-    3. fallback "unknown"
-    """
-    raw = os.environ.get("LUMEN_VERSION", "").strip()
-    if raw:
-        return raw
-    try:
-        from lumen_core import __version__ as _v  # type: ignore[attr-defined]
-
-        if isinstance(_v, str) and _v:
-            return _v
-    except Exception:  # noqa: BLE001
-        pass
-    return "unknown"
-
-
-_LUMEN_ORIGINATOR = f"lumen-prod-{_resolve_lumen_version()}"
-
-
-_image_trace_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "lumen_image_trace_id",
-    default=None,
-)
-
-
-@dataclass
-class _ImageQuotaScope:
-    task_id: str
-    attempt_epoch: int
-    logical_call_index: int = 0
-
-
-@dataclass
-class _ImageQuotaReservation:
-    provider_name: str
-    member: str
-    reserved_at: float
-    state: str = "reserved"
-
-
-_image_quota_scope_ctx: contextvars.ContextVar[_ImageQuotaScope | None] = (
-    contextvars.ContextVar("lumen_image_quota_scope", default=None)
-)
-_image_quota_reservation_ctx: contextvars.ContextVar[_ImageQuotaReservation | None] = (
-    contextvars.ContextVar("lumen_image_quota_reservation", default=None)
-)
-
-
-def push_image_trace_id(trace_id: str | None) -> contextvars.Token[str | None] | None:
-    """Bind a generation-level trace id to downstream image HTTP calls."""
-    if not isinstance(trace_id, str) or not trace_id:
-        return None
-    return _image_trace_id_ctx.set(trace_id)
-
-
-def pop_image_trace_id(token: contextvars.Token[str | None] | None) -> None:
-    if token is None:
-        return
-    _image_trace_id_ctx.reset(token)
-
-
-def push_image_quota_context(
-    task_id: str,
-    attempt_epoch: int,
-) -> contextvars.Token[_ImageQuotaScope | None]:
-    return _image_quota_scope_ctx.set(
-        _ImageQuotaScope(
-            task_id=str(task_id),
-            attempt_epoch=max(1, int(attempt_epoch or 1)),
-        )
-    )
-
-
-def pop_image_quota_context(
-    token: contextvars.Token[_ImageQuotaScope | None],
-) -> None:
-    _image_quota_scope_ctx.reset(token)
-
-
-def _next_image_quota_member(provider_name: str, route: str) -> str:
-    scope = _image_quota_scope_ctx.get()
-    if scope is None:
-        trace_id = _image_trace_id_ctx.get() or uuid.uuid4().hex
-        return f"{trace_id}:1:{provider_name}:{route}"
-    scope.logical_call_index += 1
-    return (
-        f"{scope.task_id}:{scope.attempt_epoch}:{scope.logical_call_index}:"
-        f"{provider_name}:{route}"
-    )
+def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
+    return resolve_image_upstream_services(runtime)
 
 
 def _generate_trace_id() -> str:
     """每次上游 HTTP 调用生成一个 x-trace-id，方便和上游下发的 x-request-id 对账。"""
-    return _image_trace_id_ctx.get() or uuid.uuid4().hex
+    return uuid.uuid4().hex
 
 
 # ---- 已知 SSE output[].type 白名单 ----
@@ -327,7 +228,7 @@ _JSON_PAYLOAD_SENTINEL_TYPE = "_lumen.image.json_payload"
 # 注意：_SSE_MAX_LINE_BYTES 在文件后面定义，这里只能写字面值（保持两处同步）。
 _NON_SSE_JSON_MAX_BYTES = 32 * 1024 * 1024
 
-ImageProgressCallback = Callable[[dict[str, Any]], Any]
+ImageProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 # GEN-P0-8: 上游图片规范化的严格边界
 # 100 MB 原始字节 / 64M 像素 / 100 MB 编码后字节——低于任何已知合理 input.
@@ -340,8 +241,9 @@ _MAX_REFERENCE_IMAGE_PIXELS = 64_000_000
 # 强制上限到 64M 像素——和 _MAX_REFERENCE_IMAGE_PIXELS 对齐——这样即使 magic bytes
 # 绕过 size_bytes 检查（比如 16x 压缩的 PNG），PIL.Image.open 也会直接 DecompressionBombError。
 # 必须设为 int，PIL 把 None 当作"无限制"。全进程生效，所以用 max(...) 保证不回退他处更大的值。
-def _configure_pil_max_image_pixels() -> None:
-    services = upstream_services()
+def _configure_pil_max_image_pixels(
+    services: UpstreamServices,
+) -> None:
     try:
         image_api = services.infrastructure.PILImage
         max_pixels = services.core.MAX_REFERENCE_IMAGE_PIXELS
@@ -458,37 +360,14 @@ _DEFAULT_IMAGE_OUTPUT_FORMAT = "png"
 # output_compression 仅对 jpeg/webp 生效；PNG 路径下不会进入 body。保留 100 以备显式切 jpeg/webp。
 _DEFAULT_IMAGE_OUTPUT_COMPRESSION = 100
 
-# Retry 时打散 prompt cache 的 ContextVar——上层 set 后所有 body 构造点会读到。
-# 默认 1 表示首次尝试，body 保持原样享受 cache 命中；> 1 时由 _apply_retry_cache_busters 注入打散字段。
-# ContextVar 比逐层透传 retry_attempt 参数好——image dispatch 链路有 9 层函数，全改签名风险大。
-_image_retry_attempt_ctx: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "lumen_image_retry_attempt", default=1
-)
-
-
-def push_image_retry_attempt(attempt: int) -> contextvars.Token[int]:
-    """供 generation.py 等上层在调用 edit_image / generate_image 前设置当前 task 级 retry attempt。
-
-    用法：
-        token = push_image_retry_attempt(gen.attempt)
-        try:
-            image_iter = edit_image(...)
-            ...
-        finally:
-            pop_image_retry_attempt(token)
-
-    attempt == 1 时下游 body 构造点不打散；> 1 时注入 prompt_cache_key 等"打散三件套"。
-    """
-    return _image_retry_attempt_ctx.set(max(1, int(attempt or 1)))
-
-
-def pop_image_retry_attempt(token: contextvars.Token[int]) -> None:
-    """配对 push_image_retry_attempt——必须在 finally 里调用，避免 ContextVar 漂移到外层环境。"""
-    _image_retry_attempt_ctx.reset(token)
-
 
 def _apply_retry_cache_busters(
-    body: dict[str, Any], retry_attempt: int, prompt: str, size: str
+    body: dict[str, Any],
+    retry_attempt: int,
+    prompt: str,
+    size: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> None:
     """Retry 时往 body 注入"打散字段"，绕开 ChatGPT codex 端的故障 prompt cache。
 
@@ -505,7 +384,8 @@ def _apply_retry_cache_busters(
 
     retry_attempt == 1 时无操作，保留首次请求的 cache 命中收益。
     """
-    upstream_services().requests.apply_retry_cache_busters(
+    services = _runtime_services(runtime)
+    services.requests.apply_retry_cache_busters(
         body,
         retry_attempt,
         prompt,
@@ -557,9 +437,12 @@ def _summarize_upstream_error_detail(
     return {"keys": sorted(str(key) for key in detail.keys())[:10]}
 
 
-def _image_request_policy() -> upstream_image_requests.ImageRequestPolicy:
+def _image_request_policy(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> upstream_image_requests.ImageRequestPolicy:
     """Snapshot current service policy so test fakes remain call-time visible."""
-    services = upstream_services()
+    services = _runtime_services(runtime)
     core = services.core
     return services.infrastructure.upstream_image_requests.ImageRequestPolicy(
         upstream_model=services.infrastructure.UPSTREAM_MODEL,
@@ -580,17 +463,27 @@ def _image_request_policy() -> upstream_image_requests.ImageRequestPolicy:
     )
 
 
-def _normalize_image_quality(value: str | None) -> str:
-    return upstream_services().requests.normalize_image_quality(
+def _normalize_image_quality(
+    value: str | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.normalize_image_quality(
         value,
-        policy=_image_request_policy(),
+        policy=_image_request_policy(runtime=runtime),
     )
 
 
-def _normalize_image_output_format(value: str | None) -> str:
-    return upstream_services().requests.normalize_image_output_format(
+def _normalize_image_output_format(
+    value: str | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.normalize_image_output_format(
         value,
-        policy=_image_request_policy(),
+        policy=_image_request_policy(runtime=runtime),
     )
 
 
@@ -598,25 +491,37 @@ def _normalize_image_output_compression(
     value: int | None,
     *,
     output_format: str,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> int | None:
-    return upstream_services().requests.normalize_image_output_compression(
+    services = _runtime_services(runtime)
+    return services.requests.normalize_image_output_compression(
         value,
         output_format=output_format,
-        policy=_image_request_policy(),
+        policy=_image_request_policy(runtime=runtime),
     )
 
 
-def _normalize_image_background(value: str | None) -> str:
-    return upstream_services().requests.normalize_image_background(
+def _normalize_image_background(
+    value: str | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.normalize_image_background(
         value,
-        policy=_image_request_policy(),
+        policy=_image_request_policy(runtime=runtime),
     )
 
 
-def _normalize_image_moderation(value: str | None) -> str:
-    return upstream_services().requests.normalize_image_moderation(
+def _normalize_image_moderation(
+    value: str | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.normalize_image_moderation(
         value,
-        policy=_image_request_policy(),
+        policy=_image_request_policy(runtime=runtime),
     )
 
 
@@ -627,35 +532,47 @@ def _add_image_output_options(
     output_compression: int | None,
     background: str | None,
     moderation: str | None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> None:
-    upstream_services().requests.add_image_output_options(
+    services = _runtime_services(runtime)
+    services.requests.add_image_output_options(
         body,
         output_format=output_format,
         output_compression=output_compression,
         background=background,
         moderation=moderation,
         hooks=upstream_image_requests.ImageOutputOptionsHooks(
-            normalize_image_background=upstream_services().core.normalize_image_background,
-            normalize_image_output_format=upstream_services().core.normalize_image_output_format,
+            normalize_image_background=services.core.normalize_image_background,
+            normalize_image_output_format=services.core.normalize_image_output_format,
             normalize_image_output_compression=(
-                upstream_services().core.normalize_image_output_compression
+                services.core.normalize_image_output_compression
             ),
-            normalize_image_moderation=upstream_services().core.normalize_image_moderation,
+            normalize_image_moderation=services.core.normalize_image_moderation,
         ),
     )
 
 
-def _is_transparent_image_request(background: str | None) -> bool:
-    return upstream_services().requests.is_transparent_image_request(
+def _is_transparent_image_request(
+    background: str | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
+    services = _runtime_services(runtime)
+    return services.requests.is_transparent_image_request(
         background,
-        normalize_image_background=upstream_services().core.normalize_image_background,
+        normalize_image_background=services.core.normalize_image_background,
     )
 
 
-def _append_transparent_matte_prompt(prompt: str) -> str:
-    return upstream_services().requests.append_transparent_matte_prompt(
+def _append_transparent_matte_prompt(
+    prompt: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.append_transparent_matte_prompt(
         prompt,
-        policy=upstream_services().core.image_request_policy(),
+        policy=services.core.image_request_policy(),
     )
 
 
@@ -664,26 +581,26 @@ def _transparent_matte_upstream_options(
     prompt: str,
     output_format: str | None,
     background: str | None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[str, str | None, str | None]:
-    return upstream_services().requests.transparent_matte_upstream_options(
+    services = _runtime_services(runtime)
+    return services.requests.transparent_matte_upstream_options(
         prompt=prompt,
         output_format=output_format,
         background=background,
         hooks=upstream_image_requests.TransparentMatteHooks(
             is_transparent_image_request=(
-                upstream_services().core.is_transparent_image_request
+                services.core.is_transparent_image_request
             ),
             append_transparent_matte_prompt=(
-                upstream_services().core.append_transparent_matte_prompt
+                services.core.append_transparent_matte_prompt
             ),
         ),
     )
 
 
-async def close_client() -> None:
-    lifecycle = get_upstream_runtime().supplier_transport
-    close = getattr(lifecycle, "close", None) or getattr(lifecycle, "close_client")
-    await close()
+async def close_client(*, runtime: ImageUpstreamRuntime) -> None:
+    await upstream_client_lifecycle.close_client(runtime=runtime)
 
 
 @dataclass(frozen=True)
@@ -744,10 +661,14 @@ def _legacy_route_to_channel_engine(route: str | None) -> tuple[str, str]:
     return _IMAGE_CHANNEL_AUTO, _IMAGE_ROUTE_RESPONSES
 
 
-async def _resolve_legacy_image_primary_route() -> str | None:
+async def _resolve_legacy_image_primary_route(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str | None:
+    services = _runtime_services(runtime)
     for key in (_IMAGE_PRIMARY_ROUTE_KEY, _IMAGE_PRIMARY_ROUTE_LEGACY_KEY):
         try:
-            raw = await upstream_services().infrastructure.resolve(key)
+            raw = await services.infrastructure.resolve(key)
         except Exception as exc:  # noqa: BLE001
             logger.debug("image route setting resolve fallback key=%s err=%s", key, exc)
             raw = None
@@ -756,25 +677,36 @@ async def _resolve_legacy_image_primary_route() -> str | None:
     return None
 
 
-async def _has_explicit_image_dispatch_setting(key: str, env_name: str) -> bool:
+async def _has_explicit_image_dispatch_setting(
+    key: str,
+    env_name: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
+    services = _runtime_services(runtime)
     if os.environ.get(env_name, "").strip():
         return True
     try:
-        raw = await upstream_services().core.resolve_db(key)
+        raw = await services.core.resolve_db(key)
     except Exception as exc:  # noqa: BLE001
         logger.debug("image dispatch db setting lookup failed key=%s err=%s", key, exc)
         return False
     return raw is not None and str(raw).strip() != ""
 
 
-async def _resolve_image_channel() -> str:
+async def _resolve_image_channel(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
     """Resolve async channel strategy with legacy primary_route fallback."""
+    services = _runtime_services(runtime)
     has_explicit = await _has_explicit_image_dispatch_setting(
         _IMAGE_CHANNEL_KEY,
         "IMAGE_CHANNEL",
+        runtime=runtime,
     )
     raw = (
-        await upstream_services().infrastructure.resolve(_IMAGE_CHANNEL_KEY)
+        await services.infrastructure.resolve(_IMAGE_CHANNEL_KEY)
         if has_explicit
         else None
     )
@@ -782,7 +714,7 @@ async def _resolve_image_channel() -> str:
     if channel in _IMAGE_CHANNELS:
         return channel
 
-    legacy_route = await _resolve_legacy_image_primary_route()
+    legacy_route = await _resolve_legacy_image_primary_route(runtime=runtime)
     legacy_channel, _legacy_engine = _legacy_route_to_channel_engine(legacy_route)
     if channel:
         logger.warning(
@@ -794,14 +726,19 @@ async def _resolve_image_channel() -> str:
     return legacy_channel
 
 
-async def _resolve_image_engine() -> str:
+async def _resolve_image_engine(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
     """Resolve image engine with legacy primary_route fallback."""
+    services = _runtime_services(runtime)
     has_explicit = await _has_explicit_image_dispatch_setting(
         _IMAGE_ENGINE_KEY,
         "IMAGE_ENGINE",
+        runtime=runtime,
     )
     raw = (
-        await upstream_services().infrastructure.resolve(_IMAGE_ENGINE_KEY)
+        await services.infrastructure.resolve(_IMAGE_ENGINE_KEY)
         if has_explicit
         else None
     )
@@ -809,7 +746,7 @@ async def _resolve_image_engine() -> str:
     if engine in _IMAGE_ENGINES:
         return engine
 
-    legacy_route = await _resolve_legacy_image_primary_route()
+    legacy_route = await _resolve_legacy_image_primary_route(runtime=runtime)
     _legacy_channel, legacy_engine = _legacy_route_to_channel_engine(legacy_route)
     if engine:
         logger.warning(
@@ -821,15 +758,18 @@ async def _resolve_image_engine() -> str:
     return legacy_engine
 
 
-async def _resolve_image_primary_route() -> str:
-    """Compatibility label for older callers/tests.
+async def resolve_image_primary_route(
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    """Route label for queueing and admin metadata.
 
     New dispatch uses ``image.channel`` + ``image.engine``. This function keeps
     the old route-ish return values where possible so queueing and admin
     metadata can continue to treat dual_race specially.
     """
-    channel = await _resolve_image_channel()
-    engine = await _resolve_image_engine()
+    channel = await _resolve_image_channel(runtime=runtime)
+    engine = await _resolve_image_engine(runtime=runtime)
     if engine == _IMAGE_ROUTE_DUAL_RACE:
         return _IMAGE_ROUTE_DUAL_RACE
     if channel == _IMAGE_CHANNEL_IMAGE_JOBS_ONLY:
@@ -839,14 +779,11 @@ async def _resolve_image_primary_route() -> str:
     return _IMAGE_ROUTE_RESPONSES
 
 
-# 兼容性别名（保留旧函数名，避免外部 import / 测试 monkeypatch 断裂）
-_resolve_text_to_image_primary_route = _resolve_image_primary_route
-
-
 def _auth_headers(
     api_key: str,
     *,
     trace_id: str | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> dict[str, str]:
     """构造 outbound headers。
 
@@ -855,22 +792,26 @@ def _auth_headers(
     - `x-trace-id`: 调用方自生成的 uuid4，用于对账上游下发的 `x-request-id`
     传入 trace_id=None 时由本函数自动生成；调用方需要事后日志记录时可显式传同一个值。
     """
-    headers: dict[str, str] = {
-        "authorization": f"Bearer {api_key}",
-        "originator": _LUMEN_ORIGINATOR,
-        "x-trace-id": trace_id or upstream_services().core.generate_trace_id(),
-    }
-    return headers
+    del runtime
+    return upstream_auth_headers(api_key, trace_id=trace_id)
 
 
-def _json_dumps_stable(value: Any) -> str:
-    return upstream_services().requests.json_dumps_stable(value)
+def _json_dumps_stable(
+    value: Any,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
+    services = _runtime_services(runtime)
+    return services.requests.json_dumps_stable(value)
 
 
 def _image_file_fingerprints(
     files: list[tuple[str, tuple[str, bytes, str]]] | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> list[dict[str, Any]]:
-    return upstream_services().requests.image_file_fingerprints(files)
+    services = _runtime_services(runtime)
+    return services.requests.image_file_fingerprints(files)
 
 
 def _image_idempotency_key(
@@ -879,15 +820,17 @@ def _image_idempotency_key(
     endpoint: str,
     body: dict[str, Any] | None = None,
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> str:
-    return upstream_services().requests.image_idempotency_key(
+    services = _runtime_services(runtime)
+    return services.requests.image_idempotency_key(
         trace_id=trace_id,
         endpoint=endpoint,
         body=body,
         files=files,
         hooks=upstream_image_requests.ImageIdempotencyKeyHooks(
-            json_dumps_stable=upstream_services().core.json_dumps_stable,
-            image_file_fingerprints=upstream_services().core.image_file_fingerprints,
+            json_dumps_stable=services.core.json_dumps_stable,
+            image_file_fingerprints=services.core.image_file_fingerprints,
         ),
     )
 
@@ -899,15 +842,17 @@ def _attach_image_idempotency_key(
     endpoint: str,
     body: dict[str, Any] | None = None,
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> None:
-    upstream_services().requests.attach_image_idempotency_key(
+    services = _runtime_services(runtime)
+    services.requests.attach_image_idempotency_key(
         headers,
         trace_id=trace_id,
         endpoint=endpoint,
         body=body,
         files=files,
         hooks=upstream_image_requests.AttachImageIdempotencyKeyHooks(
-            image_idempotency_key=upstream_services().core.image_idempotency_key,
+            image_idempotency_key=services.core.image_idempotency_key,
         ),
     )
 
@@ -1137,15 +1082,35 @@ async def _extract_image_results(
     status_code: int,
     *,
     proxy_url: str | None = None,
+    request_context: ImageRequestContext | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> list[tuple[str, str | None]]:
-    return await upstream_services().direct.extract_image_results(
+    runtime = runtime or (
+        request_context.upstream_runtime if request_context is not None else None
+    )
+    services = _runtime_services(runtime)
+    fetch_image_url_as_bytes = services.direct.fetch_image_url_as_bytes
+    if request_context is not None:
+
+        async def fetch_image_url_as_bytes(
+            image_url: str,
+            *,
+            proxy_url: str | None = None,
+        ) -> bytes:
+            return await services.direct.fetch_image_url_as_bytes(
+                image_url,
+                proxy_url=proxy_url,
+                request_context=request_context,
+            )
+
+    return await services.direct.extract_image_results(
         payload,
         status_code,
-        fetch_image_url_as_bytes=upstream_services().direct.fetch_image_url_as_bytes,
-        upstream_error_type=upstream_services().infrastructure.UpstreamError,
-        bad_response_error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+        fetch_image_url_as_bytes=fetch_image_url_as_bytes,
+        upstream_error_type=services.infrastructure.UpstreamError,
+        bad_response_error_code=services.infrastructure.EC.BAD_RESPONSE.value,
         no_image_returned_error_code=(
-            upstream_services().infrastructure.EC.NO_IMAGE_RETURNED.value
+            services.infrastructure.EC.NO_IMAGE_RETURNED.value
         ),
         proxy_url=proxy_url,
     )
@@ -1156,14 +1121,23 @@ async def _extract_image_result(
     status_code: int,
     *,
     proxy_url: str | None = None,
+    request_context: ImageRequestContext | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[str, str | None]:
-    """Compatibility wrapper for callers that expect the first image only."""
-    return await upstream_services().direct.extract_image_result(
-        payload,
-        status_code,
-        extract_image_results=upstream_services().core.extract_image_results,
-        proxy_url=proxy_url,
+    runtime = runtime or (
+        request_context.upstream_runtime if request_context is not None else None
     )
+    services = _runtime_services(runtime)
+    kwargs: dict[str, Any] = {"proxy_url": proxy_url}
+    if request_context is not None:
+        kwargs["request_context"] = request_context
+    return (
+        await services.core.extract_image_results(
+            payload,
+            status_code,
+            **kwargs,
+        )
+    )[0]
 
 
 # 图生图 multipart 走 curl 子进程——实测在同一台服务器上 httpx.AsyncClient 发出
@@ -1173,27 +1147,52 @@ async def _extract_image_result(
 _CURL_BIN = shutil.which("curl") or "/usr/bin/curl"
 
 
-def _extract_response_image_b64(event: dict[str, Any]) -> str | None:
-    return upstream_services().responses.extract_response_image_b64(event)
+def _extract_response_image_b64(
+    event: dict[str, Any],
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str | None:
+    services = _runtime_services(runtime)
+    return services.responses.extract_response_image_b64(event)
 
 
-def _extract_response_revised_prompt(event: dict[str, Any]) -> str | None:
-    return upstream_services().responses.extract_response_revised_prompt(event)
+def _extract_response_revised_prompt(
+    event: dict[str, Any],
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str | None:
+    services = _runtime_services(runtime)
+    return services.responses.extract_response_revised_prompt(event)
 
 
-def _b64_value_if_str(value: Any) -> str | None:
-    return upstream_services().responses.b64_value_if_str(value)
+def _b64_value_if_str(
+    value: Any,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str | None:
+    services = _runtime_services(runtime)
+    return services.responses.b64_value_if_str(value)
 
 
-def _extract_image_b64_from_payload(payload: Any) -> str | None:
-    return upstream_services().responses.extract_image_b64_from_payload(
+def _extract_image_b64_from_payload(
+    payload: Any,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str | None:
+    services = _runtime_services(runtime)
+    return services.responses.extract_image_b64_from_payload(
         payload,
-        b64_value_if_str=upstream_services().core.b64_value_if_str,
+        b64_value_if_str=services.core.b64_value_if_str,
     )
 
 
-def _extract_image_billable_count(payload: Any) -> int | None:
-    return upstream_services().responses.extract_image_billable_count(payload)
+def _extract_image_billable_count(
+    payload: Any,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> int | None:
+    services = _runtime_services(runtime)
+    return services.responses.extract_image_billable_count(payload)
 
 
 # 带 partial_images 时上游能承载的像素上限（见 _responses_image_stream 里的说明）。
@@ -1265,9 +1264,10 @@ async def responses_call(
     proxy_override: ProviderProxyDefinition | None = None,
     timeout_s: float | None = None,
     endpoint_label: str = "responses",
+    runtime: ImageUpstreamRuntime,
 ) -> dict[str, Any]:
     """Run an unowned text Responses call with provider circuit accounting."""
-    services = upstream_services()
+    services = runtime.services
     call = services.responses.responses_client_call
     caller_owns_provider = (
         api_key_override is not None and base_url_override is not None
@@ -1312,25 +1312,156 @@ async def responses_call(
     return payload
 
 
-install_upstream_services(build_upstream_services(globals()))
-_configure_pil_max_image_pixels()
-install_upstream_runtime(
-    build_upstream_runtime(
-        settings=settings,
-        providers=provider_pool,
-        supplier_transport=upstream_client_lifecycle,
-        image_job_client=ImageJobClient,
-        result_downloads=upstream_direct_requests,
-        progress=upstream_transport,
-        clock=time,
-        metrics={
-            "duration": record_upstream_duration,
-            "request": record_upstream_request,
-            "tokens": record_upstream_tokens,
-            "used_percent": record_used_percent,
-        },
+def build_image_upstream_runtime() -> ImageUpstreamRuntime:
+    runtime = ImageUpstreamRuntime(build_upstream_services(globals()))
+    services = runtime.services
+    _configure_pil_max_image_pixels(services)
+    services.core.configure_pil_max_image_pixels = partial(
+        _configure_pil_max_image_pixels,
+        services,
     )
-)
+    bindings = {
+        "core": (
+            "add_image_output_options",
+            "append_transparent_matte_prompt",
+            "apply_retry_cache_busters",
+            "attach_image_idempotency_key",
+            "auth_headers",
+            "b64_value_if_str",
+            "extract_image_b64_from_payload",
+            "extract_image_billable_count",
+            "extract_image_result",
+            "extract_image_results",
+            "extract_response_image_b64",
+            "extract_response_revised_prompt",
+            "has_explicit_image_dispatch_setting",
+            "image_file_fingerprints",
+            "image_idempotency_key",
+            "image_request_policy",
+            "is_transparent_image_request",
+            "json_dumps_stable",
+            "normalize_image_background",
+            "normalize_image_moderation",
+            "normalize_image_output_compression",
+            "normalize_image_output_format",
+            "normalize_image_quality",
+            "resolve_image_channel",
+            "resolve_image_engine",
+            "resolve_image_primary_route",
+            "resolve_legacy_image_primary_route",
+            "responses_call",
+            "transparent_matte_upstream_options",
+        ),
+        "direct": (
+            "direct_image_result_unknown_error",
+            "download_result_url_bytes",
+            "fetch_image_url_as_bytes",
+            "image_request_timeout",
+            "is_direct_image_result_unknown",
+            "minimum_image_read_timeout",
+            "resolve_image_job_base_url",
+            "select_image_read_timeout",
+            "wrap_inpaint_prompt",
+        ),
+        "dispatch": (
+            "image_dispatch_candidates",
+            "image_endpoint_kind_for_engine",
+            "image_jobs_endpoint_for_engine",
+            "is_image_job_configuration_error",
+            "provider_supports_image_jobs",
+            "should_use_image_jobs",
+            "validate_selected_image_job_configuration",
+        ),
+        "image_jobs": (
+            "build_image_job_client",
+            "download_image_job_result",
+            "image_job_body_base",
+            "image_job_error",
+            "image_job_payload",
+            "image_job_reference_image_entries",
+            "image_job_sidecar_token",
+            "submit_and_wait_image_job",
+            "should_continue_image_job_failover",
+            "validate_effective_image_job_configuration",
+        ),
+        "lifecycle": (
+            "build_client",
+            "build_images_client",
+            "cache_proxied_client",
+            "close_client",
+            "close_retired_clients_now",
+            "delayed_aclose",
+            "get_client",
+            "get_images_client",
+            "resolve_timeout_config",
+            "schedule_delayed_aclose",
+        ),
+        "retry": (
+            "fallback_retry_backoff_seconds",
+            "is_retryable_fallback_exception",
+            "max_attempts_for_exception",
+            "mentions_safety_policy",
+            "merge_fallback_errors",
+            "merge_image_path_errors",
+            "provider_error_details",
+            "retry_after_seconds",
+            "should_continue_image_provider_failover",
+            "summarize_exception",
+            "truncate_lane_summary",
+        ),
+        "providers": (
+            "image_quota_claim",
+            "image_request_attempt_claim",
+            "is_image_rate_limit_error",
+            "is_quota_accounting_unavailable",
+            "pool_select_compat",
+            "provider_allows_image_endpoint",
+            "provider_attempt_context",
+            "provider_capability_error",
+            "provider_endpoint_locked_error",
+            "provider_endpoint_unavailable_error",
+            "record_admin_image_call_or_raise",
+            "release_unused_image_reservation",
+            "reserve_admin_image_call",
+        ),
+        "references": (
+            "get_or_upload_reference",
+            "normalize_reference_image",
+            "push_reference_to_image_job",
+            "reference_cache_delete",
+            "reference_cache_get",
+            "reference_cache_keys",
+            "reference_cache_store",
+            "reference_cache_trim",
+            "reference_url_is_live",
+            "resolve_reference_image_urls",
+        ),
+        "requests": (
+            "validate_image_job_base_url",
+            "validated_byok_target_for_request",
+        ),
+        "race": ("cancel_and_wait_tasks",),
+        "responses": (
+            "iter_sse",
+            "iter_sse_with_runtime",
+            "responses_call",
+            "responses_client_call",
+            "stream_completion",
+        ),
+        "transport": (
+            "curl_post_multipart",
+            "curl_post_multipart_using_paths",
+            "emit_image_progress",
+            "iter_sse_curl",
+            "maybe_record_usage_from_event",
+            "stage_multipart_bytes_to_tmp",
+        ),
+    }
+    for group_name, names in bindings.items():
+        group = getattr(services, group_name)
+        for name in names:
+            setattr(group, name, partial(getattr(group, name), runtime=runtime))
+    return runtime
 
 
 __all__ = [
@@ -1339,6 +1470,7 @@ __all__ = [
     "edit_image",
     "stream_completion",
     "responses_call",
+    "build_image_upstream_runtime",
     "close_client",
     "validate_effective_image_job_configuration",
 ]

@@ -74,10 +74,10 @@ export function useSSE(
     options.onControl?.(event),
   );
   const emitRecoverSnapshot = useEffectEvent<SnapshotAdapter>(
-    (scopes, reason) => {
+    (scopes, reason, signal) => {
       const recover = options.recoverSnapshot;
       return recover
-        ? recover(scopes, reason)
+        ? recover(scopes, reason, signal)
         : Promise.reject(new Error("snapshot adapter unavailable"));
     },
   );

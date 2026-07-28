@@ -10,11 +10,14 @@ normal static import graph misses:
 - writes, deletes, and mutating calls against `sys.modules`;
 - imports of private names across module boundaries;
 - module-level mutable containers and explicit `global` statements;
+- production module attribute replacement and dynamic `setattr`;
+- cached service singletons and package-to-top-level sibling imports;
 - public API exports for compatibility facades in the retirement ledger.
 
 The baseline is not an allowlist for new code. `scripts/check_architecture.py`
-fails when a new finding appears or when a facade public API changes. Removing
-an entry is always allowed; updating the baseline requires explicit review:
+fails when a new finding appears, an obsolete finding remains in the baseline,
+or a facade public API changes. Debt reduction and its baseline removal must
+land together:
 
 ```bash
 uv run python scripts/architecture_audit.py --update-baseline
@@ -42,11 +45,13 @@ ledger entry.
 | I-008 | Resume, rollback, failpoint, shell syntax, and gate regression tests |
 
 The updater keeps `scripts/update.sh` as the public entrypoint. Its implementation
-lives in `scripts/update/`, and the journal records operation identity, phase
-attempts, completed phases, selected rollback context, terminal status, and
-failure metadata. `LUMEN_UPDATE_FAILPOINT` accepts `before:<phase>`,
-`after:<phase>`, `<phase>:before`, `<phase>:after`, or a bare phase name.
-`LUMEN_UPDATE_RESUME=1` reuses a failed or interrupted journal operation.
+lives in `scripts/update/`. Journal schema v2 persists the original link/env
+snapshot, runtime invariants, committed boundary, top-level phase attempts,
+terminal status, and failure metadata. `LUMEN_UPDATE_FAILPOINT` accepts
+`before:<phase>`, `before_done:<phase>`, `after_done:<phase>`,
+`after:<phase>`, the reversed `<phase>:<timing>` forms, or a bare phase name.
+`LUMEN_UPDATE_RESUME=1` reuses a failed or interrupted v2 operation only after
+link, env, snapshot, target-release, and migration-head validation.
 
 ### Update Module Boundaries
 
@@ -60,6 +65,6 @@ failure metadata. `LUMEN_UPDATE_FAILPOINT` accepts `before:<phase>`,
 - `update/runner.sh`: module loading, locks/traps, resume-aware phase ordering,
   and terminal status only.
 
-Every updater shell file must remain below 600 lines. The complexity gate scans
-`scripts/update.sh` and `scripts/update/**/*.sh` recursively with a maximum of
-599 lines, independently from the 1,500-line Python/TypeScript source limit.
+Every updater shell file must remain at or below 400 lines. The complexity gate
+scans `scripts/update.sh` and `scripts/update/**/*.sh` recursively with that
+limit, independently from the general Python/TypeScript source limit.

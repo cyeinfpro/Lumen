@@ -5,6 +5,25 @@
 update_phase_fetch_release() {
 emit_start fetch_release
 
+if [ "${LUMEN_UPDATE_JOURNAL_RESUMED:-0}" = "1" ] \
+        && [ -n "${TARGET_TAG:-}" ] \
+        && [ -n "${NEW_ID:-}" ] \
+        && [ -n "${NEW_RELEASE:-}" ] \
+        && [ -n "${RELEASE_SOURCE_COMMIT:-}" ] \
+        && [ -n "${RELEASE_SOURCE_COMMIT_PROOF:-}" ] \
+        && [ -n "${RELEASE_SOURCE_PROOF_FILE:-}" ] \
+        && [ -n "${RELEASE_SOURCE_PROOF_SHA256:-}" ] \
+        && [ -n "${RELEASE_SOURCE_TREE_SHA256:-}" ]; then
+    if ! lumen_update_journal_bind_target; then
+        log_error "[fetch_release] 已落盘 target proof 无法幂等重放。"
+        emit_fail fetch_release 1
+        exit 1
+    fi
+    emit_info fetch_release resume "target_contract_replayed"
+    emit_done fetch_release 0
+    return 0
+fi
+
 # 发布物来源目录：
 #   - LUMEN_REPO_DIR / LUMEN_SOURCE_ROOT 显式指定时优先采用；
 #   - 当前脚本或 /root/Lumen 来自完整 git 仓库时，优先从该仓库复制（让脚本/compose 修复进入新 release）；
@@ -119,17 +138,20 @@ if [ -z "${RELEASE_SOURCE_REF}" ]; then
     RELEASE_SOURCE_REF="${TARGET_RELEASE_TAG}"
 fi
 
-if [ -d "${REPO_DIR}/.git" ] && [ -n "${RELEASE_SOURCE_REF}" ]; then
+if [ -d "${REPO_DIR}/.git" ]; then
+    RELEASE_SOURCE_GIT_REF="${RELEASE_SOURCE_REF:-HEAD}"
     RELEASE_SOURCE_GIT_COMMIT="$(cd "${REPO_DIR}" \
-        && git rev-parse --verify "${RELEASE_SOURCE_REF}^{commit}" 2>/dev/null || true)"
+        && git rev-parse --verify \
+            "${RELEASE_SOURCE_GIT_REF}^{commit}" 2>/dev/null || true)"
     if release_commit_is_valid "${RELEASE_SOURCE_GIT_COMMIT}"; then
         if ! record_release_source_commit \
-                "${RELEASE_SOURCE_GIT_COMMIT}" "git:${RELEASE_SOURCE_REF}"; then
+                "${RELEASE_SOURCE_GIT_COMMIT}" \
+                "git:${RELEASE_SOURCE_GIT_REF}"; then
             emit_fail fetch_release 1
             exit 1
         fi
     elif [ -n "${RELEASE_EXPECTED_COMMIT}" ]; then
-        log_error "[fetch_release] 无法从本地 git 解析 ${RELEASE_SOURCE_REF} 的 immutable commit。"
+        log_error "[fetch_release] 无法从本地 git 解析 ${RELEASE_SOURCE_GIT_REF} 的 immutable commit。"
         emit_fail fetch_release 1
         exit 1
     fi
@@ -195,6 +217,78 @@ elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
         fi
         enable_local_build_fallback
     fi
+fi
+
+if ! release_commit_is_valid "${RELEASE_SOURCE_COMMIT:-}" \
+        || [ -z "${RELEASE_SOURCE_COMMIT_PROOF:-}" ]; then
+    log_error "[fetch_release] 待发布源码缺少不可变 commit/proof，拒绝完成 fetch_release。"
+    emit_fail fetch_release 1
+    exit 1
+fi
+if ! rm -f \
+        "${NEW_RELEASE}/.image-tag" \
+        "${NEW_RELEASE}/.release-source-proof" \
+        "${NEW_RELEASE}/release-manifest.json"; then
+    log_error "[fetch_release] 无法清理从旧 release 继承的 proof 文件。"
+    emit_fail fetch_release 1
+    exit 1
+fi
+if ! RELEASE_SOURCE_TREE_SHA256="$(
+        lumen_update_release_source_sha256 "${NEW_RELEASE}"
+    )"; then
+    log_error "[fetch_release] 无法计算 staged source tree SHA-256。"
+    emit_fail fetch_release 1
+    exit 1
+fi
+RELEASE_SOURCE_PROOF_FILE="${NEW_RELEASE}/.release-source-proof"
+RELEASE_SOURCE_PROOF_TMP="$(
+    mktemp "${NEW_RELEASE}/.release-source-proof.XXXXXXXXXX" 2>/dev/null
+)" || {
+    log_error "[fetch_release] 无法创建 source proof 临时文件。"
+    emit_fail fetch_release 1
+    exit 1
+}
+if ! printf '%s\n%s\n' \
+        "${RELEASE_SOURCE_COMMIT}" \
+        "${RELEASE_SOURCE_COMMIT_PROOF}" > "${RELEASE_SOURCE_PROOF_TMP}" \
+        || ! lumen_update_copy_file_durable \
+            "${RELEASE_SOURCE_PROOF_TMP}" "${RELEASE_SOURCE_PROOF_FILE}"; then
+    rm -f "${RELEASE_SOURCE_PROOF_TMP}" 2>/dev/null || true
+    log_error "[fetch_release] 无法持久化 source commit proof。"
+    emit_fail fetch_release 1
+    exit 1
+fi
+rm -f "${RELEASE_SOURCE_PROOF_TMP}"
+RELEASE_SOURCE_PROOF_SHA256="$(
+    lumen_update_file_sha256 "${RELEASE_SOURCE_PROOF_FILE}"
+)"
+
+RELEASE_MANIFEST_FILE=""
+RELEASE_MANIFEST_SHA256=""
+if [ -n "${RELEASE_SOURCE_MANIFEST_CACHE}" ]; then
+    if [ ! -f "${RELEASE_SOURCE_MANIFEST_CACHE}" ]; then
+        log_error "[fetch_release] release manifest cache 缺失，拒绝绑定 target。"
+        emit_fail fetch_release 1
+        exit 1
+    fi
+    RELEASE_MANIFEST_SHA256="$(
+        lumen_update_file_sha256 "${RELEASE_SOURCE_MANIFEST_CACHE}"
+    )"
+fi
+if [ -n "${TARGET_RELEASE_TAG}" ] && [ -z "${RELEASE_MANIFEST_SHA256}" ]; then
+    log_error "[fetch_release] fixed release 缺少 release manifest SHA-256，拒绝绑定 target。"
+    emit_fail fetch_release 1
+    exit 1
+fi
+RELEASE_IMAGE_TAG_FILE=""
+RELEASE_IMAGE_TAG_SHA256=""
+# rolling digest 只有本地 pull/build 后才能证明；先绑定空值，pull_images 再用
+# Docker 的 immutable RepoDigest/Image ID 单调补全，不能用 tag/source commit 冒充。
+TARGET_ROLLING_DIGEST=""
+if ! lumen_update_journal_bind_target; then
+    log_error "[fetch_release] update target 与 journal 中已绑定的不可变目标冲突。"
+    emit_fail fetch_release 1
+    exit 1
 fi
 
 emit_done fetch_release 0

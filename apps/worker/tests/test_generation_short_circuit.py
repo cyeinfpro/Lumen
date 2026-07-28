@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from app.tasks.generation_parts import default_runtime as generation
 from lumen_core.constants import ImageSource
+from app.tasks.generation_parts import persistence
 
 
 class _ScalarResult:
@@ -41,7 +41,7 @@ def _image(**overrides: Any) -> SimpleNamespace:
 async def test_existing_generated_image_short_circuit_accepts_valid_image() -> None:
     row = _image()
 
-    found = await generation._find_existing_generated_image(
+    found = await persistence.find_existing_generated_image(
         _Session(row),
         task_id="gen-1",
         user_id="user-1",
@@ -52,7 +52,7 @@ async def test_existing_generated_image_short_circuit_accepts_valid_image() -> N
 
 @pytest.mark.asyncio
 async def test_existing_generated_image_short_circuit_rejects_non_generated() -> None:
-    found = await generation._find_existing_generated_image(
+    found = await persistence.find_existing_generated_image(
         _Session(_image(source="upload")),
         task_id="gen-1",
         user_id="user-1",
@@ -63,7 +63,7 @@ async def test_existing_generated_image_short_circuit_rejects_non_generated() ->
 
 @pytest.mark.asyncio
 async def test_existing_generated_image_short_circuit_rejects_bad_dimensions() -> None:
-    found = await generation._find_existing_generated_image(
+    found = await persistence.find_existing_generated_image(
         _Session(_image(width=0, height=1024)),
         task_id="gen-1",
         user_id="user-1",

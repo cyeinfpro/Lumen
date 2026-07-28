@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import base64
 import inspect
 from types import SimpleNamespace
@@ -11,6 +9,10 @@ import pytest
 
 from app.upstream_parts import direct_images
 from app.upstream_parts import upstream_impl as _upstream_impl  # noqa: F401  组装服务
+
+
+TEST_UPSTREAM_RUNTIME = _upstream_impl.build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 class InjectedUpstreamError(Exception):
@@ -152,9 +154,9 @@ async def test_direct_first_result_helper_uses_injected_results_facade() -> None
     assert seen == [(payload, 202, "http://proxy.example")]
 
 
-def test_upstream_facades_keep_legacy_async_signatures() -> None:
+def test_upstream_facades_expose_explicit_runtime_signatures() -> None:
     for name in ("_extract_image_results", "_extract_image_result"):
-        facade = getattr(upstream_services().core, name.lstrip("_"))
+        facade = getattr(TEST_UPSTREAM_SERVICES.core, name.lstrip("_"))
         signature = inspect.signature(facade)
 
         assert inspect.iscoroutinefunction(facade)
@@ -162,6 +164,8 @@ def test_upstream_facades_keep_legacy_async_signatures() -> None:
             "payload",
             "status_code",
             "proxy_url",
+            "request_context",
+            "runtime",
         )
         assert signature.parameters["payload"].default is inspect.Parameter.empty
         assert signature.parameters["status_code"].default is inspect.Parameter.empty
@@ -196,15 +200,15 @@ async def test_results_facade_resolves_dependencies_and_codes_at_call_time(
         return [("facade-result", None)]
 
     monkeypatch.setattr(
-        upstream_services().direct, "fetch_image_url_as_bytes", fake_fetch
+        TEST_UPSTREAM_SERVICES.direct, "fetch_image_url_as_bytes", fake_fetch
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure,
+        TEST_UPSTREAM_SERVICES.infrastructure,
         "UpstreamError",
         CurrentUpstreamError,
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure,
+        TEST_UPSTREAM_SERVICES.infrastructure,
         "EC",
         SimpleNamespace(
             BAD_RESPONSE=SimpleNamespace(value="current-bad-response"),
@@ -212,13 +216,13 @@ async def test_results_facade_resolves_dependencies_and_codes_at_call_time(
         ),
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "extract_image_results",
         fake_extract,
     )
 
     payload = {"data": [{"b64_json": "ignored"}]}
-    assert await upstream_services().core.extract_image_results(
+    assert await TEST_UPSTREAM_SERVICES.core.extract_image_results(
         payload,
         207,
         proxy_url="http://current-proxy",
@@ -250,11 +254,11 @@ async def test_first_result_facade_chains_through_current_results_facade(
         return [("patched-first", "patched-prompt")]
 
     monkeypatch.setattr(
-        upstream_services().core, "extract_image_results", fake_results_facade
+        TEST_UPSTREAM_SERVICES.core, "extract_image_results", fake_results_facade
     )
 
     payload = {"data": [{"b64_json": "ignored"}]}
-    assert await upstream_services().core.extract_image_result(
+    assert await TEST_UPSTREAM_SERVICES.core.extract_image_result(
         payload,
         208,
         proxy_url="http://chain-proxy",
@@ -276,12 +280,12 @@ def test_result_unknown_predicate_blocks_provider_fallback(error_code: str) -> N
     direct 超时、image-job sidecar 的 uncertain 终态、上游回 2xx 却不给图，是同
     一类事故：钱已经花出去了，是否计费无从确认或已确认发生。三个码都必须命中。
     """
-    exc = upstream_services().infrastructure.UpstreamError(
+    exc = TEST_UPSTREAM_SERVICES.infrastructure.UpstreamError(
         "upstream result unknown",
         status_code=200,
         error_code=error_code,
     )
-    assert upstream_services().direct.is_direct_image_result_unknown(exc) is True
+    assert TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(exc) is True
 
 
 @pytest.mark.parametrize(
@@ -294,17 +298,17 @@ def test_ordinary_failures_still_allow_provider_fallback(
     # 能判定未交付且未扣费的失败保持既有行为：允许换 provider 重试。
     # no_image_returned 已移出本组：它只在上游 2xx 之后产生，换 provider 会
     # 再付一笔，见上面 test_result_unknown_predicate_blocks_provider_fallback。
-    exc = upstream_services().infrastructure.UpstreamError(
+    exc = TEST_UPSTREAM_SERVICES.infrastructure.UpstreamError(
         "ordinary failure",
         error_code=error_code,
     )
-    assert upstream_services().direct.is_direct_image_result_unknown(exc) is False
+    assert TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(exc) is False
 
 
 def test_non_upstream_exception_is_not_treated_as_unknown() -> None:
     # 谓词只认 UpstreamError，裸异常不得被误判成「上游可能已扣费」。
     assert (
-        upstream_services().direct.is_direct_image_result_unknown(
+        TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(
             TimeoutError("plain timeout"),
         )
         is False

@@ -14,17 +14,24 @@
 
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 import json
 from collections import OrderedDict
+from functools import partial
 from typing import Any
 
 import httpx
 import pytest
 
 from app.upstream_parts import upstream_impl as upstream
+
+
+TEST_UPSTREAM_RUNTIME = upstream.build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+TEST_RESPONSES_CALL = partial(
+    upstream.responses_call,
+    runtime=TEST_UPSTREAM_RUNTIME,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -90,17 +97,17 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, client: _FakeClient) -> None:
     async def fake_resolve_runtime() -> tuple[str, str]:
         return "https://upstream.example/v1", "test-key"
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
-        return upstream_services().lifecycle.TimeoutConfig(
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
+        return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
             connect=10.0, read=180.0, write=30.0
         )
 
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
 
 
@@ -123,7 +130,7 @@ def _valid_body() -> dict[str, Any]:
 async def test_get_client_rebuilds_when_runtime_timeout_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    built: list[upstream_services().lifecycle.TimeoutConfig] = []
+    built: list[TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig] = []
 
     class _ClosableClient:
         def __init__(self) -> None:
@@ -143,26 +150,26 @@ async def test_get_client_rebuilds_when_runtime_timeout_changes(
         return values.get(key)
 
     def fake_build_client(
-        timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
     ) -> _ClosableClient:
         built.append(timeout_config)
         client = _ClosableClient()
         clients.append(client)
         return client
 
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_client", fake_build_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_client", fake_build_client
     )
-    monkeypatch.setattr(upstream_services().core, "client", None)
-    monkeypatch.setattr(upstream_services().core, "client_timeout_config", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "client", None)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "client_timeout_config", None)
     monkeypatch.setattr(
-        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
+        TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
     )
 
-    first = await upstream_services().lifecycle.get_client()
+    first = await TEST_UPSTREAM_SERVICES.lifecycle.get_client()
     values["upstream.read_timeout_s"] = "45"
-    second = await upstream_services().lifecycle.get_client()
+    second = await TEST_UPSTREAM_SERVICES.lifecycle.get_client()
 
     assert first is clients[0]
     assert second is clients[1]
@@ -185,17 +192,17 @@ async def test_get_client_lru_evicts_proxied_clients(
             self.closed = True
 
     clients: list[_ClosableClient] = []
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=30.0, write=4.0
     )
 
     async def fake_resolve_timeout_config() -> (
-        upstream_services().lifecycle.TimeoutConfig
+        TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig
     ):
         return timeout_config
 
     def fake_build_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
     ) -> _ClosableClient:
@@ -204,23 +211,23 @@ async def test_get_client_lru_evicts_proxied_clients(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle,
+        TEST_UPSTREAM_SERVICES.lifecycle,
         "resolve_timeout_config",
         fake_resolve_timeout_config,
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_client", fake_build_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_client", fake_build_client
     )
-    monkeypatch.setattr(upstream_services().core, "proxied_clients", OrderedDict())
-    monkeypatch.setattr(upstream_services().core, "PROXIED_CLIENT_CACHE_MAX", 2)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "proxied_clients", OrderedDict())
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CACHE_MAX", 2)
     monkeypatch.setattr(
-        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
+        TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
     )
 
-    first = await upstream_services().lifecycle.get_client("http://proxy-1")
-    second = await upstream_services().lifecycle.get_client("http://proxy-2")
-    again = await upstream_services().lifecycle.get_client("http://proxy-1")
-    third = await upstream_services().lifecycle.get_client("http://proxy-3")
+    first = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy-1")
+    second = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy-2")
+    again = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy-1")
+    third = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy-3")
 
     assert again is first
     assert third is clients[2]
@@ -228,9 +235,9 @@ async def test_get_client_lru_evicts_proxied_clients(
     assert second.closed is False
     await asyncio.sleep(0.05)
     assert second.closed is True
-    assert len(upstream_services().core.proxied_clients) == 2
+    assert len(TEST_UPSTREAM_SERVICES.core.proxied_clients) == 2
     assert [
-        client.proxy_url for client in upstream_services().core.proxied_clients.values()
+        client.proxy_url for client in TEST_UPSTREAM_SERVICES.core.proxied_clients.values()
     ] == [
         "http://proxy-1",
         "http://proxy-3",
@@ -250,17 +257,17 @@ async def test_get_images_client_lru_evicts_proxied_clients(
             self.closed = True
 
     clients: list[_ClosableClient] = []
-    timeout_config = upstream_services().lifecycle.TimeoutConfig(
+    timeout_config = TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
         connect=3.0, read=30.0, write=4.0
     )
 
     async def fake_resolve_timeout_config() -> (
-        upstream_services().lifecycle.TimeoutConfig
+        TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig
     ):
         return timeout_config
 
     def fake_build_images_client(
-        _timeout_config: upstream_services().lifecycle.TimeoutConfig,
+        _timeout_config: TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig,
         *,
         proxy_url: str | None = None,
     ) -> _ClosableClient:
@@ -269,25 +276,25 @@ async def test_get_images_client_lru_evicts_proxied_clients(
         return client
 
     monkeypatch.setattr(
-        upstream_services().lifecycle,
+        TEST_UPSTREAM_SERVICES.lifecycle,
         "resolve_timeout_config",
         fake_resolve_timeout_config,
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
     )
     monkeypatch.setattr(
-        upstream_services().core, "proxied_images_clients", OrderedDict()
+        TEST_UPSTREAM_SERVICES.core, "proxied_images_clients", OrderedDict()
     )
-    monkeypatch.setattr(upstream_services().core, "PROXIED_CLIENT_CACHE_MAX", 2)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CACHE_MAX", 2)
     monkeypatch.setattr(
-        upstream_services().core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
+        TEST_UPSTREAM_SERVICES.core, "PROXIED_CLIENT_CLOSE_DELAY_SECONDS", 0.01
     )
 
-    first = await upstream_services().lifecycle.get_images_client("http://proxy-1")
-    second = await upstream_services().lifecycle.get_images_client("http://proxy-2")
-    again = await upstream_services().lifecycle.get_images_client("http://proxy-1")
-    third = await upstream_services().lifecycle.get_images_client("http://proxy-3")
+    first = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client("http://proxy-1")
+    second = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client("http://proxy-2")
+    again = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client("http://proxy-1")
+    third = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client("http://proxy-3")
 
     assert again is first
     assert third is clients[2]
@@ -295,7 +302,7 @@ async def test_get_images_client_lru_evicts_proxied_clients(
     assert second.closed is False
     await asyncio.sleep(0.05)
     assert second.closed is True
-    assert len(upstream_services().core.proxied_images_clients) == 2
+    assert len(TEST_UPSTREAM_SERVICES.core.proxied_images_clients) == 2
 
 
 @pytest.mark.asyncio
@@ -332,7 +339,7 @@ async def test_responses_call_aggregates_sse_completed_frame(
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
 
-    result = await upstream.responses_call(_valid_body())
+    result = await TEST_RESPONSES_CALL(_valid_body())
 
     assert result == response_obj
     assert client.stream_calls[0]["url"] == "https://upstream.example/v1/responses"
@@ -354,12 +361,12 @@ async def test_iter_sse_with_runtime_counts_utf8_bytes_for_line_limit(
     )
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
-    monkeypatch.setattr(upstream_services().core, "SSE_MAX_LINE_BYTES", 4)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "SSE_MAX_LINE_BYTES", 4)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         _ = [
             event
-            async for event in upstream_services().responses.iter_sse_with_runtime(
+            async for event in TEST_UPSTREAM_SERVICES.responses.iter_sse_with_runtime(
                 base="https://upstream.example/v1",
                 api_key="test-key",
                 body=_valid_body(),
@@ -385,7 +392,7 @@ async def test_iter_sse_with_runtime_closes_response_on_http_error(
     with pytest.raises(upstream.UpstreamError) as exc_info:
         _ = [
             event
-            async for event in upstream_services().responses.iter_sse_with_runtime(
+            async for event in TEST_UPSTREAM_SERVICES.responses.iter_sse_with_runtime(
                 base="https://upstream.example/v1",
                 api_key="test-key",
                 body=_valid_body(),
@@ -407,10 +414,10 @@ async def test_responses_call_counts_utf8_bytes_for_line_limit(
     )
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
-    monkeypatch.setattr(upstream_services().core, "SSE_MAX_LINE_BYTES", 4)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "SSE_MAX_LINE_BYTES", 4)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.error_code == "stream_too_large"
     assert fake_response.aclose_called is True
@@ -429,7 +436,7 @@ async def test_responses_call_closes_response_on_http_error(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.error_code == "text_stream_interrupted"
     assert fake_response.aclose_called is True
@@ -454,7 +461,7 @@ async def test_responses_call_returns_json_body_directly(
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
 
-    result = await upstream.responses_call(
+    result = await TEST_RESPONSES_CALL(
         _valid_body(),
         endpoint_label="responses_summary",
     )
@@ -477,7 +484,7 @@ async def test_responses_call_4xx_raises_upstream_error(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.error_code == "rate_limit_error"
@@ -497,7 +504,7 @@ async def test_responses_call_5xx_raises_upstream_error(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.error_code == "server_error"
@@ -517,7 +524,7 @@ async def test_responses_call_cancelled_propagates(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(asyncio.CancelledError):
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     # 取消时 async context manager 仍会退出，让 httpx 释放底层连接。
     assert fake_response.aclose_called is True
@@ -534,7 +541,7 @@ async def test_responses_call_records_usage_metric_for_sse(
         if isinstance(usage, dict):
             captured.append(usage)
 
-    monkeypatch.setattr(upstream_services().core, "record_usage", fake_record_usage)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "record_usage", fake_record_usage)
 
     response_obj = {
         "id": "resp_3",
@@ -555,7 +562,7 @@ async def test_responses_call_records_usage_metric_for_sse(
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
 
-    await upstream.responses_call(_valid_body())
+    await TEST_RESPONSES_CALL(_valid_body())
 
     assert captured, "_record_usage was not invoked for SSE completed frame"
     assert captured[0]["input_tokens"] == 7
@@ -572,7 +579,7 @@ async def test_responses_call_records_usage_metric_for_json(
         if isinstance(usage, dict):
             captured.append(usage)
 
-    monkeypatch.setattr(upstream_services().core, "record_usage", fake_record_usage)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "record_usage", fake_record_usage)
 
     payload = {
         "id": "resp_4",
@@ -588,7 +595,7 @@ async def test_responses_call_records_usage_metric_for_json(
     client = _FakeClient(fake_response)
     _patch_client(monkeypatch, client)
 
-    await upstream.responses_call(_valid_body())
+    await TEST_RESPONSES_CALL(_valid_body())
 
     assert captured == [payload["usage"]]
 
@@ -616,12 +623,12 @@ async def test_responses_call_uses_overrides_skips_resolve_runtime(
     async def fake_get_client() -> _FakeClient:
         return client
 
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
 
-    await upstream.responses_call(
+    await TEST_RESPONSES_CALL(
         _valid_body(),
         api_key_override="override-key",
         base_url_override="https://override.example/v1",
@@ -653,7 +660,7 @@ async def test_responses_call_validates_body_and_sorts_tools(
     ]
     body["tool_choice"] = "auto"
 
-    await upstream.responses_call(body)
+    await TEST_RESPONSES_CALL(body)
 
     sent = client.stream_calls[0]["json"]
     assert [t["name"] for t in sent["tools"]] == ["alpha", "zeta"]
@@ -671,7 +678,7 @@ async def test_responses_call_timeout_maps_to_upstream_timeout(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.error_code == "upstream_timeout"
     assert exc_info.value.status_code is None
@@ -695,6 +702,6 @@ async def test_responses_call_sse_missing_completed_frame_raises_bad_response(
     _patch_client(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream.responses_call(_valid_body())
+        await TEST_RESPONSES_CALL(_valid_body())
 
     assert exc_info.value.error_code == "bad_response"

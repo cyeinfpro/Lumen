@@ -1,4 +1,5 @@
 fastapi
 httpx
 pillow
+cryptography>=42.0,<47.0
 uvicorn[standard]

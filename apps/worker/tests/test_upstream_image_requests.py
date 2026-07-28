@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
+from app.provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    UpstreamServices,
+)
 
 import ast
 import base64
@@ -13,8 +16,15 @@ from typing import Any
 import pytest
 
 from app import upstream_image_requests as image_requests
+from app.upstream_parts import upstream_impl as _upstream
+from app.upstream_parts.image_execution import (
+    ImageExecutionRequest,
+    ImageRequestContext,
+)
 
 
+TEST_UPSTREAM_RUNTIME = _upstream.build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 _POLICY = image_requests.ImageRequestPolicy(
     upstream_model="gpt-image-test",
     default_responses_model="gpt-responses-test",
@@ -32,6 +42,58 @@ _POLICY = image_requests.ImageRequestPolicy(
     partial_images_max_pixels=1_400_000,
     image_job_retention_days=1,
 )
+
+
+def _body_request(
+    *,
+    retry_attempt: int = 1,
+    runtime: ImageUpstreamRuntime | None = None,
+    **changes: Any,
+) -> ImageExecutionRequest:
+    runtime = runtime or TEST_UPSTREAM_RUNTIME
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "test",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "high",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "request_context": ImageRequestContext.create(
+            retry_attempt=retry_attempt,
+            upstream_runtime=runtime,
+        ),
+        "upstream_runtime": runtime,
+    }
+    values.update(changes)
+    return ImageExecutionRequest(**values)
+
+
+def _facade_body(
+    *,
+    services: UpstreamServices | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
+    image_urls: list[str] | None = None,
+    retry_attempt: int = 1,
+    **changes: Any,
+) -> dict[str, Any]:
+    graph = services or TEST_UPSTREAM_SERVICES
+    return graph.image_jobs.build_responses_image_body(
+        _body_request(
+            retry_attempt=retry_attempt,
+            runtime=runtime,
+            **changes,
+        ),
+        image_urls=image_urls,
+    )
 
 
 def _policy(**changes: Any) -> image_requests.ImageRequestPolicy:
@@ -525,11 +587,11 @@ def test_idempotency_facades_pass_current_monkeypatched_hooks(
         return "facade-stable-json"
 
     monkeypatch.setattr(
-        upstream_services().core, "image_file_fingerprints", fingerprints
+        TEST_UPSTREAM_SERVICES.core, "image_file_fingerprints", fingerprints
     )
-    monkeypatch.setattr(upstream_services().core, "json_dumps_stable", stable_dumps)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "json_dumps_stable", stable_dumps)
 
-    key = upstream_services().core.image_idempotency_key(
+    key = TEST_UPSTREAM_SERVICES.core.image_idempotency_key(
         trace_id="trace-facade",
         endpoint="image-jobs",
         body={"request_type": "generations"},
@@ -545,9 +607,9 @@ def test_idempotency_facades_pass_current_monkeypatched_hooks(
         key_calls.append(kwargs)
         return "computed-facade-key"
 
-    monkeypatch.setattr(upstream_services().core, "image_idempotency_key", computed_key)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "image_idempotency_key", computed_key)
     headers = {"Idempotency-Key": "caller-supplied-key"}
-    upstream_services().core.attach_image_idempotency_key(
+    TEST_UPSTREAM_SERVICES.core.attach_image_idempotency_key(
         headers,
         trace_id="trace-facade",
         endpoint="images/generations",
@@ -561,36 +623,36 @@ def test_facades_read_current_policy_globals_per_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        upstream_services().infrastructure, "UPSTREAM_MODEL", "patched-image-model"
+        TEST_UPSTREAM_SERVICES.infrastructure, "UPSTREAM_MODEL", "patched-image-model"
     )
     monkeypatch.setattr(
-        upstream_services().core,
+        TEST_UPSTREAM_SERVICES.core,
         "DEFAULT_IMAGE_RESPONSES_MODEL",
         "patched-responses-model",
     )
-    monkeypatch.setattr(upstream_services().core, "DEFAULT_IMAGE_OUTPUT_FORMAT", "jpeg")
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "DEFAULT_IMAGE_OUTPUT_FORMAT", "jpeg")
     monkeypatch.setattr(
-        upstream_services().core, "DEFAULT_IMAGE_OUTPUT_COMPRESSION", 42
+        TEST_UPSTREAM_SERVICES.core, "DEFAULT_IMAGE_OUTPUT_COMPRESSION", 42
     )
     monkeypatch.setattr(
-        upstream_services().core, "TRANSPARENT_MATTE_PROMPT_NOTE", "PATCHED NOTE"
+        TEST_UPSTREAM_SERVICES.core, "TRANSPARENT_MATTE_PROMPT_NOTE", "PATCHED NOTE"
     )
-    monkeypatch.setattr(upstream_services().core, "IMAGE_JOB_RETENTION_DAYS", 9)
-    monkeypatch.setattr(upstream_services().core, "PARTIAL_IMAGES_MAX_PIXELS", 1)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "IMAGE_JOB_RETENTION_DAYS", 9)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "PARTIAL_IMAGES_MAX_PIXELS", 1)
 
-    assert upstream_services().core.normalize_image_output_format(None) == "jpeg"
+    assert TEST_UPSTREAM_SERVICES.core.normalize_image_output_format(None) == "jpeg"
     assert (
-        upstream_services().core.normalize_image_output_compression(
+        TEST_UPSTREAM_SERVICES.core.normalize_image_output_compression(
             None,
             output_format="jpeg",
         )
         == 42
     )
-    assert upstream_services().core.append_transparent_matte_prompt("prompt") == (
+    assert TEST_UPSTREAM_SERVICES.core.append_transparent_matte_prompt("prompt") == (
         "prompt\n\nPATCHED NOTE"
     )
     assert (
-        upstream_services().image_jobs.image_job_payload(
+        TEST_UPSTREAM_SERVICES.image_jobs.image_job_payload(
             request_type="generations",
             endpoint="/v1/images/generations",
             body={},
@@ -610,16 +672,16 @@ def test_facades_read_current_policy_globals_per_call(
         "moderation": None,
         "model": None,
     }
-    body = upstream_services().image_jobs.build_responses_image_body(**kwargs)
+    body = _facade_body(**kwargs)
     assert body["model"] == "patched-responses-model"
     assert body["tools"][0]["model"] == "patched-image-model"
     assert body["tools"][0]["partial_images"] == 3
     assert body["tools"][0]["output_format"] == "jpeg"
     assert body["tools"][0]["output_compression"] == 42
 
-    monkeypatch.setattr(upstream_services().core, "PARTIAL_IMAGES_MAX_PIXELS", 0)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "PARTIAL_IMAGES_MAX_PIXELS", 0)
     body_after_policy_change = (
-        upstream_services().image_jobs.build_responses_image_body(**kwargs)
+        _facade_body(**kwargs)
     )
     assert "partial_images" not in body_after_policy_change["tools"][0]
 
@@ -688,46 +750,43 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
         events.append("validate")
 
     monkeypatch.setattr(
-        upstream_services().core, "normalize_image_quality", normalize_quality
+        TEST_UPSTREAM_SERVICES.core, "normalize_image_quality", normalize_quality
     )
     monkeypatch.setattr(
-        upstream_services().core,
+        TEST_UPSTREAM_SERVICES.core,
         "transparent_matte_upstream_options",
         matte_options,
     )
     monkeypatch.setattr(
-        upstream_services().core, "add_image_output_options", add_output
+        TEST_UPSTREAM_SERVICES.core, "add_image_output_options", add_output
     )
     monkeypatch.setattr(
-        upstream_services().requests,
+        TEST_UPSTREAM_SERVICES.requests,
         "parse_size_pixels",
         parse_pixels,
     )
     monkeypatch.setattr(
-        upstream_services().references, "normalize_reference_image", normalize_reference
+        TEST_UPSTREAM_SERVICES.references, "normalize_reference_image", normalize_reference
     )
-    monkeypatch.setattr(upstream_services().core, "stable_sort_tools", sort_tools)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "stable_sort_tools", sort_tools)
     monkeypatch.setattr(
-        upstream_services().core, "apply_retry_cache_busters", retry_busters
+        TEST_UPSTREAM_SERVICES.core, "apply_retry_cache_busters", retry_busters
     )
-    monkeypatch.setattr(upstream_services().core, "validate_responses_body", validate)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "validate_responses_body", validate)
 
-    token = upstream_services().core.push_image_retry_attempt(3)
-    try:
-        body = upstream_services().image_jobs.build_responses_image_body(
-            action="edit",
-            prompt="edit",
-            size="10x10",
-            images=[b"raw"],
-            quality="high",
-            output_format="jpeg",
-            output_compression=10,
-            background="transparent",
-            moderation="auto",
-            model=None,
-        )
-    finally:
-        upstream_services().core.pop_image_retry_attempt(token)
+    body = _facade_body(
+        action="edit",
+        prompt="edit",
+        size="10x10",
+        images=[b"raw"],
+        quality="high",
+        output_format="jpeg",
+        output_compression=10,
+        background="transparent",
+        moderation="auto",
+        model=None,
+        retry_attempt=3,
+    )
 
     assert events == [
         "quality",
@@ -746,7 +805,7 @@ def test_facade_builder_uses_monkeypatched_helpers_in_order(
     )
 
 
-def test_nested_retry_context_restores_outer_and_initial_values() -> None:
+def test_explicit_retry_attempts_do_not_leak_between_body_builds() -> None:
     kwargs: dict[str, Any] = {
         "action": "generate",
         "prompt": "retry context",
@@ -759,27 +818,24 @@ def test_nested_retry_context_restores_outer_and_initial_values() -> None:
         "moderation": None,
         "model": None,
     }
-    initial_attempt = upstream_services().core.image_retry_attempt_ctx.get()
-    outer_token = upstream_services().core.push_image_retry_attempt(2)
-    try:
-        outer_body = upstream_services().image_jobs.build_responses_image_body(**kwargs)
-        inner_token = upstream_services().core.push_image_retry_attempt(5)
-        try:
-            inner_body = upstream_services().image_jobs.build_responses_image_body(
-                **kwargs
-            )
-        finally:
-            upstream_services().core.pop_image_retry_attempt(inner_token)
-        restored_outer_body = upstream_services().image_jobs.build_responses_image_body(
-            **kwargs
-        )
-    finally:
-        upstream_services().core.pop_image_retry_attempt(outer_token)
+    outer_body = _facade_body(
+        **kwargs,
+        retry_attempt=2,
+    )
+    inner_body = _facade_body(
+        **kwargs,
+        retry_attempt=5,
+    )
+    repeated_outer_body = _facade_body(
+        **kwargs,
+        retry_attempt=2,
+    )
+    default_body = _facade_body(**kwargs)
 
     assert outer_body["reasoning"]["effort"] == "minimal"
     assert inner_body["reasoning"]["effort"] == "medium"
-    assert restored_outer_body["prompt_cache_key"] == outer_body["prompt_cache_key"]
-    assert upstream_services().core.image_retry_attempt_ctx.get() == initial_attempt
+    assert repeated_outer_body["prompt_cache_key"] == outer_body["prompt_cache_key"]
+    assert "prompt_cache_key" not in default_body
 
 
 @pytest.mark.asyncio
@@ -788,7 +844,11 @@ async def test_responses_stream_routes_body_through_facade(
 ) -> None:
     images = [b"raw-reference"]
     image_urls = ["https://refs.example/ref.webp"]
-    expected = upstream_services().image_jobs.build_responses_image_body(
+    runtime = _upstream.build_image_upstream_runtime()
+    services = runtime.services
+    expected = _facade_body(
+        services=services,
+        runtime=runtime,
         action="edit",
         prompt="edit via stream",
         size="1024x1024",
@@ -801,17 +861,23 @@ async def test_responses_stream_routes_body_through_facade(
         moderation="low",
         model=None,
     )
-    original_builder = upstream_services().image_jobs.build_responses_image_body
+    original_builder = services.image_jobs.build_responses_image_body
     captured: dict[str, Any] = {}
 
-    def facade_wrapper(**kwargs: Any) -> dict[str, Any]:
-        captured["builder_kwargs"] = kwargs
-        body = original_builder(**kwargs)
+    def facade_wrapper(
+        request: ImageExecutionRequest,
+        *,
+        image_urls: list[str] | None = None,
+    ) -> dict[str, Any]:
+        captured["builder_request"] = request
+        captured["builder_kwargs"] = {"image_urls": image_urls}
+        body = original_builder(request, image_urls=image_urls)
         body["facade_marker"] = True
         captured["built_body"] = body
         return body
 
     async def resolve_job_base() -> str:
+        captured["job_base_called"] = True
         return "https://image-job.example"
 
     async def resolve_refs(
@@ -835,41 +901,57 @@ async def test_responses_stream_routes_body_through_facade(
             },
         }
 
+    monkeypatch.setattr(services.image_jobs, "build_responses_image_body", facade_wrapper)
     monkeypatch.setattr(
-        upstream_services().image_jobs, "build_responses_image_body", facade_wrapper
+        services.direct,
+        "resolve_image_job_base_url",
+        resolve_job_base,
     )
     monkeypatch.setattr(
-        upstream_services().direct, "resolve_image_job_base_url", resolve_job_base
+        services.references, "resolve_reference_image_urls", resolve_refs
     )
     monkeypatch.setattr(
-        upstream_services().references, "resolve_reference_image_urls", resolve_refs
+        services.infrastructure, "resolve_provider_proxy_url", resolve_proxy
     )
+    monkeypatch.setattr(services.transport, "iter_sse_curl", iter_sse)
+
+    def select_image_read_timeout(_size: str) -> float:
+        captured["read_timeout_called"] = True
+        return 1.0
+
     monkeypatch.setattr(
-        upstream_services().infrastructure, "resolve_provider_proxy_url", resolve_proxy
-    )
-    monkeypatch.setattr(upstream_services().transport, "iter_sse_curl", iter_sse)
-    monkeypatch.setattr(
-        upstream_services().direct,
+        services.direct,
         "select_image_read_timeout",
-        lambda _size: 1.0,
+        select_image_read_timeout,
     )
 
-    result = await upstream_services().responses.responses_image_stream(
-        prompt="edit via stream",
-        size="1024x1024",
-        action="edit",
-        images=images,
-        quality="high",
-        output_format="webp",
-        output_compression=80,
-        background="auto",
-        moderation="low",
+    result = await services.responses.responses_image_stream(
+        ImageExecutionRequest(
+            action="edit",
+            prompt="edit via stream",
+            size="1024x1024",
+            images=images,
+            mask=None,
+            n=1,
+            quality="high",
+            output_format="webp",
+            output_compression=80,
+            background="auto",
+            moderation="low",
+            model=None,
+            progress_callback=None,
+            provider_override=None,
+            user_id=None,
+            upstream_runtime=runtime,
+        ),
         use_httpx=False,
         base_url_override="https://upstream.example/v1",
         api_key_override="test-key",
     )
 
     assert result == ("ZmFrZS1pbWFnZQ==", None)
+    assert captured["job_base_called"] is True
+    assert captured["read_timeout_called"] is True
     assert captured["reference_kwargs"]["api_key"] == (
         "test-image-job-sidecar-token-0123456789"
     )
@@ -896,10 +978,10 @@ async def test_image_job_reference_upload_uses_sidecar_token(
         return ["https://refs.example/ref.webp"]
 
     monkeypatch.setattr(
-        upstream_services().references, "resolve_reference_image_urls", resolve_refs
+        TEST_UPSTREAM_SERVICES.references, "resolve_reference_image_urls", resolve_refs
     )
 
-    entries = await upstream_services().image_jobs.image_job_reference_image_entries(
+    entries = await TEST_UPSTREAM_SERVICES.image_jobs.image_job_reference_image_entries(
         [b"raw-reference"],
         base_url="https://image-job.example",
         api_key="sk-upstream",

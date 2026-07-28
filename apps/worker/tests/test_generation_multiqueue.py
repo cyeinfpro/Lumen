@@ -2,29 +2,32 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 import time
 
 import pytest
 
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
+from app.tasks.generation_parts import queue as generation_queue, queue_claim
+from app.tasks.generation_parts.default_runtime import build_generation_runtime
 
 
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
+generation_services = build_generation_runtime().deps
 
 
-from app.tasks.generation_parts import queue as generation_queue
+class _QueueService:
+    expose_provider_diagnostics = False
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.provider_cooldowns: dict[str, float] = {}
+
+    def configured_capacity(self) -> int:
+        return self.capacity
+
+    async def resolve_capacity(self) -> int:
+        return self.capacity
 
 
 class _QueueRedis:
@@ -205,16 +208,16 @@ async def test_weighted_fair_lane_ordering_inside_scan_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        generation,
-        "_IMAGE_QUEUE_LANE_WEIGHTS",
+        generation_queue,
+        "IMAGE_QUEUE_LANE_WEIGHTS",
         {
             "image:interactive": 2,
             "image:workflow:large": 1,
         },
     )
     monkeypatch.setattr(
-        generation,
-        "_IMAGE_QUEUE_LANE_RANK",
+        generation_queue,
+        "IMAGE_QUEUE_LANE_RANK",
         {
             "image:interactive": 0,
             "image:workflow:large": 1,
@@ -235,10 +238,11 @@ async def test_weighted_fair_lane_ordering_inside_scan_window(
         ],
     }
 
-    selected = await generation._select_ready_generation_ids_by_lane(
+    selected = await generation_queue.select_ready_generation_ids_by_lane(
         _QueueRedis(),
         ready_by_lane,
         limit=6,
+        services=generation_services,
     )
 
     assert [_candidate_id(item) for item in selected] == [
@@ -257,34 +261,43 @@ async def test_ready_scan_skips_active_not_before_and_local_cooldown(
 ) -> None:
     redis = _QueueRedis()
     now = time.time()
-    redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY] = {
+    redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY] = {
         "active-old": now + 120.0,
     }
-    redis.strings[generation._image_queue_not_before_key("redis-wait")] = str(
+    redis.strings[generation_queue.image_queue_not_before_key("redis-wait")] = str(
         now + 120.0
     )
-    monkeypatch.setattr(
-        generation,
-        "_PROVIDER_COOLDOWN_LOCAL",
-        {"local-wait": time.monotonic() + 120.0},
+    queue_service = _QueueService(4)
+    queue_service.provider_cooldowns["local-wait"] = time.monotonic() + 120.0
+    services = replace(
+        generation_services,
+        queue=queue_service,
     )
 
-    async def fake_queued_generation_ids(limit: int) -> list[str]:
-        return [
+    async def fake_queued_generation_candidates(
+        limit: int,
+        _services: Any,
+    ) -> list[SimpleNamespace]:
+        ids = [
             "active-old",
             "redis-wait",
             "local-wait",
             "ready-a",
             "ready-b",
         ][:limit]
+        return [_candidate(task_id, "image:interactive", idx) for idx, task_id in enumerate(ids)]
 
     monkeypatch.setattr(
-        generation,
-        "_queued_generation_ids",
-        fake_queued_generation_ids,
+        generation_queue,
+        "queued_generation_candidates",
+        fake_queued_generation_candidates,
     )
 
-    ready = await generation._ready_queued_generation_ids(redis, 2)
+    ready = await generation_queue.ready_queued_generation_ids(
+        redis,
+        2,
+        services=services,
+    )
 
     assert ready == ["ready-a", "ready-b"]
 
@@ -297,32 +310,44 @@ async def test_reserve_admits_task_inside_ready_window_when_capacity_gt_one(
     ready_limits: list[int] = []
     provider = SimpleNamespace(name="provider-a", image_concurrency=2)
 
-    async def fake_capacity() -> int:
+    async def fake_capacity(*, services: Any) -> int:
+        _ = services
         return 2
 
     async def fake_ready_queued_generation_ids(
         _redis: Any,
         limit: int,
+        **_kwargs: Any,
     ) -> list[str]:
         ready_limits.append(limit)
         return ["oldest", "target"][:limit]
 
-    monkeypatch.setattr(generation, "_resolve_image_queue_capacity", fake_capacity)
     monkeypatch.setattr(
-        generation,
-        "_ready_queued_generation_ids",
+        queue_claim,
+        "resolve_image_queue_capacity",
+        fake_capacity,
+    )
+    monkeypatch.setattr(
+        queue_claim,
+        "ready_queued_generation_ids",
         fake_ready_queued_generation_ids,
     )
 
-    admitted = await generation._reserve_image_queue_slot(
+    admitted = await queue_claim.reserve_image_queue_slot(
         redis,
         "target",
         endpoint_kind="generations",
         provider_override=provider,
+        services=generation_services,
     )
 
     assert admitted is provider
     assert max(ready_limits) >= 2
-    assert redis.strings[generation._image_task_provider_key("target")] == "provider-a"
-    assert "target" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
-    assert "target" in redis.zsets[generation._image_provider_active_key("provider-a")]
+    assert (
+        redis.strings[generation_queue.image_task_provider_key("target")]
+        == "provider-a"
+    )
+    assert "target" in redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY]
+    assert "target" in redis.zsets[
+        generation_queue.image_provider_active_key("provider-a")
+    ]

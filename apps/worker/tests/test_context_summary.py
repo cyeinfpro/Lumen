@@ -175,11 +175,14 @@ async def test_call_summary_upstream_reports_actual_success_and_closes_half_open
     from app import provider_pool, upstream
 
     pool, health = _half_open_text_pool()
+    image_upstream_runtime = object()
+    seen_runtime: list[Any] = []
 
     async def fake_get_pool() -> Any:
         return pool
 
-    async def fake_responses_call(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+    async def fake_responses_call(*_args: Any, **kwargs: Any) -> dict[str, str]:
+        seen_runtime.append(kwargs["runtime"])
         return {"output_text": "summary text"}
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
@@ -189,9 +192,11 @@ async def test_call_summary_upstream_reports_actual_success_and_closes_half_open
         "input",
         100,
         "gpt-test",
+        image_upstream_runtime=image_upstream_runtime,  # type: ignore[arg-type]
     )
 
     assert result == "summary text"
+    assert seen_runtime == [image_upstream_runtime]
     assert health.consecutive_failures == 0
     assert health.cooldown_until is None
     assert health.half_open_probe_inflight is False
@@ -654,7 +659,7 @@ async def test_segment_and_summarize_limits_safe_prefix_instead_of_tail(
         target_tokens=100,
         model="gpt-test",
         input_budget=80,
-        coverage=coverage,
+        execution=context_summary._SegmentSummaryExecution(coverage=coverage),
     )
 
     assert result == "summary-8"
@@ -690,7 +695,7 @@ async def test_segment_limit_does_not_cross_cap_for_one_oversized_message(
         target_tokens=100,
         model="gpt-test",
         input_budget=80,
-        coverage=coverage,
+        execution=context_summary._SegmentSummaryExecution(coverage=coverage),
     )
 
     assert result is None
@@ -735,7 +740,7 @@ async def test_segment_failure_returns_last_complete_message_boundary(
         target_tokens=100,
         model="gpt-test",
         input_budget=80,
-        coverage=coverage,
+        execution=context_summary._SegmentSummaryExecution(coverage=coverage),
     )
 
     assert len(calls) == 3
@@ -774,7 +779,7 @@ async def test_partial_segment_commit_resumes_after_covered_boundary(
         )
 
     async def fake_segment(**kwargs: Any) -> str:
-        coverage = kwargs["coverage"]
+        coverage = kwargs["execution"].coverage
         current_messages = kwargs["messages"]
         if len(load_after_ids) == 1:
             coverage.covered_message_count = 1
@@ -1376,7 +1381,7 @@ async def test_segment_limit_local_fallback_does_not_record_failure_sample(
         return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
 
     async def segment_limited(**kwargs: Any) -> None:
-        kwargs["coverage"].partial_reason = "segment_limit"
+        kwargs["execution"].coverage.partial_reason = "segment_limit"
         return None
 
     async def fail_circuit_sample(*_args: Any, **_kwargs: Any) -> None:

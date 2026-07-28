@@ -88,6 +88,13 @@ function recoveryReason(event: RealtimeControlEvent): RecoveryReason | null {
       cursor: event.cursor,
     };
   }
+  if (event.type === "recovery_required") {
+    return {
+      kind: "recovery_required",
+      reason: event.reason,
+      cursor: event.cursor,
+    };
+  }
   if (event.type === "server_epoch_changed") {
     return {
       kind: "server_epoch_changed",
@@ -115,6 +122,8 @@ export class RealtimeRuntime {
   private readonly election: LeaderElection;
   private readonly options: RealtimeRuntimeOptions;
   private recoveryFlight: Promise<void> | null = null;
+  private recoveryAbort: AbortController | null = null;
+  private recoveryGeneration = 0;
   private unsubscribeBus: (() => void) | null = null;
   private unsubscribeLeader: (() => void) | null = null;
 
@@ -190,6 +199,7 @@ export class RealtimeRuntime {
     );
     this.unsubscribeLeader = this.election.subscribe((leader) => {
       this.leader = leader;
+      if (!leader) this.cancelRecovery();
       this.dispatch({ type: leader ? "start" : "stop" });
     });
     this.election.start();
@@ -197,6 +207,7 @@ export class RealtimeRuntime {
 
   private stop(): void {
     this.started = false;
+    this.cancelRecovery();
     this.dispatch({ type: "stop" });
     this.unsubscribeBus?.();
     this.unsubscribeLeader?.();
@@ -209,6 +220,14 @@ export class RealtimeRuntime {
   }
 
   private dispatch(event: Parameters<typeof transitionConnection>[1]): void {
+    if (
+      event.type === "stop" ||
+      event.type === "hidden" ||
+      event.type === "offline" ||
+      event.type === "unauthorized"
+    ) {
+      this.cancelRecovery();
+    }
     // 修复恢复期重复连接：快照恢复在途时丢弃重连类事件。它们会把状态机推出
     // recovering，随后到达的 snapshot_success 因状态不匹配被丢弃 —— 既白开一条用
     // 旧 cursor 的连接，又丢掉恢复得到的新 cursor。恢复完成后自己会重新开流。
@@ -330,31 +349,73 @@ export class RealtimeRuntime {
       if (event.cursor) this.dispatch({ type: "cursor", cursor: event.cursor });
       return;
     }
-    this.dispatch(
-      reason.kind === "replay_gap"
-        ? {
-            type: "replay_gap",
-            reason: reason.reason,
-            cursor: reason.cursor,
-          }
-        : {
-            type: "epoch_change",
-            epoch: reason.epoch,
-            cursor: reason.cursor,
-          },
-    );
+    if (reason.kind === "server_epoch_changed") {
+      this.dispatch({
+        type: "epoch_change",
+        epoch: reason.epoch,
+        cursor: reason.cursor,
+      });
+      return;
+    }
+    this.dispatch({
+      type:
+        reason.kind === "recovery_required"
+          ? "recovery_required"
+          : "replay_gap",
+      reason: reason.reason,
+      cursor: reason.cursor,
+    });
   }
 
   private recover(reason: RecoveryReason): Promise<void> {
     if (this.recoveryFlight) return this.recoveryFlight;
-    const flight = this.performRecovery(reason).finally(() => {
+    const generation = this.recoveryGeneration + 1;
+    this.recoveryGeneration = generation;
+    const controller = new AbortController();
+    this.recoveryAbort = controller;
+    const flight = this.performRecovery(
+      reason,
+      generation,
+      controller.signal,
+    ).finally(() => {
       if (this.recoveryFlight === flight) this.recoveryFlight = null;
+      if (
+        this.recoveryGeneration === generation &&
+        this.recoveryAbort === controller
+      ) {
+        this.recoveryAbort = null;
+      }
     });
     this.recoveryFlight = flight;
     return flight;
   }
 
-  private async performRecovery(reason: RecoveryReason): Promise<void> {
+  private cancelRecovery(): void {
+    if (!this.recoveryFlight && !this.recoveryAbort) return;
+    this.recoveryGeneration += 1;
+    this.recoveryAbort?.abort();
+    this.recoveryAbort = null;
+    this.recoveryFlight = null;
+  }
+
+  private recoveryIsCurrent(
+    generation: number,
+    signal: AbortSignal,
+  ): boolean {
+    return (
+      !signal.aborted &&
+      this.started &&
+      this.leader &&
+      this.subscribers.size > 0 &&
+      this.recoveryGeneration === generation
+    );
+  }
+
+  private async performRecovery(
+    reason: RecoveryReason,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     const adapters = [
       ...new Set(
         [...this.subscribers]
@@ -363,22 +424,31 @@ export class RealtimeRuntime {
       ),
     ];
     if (adapters.length === 0) {
-      this.dispatch({ type: "snapshot_failure" });
+      if (this.recoveryIsCurrent(generation, signal)) {
+        this.dispatch({ type: "snapshot_failure" });
+      }
       return;
     }
-    const coordinator = new ReplayCoordinator(async (scopes, currentReason) => {
-      const results = await Promise.all(
-        adapters.map((adapter) => adapter(scopes, currentReason)),
-      );
-      return {
-        cursor:
-          results.find((result) => result.cursor)?.cursor ??
-          ("cursor" in currentReason ? currentReason.cursor : undefined),
-        syncedAt: this.now(),
-      };
-    });
+    const coordinator = new ReplayCoordinator(
+      async (scopes, currentReason, currentSignal) => {
+        currentSignal.throwIfAborted();
+        const results = await Promise.all(
+          adapters.map((adapter) =>
+            adapter(scopes, currentReason, currentSignal),
+          ),
+        );
+        currentSignal.throwIfAborted();
+        return {
+          cursor:
+            results.find((result) => result.cursor)?.cursor ??
+            ("cursor" in currentReason ? currentReason.cursor : undefined),
+          syncedAt: this.now(),
+        };
+      },
+    );
     try {
-      const result = await coordinator.recover(reason);
+      const result = await coordinator.recover(reason, signal);
+      if (!this.recoveryIsCurrent(generation, signal)) return;
       this.bus.post(
         {
           type: "recovery_complete",
@@ -389,6 +459,7 @@ export class RealtimeRuntime {
       );
       this.dispatch({ type: "snapshot_success", cursor: result.cursor });
     } catch (error) {
+      if (!this.recoveryIsCurrent(generation, signal)) return;
       this.bus.post(
         {
           type: "recovery_failed",

@@ -111,6 +111,76 @@ def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_dispatch_passes_storage_coordinator_from_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import volcano_assets
+
+    operation = {
+        "id": "operation-1",
+        "action": "create_asset",
+        "status": "queued",
+        "attempt": 1,
+        "delivery_generation": 0,
+        "name": "asset",
+    }
+    redis = object()
+    coordinator = object()
+    captured: list[object] = []
+
+    class Persistence:
+        def __init__(self) -> None:
+            self.redis = redis
+
+        def bind(self, _operation: dict[str, Any]) -> None:
+            return None
+
+    async def get_operation(_redis: Any, _operation_id: str) -> dict[str, Any]:
+        return operation
+
+    async def read_receipt(
+        _operation: dict[str, Any],
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
+    async def create(
+        _redis: Any,
+        _operation: dict[str, Any],
+        _failure: Any,
+        *,
+        persistence: Any,
+        storage_writes: Any,
+    ) -> dict[str, Any]:
+        assert isinstance(persistence, Persistence)
+        captured.append(storage_writes)
+        return {"status": "captured"}
+
+    monkeypatch.setattr(volcano_assets, "_get_operation", get_operation)
+    monkeypatch.setattr(volcano_assets, "_read_success_receipt", read_receipt)
+    monkeypatch.setattr(
+        volcano_assets,
+        "_operation_contract_failure",
+        lambda _operation: None,
+    )
+    monkeypatch.setattr(volcano_assets, "_process_create_asset", create)
+
+    result = await volcano_assets._process_locked(
+        {
+            "redis": redis,
+            "storage_write_coordinator": coordinator,
+        },
+        "operation-1",
+        None,
+        None,
+        persistence=Persistence(),
+    )
+
+    assert result == {"status": "captured"}
+    assert captured == [coordinator]
+
+
+@pytest.mark.asyncio
 async def test_worker_create_asset_forces_scope_and_safe_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

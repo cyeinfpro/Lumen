@@ -341,11 +341,12 @@ async def test_nav_feature_guard_cache_expires(
 
 
 @pytest.mark.asyncio
-async def test_nav_feature_guard_does_not_cache_read_failures(
+async def test_nav_feature_guard_briefly_caches_read_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessions: list[int] = []
     failing = True
+    now = 1_000.0
 
     class SessionContext:
         async def __aenter__(self):
@@ -366,15 +367,22 @@ async def test_nav_feature_guard_does_not_cache_read_failures(
 
     monkeypatch.setattr(main, "SessionLocal", SessionContext)
     monkeypatch.setattr(main, "get_setting", get_setting)
-    wrapped = main._NavFeatureGuardMiddleware(app)
+    cache = main._NavFeatureFlagCache(
+        failure_ttl_seconds=0.75,
+        clock=lambda: now,
+    )
+    wrapped = main._NavFeatureGuardMiddleware(app, cache)
 
     assert await _call_guard(wrapped, "/videos") == 404
     assert await _call_guard(wrapped, "/videos") == 404
-    assert len(sessions) == 2
+    assert len(sessions) == 1
 
     failing = False
-    # A recovered database must be visible immediately, not after the TTL.
+    now += 0.76
+    # A recovered database becomes visible after the short failure backoff,
+    # rather than waiting for the normal five-second success TTL.
     assert await _call_guard(wrapped, "/videos") == 200
+    assert len(sessions) == 2
 
 
 @pytest.mark.asyncio

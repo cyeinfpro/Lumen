@@ -11,9 +11,11 @@ export type FetchExecutorOptions = {
   fetchImpl?: typeof fetch;
 };
 
+export type RequestFactory = () => RequestInit;
+
 export async function executeFetch(
   url: string,
-  init: RequestInit,
+  requestFactory: RequestFactory,
   options: FetchExecutorOptions,
 ): Promise<Response> {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -21,6 +23,7 @@ export async function executeFetch(
   let attempt = 0;
 
   while (true) {
+    const init = requestFactory();
     try {
       const response = await fetchImpl(url, init);
       if (
@@ -30,6 +33,7 @@ export async function executeFetch(
       ) {
         return response;
       }
+      await response.body?.cancel().catch(() => undefined);
       await waitForRetry(retryDelayMs(attempt, response), init.signal);
     } catch (error) {
       if (init.signal?.aborted) throw error;

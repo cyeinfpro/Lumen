@@ -12,12 +12,13 @@
 - chat_tools: chat tool status normalization
 """
 
-__version__ = "1.2.73"
+__version__ = "1.2.74"
 
 from . import (  # noqa: F401
     canvas,
     canvas_models,
     canvas_schemas,
+    capacity_leases,
     chat_tools,
     constants,
     context_window,
@@ -30,6 +31,7 @@ from . import (  # noqa: F401
     runtime_settings,
     schemas,
     sizing,
+    storage_capacity,
     utils,
     video_billing,
     video_providers,

@@ -30,6 +30,7 @@ PYPROJECT_FILES = [
     ROOT / "apps/api/pyproject.toml",
     ROOT / "apps/worker/pyproject.toml",
     ROOT / "apps/tgbot/pyproject.toml",
+    ROOT / "image-job/pyproject.toml",
     ROOT / "packages/core/pyproject.toml",
 ]
 WEB_PACKAGE_JSON = ROOT / "apps/web/package.json"
@@ -41,6 +42,7 @@ UV_LOCK_PACKAGE_NAMES = {
     "lumen-api",
     "lumen-worker",
     "lumen-tgbot",
+    "lumen-image-job",
     "lumen-core",
 }
 CURRENT_RELEASE_JSON_CANDIDATES = (
@@ -98,7 +100,9 @@ def read_json(path: Path) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def read_uv_lock_packages(path: Path) -> list[dict[str, Any]]:
@@ -208,17 +212,23 @@ def check() -> int:
                     )
             missing = UV_LOCK_PACKAGE_NAMES - seen_lock_packages
             for name in sorted(missing):
-                mismatches.append(f"{UV_LOCK.relative_to(ROOT)} package {name}: missing")
+                mismatches.append(
+                    f"{UV_LOCK.relative_to(ROOT)} package {name}: missing"
+                )
 
     current_release_json = current_release_json_path()
     if current_release_json is not None:
         try:
             release = read_json(current_release_json)
         except json.JSONDecodeError as exc:
-            mismatches.append(f"{current_release_json.relative_to(ROOT)}: invalid JSON ({exc})")
+            mismatches.append(
+                f"{current_release_json.relative_to(ROOT)}: invalid JSON ({exc})"
+            )
         else:
             if not isinstance(release, dict):
-                mismatches.append(f"{current_release_json.relative_to(ROOT)}: JSON root is not object")
+                mismatches.append(
+                    f"{current_release_json.relative_to(ROOT)}: JSON root is not object"
+                )
             else:
                 image_tag = release.get("image_tag")
                 if image_tag == "main" and not rolling_tag_allowed():
@@ -345,7 +355,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="verify all version targets match VERSION")
     sub.add_parser("sync", help="rewrite version targets to match VERSION")
     sub.add_parser("docker-tags", help="print release Docker tags for VERSION")
-    sub.add_parser("print-runtime", help="print runtime version / image tag / release metadata")
+    sub.add_parser(
+        "print-runtime", help="print runtime version / image tag / release metadata"
+    )
     tag_parser = sub.add_parser("assert-tag", help="verify a git tag matches VERSION")
     tag_parser.add_argument("tag", help="tag name, e.g. v1.2.3")
 

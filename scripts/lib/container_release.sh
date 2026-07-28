@@ -420,6 +420,59 @@ lumen_image_tag_is_rolling() {
     printf '%s\n' "${tag}" | grep -Eq '^v[0-9]+$|^v[0-9]+\.[0-9]+$'
 }
 
+# Atomically update one dotenv key without rewriting unrelated fields.
+# Update-journal callers also persist the candidate digest before the rename.
+lumen_set_env_value_in_file() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    if [ -z "${file}" ] || [ -z "${key}" ]; then
+        log_error "lumen_set_env_value_in_file：参数不完整。"
+        return 1
+    fi
+    if [ ! -f "${file}" ]; then
+        log_error "lumen_set_env_value_in_file：${file} 不存在。"
+        return 1
+    fi
+    if [[ ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        log_error "lumen_set_env_value_in_file：非法 key=${key}。"
+        return 1
+    fi
+    if printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        log_error "lumen_set_env_value_in_file：${key} 不能包含控制字符。"
+        return 1
+    fi
+    local tmp
+    tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+    if ! awk -v k="${key}" -v v="${value}" '
+        BEGIN { done = 0 }
+        $0 ~ "^" k "=" {
+            if (done == 0) {
+                print k "=" v
+                done = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (done == 0) print k "=" v
+        }
+    ' "${file}" > "${tmp}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    if command -v lumen_update_journal_expect_env_file >/dev/null 2>&1 \
+            && ! lumen_update_journal_expect_env_file "${tmp}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    if ! mv "${tmp}" "${file}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
 # 把 LUMEN_IMAGE_TAG=<tag> 唯一写入指定 .env，禁止动其他字段（§6.4.1）。
 lumen_set_image_tag_in_env() {
     local file="$1"
@@ -460,6 +513,12 @@ lumen_set_image_tag_in_env() {
     ' "${file}" > "${tmp}"; then
         rm -f "${tmp}" 2>/dev/null || true
         log_error "写入 LUMEN_IMAGE_TAG 临时文件失败：${file}"
+        return 1
+    fi
+    if command -v lumen_update_journal_expect_env_file >/dev/null 2>&1 \
+            && ! lumen_update_journal_expect_env_file "${tmp}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        log_error "无法持久化 LUMEN_IMAGE_TAG 候选摘要：${file}"
         return 1
     fi
     if ! mv "${tmp}" "${file}"; then

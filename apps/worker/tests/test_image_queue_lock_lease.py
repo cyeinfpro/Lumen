@@ -11,21 +11,20 @@ from typing import Any
 import pytest
 from redis.exceptions import WatchError
 
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
+from lumen_core.constants import GenerationErrorCode as EC
+
+from app.provider_runtime.errors import UpstreamError
+from app.tasks.generation_parts import (
+    lease,
+    queue,
+    queue_claim,
+    queue_lock,
+    retry_state,
+)
+from app.tasks.generation_parts.default_runtime import build_generation_runtime
 
 
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(monkeypatch: pytest.MonkeyPatch):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
-
-
-from app.tasks.generation_parts import queue, queue_claim, queue_lock
+generation_services = build_generation_runtime().deps
 
 
 class _TimingRedis:
@@ -116,7 +115,7 @@ class _TimingRedis:
                 return False
             self._set_string(key, value, ex=ex, px=px)
             if (
-                key == generation._IMAGE_QUEUE_LOCK_KEY
+                key == queue_lock.IMAGE_QUEUE_LOCK_KEY
                 and self.first_lock_token is None
             ):
                 self.first_lock_token = str(value)
@@ -212,7 +211,7 @@ class _TimingRedis:
                 self.string_deadlines[lock_key] = time.monotonic() + ttl_ms / 1000.0
                 return 1
 
-        if script == generation._RELEASE_LEASE_LUA:
+        if script == lease.RELEASE_LEASE_LUA:
             lock_key, token = str(args[0]), str(args[1])
             async with self._mutex:
                 if self._get_string(lock_key) != token:
@@ -493,24 +492,24 @@ async def test_image_queue_lock_heartbeat_keeps_slow_critical_section_exclusive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = _TimingRedis()
-    monkeypatch.setattr(generation, "_IMAGE_QUEUE_LOCK_TTL_S", 0.09)
-    monkeypatch.setattr(generation, "_IMAGE_QUEUE_LOCK_WAIT_S", 0.8)
+    monkeypatch.setattr(queue_lock, "IMAGE_QUEUE_LOCK_TTL_S", 0.09)
+    monkeypatch.setattr(queue_lock, "IMAGE_QUEUE_LOCK_WAIT_S", 0.8)
 
     first_entered = asyncio.Event()
     second_entered = asyncio.Event()
     intervals: dict[str, tuple[float, float]] = {}
 
     async def first_owner() -> None:
-        async with generation._image_queue_lock(redis) as lock:
+        async with queue_lock.image_queue_lock(redis) as lock:
             started = time.monotonic()
             first_entered.set()
             await asyncio.sleep(0.28)
-            assert await redis.get(generation._IMAGE_QUEUE_LOCK_KEY) == lock.token
+            assert await redis.get(queue_lock.IMAGE_QUEUE_LOCK_KEY) == lock.token
             intervals["first"] = (started, time.monotonic())
 
     async def second_owner() -> None:
         await first_entered.wait()
-        async with generation._image_queue_lock(redis):
+        async with queue_lock.image_queue_lock(redis):
             started = time.monotonic()
             second_entered.set()
             intervals["second"] = (started, time.monotonic())
@@ -534,12 +533,13 @@ async def test_slow_provider_select_loses_lock_without_cancellation_or_reservati
     task_id = "gen-lock-race"
     provider = SimpleNamespace(name="provider-new", image_concurrency=1)
     redis = _TimingRedis()
-    task_provider_key = generation._image_task_provider_key(task_id)
+    task_provider_key = queue.image_task_provider_key(task_id)
     slow_select_started = asyncio.Event()
     allow_slow_select = asyncio.Event()
     select_calls = 0
 
-    async def capacity() -> int:
+    async def capacity(*, services: Any) -> int:
+        _ = services
         return 1
 
     async def ready(
@@ -563,14 +563,22 @@ async def test_slow_provider_select_loses_lock_without_cancellation_or_reservati
     async def get_pool() -> Pool:
         return pool
 
-    monkeypatch.setattr(generation, "_IMAGE_QUEUE_LOCK_TTL_S", 0.12)
-    monkeypatch.setattr(generation, "_IMAGE_QUEUE_LOCK_WAIT_S", 1.0)
-    monkeypatch.setattr(generation, "_resolve_image_queue_capacity", capacity)
-    monkeypatch.setattr(generation, "_ready_queued_generation_ids", ready)
+    monkeypatch.setattr(queue_lock, "IMAGE_QUEUE_LOCK_TTL_S", 0.12)
+    monkeypatch.setattr(queue_lock, "IMAGE_QUEUE_LOCK_WAIT_S", 1.0)
+    monkeypatch.setattr(
+        queue_claim,
+        "resolve_image_queue_capacity",
+        capacity,
+    )
+    monkeypatch.setattr(queue_claim, "ready_queued_generation_ids", ready)
     monkeypatch.setattr(provider_pool, "get_pool", get_pool)
 
     old_owner = asyncio.create_task(
-        generation._reserve_image_queue_slot(redis, task_id)
+        queue_claim.reserve_image_queue_slot(
+            redis,
+            task_id,
+            services=generation_services,
+        )
     )
     await asyncio.wait_for(slow_select_started.wait(), timeout=1.0)
     assert redis.first_lock_token is not None
@@ -580,7 +588,11 @@ async def test_slow_provider_select_loses_lock_without_cancellation_or_reservati
     await asyncio.sleep(0.15)
 
     new_owner_result = await asyncio.wait_for(
-        generation._reserve_image_queue_slot(redis, task_id),
+        queue_claim.reserve_image_queue_slot(
+            redis,
+            task_id,
+            services=generation_services,
+        ),
         timeout=1.0,
     )
     assert new_owner_result is provider
@@ -590,16 +602,16 @@ async def test_slow_provider_select_loses_lock_without_cancellation_or_reservati
     redis.allow_first_renewals.set()
     old_result = (await asyncio.gather(old_owner, return_exceptions=True))[0]
 
-    assert isinstance(old_result, generation.UpstreamError)
+    assert isinstance(old_result, UpstreamError)
     assert not isinstance(old_result, asyncio.CancelledError)
-    assert old_result.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert old_result.error_code == EC.LOCAL_QUEUE_FULL.value
     assert old_result.payload["retry_after"] > 0
-    assert generation._classify_exception(old_result, False).retriable is True
+    assert retry_state.classify_exception(old_result, False).retriable is True
     assert redis.strings[task_provider_key] == provider.name
-    assert list(redis.zsets[generation._image_provider_active_key(provider.name)]) == [
+    assert list(redis.zsets[queue.image_provider_active_key(provider.name)]) == [
         task_id
     ]
-    assert list(redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]) == [task_id]
+    assert list(redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]) == [task_id]
     assert len(redis.reservation_writes) == 1
     assert redis.reservation_writes[0][1:] == (task_id, provider.name)
     assert (
@@ -619,7 +631,8 @@ async def test_dual_race_reservation_token_survives_lease_free_cleanup(
     task_id = "gen-dual-reservation"
     redis = _TimingRedis()
 
-    async def capacity() -> int:
+    async def capacity(*, services: Any) -> int:
+        _ = services
         return 1
 
     async def ready(
@@ -629,36 +642,42 @@ async def test_dual_race_reservation_token_survives_lease_free_cleanup(
     ) -> list[str]:
         return [task_id]
 
-    async def no_kick(_redis: Any) -> None:
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_resolve_image_queue_capacity", capacity)
-    monkeypatch.setattr(generation, "_ready_queued_generation_ids", ready)
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(
+        queue_claim,
+        "resolve_image_queue_capacity",
+        capacity,
+    )
+    monkeypatch.setattr(queue_claim, "ready_queued_generation_ids", ready)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
 
-    reserved = await generation._reserve_image_queue_slot(
+    reserved = await queue_claim.reserve_image_queue_slot(
         redis,
         task_id,
         dual_race=True,
+        services=generation_services,
     )
 
     assert reserved is not None
-    sentinel = generation._dual_race_sentinel_name(task_id)
+    sentinel = queue_claim.dual_race_sentinel_name(task_id)
     reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
     reservation_token = redis.strings[reservation_key]
     assert reserved.name == sentinel
-    assert redis.strings[generation._image_task_provider_key(task_id)] == sentinel
-    assert sentinel in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert redis.strings[queue.image_task_provider_key(task_id)] == sentinel
+    assert sentinel in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
 
     await queue_claim.release_image_queue_slot(
         redis,
         task_id=task_id,
         provider_name=sentinel,
+        services=generation_services,
     )
 
     assert reservation_key not in redis.strings
-    assert generation._image_task_provider_key(task_id) not in redis.strings
-    assert sentinel not in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert queue.image_task_provider_key(task_id) not in redis.strings
+    assert sentinel not in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
     assert ("release", reservation_token) in redis.fenced_mutations
 
 
@@ -674,8 +693,8 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     new_reservation = "reservation-new"
     redis = _TimingRedis()
     task_lease_key = f"task:{task_id}:lease"
-    task_provider_key = generation._image_task_provider_key(task_id)
-    provider_key = generation._image_provider_active_key(provider_name)
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
     reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
     old_expiry = time.time() + 30.0
     new_expiry = time.time() + 90.0
@@ -684,16 +703,11 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     await redis.set(task_provider_key, provider_name)
     await redis.set(reservation_key, old_reservation)
     await redis.zadd(provider_key, {task_id: old_expiry})
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {task_id: old_expiry})
-    queue_claim._remember_image_queue_reservation_token(
-        task_id,
-        old_reservation,
-    )
-
-    async def no_kick(_redis: Any) -> None:
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: old_expiry})
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
     redis.block_release_token = old_lease
     old_cleanup = asyncio.create_task(
         queue_claim.release_generation_runtime_resources(
@@ -702,6 +716,7 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
             lease_token=old_lease,
             provider_name=provider_name,
             clear_avoided_providers=False,
+            services=generation_services,
         )
     )
     await asyncio.wait_for(redis.blocked_release_started.wait(), timeout=1.0)
@@ -710,7 +725,7 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     await redis.set(task_provider_key, provider_name)
     await redis.set(reservation_key, new_reservation)
     await redis.zadd(provider_key, {task_id: new_expiry})
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {task_id: new_expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: new_expiry})
 
     redis.allow_blocked_release.set()
     await asyncio.wait_for(old_cleanup, timeout=1.0)
@@ -719,7 +734,7 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     assert redis.strings[task_provider_key] == provider_name
     assert redis.strings[reservation_key] == new_reservation
     assert redis.zsets[provider_key][task_id] == new_expiry
-    assert redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY][task_id] == new_expiry
+    assert redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY][task_id] == new_expiry
     assert (old_lease, 0) in redis.reservation_release_results
     assert ("release", old_lease) not in redis.fenced_mutations
 
@@ -732,33 +747,34 @@ async def test_matching_lease_token_releases_legacy_formatted_reservation(
     provider_name = "provider-owned"
     lease_token = "worker-owned:lease"
     redis = _TimingRedis()
-    task_provider_key = generation._image_task_provider_key(task_id)
-    provider_key = generation._image_provider_active_key(provider_name)
-    legacy_lock_key = generation._image_provider_lock_key(provider_name)
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
+    legacy_lock_key = queue.image_provider_lock_key(provider_name)
     expiry = time.time() + 60.0
 
     await redis.set(f"task:{task_id}:lease", lease_token)
     await redis.set(task_provider_key, provider_name)
     await redis.set(legacy_lock_key, task_id)
     await redis.zadd(provider_key, {task_id: expiry})
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
 
-    async def no_kick(_redis: Any) -> None:
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
 
     await queue_claim.release_image_queue_slot(
         redis,
         task_id=task_id,
         provider_name=provider_name,
         lease_token=lease_token,
+        services=generation_services,
     )
 
     assert task_provider_key not in redis.strings
     assert legacy_lock_key not in redis.strings
     assert task_id not in redis.zsets[provider_key]
-    assert task_id not in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert task_id not in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
     assert (lease_token, 1) in redis.reservation_release_results
 
 
@@ -770,36 +786,32 @@ async def test_reservation_token_releases_after_worker_lease_was_removed(
     provider_name = "provider-retry"
     reservation_token = "reservation-retry"
     redis = _TimingRedis()
-    task_provider_key = generation._image_task_provider_key(task_id)
-    provider_key = generation._image_provider_active_key(provider_name)
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
     reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
     expiry = time.time() + 60.0
 
     await redis.set(task_provider_key, provider_name)
     await redis.set(reservation_key, reservation_token)
     await redis.zadd(provider_key, {task_id: expiry})
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
-    queue_claim._remember_image_queue_reservation_token(
-        task_id,
-        reservation_token,
-    )
-
-    async def no_kick(_redis: Any) -> None:
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
 
     await queue_claim.release_image_queue_slot(
         redis,
         task_id=task_id,
         provider_name=provider_name,
         lease_token="already-released-worker-lease",
+        services=generation_services,
     )
 
     assert task_provider_key not in redis.strings
     assert reservation_key not in redis.strings
     assert task_id not in redis.zsets[provider_key]
-    assert task_id not in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert task_id not in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
 
 
 @pytest.mark.asyncio
@@ -807,32 +819,33 @@ async def test_reservation_token_releases_dual_race_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task_id = "gen-release-dual"
-    sentinel = generation._dual_race_sentinel_name(task_id)
+    sentinel = queue_claim.dual_race_sentinel_name(task_id)
     reservation_token = "reservation-dual"
     redis = _TimingRedis()
-    task_provider_key = generation._image_task_provider_key(task_id)
+    task_provider_key = queue.image_task_provider_key(task_id)
     reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
     expiry = time.time() + 60.0
 
     await redis.set(task_provider_key, sentinel)
     await redis.set(reservation_key, reservation_token)
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {sentinel: expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {sentinel: expiry})
 
-    async def no_kick(_redis: Any) -> None:
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
 
     await queue_claim.release_image_queue_slot(
         redis,
         task_id=task_id,
         provider_name=sentinel,
         reservation_token=reservation_token,
+        services=generation_services,
     )
 
     assert task_provider_key not in redis.strings
     assert reservation_key not in redis.strings
-    assert sentinel not in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert sentinel not in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
 
 
 @pytest.mark.asyncio
@@ -842,28 +855,29 @@ async def test_unmarked_legacy_reservation_keeps_cleanup_compatibility(
     task_id = "gen-release-legacy"
     provider_name = "provider-legacy"
     redis = _TimingRedis()
-    task_provider_key = generation._image_task_provider_key(task_id)
-    provider_key = generation._image_provider_active_key(provider_name)
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
     expiry = time.time() + 60.0
 
     await redis.set(task_provider_key, provider_name)
     await redis.zadd(provider_key, {task_id: expiry})
-    await redis.zadd(generation._IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
 
-    async def no_kick(_redis: Any) -> None:
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(generation, "_kick_image_queue", no_kick)
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
 
     await queue_claim.release_image_queue_slot(
         redis,
         task_id=task_id,
         provider_name=provider_name,
+        services=generation_services,
     )
 
     assert task_provider_key not in redis.strings
     assert task_id not in redis.zsets[provider_key]
-    assert task_id not in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert task_id not in redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY]
 
 
 @pytest.mark.asyncio
@@ -872,25 +886,31 @@ async def test_watch_only_lock_fails_closed_before_queue_reservation(
 ) -> None:
     redis = _WatchOnlyRedis()
 
-    async def capacity() -> int:
+    async def capacity(*, services: Any) -> int:
+        _ = services
         return 1
 
-    monkeypatch.setattr(generation, "_resolve_image_queue_capacity", capacity)
+    monkeypatch.setattr(
+        queue_claim,
+        "resolve_image_queue_capacity",
+        capacity,
+    )
 
     with pytest.raises(
-        generation.UpstreamError,
+        UpstreamError,
         match="reservation requires Redis EVAL",
     ) as exc_info:
-        await generation._reserve_image_queue_slot(
+        await queue_claim.reserve_image_queue_slot(
             redis,
             "gen-watch-only",
             provider_override=SimpleNamespace(
                 name="provider-watch",
                 image_concurrency=1,
             ),
+            services=generation_services,
         )
 
-    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert exc_info.value.error_code == EC.LOCAL_QUEUE_FULL.value
     assert redis.reservation_writes == 0
     assert redis.store == {}
 
@@ -947,7 +967,7 @@ async def test_watch_fallback_survives_four_consecutive_conflicts(
 ) -> None:
     """审计 D-15：重试上限 3 在高并发下太容易耗尽并把任务拒成 LOCAL_QUEUE_FULL。"""
     redis = _ConflictingWatchRedis(conflicts=4)
-    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+    redis.store[queue_lock.IMAGE_QUEUE_LOCK_KEY] = "token-1"
     delays: list[float] = []
 
     async def record_sleep(delay: float) -> None:
@@ -970,7 +990,7 @@ async def test_watch_fallback_release_backs_off_between_conflicts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = _ConflictingWatchRedis(conflicts=4)
-    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+    redis.store[queue_lock.IMAGE_QUEUE_LOCK_KEY] = "token-1"
     delays: list[float] = []
 
     async def record_sleep(delay: float) -> None:
@@ -988,17 +1008,17 @@ async def test_watch_fallback_still_fails_closed_when_budget_is_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = _ConflictingWatchRedis(conflicts=99)
-    redis.store[generation._IMAGE_QUEUE_LOCK_KEY] = "token-1"
+    redis.store[queue_lock.IMAGE_QUEUE_LOCK_KEY] = "token-1"
 
     async def record_sleep(_delay: float) -> None:
         return None
 
     monkeypatch.setattr(queue_lock.asyncio, "sleep", record_sleep)
 
-    with pytest.raises(generation.UpstreamError) as exc_info:
+    with pytest.raises(UpstreamError) as exc_info:
         await queue_lock._renew_watch(redis, "token-1")
 
-    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert exc_info.value.error_code == EC.LOCAL_QUEUE_FULL.value
     assert redis.executes == queue_lock.FALLBACK_RETRIES
 
 
@@ -1014,9 +1034,9 @@ async def test_generation_release_lease_failure_is_logged_at_warning(
 
     with caplog.at_level(
         logging.WARNING,
-        logger="app.tasks.generation_parts.default_runtime",
+        logger=lease.logger.name,
     ):
-        await generation._release_lease(ExplodingRedis(), "gen-9", "worker-1:token-1")
+        await lease.release_lease(ExplodingRedis(), "gen-9", "worker-1:token-1")
 
     records = [
         record

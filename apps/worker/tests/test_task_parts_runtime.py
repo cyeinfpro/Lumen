@@ -7,6 +7,9 @@ from typing import Any
 
 import pytest
 
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
+from app.tasks import completion as completion_task
+from app.tasks import generation as generation_task
 from app.task_runtime import (
     BillingAction,
     EffectExecutor,
@@ -24,7 +27,7 @@ from app.tasks.completion_parts.decisions import (
     decide_completion_finalize,
     reduce_completion_frame,
 )
-from app.tasks.completion_parts.default_runtime import DEFAULT_COMPLETION_RUNTIME
+from app.tasks.completion_parts.default_runtime import build_completion_runtime
 from app.tasks.completion_parts.runtime import CompletionRuntime
 from app.tasks.generation_parts.decisions import (
     GenerationDomainState,
@@ -33,9 +36,9 @@ from app.tasks.generation_parts.decisions import (
     decide_finalize,
     decide_retry,
 )
-from app.tasks.generation_parts.default_runtime import DEFAULT_GENERATION_RUNTIME
 from app.tasks.generation_parts.queue_claim import GenerationResourceLease
 from app.tasks.generation_parts.runtime import GenerationRuntime
+from app.tasks.generation_parts.services import RunGenerationDeps
 from app.tasks.video_generation_parts.decisions import (
     VideoDomainState,
     VideoPollOutcome,
@@ -63,6 +66,29 @@ class RecordingExecutor(EffectExecutor):
 
     async def mark_applied(self, token: Any) -> None:
         self.applied_tokens.add(token.key)
+
+
+class _FakeGenerationService:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+def _fake_generation_deps() -> RunGenerationDeps:
+    return RunGenerationDeps(
+        store=_FakeGenerationService("store"),
+        artifacts=_FakeGenerationService("artifacts"),
+        billing=_FakeGenerationService("billing"),
+        events=_FakeGenerationService("events"),
+        provider=_FakeGenerationService("provider"),
+        queue=_FakeGenerationService("queue"),
+        lease=_FakeGenerationService("lease"),
+        credentials=_FakeGenerationService("credentials"),
+        workflows=_FakeGenerationService("workflows"),
+    )
+
+
+def _fake_image_upstream_runtime() -> ImageUpstreamRuntime:
+    return ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
 
 
 def test_lease_unknown_is_fail_closed() -> None:
@@ -128,6 +154,48 @@ def test_generation_retry_decision_exposes_queue_and_retry_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generation_arq_entry_requires_explicit_runtime() -> None:
+    with pytest.raises(TypeError, match="generation_runtime"):
+        await generation_task.run_generation({}, "gen-missing")
+    with pytest.raises(TypeError, match="generation_runtime"):
+        await generation_task.run_generation(
+            {"generation_runtime": object()},
+            "gen-wrong",
+        )
+
+
+@pytest.mark.asyncio
+async def test_generation_arq_entry_invokes_injected_fake_services() -> None:
+    seen: list[tuple[dict[str, Any], str, RunGenerationDeps]] = []
+    deps = _fake_generation_deps()
+
+    async def runner(
+        ctx: dict[str, Any],
+        task_id: str,
+        services: RunGenerationDeps,
+    ) -> None:
+        seen.append((ctx, task_id, services))
+
+    runtime = GenerationRuntime(deps=deps, runner=runner)
+    ctx: dict[str, Any] = {"generation_runtime": runtime}
+
+    await generation_task.run_generation(ctx, "gen-explicit")
+
+    assert seen == [(ctx, "gen-explicit", deps)]
+
+
+@pytest.mark.asyncio
+async def test_completion_arq_entry_requires_explicit_runtime() -> None:
+    with pytest.raises(TypeError, match="completion_runtime"):
+        await completion_task.run_completion({}, "comp-missing")
+    with pytest.raises(TypeError, match="completion_runtime"):
+        await completion_task.run_completion(
+            {"completion_runtime": object()},
+            "comp-wrong",
+        )
+
+
+@pytest.mark.asyncio
 async def test_generation_resource_lease_close_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,6 +209,7 @@ async def test_generation_resource_lease_close_is_idempotent(
         release,
     )
     resource = GenerationResourceLease(
+        services=_fake_generation_deps(),
         redis=object(),
         task_id="gen-3",
         lease_token="owner:token",
@@ -252,7 +321,11 @@ def test_video_poll_policy_uses_explicit_clock_and_terminal_invariants() -> None
 async def test_explicit_runtimes_delegate_without_parent_monkeypatches() -> None:
     calls: list[tuple[str, str]] = []
 
-    async def generation_runner(_ctx: dict[str, Any], task_id: str) -> None:
+    async def generation_runner(
+        _ctx: dict[str, Any],
+        task_id: str,
+        _deps: object,
+    ) -> None:
         calls.append(("generation", task_id))
 
     async def completion_runner(_ctx: dict[str, Any], task_id: str) -> None:
@@ -269,12 +342,16 @@ async def test_explicit_runtimes_delegate_without_parent_monkeypatches() -> None
         return 7
 
     generation_runtime = GenerationRuntime(
-        ports=replace(DEFAULT_GENERATION_RUNTIME.ports),
+        deps=_fake_generation_deps(),
         runner=generation_runner,
     )
+    default_completion_runtime = build_completion_runtime(
+        image_upstream_runtime=_fake_image_upstream_runtime(),
+    )
     completion_runtime = CompletionRuntime(
-        ports=replace(DEFAULT_COMPLETION_RUNTIME.ports),
+        ports=replace(default_completion_runtime.ports),
         runner=completion_runner,
+        image_upstream_runtime=default_completion_runtime.image_upstream_runtime,
     )
     video_runtime = VideoGenerationRuntime(
         ports=replace(DEFAULT_VIDEO_GENERATION_RUNTIME.ports),

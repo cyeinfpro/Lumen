@@ -12,7 +12,9 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from sqlalchemy import select
@@ -33,6 +35,7 @@ from ..observability import (
     context_compaction_duration_seconds,
     context_compaction_total,
 )
+from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..upstream import UpstreamError
 from .context_summary_parts.common import (
     LoadedSummaryMessages,
@@ -348,6 +351,7 @@ async def _call_summary_upstream(
     *,
     extra_instruction: str | None = None,
     timeout_s: float = _SUMMARY_HTTP_TIMEOUT_S,
+    image_upstream_runtime: ImageUpstreamRuntime | None = None,
 ) -> str | None:
     """Call the text provider route through the modular upstream adapter."""
     from ..provider_pool import get_pool
@@ -364,7 +368,10 @@ async def _call_summary_upstream(
         runtime=_summary_upstream_runtime(
             get_pool=get_pool,
             classify_retriable=classify_retriable,
-            responses_call=responses_call,
+            responses_call=partial(
+                responses_call,
+                runtime=image_upstream_runtime,
+            ),
         ),
     )
 
@@ -395,7 +402,13 @@ async def _call_summary_upstream_compatible(
     *,
     extra_instruction: str | None,
     timeout_s: float,
+    image_upstream_runtime: ImageUpstreamRuntime | None = None,
 ) -> str | None:
+    runtime_kwargs = (
+        {"image_upstream_runtime": image_upstream_runtime}
+        if image_upstream_runtime is not None
+        else {}
+    )
     try:
         return await _call_summary_upstream(
             input_text,
@@ -403,6 +416,7 @@ async def _call_summary_upstream_compatible(
             model,
             extra_instruction=extra_instruction,
             timeout_s=timeout_s,
+            **runtime_kwargs,
         )
     except TypeError as exc:
         if "timeout_s" not in str(exc):
@@ -412,6 +426,7 @@ async def _call_summary_upstream_compatible(
             target_tokens,
             model,
             extra_instruction=extra_instruction,
+            **runtime_kwargs,
         )
 
 
@@ -486,6 +501,12 @@ async def _safe_release_manual_compact_active(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SegmentSummaryExecution:
+    coverage: _SummaryCoverage | None = None
+    image_upstream_runtime: ImageUpstreamRuntime | None = None
+
+
 async def _segment_and_summarize(
     *,
     conv_id: str,
@@ -499,8 +520,9 @@ async def _segment_and_summarize(
     image_captions: Mapping[str, str] | None = None,
     redis: Any = None,
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
-    coverage: _SummaryCoverage | None = None,
+    execution: _SegmentSummaryExecution | None = None,
 ) -> str | None:
+    execution = execution or _SegmentSummaryExecution()
     return await _fallback.segment_and_summarize(
         conv_id=conv_id,
         messages=messages,
@@ -513,10 +535,13 @@ async def _segment_and_summarize(
         image_captions=image_captions,
         redis=redis,
         progress_callback=progress_callback,
-        coverage=coverage,
+        coverage=execution.coverage,
         runtime=_fallback.SummaryFallbackRuntime(
             message_to_line=_message_to_summary_line,
-            call_upstream=_call_summary_upstream_compatible,
+            call_upstream=partial(
+                _call_summary_upstream_compatible,
+                image_upstream_runtime=execution.image_upstream_runtime,
+            ),
             compose_input=_compose_summary_input,
             plan_segments=lambda lines, budget: _summary_segments_by_budget(
                 lines,
@@ -752,6 +777,7 @@ async def _generate_summary_result(
     *,
     circuit_open: bool,
     progress_callback: Callable[[int, int], Awaitable[None]],
+    image_upstream_runtime: ImageUpstreamRuntime | None,
 ) -> _SummaryGenerationResult | None:
     loaded = await _attach_summary_image_captions(session, request)
     coverage = _SummaryCoverage()
@@ -769,7 +795,10 @@ async def _generate_summary_result(
             image_captions=loaded.image_captions,
             redis=redis,
             progress_callback=progress_callback,
-            coverage=coverage,
+            execution=_SegmentSummaryExecution(
+                coverage=coverage,
+                image_upstream_runtime=image_upstream_runtime,
+            ),
         )
     _normalize_summary_coverage(summary_text, coverage, loaded)
 
@@ -1079,6 +1108,7 @@ async def _run_locked_context_summary(
     lock: _SummaryLock,
     *,
     circuit_open: bool,
+    image_upstream_runtime: ImageUpstreamRuntime | None,
 ) -> dict[str, Any] | None:
     renew_task: asyncio.Task[None] | None = None
     try:
@@ -1123,6 +1153,7 @@ async def _run_locked_context_summary(
             redis,
             circuit_open=circuit_open,
             progress_callback=progress,
+            image_upstream_runtime=image_upstream_runtime,
         )
         if generated is None:
             return {"status": "summary_failed"}
@@ -1194,6 +1225,7 @@ async def ensure_context_summary(
     extra_instruction: str | None = None,
     dry_run: bool = False,
     trigger: str = "auto",
+    image_upstream_runtime: ImageUpstreamRuntime | None = None,
 ) -> dict[str, Any] | None:
     """Ensure a rolling summary exists up to ``boundary``."""
     target_tokens = _settings_int(
@@ -1266,6 +1298,7 @@ async def ensure_context_summary(
         redis,
         lock,
         circuit_open=circuit_open,
+        image_upstream_runtime=image_upstream_runtime,
     )
 
 
@@ -1308,6 +1341,12 @@ async def manual_compact_conversation(
     )
 
     try:
+        image_upstream_runtime = ctx["image_upstream_runtime"]
+        if not isinstance(image_upstream_runtime, ImageUpstreamRuntime):
+            raise TypeError(
+                "ctx['image_upstream_runtime'] must be ImageUpstreamRuntime"
+            )
+
         async with SessionLocal() as session:
             conv = (
                 await session.execute(
@@ -1352,6 +1391,7 @@ async def manual_compact_conversation(
                 force=True,
                 extra_instruction=extra_instruction,
                 trigger="manual",
+                image_upstream_runtime=image_upstream_runtime,
             )
             if (
                 result is None

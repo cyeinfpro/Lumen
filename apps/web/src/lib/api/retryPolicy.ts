@@ -5,8 +5,22 @@ export type RetryMode = "query" | "none" | "idempotent";
 const RETRYABLE_STATUS = new Set([502, 503, 504]);
 const DEFAULT_DELAYS_MS = [400, 1200];
 
-export function retryModeFor(method: string, headers: Headers): RetryMode {
+export function isReplayableBody(
+  body: BodyInit | null | undefined,
+): boolean {
+  return !(
+    typeof ReadableStream !== "undefined" &&
+    body instanceof ReadableStream
+  );
+}
+
+export function retryModeFor(
+  method: string,
+  headers: Headers,
+  body?: BodyInit | null,
+): RetryMode {
   if (method === "GET" || method === "HEAD") return "query";
+  if (!isReplayableBody(body)) return "none";
   return headers.has("Idempotency-Key") ||
     headers.has("idempotency-key")
     ? "idempotent"

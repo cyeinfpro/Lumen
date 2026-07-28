@@ -5,13 +5,19 @@ of reaching into route modules or workflow implementation internals.
 """
 
 from .application.errors import (
+    InvalidWorkflowCursorError,
     WorkflowApplicationError,
     WorkflowNotFoundError,
     WorkflowPolicyNotFoundError,
     WorkflowValidationError,
 )
 from .application.policy_registry import WorkflowPolicyRegistry
-from .composition import WorkflowApplication, build_workflow_application
+from .application.queries import ListWorkflowRuns
+from .application.runtime_state import WorkflowRuntimeState
+from .composition import (
+    WorkflowApplication,
+    build_workflow_application,
+)
 from .domain.models import (
     AssetRequirement,
     CostEstimate,
@@ -26,6 +32,8 @@ from .domain.models import (
 __all__ = [
     "AssetRequirement",
     "CostEstimate",
+    "InvalidWorkflowCursorError",
+    "ListWorkflowRuns",
     "WorkflowApplication",
     "WorkflowApplicationError",
     "WorkflowCommand",
@@ -36,6 +44,7 @@ __all__ = [
     "WorkflowPolicyNotFoundError",
     "WorkflowPolicyRegistry",
     "WorkflowRunSnapshot",
+    "WorkflowRuntimeState",
     "WorkflowStepPlan",
     "WorkflowValidationError",
     "build_workflow_application",
