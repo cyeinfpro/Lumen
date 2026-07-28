@@ -38,6 +38,7 @@ from ...observability import (
 )
 from ...generation_dispatch import dispatch_identity_from_context
 from ...provider_runtime.errors import UpstreamError
+from ...upstream_parts import GeneratedImageResult
 from ..state import is_generation_terminal
 from . import failure, success
 from .admission import WeightedPermit
@@ -1285,7 +1286,7 @@ def _should_consume_batch_extras(state: GenerationRunState) -> bool:
 async def _next_batch_extra_pair(
     state: GenerationRunState,
     batch_index: int,
-) -> tuple[str, str | None] | None:
+) -> GeneratedImageResult | None:
     try:
         pair = await anext_image_with_guards(
             state.image_iter,

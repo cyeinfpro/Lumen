@@ -62,9 +62,8 @@ class RemoteImageResult:
             raise ValueError("remote image expected MIME must be non-empty or None")
 
 
-GeneratedPayload: TypeAlias = (
-    InlineImageBytes | StagedImageFile | RemoteImageResult
-)
+GeneratedPayload: TypeAlias = InlineImageBytes | StagedImageFile | RemoteImageResult
+GeneratedPayloadInput: TypeAlias = GeneratedPayload | str
 GeneratedImageResult: TypeAlias = tuple[GeneratedPayload, str | None]
 
 
@@ -159,6 +158,13 @@ def generated_payload_to_base64(payload: GeneratedPayload) -> str:
     return base64.b64encode(read_generated_payload_bytes(payload)).decode("ascii")
 
 
+def materialize_generated_payload(payload: GeneratedPayloadInput) -> bytes:
+    """Materialize the compatibility union without a bytes-to-base64 round trip."""
+    if isinstance(payload, str):
+        return decode_inline_image_base64(payload).data
+    return read_generated_payload_bytes(payload)
+
+
 def cleanup_owned_generated_payload(payload: GeneratedPayload) -> None:
     """Delete only staging files whose ownership was transferred to the caller."""
     if isinstance(payload, StagedImageFile) and payload.owned:
@@ -170,6 +176,7 @@ __all__ = [
     "DEFAULT_MAX_GENERATED_IMAGE_BYTES",
     "GeneratedImageResult",
     "GeneratedPayload",
+    "GeneratedPayloadInput",
     "InlineImageBytes",
     "RemoteImageResult",
     "StagedImageFile",
@@ -178,6 +185,7 @@ __all__ = [
     "decode_inline_image_base64",
     "generated_payload_size",
     "generated_payload_to_base64",
+    "materialize_generated_payload",
     "read_generated_payload_bytes",
     "validate_remote_image_url",
 ]

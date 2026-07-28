@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 
 import asyncio
+import hashlib
 import inspect
 import io
 import os
@@ -55,6 +56,7 @@ from app.tasks.generation_parts import (
     workflow_hooks,
 )
 from app import generation_dispatch
+from app.upstream_parts import StagedImageFile
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
 from app.tasks.generation_parts.composition_ports import (
     DefaultGenerationArtifacts,
@@ -444,6 +446,29 @@ async def test_generation_conversation_alive_check_filters_deleted_rows() -> Non
     assert "messages.deleted_at IS NULL" in rendered
     assert "conversations.deleted_at IS NULL" in rendered
     assert "FOR UPDATE OF conversations" in rendered
+
+
+def test_generation_success_materializes_and_cleans_owned_staged_payload(
+    tmp_path: Path,
+) -> None:
+    raw = b"staged-image"
+    path = tmp_path / "generated.bin"
+    path.write_bytes(raw)
+    payload = StagedImageFile(
+        path=path,
+        size=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        owned=True,
+    )
+
+    assert (
+        generation_success._decode_upstream_result(  # noqa: SLF001
+            payload,
+            generation_services,
+        )
+        == raw
+    )
+    assert not path.exists()
 
 
 @pytest.mark.asyncio

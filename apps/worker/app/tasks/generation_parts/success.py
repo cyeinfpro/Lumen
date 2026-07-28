@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import binascii
 import io
 import logging
 import time
@@ -23,6 +22,12 @@ from lumen_core.constants import (
 from lumen_core.models import Image, ImageVariant, Message, new_uuid7
 
 from ...provider_runtime.errors import UpstreamError
+from ...upstream_parts import (
+    GeneratedImageResult,
+    GeneratedPayloadInput,
+    cleanup_owned_generated_payload,
+    materialize_generated_payload,
+)
 from .diagnostics import (
     build_generation_diagnostics,
     image_effective_params_snapshot,
@@ -31,7 +36,7 @@ from .diagnostics import (
 )
 from .errors import LeaseLost, TaskCancelled
 from .event_delivery import stage_generation_success_event
-from .image_artifact_contracts import decode_upstream_image_b64, sha256
+from .image_artifact_contracts import sha256
 from .lifecycle import raise_if_generation_interrupted
 from .persistence import (
     BonusGenerationContext,
@@ -112,7 +117,7 @@ async def _validate_result_and_publish_finalizing(
     state: GenerationRunState,
     g: RunGenerationDeps,
 ) -> None:
-    if not state.b64_result:
+    if state.b64_result is None:
         raise UpstreamError(
             "upstream returned no image (tool_choice downgrade?)",
             error_code=EC.NO_IMAGE_RETURNED.value,
@@ -180,15 +185,27 @@ async def _postprocess_generated_image(
     return _build_artifact(state, processed, g)
 
 
-def _decode_upstream_result(b64_result: str | None, g: RunGenerationDeps) -> bytes:
-    try:
-        return decode_upstream_image_b64(b64_result or "")
-    except binascii.Error as exc:
+def _decode_upstream_result(
+    payload: GeneratedPayloadInput | None,
+    g: RunGenerationDeps,
+) -> bytes:
+    if payload is None:
         raise UpstreamError(
-            f"bad base64 from upstream: {exc}",
+            "upstream returned no image",
+            error_code=EC.NO_IMAGE_RETURNED.value,
+            status_code=200,
+        )
+    try:
+        return materialize_generated_payload(payload)
+    except (TypeError, ValueError) as exc:
+        raise UpstreamError(
+            f"bad image payload from upstream: {exc}",
             error_code=EC.BAD_RESPONSE.value,
             status_code=200,
         ) from exc
+    finally:
+        if not isinstance(payload, str):
+            cleanup_owned_generated_payload(payload)
 
 
 def _raise_if_sha_echo(
@@ -429,9 +446,7 @@ def _add_image_rows(
     g: RunGenerationDeps,
 ) -> None:
     parent_image_id = (
-        state.primary_input_image_id
-        if state.action == GenerationAction.EDIT
-        else None
+        state.primary_input_image_id if state.action == GenerationAction.EDIT else None
     )
     session.add(
         Image(
@@ -665,9 +680,7 @@ def _stage_success_event(
         mime=artifact.orig_mime,
         image_url=g.artifacts.public_url(artifact.key_orig),
         filename=artifact.model_metadata.get("suggested_filename"),
-        image_payload_meta=compact_image_payload_meta(
-            artifact.image_metadata
-        ),
+        image_payload_meta=compact_image_payload_meta(artifact.image_metadata),
         diagnostics=artifact.generation_diagnostics,
     )
 
@@ -766,7 +779,7 @@ async def _finalize_dual_race_bonus(
 async def _next_bonus_pair(
     state: GenerationRunState,
     g: RunGenerationDeps,
-) -> tuple[str, str | None] | None:
+) -> GeneratedImageResult | None:
     try:
         return await anext_image_with_guards(
             state.image_iter,
@@ -796,7 +809,7 @@ async def _next_bonus_pair(
 
 def _bonus_context(
     state: GenerationRunState,
-    b64_result: str,
+    b64_result: GeneratedPayloadInput,
     revised_prompt: str | None,
 ) -> BonusGenerationContext:
     return BonusGenerationContext(

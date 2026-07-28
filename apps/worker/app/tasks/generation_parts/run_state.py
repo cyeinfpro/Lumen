@@ -9,6 +9,7 @@ from typing import Any
 from lumen_core.generation_resources import ResourceDemand
 
 from ...generation_dispatch import DispatchIdentity
+from ...upstream_parts import GeneratedImageResult, GeneratedPayloadInput
 from .admission import WeightedPermit
 from .services import RunGenerationDeps
 
@@ -68,11 +69,11 @@ class GenerationRunState:
     lease_reacquired: bool = False
 
     has_partial: bool = False
-    image_iter: AsyncIterator[tuple[str, str | None]] | None = None
+    image_iter: AsyncIterator[GeneratedImageResult] | None = None
     provider_attempt_log: list[dict[str, Any]] = field(default_factory=list)
     upstream_duration_ms: int | None = None
     requested_image_count: int = 1
-    batch_extra_pairs: list[tuple[int, tuple[str, str | None]]] = field(
+    batch_extra_pairs: list[tuple[int, GeneratedImageResult]] = field(
         default_factory=list
     )
     requested_params_for_diag: dict[str, Any] = field(default_factory=dict)
@@ -85,7 +86,7 @@ class GenerationRunState:
     prompt_for_upstream: str = ""
     progress_publisher: Any | None = None
 
-    b64_result: str | None = None
+    b64_result: GeneratedPayloadInput | None = None
     revised_prompt: str | None = None
     actual_upstream_provider: str | None = None
     actual_upstream_route: str | None = None

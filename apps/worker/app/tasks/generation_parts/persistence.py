@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import binascii
 import io
 import logging
 from collections.abc import AsyncIterator
@@ -35,9 +34,14 @@ from lumen_core.models import (
     new_uuid7,
 )
 
+from ...upstream_parts import (
+    GeneratedPayloadInput,
+    cleanup_owned_generated_payload,
+    materialize_generated_payload,
+)
 from .errors import TaskCancelled
 from .event_delivery import stage_generation_event
-from .image_artifact_contracts import decode_upstream_image_b64, sha256
+from .image_artifact_contracts import sha256
 from .services import RunGenerationDeps
 
 
@@ -170,10 +174,7 @@ async def find_existing_generated_image(
             getattr(row, "user_id", None),
         )
         return None
-    if (
-        getattr(row, "source", None)
-        != ImageSource.GENERATED.value
-    ):
+    if getattr(row, "source", None) != ImageSource.GENERATED.value:
         logger.error(
             "short-circuit guard: image %s source mismatch got=%s — ignoring",
             getattr(row, "id", "?"),
@@ -220,9 +221,7 @@ async def ensure_generation_conversation_alive(
         statement = statement.with_for_update(of=Conversation)
     conversation_id = (await session.execute(statement)).scalar_one_or_none()
     if conversation_id is None:
-        raise TaskCancelled(
-            "conversation or message was deleted"
-        )
+        raise TaskCancelled("conversation or message was deleted")
     return str(conversation_id)
 
 
@@ -284,9 +283,7 @@ async def cleanup_storage_on_error(
     try:
         yield
     except BaseException:
-        cleanup = asyncio.ensure_future(
-            services.artifacts.delete_files(keys)
-        )
+        cleanup = asyncio.ensure_future(services.artifacts.delete_files(keys))
         await _wait_for_storage_task(cleanup)
         raise
 
@@ -310,7 +307,7 @@ class BonusGenerationContext:
     primary_input_image_id: str | None
     references: list[tuple[str, bytes]]
     image_request_options: dict[str, Any]
-    b64_result: str
+    b64_result: GeneratedPayloadInput
     revised_prompt: str | None
     upstream_provider: str | None
     upstream_actual_route: str | None
@@ -381,7 +378,7 @@ async def handle_dual_race_bonus_image(
 async def _prepare_bonus_artifact(
     context: BonusGenerationContext,
 ) -> BonusImageArtifact | None:
-    if not context.b64_result:
+    if context.b64_result is None:
         return None
     raw_image = _decode_bonus_image(context)
     if raw_image is None or _bonus_sha_echoed(context, raw_image):
@@ -399,16 +396,17 @@ def _decode_bonus_image(
     context: BonusGenerationContext,
 ) -> bytes | None:
     try:
-        return decode_upstream_image_b64(
-            context.b64_result
-        )
-    except binascii.Error:
+        return materialize_generated_payload(context.b64_result)
+    except (TypeError, ValueError):
         logger.warning(
-            "%s base64 decode failed parent=%s",
+            "%s image payload decode failed parent=%s",
             context.log_label,
             context.parent_task_id,
         )
         return None
+    finally:
+        if not isinstance(context.b64_result, str):
+            cleanup_owned_generated_payload(context.b64_result)
 
 
 def _bonus_sha_echoed(
@@ -548,13 +546,11 @@ def _embed_bonus_metadata(
     try:
         with PILImage.open(io.BytesIO(raw_image)) as image:
             image.load()
-            raw_image = (
-                maybe_embed_model_image_metadata_bytes(
-                    image=image,
-                    fmt=orig_format,
-                    raw_image=raw_image,
-                    metadata=model_metadata,
-                )
+            raw_image = maybe_embed_model_image_metadata_bytes(
+                image=image,
+                fmt=orig_format,
+                raw_image=raw_image,
+                metadata=model_metadata,
             )
         return raw_image, sha256(raw_image)
     except Exception as exc:  # noqa: BLE001
@@ -596,9 +592,7 @@ async def _persist_bonus_generation(
     created_storage_keys: list[str],
 ) -> list[Any] | None:
     try:
-        async with context.services.artifacts.cleanup_on_error(
-            created_storage_keys
-        ):
+        async with context.services.artifacts.cleanup_on_error(created_storage_keys):
             async with context.services.store.session() as session:
                 upstream_request = _bonus_upstream_request(context, artifact)
                 _add_bonus_rows(
@@ -668,11 +662,7 @@ async def _settle_bonus_billing(
                 image_count=1,
             )
             await session.commit()
-            await (
-                context.services.billing.flush_after_commit(
-                    session
-                )
-            )
+            await context.services.billing.flush_after_commit(session)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "%s bonus settle failed parent=%s bonus=%s err=%r "
@@ -775,8 +765,7 @@ def _add_bonus_rows(
             source=ImageSource.GENERATED.value,
             parent_image_id=(
                 context.primary_input_image_id
-                if context.action
-                == GenerationAction.EDIT.value
+                if context.action == GenerationAction.EDIT.value
                 else None
             ),
             storage_key=artifact.key_orig,
@@ -826,9 +815,7 @@ async def _attach_bonus_image_to_message(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
 ) -> None:
-    message = await session.get(
-        Message, context.message_id
-    )
+    message = await session.get(Message, context.message_id)
     if message is None:
         return
     content = dict(message.content or {})
