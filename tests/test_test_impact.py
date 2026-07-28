@@ -4,6 +4,8 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = spec_from_file_location(
@@ -122,10 +124,13 @@ def test_plan_records_matches_reverse_imports_and_unselected_suites(
         "api-images",
     ]
     assert {command["kind"] for command in plan["commands"]} == {"gate", "test"}
-    assert sum(
-        command["command"] == "uv run python scripts/check_architecture.py"
-        for command in plan["commands"]
-    ) == 1
+    assert (
+        sum(
+            command["command"] == "uv run python scripts/check_architecture.py"
+            for command in plan["commands"]
+        )
+        == 1
+    )
     assert all(
         command["command"] != "uv run pytest -q apps/api/tests"
         for command in plan["commands"]
@@ -225,3 +230,52 @@ def test_reverse_imports_stop_after_second_level(tmp_path: Path) -> None:
             ],
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("changed_file", "expected_rule", "forbidden_command"),
+    [
+        (
+            "apps/api/app/routes/events.py",
+            "backend-realtime",
+            "uv run pytest -q apps/api/tests",
+        ),
+        (
+            "apps/worker/app/tasks/generation_parts/queue.py",
+            "worker-generation-queue",
+            "uv run pytest -q apps/worker/tests",
+        ),
+        (
+            "apps/worker/app/upstream_parts/direct_images.py",
+            "worker-upstream-images",
+            "uv run pytest -q apps/worker/tests",
+        ),
+        (
+            "apps/api/app/routes/generations.py",
+            "api-stream-assets",
+            "uv run pytest -q apps/api/tests",
+        ),
+        (
+            "apps/web/src/lib/imagePreload.ts",
+            "web-stream-assets",
+            "cd apps/web && npm test",
+        ),
+    ],
+)
+def test_current_manifest_routes_critical_domains_without_generic_fallback(
+    changed_file: str,
+    expected_rule: str,
+    forbidden_command: str,
+) -> None:
+    manifest = test_impact.load_manifest(ROOT / "scripts" / "test-manifest.toml")
+
+    plan = test_impact.build_plan(
+        manifest,
+        changed_files=[changed_file],
+        base="base",
+        head="head",
+        reverse_imports=[],
+    )
+
+    assert expected_rule in {rule["name"] for rule in plan["matched_rules"]}
+    assert forbidden_command not in {command["command"] for command in plan["commands"]}

@@ -68,6 +68,8 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           printf 'base=%s\n' "${base}" >> "${GITHUB_OUTPUT}"
+      - name: Lint impact test manifest
+        run: python scripts/test_manifest_lint.py
       - name: Build explainable impact plan
         run: |
           python scripts/test_impact.py \
