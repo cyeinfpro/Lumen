@@ -14,8 +14,9 @@ from PIL import Image as PILImage
 
 from app.canvas_services import asset_ref_service
 from app.config import settings
+from app.images.application import http_routes as images
+from app.images.application.storage_maintenance import sweep_orphan_image_files
 from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
-from app.routes import images
 from lumen_core.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
 
@@ -197,7 +198,7 @@ async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> No
             return _RowsResult(values=["u/user-1/uploads/img-1.display2048.webp"])
 
     db = _SweepDb()
-    dry_run = await images.sweep_orphan_image_files(
+    dry_run = await sweep_orphan_image_files(
         db,  # type: ignore[arg-type]
         storage_root=str(tmp_path),
         dry_run=True,
@@ -211,7 +212,7 @@ async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> No
     assert video.exists()
     assert workflow.exists()
 
-    deleted = await images.sweep_orphan_image_files(
+    deleted = await sweep_orphan_image_files(
         db,  # type: ignore[arg-type]
         storage_root=str(tmp_path),
         dry_run=False,
@@ -549,6 +550,7 @@ async def test_reference_image_binary_serves_volcano_asset_variant(
             "image-1",
             _request("GET"),
             SequenceDb(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             token="x" * 16,
             variant=VOLCANO_ASSET_IMAGE_KIND,
         )
@@ -557,6 +559,7 @@ async def test_reference_image_binary_serves_volcano_asset_variant(
             "lumen-asset-image-1.jpg",
             _request("GET"),
             SequenceDb(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             token="x" * 16,
             variant=VOLCANO_ASSET_IMAGE_KIND,
         )

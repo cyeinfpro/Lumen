@@ -19,7 +19,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from app.config import settings
-from app.routes import images
+from app.images.application import http_routes as images
 from lumen_core.image_signing import (
     DEFAULT_TTL_SEC,
     build_signed_path,
