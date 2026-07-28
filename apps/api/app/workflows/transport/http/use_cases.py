@@ -1,10 +1,10 @@
-"""Named workflow application use cases used by the HTTP transport."""
+"""Named compatibility use cases owned by the HTTP transport."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..ports.http_operations import (
+from .operation_ports import (
     ApparelWorkflowOperations,
     ModelLibraryWorkflowOperations,
     PosterWorkflowOperations,

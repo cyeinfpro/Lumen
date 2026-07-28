@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol
+from typing import Protocol
 
+from ..domain.json_types import JsonMapping
 from ..domain.models import WorkflowCommand, WorkflowPlan
 
 
@@ -13,7 +14,7 @@ class WorkflowPreviewPort(Protocol):
         *,
         command: WorkflowCommand,
         plan: WorkflowPlan,
-    ) -> Mapping[str, Any]: ...
+    ) -> JsonMapping: ...
 
 
 __all__ = ["WorkflowPreviewPort"]

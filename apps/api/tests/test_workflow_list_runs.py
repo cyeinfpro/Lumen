@@ -116,7 +116,7 @@ async def test_list_workflow_runs_owns_cursor_policy_and_next_action() -> None:
     )
     query = ListWorkflowRuns(port)
 
-    first = await query.execute(
+    first = await query.list_runs(
         user_id="user-1",
         workflow_type="poster_design",
         limit=2,
@@ -129,7 +129,7 @@ async def test_list_workflow_runs_owns_cursor_policy_and_next_action() -> None:
     assert first.next_cursor is not None
     assert port.calls[0]["excluded_types"] == ()
 
-    second = await query.execute(
+    second = await query.list_runs(
         user_id="user-1",
         workflow_type="poster_design",
         cursor=first.next_cursor,
@@ -141,14 +141,14 @@ async def test_list_workflow_runs_owns_cursor_policy_and_next_action() -> None:
     assert port.calls[1]["after"].run_id == "run-1"
 
     with pytest.raises(InvalidWorkflowCursorError):
-        await query.execute(
+        await query.list_runs(
             user_id="user-1",
             workflow_type="apparel_model_showcase",
             cursor=first.next_cursor,
             limit=2,
         )
     with pytest.raises(InvalidWorkflowCursorError):
-        await query.execute(
+        await query.list_runs(
             user_id="user-1",
             workflow_type="poster_design",
             cursor="not-a-valid-cursor",
@@ -156,7 +156,7 @@ async def test_list_workflow_runs_owns_cursor_policy_and_next_action() -> None:
         )
     assert len(port.calls) == 2
 
-    await query.execute(user_id="user-1", workflow_type=None, limit=50)
+    await query.list_runs(user_id="user-1", workflow_type=None, limit=50)
     assert port.calls[2]["excluded_types"] == (
         "apparel_model_library_generate",
         "poster_style_library_generate",
@@ -179,7 +179,7 @@ async def test_list_workflow_runs_rejects_invalid_cursor_payloads(
     cursor = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
     with pytest.raises(InvalidWorkflowCursorError):
-        await ListWorkflowRuns(_ReadPort([])).execute(
+        await ListWorkflowRuns(_ReadPort([])).list_runs(
             user_id="user-1",
             cursor=cursor,
         )

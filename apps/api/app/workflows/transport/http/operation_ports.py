@@ -1,7 +1,7 @@
-"""HTTP-facing workflow operation ports.
+"""Transport-facing workflow operation contracts.
 
-The application owns the named use-case API. Adapters implement these ports
-without leaking FastAPI or SQLAlchemy imports into the application package.
+These compatibility contracts intentionally live in the HTTP transport layer:
+they carry request/session objects while the typed application ports do not.
 """
 
 from __future__ import annotations

@@ -2,7 +2,6 @@
 
 from .commands import CancelWorkflowRun
 from .errors import InvalidWorkflowCursorError
-from .http_operations import WorkflowHttpUseCases
 from .library_sync import SyncWorkflowLibrary
 from .policy_registry import WorkflowPolicyRegistry
 from .preflight import PreviewWorkflow, ValidateWorkflow
@@ -20,7 +19,6 @@ __all__ = [
     "SubmitWorkflow",
     "SyncWorkflowLibrary",
     "ValidateWorkflow",
-    "WorkflowHttpUseCases",
     "WorkflowPolicyRegistry",
     "WorkflowRuntimeState",
 ]

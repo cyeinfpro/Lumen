@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Protocol
+
+from ..domain.json_types import JsonMapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +42,7 @@ class ModelLibraryTaggingPort(Protocol):
         *,
         user_id: str,
         image_id: str,
-    ) -> Mapping[str, object]: ...
+    ) -> JsonMapping: ...
 
     async def save_update(
         self,

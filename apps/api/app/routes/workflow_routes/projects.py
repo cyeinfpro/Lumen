@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schema_models.workflows import (
     WorkflowRunListItemOut,
@@ -24,13 +23,13 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 @router.get("", response_model=WorkflowRunListOut)
 async def list_workflows(
     user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[Any, Depends(get_db)],
     type: str | None = Query(default=None),  # noqa: A002 - API field name
     cursor: Annotated[str | None, Query(max_length=512)] = None,
     limit: int = Query(default=50, ge=1, le=100),
 ) -> WorkflowRunListOut:
     try:
-        result = await list_workflow_runs(db).execute(
+        result = await list_workflow_runs(db).list_runs(
             user_id=user.id,
             workflow_type=type,
             cursor=cursor,

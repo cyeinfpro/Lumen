@@ -154,7 +154,7 @@ def _list_item(item: WorkflowRunListRecord) -> WorkflowRunListItem:
 class ListWorkflowRuns:
     read_port: WorkflowRunReadPort
 
-    async def execute(
+    async def list_runs(
         self,
         *,
         user_id: str,
