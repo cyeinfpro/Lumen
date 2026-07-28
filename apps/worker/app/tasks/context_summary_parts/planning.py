@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NotRequired, TypedDict, Unpack
 
 from lumen_core.context_window import is_summary_usable
 from lumen_core.models import Conversation
@@ -26,36 +26,63 @@ class SummaryPlan:
     handled: bool = False
 
 
+class _SummaryPlanArgs(TypedDict):
+    force: bool
+    extra_instruction: str | None
+    dry_run: bool
+    trigger: str
+    target_tokens: int
+    input_budget: int
+    summary_timeout_s: float
+    model: str
+    circuit_threshold: int
+    load_messages: Callable[
+        [Any, str, str | None, str], Awaitable[LoadedSummaryMessages]
+    ]
+    load_position: Callable[[Any, str], Awaitable[tuple[datetime, str] | None]]
+    boundary_id_fn: NotRequired[Callable[[Any], str | None]]
+    boundary_created_at_fn: NotRequired[Callable[[Any], datetime | None]]
+    extra_instruction_hash_fn: NotRequired[Callable[[str | None], str | None]]
+    is_summary_usable_fn: NotRequired[Callable[[dict[str, Any]], bool]]
+    summary_satisfies_request_fn: NotRequired[Callable[..., bool]]
+    public_summary_result_fn: NotRequired[Callable[..., dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class _SummaryPlanOptions:
+    force: bool
+    extra_instruction: str | None
+    dry_run: bool
+    trigger: str
+    target_tokens: int
+    input_budget: int
+    summary_timeout_s: float
+    model: str
+    circuit_threshold: int
+    load_messages: Callable[
+        [Any, str, str | None, str], Awaitable[LoadedSummaryMessages]
+    ]
+    load_position: Callable[[Any, str], Awaitable[tuple[datetime, str] | None]]
+    boundary_id_fn: Callable[[Any], str | None] = boundary_id
+    boundary_created_at_fn: Callable[[Any], datetime | None] = boundary_created_at
+    extra_instruction_hash_fn: Callable[[str | None], str | None] = (
+        extra_instruction_hash
+    )
+    is_summary_usable_fn: Callable[[dict[str, Any]], bool] = is_summary_usable
+    summary_satisfies_request_fn: Callable[..., bool] = summary_satisfies_request
+    public_summary_result_fn: Callable[..., dict[str, Any]] = public_summary_result
+
+
 async def build_summary_plan(
     session: Any,
     conv: Conversation,
     boundary: Any,
     settings: Any,
-    *,
-    force: bool,
-    extra_instruction: str | None,
-    dry_run: bool,
-    trigger: str,
-    target_tokens: int,
-    input_budget: int,
-    summary_timeout_s: float,
-    model: str,
-    circuit_threshold: int,
-    load_messages: Callable[
-        [Any, str, str | None, str], Awaitable[LoadedSummaryMessages]
-    ],
-    load_position: Callable[[Any, str], Awaitable[tuple[datetime, str] | None]],
-    boundary_id_fn: Callable[[Any], str | None] = boundary_id,
-    boundary_created_at_fn: Callable[[Any], datetime | None] = boundary_created_at,
-    extra_instruction_hash_fn: Callable[
-        [str | None], str | None
-    ] = extra_instruction_hash,
-    is_summary_usable_fn: Callable[[dict[str, Any]], bool] = is_summary_usable,
-    summary_satisfies_request_fn: Callable[..., bool] = summary_satisfies_request,
-    public_summary_result_fn: Callable[..., dict[str, Any]] = public_summary_result,
+    **kwargs: Unpack[_SummaryPlanArgs],
 ) -> SummaryPlan:
+    options = _SummaryPlanOptions(**kwargs)
     conv_id = str(conv.id)
-    boundary_key = boundary_id_fn(boundary)
+    boundary_key = options.boundary_id_fn(boundary)
     if not boundary_key:
         return SummaryPlan(None, handled=True)
 
@@ -64,18 +91,23 @@ async def build_summary_plan(
     )
     usable_summary = (
         existing_summary
-        if existing_summary is not None and is_summary_usable_fn(existing_summary)
+        if existing_summary is not None
+        and options.is_summary_usable_fn(existing_summary)
         else None
     )
-    extra_hash = extra_instruction_hash_fn(extra_instruction)
+    extra_hash = options.extra_instruction_hash_fn(options.extra_instruction)
     if (
-        not dry_run
-        and not force
-        and summary_satisfies_request_fn(usable_summary, boundary, extra_hash)
+        not options.dry_run
+        and not options.force
+        and options.summary_satisfies_request_fn(
+            usable_summary,
+            boundary,
+            extra_hash,
+        )
     ):
         return SummaryPlan(
             None,
-            immediate_result=public_summary_result_fn(
+            immediate_result=options.public_summary_result_fn(
                 usable_summary,
                 created=False,
                 status="cached",
@@ -85,17 +117,17 @@ async def build_summary_plan(
 
     previous_summary_text, previous_up_to_id = _previous_summary_state(
         usable_summary,
-        force=force,
+        force=options.force,
     )
-    loaded = await load_messages(
+    loaded = await options.load_messages(
         session,
         conv_id,
         previous_up_to_id,
         boundary_key,
     )
-    boundary_dt = boundary_created_at_fn(boundary)
+    boundary_dt = options.boundary_created_at_fn(boundary)
     if boundary_dt is None:
-        position = await load_position(session, boundary_key)
+        position = await options.load_position(session, boundary_key)
         boundary_dt = position[0] if position is not None else None
     if boundary_dt is None:
         return SummaryPlan(None, handled=True)
@@ -107,18 +139,18 @@ async def build_summary_plan(
             boundary_id=boundary_key,
             boundary_dt=boundary_dt,
             settings=settings,
-            target_tokens=target_tokens,
-            input_budget=input_budget,
-            summary_timeout_s=summary_timeout_s,
-            model=model,
-            circuit_threshold=circuit_threshold,
-            extra_instruction=extra_instruction,
+            target_tokens=options.target_tokens,
+            input_budget=options.input_budget,
+            summary_timeout_s=options.summary_timeout_s,
+            model=options.model,
+            circuit_threshold=options.circuit_threshold,
+            extra_instruction=options.extra_instruction,
             extra_hash=extra_hash,
             existing_summary=existing_summary,
             previous_summary_text=previous_summary_text,
             loaded=loaded,
-            trigger=trigger,
-            force=force,
+            trigger=options.trigger,
+            force=options.force,
         )
     )
 

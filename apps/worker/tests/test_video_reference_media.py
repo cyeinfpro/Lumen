@@ -2045,6 +2045,31 @@ def test_video_http_error_keeps_missing_model_as_invalid_input() -> None:
     assert exc.error_code == "invalid_input"
 
 
+@pytest.mark.parametrize(
+    ("phase", "status_code", "expected"),
+    [
+        ("submit", 401, "upstream_auth_error"),
+        ("submit", 408, "upstream_timeout"),
+        ("submit", 429, "capacity"),
+        ("poll", 404, "upstream_not_ready"),
+        ("submit", 503, "provider_error"),
+        ("submit", 302, "upstream_unknown"),
+    ],
+)
+def test_video_http_error_preserves_status_classification_precedence(
+    phase: str,
+    status_code: int,
+    expected: str,
+) -> None:
+    exc = _http_error(
+        phase,
+        status_code,
+        {"message": "generic upstream failure"},
+    )
+
+    assert exc.error_code == expected
+
+
 @pytest.mark.asyncio
 async def test_seedance_submit_rejects_reference_video_without_url() -> None:
     provider = VideoProviderDefinition(

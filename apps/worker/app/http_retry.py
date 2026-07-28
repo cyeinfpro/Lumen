@@ -7,8 +7,9 @@ import email.utils
 import logging
 import math
 import random
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NotRequired, TypedDict, Unpack
 
 import httpx
 
@@ -23,6 +24,39 @@ RETRY_HTTPX_EXC: tuple[type[BaseException], ...] = (
     httpx.ConnectError,
     httpx.RemoteProtocolError,
 )
+
+
+class _PostWithRetryArgs(TypedDict):
+    client: httpx.AsyncClient
+    url: str
+    headers: dict[str, str]
+    json_body: NotRequired[dict[str, Any] | None]
+    data: NotRequired[dict[str, str] | None]
+    files: NotRequired[list[tuple[str, tuple[str, bytes, str]]] | None]
+    timeout: NotRequired[httpx.Timeout | None]
+    retry_httpx_exceptions: NotRequired[bool]
+    max_attempts: NotRequired[int]
+    backoff_base_s: NotRequired[float]
+    before_attempt: NotRequired[Callable[[int], Awaitable[None]] | None]
+    max_response_bytes: NotRequired[int]
+    max_error_response_bytes: NotRequired[int]
+
+
+@dataclass(frozen=True)
+class _PostWithRetryRequest:
+    client: httpx.AsyncClient
+    url: str
+    headers: dict[str, str]
+    json_body: dict[str, Any] | None = None
+    data: dict[str, str] | None = None
+    files: list[tuple[str, tuple[str, bytes, str]]] | None = None
+    timeout: httpx.Timeout | None = None
+    retry_httpx_exceptions: bool = True
+    max_attempts: int = 2
+    backoff_base_s: float = 1.0
+    before_attempt: Callable[[int], Awaitable[None]] | None = None
+    max_response_bytes: int = DEFAULT_RESPONSE_MAX_BYTES
+    max_error_response_bytes: int = DEFAULT_ERROR_RESPONSE_MAX_BYTES
 
 
 class ResponseBodyTooLarge(httpx.HTTPError):
@@ -163,61 +197,47 @@ def transient_retry_sleep_seconds(
     return max(0.05, base * random.uniform(0.6, 1.4))
 
 
-async def post_with_retry(
-    *,
-    client: httpx.AsyncClient,
-    url: str,
-    headers: dict[str, str],
-    json_body: dict[str, Any] | None = None,
-    data: dict[str, str] | None = None,
-    files: list[tuple[str, tuple[str, bytes, str]]] | None = None,
-    timeout: httpx.Timeout | None = None,
-    retry_httpx_exceptions: bool = True,
-    max_attempts: int = 2,
-    backoff_base_s: float = 1.0,
-    before_attempt: Callable[[int], Awaitable[None]] | None = None,
-    max_response_bytes: int = DEFAULT_RESPONSE_MAX_BYTES,
-    max_error_response_bytes: int = DEFAULT_ERROR_RESPONSE_MAX_BYTES,
-) -> httpx.Response:
+async def post_with_retry(**kwargs: Unpack[_PostWithRetryArgs]) -> httpx.Response:
     """POST with bounded retries for transient transport and gateway failures."""
+    request = _PostWithRetryRequest(**kwargs)
     last_exc: BaseException | None = None
     last_resp: httpx.Response | None = None
-    for attempt in range(max_attempts):
+    for attempt in range(request.max_attempts):
         if attempt > 0:
             await asyncio.sleep(
                 transient_retry_sleep_seconds(
                     attempt=attempt,
-                    backoff_base_s=backoff_base_s,
+                    backoff_base_s=request.backoff_base_s,
                     response=last_resp,
                 )
             )
-        if before_attempt is not None:
-            await before_attempt(attempt + 1)
+        if request.before_attempt is not None:
+            await request.before_attempt(attempt + 1)
         try:
-            request_kwargs: dict[str, Any] = {"headers": headers}
-            if json_body is not None:
-                request_kwargs["json"] = json_body
+            request_kwargs: dict[str, Any] = {"headers": request.headers}
+            if request.json_body is not None:
+                request_kwargs["json"] = request.json_body
             else:
-                request_kwargs["data"] = data
-                request_kwargs["files"] = files
-            if timeout is not None:
-                request_kwargs["timeout"] = timeout
+                request_kwargs["data"] = request.data
+                request_kwargs["files"] = request.files
+            if request.timeout is not None:
+                request_kwargs["timeout"] = request.timeout
             response = await _post_once(
-                client=client,
-                url=url,
+                client=request.client,
+                url=request.url,
                 request_kwargs=request_kwargs,
-                max_response_bytes=max_response_bytes,
-                max_error_response_bytes=max_error_response_bytes,
+                max_response_bytes=request.max_response_bytes,
+                max_error_response_bytes=request.max_error_response_bytes,
             )
         except RETRY_HTTPX_EXC as exc:
-            if not retry_httpx_exceptions:
+            if not request.retry_httpx_exceptions:
                 raise
             last_exc = exc
             logger.warning(
                 "upstream transient httpx error attempt=%d/%d url=%s err=%r",
                 attempt + 1,
-                max_attempts,
-                url,
+                request.max_attempts,
+                request.url,
                 exc,
             )
             continue
@@ -226,8 +246,8 @@ async def post_with_retry(
             logger.warning(
                 "upstream transient status attempt=%d/%d url=%s status=%d",
                 attempt + 1,
-                max_attempts,
-                url,
+                request.max_attempts,
+                request.url,
                 response.status_code,
             )
             continue

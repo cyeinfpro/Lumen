@@ -451,7 +451,6 @@ def _http_error(
     status_code: int,
     raw: dict[str, Any],
 ) -> VideoUpstreamError:
-    code = "upstream_unknown"
     message = _nested_get(
         raw,
         ("error", "message"),
@@ -461,26 +460,35 @@ def _http_error(
     )
     if not isinstance(message, str) or not message:
         message = f"video upstream {phase} failed status={status_code}"
-    if status_code in {401, 403}:
-        code = "upstream_auth_error"
-    elif status_code in {408, 504}:
-        code = "upstream_timeout"
-    elif status_code == 429:
-        code = "capacity"
-    elif phase == "poll" and status_code == 404:
-        code = "upstream_not_ready"
-    elif _is_upstream_model_unavailable_message(message):
-        code = "provider_unavailable"
-    elif 400 <= status_code < 500:
-        code = "invalid_input"
-    elif status_code >= 500:
-        code = "provider_error"
+    code = _http_error_code(phase, status_code, message)
     return VideoUpstreamError(
         message,
         error_code=code,
         status_code=status_code,
         raw=raw,
     )
+
+
+def _http_error_code(
+    phase: str,
+    status_code: int,
+    message: str,
+) -> str:
+    if status_code in {401, 403}:
+        return "upstream_auth_error"
+    if status_code in {408, 504}:
+        return "upstream_timeout"
+    if status_code == 429:
+        return "capacity"
+    if phase == "poll" and status_code == 404:
+        return "upstream_not_ready"
+    if _is_upstream_model_unavailable_message(message):
+        return "provider_unavailable"
+    if 400 <= status_code < 500:
+        return "invalid_input"
+    if status_code >= 500:
+        return "provider_error"
+    return "upstream_unknown"
 
 
 def _is_upstream_model_unavailable_message(message: str) -> bool:

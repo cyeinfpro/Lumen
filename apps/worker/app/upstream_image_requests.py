@@ -11,7 +11,7 @@ import hashlib
 import json
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, NotRequired, Protocol, TypedDict, Unpack
 
 
 class NormalizeImageOutputCompression(Protocol):
@@ -130,6 +130,41 @@ class ImageIdempotencyKeyHooks:
 @dataclass(frozen=True)
 class AttachImageIdempotencyKeyHooks:
     image_idempotency_key: ImageIdempotencyKey
+
+
+class _ResponsesImageBodyArgs(TypedDict):
+    action: str
+    prompt: str
+    size: str
+    images: list[bytes] | None
+    quality: str
+    output_format: str | None
+    output_compression: int | None
+    background: str | None
+    moderation: str | None
+    model: str | None
+    image_urls: NotRequired[list[str] | None]
+    retry_attempt: int
+    policy: ImageRequestPolicy
+    hooks: ResponsesImageBodyHooks
+
+
+@dataclass(frozen=True)
+class _ResponsesImageBodyRequest:
+    action: str
+    prompt: str
+    size: str
+    images: list[bytes] | None
+    quality: str
+    output_format: str | None
+    output_compression: int | None
+    background: str | None
+    moderation: str | None
+    model: str | None
+    retry_attempt: int
+    policy: ImageRequestPolicy
+    hooks: ResponsesImageBodyHooks
+    image_urls: list[str] | None = None
 
 
 def _json_dumps_stable(value: Any) -> str:
@@ -434,48 +469,37 @@ def _image_job_payload(
 
 
 def _build_responses_image_body(
-    *,
-    action: str,
-    prompt: str,
-    size: str,
-    images: list[bytes] | None,
-    quality: str,
-    output_format: str | None,
-    output_compression: int | None,
-    background: str | None,
-    moderation: str | None,
-    model: str | None,
-    image_urls: list[str] | None = None,
-    retry_attempt: int,
-    policy: ImageRequestPolicy,
-    hooks: ResponsesImageBodyHooks,
+    **kwargs: Unpack[_ResponsesImageBodyArgs],
 ) -> dict[str, Any]:
+    request = _ResponsesImageBodyRequest(**kwargs)
+    policy = request.policy
+    hooks = request.hooks
     assert policy.upstream_model, "model must be set"
-    image_model = model or policy.default_responses_model
+    image_model = request.model or policy.default_responses_model
     assert image_model, "model must be set"
-    image_quality = hooks.normalize_image_quality(quality)
+    image_quality = hooks.normalize_image_quality(request.quality)
     prompt_for_upstream, output_format_for_upstream, background_for_upstream = (
         hooks.transparent_matte_upstream_options(
-            prompt=prompt,
-            output_format=output_format,
-            background=background,
+            prompt=request.prompt,
+            output_format=request.output_format,
+            background=request.background,
         )
     )
     tool: dict[str, Any] = {
         "type": "image_generation",
         "model": policy.upstream_model,
-        "action": action,
-        "size": size,
+        "action": request.action,
+        "size": request.size,
         "quality": image_quality,
     }
     hooks.add_image_output_options(
         tool,
         output_format=output_format_for_upstream,
-        output_compression=output_compression,
+        output_compression=request.output_compression,
         background=background_for_upstream,
-        moderation=moderation,
+        moderation=request.moderation,
     )
-    pixels = hooks.parse_size_pixels(size)
+    pixels = hooks.parse_size_pixels(request.size)
     if (
         image_quality != "low"
         and pixels is not None
@@ -486,13 +510,13 @@ def _build_responses_image_body(
     content: list[dict[str, Any]] = [
         {"type": "input_text", "text": prompt_for_upstream}
     ]
-    if action == "edit":
-        if image_urls:
-            for url in image_urls:
+    if request.action == "edit":
+        if request.image_urls:
+            for url in request.image_urls:
                 if isinstance(url, str) and url:
                     content.append({"type": "input_image", "image_url": url})
         else:
-            for raw in images or []:
+            for raw in request.images or []:
                 ref_bytes, mime = hooks.normalize_reference_image(raw)
                 image_b64 = base64.b64encode(ref_bytes).decode("ascii")
                 content.append(
@@ -517,7 +541,12 @@ def _build_responses_image_body(
         "store": False,
         "reasoning": {"effort": "medium", "summary": "auto"},
     }
-    hooks.apply_retry_cache_busters(body, retry_attempt, prompt, size)
+    hooks.apply_retry_cache_busters(
+        body,
+        request.retry_attempt,
+        request.prompt,
+        request.size,
+    )
     hooks.validate_responses_body(body)
     return body
 

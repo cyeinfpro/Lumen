@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 
 from lumen_core.constants import MessageStatus, Role
-from lumen_core.memory import canonical_memory_text
+from lumen_core.memory import ExtractedMemory, canonical_memory_text
 from lumen_core.models import (
     Conversation,
     MemoryAudit,
@@ -328,6 +328,263 @@ async def abandon_memory_extraction_claim(
         return True
 
 
+@dataclass(frozen=True)
+class _MemoryFinalizationContext:
+    session: Any
+    dependencies: MemoryExtractionStateDependencies
+    claim: MemoryExtractionClaim
+    user: User
+    source_message: Message
+    scope_id: str
+    existing: list[UserMemory]
+    writes: list[dict[str, Any]]
+    undo_requests: list[UndoTokenRequest]
+
+
+def _rejected_pii_write() -> dict[str, Any]:
+    return write_payload(
+        id=None,
+        kind="rejected_pii",
+        type=None,
+        content="",
+        source_excerpt=None,
+    )
+
+
+def _duplicate_memory(
+    context: _MemoryFinalizationContext,
+    candidate: ExtractedMemory,
+) -> UserMemory | None:
+    return next(
+        (
+            memory
+            for memory in context.existing
+            if memory.type == candidate.type
+            and canonical_memory_text(memory.content)
+            == canonical_memory_text(candidate.content)
+        ),
+        None,
+    )
+
+
+def _conflicting_memory(
+    context: _MemoryFinalizationContext,
+    candidate: ExtractedMemory,
+) -> UserMemory | None:
+    dependencies = context.dependencies
+    return next(
+        (
+            memory
+            for memory in context.existing
+            if dependencies.topic_key(memory.content)
+            and dependencies.topic_key(memory.content)
+            == dependencies.topic_key(candidate.content)
+            and memory.type != candidate.type
+        ),
+        None,
+    )
+
+
+def _merge_memory_candidate(
+    context: _MemoryFinalizationContext,
+    candidate: ExtractedMemory,
+    duplicate: UserMemory,
+) -> None:
+    context.dependencies.bump_positive_signal(duplicate)
+    context.session.add(
+        MemoryAudit(
+            user_id=context.user.id,
+            memory_id=duplicate.id,
+            event_type="merged",
+            old_content=duplicate.content,
+            new_content=duplicate.content,
+            source_message_id=context.source_message.id,
+            details={"source": "auto"},
+        )
+    )
+    context.undo_requests.append(
+        UndoTokenRequest(
+            write_index=len(context.writes),
+            payload={
+                "user_id": context.user.id,
+                "action": "merged",
+                "memory_id": duplicate.id,
+                "candidate": {
+                    "type": candidate.type,
+                    "content": candidate.content,
+                    "source_excerpt": candidate.source_excerpt,
+                    "source_message_id": context.source_message.id,
+                    "scope_id": context.scope_id,
+                    "source": "auto",
+                    "confidence": candidate.confidence,
+                },
+            },
+        )
+    )
+    context.writes.append(
+        write_payload(
+            id=duplicate.id,
+            kind="merged",
+            type=duplicate.type,
+            content=duplicate.content,
+            source_excerpt=candidate.source_excerpt,
+            scope_id=duplicate.scope_id,
+            recommended_scope_id=context.scope_id,
+        )
+    )
+
+
+async def _stage_memory_candidate(
+    context: _MemoryFinalizationContext,
+    prepared: PreparedMemoryCandidate,
+) -> None:
+    candidate = prepared.candidate
+    staging = UserMemoryStaging(
+        user_id=context.user.id,
+        type=candidate.type,
+        content=candidate.content,
+        source_message_id=context.source_message.id,
+        source_excerpt=candidate.source_excerpt,
+        source="auto",
+        embedding=prepared.embedding,
+        confidence=candidate.confidence,
+        scope_id=context.scope_id,
+        recommended_scope_id=context.scope_id,
+        decision="pending",
+        expires_at=context.dependencies.now()
+        + timedelta(days=context.dependencies.staging_ttl_days),
+    )
+    context.session.add(staging)
+    await context.session.flush()
+    context.undo_requests.append(
+        UndoTokenRequest(
+            write_index=len(context.writes),
+            payload={
+                "user_id": context.user.id,
+                "action": "staged",
+                "staging_id": staging.id,
+            },
+        )
+    )
+    context.writes.append(
+        write_payload(
+            id=staging.id,
+            kind="staged",
+            type=staging.type,
+            content=staging.content,
+            source_excerpt=staging.source_excerpt,
+            scope_id=staging.scope_id,
+            recommended_scope_id=staging.recommended_scope_id,
+        )
+    )
+
+
+async def _add_memory_candidate(
+    context: _MemoryFinalizationContext,
+    prepared: PreparedMemoryCandidate,
+    conflict: UserMemory | None,
+) -> None:
+    candidate = prepared.candidate
+    memory = UserMemory(
+        user_id=context.user.id,
+        type=candidate.type,
+        content=candidate.content,
+        source_message_id=context.source_message.id,
+        source_excerpt=candidate.source_excerpt,
+        source=("explicit" if candidate.intent_kind == "directive" else "auto"),
+        embedding=prepared.embedding,
+        confidence=max(candidate.confidence, context.claim.extraction_threshold),
+        scope_id=context.scope_id,
+        last_used_at=context.dependencies.now(),
+    )
+    context.session.add(memory)
+    await context.session.flush()
+    kind = "added"
+    details: dict[str, Any] = {"source": memory.source}
+    if conflict is not None:
+        conflict.superseded_by = memory.id
+        kind = "superseded"
+        details["superseded_memory_id"] = conflict.id
+    context.session.add(
+        MemoryAudit(
+            user_id=context.user.id,
+            memory_id=memory.id,
+            event_type=kind,
+            old_content=conflict.content if conflict is not None else None,
+            new_content=memory.content,
+            source_message_id=context.source_message.id,
+            details=details,
+        )
+    )
+    context.undo_requests.append(
+        UndoTokenRequest(
+            write_index=len(context.writes),
+            payload={
+                "user_id": context.user.id,
+                "action": kind,
+                "memory_id": memory.id,
+                "old_memory_id": conflict.id if conflict is not None else None,
+            },
+        )
+    )
+    context.writes.append(
+        write_payload(
+            id=memory.id,
+            kind=kind,
+            type=memory.type,
+            content=memory.content,
+            source_excerpt=memory.source_excerpt,
+            scope_id=memory.scope_id,
+            recommended_scope_id=context.scope_id,
+        )
+    )
+    context.existing.append(memory)
+
+
+async def _apply_memory_candidate(
+    context: _MemoryFinalizationContext,
+    prepared: PreparedMemoryCandidate,
+) -> None:
+    candidate = prepared.candidate
+    duplicate = _duplicate_memory(context, candidate)
+    if duplicate is not None:
+        _merge_memory_candidate(context, candidate, duplicate)
+        return
+
+    conflict = _conflicting_memory(context, candidate)
+    if (
+        candidate.confidence < context.claim.extraction_threshold
+        and candidate.intent_kind != "directive"
+    ):
+        await _stage_memory_candidate(context, prepared)
+        return
+    await _add_memory_candidate(context, prepared, conflict)
+
+
+async def _commit_empty_memory_extraction(
+    session: Any,
+    dependencies: MemoryExtractionStateDependencies,
+    claim: MemoryExtractionClaim,
+    run: MemoryExtractionRun,
+    *,
+    rejected_pii: bool,
+) -> CompletedMemoryExtraction:
+    writes = [_rejected_pii_write()] if rejected_pii else []
+    await dependencies.append_writes_to_message(
+        session,
+        claim.assistant_message_id,
+        writes,
+    )
+    mark_memory_extraction_committed(
+        run,
+        writes=writes,
+        undo_operations=[],
+        now=dependencies.now(),
+    )
+    await session.commit()
+    return completed_memory_extraction(run)
+
+
 async def finalize_memory_extraction(
     dependencies: MemoryExtractionStateDependencies,
     claim: MemoryExtractionClaim,
@@ -384,32 +641,13 @@ async def finalize_memory_extraction(
             await session.commit()
             return completed_memory_extraction(run)
         if not prepared_candidates:
-            writes = (
-                [
-                    write_payload(
-                        id=None,
-                        kind="rejected_pii",
-                        type=None,
-                        content="",
-                        source_excerpt=None,
-                    )
-                ]
-                if rejected_pii
-                else []
-            )
-            await dependencies.append_writes_to_message(
+            return await _commit_empty_memory_extraction(
                 session,
-                claim.assistant_message_id,
-                writes,
-            )
-            mark_memory_extraction_committed(
+                dependencies,
+                claim,
                 run,
-                writes=writes,
-                undo_operations=[],
-                now=dependencies.now(),
+                rejected_pii=rejected_pii,
             )
-            await session.commit()
-            return completed_memory_extraction(run)
 
         await dependencies.advisory_xact_lock(
             session,
@@ -433,184 +671,20 @@ async def finalize_memory_extraction(
         writes: list[dict[str, Any]] = []
         undo_requests: list[UndoTokenRequest] = []
         if rejected_pii:
-            writes.append(
-                write_payload(
-                    id=None,
-                    kind="rejected_pii",
-                    type=None,
-                    content="",
-                    source_excerpt=None,
-                )
-            )
-
+            writes.append(_rejected_pii_write())
+        context = _MemoryFinalizationContext(
+            session=session,
+            dependencies=dependencies,
+            claim=claim,
+            user=user,
+            source_message=source_message,
+            scope_id=scope_id,
+            existing=existing,
+            writes=writes,
+            undo_requests=undo_requests,
+        )
         for prepared in prepared_candidates:
-            candidate = prepared.candidate
-            duplicate = next(
-                (
-                    memory
-                    for memory in existing
-                    if memory.type == candidate.type
-                    and canonical_memory_text(memory.content)
-                    == canonical_memory_text(candidate.content)
-                ),
-                None,
-            )
-            if duplicate is not None:
-                dependencies.bump_positive_signal(duplicate)
-                session.add(
-                    MemoryAudit(
-                        user_id=user.id,
-                        memory_id=duplicate.id,
-                        event_type="merged",
-                        old_content=duplicate.content,
-                        new_content=duplicate.content,
-                        source_message_id=source_message.id,
-                        details={"source": "auto"},
-                    )
-                )
-                undo_requests.append(
-                    UndoTokenRequest(
-                        write_index=len(writes),
-                        payload={
-                            "user_id": user.id,
-                            "action": "merged",
-                            "memory_id": duplicate.id,
-                            "candidate": {
-                                "type": candidate.type,
-                                "content": candidate.content,
-                                "source_excerpt": candidate.source_excerpt,
-                                "source_message_id": source_message.id,
-                                "scope_id": scope_id,
-                                "source": "auto",
-                                "confidence": candidate.confidence,
-                            },
-                        },
-                    )
-                )
-                writes.append(
-                    write_payload(
-                        id=duplicate.id,
-                        kind="merged",
-                        type=duplicate.type,
-                        content=duplicate.content,
-                        source_excerpt=candidate.source_excerpt,
-                        scope_id=duplicate.scope_id,
-                        recommended_scope_id=scope_id,
-                    )
-                )
-                continue
-
-            conflict = next(
-                (
-                    memory
-                    for memory in existing
-                    if dependencies.topic_key(memory.content)
-                    and dependencies.topic_key(memory.content)
-                    == dependencies.topic_key(candidate.content)
-                    and memory.type != candidate.type
-                ),
-                None,
-            )
-            if (
-                candidate.confidence < claim.extraction_threshold
-                and candidate.intent_kind != "directive"
-            ):
-                staging = UserMemoryStaging(
-                    user_id=user.id,
-                    type=candidate.type,
-                    content=candidate.content,
-                    source_message_id=source_message.id,
-                    source_excerpt=candidate.source_excerpt,
-                    source="auto",
-                    embedding=prepared.embedding,
-                    confidence=candidate.confidence,
-                    scope_id=scope_id,
-                    recommended_scope_id=scope_id,
-                    decision="pending",
-                    expires_at=dependencies.now()
-                    + timedelta(days=dependencies.staging_ttl_days),
-                )
-                session.add(staging)
-                await session.flush()
-                undo_requests.append(
-                    UndoTokenRequest(
-                        write_index=len(writes),
-                        payload={
-                            "user_id": user.id,
-                            "action": "staged",
-                            "staging_id": staging.id,
-                        },
-                    )
-                )
-                writes.append(
-                    write_payload(
-                        id=staging.id,
-                        kind="staged",
-                        type=staging.type,
-                        content=staging.content,
-                        source_excerpt=staging.source_excerpt,
-                        scope_id=staging.scope_id,
-                        recommended_scope_id=staging.recommended_scope_id,
-                    )
-                )
-                continue
-
-            memory = UserMemory(
-                user_id=user.id,
-                type=candidate.type,
-                content=candidate.content,
-                source_message_id=source_message.id,
-                source_excerpt=candidate.source_excerpt,
-                source=("explicit" if candidate.intent_kind == "directive" else "auto"),
-                embedding=prepared.embedding,
-                confidence=max(candidate.confidence, claim.extraction_threshold),
-                scope_id=scope_id,
-                last_used_at=dependencies.now(),
-            )
-            session.add(memory)
-            await session.flush()
-            kind = "added"
-            details: dict[str, Any] = {"source": memory.source}
-            if conflict is not None:
-                conflict.superseded_by = memory.id
-                kind = "superseded"
-                details["superseded_memory_id"] = conflict.id
-            session.add(
-                MemoryAudit(
-                    user_id=user.id,
-                    memory_id=memory.id,
-                    event_type=kind,
-                    old_content=conflict.content if conflict is not None else None,
-                    new_content=memory.content,
-                    source_message_id=source_message.id,
-                    details=details,
-                )
-            )
-            undo_requests.append(
-                UndoTokenRequest(
-                    write_index=len(writes),
-                    payload={
-                        "user_id": user.id,
-                        "action": kind,
-                        "memory_id": memory.id,
-                        "old_memory_id": (
-                            conflict.id if conflict is not None else None
-                        ),
-                    },
-                )
-            )
-            writes.append(
-                write_payload(
-                    id=memory.id,
-                    kind=kind,
-                    type=memory.type,
-                    content=memory.content,
-                    source_excerpt=memory.source_excerpt,
-                    scope_id=memory.scope_id,
-                    recommended_scope_id=scope_id,
-                )
-            )
-            existing.append(memory)
+            await _apply_memory_candidate(context, prepared)
 
         writes, undo_operations = materialize_undo_operations(
             writes,
