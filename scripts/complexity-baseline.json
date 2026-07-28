@@ -41,7 +41,6 @@
     "nesting_depth": {
       "apps/api/app/routes/me.py::export_my_data": 7,
       "apps/api/app/workflows/application/model_library_generation.py::model_library_generate_prompt": 7,
-      "apps/worker/app/outbox/publisher.py::process_outbox_batch": 7,
       "apps/worker/app/tasks/completion_parts/stream.py::_extract_reasoning_text_from_item": 7,
       "apps/worker/app/video_upstream.py::_download_video_url": 7,
       "apps/worker/app/video_upstream_parts/parsing.py::_http_error": 7
