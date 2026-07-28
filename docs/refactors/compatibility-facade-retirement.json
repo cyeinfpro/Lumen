@@ -14,26 +14,8 @@
     },
     {
       "owner": "worker",
-      "path": "apps/worker/app/upstream.py",
-      "retirement_condition": "All callers use upstream_parts and provider_runtime contracts without facade monkeypatch hooks.",
-      "status": "active"
-    },
-    {
-      "owner": "worker",
       "path": "apps/worker/app/video_upstream.py",
       "retirement_condition": "All callers use video_upstream_parts directly and no compatibility signatures remain.",
-      "status": "active"
-    },
-    {
-      "owner": "worker",
-      "path": "apps/worker/app/tasks/completion.py",
-      "retirement_condition": "Task registration and tests no longer depend on late-bound facade globals.",
-      "status": "active"
-    },
-    {
-      "owner": "worker",
-      "path": "apps/worker/app/tasks/video_generation.py",
-      "retirement_condition": "Task registration and tests no longer depend on late-bound facade globals.",
       "status": "active"
     },
     {

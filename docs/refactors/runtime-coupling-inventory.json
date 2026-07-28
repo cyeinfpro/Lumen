@@ -26,26 +26,8 @@
     }
   ],
   "public_api": {
-    "apps/worker/app/tasks/completion.py": [
-      "run_completion"
-    ],
-    "apps/worker/app/tasks/video_generation.py": [
-      "cron_jobs",
-      "reconcile_video_tasks",
-      "run_video_generation",
-      "run_video_poll"
-    ],
     "apps/worker/app/tasks/volcano_assets.py": [
       "process_volcano_asset_operation"
-    ],
-    "apps/worker/app/upstream.py": [
-      "UpstreamError",
-      "close_client",
-      "edit_image",
-      "generate_image",
-      "responses_call",
-      "stream_completion",
-      "validate_effective_image_job_configuration"
     ],
     "apps/worker/app/video_upstream.py": [
       "CancelResult",
