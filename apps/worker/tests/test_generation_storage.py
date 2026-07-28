@@ -53,6 +53,7 @@ from app.tasks.generation_parts import (
     workflow_service,
     workflow_hooks,
 )
+from app import generation_dispatch
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
 from app.tasks.generation_parts.composition_ports import (
     DefaultGenerationArtifacts,
@@ -191,6 +192,8 @@ class FakeRedis:
         self.store: dict[str, str] = {}
         self.zsets: dict[str, dict[str, float]] = {}
         self.enqueued: list[tuple[str, tuple, dict]] = []
+        self.get_calls = 0
+        self.mget_calls = 0
 
     async def set(
         self,
@@ -207,7 +210,12 @@ class FakeRedis:
         return True
 
     async def get(self, key: str):
+        self.get_calls += 1
         return self.store.get(key)
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        self.mget_calls += 1
+        return [self.store.get(key) for key in keys]
 
     async def delete(self, *keys: str) -> int:
         deleted = 0
@@ -261,6 +269,48 @@ class FakeRedis:
 
     async def eval(self, *args: Any) -> int:
         script = args[0]
+        if script == generation_dispatch.BEGIN_DISPATCH_LUA:
+            (
+                active_key,
+                revision_key,
+                attempt,
+                _ttl,
+                _revision_ttl,
+                replace_value,
+            ) = args[2:8]
+            current = self.store.get(active_key)
+            if current is not None:
+                current_attempt = int(current.split("|", 1)[0])
+                if current_attempt > int(attempt):
+                    return [0, current]
+                if current_attempt == int(attempt) and current != replace_value:
+                    return [0, current]
+            revision = await self.incrby(revision_key, 1)
+            value = f"{attempt}|{revision}|reserved|"
+            self.store[active_key] = value
+            return [1, value]
+        if script == generation_dispatch.MARK_DISPATCH_ENQUEUED_LUA:
+            active_key, reserved_value, enqueued_value, _ttl = args[2:6]
+            if self.store.get(active_key) != reserved_value:
+                return 0
+            self.store[active_key] = enqueued_value
+            return 1
+        if script == generation_dispatch.CONSUME_DISPATCH_LUA:
+            active_key, prefix, worker_id, _ttl = args[2:6]
+            current = self.store.get(active_key)
+            if current is None or not current.startswith(prefix):
+                return 0
+            phase = current.split("|", 3)[2]
+            if phase not in {"reserved", "enqueued"}:
+                return 0
+            self.store[active_key] = f"{prefix}consumed|{worker_id}"
+            return 1
+        if script == generation_dispatch.FINISH_DISPATCH_LUA:
+            active_key, prefix = args[2:4]
+            current = self.store.get(active_key)
+            if current is None or not current.startswith(prefix):
+                return 0
+            return await self.delete(active_key)
         if script == generation_lease.RELEASE_LEASE_LUA:
             key = args[2]
             token = args[3]
@@ -489,18 +539,10 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
 def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
     source = inspect.getsource(lifecycle.settle_existing_generated_image)
 
-    cancel_check = source.index(
-        "if await is_cancelled(redis, task_id):"
-    )
-    release = source.index(
-        "await services.billing.release("
-    )
-    success_update = source.index(
-        "status=GenerationStatus.SUCCEEDED.value"
-    )
-    settle = source.index(
-        "await services.billing.settle("
-    )
+    cancel_check = source.index("if await is_cancelled(redis, task_id):")
+    release = source.index("await services.billing.release(")
+    success_update = source.index("status=GenerationStatus.SUCCEEDED.value")
+    settle = source.index("await services.billing.settle(")
 
     assert cancel_check < release < success_update < settle
 
@@ -827,8 +869,7 @@ async def test_cancel_renewer_task_awaits_cancel_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mark_generation_attempt_retrying_requeues_and_publishes(
-) -> None:
+async def test_mark_generation_attempt_retrying_requeues_and_publishes() -> None:
     redis = FakeRedis()
     published: list[dict] = []
 
@@ -883,7 +924,15 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
     assert ok is True
     assert session.committed is True
     assert redis.enqueued == [
-        ("run_generation", ("gen-1",), {"_defer_by": 3.5, "_job_try": 3})
+        (
+            "run_generation",
+            ("gen-1", 3, 1),
+            {
+                "_job_id": "lumen:generation:gen-1:attempt:3:dispatch:1",
+                "_defer_by": 3.5,
+                "_job_try": 3,
+            },
+        )
     ]
     assert generation_queue.image_queue_not_before_key("gen-1") in redis.store
     assert published[0]["event_name"] == EV_GEN_RETRYING
@@ -891,8 +940,9 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
 
 
 @pytest.mark.asyncio
-async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attempt(
-) -> None:
+async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attempt() -> (
+    None
+):
     redis = FakeRedis()
     published: list[dict[str, Any]] = []
 
@@ -960,15 +1010,24 @@ async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attem
     assert "generations.attempt = 2" in rendered
     assert "FOR UPDATE SKIP LOCKED" in rendered
     assert redis.enqueued == [
-        ("run_generation", ("gen-1",), {"_defer_by": 1.25, "_job_try": 3})
+        (
+            "run_generation",
+            ("gen-1", 3, 1),
+            {
+                "_job_id": "lumen:generation:gen-1:attempt:3:dispatch:1",
+                "_defer_by": 1.25,
+                "_job_try": 3,
+            },
+        )
     ]
     assert published[0]["event_name"] == EV_GEN_RETRYING
     assert published[0]["data"]["reason"] == "row_lock_lost"
 
 
 @pytest.mark.asyncio
-async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows(
-) -> None:
+async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows() -> (
+    None
+):
     redis = FakeRedis()
 
     class _RowResult:
@@ -1036,6 +1095,45 @@ async def test_image_queue_kick_skips_not_before_tasks(
     )
 
     assert [args[0] for _name, args, _kwargs in redis.enqueued] == ["gen-ready"]
+
+
+@pytest.mark.asyncio
+async def test_ready_queue_batches_not_before_reads_and_bounds_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    scan_limits: list[int] = []
+    all_candidates = [
+        generation_queue.QueuedGenerationCandidate(
+            id=f"gen-{index}",
+            attempt=1,
+        )
+        for index in range(1000)
+    ]
+
+    async def fake_candidates(
+        limit: int,
+        _services: Any,
+    ) -> list[generation_queue.QueuedGenerationCandidate]:
+        scan_limits.append(limit)
+        return all_candidates[:limit]
+
+    monkeypatch.setattr(
+        generation_queue,
+        "queued_generation_candidates",
+        fake_candidates,
+    )
+
+    selected = await generation_queue.ready_queued_generation_ids(
+        redis,
+        10,
+        services=generation_services,
+    )
+
+    assert selected == [f"gen-{index}" for index in range(10)]
+    assert scan_limits == [40]
+    assert redis.mget_calls == 1
+    assert redis.get_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1473,8 +1571,7 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
 
 
 @pytest.mark.asyncio
-async def test_write_generation_files_deletes_created_keys_on_failure(
-) -> None:
+async def test_write_generation_files_deletes_created_keys_on_failure() -> None:
     fake_storage = FakeStorage(fail_keys={"bad"})
     services = replace(
         generation_services,
@@ -1492,8 +1589,7 @@ async def test_write_generation_files_deletes_created_keys_on_failure(
 
 
 @pytest.mark.asyncio
-async def test_write_generation_files_cleanup_continues_when_delete_fails(
-) -> None:
+async def test_write_generation_files_cleanup_continues_when_delete_fails() -> None:
     fake_storage = FakeStorage(fail_keys={"bad"}, fail_delete_keys={"ok1"})
     services = replace(
         generation_services,
@@ -1510,8 +1606,7 @@ async def test_write_generation_files_cleanup_continues_when_delete_fails(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_storage_on_error_deletes_created_keys(
-) -> None:
+async def test_cleanup_storage_on_error_deletes_created_keys() -> None:
     fake_storage = FakeStorage()
     services = replace(
         generation_services,

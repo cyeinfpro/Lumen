@@ -30,6 +30,7 @@ from .lease import cancel_renewer_task, release_lease
 from .lifecycle import finalize_running_generation_cancel
 from .queue import (
     avoid_provider_for_task,
+    enqueue_generation_once,
     get_avoided_providers,
     image_queue_not_before_key,
     is_dual_race_sentinel,
@@ -107,6 +108,7 @@ async def handle_lease_lost(
         delay=delay,
         reason="lease_lost",
         max_attempts=MAX_ATTEMPTS,
+        replace_dispatch=state.dispatch_identity,
         services=g,
     )
     state.task_outcome = "retry" if requeued else "lease_lost"
@@ -128,6 +130,7 @@ async def handle_stale_attempt(
         task_id=state.task_id,
         attempt=state.attempt,
         reason=type(exc).__name__,
+        replace_dispatch=state.dispatch_identity,
         services=g,
     )
     state.task_outcome = "retry" if requeued else "stale_attempt"
@@ -419,7 +422,9 @@ async def _retry_generation(
     await _publish_retry_events(state, failure, delay, g)
 
 
-async def _avoid_failed_provider(state: GenerationRunState, g: RunGenerationDeps) -> None:
+async def _avoid_failed_provider(
+    state: GenerationRunState, g: RunGenerationDeps
+) -> None:
     provider = state.reserved_provider_name
     if provider and not is_dual_race_sentinel(provider):
         await avoid_provider_for_task(
@@ -480,12 +485,17 @@ async def _enqueue_retry(
             str(time.time() + delay),
             ex=retry_not_before_ttl(delay),
         )
-        await state.redis.enqueue_job(
-            "run_generation",
+        enqueued = await enqueue_generation_once(
+            state.redis,
             state.task_id,
-            _defer_by=delay,
-            _job_try=state.attempt + 1,
+            attempt=state.attempt + 1,
+            defer_by=delay,
+            job_try=state.attempt + 1,
+            replace_dispatch=state.dispatch_identity,
+            services=g,
         )
+        if not enqueued:
+            raise RuntimeError("generation retry dispatch was not accepted")
         return True
     except Exception as exc:  # noqa: BLE001
         logger.error(

@@ -26,6 +26,7 @@ from lumen_core.constants import (
 from lumen_core.models import Generation, Message
 
 from ...provider_runtime.errors import UpstreamError
+from ...generation_dispatch import DispatchIdentity
 from ...retry import RetryDecision, is_moderation_block, is_retriable
 from ...storage import StorageDiskFullError
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
@@ -64,11 +65,7 @@ def base_retry_backoff_seconds(attempt: int) -> float:
     idx = max(0, int(attempt) - 1)
     if idx < len(RETRY_BACKOFF_SECONDS):
         return float(RETRY_BACKOFF_SECONDS[idx])
-    last = (
-        float(RETRY_BACKOFF_SECONDS[-1])
-        if RETRY_BACKOFF_SECONDS
-        else 1.0
-    )
+    last = float(RETRY_BACKOFF_SECONDS[-1]) if RETRY_BACKOFF_SECONDS else 1.0
     overflow = idx - len(RETRY_BACKOFF_SECONDS) + 1
     return min(
         last * (2**overflow),
@@ -100,12 +97,9 @@ def generation_attempt_update(
     *,
     statuses: tuple[str, ...] | None = None,
 ) -> Any:
-    statement = (
-        update(Generation)
-        .where(
-            Generation.id == task_id,
-            Generation.attempt == attempt_epoch,
-        )
+    statement = update(Generation).where(
+        Generation.id == task_id,
+        Generation.attempt == attempt_epoch,
     )
     if statuses:
         statement = statement.where(Generation.status.in_(statuses))
@@ -131,9 +125,7 @@ async def ensure_generation_attempt_current(
 ) -> None:
     current_attempt = (
         await session.execute(
-            select(Generation.attempt)
-            .where(Generation.id == task_id)
-            .with_for_update()
+            select(Generation.attempt).where(Generation.id == task_id).with_for_update()
         )
     ).scalar_one_or_none()
     if current_attempt != attempt_epoch:
@@ -164,8 +156,7 @@ async def mark_generation_attempt_failed(
                     task_id,
                     attempt,
                     statuses=statuses,
-                )
-                .values(
+                ).values(
                     status=GenerationStatus.FAILED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -173,14 +164,9 @@ async def mark_generation_attempt_failed(
                     error_message=error_message,
                 )
             )
-            ensure_generation_updated(
-                result, task_id, attempt
-            )
+            ensure_generation_updated(result, task_id, attempt)
             message = await session.get(Message, message_id)
-            if (
-                message is not None
-                and message.status != MessageStatus.CANCELED
-            ):
+            if message is not None and message.status != MessageStatus.CANCELED:
                 message.status = MessageStatus.FAILED
             if not retriable:
                 generation = await session.get(Generation, task_id)
@@ -204,11 +190,7 @@ async def mark_generation_attempt_failed(
                 },
             )
             await session.commit()
-            await (
-                services.billing.flush_after_commit(
-                    session
-                )
-            )
+            await services.billing.flush_after_commit(session)
     except StaleGenerationAttempt as stale_exc:
         logger.info(
             "generation failed update skipped by stale attempt "
@@ -237,6 +219,7 @@ async def mark_generation_attempt_retrying(
     delay: float,
     reason: str,
     max_attempts: int,
+    replace_dispatch: DispatchIdentity | None = None,
     services: RunGenerationDeps,
 ) -> bool:
     try:
@@ -246,17 +229,14 @@ async def mark_generation_attempt_retrying(
                     task_id,
                     attempt,
                     statuses=RUNNING_GENERATION_STATUSES,
-                )
-                .values(
+                ).values(
                     status=GenerationStatus.QUEUED.value,
                     progress_stage=GenerationStage.QUEUED,
                     error_code=error_code,
                     error_message=error_message,
                 )
             )
-            ensure_generation_updated(
-                result, task_id, attempt
-            )
+            ensure_generation_updated(result, task_id, attempt)
             await session.commit()
     except StaleGenerationAttempt as stale_exc:
         logger.info(
@@ -277,16 +257,16 @@ async def mark_generation_attempt_retrying(
         enqueued = await enqueue_generation_once(
             redis,
             task_id,
+            attempt=attempt + 1,
             defer_by=delay,
             job_try=attempt + 1,
+            replace_dispatch=replace_dispatch,
             services=services,
         )
         if not enqueued:
             return False
     except Exception as enqueue_exc:  # noqa: BLE001
-        logger.error(
-            "re-enqueue failed task=%s err=%s", task_id, enqueue_exc
-        )
+        logger.error("re-enqueue failed task=%s err=%s", task_id, enqueue_exc)
         enqueue_error = "retry_enqueue_failed"
         enqueue_message = f"failed to enqueue retry: {enqueue_exc}"
         await mark_generation_attempt_failed(
@@ -332,6 +312,7 @@ async def maybe_requeue_stale_generation_attempt(
     attempt: int,
     reason: str,
     delay: float = STALE_ATTEMPT_REQUEUE_DELAY_S,
+    replace_dispatch: DispatchIdentity | None = None,
     services: RunGenerationDeps,
 ) -> bool:
     if attempt <= 0:
@@ -380,12 +361,17 @@ async def maybe_requeue_stale_generation_attempt(
             str(time.time() + delay),
             ex=retry_not_before_ttl(delay),
         )
-        await redis.enqueue_job(
-            "run_generation",
+        enqueued = await enqueue_generation_once(
+            redis,
             task_id,
-            _defer_by=delay,
-            _job_try=attempt + 1,
+            attempt=attempt + 1,
+            defer_by=delay,
+            job_try=attempt + 1,
+            replace_dispatch=replace_dispatch,
+            services=services,
         )
+        if not enqueued:
+            return False
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "stale attempt re-enqueue failed task=%s attempt=%s err=%s",
@@ -458,9 +444,7 @@ async def await_with_lease_guard(
             work_task.cancel()
             with suppress(asyncio.CancelledError):
                 await work_task
-            raise TaskCancelled(
-                "cancelled during upstream call"
-            )
+            raise TaskCancelled("cancelled during upstream call")
         return await work_task
     finally:
         if not work_task.done():
@@ -561,9 +545,7 @@ def classify_exception(
             has_partial,
             error_message=str(exc),
         )
-    return RetryDecision(
-        False, f"unhandled {type(exc).__name__}"
-    )
+    return RetryDecision(False, f"unhandled {type(exc).__name__}")
 
 
 def safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
@@ -573,9 +555,7 @@ def safe_generation_error_details(exc: BaseException) -> dict[str, Any]:
     details: dict[str, Any] = {}
     transparent_qc = payload.get("transparent_qc")
     if isinstance(transparent_qc, dict):
-        sanitized_qc = sanitize_transparent_qc_payload(
-            transparent_qc
-        )
+        sanitized_qc = sanitize_transparent_qc_payload(transparent_qc)
         if sanitized_qc:
             details["transparent_qc"] = sanitized_qc
     transparent_provider = payload.get("transparent_provider")

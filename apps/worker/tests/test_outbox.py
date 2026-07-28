@@ -25,6 +25,7 @@ from lumen_core.models import (
     User,
 )
 from app import observability, sse_publish
+from app import generation_dispatch
 from app.outbox import publisher as outbox_publisher
 from app.outbox.claims import (
     DeliveryResult,
@@ -94,6 +95,43 @@ class FakeRedis:
         self.result_job_ids.add(job_id)
 
     async def eval(self, script: str, _keys: int, key: str, *args: str):
+        if script == generation_dispatch.BEGIN_DISPATCH_LUA:
+            revision_key, attempt, _ttl, _revision_ttl, replace_value = args
+            current = self.keys.get(key)
+            if current is not None:
+                current_attempt = int(current.split("|", 1)[0])
+                if current_attempt > int(attempt):
+                    return [0, current]
+                if current_attempt == int(attempt) and current != replace_value:
+                    return [0, current]
+            revision = int(self.keys.get(revision_key) or 0) + 1
+            self.keys[revision_key] = str(revision)
+            value = f"{attempt}|{revision}|reserved|"
+            self.keys[key] = value
+            return [1, value]
+        if script == generation_dispatch.MARK_DISPATCH_ENQUEUED_LUA:
+            reserved_value, enqueued_value, _ttl = args
+            if self.keys.get(key) != reserved_value:
+                return 0
+            self.keys[key] = enqueued_value
+            return 1
+        if script == generation_dispatch.CONSUME_DISPATCH_LUA:
+            prefix, worker_id, _ttl = args
+            current = self.keys.get(key)
+            if current is None or not current.startswith(prefix):
+                return 0
+            phase = current.split("|", 3)[2]
+            if phase not in {"reserved", "enqueued"}:
+                return 0
+            self.keys[key] = f"{prefix}consumed|{worker_id}"
+            return 1
+        if script == generation_dispatch.FINISH_DISPATCH_LUA:
+            prefix = args[0]
+            current = self.keys.get(key)
+            if current is None or not current.startswith(prefix):
+                return 0
+            self.keys.pop(key, None)
+            return 1
         if script == outbox._RELEASE_OWNED_LOCK_LUA:  # noqa: SLF001
             token = args[0]
             if self.keys.get(key) != token:
@@ -637,7 +675,10 @@ async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeyp
         (
             "run_generation",
             "gen-1",
-            {"_job_id": "lumen:generation:gen-1:outbox:event-1"},
+            {
+                "_job_id": "lumen:generation:gen-1:attempt:1:dispatch:1",
+                "_job_try": 1,
+            },
         )
     ]
     assert events[0].published_at is not None
@@ -817,22 +858,17 @@ async def test_fast_path_and_publisher_replay_share_job_id_and_enqueue_once(
     _patch_session_local(monkeypatch, [event])
     processed = await outbox.publish_outbox({"redis": redis})
 
-    expected_job_id = "lumen:generation:gen-replay:outbox:event-replay"
+    expected_job_id = "lumen:generation:gen-replay:attempt:1:dispatch:1"
     assert processed == 1
     assert redis.enqueue_calls == [
         (
             "run_generation",
             "gen-replay",
-            {"_job_id": expected_job_id},
-        ),
-        (
-            "run_generation",
-            "gen-replay",
-            {"_job_id": expected_job_id},
+            {"_job_id": expected_job_id, "_job_try": 1},
         ),
     ]
     assert redis.enqueued == [("run_generation", "gen-replay")]
-    assert redis.deduped_job_ids == [expected_job_id]
+    assert redis.deduped_job_ids == []
     assert event.published_at is not None
 
 
@@ -1184,7 +1220,7 @@ def test_memory_reconciler_is_registered_as_cron() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_task_new_outbox_event_uses_new_job_id(
+async def test_same_task_new_outbox_event_reuses_active_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events = [
@@ -1201,18 +1237,13 @@ async def test_same_task_new_outbox_event_uses_new_job_id(
         (
             "run_generation",
             "gen-shared",
-            {"_job_id": "lumen:generation:gen-shared:outbox:event-first"},
-        ),
-        (
-            "run_generation",
-            "gen-shared",
-            {"_job_id": "lumen:generation:gen-shared:outbox:event-second"},
+            {
+                "_job_id": "lumen:generation:gen-shared:attempt:1:dispatch:1",
+                "_job_try": 1,
+            },
         ),
     ]
-    assert redis.enqueued == [
-        ("run_generation", "gen-shared"),
-        ("run_generation", "gen-shared"),
-    ]
+    assert redis.enqueued == [("run_generation", "gen-shared")]
     assert redis.deduped_job_ids == []
 
 
@@ -1225,14 +1256,18 @@ async def test_explicit_retry_is_not_suppressed_by_prior_arq_result(
     redis = FakeRedis()
 
     first_processed = await outbox.publish_outbox({"redis": redis})
-    original_job_id = "lumen:generation:gen-retry:outbox:event-original"
+    original_job_id = "lumen:generation:gen-retry:attempt:1:dispatch:1"
     redis.complete_job(original_job_id)
+    await generation_dispatch.finish_generation_dispatch(
+        redis,
+        generation_dispatch.DispatchIdentity("gen-retry", 1, 1),
+    )
 
     retry_event = _event(event_id="event-explicit-retry", task_id="gen-retry")
     session.events.append(retry_event)
     retry_processed = await outbox.publish_outbox({"redis": redis})
 
-    retry_job_id = "lumen:generation:gen-retry:outbox:event-explicit-retry"
+    retry_job_id = "lumen:generation:gen-retry:attempt:1:dispatch:2"
     assert first_processed == 1
     assert retry_processed == 1
     assert redis.result_job_ids == {original_job_id}
@@ -1241,12 +1276,12 @@ async def test_explicit_retry_is_not_suppressed_by_prior_arq_result(
         (
             "run_generation",
             "gen-retry",
-            {"_job_id": original_job_id},
+            {"_job_id": original_job_id, "_job_try": 1},
         ),
         (
             "run_generation",
             "gen-retry",
-            {"_job_id": retry_job_id},
+            {"_job_id": retry_job_id, "_job_try": 1},
         ),
     ]
     assert redis.enqueued == [
@@ -1582,7 +1617,7 @@ async def test_publish_outbox_replays_after_finalize_commit_failure(monkeypatch)
 
     assert processed == 1
     assert redis.enqueued == [("run_generation", "gen-1")]
-    assert redis.deduped_job_ids == ["lumen:generation:gen-1:outbox:event-1"]
+    assert redis.deduped_job_ids == []
     assert events[0].published_at is not None
 
 
@@ -1688,13 +1723,19 @@ async def test_reconcile_persists_outbox_and_commits_before_enqueue(
     _patch_publish_event(monkeypatch)
 
     class CommitAwareRedis(FakeRedis):
-        async def enqueue_job(self, job_name: str, task_id: str, **kwargs):
+        async def enqueue_job(
+            self,
+            job_name: str,
+            task_id: str,
+            *args: str,
+            **kwargs: Any,
+        ):
             assert fake_session.commits >= 1
             assert any(
                 event.kind == "generation" and event.payload.get("task_id") == task_id
                 for event in fake_session.outbox_events
             )
-            return await super().enqueue_job(job_name, task_id, **kwargs)
+            return await super().enqueue_job(job_name, task_id, *args, **kwargs)
 
     redis = CommitAwareRedis()
 
@@ -1737,6 +1778,10 @@ async def test_reconcile_enqueue_failure_leaves_durable_outbox_for_publisher(
     assert fake_session.commits >= 1
 
     redis.fail_enqueue = False
+    redis.keys.pop(
+        generation_dispatch.dispatch_active_key("gen-redrive"),
+        None,
+    )
     processed = await outbox.publish_outbox({"redis": redis})
 
     assert processed == 1

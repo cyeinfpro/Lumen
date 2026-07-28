@@ -35,6 +35,7 @@ from ...observability import (
     task_duration_seconds,
     upstream_calls_total,
 )
+from ...generation_dispatch import dispatch_identity_from_context
 from ...provider_runtime.errors import UpstreamError
 from ..state import is_generation_terminal
 from . import failure, success
@@ -61,7 +62,6 @@ from .progress import ImageProgressPublisher
 from .queue import (
     IMAGE_PROVIDER_UNAVAILABLE_RETRY_S,
     IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
-    clear_image_queue_enqueue_dedupe,
     enqueue_generation_once,
     image_queue_not_before_key,
     image_task_provider_key,
@@ -161,6 +161,7 @@ def _new_run_state(
         channel=task_channel(task_id),
         trace_id=f"gen_{task_id}",
         stage_timer=StageTimer(),
+        dispatch_identity=dispatch_identity_from_context(ctx),
     )
 
 
@@ -182,23 +183,19 @@ async def _load_initial_generation(state: GenerationRunState) -> bool:
             user_id=state.user_id,
         )
         if existing is not None:
-            state.task_outcome = (
-                await settle_existing_generated_image(
-                    session,
-                    redis=state.redis,
-                    task_id=state.task_id,
-                    user_id=state.user_id,
-                    message_id=state.message_id,
-                    generation=generation,
-                    existing_image=existing,
-                    task_started_at=state.task_start,
-                    services=state.services,
-                )
+            state.task_outcome = await settle_existing_generated_image(
+                session,
+                redis=state.redis,
+                task_id=state.task_id,
+                user_id=state.user_id,
+                message_id=state.message_id,
+                generation=generation,
+                existing_image=existing,
+                task_started_at=state.task_start,
+                services=state.services,
             )
             return False
-        state.attempt, may_run = bounded_next_attempt(
-            generation.attempt
-        )
+        state.attempt, may_run = bounded_next_attempt(generation.attempt)
         if not may_run:
             await _fail_max_attempts(state, session)
             return False
@@ -220,10 +217,7 @@ async def _claim_generation_row(
     if generation is not None:
         return generation
     existing_id = (
-        await session.execute(
-            select(Generation.id)
-            .where(Generation.id == task_id)
-        )
+        await session.execute(select(Generation.id).where(Generation.id == task_id))
     ).scalar_one_or_none()
     if existing_id is not None:
         logger.info(
@@ -231,9 +225,7 @@ async def _claim_generation_row(
             task_id,
         )
     else:
-        logger.warning(
-            "generation not found task_id=%s", task_id
-        )
+        logger.warning("generation not found task_id=%s", task_id)
     return None
 
 
@@ -249,9 +241,7 @@ def _generation_cannot_start(
         )
         return True
     if generation.status == GenerationStatus.RUNNING.value:
-        logger.info(
-            "generation already running task_id=%s", generation.id
-        )
+        logger.info("generation already running task_id=%s", generation.id)
         return True
     return False
 
@@ -324,8 +314,7 @@ async def _cancel_queued_generation(
             state.task_id,
             state.generation.attempt,
             statuses=(GenerationStatus.QUEUED.value,),
-        )
-        .values(
+        ).values(
             status=GenerationStatus.CANCELED.value,
             progress_stage=GenerationStage.FINALIZING,
             finished_at=datetime.now(timezone.utc),
@@ -351,9 +340,7 @@ async def _cancel_queued_generation(
         reason=EC.CANCELLED.value,
     )
     await session.commit()
-    await state.services.billing.flush_after_commit(
-        session
-    )
+    await state.services.billing.flush_after_commit(session)
     await _publish_queued_failure(
         state,
         EC.CANCELLED.value,
@@ -417,8 +404,7 @@ async def _fail_queued_generation(
             state.task_id,
             state.generation.attempt,
             statuses=(GenerationStatus.QUEUED.value,),
-        )
-        .values(**values)
+        ).values(**values)
     )
     ensure_generation_updated(
         result,
@@ -426,14 +412,9 @@ async def _fail_queued_generation(
         state.generation.attempt,
     )
     row = await session.get(Message, state.message_id)
-    if (
-        row is not None
-        and row.status != MessageStatus.CANCELED
-    ):
+    if row is not None and row.status != MessageStatus.CANCELED:
         row.status = MessageStatus.FAILED
-    generation = await session.get(
-        Generation, state.task_id
-    )
+    generation = await session.get(Generation, state.task_id)
     if generation is not None:
         await state.services.billing.release(
             session,
@@ -441,9 +422,7 @@ async def _fail_queued_generation(
             reason=code,
         )
     await session.commit()
-    await state.services.billing.flush_after_commit(
-        session
-    )
+    await state.services.billing.flush_after_commit(session)
     await _publish_queued_failure(state, code, message)
     state.task_outcome = "failed"
 
@@ -481,9 +460,7 @@ async def _prepare_provider_reservation(
 
 async def _resolve_route(state: GenerationRunState) -> None:
     try:
-        state.raw_image_route = (
-            await state.services.provider.resolve_primary_route()
-        )
+        state.raw_image_route = await state.services.provider.resolve_primary_route()
     except Exception:  # noqa: BLE001
         state.raw_image_route = "responses"
     state.image_route = state.raw_image_route
@@ -497,11 +474,9 @@ async def _resolve_user_runtime_provider(
         return True
     try:
         async with state.services.store.session() as session:
-            state.user_runtime_provider = (
-                await state.services.credentials.resolve(
-                    session,
-                    credential_id,
-                )
+            state.user_runtime_provider = await state.services.credentials.resolve(
+                session,
+                credential_id,
             )
         purposes = getattr(state.user_runtime_provider, "purposes", ()) or ()
         if "image" not in purposes:
@@ -532,13 +507,8 @@ async def _fail_user_runtime_provider(
     credential_id: str,
     exc: Exception,
 ) -> None:
-    byok_error = (
-        state.services.credentials.classify_error(exc)[1]
-        or "invalid_api_key"
-    )
-    await state.services.credentials.record_runtime_error(
-        credential_id, exc
-    )
+    byok_error = state.services.credentials.classify_error(exc)[1] or "invalid_api_key"
+    await state.services.credentials.record_runtime_error(credential_id, exc)
     error_code = state.services.credentials.generation_error_code(byok_error)
     error_message = state.services.credentials.error_message(byok_error)
     try:
@@ -570,8 +540,7 @@ async def _persist_user_runtime_failure(
                 GenerationStatus.QUEUED.value,
                 GenerationStatus.RUNNING.value,
             ),
-        )
-        .values(
+        ).values(
             status=GenerationStatus.FAILED.value,
             progress_stage=GenerationStage.FINALIZING,
             attempt=state.loaded_attempt,
@@ -585,17 +554,10 @@ async def _persist_user_runtime_failure(
         state.task_id,
         state.loaded_attempt,
     )
-    message = await session.get(
-        Message, state.message_id
-    )
-    if (
-        message is not None
-        and message.status != MessageStatus.CANCELED
-    ):
+    message = await session.get(Message, state.message_id)
+    if message is not None and message.status != MessageStatus.CANCELED:
         message.status = MessageStatus.FAILED
-    generation = await session.get(
-        Generation, state.task_id
-    )
+    generation = await session.get(Generation, state.task_id)
     if generation is not None:
         await state.services.billing.release(
             session,
@@ -603,15 +565,12 @@ async def _persist_user_runtime_failure(
             reason=error_code,
         )
     await session.commit()
-    await state.services.billing.flush_after_commit(
-        session
-    )
+    await state.services.billing.flush_after_commit(session)
 
 
 def _apply_route_constraints(state: GenerationRunState) -> None:
     state.requires_mask_provider = (
-        bool(state.mask_image_id)
-        and state.action == GenerationAction.EDIT
+        bool(state.mask_image_id) and state.action == GenerationAction.EDIT
     )
     if state.requires_mask_provider and state.raw_image_route in {
         "dual_race",
@@ -645,9 +604,7 @@ async def _attach_provider_pool(state: GenerationRunState) -> None:
         provider_pool = await get_pool()
         provider_pool.attach_redis(state.redis)
     except Exception:  # noqa: BLE001
-        logger.debug(
-            "provider_pool attach_redis failed", exc_info=True
-        )
+        logger.debug("provider_pool attach_redis failed", exc_info=True)
 
 
 async def _reserve_provider_slot(state: GenerationRunState) -> bool:
@@ -680,19 +637,17 @@ async def _reserve_provider(
     provider_delay = 0
     try:
         started = time.monotonic()
-        state.reserved_provider = (
-            await reserve_image_queue_slot(
-                state.redis,
-                state.task_id,
-                dual_race=state.is_dual_race,
-                endpoint_kind=state.endpoint_kind,
-                requires_mask=state.requires_mask_provider,
-                provider_override=state.user_runtime_provider,
-                queue_lane=queue_metadata.get("queue_lane"),
-                size_bucket=queue_metadata.get("size_bucket"),
-                cost_class=queue_metadata.get("cost_class"),
-                services=state.services,
-            )
+        state.reserved_provider = await reserve_image_queue_slot(
+            state.redis,
+            state.task_id,
+            dual_race=state.is_dual_race,
+            endpoint_kind=state.endpoint_kind,
+            requires_mask=state.requires_mask_provider,
+            provider_override=state.user_runtime_provider,
+            queue_lane=queue_metadata.get("queue_lane"),
+            size_bucket=queue_metadata.get("size_bucket"),
+            cost_class=queue_metadata.get("cost_class"),
+            services=state.services,
         )
         state.stage_timer.add_elapsed("provider_wait", started)
     except UpstreamError as exc:
@@ -705,13 +660,14 @@ async def _reserve_provider(
         await state.redis.set(
             image_queue_not_before_key(state.task_id),
             str(time.time() + provider_delay),
-            ex=provider_delay
-            + IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
+            ex=provider_delay + IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
         )
         await enqueue_generation_once(
             state.redis,
             state.task_id,
+            attempt=state.attempt,
             defer_by=provider_delay,
+            replace_dispatch=state.dispatch_identity,
             services=state.services,
         )
     return provider_delay
@@ -721,11 +677,6 @@ async def _publish_provider_wait(
     state: GenerationRunState,
     provider_delay: int,
 ) -> None:
-    await clear_image_queue_enqueue_dedupe(
-        state.redis,
-        state.task_id,
-        services=state.services,
-    )
     await state.services.events.publish(
         state.redis,
         state.user_id,
@@ -795,31 +746,25 @@ async def _transition_generation_running(
                 .with_for_update(skip_locked=True)
             )
         ).scalar_one_or_none()
-        if current is None or is_generation_terminal(
-            current.status
-        ):
+        if current is None or is_generation_terminal(current.status):
             await _release_stale_claim(state)
             return False
-        state.attempt, may_run = bounded_next_attempt(
-            current.attempt
-        )
+        state.attempt, may_run = bounded_next_attempt(current.attempt)
         if not may_run:
             await _release_stale_claim(state)
             return False
         running_request = _running_upstream_request(state, current)
         started_at = datetime.now(timezone.utc)
-        state.queue_metadata_payload = (
-            generation_queue_metadata(
-                upstream_request=running_request,
-                action=current.action,
-                size_requested=current.size_requested,
-                mask_image_id=current.mask_image_id,
-                created_at=current.created_at,
-                started_at=started_at,
-                finished_at=current.finished_at,
-                upstream_pixels=current.upstream_pixels,
-                now=started_at,
-            )
+        state.queue_metadata_payload = generation_queue_metadata(
+            upstream_request=running_request,
+            action=current.action,
+            size_requested=current.size_requested,
+            mask_image_id=current.mask_image_id,
+            created_at=current.created_at,
+            started_at=started_at,
+            finished_at=current.finished_at,
+            upstream_pixels=current.upstream_pixels,
+            now=started_at,
         )
         running_request = merge_queue_metadata(
             running_request,
@@ -870,8 +815,7 @@ async def _commit_running_transition(
         .where(
             Generation.id == state.task_id,
             Generation.attempt == current.attempt,
-            Generation.status
-            == GenerationStatus.QUEUED.value,
+            Generation.status == GenerationStatus.QUEUED.value,
         )
         .values(
             status=GenerationStatus.RUNNING.value,
@@ -917,9 +861,7 @@ async def _publish_generation_started(state: GenerationRunState) -> None:
             state.task_id,
             state.lease_token,
             state.lease_lost,
-            extra_lease_keys=[
-                image_task_provider_key(state.task_id)
-            ],
+            extra_lease_keys=[image_task_provider_key(state.task_id)],
             image_provider_name=state.reserved_provider_name,
         )
     )
@@ -1011,15 +953,13 @@ def _initialize_execution_state(state: GenerationRunState) -> None:
         state.gen_upstream_request_snapshot
     )
     state.batch_extra_pairs.clear()
-    state.requested_params_for_diag = (
-        image_requested_params_snapshot(
-            state.gen_upstream_request_snapshot,
-            size=state.size_requested,
-            aspect_ratio=state.aspect_ratio,
-            action=state.action,
-            input_count=len(state.input_image_ids),
-            has_mask=bool(state.mask_image_id),
-        )
+    state.requested_params_for_diag = image_requested_params_snapshot(
+        state.gen_upstream_request_snapshot,
+        size=state.size_requested,
+        aspect_ratio=state.aspect_ratio,
+        action=state.action,
+        input_count=len(state.input_image_ids),
+        has_mask=bool(state.mask_image_id),
     )
 
 
@@ -1030,11 +970,9 @@ async def _prepare_upstream_request(state: GenerationRunState) -> None:
         state.generation.upstream_request,
         size=state.resolved.size,
     )
-    state.prompt_for_upstream = (
-        prompt_with_aspect_ratio_constraint(
-            state.prompt,
-            state.aspect_ratio,
-        )
+    state.prompt_for_upstream = prompt_with_aspect_ratio_constraint(
+        state.prompt,
+        state.aspect_ratio,
     )
     await _load_references_and_mask(state)
     _normalize_mask(state)
@@ -1083,18 +1021,13 @@ async def _load_references_and_mask(state: GenerationRunState) -> None:
             state.input_image_ids,
         )
         mask = None
-        if (
-            state.mask_image_id
-            and state.action == GenerationAction.EDIT
-        ):
+        if state.mask_image_id and state.action == GenerationAction.EDIT:
             mask = await state.services.provider.load_mask_image(
                 session,
                 state.mask_image_id,
             )
     state.ref_for_body = (
-        state.references
-        if state.action == GenerationAction.EDIT
-        else []
+        state.references if state.action == GenerationAction.EDIT else []
     )
     state.mask_bytes = mask
 
@@ -1108,14 +1041,10 @@ def _normalize_mask(state: GenerationRunState) -> None:
         state.mask_bytes,
         reference_bytes,
     )
-    reference_size = state.services.provider.reference_pixel_size(
-        reference_bytes
-    )
+    reference_size = state.services.provider.reference_pixel_size(reference_bytes)
     if reference_size is not None:
         state.inpaint_size_override = (
-            state.services.provider.inpaint_size_from_reference(
-                *reference_size
-            )
+            state.services.provider.inpaint_size_from_reference(*reference_size)
         )
 
 
@@ -1139,9 +1068,7 @@ async def _dispatch_upstream_request(state: GenerationRunState) -> None:
     async with asyncio.timeout_at(state.task_deadline):
         await _raise_if_pre_upstream_interrupted(state)
         await _record_generation_upstream_marker(state, response_received=False)
-        with tracer.start_as_current_span(
-            "upstream.generate_image"
-        ) as span:
+        with tracer.start_as_current_span("upstream.generate_image") as span:
             _annotate_upstream_span(state, span)
             try:
                 await _call_upstream(state)
@@ -1163,9 +1090,7 @@ async def _raise_if_pre_upstream_interrupted(
     if state.lease_lost.is_set():
         raise LeaseLost("generation lease renewer failed")
     if await is_cancelled(state.redis, state.task_id):
-        raise TaskCancelled(
-            "cancelled before upstream request"
-        )
+        raise TaskCancelled("cancelled before upstream request")
 
 
 def _annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
@@ -1226,9 +1151,7 @@ async def _record_generation_upstream_marker(
                 .where(
                     Generation.id == state.task_id,
                     Generation.attempt == state.attempt,
-                    Generation.status.in_(
-                        RUNNING_GENERATION_STATUSES
-                    ),
+                    Generation.status.in_(RUNNING_GENERATION_STATUSES),
                 )
                 .with_for_update()
             )
