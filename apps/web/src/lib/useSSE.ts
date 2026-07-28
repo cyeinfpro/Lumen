@@ -87,6 +87,7 @@ export function useSSE(
     () => Object.keys(handlers).sort().join(","),
     [handlers],
   );
+  const hasRecoveryAdapter = typeof options.recoverSnapshot === "function";
 
   useEffect(() => {
     if (!channelKey || typeof window === "undefined") {
@@ -108,7 +109,7 @@ export function useSSE(
       onOpen: emitOpen,
       onError: emitError,
       onControl: emitControl,
-      recoverSnapshot: emitRecoverSnapshot,
+      recoverSnapshot: hasRecoveryAdapter ? emitRecoverSnapshot : undefined,
       hiddenCloseDelayMs: options.hiddenCloseDelayMs,
       maxRetryCount: options.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT,
       setStatus,
@@ -131,6 +132,7 @@ export function useSSE(
   }, [
     channelKey,
     eventKey,
+    hasRecoveryAdapter,
     options.hiddenCloseDelayMs,
     options.maxRetryCount,
   ]);

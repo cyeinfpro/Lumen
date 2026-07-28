@@ -1,4 +1,4 @@
-import { equal, ok } from "node:assert/strict";
+import { deepEqual, equal, ok } from "node:assert/strict";
 import { test } from "node:test";
 import { loadTsModule } from "../../../test-support/load-ts-module.mjs";
 import type {
@@ -217,6 +217,64 @@ test("recovery_required triggers one snapshot and reconnects from its cursor", a
   equal(transport.opens[1].input.url, "/events?cursor=20-0");
   equal(statuses.at(-1), "connecting");
   unsubscribe();
+});
+
+test("shared runtime recovers with only the subscribers that provide adapters", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const recoveryStatuses: RealtimeStatus[] = [];
+  const passiveStatuses: RealtimeStatus[] = [];
+  const passiveEvents: Array<{ data: unknown; id: string }> = [];
+  let recoveryCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribeRecovery = instance.subscribe(
+    subscriber(recoveryStatuses, async (_scopes, reason) => {
+      recoveryCalls += 1;
+      equal(reason.kind, "replay_gap");
+      equal(reason.reason, "history_pruned");
+      return { cursor: "42-0", syncedAt: 100 };
+    }),
+  );
+  const unsubscribePassive = instance.subscribe({
+    handlers: {
+      asset_updated(data, id) {
+        passiveEvents.push({ data, id });
+      },
+    },
+    setStatus(status) {
+      passiveStatuses.push(status);
+    },
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(
+    0,
+    "replay_truncated",
+    JSON.stringify({ reason: "history_pruned", cursor: "10-0" }),
+  );
+  await flushPromises();
+
+  equal(recoveryCalls, 1);
+  equal(transport.opens.length, 2);
+  equal(transport.opens[1].input.url, "/events?cursor=42-0");
+  equal(passiveStatuses.at(-1), "connecting");
+
+  transport.opens[1].sink.onOpen({} as Event);
+  transport.emit(
+    1,
+    "asset_updated",
+    JSON.stringify({ asset_id: "asset-1" }),
+    "43-0",
+  );
+
+  equal(passiveStatuses.at(-1), "open");
+  deepEqual(passiveEvents, [
+    { data: { asset_id: "asset-1" }, id: "43-0" },
+  ]);
+  unsubscribeRecovery();
+  unsubscribePassive();
 });
 
 test("last subscriber aborts recovery and stale completion has no effects", async () => {
