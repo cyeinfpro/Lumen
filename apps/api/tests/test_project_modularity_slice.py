@@ -102,7 +102,7 @@ async def test_project_lifecycle_owns_title_and_cleanup_transaction_order() -> N
     out = await UpsertWorkflowProject(
         repository=port,
         outputs=port,
-    ).execute(
+    ).upsert_project(
         UpsertWorkflowProjectCommand(
             user_id="user-1",
             run_id="run-1",
@@ -141,7 +141,7 @@ async def test_project_lifecycle_rejects_blank_title_before_commit() -> None:
         await UpsertWorkflowProject(
             repository=port,
             outputs=port,
-        ).execute(
+        ).upsert_project(
             UpsertWorkflowProjectCommand(
                 user_id="user-1",
                 run_id="run-1",
