@@ -391,13 +391,17 @@ async def test_copy_fallback_existing_different_content_is_explicit_conflict(
         key,
         expected=_identity_for(first_payload),
     )
-    with pytest.raises(ArtifactConflict, match="artifact destination conflict"):
+    with pytest.raises(
+        ArtifactConflict,
+        match="artifact destination conflict",
+    ) as exc:
         await store.publish_path(
             second_source,
             key,
             expected=_identity_for(second_payload),
         )
 
+    assert isinstance(exc.value, FileExistsError)
     assert (tmp_path / key.value).read_bytes() == first_payload
     assert conflict_metrics == ["filesystem"]
 

@@ -47,7 +47,7 @@ from .filesystem_staging import (
 )
 
 
-class ArtifactConflict(ArtifactStoreError):
+class ArtifactConflict(FileExistsError):
     pass
 
 
@@ -794,11 +794,7 @@ class FileSystemArtifactStore:
         fd: int | None = None
         with _publish_directory_lock(destination, exclusive=True):
             try:
-                fd = os.open(
-                    destination,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
+                fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 destination_created = True
                 with os.fdopen(fd, "wb") as dst:
                     fd = None
@@ -824,9 +820,8 @@ class FileSystemArtifactStore:
                 existing = _identity(destination)
             except FileNotFoundError:
                 return None
-        if (
-            existing.sha256 == expected.sha256
-            and existing.size_bytes == expected.size_bytes
+        if existing.sha256 == expected.sha256 and (
+            existing.size_bytes == expected.size_bytes
         ):
             record_publish_idempotent_winner("filesystem")
             return PublishedArtifact(key=key, identity=existing, created=False)
@@ -844,11 +839,7 @@ class FileSystemArtifactStore:
             raise ArtifactIdentityMismatch("source artifact identity changed")
         destination = self._path(key, create_parent=True)
         while True:
-            existing = self._resolve_existing_destination(
-                destination,
-                key,
-                expected,
-            )
+            existing = self._resolve_existing_destination(destination, key, expected)
             if existing is not None:
                 return existing
             try:
@@ -1308,8 +1299,7 @@ class FileSystemArtifactStore:
             consumed += 1
             try:
                 record = await asyncio.to_thread(
-                    self._record_from_metadata,
-                    metadata_path,
+                    self._record_from_metadata, metadata_path
                 )
             except FileNotFoundError:
                 record_staged_sweep_tombstone()
