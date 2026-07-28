@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.upstream_parts import direct_images
+from app.upstream_parts.generated_payload import (
+    InlineImageBytes,
+    StagedImageFile,
+)
 from app.upstream_parts import upstream_impl as _upstream_impl  # noqa: F401  组装服务
 
 
@@ -42,8 +48,14 @@ async def _unexpected_fetch(
 async def test_extract_image_results_accepts_all_b64_results() -> None:
     payload = {
         "data": [
-            {"b64_json": "image-one", "revised_prompt": "one"},
-            {"b64_json": "image-two", "revised_prompt": 2},
+            {
+                "b64_json": base64.b64encode(b"image-one").decode("ascii"),
+                "revised_prompt": "one",
+            },
+            {
+                "b64_json": base64.b64encode(b"image-two").decode("ascii"),
+                "revised_prompt": 2,
+            },
             "skip-me",
         ]
     }
@@ -56,8 +68,8 @@ async def test_extract_image_results_accepts_all_b64_results() -> None:
         bad_response_error_code="bad-response",
         no_image_returned_error_code="no-image",
     ) == [
-        ("image-one", "one"),
-        ("image-two", None),
+        (InlineImageBytes(b"image-one"), "one"),
+        (InlineImageBytes(b"image-two"), None),
     ]
 
 
@@ -90,18 +102,138 @@ async def test_extract_image_results_downloads_urls_with_injected_fetcher() -> N
         proxy_url="socks5://proxy.example:1080",
     )
 
-    assert result == [
-        (
-            base64.b64encode(b"downloaded-image").decode("ascii"),
-            "downloaded",
-        )
-    ]
+    assert result == [(InlineImageBytes(b"downloaded-image"), "downloaded")]
     assert seen == [
         (
             "https://cdn.example/image.png",
             "socks5://proxy.example:1080",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_preserves_staged_url_payload(
+    tmp_path: Path,
+) -> None:
+    staged_path = tmp_path / "generated-image.part"
+    staged_path.write_bytes(b"staged-image")
+    staged = StagedImageFile(
+        path=staged_path,
+        size=12,
+        sha256=hashlib.sha256(b"staged-image").hexdigest(),
+        owned=True,
+    )
+
+    async def fake_fetch(
+        image_url: str,
+        *,
+        proxy_url: str | None = None,
+    ) -> StagedImageFile:
+        assert image_url == "https://cdn.example/staged.png"
+        assert proxy_url is None
+        return staged
+
+    result = await direct_images._extract_image_results(
+        {"data": [{"url": "https://cdn.example/staged.png"}]},
+        200,
+        fetch_image_url_as_bytes=fake_fetch,
+        upstream_error_type=InjectedUpstreamError,
+        bad_response_error_code="bad-response",
+        no_image_returned_error_code="no-image",
+    )
+
+    assert result == [(staged, None)]
+    assert result[0][0] is staged
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_rejects_invalid_inline_base64() -> None:
+    with pytest.raises(InjectedUpstreamError) as exc_info:
+        await direct_images._extract_image_results(
+            {"data": [{"b64_json": "not-valid-base64!"}]},
+            200,
+            fetch_image_url_as_bytes=_unexpected_fetch,
+            upstream_error_type=InjectedUpstreamError,
+            bad_response_error_code="bad-response",
+            no_image_returned_error_code="no-image",
+        )
+
+    assert exc_info.value.error_code == "bad-response"
+    assert "invalid image base64" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_enforces_single_and_batch_byte_limits() -> None:
+    async def fake_fetch(
+        image_url: str,
+        *,
+        proxy_url: str | None = None,
+    ) -> bytes:
+        return image_url.rsplit("/", 1)[-1].encode("ascii")
+
+    with pytest.raises(InjectedUpstreamError, match="single-image"):
+        await direct_images._extract_image_results(
+            {"data": [{"url": "https://cdn.example/12345"}]},
+            200,
+            fetch_image_url_as_bytes=fake_fetch,
+            upstream_error_type=InjectedUpstreamError,
+            bad_response_error_code="bad-response",
+            no_image_returned_error_code="no-image",
+            max_image_bytes=4,
+        )
+
+    with pytest.raises(InjectedUpstreamError, match="batch"):
+        await direct_images._extract_image_results(
+            {
+                "data": [
+                    {"url": "https://cdn.example/123"},
+                    {"url": "https://cdn.example/456"},
+                ]
+            },
+            200,
+            fetch_image_url_as_bytes=fake_fetch,
+            upstream_error_type=InjectedUpstreamError,
+            bad_response_error_code="bad-response",
+            no_image_returned_error_code="no-image",
+            max_image_bytes=4,
+            max_batch_bytes=5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_extract_image_results_requires_https_or_allowlisted_http() -> None:
+    seen: list[str] = []
+
+    async def fake_fetch(
+        image_url: str,
+        *,
+        proxy_url: str | None = None,
+    ) -> bytes:
+        seen.append(image_url)
+        return b"image"
+
+    with pytest.raises(InjectedUpstreamError, match="unsafe image URL"):
+        await direct_images._extract_image_results(
+            {"data": [{"url": "http://cdn.example/image.png"}]},
+            200,
+            fetch_image_url_as_bytes=fake_fetch,
+            upstream_error_type=InjectedUpstreamError,
+            bad_response_error_code="bad-response",
+            no_image_returned_error_code="no-image",
+        )
+    assert seen == []
+
+    result = await direct_images._extract_image_results(
+        {"data": [{"url": "http://image-sidecar/image.png"}]},
+        200,
+        fetch_image_url_as_bytes=fake_fetch,
+        upstream_error_type=InjectedUpstreamError,
+        bad_response_error_code="bad-response",
+        no_image_returned_error_code="no-image",
+        allowed_http_result_hosts=("image-sidecar",),
+    )
+    assert result == [(InlineImageBytes(b"image"), None)]
+    assert seen == ["http://image-sidecar/image.png"]
 
 
 @pytest.mark.asyncio
@@ -142,7 +274,10 @@ async def test_direct_first_result_helper_uses_injected_results_facade() -> None
         proxy_url: str | None = None,
     ) -> list[direct_images.ImageResult]:
         seen.append((payload, status_code, proxy_url))
-        return [("first", "prompt"), ("second", None)]
+        return [
+            (InlineImageBytes(b"first"), "prompt"),
+            (InlineImageBytes(b"second"), None),
+        ]
 
     payload: dict[str, Any] = {"data": []}
     assert await direct_images._extract_image_result(
@@ -150,7 +285,7 @@ async def test_direct_first_result_helper_uses_injected_results_facade() -> None
         202,
         extract_image_results=fake_extract_results,
         proxy_url="http://proxy.example",
-    ) == ("first", "prompt")
+    ) == (InlineImageBytes(b"first"), "prompt")
     assert seen == [(payload, 202, "http://proxy.example")]
 
 
@@ -197,7 +332,7 @@ async def test_results_facade_resolves_dependencies_and_codes_at_call_time(
         seen["payload"] = payload
         seen["status_code"] = status_code
         seen.update(kwargs)
-        return [("facade-result", None)]
+        return [(InlineImageBytes(b"facade-result"), None)]
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.direct, "fetch_image_url_as_bytes", fake_fetch
@@ -226,7 +361,7 @@ async def test_results_facade_resolves_dependencies_and_codes_at_call_time(
         payload,
         207,
         proxy_url="http://current-proxy",
-    ) == [("facade-result", None)]
+    ) == [(InlineImageBytes(b"facade-result"), None)]
     assert seen == {
         "payload": payload,
         "status_code": 207,
@@ -251,7 +386,7 @@ async def test_first_result_facade_chains_through_current_results_facade(
         proxy_url: str | None = None,
     ) -> list[direct_images.ImageResult]:
         seen.append((payload, status_code, proxy_url))
-        return [("patched-first", "patched-prompt")]
+        return [(InlineImageBytes(b"patched-first"), "patched-prompt")]
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "extract_image_results", fake_results_facade
@@ -262,7 +397,7 @@ async def test_first_result_facade_chains_through_current_results_facade(
         payload,
         208,
         proxy_url="http://chain-proxy",
-    ) == ("patched-first", "patched-prompt")
+    ) == (InlineImageBytes(b"patched-first"), "patched-prompt")
     assert seen == [(payload, 208, "http://chain-proxy")]
 
 
