@@ -10,7 +10,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +39,15 @@ from .observability import (
 )
 from .ratelimit import user_rate_limits_effective, user_rate_limits_effective_reason
 from .redis_client import get_redis
+from .runtime import ApiRuntime, RuntimeLifecycle
 from .runtime_settings import (
     get_setting,
     migrate_image_primary_route,
     migrate_provider_purposes,
 )
 from .services.billing_cache import BillingCacheService
+from .services.poster_styles import tagging as poster_style_tagging
+from .services.poster_styles.tagging_runtime import build_poster_tagging_runtime
 
 
 logger = logging.getLogger(__name__)
@@ -526,17 +529,19 @@ async def lifespan(app: FastAPI):
                 await session.commit()
     except Exception:  # noqa: BLE001
         logger.warning("runtime settings image route migration failed", exc_info=True)
-    async with AsyncExitStack() as stack:
+    lifecycle = RuntimeLifecycle("api", logger=logger)
+    runtime: ApiRuntime | None = None
+    try:
         # Register each resource immediately after it becomes usable. If any
         # later startup step fails, already-acquired resources are unwound in
         # reverse order instead of relying on the lifespan reaching ``yield``.
         r = get_redis()
         await r.ping()
-        stack.push_async_callback(r.aclose)
+        lifecycle.own("redis", r.aclose)
 
         billing_cache = BillingCacheService(redis=r)
         await billing_cache.start_workers()
-        stack.push_async_callback(billing_cache.stop_workers)
+        lifecycle.own("billing_cache", billing_cache.stop_workers)
 
         try:
             from .routes import billing as billing_routes
@@ -545,11 +550,20 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             logger.warning("billing cache route wiring failed", exc_info=True)
         else:
-            stack.callback(billing_routes.configure_billing_cache, None)
+            lifecycle.own(
+                "billing_route_binding",
+                lambda: billing_routes.configure_billing_cache(None),
+            )
 
         # 初始化 arq 入队池（与 Worker 注册的 run_generation / run_completion 对接）
-        await get_arq_pool()
-        stack.push_async_callback(close_arq_pool)
+        arq = await get_arq_pool()
+        lifecycle.own("arq", close_arq_pool)
+
+        poster_tagging = build_poster_tagging_runtime(
+            r,
+            concurrency=poster_style_tagging.auto_tag_concurrency(),
+        )
+        lifecycle.own("poster_tagging", poster_tagging.aclose)
 
         from .images.application.reconcile_runtime import (
             image_artifact_reconciler_loop,
@@ -566,13 +580,28 @@ async def lifespan(app: FastAPI):
             image_reconcile_task.cancel()
             await asyncio.gather(image_reconcile_task, return_exceptions=True)
 
-        stack.push_async_callback(_stop_image_reconciler)
+        lifecycle.own("image_reconciler", _stop_image_reconciler)
+
+        runtime = ApiRuntime(
+            _redis=r,
+            _arq=arq,
+            _billing_cache=billing_cache,
+            _poster_tagging=poster_tagging,
+            _lifecycle=lifecycle,
+            _image_reconciler_enabled=True,
+        )
+        app.state.runtime = runtime
+        runtime.start(logger=logger)
 
         # Opportunistic only: if tiktoken's cache is cold and the metadata download is
         # slow, token counting falls back to a local estimate instead of blocking API
         # request handlers.
         logger.info("api.tiktoken_warm loaded=%s", warm_tiktoken(timeout_sec=0.2))
         yield
+    finally:
+        if runtime is not None and getattr(app.state, "runtime", None) is runtime:
+            delattr(app.state, "runtime")
+        await lifecycle.close()
 
 
 def _cors_allow_origins() -> list[str]:

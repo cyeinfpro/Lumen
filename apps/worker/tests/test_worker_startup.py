@@ -20,6 +20,16 @@ from app.tasks.generation_parts.runtime import GenerationRuntime
 from app.tasks.video_generation_parts.runtime import VideoGenerationRuntime
 
 
+def _generation_runtime_stub() -> SimpleNamespace:
+    async def shutdown() -> None:
+        return None
+
+    return SimpleNamespace(
+        postprocess_runtime=SimpleNamespace(executor=None),
+        shutdown=shutdown,
+    )
+
+
 @pytest.mark.asyncio
 async def test_startup_failure_closes_partial_resources(
     monkeypatch: pytest.MonkeyPatch,
@@ -74,7 +84,7 @@ async def test_startup_failure_closes_partial_resources(
     monkeypatch.setattr(
         main,
         "build_generation_runtime",
-        lambda **_kwargs: object(),
+        lambda **_kwargs: _generation_runtime_stub(),
     )
     monkeypatch.setattr(
         main,
@@ -92,9 +102,8 @@ async def test_startup_failure_closes_partial_resources(
 
     assert calls == [
         "storage_ready",
-        "billing_shutdown",
-        "close_client",
         "metrics_stop",
+        "close_client",
     ]
 
 
@@ -264,7 +273,7 @@ async def test_startup_injects_one_storage_coordinator_into_all_media_runtimes(
         "build_generation_runtime",
         lambda *, storage_writes, image_upstream_runtime: (
             injected.append(("generation", storage_writes, image_upstream_runtime))
-            or image_upstream_runtime
+            or _generation_runtime_stub()
         ),
     )
     monkeypatch.setattr(
