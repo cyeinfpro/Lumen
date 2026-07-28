@@ -24,7 +24,7 @@ class UpsertWorkflowProject:
     repository: ProjectLifecycleRepository
     outputs: ProjectOutputPort
 
-    async def execute(
+    async def upsert_project(
         self,
         command: UpsertWorkflowProjectCommand,
     ) -> ProjectRunView:

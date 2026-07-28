@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Protocol
+
+from ..domain.json_types import JsonMapping
+from ..domain.workflow_contracts import PublishBundle
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,12 +18,12 @@ class ModelLibraryGenerationTask:
     prompt: str
     attachment_ids: tuple[str, ...]
     idempotency_key: str
-    workflow_meta: Mapping[str, object]
+    workflow_meta: JsonMapping
 
 
 @dataclass(frozen=True, slots=True)
 class ModelLibraryTaskResult:
-    bundle: object
+    bundle: PublishBundle
     generation_ids: tuple[str, ...]
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
@@ -41,7 +40,7 @@ router = APIRouter()
 async def create_poster_design_workflow(
     body: PosterDesignWorkflowCreateIn,
     user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[Any, Depends(get_db)],
 ) -> PosterDesignWorkflowCreateOut:
     result = await execute_workflow_action(
         create_workflow_run(db, user).create_poster,

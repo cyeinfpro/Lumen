@@ -12,7 +12,6 @@ from .adapters.http_operations import (
     ProjectWorkflowOperationsAdapter,
 )
 from .application.commands import CancelWorkflowRun
-from .application.http_operations import WorkflowHttpUseCases
 from .application.policy_registry import WorkflowPolicyRegistry
 from .application.preflight import PreviewWorkflow, ValidateWorkflow
 from .application.queries import GetWorkflowRun
@@ -24,6 +23,7 @@ from .ports.assets import WorkflowAssetPort
 from .ports.providers import WorkflowPreviewPort
 from .ports.queue import WorkflowQueuePort
 from .ports.repositories import WorkflowRepository
+from .transport.http.use_cases import WorkflowHttpUseCases
 
 
 @dataclass(frozen=True, slots=True)

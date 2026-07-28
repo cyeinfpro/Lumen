@@ -14,13 +14,13 @@ from app.workflows.adapters.http_operations import (
 from app.workflows.adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
 from app.workflows.adapters.operations import apparel, model_library, poster, projects
 from app.workflows.application.create_run import CreateWorkflowRun
-from app.workflows.application.http_operations import WorkflowHttpUseCases
 from app.workflows.application.runtime_state import WorkflowRuntimeState
 from app.workflows.ports.run_creation import (
     CreatePosterRunCommand,
     PosterBrandAssets,
     WorkflowRunCreated,
 )
+from app.workflows.transport.http.use_cases import WorkflowHttpUseCases
 
 
 def _application() -> tuple[

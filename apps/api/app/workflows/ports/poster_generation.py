@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Protocol
+
+from ..domain.json_types import JsonMapping
+from ..domain.workflow_contracts import PublishBundle
 
 
 @dataclass(frozen=True, slots=True)
 class PosterMasterTask:
     candidate_index: int
-    style_summary: Mapping[str, object]
-    copy_analysis: Mapping[str, object]
+    style_summary: JsonMapping
+    copy_analysis: JsonMapping
     intent: str
     prompt: str
     attachment_ids: tuple[str, ...]
@@ -18,7 +21,7 @@ class PosterMasterTask:
     quality_mode: str
     size_mode: str
     size: str | None
-    workflow_meta: Mapping[str, object]
+    workflow_meta: JsonMapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,12 +34,12 @@ class PosterRenderTask:
     idempotency_key: str
     quality_mode: str
     use_master_as_reference: bool
-    workflow_meta: Mapping[str, object]
+    workflow_meta: JsonMapping
 
 
 @dataclass(frozen=True, slots=True)
 class PosterTaskResult:
-    bundle: object
+    bundle: PublishBundle
     generation_ids: tuple[str, ...]
 
 

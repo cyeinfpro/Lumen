@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (
     AgeSegment,
@@ -45,7 +44,7 @@ project_router = APIRouter()
 async def create_apparel_model_showcase(
     body: ApparelWorkflowCreateIn,
     user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[Any, Depends(get_db)],
 ) -> ApparelWorkflowCreateOut:
     result = await execute_workflow_action(
         create_workflow_run(db, user).create_apparel,

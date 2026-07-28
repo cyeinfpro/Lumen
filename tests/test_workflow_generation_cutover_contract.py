@@ -118,9 +118,7 @@ def test_workflow_application_has_no_infrastructure_operation_modules() -> None:
     operations = WORKFLOWS / "application" / "operations"
     assert not operations.exists() or not list(operations.glob("*.py"))
     adapter_operations = WORKFLOWS / "adapters" / "operations"
-    assert {
-        path.name for path in adapter_operations.glob("*.py")
-    } == {
+    assert {path.name for path in adapter_operations.glob("*.py")} == {
         "__init__.py",
         "apparel.py",
         "model_library.py",
@@ -162,9 +160,7 @@ def test_workflow_operation_adapters_have_no_compatibility_forwarders() -> None:
             if not isinstance(node.value, (ast.Name, ast.Attribute)):
                 continue
             targets = [
-                target.id
-                for target in node.targets
-                if isinstance(target, ast.Name)
+                target.id for target in node.targets if isinstance(target, ast.Name)
             ]
             if targets:
                 violations.append(
@@ -312,7 +308,7 @@ def test_workflow_composition_has_no_module_bag_or_global_runtime() -> None:
 def test_workflow_application_has_named_use_cases_not_dynamic_handler_registry() -> (
     None
 ):
-    path = WORKFLOWS / "application" / "http_operations.py"
+    path = WORKFLOWS / "transport" / "http" / "use_cases.py"
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     assert "WorkflowEndpoint" not in source
@@ -337,13 +333,15 @@ def test_workflow_application_has_named_use_cases_not_dynamic_handler_registry()
     }
     assert "execute" not in method_names
     assert {
-        "list_runs",
         "get_workflow",
-        "create_apparel_model_showcase",
         "generate_apparel_model_library_job",
-        "create_poster_design_workflow",
         "inpaint_poster_render",
     } <= method_names
+    assert {
+        "list_runs",
+        "create_apparel_model_showcase",
+        "create_poster_design_workflow",
+    }.isdisjoint(method_names)
 
 
 def test_workflow_legacy_action_facades_are_removed() -> None:
@@ -359,9 +357,7 @@ def test_workflow_legacy_action_facades_are_removed() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in forbidden_names:
-                violations.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno}:{node.id}"
-                )
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}:{node.id}")
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 for alias in node.names:
                     if alias.name in forbidden_names:
@@ -413,9 +409,7 @@ def test_workflow_transport_depends_on_application_api_or_composition() -> None:
                 continue
             module = node.module or ""
             if "adapters" in module.split(".") or "application.operations" in module:
-                violations.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno}:{module}"
-                )
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}:{module}")
     assert violations == []
 
 
@@ -429,13 +423,7 @@ def test_workflow_services_production_calls_are_zero() -> None:
 
 
 def test_workflow_cutover_keeps_cross_slice_behavior_parity_coverage() -> None:
-    path = (
-        ROOT
-        / "apps"
-        / "api"
-        / "tests"
-        / "test_workflow_http_cutover_parity.py"
-    )
+    path = ROOT / "apps" / "api" / "tests" / "test_workflow_http_cutover_parity.py"
     source = path.read_text(encoding="utf-8")
     assert {
         "test_project_http_cutover_preserves_adapter_result_and_arguments",
@@ -728,9 +716,7 @@ def test_generation_use_cases_receive_workflow_hooks_through_typed_services() ->
                 continue
             module = node.module or ""
             if module == "workflow_service" or module.endswith(".workflow_service"):
-                violations.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno}:{module}"
-                )
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}:{module}")
     assert violations == []
 
 
@@ -761,17 +747,15 @@ def test_generation_use_cases_do_not_reach_into_legacy_port_bags() -> None:
             if not attribute.startswith(service_prefixes):
                 continue
             parts = attribute.split(".")
-            service_index = (
-                parts.index("services") + 1 if "services" in parts else 1
-            )
+            service_index = parts.index("services") + 1 if "services" in parts else 1
             if service_index >= len(parts):
                 continue
             namespace = parts[service_index]
-            accessed_name = parts[service_index + 1] if service_index + 1 < len(parts) else ""
+            accessed_name = (
+                parts[service_index + 1] if service_index + 1 < len(parts) else ""
+            )
             if namespace in legacy_namespaces or accessed_name.startswith("_"):
-                violations.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno}:{attribute}"
-                )
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}:{attribute}")
     assert violations == []
 
 
@@ -857,13 +841,13 @@ def test_generation_composition_support_is_not_a_private_alias_facade() -> None:
                         violations.append(
                             f"{path.relative_to(ROOT)}:{node.lineno}:{name}"
                         )
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {
+        elif isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and node.name in {
             "__getattr__",
             "_upstream_impl",
         }:
-            violations.append(
-                f"{path.relative_to(ROOT)}:{node.lineno}:{node.name}"
-            )
+            violations.append(f"{path.relative_to(ROOT)}:{node.lineno}:{node.name}")
     assert violations == []
 
 

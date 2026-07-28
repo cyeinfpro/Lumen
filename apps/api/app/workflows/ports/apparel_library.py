@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Protocol
 
 from lumen_core.schemas import (
     ApparelModelLibraryItemOut,
@@ -11,6 +11,7 @@ from lumen_core.schemas import (
     ApparelModelLibrarySyncStateOut,
 )
 
+from ..domain.json_types import JsonObject
 from .runtime_state import AsyncLockPort
 
 
@@ -24,19 +25,19 @@ class ApparelLibraryQueryPort(Protocol):
         self,
         *,
         user_id: str,
-    ) -> tuple[list[dict[str, Any]], bool]: ...
+    ) -> tuple[list[JsonObject], bool]: ...
 
     def filter_items(
         self,
-        items: Sequence[dict[str, Any]],
+        items: Sequence[JsonObject],
         *,
         source: str,
         age_segment: str,
         appearance: str,
         query: str,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[JsonObject]: ...
 
-    def item_out(self, item: dict[str, Any]) -> ApparelModelLibraryItemOut: ...
+    def item_out(self, item: JsonObject) -> ApparelModelLibraryItemOut: ...
 
     def sync_state_out(
         self,
@@ -76,7 +77,7 @@ class ApparelLibraryDeletePort(Protocol):
         *,
         user_id: str,
         item_id: str,
-    ) -> dict[str, Any] | None: ...
+    ) -> JsonObject | None: ...
 
     async def hide_preset(self, *, user_id: str, item_id: str) -> None: ...
 

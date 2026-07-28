@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility exports
     AccessoryPlanIn,  # noqa: F401 - showcase facade dependency
@@ -113,10 +112,10 @@ async def patch_workflow(
     workflow_run_id: str,
     body: WorkflowRunPatchIn,
     user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
     result = await execute_workflow_action(
-        upsert_workflow_project(db).execute,
+        upsert_workflow_project(db).upsert_project,
         command=UpsertWorkflowProjectCommand(
             user_id=user.id,
             run_id=workflow_run_id,
@@ -130,7 +129,7 @@ async def patch_workflow(
 async def delete_workflow(
     workflow_run_id: str,
     user: CurrentUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    db: Annotated[Any, Depends(get_db)],
 ) -> dict[str, bool]:
     return await execute_workflow_action(
         project_lifecycle(db).delete,
