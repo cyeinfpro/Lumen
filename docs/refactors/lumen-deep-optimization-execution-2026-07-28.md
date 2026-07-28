@@ -51,10 +51,10 @@ All findings were rechecked against the baseline SHA before implementation.
 | F-07 | Fixed | `useSSE` registers only real recovery adapters while retaining the rule that every registered adapter must succeed. |
 | F-08 | Fixed | Auth response snapshots are captured before commit and runtime-default/audit enrichment failures fall back without changing committed success semantics. |
 | F-09 | Confirmed | Completion ports expose extensive `Any`, ORM/SQL/private helpers and RuntimeSlot state; internal capability imports use broad `except Exception`. |
-| F-10 | Confirmed | Outbox delivery performs Redis/SSE I/O inside the `FOR UPDATE SKIP LOCKED` transaction. |
-| F-11 | Confirmed | Message and task post-commit publishers are awaited serially with separate two-second budgets. |
-| F-12 | Confirmed | Video submission performs provider, media snapshot, validation, and pricing work before checking the unique-key winner. |
-| F-13 | Confirmed | Artifact staging dispatches every chunk through `asyncio.to_thread`; upload storage reservation is `max_bytes * 5`. |
+| F-10 | Fixed | Outbox rows are claimed in a short owner/TTL transaction; Redis/SSE delivery runs after commit with bounded concurrency, owner-checked finalization, stable job IDs, retries, and DLQ handling. |
+| F-11 | Fixed | Message and task post-commit publishers start together under one total latency budget; failures are isolated and pending publishers are cancelled after the shared deadline. |
+| F-12 | Fixed | Video submission computes the idempotency fingerprint first, checks the winner before expensive work, then serializes and rechecks under a transaction advisory lock before provider/media/pricing work. |
+| F-13 | Fixed | Artifact staging uses one lifecycle-owned blocking writer with a bounded byte queue; capacity is initially bounded and atomically resized to measured staged/output demand. |
 
 ## Wave Checklist
 
@@ -78,11 +78,11 @@ All findings were rechecked against the baseline SHA before implementation.
 
 ### Wave 2
 
-- [ ] Outbox F-10
-- [ ] Message/Video F-11/F-12
-- [ ] Upload F-13
-- [ ] CI impact batching
-- [ ] Lead review and ownership audit
+- [x] Outbox F-10
+- [x] Message/Video F-11/F-12
+- [x] Upload F-13
+- [x] CI impact batching
+- [x] Lead review and ownership audit
 - [ ] Wave impact plan passed
 
 ### Wave 3
@@ -214,3 +214,103 @@ All findings were rechecked against the baseline SHA before implementation.
 - Test evidence: API 1522 passed with 2 existing skips; Image 42; Canvas/Auth
   85; Upload 47; runtime lifecycle 27; Poster 68; Web 475; SSE 20
 - Final Wave result: all selected gates and tests passed
+
+### A5: Durable Outbox Claims
+
+- Baseline SHA: `1eef268a5042fad652de24bd1aae5be8a408737f`
+- Commit SHA: `9b90aeb78dcfee8548d102ffc9654b8e8cb229c3`
+  (integrated as `61757cc4fcf2fccc9e6149f7ad81fb62a95dec82`)
+- Changed files: outbox claim/publisher/contracts/tasks, media workflow model,
+  expand-only migration `0050`, and targeted Worker tests
+- Invariants: at-least-once delivery retains stable event/job identity;
+  external delivery does not run inside the row-lock transaction; only the
+  current claim owner can finalize a row; retry and DLQ semantics remain
+  explicit
+- Confirmed defect: the prior publisher held `FOR UPDATE SKIP LOCKED` rows
+  while performing Redis/SSE delivery
+- Implementation: short owner/TTL claims, bounded concurrent delivery outside
+  the transaction, owner-checked finalize, retry diagnostics, and stale-claim
+  recovery
+- Targeted tests: 57 passed; 3 PostgreSQL environment-conditional tests skipped
+  in the Lead worktree; the Agent's PostgreSQL probe passed 3 tests
+- Static gates: Ruff, format, architecture, complexity, runtime-state, and
+  migration lint passed
+- Not run: full repository suite
+- Metrics/logging: claim attempts, delivery attempts/errors, retry and DLQ
+  context use stable outbox identifiers and claim owners
+- Migration/rollback: additive nullable claim columns, non-negative attempt
+  check, and partial claim index; rollback drops only the new index/columns
+- Remaining risk: production broker latency and crash recovery require runtime
+  observation after release
+
+### A6: Message / Video Submission
+
+- Baseline SHA: `1eef268a5042fad652de24bd1aae5be8a408737f`
+- Commit SHA: `3e11376`
+- Changed files: message/regenerate routes, video submission service, targeted
+  route/video tests, and one deleted complexity baseline entry
+- Invariants: committed message/regeneration success is not reversed by
+  non-critical publishing; video unique-key conflicts retain structured `409`;
+  deferred commit does not emit an empty Canvas publish payload
+- Confirmed defects: publishers consumed serial two-second budgets and video
+  submission performed expensive external work before winner detection
+- Implementation: one shared publish deadline with concurrent fast paths;
+  early fingerprint/winner lookup plus transaction advisory lock and recheck;
+  video preparation and construction split into typed internal plans
+- Targeted tests: 171 passed; the one intentionally updated source-contract
+  node passed on failed-node-only rerun
+- Static gates: Ruff, format, architecture, complexity, and runtime-state passed
+- Not run: full repository suite
+- Metrics/logging: per-publisher failures retain structured route logging;
+  timeout cancellation is bounded by the shared deadline
+- Rollback: revert `3e11376`
+- Remaining risk: provider work is serialized per idempotency key, so production
+  lock wait and provider latency need observation
+
+### A1: Upload Writer / Capacity Lease
+
+- Baseline SHA: `1eef268a5042fad652de24bd1aae5be8a408737f`
+- Commit SHA: `444e85e`
+- Changed files: filesystem writer/store, upload application and metrics,
+  storage capacity ports/adapters, and targeted image tests
+- Invariants: staged-file hashing, fsync, abort cleanup, and artifact identity
+  remain intact; one lease is atomically resized instead of stacking
+  reservations
+- Confirmed defects: every input chunk used `asyncio.to_thread`, and the
+  reservation was always `max_bytes * 5`
+- Implementation: one blocking writer lifecycle with a 2 MiB byte-bounded
+  queue; measured resize after inspection; Redis and file capacity adapters
+  implement owner-safe resize
+- Targeted tests: 67 passed initially with four fake-lease failures; only the
+  four failed node IDs were rerun after adding the port method and passed; the
+  writer node passed after the file split
+- Static gates: Ruff, format, architecture, complexity, and runtime-state passed
+- Not run: full repository suite
+- Metrics/logging: upload bytes, writer queue wait/duration, and capacity
+  reservation ratio histograms
+- Rollback: revert `444e85e`
+- Remaining risk: queue sizing and reservation ratios require production
+  telemetry calibration
+
+### A10 / Lead: CI Impact Batching
+
+- Baseline SHA: `1eef268a5042fad652de24bd1aae5be8a408737f`
+- Commit SHA: `03db73d`
+- Changed files: `.github/workflows/ci.yml`
+- Invariants: static gates remain always-run; main and full-mandatory changes
+  retain the existing full backend/frontend suites; empty unexplained plans
+  fail closed
+- Confirmed risk: CI ignored the impact plan and always executed sequential
+  full test jobs
+- Implementation: one plan job resolves the comparison base, emits backend and
+  frontend command matrices, uploads a pinned artifact, and conditionally runs
+  impacted tests/builds while preserving existing job names
+- Tests: workflow YAML parsed; real plan split produced 7 backend and 3 frontend
+  commands; `actionlint v1.7.7` passed
+- Static gates: shell lint through actionlint and `git diff --check` passed
+- Not run: GitHub-hosted workflow, deferred to post-push Actions
+- Metrics/logging: plan artifact records selected rules, reasons, commands, and
+  full-gate escalation
+- Rollback: revert `03db73d`
+- Remaining risk: GitHub artifact path/expression behavior needs the required
+  live Actions proof
