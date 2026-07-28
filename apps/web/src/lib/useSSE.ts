@@ -10,10 +10,11 @@ import {
 } from "react";
 import type { RealtimeControlEvent } from "./sse/contracts";
 import type { SnapshotAdapter } from "./sse/replayCoordinator";
-import {
+import type {
   RealtimeRuntime,
-  type RealtimeStatus,
+  RealtimeStatus,
 } from "./sse/runtime";
+import { createRealtimeRuntime } from "@/shared/realtime/factory";
 
 export type SSEHandler = (data: unknown, id: string) => void;
 export interface SSEHandlers {
@@ -47,7 +48,9 @@ function acquireRuntime(channels: string[]): RealtimeRuntime {
   const key = [...channels].sort().join(",");
   let runtime = runtimes.get(key);
   if (!runtime) {
-    runtime = new RealtimeRuntime({ channels: key.split(",").filter(Boolean) });
+    runtime = createRealtimeRuntime({
+      channels: key.split(",").filter(Boolean),
+    });
     runtimes.set(key, runtime);
   }
   return runtime;

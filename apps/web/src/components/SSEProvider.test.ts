@@ -23,7 +23,7 @@ test("provider is a thin runtime boundary without business routing", () => {
 
 test("compatibility hook delegates to the realtime runtime and exposes control recovery", () => {
   ok(hook.trimEnd().split("\n").length < 200);
-  match(hook, /new RealtimeRuntime/);
+  match(hook, /createRealtimeRuntime/);
   match(hook, /recoverSnapshot/);
   match(hook, /onControl/);
   doesNotMatch(hook, /class SharedSSEConnection/);

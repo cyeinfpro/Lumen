@@ -1,3 +1,5 @@
+import { createBroadcastChannel } from "@/shared/realtime/browser";
+
 import {
   CROSS_TAB_PROTOCOL_VERSION,
   isCrossTabMessage,
@@ -32,12 +34,9 @@ export class CrossTabBus {
 
   start(): void {
     if (this.channel) return;
+    if (!this.factory && typeof BroadcastChannel === "undefined") return;
     const factory =
-      this.factory ??
-      (typeof BroadcastChannel === "undefined"
-        ? undefined
-        : (name: string) => new BroadcastChannel(name));
-    if (!factory) return;
+      this.factory ?? createBroadcastChannel;
     this.channel = factory(`lumen:sse:v2:${hashKey(this.channelKey)}`);
     this.channel.onmessage = (event) => {
       if (!isCrossTabMessage(event.data, this.channelKey)) return;
