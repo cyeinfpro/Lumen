@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import date as date_cls
+from dataclasses import dataclass
+from datetime import date as date_cls, datetime, time, timedelta, timezone
 from types import MappingProxyType
-from datetime import datetime, time, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -45,7 +45,11 @@ from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..services.generation_queue import release_generation_queue_state
-from ..services.task_listing import TaskListingRuntime, build_task_list
+from ..services.task_listing import (
+    TaskListingRuntime,
+    TaskListRequest,
+    build_task_list,
+)
 from ..sse_publish import publish_sse_event
 from ..task_billing import apply_rate_multiplier_micro, user_rate_multiplier_x10000
 
@@ -98,6 +102,21 @@ _WAITING_PROVIDER_CODES = frozenset(
         "upstream_error",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskListQuery:
+    status: Annotated[str | None, Query()] = None
+    kind: Literal["all", "generation", "completion"] = "all"
+    source: Annotated[str | None, Query()] = None
+    conversation_id: Annotated[str | None, Query()] = None
+    project_id: Annotated[str | None, Query()] = None
+    date_filter: Annotated[str | None, Query(alias="date")] = None
+    cursor: Annotated[str | None, Query()] = None
+    error_code: Annotated[str | None, Query()] = None
+    retryable: Annotated[bool | None, Query()] = None
+    mine: Literal[0, 1] = 1
+    limit: Annotated[int, Query(ge=1, le=500)] = 100
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -1131,33 +1150,25 @@ def _task_listing_runtime() -> TaskListingRuntime:
 async def list_tasks(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-    status: Annotated[str | None, Query()] = None,
-    kind: Literal["all", "generation", "completion"] = "all",
-    source: Annotated[str | None, Query()] = None,
-    conversation_id: Annotated[str | None, Query()] = None,
-    project_id: Annotated[str | None, Query()] = None,
-    date_filter: Annotated[str | None, Query(alias="date")] = None,
-    cursor: Annotated[str | None, Query()] = None,
-    error_code: Annotated[str | None, Query()] = None,
-    retryable: Annotated[bool | None, Query()] = None,
-    mine: Literal[0, 1] = 1,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    query: Annotated[TaskListQuery, Depends()],
 ) -> TaskListOut:
-    _ = mine  # V1: always mine==1; flag accepted for API compat.
+    _ = query.mine  # V1: always mine==1; flag accepted for API compat.
     return await build_task_list(
         db,
         _task_listing_runtime(),
-        user_id=user.id,
-        status=status,
-        kind=kind,
-        source=source,
-        conversation_id=conversation_id,
-        project_id=project_id,
-        date_filter=date_filter,
-        cursor=_decode_task_cursor(cursor),
-        error_code=error_code,
-        retryable=retryable,
-        limit=limit,
+        TaskListRequest(
+            user_id=user.id,
+            status=query.status,
+            kind=query.kind,
+            source=query.source,
+            conversation_id=query.conversation_id,
+            project_id=query.project_id,
+            date_filter=query.date_filter,
+            cursor=_decode_task_cursor(query.cursor),
+            error_code=query.error_code,
+            retryable=query.retryable,
+            limit=query.limit,
+        ),
     )
 
 

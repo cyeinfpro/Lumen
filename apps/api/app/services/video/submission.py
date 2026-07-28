@@ -123,12 +123,85 @@ async def _render_idempotent_replay(
 
 
 @dataclass(frozen=True, slots=True)
-class _VideoPreparationServices:
-    require_ready: AsyncCallback
-    public_base_loader: AsyncCallback
-    input_snapshot_loader: AsyncCallback
-    reference_snapshot_loader: AsyncCallback
-    reference_validator: SyncCallback
+class VideoSubmissionContext:
+    request: Request | None = None
+    input_image_snapshot: tuple[str | None, str | None, str | None] | None = None
+    reference_media_snapshot: list[dict[str, Any]] | None = None
+    workflow_metadata: dict[str, Any] | None = None
+    defer_commit: bool = False
+    deferred_publish_payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VideoSubmissionServices:
+    require_ready: AsyncCallback = require_video_create_ready
+    public_base_loader: AsyncCallback = reference_public_base_url
+    input_snapshot_loader: AsyncCallback = load_input_image_snapshot
+    reference_snapshot_loader: AsyncCallback = reference_media_snapshots
+    reference_validator: SyncCallback = validate_provider_reference_media
+    allow_negative_loader: AsyncCallback = allow_negative_balance
+    generation_renderer: AsyncCallback = generation_out
+    balance_invalidator: AsyncCallback = invalidate_video_balance_cache
+    queued_publisher: AsyncCallback = publish_video_queued
+
+
+_VIDEO_SUBMISSION_CONTEXT_FIELDS = (
+    "input_image_snapshot",
+    "reference_media_snapshot",
+    "workflow_metadata",
+    "defer_commit",
+    "deferred_publish_payload",
+)
+_VIDEO_SUBMISSION_SERVICE_FIELDS = (
+    "require_ready",
+    "public_base_loader",
+    "input_snapshot_loader",
+    "reference_snapshot_loader",
+    "reference_validator",
+    "allow_negative_loader",
+    "generation_renderer",
+    "balance_invalidator",
+    "queued_publisher",
+)
+
+
+def _resolve_video_submission_inputs(
+    *,
+    request: Request | None,
+    context: VideoSubmissionContext | None,
+    services: VideoSubmissionServices | None,
+    legacy: dict[str, Any],
+) -> tuple[VideoSubmissionContext, VideoSubmissionServices]:
+    context_values = {
+        name: legacy.pop(name)
+        for name in _VIDEO_SUBMISSION_CONTEXT_FIELDS
+        if name in legacy
+    }
+    service_values = {
+        name: legacy.pop(name)
+        for name in _VIDEO_SUBMISSION_SERVICE_FIELDS
+        if name in legacy
+    }
+    if legacy:
+        name = next(iter(legacy))
+        raise TypeError(
+            "create_video_generation_record() got an unexpected keyword argument "
+            f"{name!r}"
+        )
+    if context is not None and (request is not None or context_values):
+        raise TypeError(
+            "context cannot be combined with request or legacy context keywords"
+        )
+    if services is not None and service_values:
+        raise TypeError("services cannot be combined with legacy service keywords")
+    return (
+        context
+        or VideoSubmissionContext(
+            request=request,
+            **context_values,
+        ),
+        services or VideoSubmissionServices(**service_values),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +305,7 @@ async def _prepare_video_submission(
     request: Request | None,
     input_image_snapshot: tuple[str | None, str | None, str | None] | None,
     reference_media_snapshot: list[dict[str, Any]] | None,
-    services: _VideoPreparationServices,
+    services: VideoSubmissionServices,
 ) -> _VideoSubmissionPlan:
     provider, estimates = await services.require_ready(db, body)
     requires_public_media = provider_requires_public_media(provider)
@@ -385,21 +458,16 @@ async def create_video_generation_record(
     user: Any,
     *,
     request: Request | None = None,
-    input_image_snapshot: tuple[str | None, str | None, str | None] | None = None,
-    reference_media_snapshot: list[dict[str, Any]] | None = None,
-    workflow_metadata: dict[str, Any] | None = None,
-    defer_commit: bool = False,
-    deferred_publish_payload: dict[str, Any] | None = None,
-    require_ready: AsyncCallback = require_video_create_ready,
-    public_base_loader: AsyncCallback = reference_public_base_url,
-    input_snapshot_loader: AsyncCallback = load_input_image_snapshot,
-    reference_snapshot_loader: AsyncCallback = reference_media_snapshots,
-    reference_validator: SyncCallback = validate_provider_reference_media,
-    allow_negative_loader: AsyncCallback = allow_negative_balance,
-    generation_renderer: AsyncCallback = generation_out,
-    balance_invalidator: AsyncCallback = invalidate_video_balance_cache,
-    queued_publisher: AsyncCallback = publish_video_queued,
+    context: VideoSubmissionContext | None = None,
+    services: VideoSubmissionServices | None = None,
+    **legacy: Any,
 ) -> VideoGenerationOut:
+    context, services = _resolve_video_submission_inputs(
+        request=request,
+        context=context,
+        services=services,
+        legacy=legacy,
+    )
     request_fingerprint_value = request_fingerprint(body)
     winner = await _find_idempotent_generation(
         db,
@@ -411,8 +479,8 @@ async def create_video_generation_record(
             db,
             winner,
             expected_fingerprint=request_fingerprint_value,
-            defer_commit=defer_commit,
-            generation_renderer=generation_renderer,
+            defer_commit=context.defer_commit,
+            generation_renderer=services.generation_renderer,
         )
     await lock_user_key(
         db,
@@ -430,30 +498,24 @@ async def create_video_generation_record(
             db,
             winner,
             expected_fingerprint=request_fingerprint_value,
-            defer_commit=defer_commit,
-            generation_renderer=generation_renderer,
+            defer_commit=context.defer_commit,
+            generation_renderer=services.generation_renderer,
         )
 
     plan = await _prepare_video_submission(
         db,
         body,
         user_id=user.id,
-        request=request,
-        input_image_snapshot=input_image_snapshot,
-        reference_media_snapshot=reference_media_snapshot,
-        services=_VideoPreparationServices(
-            require_ready=require_ready,
-            public_base_loader=public_base_loader,
-            input_snapshot_loader=input_snapshot_loader,
-            reference_snapshot_loader=reference_snapshot_loader,
-            reference_validator=reference_validator,
-        ),
+        request=context.request,
+        input_image_snapshot=context.input_image_snapshot,
+        reference_media_snapshot=context.reference_media_snapshot,
+        services=services,
     )
     generation = _build_video_generation(
         body,
         user_id=user.id,
         request_fingerprint_value=request_fingerprint_value,
-        workflow_metadata=workflow_metadata,
+        workflow_metadata=context.workflow_metadata,
         plan=plan,
     )
     try:
@@ -465,7 +527,7 @@ async def create_video_generation_record(
             ref_type="video_generation",
             ref_id=generation.id,
             idempotency_key=f"video_generation:hold:{generation.id}",
-            allow_negative=await allow_negative_loader(db),
+            allow_negative=await services.allow_negative_loader(db),
             meta={
                 "model": body.model,
                 "billing_model": plan.billing_model,
@@ -495,16 +557,16 @@ async def create_video_generation_record(
         await db.flush()
         payload["outbox_id"] = str(outbox.id)
         outbox.payload = dict(payload)
-        if deferred_publish_payload is not None:
-            deferred_publish_payload.update(payload)
-        if not defer_commit:
+        if context.deferred_publish_payload is not None:
+            context.deferred_publish_payload.update(payload)
+        if not context.defer_commit:
             await db.commit()
     except billing_core.BillingError as exc:
-        if not defer_commit:
+        if not context.defer_commit:
             await db.rollback()
         raise video_http_error(exc.code, exc.message, exc.status_code) from exc
     except IntegrityError as exc:
-        if defer_commit:
+        if context.defer_commit:
             raise video_http_error(
                 "idempotency_conflict",
                 "idempotency_key conflict",
@@ -522,15 +584,15 @@ async def create_video_generation_record(
                 winner,
                 expected_fingerprint=request_fingerprint_value,
                 defer_commit=False,
-                generation_renderer=generation_renderer,
+                generation_renderer=services.generation_renderer,
             )
         raise video_http_error(
             "idempotency_conflict",
             "idempotency_key conflict",
             409,
         ) from exc
-    if not defer_commit:
+    if not context.defer_commit:
         await db.refresh(generation)
-        await balance_invalidator(user.id)
-        await queued_publisher(payload)
-    return await generation_renderer(db, generation)
+        await services.balance_invalidator(user.id)
+        await services.queued_publisher(payload)
+    return await services.generation_renderer(db, generation)

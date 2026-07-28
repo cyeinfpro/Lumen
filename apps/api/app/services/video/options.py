@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Collection, Iterable
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from fastapi import HTTPException
@@ -79,6 +80,30 @@ OMNI_FLASH_DURATIONS = tuple(range(6, 11))
 VIDEO_ACTION_VALUES = cast(tuple[VideoAction, ...], VIDEO_ACTIONS)
 HAPPYHORSE_MODEL_PREFIX = "happyhorse-1.0"
 OMNI_FLASH_MODEL_PREFIXES = ("omni-flash", "gemini_omni_flash")
+
+
+@dataclass(slots=True)
+class _VideoCapabilityCatalog:
+    model_actions: dict[str, set[VideoAction]] = field(default_factory=dict)
+    model_durations: dict[str, set[int]] = field(default_factory=dict)
+    model_action_durations: dict[str, dict[VideoAction, set[int]]] = field(
+        default_factory=dict
+    )
+    model_action_resolution_durations: dict[
+        str,
+        dict[VideoAction, dict[str, set[int]]],
+    ] = field(default_factory=dict)
+    model_resolutions: dict[str, set[str]] = field(default_factory=dict)
+    model_billing_models: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoCapabilityContext:
+    estimates: dict[str, Any]
+    prices: Collection[tuple[str, VideoPricingVariant, str | None]]
+    global_resolutions: list[str]
+    fallback_durations: list[int]
+    catalog: _VideoCapabilityCatalog
 
 
 async def setting_raw(db: AsyncSession, key: str) -> str | None:
@@ -500,38 +525,26 @@ def _provider_model_entries(provider: Any) -> Iterable[tuple[str, VideoAction]]:
 
 
 def _record_model_capability(
-    *,
     provider: Any,
     model: str,
     action: VideoAction,
-    estimates: dict[str, Any],
-    prices: Collection[tuple[str, VideoPricingVariant, str | None]],
-    global_resolutions: list[str],
-    fallback_durations: list[int],
-    model_actions: dict[str, set[VideoAction]],
-    model_durations: dict[str, set[int]],
-    model_action_durations: dict[str, dict[VideoAction, set[int]]],
-    model_action_resolution_durations: dict[
-        str,
-        dict[VideoAction, dict[str, set[int]]],
-    ],
-    model_resolutions: dict[str, set[str]],
-    model_billing_models: dict[str, dict[str, str]],
+    context: _VideoCapabilityContext,
 ) -> None:
+    catalog = context.catalog
     upstream_model = provider.upstream_model_for(model, action)
     billing_model = video_billing_model(model, upstream_model)
     allowed_resolutions = video_resolution_options_for_provider(
         provider.kind,
         model,
         upstream_model=upstream_model,
-        available_resolutions=global_resolutions,
+        available_resolutions=context.global_resolutions,
     )
     price_action = video_price_action_for_provider(provider.kind, action)
     action_resolutions = [
         resolution
         for resolution in allowed_resolutions
         if has_video_price(
-            prices,
+            context.prices,
             model=billing_model,
             action=price_action,
             resolutions=[resolution],
@@ -540,46 +553,49 @@ def _record_model_capability(
     if not action_resolutions:
         return
     estimate_durations = estimate_duration_options_for_model_action(
-        estimates,
+        context.estimates,
         model=billing_model,
         action=price_action,
         resolutions=action_resolutions,
     )
     action_durations = duration_options_for_provider_action(
-        estimates,
+        context.estimates,
         model=model,
         upstream_model=upstream_model,
         provider_kind=provider.kind,
         action=action,
         resolutions=action_resolutions,
-        fallback_durations=fallback_durations,
+        fallback_durations=context.fallback_durations,
     )
-    model_actions.setdefault(model, set()).add(action)
-    model_durations.setdefault(model, set()).update(action_durations)
-    model_action_durations.setdefault(model, {}).setdefault(action, set()).update(
-        action_durations
-    )
-    action_resolution_durations = model_action_resolution_durations.setdefault(
-        model,
+    catalog.model_actions.setdefault(model, set()).add(action)
+    catalog.model_durations.setdefault(model, set()).update(action_durations)
+    catalog.model_action_durations.setdefault(model, {}).setdefault(
+        action,
+        set(),
+    ).update(action_durations)
+    action_resolution_durations = catalog.model_action_resolution_durations.setdefault(
+        model, {}
+    ).setdefault(
+        action,
         {},
-    ).setdefault(action, {})
+    )
     for resolution in action_resolutions:
         resolution_durations = duration_options_for_provider_action(
-            estimates,
+            context.estimates,
             model=model,
             upstream_model=upstream_model,
             provider_kind=provider.kind,
             action=action,
             resolutions=[resolution],
-            fallback_durations=estimate_durations or fallback_durations,
+            fallback_durations=estimate_durations or context.fallback_durations,
             allow_action_fallback=False,
             allow_global_fallback=False,
         )
         action_resolution_durations.setdefault(resolution, set()).update(
             resolution_durations
         )
-    model_resolutions.setdefault(model, set()).update(action_resolutions)
-    model_billing_models.setdefault(model, {})[action] = billing_model
+    catalog.model_resolutions.setdefault(model, set()).update(action_resolutions)
+    catalog.model_billing_models.setdefault(model, {})[action] = billing_model
 
 
 def _model_option(
@@ -587,18 +603,11 @@ def _model_option(
     *,
     model: str,
     actions: set[VideoAction],
-    model_durations: dict[str, set[int]],
-    model_action_durations: dict[str, dict[VideoAction, set[int]]],
-    model_action_resolution_durations: dict[
-        str,
-        dict[VideoAction, dict[str, set[int]]],
-    ],
-    model_resolutions: dict[str, set[str]],
-    model_billing_models: dict[str, dict[str, str]],
+    catalog: _VideoCapabilityCatalog,
 ) -> VideoModelOptionOut:
     sorted_actions = sorted(actions)
     billing_models: dict[str, str] = {
-        action: model_billing_models.get(model, {}).get(action, model)
+        action: catalog.model_billing_models.get(model, {}).get(action, model)
         for action in sorted_actions
     }
     unique_billing_models = set(billing_models.values())
@@ -611,24 +620,27 @@ def _model_option(
         ),
         billing_models=billing_models,
         actions=sorted_actions,
-        durations_s=sorted(model_durations.get(model, set())),
+        durations_s=sorted(catalog.model_durations.get(model, set())),
         durations_by_action={
             action: sorted(durations)
-            for action, durations in model_action_durations.get(model, {}).items()
+            for action, durations in catalog.model_action_durations.get(
+                model,
+                {},
+            ).items()
         },
         durations_by_action_resolution={
             action: {
                 resolution: sorted(durations)
                 for resolution, durations in resolution_map.items()
             }
-            for action, resolution_map in model_action_resolution_durations.get(
+            for action, resolution_map in catalog.model_action_resolution_durations.get(
                 model,
                 {},
             ).items()
         },
         resolutions=cast(
             list[VideoResolution],
-            ordered_video_resolutions(model_resolutions.get(model, set())),
+            ordered_video_resolutions(catalog.model_resolutions.get(model, set())),
         ),
         reference_media_limits=reference_media_limits_for_model(
             providers,
@@ -669,50 +681,36 @@ async def get_wallet_video_options(
     global_durations = duration_options(estimates)
     fallback_durations = durations or global_durations
 
-    model_actions: dict[str, set[VideoAction]] = {}
-    model_durations: dict[str, set[int]] = {}
-    model_action_durations: dict[str, dict[VideoAction, set[int]]] = {}
-    model_action_resolution_durations: dict[
-        str,
-        dict[VideoAction, dict[str, set[int]]],
-    ] = {}
-    model_resolutions: dict[str, set[str]] = {}
-    model_billing_models: dict[str, dict[str, str]] = {}
+    catalog = _VideoCapabilityCatalog()
+    context = _VideoCapabilityContext(
+        estimates=estimates,
+        prices=price_pairs,
+        global_resolutions=resolutions,
+        fallback_durations=fallback_durations,
+        catalog=catalog,
+    )
     for provider in providers:
         for model, action in _provider_model_entries(provider):
             _record_model_capability(
-                provider=provider,
-                model=model,
-                action=action,
-                estimates=estimates,
-                prices=price_pairs,
-                global_resolutions=resolutions,
-                fallback_durations=fallback_durations,
-                model_actions=model_actions,
-                model_durations=model_durations,
-                model_action_durations=model_action_durations,
-                model_action_resolution_durations=model_action_resolution_durations,
-                model_resolutions=model_resolutions,
-                model_billing_models=model_billing_models,
+                provider,
+                model,
+                action,
+                context,
             )
-    if enabled and not model_actions and unavailable_reason is None:
+    if enabled and not catalog.model_actions and unavailable_reason is None:
         unavailable_reason = "video_provider_or_pricing_missing"
     model_options = [
         _model_option(
             providers,
             model=model,
             actions=actions,
-            model_durations=model_durations,
-            model_action_durations=model_action_durations,
-            model_action_resolution_durations=model_action_resolution_durations,
-            model_resolutions=model_resolutions,
-            model_billing_models=model_billing_models,
+            catalog=catalog,
         )
-        for model, actions in sorted(model_actions.items())
+        for model, actions in sorted(catalog.model_actions.items())
     ]
     public_hold_estimates = public_video_hold_estimates(
         estimates,
-        model_billing_models,
+        catalog.model_billing_models,
     )
     return VideoOptionsOut(
         enabled=enabled and unavailable_reason is None,

@@ -101,9 +101,10 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
     assert out == {"status": "queued"}
     assert redis.deleted == ["task:gen-1:cancel"]
     assert db.committed is True
-    assert "FOR UPDATE" in str(
-        db.statements[0].compile(dialect=postgresql.dialect())
-    ).upper()
+    assert (
+        "FOR UPDATE"
+        in str(db.statements[0].compile(dialect=postgresql.dialect())).upper()
+    )
 
 
 @pytest.mark.asyncio
@@ -218,7 +219,11 @@ async def test_list_tasks_scopes_generation_and_completion_queries_to_user() -> 
     db = _CapturingDb()
     user = SimpleNamespace(id="user-1")
 
-    await tasks.list_tasks(user=user, db=db, limit=10)
+    await tasks.list_tasks(
+        user=user,
+        db=db,
+        query=tasks.TaskListQuery(limit=10),
+    )
 
     rendered = [str(statement) for statement in db.statements]
     assert len(rendered) == 3
@@ -238,7 +243,9 @@ async def test_list_my_active_tasks_scopes_queries_to_user() -> None:
     assert len(rendered) == 2
     assert "generations.user_id" in rendered[0]
     assert "completions.user_id" in rendered[1]
-    compiled = [statement.compile(dialect=postgresql.dialect()) for statement in db.statements]
+    compiled = [
+        statement.compile(dialect=postgresql.dialect()) for statement in db.statements
+    ]
     assert all(" LIMIT " in str(statement).upper() for statement in compiled)
     assert all(50 in statement.params.values() for statement in compiled)
 

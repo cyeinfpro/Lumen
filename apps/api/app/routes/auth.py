@@ -10,6 +10,7 @@ import hashlib
 import logging
 import re
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, Protocol
@@ -177,6 +178,13 @@ _ALLOWED_EMAIL_INTEGRITY_MARKERS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _SignupAccess:
+    allow: AllowedEmail | None
+    invite: InviteLink | None
+    role: str
+
+
 def _sanitize_ua(raw: str | None) -> str:
     return _UA_CONTROL_CHARS.sub("", raw or "")[:1024]
 
@@ -245,6 +253,30 @@ def _integrity_error_text(exc: IntegrityError) -> str:
 def _integrity_error_matches(exc: IntegrityError, markers: tuple[str, ...]) -> bool:
     text = _integrity_error_text(exc)
     return any(marker in text for marker in markers)
+
+
+async def _reject_signup(
+    *,
+    request: Request,
+    email: str,
+    password: str,
+    reason: str,
+    code: str,
+    message: str,
+    status_code: int,
+) -> None:
+    verify_password(_DUMMY_PASSWORD_HASH, password)
+    logger.info(
+        "signup_rejected",
+        extra={"email_hash": _log_hash(email), "reason": reason},
+    )
+    await write_audit_isolated(
+        event_type="auth.signup.fail",
+        actor_email=email,
+        actor_ip_hash=request_ip_hash(request),
+        details={"reason": reason},
+    )
+    raise _bad(code, message, status_code)
 
 
 async def _reject_byok_signup(
@@ -685,149 +717,116 @@ def _invite_validity_reason(
     return None
 
 
-@router.post(
-    "/signup",
-    response_model=UserOut,
-    dependencies=[Depends(AUTH_SIGNUP_LIMITER)],
-)
-async def signup(
+async def _standard_signup_access(
+    db: AsyncSession,
     body: SignupIn,
     request: Request,
-    response: Response,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> UserOut:
-    email = body.email.strip().lower()
-    if not email or not body.password:
-        raise _bad("invalid_input", "email and password are required", 422)
-    _validate_password_strength(body.password)
-
-    # Pre-existing user check first — don't accidentally consume an invite.
+    email: str,
+) -> _SignupAccess:
     existing = (
         await db.execute(
             select(User).where(User.email == email, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
     if existing:
-        # Why: keep response time roughly equal to the success path so attackers
-        # can't enumerate registered emails by timing.
-        verify_password(_DUMMY_PASSWORD_HASH, body.password)
-        logger.info(
-            "signup_rejected",
-            extra={"email_hash": _log_hash(email), "reason": "email_taken"},
+        await _reject_signup(
+            request=request,
+            email=email,
+            password=body.password,
+            reason="email_taken",
+            code="email_taken",
+            message="an account with this email already exists",
+            status_code=409,
         )
-        await write_audit_isolated(
-            event_type="auth.signup.fail",
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"reason": "email_taken"},
-        )
-        raise _bad("email_taken", "an account with this email already exists", 409)
 
-    # Either allowlisted or holding a valid invite token.
     allow = (
         await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
     ).scalar_one_or_none()
+    if allow is not None:
+        return _SignupAccess(allow=allow, invite=None, role="member")
+    if not body.invite_token:
+        await _reject_signup(
+            request=request,
+            email=email,
+            password=body.password,
+            reason="email_not_invited",
+            code="email_not_invited",
+            message="this email is not on the invite allowlist",
+            status_code=403,
+        )
 
-    invite: InviteLink | None = None
-    role = "member"
+    invite_row = (
+        await db.execute(
+            select(InviteLink, User)
+            .join(User, User.id == InviteLink.created_by, isouter=True)
+            .where(InviteLink.token == body.invite_token)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).first()
+    invite = invite_row[0] if invite_row is not None else None
+    invite_creator = invite_row[1] if invite_row is not None else None
+    if invite is None:
+        await _reject_signup(
+            request=request,
+            email=email,
+            password=body.password,
+            reason="invalid_invite",
+            code="invalid_invite",
+            message="invite token not found",
+            status_code=403,
+        )
+    reason = _invite_validity_reason(invite, datetime.now(timezone.utc), invite_creator)
+    if reason is not None:
+        await _reject_signup(
+            request=request,
+            email=email,
+            password=body.password,
+            reason=reason,
+            code="invalid_invite",
+            message=f"invite is {reason}",
+            status_code=403,
+        )
+    if invite.email is not None and invite.email.lower() != email:
+        await _reject_signup(
+            request=request,
+            email=email,
+            password=body.password,
+            reason="invite_email_mismatch",
+            code="invite_email_mismatch",
+            message="this invite is bound to a different email",
+            status_code=403,
+        )
+    return _SignupAccess(allow=None, invite=invite, role=invite.role or "member")
 
-    if not allow:
-        if not body.invite_token:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            logger.info(
-                "signup_rejected",
-                extra={"email_hash": _log_hash(email), "reason": "email_not_invited"},
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "email_not_invited"},
-            )
-            raise _bad(
-                "email_not_invited",
-                "this email is not on the invite allowlist",
-                403,
-            )
-        invite_row = (
-            await db.execute(
-                select(InviteLink, User)
-                .join(User, User.id == InviteLink.created_by, isouter=True)
-                .where(InviteLink.token == body.invite_token)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).first()
-        invite = invite_row[0] if invite_row is not None else None
-        invite_creator = invite_row[1] if invite_row is not None else None
-        if invite is None:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            logger.info(
-                "signup_rejected",
-                extra={"email_hash": _log_hash(email), "reason": "invalid_invite"},
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "invalid_invite"},
-            )
-            raise _bad("invalid_invite", "invite token not found", 403)
-        now = datetime.now(timezone.utc)
-        reason = _invite_validity_reason(invite, now, invite_creator)
-        if reason is not None:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            logger.info(
-                "signup_rejected",
-                extra={"email_hash": _log_hash(email), "reason": reason},
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": reason},
-            )
-            raise _bad("invalid_invite", f"invite is {reason}", 403)
-        if invite.email is not None and invite.email.lower() != email:
-            verify_password(_DUMMY_PASSWORD_HASH, body.password)
-            logger.info(
-                "signup_rejected",
-                extra={
-                    "email_hash": _log_hash(email),
-                    "reason": "invite_email_mismatch",
-                },
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "invite_email_mismatch"},
-            )
-            raise _bad(
-                "invite_email_mismatch",
-                "this invite is bound to a different email",
-                403,
-            )
-        role = invite.role or "member"
 
+async def _persist_standard_signup(
+    db: AsyncSession,
+    body: SignupIn,
+    request: Request,
+    email: str,
+    access: _SignupAccess,
+) -> tuple[User, AuthSession, str, UserOut]:
     user = User(
         email=email,
         password_hash=hash_password(body.password),
         display_name=body.display_name or email.split("@")[0],
         email_verified=False,
-        role=role,
+        role=access.role,
     )
     db.add(user)
     try:
         await db.flush()
-
-        if invite is not None:
-            # Mark invite consumed and ensure the email is allowlisted going forward.
-            invite.used_at = datetime.now(timezone.utc)
-            invite.used_by = user.id
-            if not allow:
-                db.add(AllowedEmail(email=email, invited_by=invite.created_by))
-
+        if access.invite is not None:
+            access.invite.used_at = datetime.now(timezone.utc)
+            access.invite.used_by = user.id
+            if access.allow is None:
+                db.add(
+                    AllowedEmail(
+                        email=email,
+                        invited_by=access.invite.created_by,
+                    )
+                )
         session, _ = await _create_session(db, user, request)
         csrf, user_out = _auth_response_snapshot(user, session)
         await db.commit()
@@ -881,18 +880,48 @@ async def signup(
             "signup is temporarily unavailable",
             503,
         ) from exc
+    return user, session, csrf, user_out
 
+
+@router.post(
+    "/signup",
+    response_model=UserOut,
+    dependencies=[Depends(AUTH_SIGNUP_LIMITER)],
+)
+async def signup(
+    body: SignupIn,
+    request: Request,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserOut:
+    email = body.email.strip().lower()
+    if not email or not body.password:
+        raise _bad("invalid_input", "email and password are required", 422)
+    _validate_password_strength(body.password)
+
+    access = await _standard_signup_access(db, body, request, email)
+    user, session, csrf, user_out = await _persist_standard_signup(
+        db,
+        body,
+        request,
+        email,
+        access,
+    )
     _set_auth_cookies(response, session.id, csrf)
     logger.info(
         "signup_succeeded",
-        extra={"email_hash": _log_hash(email), "user_id": user.id, "role": role},
+        extra={
+            "email_hash": _log_hash(email),
+            "user_id": user.id,
+            "role": access.role,
+        },
     )
     await _write_post_commit_audit_best_effort(
         event_type="auth.signup.success",
         user_id=user.id,
         actor_email=email,
         actor_ip_hash=request_ip_hash(request),
-        details={"role": role},
+        details={"role": access.role},
     )
     return await _user_out_with_runtime_defaults(user_out, db)
 

@@ -294,8 +294,7 @@ async def test_list_tasks_uses_shared_task_item_builder() -> None:
     output = await tasks.list_tasks(
         user=_user(),  # type: ignore[arg-type]
         db=db,  # type: ignore[arg-type]
-        kind="generation",
-        limit=10,
+        query=tasks.TaskListQuery(kind="generation", limit=10),
     )
 
     expected = tasks._build_task_item(  # noqa: SLF001
@@ -341,8 +340,7 @@ async def test_list_tasks_preserves_cross_kind_sort_order() -> None:
     output = await tasks.list_tasks(
         user=_user(),  # type: ignore[arg-type]
         db=db,  # type: ignore[arg-type]
-        kind="all",
-        limit=10,
+        query=tasks.TaskListQuery(kind="all", limit=10),
     )
 
     assert [(item.kind, item.id) for item in output.items] == [
