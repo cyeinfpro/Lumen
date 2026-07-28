@@ -10,6 +10,7 @@ GET /events?channels=task:abc,conv:xyz,user:me
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 import json
 import logging
@@ -70,6 +71,7 @@ _KEEPALIVE_INTERVAL_SECONDS = 15
 _IDLE_HEARTBEAT_INTERVAL_SECONDS = 60
 _REPLAY_BATCH_SIZE = 500
 _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
+_CONNECTION_DEDUPE_MAX_KEYS = 4096
 
 
 _LAST_EVENT_ID_MAX_AGE_MS = 24 * 60 * 60 * 1000  # 24h replay window cap
@@ -562,16 +564,58 @@ async def _iter_replay_events(
         yield event
 
 
-def _remember_replayed_event(event: dict, replayed_sse_ids: set[str]) -> bool:
+@dataclass
+class _ConnectionEventDeduper:
+    max_keys: int = _CONNECTION_DEDUPE_MAX_KEYS
+    order: deque[str] = field(default_factory=deque)
+    seen: set[str] = field(default_factory=set)
+
+    def remember(
+        self,
+        *,
+        sse_id: object = None,
+        event_id: object = None,
+    ) -> bool:
+        keys: list[str] = []
+        normalized_sse_id = _normalize_recoverable_sse_id(sse_id)
+        if normalized_sse_id is not None:
+            keys.append(f"sse:{normalized_sse_id}")
+        normalized_event_id = _normalize_event_id(event_id)
+        if normalized_event_id is not None and len(normalized_event_id) <= 256:
+            keys.append(f"event:{normalized_event_id}")
+        if not keys:
+            return True
+        if any(key in self.seen for key in keys):
+            return False
+        for key in dict.fromkeys(keys):
+            self.seen.add(key)
+            self.order.append(key)
+        while len(self.order) > self.max_keys:
+            self.seen.discard(self.order.popleft())
+        return True
+
+
+def _event_payload_ids(event: dict) -> tuple[object, object]:
+    try:
+        payload = json.loads(event.get("data", ""))
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        return event.get("id"), None
+    return (
+        event.get("id") or payload.get("sse_id"),
+        payload.get("event_id"),
+    )
+
+
+def _remember_replayed_event(
+    event: dict,
+    event_deduper: _ConnectionEventDeduper,
+) -> bool:
     if event.get("event") == "replay_truncated":
         return True
-    replay_id = _normalize_recoverable_sse_id(event.get("id"))
-    if replay_id is None:
-        return True
-    if replay_id in replayed_sse_ids:
-        return False
-    replayed_sse_ids.add(replay_id)
-    return True
+    sse_id, event_id = _event_payload_ids(event)
+    return event_deduper.remember(sse_id=sse_id, event_id=event_id)
 
 
 async def _replay_connection_events(
@@ -583,7 +627,7 @@ async def _replay_connection_events(
     include_user_channel: bool,
     user_channel: str,
     user_id: str,
-    replayed_sse_ids: set[str],
+    event_deduper: _ConnectionEventDeduper,
 ) -> AsyncIterator[dict]:
     if last_event_id is None:
         return
@@ -603,7 +647,7 @@ async def _replay_connection_events(
             include_user_channel=include_user_channel,
             user_channel=user_channel,
         ):
-            if _remember_replayed_event(event, replayed_sse_ids):
+            if _remember_replayed_event(event, event_deduper):
                 yield event
     except Exception:
         logger.warning(
@@ -647,7 +691,9 @@ class _EventStreamState:
     last_upstream: float = field(default_factory=time.monotonic)
     connection_slot_lost: bool = False
     pending_compaction: dict[str, tuple[float, dict]] = field(default_factory=dict)
-    replayed_sse_ids: set[str] = field(default_factory=set)
+    event_deduper: _ConnectionEventDeduper = field(
+        default_factory=_ConnectionEventDeduper
+    )
 
 
 def _channel_selection(channels: str, user_id: str) -> _ChannelSelection:
@@ -872,7 +918,10 @@ async def _standard_pubsub_events(
             payload=payload,
             channel=_decode_pubsub_text(message.get("channel")),
         )
-    if event_id is not None and event_id in state.replayed_sse_ids:
+    if not state.event_deduper.remember(
+        sse_id=event_id,
+        event_id=envelope_event_id,
+    ):
         return []
     payload = _payload_with_event_ids(payload, event_id, envelope_event_id)
     state.last_upstream = time.monotonic()
@@ -947,7 +996,10 @@ async def _compaction_pubsub_events(
         payload,
         public_channel,
     )
-    if event_id is not None and event_id in state.replayed_sse_ids:
+    if not state.event_deduper.remember(
+        sse_id=event_id,
+        event_id=payload.get("event_id") if payload is not None else None,
+    ):
         return []
     phase = payload.get("phase") if payload is not None else None
     if phase == "started":
@@ -1051,7 +1103,7 @@ async def _event_stream(state: _EventStreamState) -> AsyncIterator[dict]:
             include_user_channel=state.include_user_channel,
             user_channel=state.user_channel,
             user_id=state.user_id,
-            replayed_sse_ids=state.replayed_sse_ids,
+            event_deduper=state.event_deduper,
         ):
             yield event
             if event.get("event") in {
