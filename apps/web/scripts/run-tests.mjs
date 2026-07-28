@@ -3,9 +3,12 @@
 import {
   existsSync,
   readdirSync,
+  realpathSync,
+  statSync,
 } from "node:fs";
 import {
   dirname,
+  isAbsolute,
   join,
   relative,
   resolve,
@@ -40,8 +43,55 @@ export function discoverTestFiles(webRoot = DEFAULT_WEB_ROOT) {
   return files.sort();
 }
 
-function run() {
-  const testFiles = discoverTestFiles();
+function isInsideRoot(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return (
+    relativePath === ""
+    || (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+  );
+}
+
+function normalizeExplicitTestFile(input, webRoot) {
+  if (input.split(/[\\/]+/).includes("..")) {
+    throw new Error(`Test path must not contain '..': ${input}`);
+  }
+  const resolvedRoot = resolve(webRoot);
+  const resolvedPath = isAbsolute(input)
+    ? resolve(input)
+    : resolve(resolvedRoot, input);
+  if (!isInsideRoot(resolvedRoot, resolvedPath)) {
+    throw new Error(`Test file must be inside the Web root: ${input}`);
+  }
+  if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) {
+    throw new Error(`Test file does not exist: ${input}`);
+  }
+  if (!TEST_FILE_RE.test(resolvedPath)) {
+    throw new Error(`Expected a test/spec file: ${input}`);
+  }
+  const realRoot = realpathSync(resolvedRoot);
+  const realPath = realpathSync(resolvedPath);
+  if (!isInsideRoot(realRoot, realPath)) {
+    throw new Error(`Test file must be inside the Web root: ${input}`);
+  }
+  return relative(resolvedRoot, resolvedPath).split("\\").join("/");
+}
+
+export function selectTestFiles(args, webRoot = DEFAULT_WEB_ROOT) {
+  if (args.length === 0) return discoverTestFiles(webRoot);
+  return [
+    ...new Set(args.map((input) => normalizeExplicitTestFile(input, webRoot))),
+  ];
+}
+
+function run(args = process.argv.slice(2)) {
+  let testFiles;
+  try {
+    testFiles = selectTestFiles(args);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+    return;
+  }
   if (testFiles.length === 0) {
     console.error("No frontend test files were discovered.");
     process.exitCode = 1;
