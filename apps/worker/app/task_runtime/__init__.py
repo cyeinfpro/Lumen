@@ -1,7 +1,13 @@
 """Shared execution primitives for worker task runtimes."""
 
 from .cancellation import CancellationPort, CancellationState
-from .contracts import ClockPort, IdempotencyToken, SystemClock, TaskIdentity
+from .contracts import (
+    AsyncCloseable,
+    ClockPort,
+    IdempotencyToken,
+    SystemClock,
+    TaskIdentity,
+)
 from .effects import (
     Effect,
     EffectBatch,
@@ -26,6 +32,7 @@ from .transitions import (
 )
 
 __all__ = [
+    "AsyncCloseable",
     "BillingAction",
     "CancellationPort",
     "CancellationState",
