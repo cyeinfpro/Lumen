@@ -644,11 +644,12 @@ async def get_image_variant(
         raise _http("not_found", "image not found", 404)
     await _ensure_image_visible_to_user(db, img, user)
     if kind == DISPLAY_VARIANT:
+        expected_user_id = user.id
         await db.rollback()
         try:
             variant = await variant_service.ensure_display_variant(
                 image_id,
-                expected_user_id=user.id,
+                expected_user_id=expected_user_id,
             )
         except VariantError as exc:
             raise _http(exc.code, exc.message, exc.status_code) from exc
