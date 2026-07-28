@@ -12,7 +12,6 @@
       "apps/api/app/canvas_services/execution_service.py::execute_node": 305,
       "apps/api/app/routes/auth.py::signup": 205,
       "apps/api/app/services/message_submission.py::_create_generation_tasks": 202,
-      "apps/api/app/services/video/submission.py::create_video_generation_record": 288,
       "apps/worker/app/tasks/memory_extraction_parts/run_state.py::finalize_memory_extraction": 304
     },
     "function_parameters": {

@@ -1741,12 +1741,77 @@ def test_create_video_generation_commits_video_hold_and_outbox_together() -> Non
 
 
 def test_create_video_generation_reuses_request_fingerprint() -> None:
-    source = inspect.getsource(video_submission.create_video_generation_record)
+    submission_source = inspect.getsource(
+        video_submission.create_video_generation_record
+    )
+    builder_source = inspect.getsource(video_submission._build_video_generation)
 
-    assert "request_fingerprint_value = request_fingerprint(body)" in source
-    assert '"request_fingerprint": request_fingerprint_value' in source
-    assert '"reference_media_count": len(reference_snapshots)' in source
-    assert "request_fingerprint=request_fingerprint_value" in source
+    assert "request_fingerprint_value = request_fingerprint(body)" in submission_source
+    assert '"request_fingerprint": request_fingerprint_value' in builder_source
+    assert '"reference_media_count": len(plan.reference_snapshots)' in builder_source
+    assert "request_fingerprint=request_fingerprint_value" in builder_source
+
+
+@pytest.mark.asyncio
+async def test_video_idempotent_lock_recheck_skips_expensive_preparation() -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idempotency-early-winner",
+    )
+    fingerprint = video_submission.request_fingerprint(body)
+    winner = SimpleNamespace(request_fingerprint=fingerprint, diagnostics={})
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [None, winner]
+            self.connection_calls = 0
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.results.pop(0))
+
+        async def connection(self) -> Any:
+            self.connection_calls += 1
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def fail_expensive(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("expensive video preparation must be skipped")
+
+    rendered = SimpleNamespace(id="winner-output")
+
+    async def render(_db: Any, row: Any) -> Any:
+        assert row is winner
+        return rendered
+
+    db = Db()
+    result = await video_submission.create_video_generation_record(
+        db,  # type: ignore[arg-type]
+        body,
+        SimpleNamespace(id="user-1"),
+        require_ready=fail_expensive,
+        public_base_loader=fail_expensive,
+        input_snapshot_loader=fail_expensive,
+        reference_snapshot_loader=fail_expensive,
+        allow_negative_loader=fail_expensive,
+        generation_renderer=render,
+        balance_invalidator=fail_expensive,
+        queued_publisher=fail_expensive,
+    )
+
+    assert result is rendered
+    assert db.connection_calls == 1
+    assert db.results == []
 
 
 def test_video_route_submission_wrapper_preserves_patch_hooks() -> None:

@@ -51,7 +51,7 @@ from ..runtime_settings import get_setting
 from ..services.generation_queue import release_generation_queue_state
 from .messages import (
     DEFAULT_IMAGE_OUTPUT_FORMAT as _DEFAULT_IMAGE_OUTPUT_FORMAT,
-    await_post_commit_publish as _await_post_commit_publish,
+    await_post_commit_publishes as _await_post_commit_publishes,
     create_assistant_task as _create_assistant_task,
     idempotency_lookup_keys as _idempotency_lookup_keys,
     message_alive_filters as _message_alive_filters,
@@ -793,31 +793,32 @@ async def regenerate_message(
         cleanup=cleanup,
     )
 
-    await _await_post_commit_publish(
-        "message_appended",
-        _publish_message_appended(
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            message_ids=[result.assistant_msg.id],
+    await _await_post_commit_publishes(
+        (
+            "message_appended",
+            _publish_message_appended(
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                message_ids=[result.assistant_msg.id],
+            ),
+            None,
+        ),
+        (
+            "assistant_task",
+            _publish_assistant_task(
+                db=db,
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                assistant_msg_id=result.assistant_msg.id,
+                outbox_payloads=result.outbox_payloads,
+                outbox_rows=result.outbox_rows,
+            ),
+            result.assistant_msg.id,
         ),
         user_id=user.id,
         conv_id=conv_id,
-    )
-    await _await_post_commit_publish(
-        "assistant_task",
-        _publish_assistant_task(
-            db=db,
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            assistant_msg_id=result.assistant_msg.id,
-            outbox_payloads=result.outbox_payloads,
-            outbox_rows=result.outbox_rows,
-        ),
-        user_id=user.id,
-        conv_id=conv_id,
-        assistant_msg_id=result.assistant_msg.id,
     )
 
     return RegenerateOut(
