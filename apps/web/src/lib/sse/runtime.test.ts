@@ -282,6 +282,68 @@ test("shared runtime recovers with only the subscribers that provide adapters", 
   unsubscribePassive();
 });
 
+test("adding a subscriber with existing event names does not churn the SSE source", () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const instance = runtime("tab-a", transport, hub, clock);
+  const statuses: RealtimeStatus[] = [];
+  const first = instance.subscribe({
+    handlers: { "asset_updated": () => {} },
+    setStatus(status) {
+      statuses.push(status);
+    },
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  const second = instance.subscribe({
+    handlers: { "asset_updated": () => {} },
+    setStatus(status) {
+      statuses.push(status);
+    },
+  });
+
+  equal(transport.opens.length, 1);
+  ok(statuses.includes("open"));
+  second();
+  first();
+});
+
+test("adding a subscriber with a new event name reconnects once with the union", () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const instance = runtime("tab-a", transport, hub, clock);
+  const first = instance.subscribe({
+    handlers: { "asset_updated": () => {} },
+    setStatus() {},
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  const second = instance.subscribe({
+    handlers: { "generation.succeeded": () => {} },
+    setStatus() {},
+  });
+
+  equal(transport.opens.length, 2);
+  deepEqual(
+    new Set(transport.opens[1].input.eventNames),
+    new Set([
+      "asset_updated",
+      "generation.succeeded",
+      "replay_truncated",
+      "recovery_required",
+      "server_epoch_changed",
+      "auth_invalidated",
+      "heartbeat",
+    ]),
+  );
+  second();
+  first();
+});
+
 test("shared runtime fails recovery when any real adapter fails", async () => {
   const clock = new FakeClock();
   const hub = new FakeBroadcastHub();

@@ -129,6 +129,8 @@ class GenerationEventService(Protocol):
 class GenerationProviderService(Protocol):
     async def resolve_primary_route(self) -> str: ...
 
+    def endpoint_kind_for_engine(self, engine: str) -> str | None: ...
+
     async def load_reference_images(
         self,
         session: AsyncSession,

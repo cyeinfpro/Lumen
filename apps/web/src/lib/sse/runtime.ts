@@ -108,6 +108,7 @@ export class RealtimeRuntime {
   private subscribers = new Set<RuntimeSubscriber>();
   private state: ConnectionState = { kind: "idle" };
   private source: StreamHandle | null = null;
+  private sourceEventNames = new Set<string>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private hiddenTimer: ReturnType<typeof setTimeout> | null = null;
   private seen = new Set<string>();
@@ -148,7 +149,9 @@ export class RealtimeRuntime {
     this.subscribers.add(subscriber);
     subscriber.setStatus(statusFor(this.state));
     if (!this.started) this.start();
-    else if (this.leader) this.dispatch({ type: "manual_reconnect" });
+    else if (this.leader && this.sourceNeedsEventNames(subscriber)) {
+      this.dispatch({ type: "manual_reconnect" });
+    }
     return () => {
       this.subscribers.delete(subscriber);
       if (this.subscribers.size === 0) this.stop();
@@ -214,6 +217,7 @@ export class RealtimeRuntime {
     this.unsubscribeLeader = null;
     this.election.stop();
     this.bus.close();
+    this.sourceEventNames.clear();
     this.seen.clear();
     this.seenQueue = [];
   }
@@ -259,6 +263,7 @@ export class RealtimeRuntime {
     if (effect.kind === "closeSource") {
       this.source?.close();
       this.source = null;
+      this.sourceEventNames.clear();
       return;
     }
     if (effect.kind === "cancelRetry") {
@@ -291,6 +296,7 @@ export class RealtimeRuntime {
     for (const subscriber of this.subscribers) {
       for (const name of Object.keys(subscriber.handlers)) names.add(name);
     }
+    this.sourceEventNames = names;
     this.source = this.transport.open(
       {
         url: sseUrl(this.options.channels, cursor),
@@ -308,6 +314,13 @@ export class RealtimeRuntime {
         onEvent: (name, data, eventCursor) =>
           this.onStreamEvent(name, data, eventCursor),
       },
+    );
+  }
+
+  private sourceNeedsEventNames(subscriber: RuntimeSubscriber): boolean {
+    if (!this.source) return false;
+    return Object.keys(subscriber.handlers).some(
+      (name) => !this.sourceEventNames.has(name),
     );
   }
 

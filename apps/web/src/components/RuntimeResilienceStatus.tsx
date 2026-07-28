@@ -19,17 +19,17 @@ function realtimeIsHealthy(status: RuntimeResilienceSnapshot): boolean {
 
 function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   if (status.session === "unauthorized") {
-    return "会话已失效，高风险操作已停止。";
+    return "会话已失效";
   }
   if (status.session === "degraded") {
-    return "会话验证暂不可用，高风险操作已切换为只读。";
+    return "会话验证暂不可用";
   }
   if (status.realtime === "error" || status.realtime === "closed") {
-    return "实时连接已中断，任务状态正通过快照恢复。";
+    return "实时连接中断，正在恢复";
   }
   return status.session === "revalidating"
-    ? "正在确认会话状态。"
-    : "正在建立实时连接。";
+    ? "正在确认会话"
+    : "正在连接";
 }
 
 export function RuntimeResilienceStatus() {
@@ -40,7 +40,7 @@ export function RuntimeResilienceStatus() {
   const sessionDegraded = status.session === "degraded";
   const realtimeDegraded =
     status.realtime === "error" || status.realtime === "closed";
-  const urgent = unauthorized || sessionDegraded || realtimeDegraded;
+  const urgent = unauthorized || sessionDegraded;
   const message = runtimeStatusMessage(status);
   const Icon = unauthorized
     ? LogIn
@@ -64,26 +64,31 @@ export function RuntimeResilienceStatus() {
       role={urgent ? "alert" : "status"}
       aria-live={urgent ? "assertive" : "polite"}
       data-runtime-resilience-status
-      className={
-        "fixed inset-x-3 bottom-[calc(var(--mobile-tabbar-height,0px)+var(--space-2))] z-[var(--z-banner)] mx-auto flex max-w-xl items-center gap-2 rounded-[var(--radius-card)] border px-3 py-2 type-body-sm shadow-[var(--shadow-2)] backdrop-blur-xl md:bottom-4 " +
-        (urgent
-          ? "border-warning-border bg-warning-soft text-[var(--warning-fg)]"
-          : "border-info-border bg-info-soft text-[var(--info-fg)]")
-      }
+      className="pointer-events-none fixed right-3 top-[calc(var(--mobile-topbar-h)+var(--top-banner-stack-height,0px)+env(safe-area-inset-top,0px)+var(--space-2))] z-[var(--z-toast)] max-w-[min(20rem,calc(100vw-1.5rem))] md:bottom-4 md:left-auto md:right-4 md:top-auto"
     >
-      <Icon
-        className={"h-4 w-4 shrink-0 " + (!urgent ? "animate-spin" : "")}
-        aria-hidden
-      />
-      <span className="min-w-0 flex-1 break-words">{message}</span>
-      <button
-        type="button"
-        onClick={recover}
-        className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-[var(--radius-control)] px-2 text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-[var(--focus-outline)] md:min-h-8"
+      <div
+        className={
+          "pointer-events-auto flex items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-1.5 type-caption shadow-[var(--shadow-1)] backdrop-blur-xl " +
+          (urgent
+            ? "border-warning-border bg-warning-soft/95 text-[var(--warning-fg)]"
+            : "border-info-border bg-info-soft/95 text-[var(--info-fg)]")
+        }
       >
-        <ActionIcon className="h-3.5 w-3.5" aria-hidden />
-        {unauthorized ? "登录" : "立即恢复"}
-      </button>
+        <Icon
+          className={"h-4 w-4 shrink-0 " + (!urgent ? "animate-spin" : "")}
+          aria-hidden
+        />
+        <span className="min-w-0 flex-1 truncate">{message}</span>
+        <button
+          type="button"
+          onClick={recover}
+          aria-label={unauthorized ? "登录" : "立即恢复实时连接"}
+          title={unauthorized ? "登录" : "立即恢复实时连接"}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-[var(--focus-outline)]"
+        >
+          <ActionIcon className="h-4 w-4" aria-hidden />
+        </button>
+      </div>
     </div>
   );
 }

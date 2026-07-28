@@ -961,5 +961,6 @@ class GenerationResourceLease:
             lease_token=self.lease_token,
             provider_name=self.provider_name,
             clear_avoided_providers=self.clear_avoided_providers,
+            services=self.services,
         )
         return True

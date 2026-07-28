@@ -439,6 +439,14 @@ class DefaultGenerationProvider:
 
         return await resolve_image_primary_route(self._upstream_runtime)
 
+    def endpoint_kind_for_engine(self, engine: str) -> str | None:
+        from ...upstream_parts.image_dispatch import image_endpoint_kind_for_engine
+
+        return image_endpoint_kind_for_engine(
+            engine,
+            runtime=self._upstream_runtime,
+        )
+
     async def load_reference_images(
         self,
         session: AsyncSession,

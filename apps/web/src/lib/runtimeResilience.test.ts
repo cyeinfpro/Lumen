@@ -56,5 +56,9 @@ test("runtime recovery login uses the shared safe replace navigation", () => {
     "utf8",
   );
   match(source, /replaceWithLogin\(\)/);
+  match(source, /top-\[calc\(var\(--mobile-topbar-h\)/);
+  match(source, /md:bottom-4 md:left-auto md:right-4 md:top-auto/);
+  match(source, /aria-label=\{unauthorized \? "登录" : "立即恢复实时连接"\}/);
+  match(source, /className="pointer-events-none fixed/);
   doesNotMatch(source, /location\.assign/);
 });
