@@ -134,6 +134,7 @@ paths = [
 ]
 commands = [
   "cd apps/web && npm test -- src/lib/useSSE.test.ts src/components/SSEProvider.test.ts src/lib/sse/connectionMachine.test.ts src/lib/sse/eventSourceTransport.test.ts src/lib/sse/leaderElection.test.ts src/lib/sse/replayCoordinator.test.ts src/lib/sse/runtime.test.ts src/lib/sse/validation.test.ts",
+  "cd apps/web && npm test -- src/lib/sse/progressCoalescer.test.ts",
 ]
 gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["sse-replay"]

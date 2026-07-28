@@ -38,6 +38,7 @@ import {
   type LumenRealtimeEffectContext,
 } from "./eventEffects";
 import { EventRouter } from "./eventRouter";
+import { ProgressEventCoalescer } from "./progressCoalescer";
 import type { SnapshotAdapter } from "./replayCoordinator";
 import type { SnapshotScope } from "./snapshotScopes";
 
@@ -268,6 +269,14 @@ export function useLumenRealtime(): void {
     () => new EventRouter(createLumenEffectRegistry(EVENT_NAMES, effectContext)),
     [effectContext],
   );
+  const eventCoalescer = useMemo(
+    () =>
+      new ProgressEventCoalescer((event) => {
+        router.route(event);
+      }),
+    [router],
+  );
+  useEffect(() => () => eventCoalescer.dispose(), [eventCoalescer]);
   const handlers = useMemo<SSEHandlers>(
     () =>
       Object.fromEntries(
@@ -275,7 +284,7 @@ export function useLumenRealtime(): void {
           name,
           (payload: unknown, cursor: string) => {
             if (!payload || typeof payload !== "object") return;
-            router.route({
+            eventCoalescer.route({
               kind: "domain",
               type: name,
               version: 1,
@@ -285,7 +294,7 @@ export function useLumenRealtime(): void {
           },
         ]),
       ),
-    [router],
+    [eventCoalescer],
   );
 
   const recoverSnapshot = useCallback<SnapshotAdapter>(
