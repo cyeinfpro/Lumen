@@ -168,9 +168,7 @@ class ListWorkflowRuns:
         page = await self.read_port.list_runs(
             user_id=user_id,
             workflow_type=normalized_type,
-            excluded_types=(
-                () if normalized_type else _HIDDEN_PROJECT_WORKFLOW_TYPES
-            ),
+            excluded_types=(() if normalized_type else _HIDDEN_PROJECT_WORKFLOW_TYPES),
             after=_decode_cursor(cursor, workflow_type=normalized_type),
             limit=limit,
         )

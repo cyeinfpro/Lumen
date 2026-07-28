@@ -170,9 +170,7 @@ class WorkflowHttpUseCases:
     async def sync_apparel_model_library_presets(
         self, *, user: object, db: object
     ) -> object:
-        return await self.apparel.sync_apparel_model_library_presets(
-            user=user, db=db
-        )
+        return await self.apparel.sync_apparel_model_library_presets(user=user, db=db)
 
     async def get_apparel_model_library_item_binary(
         self,
