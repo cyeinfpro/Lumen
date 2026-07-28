@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -11,7 +12,8 @@ import shutil
 import stat
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Set
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Set
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -23,6 +25,11 @@ from ..domain.artifact import (
     StagedSweepBudget,
     StagedSweepResult,
     UploadTicket,
+)
+from ..metrics import (
+    record_publish_conflict,
+    record_publish_idempotent_winner,
+    record_staged_sweep_tombstone,
 )
 from .filesystem_staging import (
     ArtifactIdentityMismatch,
@@ -40,6 +47,10 @@ from .filesystem_staging import (
 )
 
 
+class ArtifactConflict(ArtifactStoreError):
+    pass
+
+
 _CHUNK_SIZE = 256 * 1024
 _STAGE_FILE_PATTERN = re.compile(
     r"^artifact-v1-(?P<created>\d+)-(?P<size>\d+)-"
@@ -48,6 +59,7 @@ _STAGE_FILE_PATTERN = re.compile(
 _STAGED_INDEX_DIRECTORY = ".upload-staged-index"
 _STAGED_QUARANTINE_DIRECTORY = ".upload-staged-quarantine"
 _STAGED_CURSOR_FILE = ".upload-staged-cursor.json"
+_PUBLISH_LOCK_FILE = ".artifact-publish.lock"
 _STAGED_SHARD_COUNT = 4
 _STAGED_LEGACY_SLOT = _STAGED_SHARD_COUNT
 _STAGED_SLOT_COUNT = _STAGED_SHARD_COUNT + 1
@@ -104,6 +116,30 @@ def _identity(path: Path) -> ArtifactIdentity:
         device=info.st_dev,
         inode=info.st_ino,
     )
+
+
+@contextmanager
+def _publish_directory_lock(
+    destination: Path,
+    *,
+    exclusive: bool,
+) -> Iterator[None]:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    lock_path = destination.parent / _PUBLISH_LOCK_FILE
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ArtifactStoreError("artifact publish lock is unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 class FileSystemArtifactStore:
@@ -754,15 +790,48 @@ class FileSystemArtifactStore:
 
     @staticmethod
     def _copy_exclusive(source: Path, destination: Path) -> None:
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with source.open("rb") as src, os.fdopen(fd, "wb") as dst:
-                shutil.copyfileobj(src, dst, length=_CHUNK_SIZE)
-                dst.flush()
-                os.fsync(dst.fileno())
-        except BaseException:
-            destination.unlink(missing_ok=True)
-            raise
+        destination_created = False
+        fd: int | None = None
+        with _publish_directory_lock(destination, exclusive=True):
+            try:
+                fd = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                destination_created = True
+                with os.fdopen(fd, "wb") as dst:
+                    fd = None
+                    with source.open("rb") as src:
+                        shutil.copyfileobj(src, dst, length=_CHUNK_SIZE)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+            except BaseException:
+                if fd is not None:
+                    os.close(fd)
+                if destination_created:
+                    destination.unlink(missing_ok=True)
+                raise
+
+    @staticmethod
+    def _resolve_existing_destination(
+        destination: Path,
+        key: ArtifactKey,
+        expected: ArtifactIdentity,
+    ) -> PublishedArtifact | None:
+        with _publish_directory_lock(destination, exclusive=False):
+            try:
+                existing = _identity(destination)
+            except FileNotFoundError:
+                return None
+        if (
+            existing.sha256 == expected.sha256
+            and existing.size_bytes == expected.size_bytes
+        ):
+            record_publish_idempotent_winner("filesystem")
+            return PublishedArtifact(key=key, identity=existing, created=False)
+        record_publish_conflict("filesystem")
+        raise ArtifactConflict(f"artifact destination conflict for key={key.value}")
 
     def _publish_path_sync(
         self,
@@ -774,25 +843,26 @@ class FileSystemArtifactStore:
         if not expected.matches(source_identity):
             raise ArtifactIdentityMismatch("source artifact identity changed")
         destination = self._path(key, create_parent=True)
-        try:
-            existing = _identity(destination)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None:
-            if (
-                existing.sha256 == expected.sha256
-                and existing.size_bytes == expected.size_bytes
-            ):
-                return PublishedArtifact(key=key, identity=existing, created=False)
-            raise FileExistsError(destination)
-        try:
-            os.link(source, destination)
-        except OSError as exc:
-            if isinstance(exc, FileExistsError):
-                return self._publish_path_sync(source, key, expected)
-            if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
-                raise
-            self._copy_exclusive(source, destination)
+        while True:
+            existing = self._resolve_existing_destination(
+                destination,
+                key,
+                expected,
+            )
+            if existing is not None:
+                return existing
+            try:
+                os.link(source, destination)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
+                    raise
+                try:
+                    self._copy_exclusive(source, destination)
+                except FileExistsError:
+                    continue
+            break
         _fsync_directory(destination.parent)
         published_identity = _identity(destination)
         if (
@@ -1241,6 +1311,9 @@ class FileSystemArtifactStore:
                     self._record_from_metadata,
                     metadata_path,
                 )
+            except FileNotFoundError:
+                record_staged_sweep_tombstone()
+                continue
             except (ArtifactStoreError, json.JSONDecodeError, UnicodeError):
                 progress.deferred += 1
                 try:
@@ -1254,6 +1327,19 @@ class FileSystemArtifactStore:
                 continue
             records.append(record)
         return records, consumed
+
+    def _annotate_sweep_error(
+        self,
+        error: Exception,
+        cursor: _SweepCursor | None,
+    ) -> None:
+        error._lumen_sweep_cursor = (  # type: ignore[attr-defined]
+            None if cursor is None else self._cursor_token(cursor)
+        )
+        error._lumen_sweep_slot = (  # type: ignore[attr-defined]
+            None if cursor is None else cursor.slot
+        )
+        error._lumen_sweep_root = str(self.root)  # type: ignore[attr-defined]
 
     async def _sweep_metadata_slot(
         self,
@@ -1352,45 +1438,50 @@ class FileSystemArtifactStore:
     ) -> StagedSweepResult:
         started_at = self._monotonic()
         deadline = started_at + budget.max_seconds_per_pass
-        cursor = await asyncio.to_thread(self._load_sweep_cursor)
-        progress = _SweepProgress(legacy_after=cursor.legacy_after)
+        cursor: _SweepCursor | None = None
+        try:
+            cursor = await asyncio.to_thread(self._load_sweep_cursor)
+            progress = _SweepProgress(legacy_after=cursor.legacy_after)
 
-        if cursor.slot < _STAGED_SHARD_COUNT:
-            await self._sweep_metadata_slot(
-                cursor,
-                active_tickets=active_tickets,
-                load_active_tickets=load_active_tickets,
-                stale_before=stale_before,
-                budget=budget,
-                deadline=deadline,
-                before_delete=before_delete,
-                progress=progress,
-            )
-        else:
-            await self._sweep_legacy_slot(
-                cursor,
-                active_tickets=active_tickets,
-                load_active_tickets=load_active_tickets,
-                stale_before=stale_before,
-                budget=budget,
-                deadline=deadline,
-                before_delete=before_delete,
-                progress=progress,
-            )
+            if cursor.slot < _STAGED_SHARD_COUNT:
+                await self._sweep_metadata_slot(
+                    cursor,
+                    active_tickets=active_tickets,
+                    load_active_tickets=load_active_tickets,
+                    stale_before=stale_before,
+                    budget=budget,
+                    deadline=deadline,
+                    before_delete=before_delete,
+                    progress=progress,
+                )
+            else:
+                await self._sweep_legacy_slot(
+                    cursor,
+                    active_tickets=active_tickets,
+                    load_active_tickets=load_active_tickets,
+                    stale_before=stale_before,
+                    budget=budget,
+                    deadline=deadline,
+                    before_delete=before_delete,
+                    progress=progress,
+                )
 
-        next_slot = (
-            (cursor.slot + 1) % _STAGED_SLOT_COUNT
-            if progress.slot_complete
-            else cursor.slot
-        )
-        next_cursor_state = _SweepCursor(
-            slot=next_slot,
-            legacy_after=progress.legacy_after,
-        )
-        await asyncio.to_thread(
-            self._persist_sweep_cursor,
-            next_cursor_state,
-        )
+            next_slot = (
+                (cursor.slot + 1) % _STAGED_SLOT_COUNT
+                if progress.slot_complete
+                else cursor.slot
+            )
+            next_cursor_state = _SweepCursor(
+                slot=next_slot,
+                legacy_after=progress.legacy_after,
+            )
+            await asyncio.to_thread(
+                self._persist_sweep_cursor,
+                next_cursor_state,
+            )
+        except Exception as exc:
+            self._annotate_sweep_error(exc, cursor)
+            raise
         return StagedSweepResult(
             scanned=progress.scanned,
             hashed_bytes=progress.hashed_bytes,

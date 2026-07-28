@@ -34,6 +34,7 @@ from ..domain.artifact import (
     PublishedArtifact,
     StagedSweepBudget,
 )
+from ..metrics import record_staged_sweep_failure
 from ..ports.artifact_store import ArtifactStorePort
 from ..processing.service import ImageProcessor
 
@@ -54,6 +55,7 @@ class ReconcileStats:
     deferred: int = 0
     budget_exhausted: bool = False
     next_cursor: str | None = None
+    sweep_error_code: str | None = None
 
 
 class ReconcileLeaseLost(RuntimeError):
@@ -122,6 +124,23 @@ def _reconcile_backoff(attempts: int) -> timedelta:
     exponent = max(0, min(attempts - 1, 16))
     seconds = _RECONCILE_BASE_BACKOFF.total_seconds() * (2**exponent)
     return min(timedelta(seconds=seconds), _RECONCILE_MAX_BACKOFF)
+
+
+def _sweep_error_context(
+    artifacts: ArtifactStorePort,
+    error: Exception,
+) -> tuple[str | None, int | None, str]:
+    cursor = getattr(error, "_lumen_sweep_cursor", None)
+    slot = getattr(error, "_lumen_sweep_slot", None)
+    root = getattr(error, "_lumen_sweep_root", None)
+    if not isinstance(cursor, str):
+        cursor = None
+    if not isinstance(slot, int):
+        slot = None
+    if not isinstance(root, str):
+        configured_root = getattr(artifacts, "root", None)
+        root = "unknown" if configured_root is None else str(configured_root)
+    return cursor, slot, root
 
 
 class ImageArtifactReconciler:
@@ -231,8 +250,29 @@ class ImageArtifactReconciler:
             )
         except ReconcileLeaseLost:
             raise
-        except Exception:
+        except Exception as exc:
+            error_code = _reconcile_error_code(exc)
+            cursor, slot, root = _sweep_error_context(self.artifacts, exc)
             stats.deferred += 1
+            stats.sweep_error_code = error_code
+            record_staged_sweep_failure(error_code)
+            logger.exception(
+                "image staged sweep failed",
+                extra={
+                    "sweep_error_class": exc.__class__.__name__,
+                    "sweep_error_code": error_code,
+                    "sweep_cursor": cursor,
+                    "sweep_slot": slot,
+                    "sweep_max_files": sweep_budget.max_files_per_pass,
+                    "sweep_max_bytes": sweep_budget.max_bytes_hashed_per_pass,
+                    "sweep_max_seconds": sweep_budget.max_seconds_per_pass,
+                    "sweep_root": root,
+                    "reconcile_instance": f"pid:{os.getpid()}",
+                    "reconcile_fence": (
+                        None if lease_guard is None else lease_guard.fence
+                    ),
+                },
+            )
         else:
             stats.scanned += sweep.scanned
             stats.hashed_bytes = sweep.hashed_bytes

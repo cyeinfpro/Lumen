@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.images.adapters import filesystem_store as filesystem_store_module
 from app.images.adapters.filesystem_store import FileSystemArtifactStore
+from app.images.application import reconcile_policy as reconcile_policy_module
 from app.images.application.reconcile_policy import ImageArtifactReconciler
+from app.images.application.reconcile_policy import ReconcileLeaseLost
 from app.images.domain.artifact import (
     ArtifactIdentity,
+    ArtifactStatus,
     StagedSweepBudget,
     StagedSweepResult,
     UploadTicket,
@@ -389,6 +395,81 @@ async def test_hash_timeout_rotates_metadata_so_same_shard_record_can_advance(
 
 
 @pytest.mark.asyncio
+async def test_metadata_tombstone_advances_cursor_without_deferral(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileSystemArtifactStore(tmp_path)
+
+    async def source():
+        yield b"staged"
+
+    staged = await store.stage(
+        UploadTicket("ticket-tombstone"),
+        source(),
+        max_bytes=100,
+    )
+    metadata_path = Path(staged.metadata_path or "")
+    shard = int(metadata_path.parent.name, 16)
+    _force_sweep_slot(store, shard)
+    original_scan = FileSystemArtifactStore._scan_metadata_shard
+    deleted_paths: list[Path] = []
+    tombstone_metrics: list[None] = []
+
+    def scan_then_delete(
+        sweep_store: FileSystemArtifactStore,
+        current_shard: int,
+        *,
+        max_files: int,
+        deadline: float,
+    ) -> Any:
+        page = original_scan(
+            sweep_store,
+            current_shard,
+            max_files=max_files,
+            deadline=deadline,
+        )
+        if page.paths and not deleted_paths:
+            page.paths[0].unlink()
+            deleted_paths.append(page.paths[0])
+        return page
+
+    monkeypatch.setattr(
+        FileSystemArtifactStore,
+        "_scan_metadata_shard",
+        scan_then_delete,
+    )
+    monkeypatch.setattr(
+        filesystem_store_module,
+        "record_staged_sweep_tombstone",
+        lambda: tombstone_metrics.append(None),
+    )
+
+    first = await store.sweep_staged(
+        active_tickets=set(),
+        stale_before=float("inf"),
+        budget=_budget(files=1, hashed_bytes=100),
+    )
+
+    assert first.scanned == 1
+    assert first.deferred == 0
+    assert first.next_cursor == (
+        f"v1:{(shard + 1) % filesystem_store_module._STAGED_SLOT_COUNT}:"
+    )
+    assert tombstone_metrics == [None]
+
+    second = await store.sweep_staged(
+        active_tickets=set(),
+        stale_before=float("inf"),
+        budget=_budget(files=1, hashed_bytes=100),
+    )
+
+    assert second.deferred == 0
+    assert second.next_cursor != first.next_cursor
+    assert tombstone_metrics == [None]
+
+
+@pytest.mark.asyncio
 async def test_file_larger_than_total_hash_budget_is_quarantined_without_stall(
     tmp_path: Path,
 ) -> None:
@@ -636,3 +717,120 @@ async def test_reconciler_uses_bounded_sweep_and_exposes_sweep_stats() -> None:
     assert stats.quarantined_staged == 1
     assert stats.budget_exhausted is True
     assert stats.next_cursor == "v1:2:"
+
+
+@pytest.mark.asyncio
+async def test_sweep_failure_preserves_row_reconcile_and_records_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id="image-1",
+        artifact_status=ArtifactStatus.STAGING.value,
+        updated_at=now - timedelta(minutes=10),
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.transition_calls = 0
+
+        async def list_reconcile_candidates(self, **_kwargs: Any) -> list[Any]:
+            return [row]
+
+        async def transition(self, *_args: Any, **_kwargs: Any) -> None:
+            self.transition_calls += 1
+
+        async def active_upload_tickets(
+            self,
+            _candidate_tickets: set[str] | None = None,
+        ) -> set[str]:
+            return set()
+
+    class Store:
+        root = tmp_path
+
+        async def sweep_staged(self, **_kwargs: Any) -> StagedSweepResult:
+            error = PermissionError("staged index unavailable")
+            error._lumen_sweep_cursor = "v1:2:"  # type: ignore[attr-defined]
+            error._lumen_sweep_slot = 2  # type: ignore[attr-defined]
+            raise error
+
+    repository = Repository()
+    metric_reasons: list[str] = []
+    monkeypatch.setattr(
+        reconcile_policy_module,
+        "record_staged_sweep_failure",
+        metric_reasons.append,
+    )
+
+    with caplog.at_level(
+        logging.ERROR,
+        logger="app.images.application.reconcile_policy",
+    ):
+        stats = await ImageArtifactReconciler(
+            repository=repository,  # type: ignore[arg-type]
+            artifacts=Store(),  # type: ignore[arg-type]
+            storage_capacity=_StorageCapacity(),
+        ).run_once(
+            now=now,
+            stale_after=timedelta(seconds=0),
+            max_files_per_pass=7,
+            max_bytes_hashed_per_pass=8192,
+            max_seconds_per_pass=0.5,
+        )
+
+    assert repository.transition_calls == 1
+    assert stats.marked_failed == 1
+    assert stats.deferred == 1
+    assert stats.sweep_error_code == "permission_error"
+    assert metric_reasons == ["permission_error"]
+    record = next(
+        item for item in caplog.records if item.message == "image staged sweep failed"
+    )
+    assert record.sweep_error_class == "PermissionError"
+    assert record.sweep_error_code == "permission_error"
+    assert record.sweep_cursor == "v1:2:"
+    assert record.sweep_slot == 2
+    assert record.sweep_max_files == 7
+    assert record.sweep_max_bytes == 8192
+    assert record.sweep_max_seconds == 0.5
+    assert record.sweep_root == str(tmp_path)
+    assert record.reconcile_instance == f"pid:{os.getpid()}"
+    assert record.reconcile_fence is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_lease_loss_is_not_classified_or_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Repository:
+        async def list_reconcile_candidates(self, **_kwargs: Any) -> list[Any]:
+            return []
+
+        async def active_upload_tickets(
+            self,
+            _candidate_tickets: set[str] | None = None,
+        ) -> set[str]:
+            return set()
+
+    class Store:
+        async def sweep_staged(self, **_kwargs: Any) -> StagedSweepResult:
+            raise ReconcileLeaseLost("lease lost during sweep")
+
+    metric_reasons: list[str] = []
+    monkeypatch.setattr(
+        reconcile_policy_module,
+        "record_staged_sweep_failure",
+        metric_reasons.append,
+    )
+
+    with pytest.raises(ReconcileLeaseLost, match="lease lost during sweep"):
+        await ImageArtifactReconciler(
+            repository=Repository(),  # type: ignore[arg-type]
+            artifacts=Store(),  # type: ignore[arg-type]
+            storage_capacity=_StorageCapacity(),
+        ).run_once()
+
+    assert metric_reasons == []

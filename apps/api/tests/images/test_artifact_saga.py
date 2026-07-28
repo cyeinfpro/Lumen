@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
 import importlib.util
 import io
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
@@ -14,8 +18,12 @@ from alembic.operations import Operations
 from PIL import Image as PILImage
 from sqlalchemy import create_engine, inspect, text
 
-from app.images.adapters.filesystem_store import FileSystemArtifactStore
+from app.images.adapters import filesystem_store as filesystem_store_module
 from app.images.adapters.filesystem_store import ArtifactStoreError
+from app.images.adapters.filesystem_store import (
+    ArtifactConflict,
+    FileSystemArtifactStore,
+)
 from app.images.adapters.local_capacity import (
     CapacityExceeded,
     CapacityLimits,
@@ -34,6 +42,7 @@ from lumen_core.capacity_leases import (
     race_with_capacity_lease,
 )
 from app.images.domain.artifact import (
+    ArtifactIdentity,
     ArtifactKey,
     ArtifactStatus,
     InvalidArtifactTransition,
@@ -246,6 +255,13 @@ def _policy() -> UploadPolicy:
     )
 
 
+def _identity_for(payload: bytes) -> ArtifactIdentity:
+    return ArtifactIdentity(
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+
+
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "image_artifact_migration_under_test",
@@ -300,6 +316,129 @@ async def test_artifact_store_rejects_symlink_parent(tmp_path: Path) -> None:
     store = FileSystemArtifactStore(tmp_path)
     with pytest.raises(ArtifactStoreError):
         await store.identity(ArtifactKey("u/user-1/uploads/image.png"))
+
+
+@pytest.mark.asyncio
+async def test_copy_fallback_concurrent_publish_resolves_identical_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"shared artifact"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/shared.bin")
+    barrier = threading.Barrier(2)
+    original_copy = FileSystemArtifactStore._copy_exclusive
+    winner_metrics: list[str] = []
+
+    def unsupported_link(_source: Path, _destination: Path) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def racing_copy(copy_source: Path, destination: Path) -> None:
+        barrier.wait(timeout=2)
+        original_copy(copy_source, destination)
+
+    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(
+        FileSystemArtifactStore,
+        "_copy_exclusive",
+        staticmethod(racing_copy),
+    )
+    monkeypatch.setattr(
+        filesystem_store_module,
+        "record_publish_idempotent_winner",
+        winner_metrics.append,
+    )
+
+    first, second = await asyncio.gather(
+        store.publish_path(source, key, expected=_identity_for(payload)),
+        store.publish_path(source, key, expected=_identity_for(payload)),
+    )
+
+    assert sorted((first.created, second.created)) == [False, True]
+    assert (tmp_path / key.value).read_bytes() == payload
+    assert winner_metrics == ["filesystem"]
+
+
+@pytest.mark.asyncio
+async def test_copy_fallback_existing_different_content_is_explicit_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_payload = b"first artifact"
+    second_payload = b"second artifact"
+    first_source = tmp_path / "first.bin"
+    second_source = tmp_path / "second.bin"
+    first_source.write_bytes(first_payload)
+    second_source.write_bytes(second_payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/conflict.bin")
+    conflict_metrics: list[str] = []
+
+    def unsupported_link(_source: Path, _destination: Path) -> None:
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(
+        filesystem_store_module,
+        "record_publish_conflict",
+        conflict_metrics.append,
+    )
+
+    await store.publish_path(
+        first_source,
+        key,
+        expected=_identity_for(first_payload),
+    )
+    with pytest.raises(ArtifactConflict, match="artifact destination conflict"):
+        await store.publish_path(
+            second_source,
+            key,
+            expected=_identity_for(second_payload),
+        )
+
+    assert (tmp_path / key.value).read_bytes() == first_payload
+    assert conflict_metrics == ["filesystem"]
+
+
+def test_copy_exclusive_closes_destination_fd_when_source_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"source")
+    destination = tmp_path / "destination.bin"
+    original_os_open = os.open
+    original_path_open = Path.open
+    destination_fds: list[int] = []
+
+    def tracking_os_open(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        fd = original_os_open(path, flags, mode)
+        if Path(path) == destination:
+            destination_fds.append(fd)
+        return fd
+
+    def failing_source_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path == source:
+            raise OSError("source open failed")
+        return original_path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", tracking_os_open)
+    monkeypatch.setattr(Path, "open", failing_source_open)
+
+    with pytest.raises(OSError, match="source open failed"):
+        FileSystemArtifactStore._copy_exclusive(source, destination)
+
+    assert destination_fds
+    assert not destination.exists()
+    for fd in destination_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
 
 
 def test_artifact_state_machine_rejects_invalid_jump() -> None:
