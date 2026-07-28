@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io as _io
 import json
 import os
@@ -27,14 +28,19 @@ from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
 )
-from app.upstream_parts import entrypoints as upstream
+from app.upstream_parts import (
+    InlineImageBytes,
+    StagedImageFile,
+    cleanup_owned_generated_payload,
+    entrypoints as upstream,
+)
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     UPSTREAM_MODEL,
 )
-from lumen_core.url_security import PublicHttpDownload
+from lumen_core.url_security import PublicHttpDownload, PublicHttpStagedDownload
 
 TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
 TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
@@ -1188,7 +1194,7 @@ async def test_generate_image_can_use_image2_direct_route(
         )
     )
 
-    assert b64 == PNG_B64
+    assert b64 == InlineImageBytes(b"fake-png-bytes")
     assert revised == "direct prompt"
     assert client.streams == []
     assert len(client.posts) == 1
@@ -1253,9 +1259,9 @@ async def test_generate_image_direct_image2_yields_all_n_results(
     ]
 
     assert results == [
-        (PNG_B64, "direct prompt 1"),
-        (PNG_B64, "direct prompt 2"),
-        (PNG_B64, "direct prompt 3"),
+        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 1"),
+        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 2"),
+        (InlineImageBytes(b"fake-png-bytes"), "direct prompt 3"),
     ]
     assert client.posts[0]["json"]["n"] == 3
 
@@ -1348,7 +1354,7 @@ async def test_stream_responses_falls_back_to_direct_image2_on_moderation(
         )
     )
 
-    assert b64 == PNG_B64
+    assert b64 == InlineImageBytes(b"fake-png-bytes")
     assert revised == "direct prompt"
     assert len(client.streams) == 1
     assert len(client.posts) == 1
@@ -2329,7 +2335,7 @@ async def test_extract_image_result_accepts_b64_json() -> None:
             upstream_runtime=TEST_UPSTREAM_RUNTIME
         ),
     )
-    assert b64 == PNG_B64
+    assert b64 == InlineImageBytes(b"fake-png-bytes")
     assert revised == "rp"
 
 
@@ -2343,8 +2349,8 @@ async def test_extract_image_results_accepts_multiple_b64_json() -> None:
     }
 
     assert await TEST_UPSTREAM_SERVICES.core.extract_image_results(payload, 200) == [
-        ("aW1hZ2UtMQ==", "one"),
-        ("aW1hZ2UtMg==", "two"),
+        (InlineImageBytes(b"image-1"), "one"),
+        (InlineImageBytes(b"image-2"), "two"),
     ]
 
 
@@ -2352,20 +2358,30 @@ async def test_extract_image_results_accepts_multiple_b64_json() -> None:
 async def test_extract_image_result_falls_back_to_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """data[].url 形态（部分第三方网关默认 response_format=url）应被下载并转 b64。"""
+    """data[].url is streamed into an owned staged payload."""
     raw_bytes = TINY_PNG
     requested_urls: list[str] = []
 
-    class _UrlClient:
-        async def get(self, url: str) -> ImageJobResponse:
-            requested_urls.append(url)
-            return ImageJobResponse(200, None, content=raw_bytes)
-
-    async def fake_get_images_client(proxy_url: str | None = None) -> _UrlClient:
-        return _UrlClient()
+    async def fake_download(
+        url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        requested_urls.append(url)
+        destination = kwargs["destination"]
+        destination.write_bytes(raw_bytes)
+        return PublicHttpStagedDownload(
+            url=url,
+            status_code=200,
+            headers={"content-type": "image/png"},
+            path=destination,
+            size=len(raw_bytes),
+            sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        )
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        fake_download,
     )
 
     payload = {
@@ -2376,7 +2392,7 @@ async def test_extract_image_result_falls_back_to_url(
             }
         ]
     }
-    b64, revised = await TEST_UPSTREAM_SERVICES.core.extract_image_result(
+    image_payload, revised = await TEST_UPSTREAM_SERVICES.core.extract_image_result(
         payload,
         200,
         request_context=ImageRequestContext.create(
@@ -2384,9 +2400,11 @@ async def test_extract_image_result_falls_back_to_url(
         ),
     )
 
-    assert base64.b64decode(b64) == raw_bytes
+    assert isinstance(image_payload, StagedImageFile)
+    assert image_payload.path.read_bytes() == raw_bytes
     assert revised == "via url"
     assert requested_urls == ["https://cdn.example/imgs/abc.png"]
+    cleanup_owned_generated_payload(image_payload)
 
 
 @pytest.mark.asyncio
@@ -2401,15 +2419,23 @@ async def test_extract_image_result_raises_when_neither_b64_nor_url() -> None:
 async def test_extract_image_result_url_download_failure_raises_upstream_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _BadUrlClient:
-        async def get(self, url: str) -> ImageJobResponse:
-            return ImageJobResponse(404, {"error": "not found"})
-
-    async def fake_get_images_client(proxy_url: str | None = None) -> _BadUrlClient:
-        return _BadUrlClient()
+    async def missing(
+        url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        return PublicHttpStagedDownload(
+            url=url,
+            status_code=404,
+            headers={"content-type": "application/json"},
+            path=kwargs["destination"],
+            size=0,
+            sha256=hashlib.sha256(b"").hexdigest(),
+        )
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        missing,
     )
 
     payload = {"data": [{"url": "https://cdn.example/missing.png"}]}
