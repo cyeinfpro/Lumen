@@ -44,3 +44,18 @@ test("SSE defaults to infinite retry and exposes immediate reconnect", () => {
   match(source, /runtimeRef\.current\?\.reconnect\(\)/);
   match(source, /return \{ status, reconnect \};/);
 });
+
+test("SSE registers recovery only when the caller provides the capability", () => {
+  match(
+    source,
+    /const hasRecoveryAdapter = typeof options\.recoverSnapshot === "function";/,
+  );
+  match(
+    source,
+    /recoverSnapshot: hasRecoveryAdapter \? emitRecoverSnapshot : undefined,/,
+  );
+  match(
+    source,
+    /\[\s*channelKey,\s*eventKey,\s*hasRecoveryAdapter,/,
+  );
+});
