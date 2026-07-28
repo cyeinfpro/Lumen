@@ -74,6 +74,50 @@ async def test_worker_publish_event_envelope_contains_channel(
     assert stream_payload["channel"] == "task:completion-1"
     assert publish_payload["channel"] == "task:completion-1"
     assert [channel for channel, _payload in redis.published] == [
-        "task:completion-1",
         "user:user-1",
+        "task:completion-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_user_live_failure_still_publishes_compat_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sse_publish = _load_worker_sse_publish()
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(sse_publish.asyncio, "sleep", no_sleep)
+
+    class Redis:
+        def __init__(self) -> None:
+            self.publish_calls: list[str] = []
+
+        async def eval(self, *_args: Any, **_kwargs: Any) -> str:
+            return "1710000000000-1"
+
+        async def expire(self, *_args: Any, **_kwargs: Any) -> int:
+            return 1
+
+        async def publish(self, channel: str, _payload: str) -> int:
+            self.publish_calls.append(channel)
+            if channel == "user:user-1":
+                raise RuntimeError("user live unavailable")
+            return 1
+
+    redis = Redis()
+
+    await sse_publish.publish_event(
+        redis,
+        "user-1",
+        "task:completion-1",
+        "completion.queued",
+        {"completion_id": "completion-1", "event_id": "evt-stable"},
+    )
+
+    assert redis.publish_calls == [
+        "user:user-1",
+        "user:user-1",
+        "task:completion-1",
     ]

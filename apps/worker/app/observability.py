@@ -189,6 +189,27 @@ upstream_calls_total = _metric(
     labelnames=("kind", "outcome"),
 )
 
+sse_live_publish_total = _metric(
+    Counter,
+    "lumen_sse_live_publish_total",
+    "SSE live fanout attempts by channel kind and outcome.",
+    labelnames=("channel_kind", "outcome"),
+)
+
+sse_live_publish_bytes_total = _metric(
+    Counter,
+    "lumen_sse_live_publish_bytes_total",
+    "SSE live fanout payload bytes by channel kind.",
+    labelnames=("channel_kind",),
+)
+
+sse_live_publish_duration_seconds = _metric(
+    Histogram,
+    "lumen_sse_live_publish_duration_seconds",
+    "SSE live fanout duration by channel kind and outcome.",
+    labelnames=("channel_kind", "outcome"),
+)
+
 wallet_overdrawn_total = _metric(
     Counter,
     "wallet_overdrawn_total",

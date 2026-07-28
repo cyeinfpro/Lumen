@@ -2795,7 +2795,7 @@ async def test_publish_message_appended_payload_contains_conversation_and_messag
     xadd = redis.calls[0]
     publish = redis.calls[1]
     assert xadd[0] == "eval"
-    assert publish[1][0] == "conv:conv-1"
+    assert publish[1][0] == "user:user-1"
     publish_payload = json.loads(publish[1][1])
     assert publish_payload["event"] == "conv.message.appended"
     assert publish_payload["channel"] == "conv:conv-1"
@@ -2827,6 +2827,44 @@ async def test_api_sse_publish_preserves_falsy_payload_event_id() -> None:
     assert stream_payload["data"]["event_id"] == "0"
     assert publish_payload["event_id"] == "0"
     assert publish_payload["data"]["event_id"] == "0"
+
+
+class _ApiSseFallbackPipeline:
+    def __init__(self, redis: Any) -> None:
+        self.redis = redis
+        self.watched: dict[str, str | None] = {}
+        self.commands: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    async def watch(self, *keys: str) -> None:
+        self.watched = {key: await self.redis.get(key) for key in keys}
+
+    async def get(self, key: str) -> str | None:
+        return await self.redis.get(key)
+
+    def multi(self) -> None:
+        return None
+
+    def delete(self, key: str) -> None:
+        self.commands.append(("delete", (key,), {}))
+
+    def set(self, key: str, value: str, **kwargs: Any) -> None:
+        self.commands.append(("set", (key, value), kwargs))
+
+    def xadd(self, key: str, fields: dict[str, str], **kwargs: Any) -> None:
+        self.commands.append(("xadd", (key, fields), kwargs))
+
+    def expire(self, key: str, ttl: int) -> None:
+        self.commands.append(("expire", (key, ttl), {}))
+
+    async def execute(self) -> list[Any]:
+        assert {key: await self.redis.get(key) for key in self.watched} == self.watched
+        return [
+            await getattr(self.redis, command)(*args, **kwargs)
+            for command, args, kwargs in self.commands
+        ]
+
+    async def reset(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -2875,6 +2913,9 @@ async def test_api_sse_publish_falls_back_when_lua_cannot_xadd() -> None:
             self.deleted.append(key)
             return 1 if self.kv.pop(key, None) is not None else 0
 
+        async def expire(self, _key: str, _ttl: int) -> int:
+            return 1
+
         async def xadd(
             self,
             key: str,
@@ -2888,6 +2929,10 @@ async def test_api_sse_publish_falls_back_when_lua_cannot_xadd() -> None:
         async def publish(self, channel: str, payload: str) -> int:
             self.published.append((channel, payload))
             return 1
+
+        def pipeline(self, *, transaction: bool = True) -> _ApiSseFallbackPipeline:
+            assert transaction is True
+            return _ApiSseFallbackPipeline(self)
 
     redis = GarnetLikeRedis()
 
@@ -2906,11 +2951,59 @@ async def test_api_sse_publish_falls_back_when_lua_cannot_xadd() -> None:
     assert redis.kv[dedupe_key] == "1710000000000-7"
     assert redis.stream_entries[0][0] == "events:user:user-1"
     assert [channel for channel, _payload in redis.published] == [
-        "conv:conv-1",
         "user:user-1",
+        "conv:conv-1",
     ]
     published = json.loads(redis.published[0][1])
     assert published["sse_id"] == "1710000000000-7"
+
+
+@pytest.mark.asyncio
+async def test_api_sse_live_failure_does_not_reverse_durable_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import sse_publish as api_sse_publish
+
+    class Redis:
+        def __init__(self) -> None:
+            self.publish_calls: list[str] = []
+
+        async def eval(self, *_args: Any, **_kwargs: Any) -> str:
+            return "1710000000000-9"
+
+        async def expire(self, *_args: Any, **_kwargs: Any) -> int:
+            return 1
+
+        async def publish(self, channel: str, _payload: str) -> int:
+            self.publish_calls.append(channel)
+            if channel == "user:user-1":
+                raise RuntimeError("user live unavailable")
+            return 1
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(api_sse_publish.asyncio, "sleep", no_sleep)
+    redis = Redis()
+
+    stream_id = await messages.publish_sse_event(
+        redis,  # type: ignore[arg-type]
+        user_id="user-1",
+        channel="conv:conv-1",
+        event_name="conv.message.appended",
+        data={
+            "conversation_id": "conv-1",
+            "message_id": "msg-1",
+            "event_id": "evt-stable",
+        },
+    )
+
+    assert stream_id == "1710000000000-9"
+    assert redis.publish_calls == [
+        "user:user-1",
+        "user:user-1",
+        "conv:conv-1",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2961,6 +3054,9 @@ async def test_api_sse_publish_rejects_unrecoverable_live_ids(
             self.deleted.append(key)
             return 1 if self.kv.pop(key, None) is not None else 0
 
+        async def expire(self, _key: str, _ttl: int) -> int:
+            return 1
+
         async def xadd(
             self,
             _key: str,
@@ -2973,6 +3069,10 @@ async def test_api_sse_publish_rejects_unrecoverable_live_ids(
         async def publish(self, channel: str, payload: str) -> int:
             self.published.append((channel, payload))
             return 1
+
+        def pipeline(self, *, transaction: bool = True) -> _ApiSseFallbackPipeline:
+            assert transaction is True
+            return _ApiSseFallbackPipeline(self)
 
     redis = GarnetNoStreamRedis()
 
@@ -2996,7 +3096,7 @@ async def test_api_sse_publish_rejects_unrecoverable_live_ids(
     assert redis.eval_calls == 3
     assert redis.xadd_calls == 3
     assert redis.deleted == [dedupe_key, dedupe_key, dedupe_key]
-    assert redis.kv[dedupe_key] == ""
+    assert redis.kv[dedupe_key].startswith("pending:")
     assert redis.published == []
 
 
@@ -3021,6 +3121,7 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
     class Redis:
         def __init__(self) -> None:
             self.pipes: list[Pipe] = []
+            self.published: list[tuple[str, str]] = []
 
         def pipeline(self, *, transaction: bool = False) -> Pipe:
             assert transaction is False
@@ -3033,8 +3134,9 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
         async def eval(self, *_args: Any, **_kwargs: Any) -> str:
             raise AssertionError("batch path should use pipeline eval")
 
-        async def publish(self, *_args: Any, **_kwargs: Any) -> int:
-            raise AssertionError("batch path should use pipeline publish")
+        async def publish(self, channel: str, payload: str) -> int:
+            self.published.append((channel, payload))
+            return 1
 
     redis = Redis()
 
@@ -3045,10 +3147,9 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
         message_ids=["msg-1", "msg-2"],
     )
 
-    assert len(redis.pipes) == 2
+    assert len(redis.pipes) == 1
     assert [call[0] for call in redis.pipes[0].calls] == ["eval", "eval"]
-    assert [call[0] for call in redis.pipes[1].calls] == ["publish"] * 4
-    publish_payloads = [json.loads(call[1][1]) for call in redis.pipes[1].calls]
+    publish_payloads = [json.loads(payload) for _channel, payload in redis.published]
     assert [payload["sse_id"] for payload in publish_payloads] == [
         "1710000000000-0",
         "1710000000000-0",
@@ -3067,11 +3168,11 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
         "msg-2",
         "msg-2",
     ]
-    assert [call[1][0] for call in redis.pipes[1].calls] == [
-        "conv:conv-1",
+    assert [channel for channel, _payload in redis.published] == [
         "user:user-1",
         "conv:conv-1",
         "user:user-1",
+        "conv:conv-1",
     ]
 
 
@@ -3096,6 +3197,7 @@ async def test_api_sse_publish_batch_preserves_falsy_payload_event_id() -> None:
     class Redis:
         def __init__(self) -> None:
             self.pipes: list[Pipe] = []
+            self.published: list[tuple[str, str]] = []
 
         def pipeline(self, *, transaction: bool = False) -> Pipe:
             assert transaction is False
@@ -3104,6 +3206,10 @@ async def test_api_sse_publish_batch_preserves_falsy_payload_event_id() -> None:
             )
             self.pipes.append(pipe)
             return pipe
+
+        async def publish(self, channel: str, payload: str) -> int:
+            self.published.append((channel, payload))
+            return 1
 
     redis = Redis()
 
@@ -3135,7 +3241,7 @@ async def test_api_sse_publish_batch_preserves_falsy_payload_event_id() -> None:
 
     assert redis.pipes[0].calls[0][1][4] == "0"
     stream_payload = json.loads(redis.pipes[0].calls[0][1][6])
-    publish_payload = json.loads(redis.pipes[1].calls[0][1][1])
+    publish_payload = json.loads(redis.published[0][1])
     assert stream_payload["event_id"] == "0"
     assert stream_payload["data"]["event_id"] == "0"
     assert publish_payload["event_id"] == "0"
