@@ -21,10 +21,13 @@ from app.tasks import (
 )
 from app.tasks.context_summary_parts import persistence as context_summary_persistence
 from app.tasks.completion_parts import default_runtime as completion_runtime
-from app.tasks.completion_parts.runtime import (
-    CompletionRuntime,
-    completion_ports,
+from app.tasks.completion_parts.contracts import (
+    CompletionCommand,
+    CompletionOutcome,
+    CompletionPhase,
+    CompletionResult,
 )
+from app.tasks.completion_parts.runtime import CompletionRuntime
 from app.tasks.generation_parts import event_delivery as generation_event_delivery
 from app.tasks.generation_parts import failure as generation_failure
 from app.tasks.generation_parts import lease as generation_lease
@@ -96,10 +99,7 @@ class _TaskServicesHarness:
         return None
 
 
-completion = _TaskServicesHarness(
-    completion_runtime,
-    TEST_COMPLETION_RUNTIME.ports,
-)
+completion = completion_runtime
 video_generation = _TaskServicesHarness(
     video_runtime,
     video_runtime.DEFAULT_VIDEO_GENERATION_RUNTIME.ports,
@@ -111,24 +111,33 @@ video_generation = _TaskServicesHarness(
 
 
 @pytest.mark.asyncio
-async def test_completion_runtime_scopes_explicit_ports() -> None:
-    process_ports = TEST_COMPLETION_RUNTIME.ports
+async def test_completion_runtime_scopes_explicit_services() -> None:
+    process_services = TEST_COMPLETION_RUNTIME.services
     seen: list[Any] = []
 
-    async def runner(ctx: dict[str, Any], task_id: str) -> None:
-        seen.extend((completion_ports(), ctx, task_id))
+    async def runner(command: CompletionCommand) -> CompletionResult:
+        seen.extend((command.task_id, command.redis, command.worker_id))
+        return CompletionResult(
+            task_id=command.task_id,
+            phase=CompletionPhase.COMPLETE,
+            outcome=CompletionOutcome.SUCCEEDED,
+        )
 
     runtime = CompletionRuntime(
-        ports=process_ports,
+        services=process_services,
         runner=runner,
         image_upstream_runtime=TEST_UPSTREAM_RUNTIME,
     )
-    ctx = {"redis": object()}
-    await runtime.run(ctx, "comp-1")
+    redis = object()
+    await runtime.run(
+        CompletionCommand(
+            task_id="comp-1",
+            redis=redis,  # type: ignore[arg-type]
+            worker_id="worker-1",
+        )
+    )
 
-    assert seen == [process_ports, ctx, "comp-1"]
-    with pytest.raises(RuntimeError, match="task runtime is not configured"):
-        completion_ports()
+    assert seen == ["comp-1", redis, "worker-1"]
 
 
 @pytest.mark.asyncio
@@ -2233,8 +2242,7 @@ async def test_startup_failure_closes_upstream_clients(
     with pytest.raises(RuntimeError, match="otel boom"):
         await main._on_startup({"redis": object()})
 
-    assert "upstream" in cleanup_calls
-    assert "metrics" in cleanup_calls
+    assert cleanup_calls == ["upstream"]
 
 
 @pytest.mark.asyncio

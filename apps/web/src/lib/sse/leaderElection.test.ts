@@ -13,6 +13,13 @@ import type {
 
 const { CrossTabBus } = loadTsModule(
   new URL("./crossTabBus.ts", import.meta.url),
+  {
+    "@/shared/realtime/browser": {
+      createBroadcastChannel() {
+        throw new Error("test must inject a BroadcastChannel factory");
+      },
+    },
+  },
 ) as {
   CrossTabBus: new (
     channelKey: string,
