@@ -23,11 +23,11 @@ import binascii
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
-from sqlalchemy import Select, and_, func, or_, select
+from pydantic import BaseModel, Field
+from sqlalchemy import Select, and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.byok_retention import (
@@ -35,12 +35,20 @@ from lumen_core.byok_retention import (
     cutoffs as byok_retention_cutoffs,
 )
 from lumen_core.constants import GenerationStatus
-from lumen_core.models import Conversation, Generation, Image, ImageVariant, Message
+from lumen_core.models import (
+    Conversation,
+    Generation,
+    Image,
+    ImageVariant,
+    ImageVariantClaim,
+    Message,
+)
 from lumen_core.providers import parse_provider_bool
 
 from ..db import get_db
 from ..deps import CurrentUser
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
+from ..images.application import ImageVisibilityCandidate, visible_image_ids
 
 
 router = APIRouter()
@@ -48,6 +56,8 @@ router = APIRouter()
 
 CURSOR_VERSION = "v3"
 COUNT_CAP = 10_000
+FEED_VARIANT_KINDS = ("thumb256", "preview1024", "display2048")
+VariantReadiness = Literal["ready", "pending", "missing", "failed"]
 
 
 # ---------- 支持的 aspect ratio 白名单 ----------
@@ -76,13 +86,22 @@ def _bool_option(value: object, default: bool = False) -> bool:
 # ---------- Schemas ----------
 
 
+class GenerationVariantStates(BaseModel):
+    thumb256: VariantReadiness = "missing"
+    preview1024: VariantReadiness = "missing"
+    display2048: VariantReadiness = "missing"
+
+
 class GenerationImageOut(BaseModel):
     id: str
     url: str
     mime: str
     display_url: str
     preview_url: str | None = None
-    thumb_url: str
+    thumb_url: str | None = None
+    display_ready: bool = False
+    variants: GenerationVariantStates = Field(default_factory=GenerationVariantStates)
+    variant_version: str
     width: int
     height: int
 
@@ -373,6 +392,7 @@ async def _feed_images(
     db: AsyncSession,
     generations: list[Generation],
     *,
+    user_id: str,
     visible_after: datetime | None,
 ) -> dict[str, Image]:
     generation_ids = [generation.id for generation in generations]
@@ -389,12 +409,10 @@ async def _feed_images(
         )
         .where(
             Image.owner_generation_id.in_(generation_ids),
+            Image.user_id == user_id,
             Image.deleted_at.is_(None),
         )
         .subquery()
-    )
-    image_filters = (
-        [Image.created_at >= visible_after] if visible_after is not None else []
     )
     rows = (
         (
@@ -402,13 +420,27 @@ async def _feed_images(
                 select(Image)
                 .join(ranked_images, Image.id == ranked_images.c.image_id)
                 .where(ranked_images.c.rn == 1)
-                .where(*image_filters)
                 .order_by(ranked_images.c.owner_generation_id.asc())
             )
         )
         .scalars()
         .all()
     )
+    if visible_after is not None and rows:
+        allowed_image_ids = await visible_image_ids(
+            db,
+            [
+                ImageVisibilityCandidate(
+                    image_id=image.id,
+                    owner_generation_id=image.owner_generation_id,
+                    created_at=image.created_at,
+                )
+                for image in rows
+            ],
+            user_id=user_id,
+            visible_after=visible_after,
+        )
+        rows = [image for image in rows if image.id in allowed_image_ids]
     image_by_generation: dict[str, Image] = {}
     for image in rows:
         generation_id = image.owner_generation_id
@@ -417,24 +449,56 @@ async def _feed_images(
     return image_by_generation
 
 
-async def _feed_variant_kinds(
+def _feed_variant_states_statement(image_ids: list[str]):
+    ready_rows = select(
+        ImageVariant.image_id.label("image_id"),
+        ImageVariant.kind.label("kind"),
+        literal("ready").label("state"),
+    ).where(
+        ImageVariant.image_id.in_(image_ids),
+        ImageVariant.kind.in_(FEED_VARIANT_KINDS),
+    )
+    claim_rows = select(
+        ImageVariantClaim.image_id.label("image_id"),
+        ImageVariantClaim.kind.label("kind"),
+        case(
+            (ImageVariantClaim.error_code.is_not(None), "failed"),
+            else_="pending",
+        ).label("state"),
+    ).where(
+        ImageVariantClaim.image_id.in_(image_ids),
+        ImageVariantClaim.kind.in_(FEED_VARIANT_KINDS),
+        ~select(ImageVariant.id)
+        .where(
+            ImageVariant.image_id == ImageVariantClaim.image_id,
+            ImageVariant.kind == ImageVariantClaim.kind,
+        )
+        .exists(),
+    )
+    return union_all(ready_rows, claim_rows)
+
+
+async def _feed_variant_states(
     db: AsyncSession,
     image_by_generation: dict[str, Image],
-) -> dict[str, set[str]]:
+) -> dict[str, GenerationVariantStates]:
     if not image_by_generation:
         return {}
     image_ids = [image.id for image in image_by_generation.values()]
-    rows = (
-        await db.execute(
-            select(ImageVariant.image_id, ImageVariant.kind).where(
-                ImageVariant.image_id.in_(image_ids)
-            )
-        )
-    ).all()
-    kinds_by_image: dict[str, set[str]] = {}
-    for image_id, kind in rows:
-        kinds_by_image.setdefault(image_id, set()).add(kind)
-    return kinds_by_image
+    rows = (await db.execute(_feed_variant_states_statement(image_ids))).all()
+    states_by_image: dict[str, dict[str, VariantReadiness]] = {}
+    for image_id, kind, state in rows:
+        if kind not in FEED_VARIANT_KINDS or state not in {
+            "ready",
+            "pending",
+            "failed",
+        }:
+            continue
+        states_by_image.setdefault(image_id, {})[kind] = state
+    return {
+        image_id: GenerationVariantStates.model_validate(states)
+        for image_id, states in states_by_image.items()
+    }
 
 
 async def _feed_conversation_ids(
@@ -455,19 +519,28 @@ def _feed_item(
     generation: Generation,
     *,
     image: Image,
-    variant_kinds: set[str],
+    variant_states: GenerationVariantStates,
     conversation_id: str,
 ) -> GenerationFeedItem:
     preview_url = (
         f"/api/images/{image.id}/variants/preview1024"
-        if "preview1024" in variant_kinds
+        if variant_states.preview1024 == "ready"
         else None
     )
     thumb_url = (
         f"/api/images/{image.id}/variants/thumb256"
-        if "thumb256" in variant_kinds
-        else preview_url or f"/api/images/{image.id}/binary"
+        if variant_states.thumb256 == "ready"
+        else None
     )
+    variant_version = hashlib.sha256(
+        (
+            f"{image.sha256}|"
+            + "|".join(
+                f"{kind}:{getattr(variant_states, kind)}"
+                for kind in FEED_VARIANT_KINDS
+            )
+        ).encode("utf-8")
+    ).hexdigest()[:20]
     upstream_request = (
         generation.upstream_request
         if isinstance(generation.upstream_request, dict)
@@ -495,6 +568,9 @@ def _feed_item(
             display_url=f"/api/images/{image.id}/variants/display2048",
             preview_url=preview_url,
             thumb_url=thumb_url,
+            display_ready=variant_states.display2048 == "ready",
+            variants=variant_states,
+            variant_version=variant_version,
             width=image.width,
             height=image.height,
         ),
@@ -507,7 +583,7 @@ def _feed_items(
     generations: list[Generation],
     *,
     images: dict[str, Image],
-    variants: dict[str, set[str]],
+    variants: dict[str, GenerationVariantStates],
     conversations: dict[str, str],
 ) -> list[GenerationFeedItem]:
     items: list[GenerationFeedItem] = []
@@ -519,7 +595,7 @@ def _feed_items(
             _feed_item(
                 generation,
                 image=image,
-                variant_kinds=variants.get(image.id, set()),
+                variant_states=variants.get(image.id, GenerationVariantStates()),
                 conversation_id=conversations.get(generation.message_id, ""),
             )
         )
@@ -598,13 +674,18 @@ async def list_generation_feed(
         return GenerationFeedOut(items=[], next_cursor=None, total=total)
 
     # ---- 聚合 image + message 信息 ----
-    image_by_gen = await _feed_images(db, gens, visible_after=visible_after)
-    kinds_by_image = await _feed_variant_kinds(db, image_by_gen)
+    image_by_gen = await _feed_images(
+        db,
+        gens,
+        user_id=user.id,
+        visible_after=visible_after,
+    )
+    states_by_image = await _feed_variant_states(db, image_by_gen)
     conv_by_msg = await _feed_conversation_ids(db, gens)
     items = _feed_items(
         gens,
         images=image_by_gen,
-        variants=kinds_by_image,
+        variants=states_by_image,
         conversations=conv_by_msg,
     )
 

@@ -43,11 +43,8 @@ from lumen_core.image_signing import (
     verify_image_sig,
 )
 from lumen_core.models import (
-    Conversation,
-    Generation,
     Image,
     ImageVariant,
-    Message,
     Share,
     User,
 )
@@ -109,6 +106,7 @@ from .upload import (
     UploadCommandService,
     UploadPolicy,
 )
+from .visibility_batch import ImageVisibilityCandidate, visible_image_ids
 
 
 router = APIRouter(lifespan=create_image_route_lifespan())
@@ -149,22 +147,6 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
     )
 
 
-def _content_references_image(value: Any, image_id: str) -> bool:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if (
-                key in {"image_id", "source_image_id", "mask_image_id"}
-                and item == image_id
-            ):
-                return True
-            if _content_references_image(item, image_id):
-                return True
-        return False
-    if isinstance(value, list):
-        return any(_content_references_image(item, image_id) for item in value)
-    return False
-
-
 async def _image_referenced_by_visible_user_history(
     db: AsyncSession,
     img: Image,
@@ -172,67 +154,17 @@ async def _image_referenced_by_visible_user_history(
     policy: Any,
 ) -> bool:
     visible_after = byok_retention_cutoffs(policy=policy).visible_after
-    gen_row = (
-        await db.execute(
-            select(Generation.id)
-            .join(Message, Message.id == Generation.message_id)
-            .join(Conversation, Conversation.id == Message.conversation_id)
-            .where(
-                Generation.user_id == user.id,
-                Conversation.user_id == user.id,
-                Conversation.deleted_at.is_(None),
-                Message.deleted_at.is_(None),
-                Message.created_at >= visible_after,
-                or_(
-                    Generation.id == getattr(img, "owner_generation_id", None),
-                    Generation.primary_input_image_id == img.id,
-                    Generation.mask_image_id == img.id,
-                ),
-            )
-            .limit(1)
-        )
-    ).first()
-    if gen_row is not None:
-        return True
-
-    gen_inputs = (
-        (
-            await db.execute(
-                select(Generation.input_image_ids)
-                .join(Message, Message.id == Generation.message_id)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .where(
-                    Generation.user_id == user.id,
-                    Conversation.user_id == user.id,
-                    Conversation.deleted_at.is_(None),
-                    Message.deleted_at.is_(None),
-                    Message.created_at >= visible_after,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    candidate = ImageVisibilityCandidate(
+        image_id=img.id,
+        owner_generation_id=getattr(img, "owner_generation_id", None),
+        created_at=img.created_at,
     )
-    if any(img.id in (input_ids or []) for input_ids in gen_inputs):
-        return True
-
-    contents = (
-        (
-            await db.execute(
-                select(Message.content)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .where(
-                    Conversation.user_id == user.id,
-                    Conversation.deleted_at.is_(None),
-                    Message.deleted_at.is_(None),
-                    Message.created_at >= visible_after,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    return img.id in await visible_image_ids(
+        db,
+        [candidate],
+        user_id=user.id,
+        visible_after=visible_after,
     )
-    return any(_content_references_image(content, img.id) for content in contents)
 
 
 async def _ensure_image_visible_to_user(

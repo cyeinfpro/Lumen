@@ -31,6 +31,10 @@ from app.images.adapters.sqlalchemy_repository import (
     _reconcile_priority,
 )
 from app.images.application import http_routes, reconcile_runtime
+from app.images.application.visibility_batch import (
+    ImageVisibilityCandidate,
+    visible_image_ids,
+)
 from app.images.composition import (
     ImageRouteComposition,
     compose_image_routes,
@@ -129,6 +133,51 @@ def test_reconcile_candidates_do_not_starve_behind_old_ready_rows() -> None:
         "processing-stale",
         "ready-due",
     ]
+
+
+@pytest.mark.asyncio
+async def test_byok_visibility_batches_only_old_candidates() -> None:
+    now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+    visible_after = now - timedelta(days=7)
+    executed = 0
+    referenced_ids = {f"old-{index:02d}" for index in range(0, 50, 2)}
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def all(self) -> list[str]:
+            return sorted(referenced_ids)
+
+    class Db:
+        async def execute(self, _statement: Any) -> Result:
+            nonlocal executed
+            executed += 1
+            return Result()
+
+    visible = await visible_image_ids(
+        Db(),  # type: ignore[arg-type]
+        [
+            ImageVisibilityCandidate(
+                image_id="recent",
+                owner_generation_id=None,
+                created_at=now,
+            ),
+            *[
+                ImageVisibilityCandidate(
+                    image_id=f"old-{index:02d}",
+                    owner_generation_id=f"gen-{index:02d}",
+                    created_at=visible_after - timedelta(days=1),
+                )
+                for index in range(50)
+            ],
+        ],
+        user_id="user-1",
+        visible_after=visible_after,
+    )
+
+    assert visible == {"recent", *referenced_ids}
+    assert executed == 1
 
 
 class _LeaseRedis:

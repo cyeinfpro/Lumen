@@ -10,6 +10,10 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
+from app.images.application import (
+    ImageVisibilityCandidate,
+    visible_reference_image_ids_statement,
+)
 from app.routes import generations
 from lumen_core.models import Generation
 
@@ -58,6 +62,39 @@ def test_generation_feed_filters_out_deleted_or_archived_conversations() -> None
     assert "images.user_id = 'user-1'" in rendered
     assert "images.deleted_at IS NULL" in rendered
     assert "(generations.upstream_request ->> 'workflow_run_id') IS NULL" in rendered
+
+
+@pytest.mark.asyncio
+async def test_generation_feed_first_image_query_is_scoped_to_feed_user() -> None:
+    generation = SimpleNamespace(id="gen-1")
+
+    class Db:
+        async def execute(self, statement: Any):
+            rendered = str(
+                statement.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+            assert "images.user_id = 'user-1'" in rendered
+
+            class Result:
+                def scalars(self):
+                    return self
+
+                def all(self) -> list[Any]:
+                    return []
+
+            return Result()
+
+    images = await generations._feed_images(
+        Db(),  # type: ignore[arg-type]
+        [generation],  # type: ignore[list-item]
+        user_id="user-1",
+        visible_after=None,
+    )
+
+    assert images == {}
 
 
 def test_generation_feed_fast_filter_accepts_legacy_true_values() -> None:
@@ -198,11 +235,105 @@ def test_generation_feed_image_schema_exposes_original_mime() -> None:
         mime="image/jpeg",
         display_url="/api/images/img-1/variants/display2048",
         thumb_url="/api/images/img-1/variants/thumb256",
+        variant_version="version-1",
         width=2560,
         height=3200,
     )
 
     assert image.model_dump()["mime"] == "image/jpeg"
+
+
+def test_generation_feed_variant_state_contract_never_uses_binary_for_grid() -> None:
+    generation = SimpleNamespace(
+        id="gen-1",
+        created_at=datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+        message_id="msg-1",
+        prompt="cat",
+        aspect_ratio="1:1",
+        primary_input_image_id=None,
+        input_image_ids=[],
+        upstream_request={},
+    )
+    image = SimpleNamespace(
+        id="img-1",
+        mime="image/png",
+        width=4096,
+        height=4096,
+        sha256="a" * 64,
+    )
+
+    item = generations._feed_item(
+        generation,  # type: ignore[arg-type]
+        image=image,  # type: ignore[arg-type]
+        variant_states=generations.GenerationVariantStates(
+            thumb256="missing",
+            preview1024="ready",
+            display2048="pending",
+        ),
+        conversation_id="conv-1",
+    )
+
+    assert item.image.url == "/api/images/img-1/binary"
+    assert item.image.thumb_url is None
+    assert item.image.preview_url == "/api/images/img-1/variants/preview1024"
+    assert item.image.display_ready is False
+    assert item.image.variants.model_dump() == {
+        "thumb256": "missing",
+        "preview1024": "ready",
+        "display2048": "pending",
+    }
+    assert all(
+        "/binary" not in url
+        for url in (item.image.thumb_url, item.image.preview_url)
+        if url is not None
+    )
+
+
+def test_generation_feed_variant_state_query_includes_claim_readiness() -> None:
+    rendered = str(
+        generations._feed_variant_states_statement(["img-1"]).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "FROM image_variants" in rendered
+    assert "UNION ALL" in rendered
+    assert "FROM image_variant_claims" in rendered
+    assert "image_variant_claims.error_code IS NOT NULL" in rendered
+    assert "NOT (EXISTS" in rendered
+
+
+def test_byok_visibility_batch_uses_sql_references_without_loading_history() -> None:
+    statement = visible_reference_image_ids_statement(
+        [
+            ImageVisibilityCandidate(
+                image_id="img-1",
+                owner_generation_id="gen-1",
+                created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            ),
+            ImageVisibilityCandidate(
+                image_id="img-2",
+                owner_generation_id=None,
+                created_at=datetime(2026, 6, 2, tzinfo=timezone.utc),
+            ),
+        ],
+        user_id="user-1",
+        visible_after=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    rendered = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    outer_select = rendered.split("WHERE (EXISTS", maxsplit=1)[0]
+
+    assert "VALUES ('img-1', 'gen-1'), ('img-2', NULL)" in rendered
+    assert "= ANY (generations.input_image_ids)" in rendered
+    assert "jsonb_path_exists(messages.content" in rendered
+    assert "messages.content" not in outer_select
+    assert "generations.input_image_ids" not in outer_select
 
 
 @pytest.mark.asyncio
