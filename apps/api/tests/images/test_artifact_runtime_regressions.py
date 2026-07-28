@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.routing import APIRoute
 from sqlalchemy import (
     Column,
@@ -41,6 +41,78 @@ from app.images.composition import (
     create_image_route_lifespan,
     get_upload_command_service,
 )
+
+
+@pytest.mark.asyncio
+async def test_display_route_freezes_user_id_before_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class User:
+        expired = False
+
+        @property
+        def id(self) -> str:
+            if self.expired:
+                raise AssertionError("user id accessed after rollback")
+            return "user-1"
+
+    user = User()
+    image = SimpleNamespace(id="image-1")
+
+    class Result:
+        def scalar_one_or_none(self) -> Any:
+            return image
+
+    class Db:
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+        async def rollback(self) -> None:
+            user.expired = True
+
+    seen: list[tuple[str, str | None]] = []
+
+    class VariantService:
+        async def ensure_display_variant(
+            self,
+            image_id: str,
+            *,
+            expected_user_id: str | None = None,
+        ) -> Any:
+            seen.append((image_id, expected_user_id))
+            return SimpleNamespace(
+                image_id=image_id,
+                kind="display2048",
+                storage_key="u/user-1/display.webp",
+            )
+
+    async def visible(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(http_routes, "_ensure_image_visible_to_user", visible)
+    monkeypatch.setattr(
+        http_routes,
+        "_fs_path",
+        lambda _key: tmp_path / "display.webp",
+    )
+    monkeypatch.setattr(
+        http_routes,
+        "_storage_streaming_response",
+        lambda *_args, **_kwargs: Response("ok"),
+    )
+
+    response = await http_routes.get_image_variant(
+        "image-1",
+        "display2048",
+        Request({"type": "http", "method": "GET", "path": "/"}),
+        user,  # type: ignore[arg-type]
+        Db(),  # type: ignore[arg-type]
+        VariantService(),  # type: ignore[arg-type]
+    )
+
+    assert response.status_code == 200
+    assert seen == [("image-1", "user-1")]
 
 
 def test_reconcile_candidates_do_not_starve_behind_old_ready_rows() -> None:
