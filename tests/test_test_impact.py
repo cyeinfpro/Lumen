@@ -256,7 +256,7 @@ def test_reverse_imports_stop_after_second_level(tmp_path: Path) -> None:
             "uv run pytest -q apps/api/tests",
         ),
         (
-            "apps/web/src/lib/imagePreload.ts",
+            "apps/web/src/features/assets/model/prewarmScheduler.ts",
             "web-stream-assets",
             "cd apps/web && npm test",
         ),
