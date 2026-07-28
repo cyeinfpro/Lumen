@@ -22,6 +22,21 @@ from lumen_core.schemas import TaskItemOut, TaskListOut
 TaskCursor = tuple[datetime, Literal["generation", "completion"], str] | None
 
 
+@dataclass(frozen=True, slots=True)
+class TaskListRequest:
+    user_id: str
+    status: str | None
+    kind: Literal["all", "generation", "completion"]
+    source: str | None
+    conversation_id: str | None
+    project_id: str | None
+    date_filter: str | None
+    cursor: TaskCursor
+    error_code: str | None
+    retryable: bool | None
+    limit: int
+
+
 @dataclass(frozen=True)
 class TaskListingRuntime:
     apply_cursor: Callable[..., Any]
@@ -369,40 +384,29 @@ def _sortable_items(
 async def build_task_list(
     db: AsyncSession,
     runtime: TaskListingRuntime,
-    *,
-    user_id: str,
-    status: str | None,
-    kind: Literal["all", "generation", "completion"],
-    source: str | None,
-    conversation_id: str | None,
-    project_id: str | None,
-    date_filter: str | None,
-    cursor: TaskCursor,
-    error_code: str | None,
-    retryable: bool | None,
-    limit: int,
+    request: TaskListRequest,
 ) -> TaskListOut:
-    query_limit = min(max(limit * 3, limit + 1), 1000)
+    query_limit = min(max(request.limit * 3, request.limit + 1), 1000)
     gen_stmt, comp_stmt = _query_statements(
         runtime,
-        user_id=user_id,
-        status=status,
-        error_code=error_code,
-        date_filter=date_filter,
-        cursor=cursor,
+        user_id=request.user_id,
+        status=request.status,
+        error_code=request.error_code,
+        date_filter=request.date_filter,
+        cursor=request.cursor,
     )
     generations, completions = await _task_rows(
         db,
         runtime,
         gen_stmt=gen_stmt,
         comp_stmt=comp_stmt,
-        kind=kind,
+        kind=request.kind,
         query_limit=query_limit,
     )
     message_meta = await _message_meta(db, runtime, generations, completions)
     defaults = await _conversation_defaults(db, runtime, message_meta)
     images, variant_kinds = await _generation_media(db, generations)
-    queue_positions = await _queue_positions(db, runtime, user_id)
+    queue_positions = await _queue_positions(db, runtime, request.user_id)
     sortable = _sortable_items(
         runtime,
         generations,
@@ -412,18 +416,18 @@ async def build_task_list(
         images=images,
         variant_kinds=variant_kinds,
         queue_positions=queue_positions,
-        source=source,
-        conversation_id=conversation_id,
-        project_id=project_id,
-        retryable=retryable,
+        source=request.source,
+        conversation_id=request.conversation_id,
+        project_id=request.project_id,
+        retryable=request.retryable,
     )
     sortable.sort(
         key=lambda pair: (pair[0], runtime.kind_rank(pair[1]), pair[2]),
         reverse=True,
     )
-    page = sortable[:limit]
+    page = sortable[: request.limit]
     next_cursor = None
-    if len(sortable) > limit and page:
+    if len(sortable) > request.limit and page:
         sort_at, item_kind, task_id, _item = page[-1]
         next_cursor = runtime.encode_cursor(sort_at, item_kind, task_id)
     return TaskListOut(

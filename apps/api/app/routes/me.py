@@ -9,6 +9,7 @@ import os
 import stat
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -80,6 +81,14 @@ _EXPORT_CHUNK_SIZE = 64 * 1024
 # full hour. The refill rate (1/hr) still caps sustained use to one export per
 # hour; the extra burst slot is purely for retry-after-failure ergonomics.
 _EXPORT_LIMITER = RateLimiter(capacity=2, refill_per_sec=1 / 3600, always_on=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _ExportStats:
+    messages: int
+    images: int
+    images_skipped: int
+    zip_bytes: int
 
 
 @runtime_checkable
@@ -158,6 +167,139 @@ def _open_storage_file_safe(storage_key: str | None) -> BinaryIO | None:
             except OSError:
                 pass
         return None
+
+
+async def _export_messages(
+    db: AsyncSession,
+    archive: zipfile.ZipFile,
+    user_id: str,
+) -> int:
+    exported = 0
+    last_created_at: datetime | None = None
+    last_id: str | None = None
+    with archive.open("messages.ndjson", "w") as messages_file:
+        while True:
+            filters = [Conversation.user_id == user_id]
+            if last_created_at is not None and last_id is not None:
+                filters.append(
+                    or_(
+                        Message.created_at > last_created_at,
+                        and_(
+                            Message.created_at == last_created_at,
+                            Message.id > last_id,
+                        ),
+                    )
+                )
+            rows = (
+                await db.execute(
+                    select(
+                        Message.conversation_id.label("conversation_id"),
+                        Message.id.label("id"),
+                        Message.role.label("role"),
+                        Message.content.label("content"),
+                        Message.intent.label("intent"),
+                        Message.status.label("status"),
+                        Message.created_at.label("created_at"),
+                    )
+                    .join(Conversation, Conversation.id == Message.conversation_id)
+                    .where(*filters)
+                    .order_by(Message.created_at.asc(), Message.id.asc())
+                    .limit(_EXPORT_BATCH_SIZE)
+                )
+            ).all()
+            if not rows:
+                break
+            for message in rows:
+                line = _export_message_record(message)
+                await asyncio.to_thread(
+                    messages_file.write,
+                    json.dumps(line, ensure_ascii=False).encode("utf-8") + b"\n",
+                )
+                exported += 1
+            last_created_at = rows[-1].created_at
+            last_id = rows[-1].id
+    return exported
+
+
+async def _write_export_image(
+    archive: zipfile.ZipFile,
+    image: Any,
+) -> bool:
+    source = await asyncio.to_thread(_open_storage_file_safe, image.storage_key)
+    if source is None:
+        return False
+    extension = _ext_for(image.mime)
+    with source, archive.open(f"images/{image.id}.{extension}", "w") as image_file:
+        while chunk := await asyncio.to_thread(source.read, _EXPORT_CHUNK_SIZE):
+            await asyncio.to_thread(image_file.write, chunk)
+    return True
+
+
+async def _export_images(
+    db: AsyncSession,
+    archive: zipfile.ZipFile,
+    user_id: str,
+) -> tuple[int, int]:
+    exported = 0
+    skipped = 0
+    last_created_at: datetime | None = None
+    last_id: str | None = None
+    while True:
+        filters = [Image.user_id == user_id, Image.deleted_at.is_(None)]
+        if last_created_at is not None and last_id is not None:
+            filters.append(
+                or_(
+                    Image.created_at > last_created_at,
+                    and_(
+                        Image.created_at == last_created_at,
+                        Image.id > last_id,
+                    ),
+                )
+            )
+        rows = (
+            await db.execute(
+                select(
+                    Image.id.label("id"),
+                    Image.storage_key.label("storage_key"),
+                    Image.mime.label("mime"),
+                    Image.created_at.label("created_at"),
+                )
+                .where(*filters)
+                .order_by(Image.created_at.asc(), Image.id.asc())
+                .limit(_EXPORT_BATCH_SIZE)
+            )
+        ).all()
+        if not rows:
+            break
+        for image in rows:
+            if await _write_export_image(archive, image):
+                exported += 1
+            else:
+                skipped += 1
+        last_created_at = rows[-1].created_at
+        last_id = rows[-1].id
+    return exported, skipped
+
+
+async def _build_export_archive(
+    db: AsyncSession,
+    tmp: BinaryIO,
+    user_id: str,
+) -> _ExportStats:
+    with zipfile.ZipFile(
+        tmp,
+        "w",
+        zipfile.ZIP_DEFLATED,
+        allowZip64=True,
+    ) as archive:
+        messages = await _export_messages(db, archive, user_id)
+        images, images_skipped = await _export_images(db, archive, user_id)
+    return _ExportStats(
+        messages=messages,
+        images=images,
+        images_skipped=images_skipped,
+        zip_bytes=tmp.tell(),
+    )
 
 
 async def _release_account_delete_task_hold(
@@ -570,112 +712,9 @@ async def export_my_data(
     await _EXPORT_LIMITER.check(get_redis(), f"rl:me:export:{user.id}")
 
     tmp = tempfile.TemporaryFile()
-    messages_exported = 0
-    images_exported = 0
-    images_skipped = 0
 
     try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-            with zf.open("messages.ndjson", "w") as messages_file:
-                last_created_at: datetime | None = None
-                last_id: str | None = None
-                while True:
-                    filters = [Conversation.user_id == user.id]
-                    if last_created_at is not None and last_id is not None:
-                        filters.append(
-                            or_(
-                                Message.created_at > last_created_at,
-                                and_(
-                                    Message.created_at == last_created_at,
-                                    Message.id > last_id,
-                                ),
-                            )
-                        )
-                    rows = (
-                        await db.execute(
-                            select(
-                                Message.conversation_id.label("conversation_id"),
-                                Message.id.label("id"),
-                                Message.role.label("role"),
-                                Message.content.label("content"),
-                                Message.intent.label("intent"),
-                                Message.status.label("status"),
-                                Message.created_at.label("created_at"),
-                            )
-                            .join(
-                                Conversation,
-                                Conversation.id == Message.conversation_id,
-                            )
-                            .where(*filters)
-                            .order_by(Message.created_at.asc(), Message.id.asc())
-                            .limit(_EXPORT_BATCH_SIZE)
-                        )
-                    ).all()
-                    if not rows:
-                        break
-                    for m in rows:
-                        line = _export_message_record(m)
-                        await asyncio.to_thread(
-                            messages_file.write,
-                            json.dumps(line, ensure_ascii=False).encode("utf-8")
-                            + b"\n",
-                        )
-                        messages_exported += 1
-                    last_created_at = rows[-1].created_at
-                    last_id = rows[-1].id
-
-            last_created_at = None
-            last_id = None
-            while True:
-                filters = [Image.user_id == user.id, Image.deleted_at.is_(None)]
-                if last_created_at is not None and last_id is not None:
-                    filters.append(
-                        or_(
-                            Image.created_at > last_created_at,
-                            and_(
-                                Image.created_at == last_created_at,
-                                Image.id > last_id,
-                            ),
-                        )
-                    )
-                rows = (
-                    await db.execute(
-                        select(
-                            Image.id.label("id"),
-                            Image.storage_key.label("storage_key"),
-                            Image.mime.label("mime"),
-                            Image.created_at.label("created_at"),
-                        )
-                        .where(*filters)
-                        .order_by(Image.created_at.asc(), Image.id.asc())
-                        .limit(_EXPORT_BATCH_SIZE)
-                    )
-                ).all()
-                if not rows:
-                    break
-                for img in rows:
-                    src = await asyncio.to_thread(
-                        _open_storage_file_safe,
-                        img.storage_key,
-                    )
-                    if src is None:
-                        images_skipped += 1
-                        continue
-                    ext = _ext_for(img.mime)
-                    with src, zf.open(f"images/{img.id}.{ext}", "w") as image_file:
-                        while True:
-                            chunk = await asyncio.to_thread(
-                                src.read,
-                                _EXPORT_CHUNK_SIZE,
-                            )
-                            if not chunk:
-                                break
-                            await asyncio.to_thread(image_file.write, chunk)
-                    images_exported += 1
-                last_created_at = rows[-1].created_at
-                last_id = rows[-1].id
-
-        zip_size = tmp.tell()
+        stats = await _build_export_archive(db, tmp, user.id)
         await write_audit(
             db,
             event_type="me.data.export",
@@ -684,10 +723,10 @@ async def export_my_data(
             actor_ip_hash=request_ip_hash(request),
             target_user_id=user.id,
             details={
-                "messages": messages_exported,
-                "images": images_exported,
-                "images_skipped": images_skipped,
-                "zip_bytes": zip_size,
+                "messages": stats.messages,
+                "images": stats.images,
+                "images_skipped": stats.images_skipped,
+                "zip_bytes": stats.zip_bytes,
             },
         )
         await db.commit()
@@ -701,7 +740,7 @@ async def export_my_data(
 
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        "Content-Length": str(zip_size),
+        "Content-Length": str(stats.zip_bytes),
     }
     return StreamingResponse(
         _iter_tempfile_and_close(tmp),
