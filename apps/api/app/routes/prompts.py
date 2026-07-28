@@ -184,15 +184,9 @@ def _provider_allows_prompt_enhance(provider: ProviderDefinition) -> bool:
 
 async def _resolve_provider_order(
     db: AsyncSession,
-    runtime: _PromptRuntime | None = None,
+    runtime: _PromptRuntime,
 ) -> list[ProviderDefinition]:
     """Read Provider Pool, with legacy UPSTREAM_* env fallback only if absent."""
-    if runtime is None:
-        from ..main import app
-
-        runtime = getattr(app.state, _PROMPT_RUNTIME_STATE_KEY, None)
-        if not isinstance(runtime, _PromptRuntime):
-            raise RuntimeError("prompt enhancement runtime is unavailable")
     spec_providers = get_spec("providers")
     raw_providers = await get_setting(db, spec_providers) if spec_providers else None
     providers, _proxies, errors = build_effective_provider_config(
@@ -1116,6 +1110,8 @@ async def enhance_prompt(
 
 resolve_provider_order = _resolve_provider_order
 stream_enhance = _stream_enhance
+PromptRuntime = _PromptRuntime
+get_prompt_runtime = _prompt_runtime
 
 
 @router.post("/video/enhance")

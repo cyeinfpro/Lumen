@@ -67,7 +67,12 @@ from ..services.provider_config import (
 )
 from .media_delivery import image_storage_path, image_storage_streaming_response
 from .messages import submit_user_message
-from .prompts import resolve_provider_order, stream_enhance
+from .prompts import (
+    PromptRuntime,
+    get_prompt_runtime,
+    resolve_provider_order,
+    stream_enhance,
+)
 from lumen_core.providers import (
     parse_provider_bool,
     parse_proxy_item,
@@ -729,17 +734,20 @@ async def enhance_prompt(
     body: EnhancePromptIn,
     user: BotUser,  # 仅作鉴权，enhance 自身不带 user 上下文
     db: Annotated[AsyncSession, Depends(get_db)],
+    runtime: Annotated[PromptRuntime, Depends(get_prompt_runtime)],
 ) -> EnhancePromptOut:
     """复用 /prompts/enhance 的内核，但聚合 SSE 增量为完整字符串。bot 端不需要流式。"""
     import json as _json
 
-    providers = [p for p in await resolve_provider_order(db) if p.api_key.strip()]
+    providers = [
+        p for p in await resolve_provider_order(db, runtime) if p.api_key.strip()
+    ]
     if not providers:
         raise _http("not_configured", "upstream API key not set", 503)
 
     parts: list[str] = []
     error: str | None = None
-    async for chunk in stream_enhance(body.text, providers):
+    async for chunk in stream_enhance(body.text, providers, runtime=runtime):
         # chunk 形如 "data: {\"text\": \"...\"}\n\n" 或 "data: [DONE]\n\n" 或 "data: {\"error\": \"...\"}\n\n"
         if not chunk.startswith("data: "):
             continue
