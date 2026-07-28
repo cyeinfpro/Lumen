@@ -33,7 +33,7 @@ reinterpret the source plan.
 - After cleanup, the only persistent branches are `main`, `origin/main`, and
   the current V2 integration branch.
 
-### V2 Wave 0 In Progress
+### V2 Wave 0 Completion
 
 - Existing impact planner tests:
   `uv run pytest -q tests/test_test_impact.py tests/test_run_test_plan.py`
@@ -55,6 +55,72 @@ reinterpret the source plan.
   (`Too many open files`, soft limit 256) before product commands started.
   Commands were rerun serially and passed; this is recorded as an environment
   constraint, not a product failure.
+
+#### Commits
+
+- A9 manifest linter:
+  `7662f25` (`test: add impact manifest linter`).
+- A0 shared manifest/CI mapping:
+  `acda552` (`test: map v2 optimization domains`).
+- A8 perf/fault harness:
+  `66d9593` (`test(perf): add wave 0 baseline harness`).
+
+#### Agent Evidence
+
+- A1 confirmed RT-01/02/03 at `WORK_BASE_SHA`: task+user live delivery emits
+  two frames for one `sse_id`; the API non-Lua fallback can produce two Stream
+  entries for one stable event ID; durable/user/compat fanout outcomes are not
+  independently observable.
+- A3 confirmed GEN-01/02/03/04/06 at `WORK_BASE_SHA`: enqueue-result-unknown
+  immediately retries; selecting 10 jobs from 1000 candidates performs 1000
+  per-candidate Redis reads; provider selection still probes with `TypeError`;
+  admission remains count-only; 100 wake hints cause 100 scheduler scans.
+- A5 confirmed the Asset gaps listed above from current source paths. This was
+  a read-only Lead audit; no Wave 3 implementation was pulled forward.
+- A8 produced `perf/wave0/` and
+  `docs/perf/lumen-wave0-baseline-2026-07-28.{md,json}` without changing
+  product code.
+- A9 produced a read-only manifest audit and linter. A0 retained sole ownership
+  of `scripts/test-manifest.toml` and `.github/workflows/ci.yml`.
+
+#### Metrics
+
+- Manifest before -> after:
+  stale `2 -> 0`, unmatched `2 -> 0`, critical fallback-only `47 -> 0`,
+  shadowed `0 -> 0`; 18 intentional full-mandatory patterns remain explained.
+- Realtime baseline: same live event on task+user channels -> 2 frames;
+  replay-seen live event -> 0 frames.
+- Queue baseline:
+  10/100/1000 candidates -> 29/119/1019 Redis commands, with 8 enqueues.
+- Synthetic RSS:
+  1MP 52.6 MiB, 4K 159.1 MiB, edit 144.2 MiB, dual race 192.4 MiB.
+- Browser contract fixture:
+  1000 mounted tiles, 3009 DOM elements, 1013 requests, 0 `/binary` requests,
+  20 thumb-404-to-preview fallbacks.
+- Authenticated feed/search remained explicitly `gated`; the harness requires
+  a representative authenticated API dataset before claiming DB latency.
+
+#### Verification
+
+- `uv run pytest -q tests/test_test_manifest_lint.py
+  tests/test_test_impact.py tests/test_run_test_plan.py` -> 16 passed.
+- `uv run pytest -q perf/wave0/test_run.py` -> 4 passed.
+- Manifest linter -> passed for 1218 production files.
+- Changed-file Ruff and Ruff format -> passed.
+- Backend architecture, complexity, and runtime-state gates -> passed at
+  `3 / 11 / 15`.
+- Web runner and browser harness Node syntax -> passed.
+- CI YAML parse and `git diff --check` -> passed.
+- No full API/Worker/Web suite or repository-wide gate was run in Wave 0.
+
+#### Invariants And Rollback
+
+- No business behavior, database schema, queue lease, billing, artifact,
+  cache, delivery, or BYOK retention logic changed.
+- Shared Core, lockfiles, migrations, CI workflow changes, and test
+  infrastructure remain full-mandatory.
+- Rollback the three Wave 0 commits in reverse order. Removing the independent
+  harness requires no data migration or feature flag.
 
 ## Baseline
 
