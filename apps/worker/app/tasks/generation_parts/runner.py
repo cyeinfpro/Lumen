@@ -3,14 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select, update
 
 from lumen_core.constants import (
-    EV_GEN_FAILED,
     EV_GEN_PROGRESS,
     EV_GEN_QUEUED,
     EV_GEN_STARTED,
@@ -24,44 +22,26 @@ from lumen_core.constants import (
 from lumen_core.generation_resources import generation_resource_demand
 from lumen_core.models import Generation, Message, new_uuid7
 from lumen_core.queue_metadata import generation_queue_metadata, merge_queue_metadata
-from lumen_core.sizing import resolve_size
-from lumen_core.upstream_billing import (
-    mark_upstream_dispatch_started,
-    mark_upstream_response_received,
-)
 
 from ...observability import (
-    get_tracer,
     safe_outcome,
     task_duration_seconds,
-    upstream_calls_total,
 )
 from ...generation_dispatch import dispatch_identity_from_context
 from ...provider_runtime.errors import UpstreamError
-from ...upstream_parts import GeneratedImageResult
 from ..state import is_generation_terminal
 from . import failure, success
 from .admission import WeightedPermit
 from .diagnostics import (
     StageTimer,
-    generation_trace_id,
-    image_requested_params_snapshot,
-    queue_wait_ms,
 )
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .lease import (
     acquire_lease,
     cancel_renewer_task,
-    is_cancelled,
     lease_renewer,
     release_lease,
 )
-from .lifecycle import settle_existing_generated_image
-from .persistence import (
-    ensure_generation_conversation_alive,
-    find_existing_generated_image,
-)
-from .progress import ImageProgressPublisher
 from .queue import (
     IMAGE_PROVIDER_UNAVAILABLE_RETRY_S,
     IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
@@ -79,17 +59,7 @@ from .queue_claim import (
     release_image_queue_slot,
     reserve_image_queue_slot,
 )
-from .request_options import (
-    image_request_options,
-    image_requested_count,
-    primary_input_image_id_valid,
-    prompt_with_aspect_ratio_constraint,
-    validate_resolved_size,
-)
 from .retry_state import (
-    MAX_ATTEMPTS,
-    RUNNING_GENERATION_STATUSES,
-    anext_image_with_guards,
     bounded_next_attempt,
     consume_image_iter_close_result,
     ensure_generation_updated,
@@ -97,17 +67,22 @@ from .retry_state import (
 )
 from .run_state import GenerationRunState
 from .runtime_contracts import GENERATION_RUN_TIMEOUT_S
-from .services import (
-    GenerationProviderContext,
-    GenerationProviderEditRequest,
-    GenerationProviderRequest,
-    RunGenerationDeps,
+from .runner_claim_phase import (
+    fail_queued_generation as _fail_queued_generation,
+    load_initial_generation as _load_initial_generation,
+    publish_queued_failure as _publish_queued_failure,
 )
+from .runner_dispatch_phase import (
+    build_image_iterator as _build_image_iterator,
+    dispatch_upstream_request as _dispatch_upstream_request,
+    initialize_execution_state as _initialize_execution_state,
+    prepare_upstream_request as _prepare_upstream_request,
+)
+from .services import RunGenerationDeps
 
 
 LEASE_REACQUIRED_SUBSTAGE = "lease_reacquired"
 logger = logging.getLogger(__name__)
-tracer = get_tracer("lumen.worker.generation")
 
 
 async def run_generation(
@@ -165,305 +140,6 @@ def _new_run_state(
         trace_id=f"gen_{task_id}",
         stage_timer=StageTimer(),
         dispatch_identity=dispatch_identity_from_context(ctx),
-    )
-
-
-async def _load_initial_generation(state: GenerationRunState) -> bool:
-    async with state.services.store.session() as session:
-        generation = await _claim_generation_row(state, session)
-        if generation is None:
-            return False
-        if _generation_cannot_start(state, generation):
-            return False
-        _load_generation_fields(state, generation)
-        if not await _validate_conversation(state, session):
-            return False
-        if not await _validate_primary_input(state, session):
-            return False
-        existing = await find_existing_generated_image(
-            session,
-            task_id=state.task_id,
-            user_id=state.user_id,
-        )
-        if existing is not None:
-            state.task_outcome = await settle_existing_generated_image(
-                session,
-                redis=state.redis,
-                task_id=state.task_id,
-                user_id=state.user_id,
-                message_id=state.message_id,
-                generation=generation,
-                existing_image=existing,
-                task_started_at=state.task_start,
-                services=state.services,
-            )
-            return False
-        state.attempt, may_run = bounded_next_attempt(generation.attempt)
-        if not may_run:
-            await _fail_max_attempts(state, session)
-            return False
-        request = state.gen_upstream_request_snapshot or {}
-        metadata = generation_queue_metadata(
-            upstream_request=request,
-            action=state.action,
-            size_requested=state.size_requested,
-            mask_image_id=state.mask_image_id,
-            created_at=state.gen_created_at,
-        )
-        state.resource_demand = generation_resource_demand(
-            pixel_count=metadata.get("pixel_count"),
-            reference_count=len(state.input_image_ids),
-            action=str(state.action),
-            has_mask=bool(state.mask_image_id),
-            transparent=request.get("background") == "transparent",
-            output_count=int(request.get("n") or 1),
-            dual_race=request.get("image_route") == "dual_race",
-        )
-    return True
-
-
-async def _claim_generation_row(
-    state: GenerationRunState,
-    session: Any,
-) -> Any | None:
-    task_id = state.task_id
-    generation = (
-        await session.execute(
-            select(Generation)
-            .where(Generation.id == task_id)
-            .with_for_update(skip_locked=True)
-        )
-    ).scalar_one_or_none()
-    if generation is not None:
-        return generation
-    existing_id = (
-        await session.execute(select(Generation.id).where(Generation.id == task_id))
-    ).scalar_one_or_none()
-    if existing_id is not None:
-        logger.info(
-            "generation initial claim skipped locked row task_id=%s",
-            task_id,
-        )
-    else:
-        logger.warning("generation not found task_id=%s", task_id)
-    return None
-
-
-def _generation_cannot_start(
-    state: GenerationRunState,
-    generation: Any,
-) -> bool:
-    if is_generation_terminal(generation.status):
-        logger.info(
-            "generation already terminal task_id=%s status=%s",
-            generation.id,
-            generation.status,
-        )
-        return True
-    if generation.status == GenerationStatus.RUNNING.value:
-        logger.info("generation already running task_id=%s", generation.id)
-        return True
-    return False
-
-
-def _load_generation_fields(
-    state: GenerationRunState,
-    generation: Any,
-) -> None:
-    state.generation = generation
-    state.loaded_attempt = generation.attempt
-    state.gen_created_at = getattr(generation, "created_at", None)
-    state.user_id = generation.user_id
-    state.message_id = generation.message_id
-    state.action = generation.action
-    state.prompt = generation.prompt
-    state.aspect_ratio = generation.aspect_ratio
-    state.size_requested = generation.size_requested
-    state.input_image_ids = list(generation.input_image_ids or [])
-    state.primary_input_image_id = generation.primary_input_image_id
-    state.user_api_credential_id = getattr(
-        generation,
-        "user_api_credential_id",
-        None,
-    )
-    state.mask_image_id = getattr(generation, "mask_image_id", None)
-    state.gen_idempotency_key = generation.idempotency_key
-    state.gen_model = generation.model
-    state.gen_upstream_request_snapshot = (
-        dict(generation.upstream_request)
-        if isinstance(generation.upstream_request, dict)
-        else None
-    )
-    state.trace_id = generation_trace_id(
-        state.task_id,
-        state.gen_upstream_request_snapshot,
-    )
-    state.stage_timer.set_ms(
-        "queue_wait",
-        queue_wait_ms(state.gen_created_at),
-    )
-    state.image_request_options = image_request_options(
-        generation.upstream_request,
-        size=state.size_requested,
-    )
-
-
-async def _validate_conversation(
-    state: GenerationRunState,
-    session: Any,
-) -> bool:
-    try:
-        await ensure_generation_conversation_alive(
-            session,
-            message_id=state.message_id,
-            user_id=state.user_id,
-        )
-        return True
-    except TaskCancelled as exc:
-        await _cancel_queued_generation(state, session, str(exc))
-        return False
-
-
-async def _cancel_queued_generation(
-    state: GenerationRunState,
-    session: Any,
-    message: str,
-) -> None:
-    result = await session.execute(
-        generation_attempt_update(
-            state.task_id,
-            state.generation.attempt,
-            statuses=(GenerationStatus.QUEUED.value,),
-        ).values(
-            status=GenerationStatus.CANCELED.value,
-            progress_stage=GenerationStage.FINALIZING,
-            finished_at=datetime.now(timezone.utc),
-            error_code=EC.CANCELLED.value,
-            error_message=message,
-        )
-    )
-    ensure_generation_updated(
-        result,
-        state.task_id,
-        state.generation.attempt,
-    )
-    row = await session.get(Message, state.message_id)
-    if row is not None and row.status not in (
-        MessageStatus.SUCCEEDED,
-        MessageStatus.FAILED,
-        MessageStatus.CANCELED,
-    ):
-        row.status = MessageStatus.FAILED
-    await state.services.billing.release(
-        session,
-        state.generation,
-        reason=EC.CANCELLED.value,
-    )
-    await session.commit()
-    await state.services.billing.flush_after_commit(session)
-    await _publish_queued_failure(
-        state,
-        EC.CANCELLED.value,
-        message,
-    )
-    state.task_outcome = "failed"
-
-
-async def _validate_primary_input(
-    state: GenerationRunState,
-    session: Any,
-) -> bool:
-    if primary_input_image_id_valid(
-        state.primary_input_image_id,
-        state.input_image_ids,
-    ):
-        return True
-    await _fail_queued_generation(
-        state,
-        session,
-        code=EC.INVALID_PARAM.value,
-        message="primary_input_image_id must be included in input_image_ids",
-        next_attempt=None,
-    )
-    return False
-
-
-async def _fail_max_attempts(
-    state: GenerationRunState,
-    session: Any,
-) -> None:
-    await _fail_queued_generation(
-        state,
-        session,
-        code="max_attempts_exceeded",
-        message=f"generation exceeded max attempts ({MAX_ATTEMPTS})",
-        next_attempt=state.attempt,
-    )
-    _observe_task_duration(state)
-
-
-async def _fail_queued_generation(
-    state: GenerationRunState,
-    session: Any,
-    *,
-    code: str,
-    message: str,
-    next_attempt: int | None,
-) -> None:
-    values: dict[str, Any] = {
-        "status": GenerationStatus.FAILED.value,
-        "progress_stage": GenerationStage.FINALIZING,
-        "finished_at": datetime.now(timezone.utc),
-        "error_code": code,
-        "error_message": message,
-    }
-    if next_attempt is not None:
-        values["attempt"] = next_attempt
-    result = await session.execute(
-        generation_attempt_update(
-            state.task_id,
-            state.generation.attempt,
-            statuses=(GenerationStatus.QUEUED.value,),
-        ).values(**values)
-    )
-    ensure_generation_updated(
-        result,
-        state.task_id,
-        state.generation.attempt,
-    )
-    row = await session.get(Message, state.message_id)
-    if row is not None and row.status != MessageStatus.CANCELED:
-        row.status = MessageStatus.FAILED
-    generation = await session.get(Generation, state.task_id)
-    if generation is not None:
-        await state.services.billing.release(
-            session,
-            generation,
-            reason=code,
-        )
-    await session.commit()
-    await state.services.billing.flush_after_commit(session)
-    await _publish_queued_failure(state, code, message)
-    state.task_outcome = "failed"
-
-
-async def _publish_queued_failure(
-    state: GenerationRunState,
-    code: str,
-    message: str,
-) -> None:
-    await state.services.events.publish(
-        state.redis,
-        state.user_id,
-        state.task_channel(state.task_id),
-        EV_GEN_FAILED,
-        {
-            "generation_id": state.task_id,
-            "message_id": state.message_id,
-            "code": code,
-            "message": message,
-            "retriable": False,
-        },
     )
 
 
@@ -984,340 +660,6 @@ async def _cleanup_failed_setup(state: GenerationRunState) -> None:
         )
 
 
-def _initialize_execution_state(state: GenerationRunState) -> None:
-    state.has_partial = False
-    state.image_iter = None
-    state.provider_attempt_log.clear()
-    state.upstream_duration_ms = None
-    state.requested_image_count = image_requested_count(
-        state.gen_upstream_request_snapshot
-    )
-    state.batch_extra_pairs.clear()
-    state.requested_params_for_diag = image_requested_params_snapshot(
-        state.gen_upstream_request_snapshot,
-        size=state.size_requested,
-        aspect_ratio=state.aspect_ratio,
-        action=state.action,
-        input_count=len(state.input_image_ids),
-        has_mask=bool(state.mask_image_id),
-    )
-
-
-async def _prepare_upstream_request(state: GenerationRunState) -> None:
-    started = time.monotonic()
-    state.resolved = _resolve_generation_size(state)
-    state.image_request_options = image_request_options(
-        state.generation.upstream_request,
-        size=state.resolved.size,
-    )
-    state.prompt_for_upstream = prompt_with_aspect_ratio_constraint(
-        state.prompt,
-        state.aspect_ratio,
-    )
-    await _load_references_and_mask(state)
-    _normalize_mask(state)
-    state.stage_timer.add_elapsed("normalize", started)
-    await _publish_stream_started(state)
-    state.progress_publisher = ImageProgressPublisher(
-        state,
-        state.services,
-    )
-
-
-def _resolve_generation_size(state: GenerationRunState) -> Any:
-    fixed_size = (
-        state.size_requested
-        if state.size_requested and "x" in state.size_requested
-        else None
-    )
-    try:
-        resolved = resolve_size(
-            state.aspect_ratio,
-            "fixed",
-            fixed_size,
-        )
-        validate_resolved_size(
-            resolved.size,
-            state.aspect_ratio,
-            validate_aspect_ratio=fixed_size is None,
-        )
-        return resolved
-    except ValueError as exc:
-        raise UpstreamError(
-            f"invalid size_requested: {exc}",
-            status_code=400,
-            error_code=EC.INVALID_VALUE.value,
-            payload={
-                "size_requested": state.size_requested,
-                "aspect_ratio": state.aspect_ratio,
-            },
-        ) from exc
-
-
-async def _load_references_and_mask(state: GenerationRunState) -> None:
-    async with state.services.store.session() as session:
-        state.references = await state.services.provider.load_reference_images(
-            session,
-            state.input_image_ids,
-        )
-        mask = None
-        if state.mask_image_id and state.action == GenerationAction.EDIT:
-            mask = await state.services.provider.load_mask_image(
-                session,
-                state.mask_image_id,
-            )
-    state.ref_for_body = (
-        state.references if state.action == GenerationAction.EDIT else []
-    )
-    state.mask_bytes = mask
-
-
-def _normalize_mask(state: GenerationRunState) -> None:
-    state.inpaint_size_override = None
-    if state.mask_bytes is None or not state.ref_for_body:
-        return
-    reference_bytes = state.ref_for_body[0][1]
-    state.mask_bytes = state.services.provider.resize_mask_to_reference(
-        state.mask_bytes,
-        reference_bytes,
-    )
-    reference_size = state.services.provider.reference_pixel_size(reference_bytes)
-    if reference_size is not None:
-        state.inpaint_size_override = (
-            state.services.provider.inpaint_size_from_reference(*reference_size)
-        )
-
-
-async def _publish_stream_started(state: GenerationRunState) -> None:
-    await state.services.events.publish(
-        state.redis,
-        state.user_id,
-        state.channel,
-        EV_GEN_PROGRESS,
-        {
-            "generation_id": state.task_id,
-            "message_id": state.message_id,
-            "trace_id": state.trace_id,
-            "stage": GenerationStage.RENDERING.value,
-            "substage": GenerationStage.STREAM_STARTED.value,
-        },
-    )
-
-
-async def _dispatch_upstream_request(state: GenerationRunState) -> None:
-    async with asyncio.timeout_at(state.task_deadline):
-        await _raise_if_pre_upstream_interrupted(state)
-        await _record_generation_upstream_marker(state, response_received=False)
-        with tracer.start_as_current_span("upstream.generate_image") as span:
-            _annotate_upstream_span(state, span)
-            try:
-                await _call_upstream(state)
-                upstream_calls_total.labels(
-                    kind="generation",
-                    outcome="ok",
-                ).inc()
-            except Exception:
-                upstream_calls_total.labels(
-                    kind="generation",
-                    outcome="error",
-                ).inc()
-                raise
-
-
-async def _raise_if_pre_upstream_interrupted(
-    state: GenerationRunState,
-) -> None:
-    if state.lease_lost.is_set():
-        raise LeaseLost("generation lease renewer failed")
-    if await is_cancelled(state.redis, state.task_id):
-        raise TaskCancelled("cancelled before upstream request")
-
-
-def _annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
-    try:
-        span.set_attribute("lumen.task_id", state.task_id)
-        span.set_attribute("lumen.action", state.action)
-        span.set_attribute(
-            "lumen.size",
-            state.inpaint_size_override or state.resolved.size,
-        )
-        if state.inpaint_size_override:
-            span.set_attribute(
-                "lumen.size_requested",
-                state.resolved.size,
-            )
-        if state.reserved_provider_name:
-            span.set_attribute(
-                "lumen.provider",
-                state.reserved_provider_name,
-            )
-    except Exception:  # noqa: BLE001
-        pass
-
-
-async def _call_upstream(state: GenerationRunState) -> None:
-    started = time.monotonic()
-    state.image_iter = _build_image_iterator(state)
-    first_pair = await anext_image_with_guards(
-        state.image_iter,
-        state.lease_lost,
-        redis=state.redis,
-        task_id=state.task_id,
-    )
-    if first_pair is None:
-        raise UpstreamError(
-            "upstream image generator yielded no result",
-            error_code=EC.NO_IMAGE_RETURNED.value,
-            status_code=200,
-        )
-    await _record_generation_upstream_marker(state, response_received=True)
-    state.b64_result, state.revised_prompt = first_pair
-    state.upstream_duration_ms = int(max(0.0, time.monotonic() - started) * 1000)
-    state.stage_timer.set_ms("render", state.upstream_duration_ms)
-    _record_winner_provider(state)
-    await _consume_batch_extra_pairs(state)
-
-
-async def _record_generation_upstream_marker(
-    state: GenerationRunState,
-    *,
-    response_received: bool,
-) -> None:
-    recorded_at = datetime.now(timezone.utc).isoformat()
-    async with state.services.store.session() as session:
-        current = (
-            await session.execute(
-                select(Generation)
-                .where(
-                    Generation.id == state.task_id,
-                    Generation.attempt == state.attempt,
-                    Generation.status.in_(RUNNING_GENERATION_STATUSES),
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if current is None:
-            raise StaleGenerationAttempt(
-                f"generation marker stale task={state.task_id} attempt={state.attempt}"
-            )
-        marker = (
-            mark_upstream_response_received
-            if response_received
-            else mark_upstream_dispatch_started
-        )
-        request = marker(
-            current,
-            at=recorded_at,
-            attempt=state.attempt,
-        )
-        current.upstream_request = request
-        await session.commit()
-        state.gen_upstream_request_snapshot = dict(request)
-
-
-def _build_image_iterator(state: GenerationRunState) -> Any:
-    options = state.image_request_options
-    provider_override = None if state.is_dual_race else state.reserved_provider
-    request = GenerationProviderRequest(
-        prompt=state.prompt_for_upstream,
-        size=state.resolved.size,
-        quality=str(options["render_quality"]),
-        output_format=str(options["output_format"]),
-        output_compression=options.get("output_compression"),
-        background=str(options["background"]),
-        moderation=str(options["moderation"]),
-        n=state.requested_image_count,
-        model=str(options["responses_model"]),
-        progress_callback=state.progress_publisher,
-        provider_override=provider_override,
-        user_id=state.user_id,
-        context=GenerationProviderContext(
-            trace_id=state.trace_id,
-            retry_attempt=state.attempt,
-            quota_task_id=state.task_id,
-            quota_attempt_epoch=state.attempt,
-        ),
-    )
-    if state.action != GenerationAction.EDIT:
-        return state.services.provider.generate(request)
-    if not state.ref_for_body:
-        raise UpstreamError(
-            "edit action requires at least one reference image",
-            error_code=EC.INVALID_REQUEST_ERROR.value,
-            status_code=400,
-        )
-    edit_request = GenerationProviderEditRequest(
-        request=replace(
-            request,
-            size=state.inpaint_size_override or state.resolved.size,
-        ),
-        images=tuple(raw for _sha, raw in state.ref_for_body),
-        mask=state.mask_bytes,
-    )
-    return state.services.provider.edit(edit_request)
-
-
-def _record_winner_provider(state: GenerationRunState) -> None:
-    event = state.progress_publisher.pop_provider_used_event()
-    state.actual_upstream_provider = event.get("provider")
-    state.actual_upstream_route = event.get("route")
-    state.actual_upstream_source = event.get("source")
-    state.actual_upstream_endpoint = event.get("endpoint")
-
-
-async def _consume_batch_extra_pairs(state: GenerationRunState) -> None:
-    if not _should_consume_batch_extras(state):
-        return
-    for batch_index in range(2, state.requested_image_count + 1):
-        extra_pair = await _next_batch_extra_pair(state, batch_index)
-        if extra_pair is None:
-            break
-        state.batch_extra_pairs.append((batch_index, extra_pair))
-
-
-def _should_consume_batch_extras(state: GenerationRunState) -> bool:
-    return bool(
-        state.requested_image_count > 1
-        and state.image_iter is not None
-        and state.actual_upstream_source in {"image2_direct", "image2_edit_direct"}
-    )
-
-
-async def _next_batch_extra_pair(
-    state: GenerationRunState,
-    batch_index: int,
-) -> GeneratedImageResult | None:
-    try:
-        pair = await anext_image_with_guards(
-            state.image_iter,
-            state.lease_lost,
-            redis=state.redis,
-            task_id=state.task_id,
-        )
-    except (
-        LeaseLost,
-        TaskCancelled,
-        asyncio.CancelledError,
-    ):
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "image2 n extra iter failed task=%s index=%s err=%r",
-            state.task_id,
-            batch_index,
-            exc,
-        )
-        return None
-    if pair is None:
-        logger.warning(
-            "image2 n returned fewer images task=%s requested=%s actual=%s",
-            state.task_id,
-            state.requested_image_count,
-            batch_index - 1,
-        )
-    return pair
-
-
 async def _cleanup_generation_run(state: GenerationRunState) -> None:
     if state.renewer is not None:
         await cancel_renewer_task(state.renewer)
@@ -1365,3 +707,10 @@ def _observe_task_duration(state: GenerationRunState) -> None:
         ).observe(duration)
     except Exception:  # noqa: BLE001
         pass
+
+
+__all__ = [
+    "_build_image_iterator",
+    "_fail_queued_generation",
+    "run_generation",
+]
