@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from typing import Any, Awaitable
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.canvas_models import (
+    CanvasDocument,
     CanvasExecutionTask,
     CanvasNodeExecution,
     CanvasNodeSelection,
@@ -74,6 +76,17 @@ _CANVAS_ATTACHMENT_ROLES = frozenset(
         "other",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedNodeExecution:
+    canvas: CanvasDocument
+    resolved: ResolvedNode
+    run: CanvasRun
+    execution: CanvasNodeExecution
+    node_type: str
+    submission_key: str
+    request_fingerprint: str
 
 
 async def _await_post_commit_publish(
@@ -558,45 +571,12 @@ def _execution_metadata(
     }
 
 
-async def execute_node(
+async def _raise_if_active_execution(
     db: AsyncSession,
     *,
-    user: User,
-    canvas_id: str,
+    canvas: CanvasDocument,
     node_id: str,
-    body: CanvasExecuteIn,
-    header_idempotency_key: str | None,
-    request: Request,
-) -> tuple[CanvasRun, CanvasNodeExecution]:
-    if header_idempotency_key != body.idempotency_key:
-        raise canvas_http(
-            "idempotency_key_mismatch",
-            "Idempotency-Key must match idempotency_key",
-            422,
-        )
-    request_fingerprint = stable_hash(
-        {
-            "canvas_id": canvas_id,
-            "node_id": node_id,
-            "document_revision": body.document_revision,
-            "auto_select_on_success": body.auto_select_on_success,
-        }
-    )
-    replay = await _serialized_idempotent_run(
-        db,
-        user_id=user.id,
-        idempotency_key=body.idempotency_key,
-        request_fingerprint=request_fingerprint,
-    )
-    if replay is not None:
-        return replay
-
-    canvas = await get_owned_canvas(
-        db,
-        user_id=user.id,
-        canvas_id=canvas_id,
-        lock=True,
-    )
+) -> None:
     active = (
         await db.execute(
             select(CanvasRun, CanvasNodeExecution)
@@ -620,6 +600,24 @@ async def execute_node(
             execution_id=active_execution.id,
             status=active_execution.status,
         )
+
+
+async def _prepare_node_execution(
+    db: AsyncSession,
+    *,
+    user: User,
+    canvas_id: str,
+    node_id: str,
+    body: CanvasExecuteIn,
+    request_fingerprint: str,
+) -> PreparedNodeExecution | tuple[CanvasRun, CanvasNodeExecution]:
+    canvas = await get_owned_canvas(
+        db,
+        user_id=user.id,
+        canvas_id=canvas_id,
+        lock=True,
+    )
+    await _raise_if_active_execution(db, canvas=canvas, node_id=node_id)
     if int(canvas.revision) != body.document_revision:
         raise canvas_http(
             "canvas_revision_conflict",
@@ -757,75 +755,101 @@ async def execute_node(
             "status": "queued",
         },
     )
-    metadata = _execution_metadata(
-        canvas_id=canvas.id,
-        run_id=run.id,
-        node_id=node_id,
-        execution_id=execution.id,
+    return PreparedNodeExecution(
+        canvas=canvas,
         resolved=resolved,
+        run=run,
+        execution=execution,
+        node_type=node_type,
+        submission_key=submission_key,
+        request_fingerprint=request_fingerprint,
     )
 
-    if node_type in IMAGE_EXECUTABLE_NODE_TYPES:
-        attachment_ids, mask_image_id = _image_task_inputs(
-            node_type=node_type,
-            resolved=resolved,
-        )
-        submission = await create_canvas_image_task(
-            db,
-            user=user,
-            canvas=canvas,
-            prompt=resolved.prompt,
-            attachment_ids=attachment_ids,
-            mask_image_id=mask_image_id,
-            image_params=_image_params(config),
-            idempotency_key=submission_key,
-            metadata=metadata,
-        )
-        if not submission.generation_ids:
-            raise canvas_http(
-                "canvas_task_not_created",
-                "image generation task was not created",
-                500,
-            )
-        for ordinal, generation_id in enumerate(submission.generation_ids):
-            db.add(
-                CanvasExecutionTask(
-                    execution_id=execution.id,
-                    ordinal=ordinal,
-                    task_kind="generation",
-                    generation_id=generation_id,
-                    status="queued",
-                    idempotency_key=f"{submission_key}:{ordinal}"[:96],
-                    request_fingerprint=request_fingerprint,
-                    billing_ref_type="generation",
-                    billing_ref_id=generation_id,
-                    output_jsonb={},
-                )
-            )
-        await db.commit()
-        await _await_post_commit_publish(
-            "image",
-            publish_canvas_image_task(
-                db,
-                user_id=user.id,
-                submission=submission,
-            ),
-            canvas_id=canvas.id,
-            execution_id=execution.id,
-        )
-        return run, execution
 
+def _prepared_execution_metadata(prepared: PreparedNodeExecution) -> dict[str, Any]:
+    return _execution_metadata(
+        canvas_id=prepared.canvas.id,
+        run_id=prepared.run.id,
+        node_id=prepared.execution.node_id,
+        execution_id=prepared.execution.id,
+        resolved=prepared.resolved,
+    )
+
+
+async def _submit_image_execution(
+    db: AsyncSession,
+    *,
+    user: User,
+    prepared: PreparedNodeExecution,
+) -> tuple[CanvasRun, CanvasNodeExecution]:
+    attachment_ids, mask_image_id = _image_task_inputs(
+        node_type=prepared.node_type,
+        resolved=prepared.resolved,
+    )
+    submission = await create_canvas_image_task(
+        db,
+        user=user,
+        canvas=prepared.canvas,
+        prompt=prepared.resolved.prompt,
+        attachment_ids=attachment_ids,
+        mask_image_id=mask_image_id,
+        image_params=_image_params(dict(prepared.resolved.node.get("config") or {})),
+        idempotency_key=prepared.submission_key,
+        metadata=_prepared_execution_metadata(prepared),
+    )
+    if not submission.generation_ids:
+        raise canvas_http(
+            "canvas_task_not_created",
+            "image generation task was not created",
+            500,
+        )
+    for ordinal, generation_id in enumerate(submission.generation_ids):
+        db.add(
+            CanvasExecutionTask(
+                execution_id=prepared.execution.id,
+                ordinal=ordinal,
+                task_kind="generation",
+                generation_id=generation_id,
+                status="queued",
+                idempotency_key=f"{prepared.submission_key}:{ordinal}"[:96],
+                request_fingerprint=prepared.request_fingerprint,
+                billing_ref_type="generation",
+                billing_ref_id=generation_id,
+                output_jsonb={},
+            )
+        )
+    await db.commit()
+    await _await_post_commit_publish(
+        "image",
+        publish_canvas_image_task(
+            db,
+            user_id=user.id,
+            submission=submission,
+        ),
+        canvas_id=prepared.canvas.id,
+        execution_id=prepared.execution.id,
+    )
+    return prepared.run, prepared.execution
+
+
+async def _submit_video_execution(
+    db: AsyncSession,
+    *,
+    user: User,
+    request: Request,
+    prepared: PreparedNodeExecution,
+) -> tuple[CanvasRun, CanvasNodeExecution]:
     if getattr(user, "account_mode", "wallet") != "wallet":
         raise canvas_http(
             "account_mode_forbidden",
             "video generation requires wallet mode",
             403,
         )
-    video_key = f"cv:{execution.id}"[:96]
+    video_key = f"cv:{prepared.execution.id}"[:96]
     video_body = await _video_body(
         db,
         user=user,
-        resolved=resolved,
+        resolved=prepared.resolved,
         idempotency_key=video_key,
     )
     video_submission = await create_canvas_video_task(
@@ -833,7 +857,7 @@ async def execute_node(
         body=video_body,
         user=user,
         request=request,
-        metadata=metadata,
+        metadata=_prepared_execution_metadata(prepared),
     )
     video_out = video_submission.generation
     actual = (
@@ -843,7 +867,7 @@ async def execute_node(
     ).scalar_one()
     db.add(
         CanvasExecutionTask(
-            execution_id=execution.id,
+            execution_id=prepared.execution.id,
             ordinal=0,
             task_kind="video_generation",
             video_generation_id=actual.id,
@@ -859,7 +883,59 @@ async def execute_node(
     await _await_post_commit_publish(
         "video",
         publish_canvas_video_task(submission=video_submission),
-        canvas_id=canvas.id,
-        execution_id=execution.id,
+        canvas_id=prepared.canvas.id,
+        execution_id=prepared.execution.id,
     )
-    return run, execution
+    return prepared.run, prepared.execution
+
+
+async def execute_node(
+    db: AsyncSession,
+    *,
+    user: User,
+    canvas_id: str,
+    node_id: str,
+    body: CanvasExecuteIn,
+    header_idempotency_key: str | None,
+    request: Request,
+) -> tuple[CanvasRun, CanvasNodeExecution]:
+    if header_idempotency_key != body.idempotency_key:
+        raise canvas_http(
+            "idempotency_key_mismatch",
+            "Idempotency-Key must match idempotency_key",
+            422,
+        )
+    request_fingerprint = stable_hash(
+        {
+            "canvas_id": canvas_id,
+            "node_id": node_id,
+            "document_revision": body.document_revision,
+            "auto_select_on_success": body.auto_select_on_success,
+        }
+    )
+    replay = await _serialized_idempotent_run(
+        db,
+        user_id=user.id,
+        idempotency_key=body.idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
+    if replay is not None:
+        return replay
+    prepared = await _prepare_node_execution(
+        db,
+        user=user,
+        canvas_id=canvas_id,
+        node_id=node_id,
+        body=body,
+        request_fingerprint=request_fingerprint,
+    )
+    if isinstance(prepared, tuple):
+        return prepared
+    if prepared.node_type in IMAGE_EXECUTABLE_NODE_TYPES:
+        return await _submit_image_execution(db, user=user, prepared=prepared)
+    return await _submit_video_execution(
+        db,
+        user=user,
+        request=request,
+        prepared=prepared,
+    )

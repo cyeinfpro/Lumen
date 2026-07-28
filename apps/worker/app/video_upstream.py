@@ -279,6 +279,66 @@ def _validate_video_download_response(response: httpx.Response) -> None:
         )
 
 
+async def _stream_video_response(
+    response: httpx.Response,
+    *,
+    ensure_active: Callable[[], None] | None,
+) -> DownloadedVideo:
+    fd, raw_path = tempfile.mkstemp(
+        prefix="lumen-video-download-",
+        suffix=".part",
+    )
+    path = Path(raw_path)
+    total = 0
+    prefix = bytearray()
+    declared_mime = response.headers.get("content-type")
+    try:
+        with os.fdopen(fd, "wb") as file_obj:
+            async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                if ensure_active is not None:
+                    ensure_active()
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > _VIDEO_FETCH_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        "video fetch response exceeds maximum size",
+                        error_code="fetch_failed",
+                        status_code=413,
+                    )
+                if len(prefix) < 4096:
+                    remaining = 4096 - len(prefix)
+                    prefix.extend(chunk[:remaining])
+                file_obj.write(chunk)
+        if not total:
+            raise VideoUpstreamError(
+                "video fetch response was empty",
+                error_code="fetch_failed",
+                status_code=response.status_code,
+            )
+        try:
+            mime, extension = detect_video_media(bytes(prefix), declared_mime)
+        except UnsupportedVideoMediaError as exc:
+            raise VideoUpstreamError(
+                "video fetch response was not a supported video",
+                error_code="fetch_failed",
+                status_code=415,
+                raw={"content_type": declared_mime},
+            ) from exc
+        if ensure_active is not None:
+            ensure_active()
+        return DownloadedVideo(
+            path=path,
+            mime=mime,
+            extension=extension,
+            size_bytes=total,
+            declared_mime=declared_mime,
+        )
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 async def _download_video_url(
     video_url: str,
     *,
@@ -320,62 +380,10 @@ async def _download_video_url(
                     current_url = redirect_url
                     continue
                 _validate_video_download_response(response)
-                fd, raw_path = tempfile.mkstemp(
-                    prefix="lumen-video-download-",
-                    suffix=".part",
+                return await _stream_video_response(
+                    response,
+                    ensure_active=ensure_active,
                 )
-                path = Path(raw_path)
-                total = 0
-                prefix = bytearray()
-                declared_mime = response.headers.get("content-type")
-                try:
-                    with os.fdopen(fd, "wb") as file_obj:
-                        async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                            if ensure_active is not None:
-                                ensure_active()
-                            if not chunk:
-                                continue
-                            total += len(chunk)
-                            if total > _VIDEO_FETCH_MAX_BYTES:
-                                raise VideoUpstreamError(
-                                    "video fetch response exceeds maximum size",
-                                    error_code="fetch_failed",
-                                    status_code=413,
-                                )
-                            if len(prefix) < 4096:
-                                remaining = 4096 - len(prefix)
-                                prefix.extend(chunk[:remaining])
-                            file_obj.write(chunk)
-                    if not total:
-                        raise VideoUpstreamError(
-                            "video fetch response was empty",
-                            error_code="fetch_failed",
-                            status_code=response.status_code,
-                        )
-                    try:
-                        mime, extension = detect_video_media(
-                            bytes(prefix),
-                            declared_mime,
-                        )
-                    except UnsupportedVideoMediaError as exc:
-                        raise VideoUpstreamError(
-                            "video fetch response was not a supported video",
-                            error_code="fetch_failed",
-                            status_code=415,
-                            raw={"content_type": declared_mime},
-                        ) from exc
-                    if ensure_active is not None:
-                        ensure_active()
-                    return DownloadedVideo(
-                        path=path,
-                        mime=mime,
-                        extension=extension,
-                        size_bytes=total,
-                        declared_mime=declared_mime,
-                    )
-                except BaseException:
-                    path.unlink(missing_ok=True)
-                    raise
     raise VideoUpstreamError(
         "video fetch exceeded redirect limit",
         error_code="fetch_failed",

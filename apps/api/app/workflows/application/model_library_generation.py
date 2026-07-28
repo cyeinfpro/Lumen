@@ -20,6 +20,18 @@ MODEL_LIBRARY_TITLE_AGE_LABELS: Mapping[str, str] = MappingProxyType(
     }
 )
 
+MODEL_LIBRARY_AGE_DIRECTIVES: Mapping[str, str] = MappingProxyType(
+    {
+        "toddler": "age 2-4, toddler proportions",
+        "child": "age 5-12, child proportions",
+        "teen": "age 13-17, teen proportions",
+        "young_adult": "age 18-29, young adult proportions",
+        "adult": "age 30-44, mature adult proportions",
+        "middle_aged": "age 45-59, middle-aged adult proportions",
+        "senior": "age 60 or older, senior adult proportions",
+    }
+)
+
 
 def model_library_gender_label(genders: list[str]) -> str:
     if set(genders) == {"female", "male"}:
@@ -67,21 +79,7 @@ def model_library_generate_prompt(
     appearance = (appearance_direction or "").strip()
     extras = (extra_requirements or "").strip()
     tag_text = ", ".join(clean_style_tags(style_tags)) if style_tags else ""
-    age_directive = ""
-    if age_segment == "toddler":
-        age_directive = "age 2-4, toddler proportions"
-    elif age_segment == "child":
-        age_directive = "age 5-12, child proportions"
-    elif age_segment == "teen":
-        age_directive = "age 13-17, teen proportions"
-    elif age_segment == "young_adult":
-        age_directive = "age 18-29, young adult proportions"
-    elif age_segment == "adult":
-        age_directive = "age 30-44, mature adult proportions"
-    elif age_segment == "middle_aged":
-        age_directive = "age 45-59, middle-aged adult proportions"
-    elif age_segment == "senior":
-        age_directive = "age 60 or older, senior adult proportions"
+    age_directive = MODEL_LIBRARY_AGE_DIRECTIVES.get(age_segment, "")
     base_styling = "warm ivory sleeveless top and warm ivory shorts, barefoot"
     appearance_directive = f"Appearance direction: {appearance}." if appearance else ""
     style_directive = f"Style references: {tag_text}." if tag_text else ""
