@@ -851,8 +851,7 @@ async def test_sync_releases_process_lock_before_external_io(
     ) -> Any:
         assert proxy_url is None
         assert lease_token
-        assert type(plib._SYNC_LOCK).__name__ == "_FileLockCompatibilityContext"
-        assert plib._SYNC_LOCK.locked() is False
+        assert not hasattr(plib, "_SYNC_LOCK")
         return poster_styles.PosterStyleSyncOut(status="ok")
 
     monkeypatch.setattr(poster_styles, "_do_sync_library_presets", fake_sync)
