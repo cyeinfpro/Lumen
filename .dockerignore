@@ -49,8 +49,6 @@ credentials.json
 **/credentials.json
 shared/
 
-image-job/
-
 docs/
 ISSUES.md
 tools/
