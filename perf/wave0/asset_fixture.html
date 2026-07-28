@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Lumen Wave 0 Asset Fixture</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: #f4f4f5;
+        color: #18181b;
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+        padding: 12px;
+      }
+
+      .asset-tile {
+        min-height: 160px;
+        overflow: hidden;
+        border: 1px solid #d4d4d8;
+        border-radius: 6px;
+        background: #fff;
+      }
+
+      .asset-tile img {
+        display: block;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        background: #e4e4e7;
+        object-fit: cover;
+      }
+
+      .asset-tile span {
+        display: block;
+        padding: 6px 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="assets"></main>
+    <script>
+      const count = Number(new URLSearchParams(location.search).get("count") || 1000);
+      const root = document.querySelector("#assets");
+      const fragment = document.createDocumentFragment();
+      const metrics = {
+        count,
+        image_errors: 0,
+        long_tasks: [],
+        preview_fallbacks: 0,
+        scenario_counts: {
+          missing_thumb: 0,
+          pending: 0,
+          thumb_404: 0,
+        },
+      };
+      window.__wave0Metrics = metrics;
+
+      if ("PerformanceObserver" in window) {
+        try {
+          new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              metrics.long_tasks.push(entry.duration);
+            }
+          }).observe({ entryTypes: ["longtask"] });
+        } catch {
+          // Long Task API is optional in some headless/browser versions.
+        }
+      }
+
+      for (let index = 0; index < count; index += 1) {
+        const percentile = index % 100;
+        const tile = document.createElement("article");
+        tile.className = "asset-tile";
+        tile.dataset.assetId = `asset-${index}`;
+        const image = document.createElement("img");
+        image.alt = `asset ${index}`;
+        image.loading = "lazy";
+        image.decoding = "async";
+
+        if (percentile < 1) {
+          metrics.scenario_counts.pending += 1;
+          image.removeAttribute("src");
+        } else if (percentile < 3) {
+          metrics.scenario_counts.thumb_404 += 1;
+          image.src = `/img/${index}/thumb?fail=1`;
+          image.addEventListener(
+            "error",
+            () => {
+              metrics.image_errors += 1;
+              metrics.preview_fallbacks += 1;
+              image.src = `/img/${index}/preview`;
+            },
+            { once: true },
+          );
+        } else if (percentile < 8) {
+          metrics.scenario_counts.missing_thumb += 1;
+          image.src = `/img/${index}/preview`;
+        } else {
+          image.src = `/img/${index}/thumb`;
+        }
+
+        const label = document.createElement("span");
+        label.textContent = `asset-${index}`;
+        tile.append(image, label);
+        fragment.append(tile);
+      }
+      root.append(fragment);
+      performance.mark("wave0:first-interactive");
+    </script>
+  </body>
+</html>
