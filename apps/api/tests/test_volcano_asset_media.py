@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image as PILImage
 
-from app import volcano_asset_media
+from lumen_core import volcano_asset_media
 
 
 def _png(path: Path, size: tuple[int, int], color=(120, 80, 40)) -> None:

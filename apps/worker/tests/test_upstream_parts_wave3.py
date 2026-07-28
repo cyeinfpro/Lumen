@@ -135,7 +135,9 @@ def test_wave3_modules_are_owned_by_public_service_groups() -> None:
 
 
 def test_wave3_facade_and_modules_stay_below_line_limits() -> None:
-    public_source = Path(__file__).parents[1] / "app" / "upstream.py"
+    public_source = (
+        Path(__file__).parents[1] / "app" / "upstream_parts" / "entrypoints.py"
+    )
     assert len(public_source.read_text().splitlines()) < 200
     assert len(Path(upstream.__file__).read_text().splitlines()) < 3000
 
@@ -170,7 +172,8 @@ def test_retry_budget_classification_survives_extraction(
     )
 
     assert (
-        TEST_UPSTREAM_SERVICES.retry.max_attempts_for_exception(exc) == expected_attempts
+        TEST_UPSTREAM_SERVICES.retry.max_attempts_for_exception(exc)
+        == expected_attempts
     )
 
 
