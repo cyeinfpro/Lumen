@@ -14,7 +14,7 @@ from lumen_core.video_providers import (
     select_video_provider,
 )
 
-from ...video_upstream import VideoReferenceMedia, VideoUpstreamError
+from ...video_upstream_service import VideoReferenceMedia, VideoUpstreamError
 
 
 async def provider_config():

@@ -55,7 +55,7 @@ def _sync_video_ports(
         yield
 
 
-from app.video_upstream import (
+from app.video_upstream_service import (
     PollResult,
     VideoSubmitRequest,
     VideoUpstreamError,

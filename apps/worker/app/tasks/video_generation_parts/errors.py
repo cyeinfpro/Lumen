@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from ...video_upstream import VideoUpstreamError
+from ...video_upstream_service import VideoUpstreamError
 
 
 SUBMIT_RETRY_DELAYS_S = (8, 24, 60)

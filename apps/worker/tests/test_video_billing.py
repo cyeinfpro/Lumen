@@ -7,7 +7,7 @@ import pytest
 
 from app import video_artifacts, video_billing
 from app.tasks.video_generation_parts import default_runtime as video_generation
-from app.video_upstream import PollResult
+from app.video_upstream_service import PollResult
 from lumen_core.models import VideoGeneration
 
 

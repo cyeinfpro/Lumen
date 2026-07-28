@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import video_upstream as video_upstream_module
+from app import video_upstream_service as video_upstream_module
 from app.tasks.video_generation_parts import default_runtime as video_generation_tasks
 from app.tasks.video_generation_parts.default_runtime import (
     _reference_media_bytes,
@@ -29,7 +29,7 @@ def _sync_video_ports(
         yield
 
 
-from app.video_upstream import (
+from app.video_upstream_service import (
     CancelResult,
     DashScopeHappyHorseAdapter,
     UnifiedVideoCreateAdapter,

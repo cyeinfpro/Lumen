@@ -35,7 +35,7 @@ from apps.worker.tests.volcano_asset_test_support import (
 async def test_provider_operation_binding_uses_exact_named_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     expected = _provider()
     higher_priority = VideoProviderDefinition(
@@ -91,7 +91,7 @@ async def test_provider_operation_binding_uses_exact_named_provider(
 
 @pytest.fixture(autouse=True)
 def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     async def read(
         _operation: dict[str, Any],
@@ -114,7 +114,7 @@ def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_create_dispatch_passes_storage_coordinator_from_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     operation = {
         "id": "operation-1",
@@ -184,7 +184,7 @@ async def test_create_dispatch_passes_storage_coordinator_from_context(
 async def test_worker_create_asset_forces_scope_and_safe_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _operation()
@@ -300,7 +300,7 @@ async def test_worker_create_asset_forces_scope_and_safe_url(
 async def test_worker_asset_quota_failure_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -353,7 +353,7 @@ async def test_worker_asset_quota_failure_is_retryable(
 async def test_worker_defers_when_actual_create_qpm_is_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -407,7 +407,7 @@ async def test_worker_defers_when_actual_create_qpm_is_full(
 
 @pytest.mark.asyncio
 async def test_worker_operation_lock_defers_duplicate_delivery() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     redis = _Redis(_operation())
     redis.values["video-assets:operation-lock:operation-1"] = "other-worker"
@@ -433,7 +433,7 @@ async def test_worker_operation_lock_defers_duplicate_delivery() -> None:
 async def test_worker_skips_failed_and_stale_deliveries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     failed = _operation()
     failed.update(
@@ -481,7 +481,7 @@ async def test_worker_skips_failed_and_stale_deliveries(
 async def test_worker_normalizes_legacy_empty_name_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _operation()
@@ -535,7 +535,7 @@ async def test_worker_normalizes_legacy_empty_name_before_submit(
 async def test_worker_recovers_success_receipt_without_resubmitting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -628,7 +628,7 @@ async def test_worker_recovers_success_receipt_without_resubmitting(
 async def test_worker_reconciles_ambiguous_create_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -703,7 +703,7 @@ async def test_worker_reconciles_ambiguous_create_response(
 async def test_worker_never_resubmits_when_create_asset_reconcile_is_ambiguous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = {
@@ -776,7 +776,7 @@ async def test_worker_never_resubmits_when_create_asset_reconcile_is_ambiguous(
 async def test_worker_recovers_unconfirmed_rate_limit_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -843,7 +843,7 @@ async def test_worker_recovers_unconfirmed_rate_limit_delivery(
 async def test_worker_does_not_submit_after_lease_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -903,7 +903,7 @@ async def test_worker_does_not_submit_after_lease_loss(
 async def test_operation_heartbeat_converges_during_redis_outage_near_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     operation = _operation()
     redis = _Redis(operation)
@@ -952,7 +952,7 @@ async def test_operation_heartbeat_converges_during_redis_outage_near_ttl(
 async def test_old_owner_cannot_persist_success_or_failure_after_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     async def reject_receipt(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("superseded owner must not write a receipt")
@@ -1017,7 +1017,7 @@ async def test_old_owner_cannot_persist_success_or_failure_after_replacement(
 
 @pytest.mark.asyncio
 async def test_terminal_boundary_rejects_superseded_attempt() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     operation = _operation()
     redis = _Redis(operation)
@@ -1064,7 +1064,7 @@ async def test_terminal_boundary_rejects_superseded_attempt() -> None:
 async def test_worker_create_group_uses_group_quota_without_create_asset_qpm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
@@ -1141,7 +1141,7 @@ async def test_worker_create_group_uses_group_quota_without_create_asset_qpm(
 async def test_worker_create_group_does_not_claim_unique_heuristic_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
@@ -1228,7 +1228,7 @@ async def test_worker_create_group_does_not_claim_unique_heuristic_candidate(
 async def test_worker_create_group_never_resubmits_when_reconcile_is_not_unique(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
