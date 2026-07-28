@@ -60,5 +60,10 @@ test("runtime recovery login uses the shared safe replace navigation", () => {
   match(source, /md:bottom-4 md:left-auto md:right-4 md:top-auto/);
   match(source, /aria-label=\{unauthorized \? "登录" : "立即恢复实时连接"\}/);
   match(source, /className="pointer-events-none fixed/);
+  match(
+    source,
+    /if \(!unauthorized && !sessionDegraded && !realtimeDegraded\) return null;/,
+  );
+  doesNotMatch(source, /"正在连接"|"正在确认会话"|animate-spin/);
   doesNotMatch(source, /location\.assign/);
 });
