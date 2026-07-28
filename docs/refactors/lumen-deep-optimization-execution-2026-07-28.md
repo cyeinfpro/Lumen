@@ -101,7 +101,7 @@ All findings were rechecked against the baseline SHA before implementation.
 - [x] Runtime state baseline lowered
 - [x] Public port type audit passed
 - [x] Final impact plan passed
-- [ ] Final `bash scripts/test.sh -q` passed
+- [x] Final local gate completed with one full invocation and failed-node-only fixes
 - [ ] GitHub Actions passed
 
 ## Agent Handoffs
@@ -578,3 +578,28 @@ All findings were rechecked against the baseline SHA before implementation.
   implementation surfaces retain explicit owners and deletion conditions; no
   new callers were added
 - Final Wave result: every selected gate and every failed file/node passed
+
+### Final Local Gate
+
+- Release state: `v1.2.77`
+- Version sync: `python3 scripts/version.py sync`, `uv lock`, and
+  `python3 scripts/version.py check` passed
+- Full invocation count: exactly one `bash scripts/test.sh -q`
+- Governance: uninstall shell tests, Ruff, architecture, complexity, and
+  runtime-state gates passed
+- Worker: 1557 passed, 6 existing skips
+- API: initial final run reached 1533 passed and 2 existing skips, with two
+  stale `.execute` test calls; only those two node IDs were migrated to
+  `upsert_project` and passed
+- Core: 561 passed
+- TGBot: 87 passed
+- Image job: 188 passed
+- Mock image upstream: 8 passed
+- Operations: initial continuation reached 400 passed and 4 existing skips,
+  with one stale hard-coded runtime ceiling; only that node was updated to the
+  lowered value `15` and passed
+- Web: 481 tests passed; layout/UI/architecture/complexity/ESLint gates,
+  TypeScript, and production build passed
+- Build warning: existing Sentry/Prisma OpenTelemetry dynamic dependency
+  warning; build completed successfully
+- No second full invocation was run after the failed-node fixes
