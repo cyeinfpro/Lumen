@@ -420,9 +420,22 @@ test("architecture gate rejects layer inversion and dependency cycles", () => {
         source: "lib/domain.ts",
         target: "components/widget.ts",
       },
+      {
+        rule: "store-to-store-import",
+        source: "store/first.ts",
+        target: "store/second.ts",
+      },
+      {
+        rule: "store-to-store-import",
+        source: "store/second.ts",
+        target: "store/first.ts",
+      },
     ]);
     assert.deepEqual(findings.cycles, [
       ["store/first.ts", "store/second.ts"],
+    ]);
+    assert.deepEqual(findings.cyclePaths, [
+      ["store/first.ts", "store/second.ts", "store/first.ts"],
     ]);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
