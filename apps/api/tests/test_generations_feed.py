@@ -113,7 +113,9 @@ def test_generation_feed_fast_filter_accepts_legacy_true_values() -> None:
         )
     )
 
-    assert "lower((generations.upstream_request ->> 'fast')) IN ('true', '1')" in rendered
+    assert (
+        "lower((generations.upstream_request ->> 'fast')) IN ('true', '1')" in rendered
+    )
 
 
 def test_generation_feed_output_treats_string_false_fast_as_disabled() -> None:
@@ -122,7 +124,9 @@ def test_generation_feed_output_treats_string_false_fast_as_disabled() -> None:
     assert generations._bool_option("true") is True
 
 
-def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page() -> None:
+def test_generation_feed_cursor_carries_total_and_filter_signature_for_next_page() -> (
+    None
+):
     created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     filter_sig = generations._feed_filter_signature(
         user_id="user-1",
@@ -171,7 +175,9 @@ def test_generation_feed_cursor_decodes_legacy_v1_without_total() -> None:
     assert decoded_filter_sig is None
 
 
-def test_generation_feed_legacy_v2_total_is_not_trusted_without_filter_signature() -> None:
+def test_generation_feed_legacy_v2_total_is_not_trusted_without_filter_signature() -> (
+    None
+):
     created_at = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
     raw = f"v2|{created_at.isoformat()}|gen-1|123".encode("utf-8")
     cursor = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -400,8 +406,8 @@ async def test_generation_feed_empty_race_page_keeps_next_cursor() -> None:
     assert out.items == []
     assert out.total == 2
     assert out.next_cursor is not None
-    _created_at, generation_id, cursor_total, _filter_sig = (
-        generations._decode_cursor(out.next_cursor)
+    _created_at, generation_id, cursor_total, _filter_sig = generations._decode_cursor(
+        out.next_cursor
     )
     assert generation_id == "gen-2"
     assert cursor_total == 2

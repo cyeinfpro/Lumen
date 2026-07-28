@@ -338,10 +338,11 @@ name = "api-stream-assets"
 paths = [
   "apps/api/app/routes/generations.py",
   "apps/api/app/images/application/http_routes.py",
+  "apps/api/app/images/application/visibility_batch.py",
   "apps/api/app/images/**/*variant*.py",
 ]
 commands = [
-  "uv run pytest -q apps/api/tests/test_generations_feed.py apps/api/tests/images/test_artifact_runtime_regressions.py apps/api/tests/images/test_variant_service.py",
+  "uv run pytest -q apps/api/tests/test_generations_feed.py apps/api/tests/images/test_artifact_runtime_regressions.py apps/api/tests/test_core_security_infra.py",
 ]
 gates = [
   "python-ruff",
@@ -364,12 +365,23 @@ paths = [
   "apps/web/src/features/assets/**",
 ]
 commands = [
-  "cd apps/web && npm test -- __tests__/admin-lightbox-dead-code.test.mjs src/components/ui/shell/StudioLayoutContracts.test.ts",
+  "cd apps/web && npm test -- src/components/ui/stream/sourceCandidates.test.ts src/components/ui/stream/VirtualMasonry.test.ts src/lib/prewarmScheduler.test.ts src/lib/streamQuery.test.ts src/components/ui/stream/AssetTile.test.ts src/components/ui/shell/StreamSearchWiring.test.ts __tests__/admin-lightbox-dead-code.test.mjs src/components/ui/shell/StudioLayoutContracts.test.ts",
 ]
 gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["asset-loading"]
 resources = []
 allow_empty = true
+
+[[rules]]
+name = "perf-wave3-assets"
+paths = ["perf/wave3/**"]
+commands = [
+  "node --test perf/wave3/model.test.mjs",
+  "uv run pytest -q perf/wave3/test_run.py",
+]
+gates = ["python-ruff"]
+risk = ["asset-loading", "browser-smoke"]
+resources = []
 
 [[rules]]
 name = "shared-core"

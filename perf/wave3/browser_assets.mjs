@@ -58,6 +58,9 @@ function parseArgs(argv) {
   if (!["legacy", "target"].includes(options.mode)) {
     throw new Error("--mode must be legacy or target");
   }
+  if (options.url && options.tileSelector === ".asset-tile") {
+    options.tileSelector = "[data-mounted-tile]";
+  }
   return options;
 }
 
@@ -284,18 +287,31 @@ class CdpClient {
 }
 
 async function evaluate(client, expression) {
-  const response = await client.send("Runtime.evaluate", {
-    awaitPromise: true,
-    expression,
-    returnByValue: true,
-  });
-  if (response.exceptionDetails) {
-    throw new Error(
-      response.exceptionDetails.exception?.description ??
-        response.exceptionDetails.text,
-    );
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const response = await client.send("Runtime.evaluate", {
+        awaitPromise: true,
+        expression,
+        returnByValue: true,
+      });
+      if (response.exceptionDetails) {
+        throw new Error(
+          response.exceptionDetails.exception?.description ??
+            response.exceptionDetails.text,
+        );
+      }
+      return response.result.value;
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      const navigationRace =
+        message.includes("Inspected target navigated or closed") ||
+        message.includes("Execution context was destroyed") ||
+        message.includes("Cannot find context");
+      if (!navigationRace || attempt === 19) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
-  return response.result.value;
+  throw new Error("runtime evaluation retry budget exhausted");
 }
 
 async function performanceMetrics(client) {
@@ -372,19 +388,33 @@ async function runBrowser(options) {
       responses: 0,
       searchRequests: 0,
     };
+    const requestCounts = new Map();
+    const failedThumbCounts = new Map();
+    let initialFeedRequests = 0;
     client.on("Network.requestWillBeSent", ({ request }) => {
       network.requests += 1;
+      requestCounts.set(request.url, (requestCounts.get(request.url) ?? 0) + 1);
       if (request.url.includes("/binary")) network.binaryRequests += 1;
       if (request.url.includes("/display")) network.displayRequests += 1;
-      if (
-        request.url.includes("/api/generations/feed") &&
-        new URL(request.url).searchParams.has("q")
-      ) {
-        network.searchRequests += 1;
+      if (request.url.includes("/api/generations/feed")) {
+        if (new URL(request.url).searchParams.has("q")) {
+          network.searchRequests += 1;
+        } else {
+          initialFeedRequests += 1;
+        }
       }
     });
-    client.on("Network.responseReceived", () => {
+    client.on("Network.responseReceived", ({ response }) => {
       network.responses += 1;
+      if (
+        response.status >= 400 &&
+        response.url.includes("/variants/thumb256")
+      ) {
+        failedThumbCounts.set(
+          response.url,
+          (failedThumbCounts.get(response.url) ?? 0) + 1,
+        );
+      }
     });
     client.on("Network.loadingFinished", ({ encodedDataLength }) => {
       network.encodedBytes += encodedDataLength ?? 0;
@@ -429,6 +459,27 @@ async function runBrowser(options) {
       source: connectionOverride,
     });
     const headers = { ...options.headers };
+    const cookieHeaderKey = Object.keys(headers).find(
+      (key) => key.toLowerCase() === "cookie",
+    );
+    let configuredCookies = 0;
+    if (cookieHeaderKey) {
+      const cookieHeader = String(headers[cookieHeaderKey] ?? "");
+      delete headers[cookieHeaderKey];
+      for (const pair of cookieHeader.split(";")) {
+        const separator = pair.indexOf("=");
+        if (separator <= 0) continue;
+        const name = pair.slice(0, separator).trim();
+        const value = pair.slice(separator + 1).trim();
+        if (!name || !value) continue;
+        const configured = await client.send("Network.setCookie", {
+          name,
+          url: targetUrl,
+          value,
+        });
+        if (configured.success) configuredCookies += 1;
+      }
+    }
     if (options.saveData) headers["Save-Data"] = "on";
     if (Object.keys(headers).length > 0) {
       await client.send("Network.setExtraHTTPHeaders", { headers });
@@ -440,14 +491,58 @@ async function runBrowser(options) {
     await evaluate(
       client,
       `(async () => {
-        const deadline = Date.now() + 10000;
-        while (document.documentElement.dataset.ready !== "true") {
-          if (Date.now() > deadline) throw new Error("fixture readiness timeout");
+        const deadline = Date.now() + ${options.url ? 30000 : 10000};
+        while (true) {
+          const fixtureReady =
+            document.documentElement.dataset.ready === "true";
+          const targetReady =
+            document.readyState === "complete" &&
+            document.querySelector(${JSON.stringify(options.tileSelector)});
+          if (${JSON.stringify(Boolean(options.url))} ? targetReady : fixtureReady) {
+            break;
+          }
+          if (Date.now() > deadline) {
+            throw new Error(${JSON.stringify(
+              options.url
+                ? "target page readiness timeout"
+                : "fixture readiness timeout",
+            )});
+          }
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
         return true;
       })()`,
     );
+    const initialFeedRequestsBeforeSearch = initialFeedRequests;
+    const productSearchEvidence = options.url
+      ? await evaluate(
+          client,
+          `(async () => {
+            const response = await fetch(
+              "/api/generations/feed?limit=50&q=${encodeURIComponent(
+                DEFAULT_FIXTURE.searchQuery,
+              )}",
+              { credentials: "include" }
+            );
+            const payload = await response.json();
+            return {
+              matchedQuery: Array.isArray(payload.items)
+                ? payload.items.some((item) =>
+                    String(item.prompt ?? "")
+                      .toLowerCase()
+                      .includes(${JSON.stringify(
+                        DEFAULT_FIXTURE.searchQuery,
+                      )})
+                  )
+                : false,
+              resultIds: Array.isArray(payload.items)
+                ? payload.items.map((item) => item.id)
+                : [],
+              searchStatus: response.status
+            };
+          })()`,
+        )
+      : null;
     await client.send("HeapProfiler.collectGarbage");
     const initialPerformance = await performanceMetrics(client);
 
@@ -455,29 +550,73 @@ async function runBrowser(options) {
       client,
       `(async () => {
         const samples = [];
+        const scrollingElement = document.scrollingElement;
+        const candidates = [
+          scrollingElement,
+          ...Array.from(document.querySelectorAll("*")).filter((element) => {
+            const style = getComputedStyle(element);
+            return (
+              /(auto|scroll)/.test(style.overflowY) &&
+              element.scrollHeight > element.clientHeight + 4
+            );
+          })
+        ].filter(Boolean);
+        const scroller = candidates.sort(
+          (a, b) =>
+            (b.scrollHeight - b.clientHeight) -
+            (a.scrollHeight - a.clientHeight)
+        )[0] ?? scrollingElement;
+        const setScroll = (top) => {
+          if (scroller === scrollingElement) window.scrollTo(0, top);
+          else {
+            scroller.scrollTop = top;
+            scroller.dispatchEvent(new Event("scroll"));
+          }
+        };
+        const scrollTop = () =>
+          scroller === scrollingElement ? window.scrollY : scroller.scrollTop;
         const sample = () => {
           samples.push({
             mounted: document.querySelectorAll(${JSON.stringify(
               options.tileSelector,
             )}).length,
-            scrollY: window.scrollY
+            scrollY: scrollTop(),
+            total: Number(
+              document.querySelector("#stream-masonry")?.dataset.virtualTotal ?? 0
+            )
           });
         };
         sample();
+        if (${JSON.stringify(Boolean(options.url))}) {
+          let stableRounds = 0;
+          let previousTotal = -1;
+          for (let round = 0; round < 40 && stableRounds < 5; round += 1) {
+            setScroll(Math.max(0, scroller.scrollHeight - scroller.clientHeight));
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            sample();
+            const currentTotal = samples.at(-1)?.total ?? 0;
+            stableRounds =
+              currentTotal === previousTotal ? stableRounds + 1 : 0;
+            previousTotal = currentTotal;
+          }
+        }
         for (let cycle = 0; cycle < 2; cycle += 1) {
-          const height = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+          const height = Math.max(
+            0,
+            scroller.scrollHeight - scroller.clientHeight
+          );
           for (let y = 0; y <= height; y += 1200) {
-            window.scrollTo(0, y);
+            setScroll(y);
             await new Promise((resolve) => requestAnimationFrame(resolve));
             sample();
           }
           for (let y = height; y >= 0; y -= 1200) {
-            window.scrollTo(0, y);
+            setScroll(y);
             await new Promise((resolve) => requestAnimationFrame(resolve));
             sample();
           }
         }
-        window.scrollTo(0, 0);
+        setScroll(0);
         await new Promise((resolve) => setTimeout(resolve, 150));
         return samples;
       })()`,
@@ -485,22 +624,68 @@ async function runBrowser(options) {
     await client.send("HeapProfiler.collectGarbage");
     const afterScrollPerformance = await performanceMetrics(client);
 
+    const displayRequestsBeforeHover = network.displayRequests;
+    const binaryRequestsBeforeOpen = network.binaryRequests;
+    const genericHoverResult = options.url
+      ? await evaluate(
+          client,
+          `(async () => {
+            const tiles = Array.from(document.querySelectorAll(${JSON.stringify(
+              options.tileSelector,
+            )}));
+            for (const tile of tiles) {
+              tile.dispatchEvent(new PointerEvent("pointerover", {
+                bubbles: true,
+                pointerId: 1,
+                pointerType: "mouse"
+              }));
+              tile.dispatchEvent(new PointerEvent("pointerout", {
+                bubbles: true,
+                pointerId: 1,
+                pointerType: "mouse"
+              }));
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            return { hovered: tiles.length };
+          })()`,
+        )
+      : null;
+    const hoverDisplayRequests =
+      network.displayRequests - displayRequestsBeforeHover;
+
     const actionResult = await evaluate(
       client,
       `(async () => {
-        if (!window.__wave3Actions) {
-          return { status: "gated", reason: "target page does not expose window.__wave3Actions" };
+        if (window.__wave3Actions) {
+          await window.__wave3Actions.stressPrewarm(500);
+          await window.__wave3Actions.openVisibleTile();
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          await window.__wave3Actions.closeLightbox();
+          const resultIds = await window.__wave3Actions.search(${JSON.stringify(
+            DEFAULT_FIXTURE.searchQuery,
+          )});
+          return { resultIds, status: "measured" };
         }
-        await window.__wave3Actions.stressPrewarm(500);
-        await window.__wave3Actions.openVisibleTile();
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        await window.__wave3Actions.closeLightbox();
-        const resultIds = await window.__wave3Actions.search(${JSON.stringify(
-          DEFAULT_FIXTURE.searchQuery,
+
+        const firstTile = document.querySelector(${JSON.stringify(
+          options.tileSelector,
         )});
-        return { resultIds, status: "measured" };
+        firstTile?.querySelector('[role="button"]')?.click();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          key: "Escape"
+        }));
+        return {
+          lightboxOpened: Boolean(firstTile),
+          status: "measured"
+        };
       })()`,
     );
+    if (options.url && productSearchEvidence) {
+      actionResult.resultIds = productSearchEvidence.resultIds;
+      actionResult.searchStatus = productSearchEvidence.searchStatus;
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
     await client.send("HeapProfiler.collectGarbage");
     const finalPerformance = await performanceMetrics(client);
@@ -509,8 +694,17 @@ async function runBrowser(options) {
       `(() => {
         const resources = performance.getEntriesByType("resource");
         const metrics = window.__wave3Metrics ?? {};
+        const brokenThumbs = Array.from(document.images).filter((image) =>
+          image.complete &&
+          image.naturalWidth === 0 &&
+          image.srcset.includes("thumb256")
+        ).length;
         return {
-          diagnostics: metrics.diagnostics ?? null,
+          diagnostics: {
+            ...(metrics.diagnostics ?? {}),
+            failedThumbStillInSrcSet:
+              metrics.diagnostics?.failedThumbStillInSrcSet ?? brokenThumbs
+          },
           domNodes: document.getElementsByTagName("*").length,
           firstInteractiveMs:
             performance.getEntriesByName("wave3:first-interactive")[0]?.startTime ??
@@ -530,6 +724,26 @@ async function runBrowser(options) {
         };
       })()`,
     );
+    if (options.url) {
+      page.diagnostics = {
+        ...page.diagnostics,
+        displayRequestsByReason: {
+          ...(page.diagnostics?.displayRequestsByReason ?? {}),
+          hover: hoverDisplayRequests,
+        },
+        gridBinaryRequests: binaryRequestsBeforeOpen,
+        repeatedFailedThumbRequests: Array.from(
+          failedThumbCounts.values(),
+        ).reduce((total, count) => total + Math.max(0, count - 1), 0),
+      };
+      page.search = {
+        loadedPagesBeforeSearch: initialFeedRequestsBeforeSearch,
+        matchedQuery: productSearchEvidence?.matchedQuery ?? false,
+        normalizedQuery: DEFAULT_FIXTURE.searchQuery,
+        requestCount: network.searchRequests,
+        resultIds: actionResult.resultIds ?? [],
+      };
+    }
     client.close();
     const heapInitial = initialPerformance.JSHeapUsedSize ?? null;
     const heapFinal = finalPerformance.JSHeapUsedSize ?? null;
@@ -568,7 +782,14 @@ async function runBrowser(options) {
       mode: options.url ? "target_url" : `${options.mode}_synthetic_fixture`,
       network,
       page,
-      requestHeadersConfigured: Object.keys(headers).length > 0,
+      productActions: options.url
+        ? {
+            ...genericHoverResult,
+            hoverDisplayRequests,
+          }
+        : null,
+      requestHeadersConfigured:
+        configuredCookies > 0 || Object.keys(headers).length > 0,
       server: options.url ? null : requestMetrics,
       status: "measured",
       targetUrl,
@@ -578,12 +799,19 @@ async function runBrowser(options) {
         prewarmCandidates: 500,
         scrollSamples: {
           count: scrollSamples.length,
+          maxLoaded: Math.max(
+            ...scrollSamples.map((sample) => sample.total ?? 0),
+          ),
           maxMounted: Math.max(...scrollSamples.map((sample) => sample.mounted)),
           minMounted: Math.min(...scrollSamples.map((sample) => sample.mounted)),
         },
         searchQuery: DEFAULT_FIXTURE.searchQuery,
       },
     };
+    result.page.maxMountedTiles = Math.max(
+      result.page.maxMountedTiles ?? 0,
+      result.workload.scrollSamples.maxMounted,
+    );
     result.acceptance = targetAcceptance(
       result,
       options.mobile ? "mobile" : "desktop",

@@ -14,7 +14,7 @@ from lumen_core.models import Conversation, Generation, Message
 
 
 _MESSAGE_IMAGE_REFERENCE_PATH = (
-    '$.** ? (@.image_id == $target || @.source_image_id == $target || '
+    "$.** ? (@.image_id == $target || @.source_image_id == $target || "
     "@.mask_image_id == $target)"
 )
 
@@ -33,8 +33,7 @@ def visible_reference_image_ids_statement(
     visible_after: datetime,
 ):
     rows = [
-        (candidate.image_id, candidate.owner_generation_id)
-        for candidate in candidates
+        (candidate.image_id, candidate.owner_generation_id) for candidate in candidates
     ]
     candidate_values = (
         values(
@@ -60,8 +59,7 @@ def visible_reference_image_ids_statement(
                 Generation.id == candidate_values.c.owner_generation_id,
                 Generation.primary_input_image_id == candidate_values.c.image_id,
                 Generation.mask_image_id == candidate_values.c.image_id,
-                candidate_values.c.image_id
-                == Generation.input_image_ids.any_(),
+                candidate_values.c.image_id == Generation.input_image_ids.any_(),
             ),
         )
         .exists()
