@@ -19,23 +19,6 @@ class WorkflowHttpUseCases:
     model_library: ModelLibraryWorkflowOperations
     poster: PosterWorkflowOperations
 
-    async def list_runs(
-        self,
-        *,
-        db: object,
-        user_id: str,
-        workflow_type: str | None,
-        cursor: str | None,
-        limit: int,
-    ) -> object:
-        return await self.projects.list_runs(
-            db=db,
-            user_id=user_id,
-            workflow_type=workflow_type,
-            cursor=cursor,
-            limit=limit,
-        )
-
     async def get_workflow(
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object:

@@ -13,7 +13,6 @@ from sqlalchemy.dialects import postgresql
 from app.routes.workflow_routes import projects
 from app.workflows.application.errors import InvalidWorkflowCursorError
 from app.workflows.application.queries import ListWorkflowRuns
-from app.workflows.composition import build_workflow_application
 from app.workflows.ports.run_reads import (
     WorkflowRunListRecord,
     WorkflowRunReadPage,
@@ -201,9 +200,7 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
         ]
     )
 
-    application = build_workflow_application(include_http=True)
     first_page = await projects.list_workflows(
-        application,
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
         type="poster_design",
@@ -229,7 +226,6 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
 
     next_db = _Db([[]])
     next_page = await projects.list_workflows(
-        application,
         SimpleNamespace(id="user-1"),
         next_db,  # type: ignore[arg-type]
         type="poster_design",
@@ -254,7 +250,6 @@ async def test_list_workflows_route_uses_stable_sqlalchemy_page_boundary() -> No
         ]
     )
     boundary_page = await projects.list_workflows(
-        application,
         SimpleNamespace(id="user-1"),
         boundary_db,  # type: ignore[arg-type]
         type="poster_design",
@@ -269,7 +264,6 @@ async def test_list_workflows_route_hides_background_projects_by_default() -> No
     db = _Db([[]])
 
     out = await projects.list_workflows(
-        build_workflow_application(include_http=True),
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
         type=None,
@@ -292,7 +286,6 @@ async def test_list_workflows_route_hides_background_projects_by_default() -> No
 async def test_list_workflows_route_maps_invalid_cursor_to_http_422() -> None:
     with pytest.raises(HTTPException) as excinfo:
         await projects.list_workflows(
-            build_workflow_application(include_http=True),
             SimpleNamespace(id="user-1"),
             _Db([]),  # type: ignore[arg-type]
             type="poster_design",

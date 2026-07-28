@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schema_models.workflows import (
     WorkflowRunListItemOut,
@@ -13,9 +14,9 @@ from lumen_core.schema_models.workflows import (
 
 from ...db import get_db
 from ...deps import CurrentUser
+from ...workflows.adapters.sqlalchemy_reads import SQLAlchemyWorkflowRunReadAdapter
 from ...workflows.application.errors import InvalidWorkflowCursorError
-from ...workflows.composition import WorkflowApplication
-from ...workflows.transport.http.dependencies import get_workflow_application
+from ...workflows.application.queries import ListWorkflowRuns
 
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -23,16 +24,16 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 
 @router.get("", response_model=WorkflowRunListOut)
 async def list_workflows(
-    application: Annotated[WorkflowApplication, Depends(get_workflow_application)],
     user: CurrentUser,
-    db: Annotated[Any, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     type: str | None = Query(default=None),  # noqa: A002 - API field name
     cursor: Annotated[str | None, Query(max_length=512)] = None,
     limit: int = Query(default=50, ge=1, le=100),
 ) -> WorkflowRunListOut:
     try:
-        result = await application.require_http().list_runs(
-            db=db,
+        result = await ListWorkflowRuns(
+            SQLAlchemyWorkflowRunReadAdapter(db)
+        ).execute(
             user_id=user.id,
             workflow_type=type,
             cursor=cursor,

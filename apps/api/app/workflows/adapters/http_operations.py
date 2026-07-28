@@ -4,32 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..application.queries import ListWorkflowRuns
 from ..application.runtime_state import WorkflowRuntimeState
 from .operations import apparel, model_library, poster, projects
-from .sqlalchemy_reads import SQLAlchemyWorkflowRunReadAdapter
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectWorkflowOperationsAdapter:
     runtime: WorkflowRuntimeState
-
-    async def list_runs(
-        self,
-        *,
-        db: object,
-        user_id: str,
-        workflow_type: str | None,
-        cursor: str | None,
-        limit: int,
-    ) -> object:
-        query = ListWorkflowRuns(SQLAlchemyWorkflowRunReadAdapter(db))
-        return await query.execute(
-            user_id=user_id,
-            workflow_type=workflow_type,
-            cursor=cursor,
-            limit=limit,
-        )
 
     async def get_workflow(
         self, *, workflow_run_id: str, user: object, db: object
