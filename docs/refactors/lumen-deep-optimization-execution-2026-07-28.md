@@ -198,6 +198,104 @@ reinterpret the source plan.
 - Rollback backend fanout/durable behavior with `7404e97`, then connection
   dedupe with `3f95c6f`. Do not roll back the Redis Stream itself.
 
+### V2 Wave 2 Completion
+
+#### Commits And Agent Evidence
+
+- Stable dispatch identity and batched scheduler:
+  `4b00b22` (`fix(generation): stabilize dispatch scheduling`).
+- A4 GeneratedPayload contract:
+  agent `8fe931b`, integrated as `68ff722`
+  (`refactor(worker): add generated payload contract`).
+- A8 Wave 2 characterization harness:
+  agent `b6a4e8a`, integrated as `bc0ac21`
+  (`test(perf): add wave 2 generation harness`).
+- Typed provider selector, wakeup coalescing, and weighted permit:
+  `6a4dd46` (`feat(generation): add weighted resource admission`).
+- Staged payload runtime and DNS-pinned streaming downloader:
+  `aa7d0de` (`perf(generation): stage upstream image payloads`).
+- Failed-node contract migration:
+  `6da3419` (`test(generation): align staged payload contracts`).
+
+A4 changed only its owned upstream payload and direct-image tests. A8 changed
+only `perf/wave2` and the Wave 2 characterization artifacts. A0 retained
+ownership of queue/runtime wiring, shared Core, outbox, settings, ledger, and
+integration.
+
+#### Behavior And Invariants
+
+- Every scheduled ARQ image job has
+  `generation_id + DB attempt + dispatch revision` and a stable job ID.
+  Concurrent kickers share one active revision. An unknown enqueue result keeps
+  the reservation until TTL instead of deleting it and blindly retrying.
+- The ARQ entrypoint compare-and-consumes the active identity. A late old
+  revision exits before DB/provider work; provider wait atomically supersedes
+  only its own revision.
+- Candidate delay metadata is read with one `MGET`; candidate scan size is
+  bounded by requested capacity and oversample, not a fixed 1000. Lane queues
+  use `deque.popleft`.
+- Wake hints use a one-second Redis NX lease. One hundred concurrent hints
+  produce one scheduler scan; Redis failure fails open to a scan.
+- Provider pool compatibility is decided once by signature introspection in
+  the runtime-owned queue adapter. A selector-internal `TypeError` propagates
+  and is never reinterpreted as an older interface.
+- `ResourceDemand` accounts for pixel, reference, postprocess, external-lane,
+  and output units. Weighted permits enforce global, per-user, and external
+  budgets, carry attempt/revision identity, renew with the generation lease,
+  reclaim on expiry, and release idempotently with a revision fence.
+- Dual race consumes two external-lane units. DB attempt fence, provider
+  reservation, generation lease, billing, artifact saga/reconcile, and
+  terminal-event ordering remain unchanged.
+- Direct URL image results are streamed through the existing DNS-pinned,
+  redirect-revalidated URL boundary into an owned staging file. Inline base64,
+  inline bytes, and staged files form one tagged union. Success and bonus paths
+  materialize once and delete only owned staging files.
+- No process-wide mutable global was added. Cross-domain consumers import the
+  dispatch and payload contracts through public modules.
+
+#### Metrics
+
+- 100-candidate scheduler:
+  `119 -> 29` Redis commands/RTT, a 75.63% reduction; 10 and 100 candidates
+  both use four candidate-scan RTT.
+- Enqueue-result-unknown:
+  `2 -> 1` accepted active dispatch revisions; duplicate active revisions
+  `1 -> 0`.
+- Mixed weighted workload:
+  peak `12 / 14` global units, `4 / 4` external units, 13/13 tasks completed,
+  and zero permit leaks in cancel/lease-lost cleanup.
+- Synthetic 12 MiB/4K payload:
+  peak RSS `129,679,360 -> 78,135,296` bytes, 39.75% lower.
+- Evidence:
+  `docs/perf/lumen-wave2-after-2026-07-28.{md,json}`.
+- A real external-provider 4K workload was not run locally and remains
+  explicitly gated; the synthetic result is not presented as a provider SLO.
+
+#### Verification
+
+- Direct dispatch/scheduler/outbox/runtime set: 142 passed.
+- Typed selector/wakeup/admission set: 100 passed.
+- URL security, payload, success, and bonus set: 121 passed with six Pillow
+  deprecation warnings.
+- Required Wave 2 batch first run:
+  144 passed and seven failures, all in
+  `test_responses_image_fallback.py` old base64/provider-client assertions.
+- Failed-file-only rerun after contract migration:
+  47 passed. The already-passing batch nodes were not rerun.
+- Manifest linter passed with stale/unmatched/critical-fallback/shadowed all
+  zero.
+- Backend architecture, complexity, and runtime-state gates passed at
+  `3 / 11 / 15`; no baseline was raised.
+- No repository-wide `scripts/test.sh` invocation was run.
+
+#### Rollback
+
+- Revert `6da3419`, then `aa7d0de` to restore the legacy payload boundary.
+- Revert `6a4dd46` to remove weighted permit/provider-selector/wakeup changes.
+- Revert `bc0ac21` and `68ff722` to remove independent evidence/contracts.
+- Revert `4b00b22` last to restore the temporary enqueue dedupe behavior.
+- No database migration or persisted business row transformation is required.
+
 ## Baseline
 
 - Date: 2026-07-28

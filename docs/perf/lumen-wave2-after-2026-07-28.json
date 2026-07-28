@@ -1,0 +1,31 @@
+{
+  "after_sha": "6da3419674d964668cb01d17459aec0148289e54",
+  "before_sha": "98172a52582a552b806ab2fc30306cf3b41f5712",
+  "date": "2026-07-28",
+  "enqueue_result_unknown": {
+    "after_active_revisions": 1,
+    "before_active_revisions": 2,
+    "status": "met"
+  },
+  "resource_admission": {
+    "dual_race_external_lane_units": 2,
+    "permit_leaks": 0,
+    "status": "met"
+  },
+  "scheduler_100": {
+    "after_redis_round_trips": 29,
+    "before_redis_round_trips": 119,
+    "reduction_percent": 75.63,
+    "status": "met"
+  },
+  "staged_payload": {
+    "after_peak_rss_bytes": 78135296,
+    "before_peak_rss_bytes": 129679360,
+    "reduction_percent": 39.75,
+    "status": "synthetic_met"
+  },
+  "real_provider_4k": {
+    "reason": "No external provider workload was executed in the local gate.",
+    "status": "gated"
+  }
+}
