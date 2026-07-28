@@ -19,7 +19,7 @@ class CompletionStream(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionContextAdapter:
+class CompletionContextBindings:
     DEFAULT_CHAT_MODEL: Any
     _inject_user_memory_context: Any
     _instructions_with_summary_guardrail: Any
@@ -29,7 +29,7 @@ class CompletionContextAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionToolAdapter:
+class CompletionToolBindings:
     _CompletionToolTracker: Any
     _CompletionUsageAccumulator: Any
     _chat_tools_from_content: Any
@@ -49,7 +49,7 @@ class CompletionToolAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionRepositoryAdapter:
+class CompletionPersistenceBindings:
     Completion: Any
     Message: Any
     SessionLocal: Any
@@ -65,7 +65,7 @@ class CompletionRepositoryAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionUpstreamAdapter:
+class CompletionUpstreamBindings:
     UpstreamError: Any
     _apply_url_citations: Any
     _completion_upstream_provider_event: Any
@@ -82,7 +82,7 @@ class CompletionUpstreamAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionBillingAdapter:
+class CompletionBillingBindings:
     _fallback_completion_tool_image_tokens: Any
     _settle_cancelled_completion_billing: Any
     _settle_failed_completion_billing: Any
@@ -96,7 +96,7 @@ class CompletionBillingAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionEventAdapter:
+class CompletionEventBindings:
     _COMPLETION_EVENT_HOOKS: Any
     _completion_event_payload: Any
     _deliver_completion_event: Any
@@ -109,7 +109,7 @@ class CompletionEventAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionLeaseRetryAdapter:
+class CompletionLeaseRetryBindings:
     RETRY_BACKOFF_SECONDS: Any
     RetryDecision: Any
     _CANCEL_CHECK_EVERY_DELTAS: Any
@@ -136,11 +136,11 @@ class CompletionLeaseRetryAdapter:
 
 
 @dataclass(frozen=True, slots=True)
-class LegacyCompletionAdapter:
-    context: CompletionContextAdapter
-    tools: CompletionToolAdapter
-    persistence: CompletionRepositoryAdapter
-    upstream: CompletionUpstreamAdapter
-    billing: CompletionBillingAdapter
-    events: CompletionEventAdapter
-    retry: CompletionLeaseRetryAdapter
+class CompletionBindings:
+    context: CompletionContextBindings
+    tools: CompletionToolBindings
+    persistence: CompletionPersistenceBindings
+    upstream: CompletionUpstreamBindings
+    billing: CompletionBillingBindings
+    events: CompletionEventBindings
+    retry: CompletionLeaseRetryBindings

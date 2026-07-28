@@ -10,7 +10,7 @@ from lumen_core.constants import DEFAULT_CHAT_INSTRUCTIONS, DEFAULT_CHAT_MODEL
 from lumen_core.models import Message
 
 from .contracts import CompletionRedis, CompletionServices
-from .legacy_adapter import LegacyCompletionAdapter
+from .bindings import CompletionBindings
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +94,7 @@ class SettlementState:
 
 @dataclass(slots=True)
 class CompletionExecution:
-    ports: LegacyCompletionAdapter
+    ports: CompletionBindings
     services: CompletionServices
     request: CompletionRequest
     preparation: PreparationState = field(default_factory=PreparationState)
