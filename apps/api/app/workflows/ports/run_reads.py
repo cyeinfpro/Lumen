@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Protocol
+
+from ..domain.json_types import JsonObject
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,7 @@ class WorkflowRunListRecord:
     product_image_ids: tuple[str, ...]
     current_step: str
     quality_mode: str
-    metadata_jsonb: dict[str, Any]
+    metadata_jsonb: JsonObject
     created_at: datetime
     updated_at: datetime
     output_count: int = 0

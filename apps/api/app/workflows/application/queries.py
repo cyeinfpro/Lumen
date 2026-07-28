@@ -6,8 +6,8 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from typing import Any
 
+from ..domain.json_types import JsonObject
 from ..domain.models import WorkflowRunSnapshot
 from ..ports.repositories import WorkflowRepository
 from ..ports.run_reads import (
@@ -37,7 +37,7 @@ class WorkflowRunListItem:
     product_image_ids: tuple[str, ...]
     current_step: str
     quality_mode: str
-    metadata_jsonb: dict[str, Any]
+    metadata_jsonb: JsonObject
     created_at: datetime
     updated_at: datetime
     output_count: int

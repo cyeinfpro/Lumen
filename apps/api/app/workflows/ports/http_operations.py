@@ -10,16 +10,6 @@ from typing import Protocol
 
 
 class ProjectWorkflowOperations(Protocol):
-    async def list_runs(
-        self,
-        *,
-        db: object,
-        user_id: str,
-        workflow_type: str | None,
-        cursor: str | None,
-        limit: int,
-    ) -> object: ...
-
     async def get_workflow(
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object: ...
