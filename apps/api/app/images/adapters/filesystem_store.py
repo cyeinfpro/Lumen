@@ -30,6 +30,7 @@ from ..metrics import (
     record_publish_conflict,
     record_publish_idempotent_winner,
     record_staged_sweep_tombstone,
+    record_upload_writer,
 )
 from .filesystem_staging import (
     ArtifactIdentityMismatch,
@@ -44,6 +45,10 @@ from .filesystem_staging import (
     SweepProgress as _SweepProgress,
     file_fingerprint as _fingerprint,
     hash_staged_file as _hash_staged_file,
+)
+from .filesystem_writer import (
+    StageFileWriter as _StageFileWriter,
+    write_all as _write_all,
 )
 
 
@@ -95,15 +100,6 @@ def _hash_file(path: Path) -> str:
         while chunk := handle.read(_CHUNK_SIZE):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("short write while staging artifact")
-        view = view[written:]
 
 
 def _identity(path: Path) -> ArtifactIdentity:
@@ -725,6 +721,7 @@ class FileSystemArtifactStore:
         )
         path = Path(raw_path)
         os.fchmod(fd, 0o600)
+        writer = _StageFileWriter(fd)
         digest = hashlib.sha256()
         size = 0
         try:
@@ -735,15 +732,19 @@ class FileSystemArtifactStore:
                 if size > max_bytes:
                     raise ArtifactStoreError("upload exceeds maximum bytes")
                 digest.update(chunk)
-                await asyncio.to_thread(_write_all, fd, chunk)
+                await writer.write(chunk)
             if size <= 0:
                 raise ArtifactStoreError("empty upload")
-            await asyncio.to_thread(os.fsync, fd)
+            await writer.finish()
+            record_upload_writer(
+                upload_bytes=size,
+                queue_wait_seconds=writer.queue_wait_seconds,
+                duration_seconds=writer.duration_seconds,
+            )
         except BaseException:
-            os.close(fd)
+            await writer.abort()
             path.unlink(missing_ok=True)
             raise
-        os.close(fd)
         created_ns = time.time_ns()
         final_path = path.with_name(
             "artifact-v1-"

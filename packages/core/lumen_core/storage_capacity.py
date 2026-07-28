@@ -66,6 +66,45 @@ redis.call('EXPIRE', KEYS[2], ttl)
 return 1
 """
 
+_REDIS_RESIZE_LUA = """
+local leases = KEYS[1]
+local weights = KEYS[2]
+local server_time = redis.call('TIME')
+local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
+local lease_id = ARGV[1]
+local requested = tonumber(ARGV[2])
+local available = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+
+local expired = redis.call('ZRANGEBYSCORE', leases, '-inf', now_ms)
+if #expired > 0 then
+  redis.call('ZREM', leases, unpack(expired))
+  redis.call('HDEL', weights, unpack(expired))
+end
+
+local current = redis.call('HGET', weights, lease_id)
+if current == false then
+  return {-1, 0, available}
+end
+
+local reserved = 0
+local values = redis.call('HVALS', weights)
+for _, value in ipairs(values) do
+  reserved = reserved + tonumber(value)
+end
+local resized_total = reserved - tonumber(current) + requested
+if requested > available or resized_total > available then
+  return {0, reserved, available}
+end
+
+redis.call('HSET', weights, lease_id, requested)
+redis.call('ZADD', leases, now_ms + ttl_ms, lease_id)
+local ttl = math.max(60, math.ceil(ttl_ms / 1000) * 2)
+redis.call('EXPIRE', leases, ttl)
+redis.call('EXPIRE', weights, ttl)
+return {1, resized_total, available}
+"""
+
 _REDIS_RELEASE_LUA = """
 redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
@@ -83,6 +122,8 @@ class StorageCapacityUnavailable(RuntimeError):
 
 class StorageCapacityLeasePort(Protocol):
     async def renew(self) -> bool: ...
+
+    async def resize(self, bytes_required: int) -> bool: ...
 
     async def release(self) -> None: ...
 
@@ -145,6 +186,11 @@ class _RedisStorageCapacityLease:
             return False
         return await self._capacity._renew(self.lease_id)
 
+    async def resize(self, bytes_required: int) -> bool:
+        if self._released:
+            return False
+        return await self._capacity._resize(self.lease_id, bytes_required)
+
     async def release(self) -> None:
         if self._released:
             return
@@ -204,6 +250,30 @@ class RedisStorageCapacity:
         )
         return int(result) == 1
 
+    async def _resize(self, lease_id: str, bytes_required: int) -> bool:
+        requested = max(0, int(bytes_required))
+        available = await asyncio.to_thread(
+            available_storage_bytes,
+            self.root,
+            minimum_free_bytes=self.limits.minimum_free_bytes,
+        )
+        result = await _resolve(
+            self.redis.eval(
+                _REDIS_RESIZE_LUA,
+                2,
+                self.leases_key,
+                self.weights_key,
+                lease_id,
+                str(requested),
+                str(available),
+                str(self.limits.lease_ttl_seconds * 1000),
+            )
+        )
+        status = int(result[0])
+        if status == 0:
+            raise StorageCapacityExceeded("image storage capacity exhausted")
+        return status == 1
+
     async def _release(self, lease_id: str) -> None:
         await _resolve(
             self.redis.eval(
@@ -230,6 +300,15 @@ class _FileStorageCapacityLease:
         if self._released:
             return False
         return await asyncio.to_thread(self._capacity._renew_sync, self.lease_id)
+
+    async def resize(self, bytes_required: int) -> bool:
+        if self._released:
+            return False
+        return await asyncio.to_thread(
+            self._capacity._resize_sync,
+            self.lease_id,
+            bytes_required,
+        )
 
     async def release(self) -> None:
         if self._released:
@@ -405,6 +484,36 @@ class FileStorageCapacity:
             return True, True
 
         return bool(self._with_locked_state(renew))
+
+    def _resize_sync(self, lease_id: str, bytes_required: int) -> bool:
+        requested = max(0, int(bytes_required))
+
+        def resize(
+            leases: dict[str, dict[str, int | float]],
+            now: float,
+        ) -> tuple[bool, bool]:
+            payload = leases.get(lease_id)
+            if payload is None:
+                return False, False
+            available = available_storage_bytes(
+                self.root,
+                minimum_free_bytes=self.limits.minimum_free_bytes,
+            )
+            reserved_without_current = sum(
+                int(item["bytes"])
+                for current_id, item in leases.items()
+                if current_id != lease_id
+            )
+            if (
+                requested > available
+                or reserved_without_current + requested > available
+            ):
+                raise StorageCapacityExceeded("image storage capacity exhausted")
+            payload["bytes"] = requested
+            payload["expires_at"] = now + self.limits.lease_ttl_seconds
+            return True, True
+
+        return bool(self._with_locked_state(resize))
 
     def _release_sync(self, lease_id: str) -> None:
         def release(

@@ -22,6 +22,7 @@ from lumen_core.model_base import new_uuid7
 from lumen_core.models import Image
 from lumen_core.storage_capacity import (
     StorageCapacityExceeded,
+    StorageCapacityLeasePort,
     StorageCapacityPort,
     StorageCapacityUnavailable,
 )
@@ -42,6 +43,7 @@ from ..domain.artifact import (
     UploadTicket,
 )
 from ..domain.resource_estimate import ImageResourceEstimate
+from ..metrics import record_capacity_reservation_ratio
 from ..ports.artifact_store import ArtifactStorePort
 from ..ports.capacity import CapacityPort
 from ..ports.image_processing import (
@@ -52,6 +54,9 @@ from ..processing.service import PreparedUpload, ProcessingError
 
 
 logger = logging.getLogger(__name__)
+
+_INITIAL_STORAGE_SAFETY_MIN_BYTES = 1024 * 1024
+_INITIAL_STORAGE_SAFETY_MAX_BYTES = 8 * 1024 * 1024
 
 
 class UploadCommandError(ValueError):
@@ -106,6 +111,25 @@ class _UploadExecutionState:
     processing_stage: _ProcessingStage | None = None
     image_id: str | None = None
     publishing_started: bool = False
+
+
+def _initial_storage_reservation_bytes(max_bytes: int) -> int:
+    source_limit = max(0, int(max_bytes))
+    safety_margin = max(
+        _INITIAL_STORAGE_SAFETY_MIN_BYTES,
+        min(_INITIAL_STORAGE_SAFETY_MAX_BYTES, source_limit // 4),
+    )
+    return source_limit + safety_margin
+
+
+def _processing_storage_reservation_bytes(
+    staged_bytes: int,
+    inspection: Any,
+) -> int:
+    return max(
+        0,
+        int(staged_bytes) + int(inspection.estimate.output_reserve_bytes),
+    )
 
 
 def _planned_manifest(
@@ -336,6 +360,11 @@ class UploadCommandService:
         transient_bytes = state.staged.identity.size_bytes + 2 * (
             prepared.size_bytes + int(prepared.normalized_ref_meta["bytes"])
         )
+        if storage_reservation_bytes is not None:
+            record_capacity_reservation_ratio(
+                reserved_bytes=storage_reservation_bytes,
+                actual_bytes=transient_bytes,
+            )
         if (
             storage_reservation_bytes is not None
             and transient_bytes > storage_reservation_bytes
@@ -495,6 +524,7 @@ class UploadCommandService:
         metadata_profile: str | None = None,
         metadata_finalizer: Callable[[str, str, dict[str, Any]], None] | None = None,
         storage_guard: Callable[[int], None] | None = None,
+        storage_lease: StorageCapacityLeasePort | None = None,
         storage_lease_guard: CapacityLeaseGuard | None = None,
         storage_reservation_bytes: int | None = None,
     ) -> Image:
@@ -507,6 +537,19 @@ class UploadCommandService:
                 storage_guard=storage_guard,
                 storage_lease_guard=storage_lease_guard,
             )
+            if (
+                storage_lease is not None
+                and storage_lease_guard is not None
+                and state.staged is not None
+            ):
+                storage_reservation_bytes = _processing_storage_reservation_bytes(
+                    state.staged.identity.size_bytes,
+                    inspection,
+                )
+                if not await storage_lease.resize(storage_reservation_bytes):
+                    storage_lease_guard.mark_lost()
+                    raise CapacityLeaseLost("storage capacity lease ownership changed")
+                await storage_lease_guard.assert_owned()
             ttl_seconds = CapacityLimits.from_env().lease_ttl_seconds
             processing_lease = await self.capacity.reserve(inspection.estimate)
             async with maintained_capacity_lease(
@@ -595,9 +638,7 @@ class UploadCommandService:
         metadata_finalizer: Callable[[str, str, dict[str, Any]], None] | None = None,
         storage_guard: Callable[[int], None] | None = None,
     ) -> Image:
-        # Worst case on filesystems without hard-link support:
-        # staged input + two processed outputs + two destination copies.
-        reserved_bytes = policy.max_bytes * 5
+        reserved_bytes = _initial_storage_reservation_bytes(policy.max_bytes)
         try:
             storage_lease = await self.storage_capacity.reserve(reserved_bytes)
         except StorageCapacityExceeded as exc:
@@ -626,6 +667,7 @@ class UploadCommandService:
                     metadata_profile=metadata_profile,
                     metadata_finalizer=metadata_finalizer,
                     storage_guard=storage_guard,
+                    storage_lease=storage_lease,
                     storage_lease_guard=storage_lease_guard,
                     storage_reservation_bytes=reserved_bytes,
                 )
