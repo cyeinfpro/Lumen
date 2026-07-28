@@ -148,6 +148,30 @@ class TaskCredentialPin:
     default_image_model: str | None
 
 
+@dataclass(frozen=True)
+class CompletionTaskCommand:
+    user_id: str
+    user_email: str | None
+    account_mode: str
+    assistant_msg: Message
+    intent: Intent
+    stored_key: str
+    attachment_ids: list[str]
+    chat_params: ChatParamsIn
+    system_prompt: str | None
+    request_metadata: dict[str, Any] | None
+    credential_pin: TaskCredentialPin | None
+    chat_wallet_preflight_done: bool
+    chat_wallet_preflight: ChatWalletPreflight | None
+
+
+@dataclass(frozen=True)
+class CompletionTaskServices:
+    ensure_chat_wallet_preflight: AsyncCallable
+    billing_allow_negative: AsyncCallable
+    write_audit: AsyncCallable
+
+
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
     err: dict[str, Any] = {"code": code, "message": msg}
     if extra:
@@ -883,52 +907,43 @@ def _select_chat_task_model(
 
 
 async def _create_completion_task(
-    *,
     db: AsyncSession,
-    user_id: str,
-    user_email: str | None,
-    account_mode: str,
-    assistant_msg: Message,
-    intent: Intent,
-    stored_key: str,
-    attachment_ids: list[str],
-    chat_params: ChatParamsIn,
-    system_prompt: str | None,
-    request_metadata: dict[str, Any] | None,
-    credential_pin: TaskCredentialPin | None,
-    chat_wallet_preflight_done: bool,
-    chat_wallet_preflight: ChatWalletPreflight | None,
-    ensure_chat_wallet_preflight_fn: AsyncCallable,
-    billing_allow_negative_fn: AsyncCallable,
-    write_audit_fn: AsyncCallable,
+    command: CompletionTaskCommand,
+    services: CompletionTaskServices,
 ) -> tuple[str, list[dict[str, Any]]]:
+    user_id = command.user_id
+    chat_params = command.chat_params
+    credential_pin = command.credential_pin
+    chat_wallet_preflight = command.chat_wallet_preflight
     task_chat_model = _select_chat_task_model(credential_pin, chat_params)
-    if not chat_wallet_preflight_done:
-        chat_wallet_preflight = await ensure_chat_wallet_preflight_fn(
+    if not command.chat_wallet_preflight_done:
+        chat_wallet_preflight = await services.ensure_chat_wallet_preflight(
             db,
             user_id=user_id,
-            user_email=user_email,
-            account_mode=account_mode,
+            user_email=command.user_email,
+            account_mode=command.account_mode,
             model=task_chat_model,
             chat_params=chat_params,
         )
     comp_upstream_request = _merge_request_metadata(
         _chat_upstream_request(chat_params),
-        request_metadata,
+        command.request_metadata,
     )
     if chat_wallet_preflight is not None:
         comp_upstream_request.update(chat_wallet_preflight.upstream_metadata())
     comp = Completion(
-        message_id=assistant_msg.id,
+        message_id=command.assistant_msg.id,
         user_id=user_id,
         model=task_chat_model,
-        input_image_ids=attachment_ids if intent == Intent.VISION_QA else [],
-        system_prompt=system_prompt,
+        input_image_ids=(
+            command.attachment_ids if command.intent == Intent.VISION_QA else []
+        ),
+        system_prompt=command.system_prompt,
         text="",
         status=CompletionStatus.QUEUED.value,
         progress_stage=CompletionStage.QUEUED.value,
         attempt=0,
-        idempotency_key=stored_key,
+        idempotency_key=command.stored_key,
         upstream_request=comp_upstream_request or None,
         user_api_credential_id=(
             credential_pin.credential_id if credential_pin else None
@@ -946,13 +961,13 @@ async def _create_completion_task(
                 ref_type="completion",
                 ref_id=comp.id,
                 idempotency_key=f"hold:{comp.id}",
-                allow_negative=await billing_allow_negative_fn(db),
+                allow_negative=await services.billing_allow_negative(db),
                 meta=chat_wallet_preflight.hold_metadata(),
             )
         except billing_core.BillingError as exc:
             raise _billing_http_error(exc) from exc
         if tx is not None:
-            await write_audit_fn(
+            await services.write_audit(
                 db,
                 event_type="wallet.hold.chat",
                 user_id=user_id,
@@ -1279,23 +1294,27 @@ async def create_assistant_task(
     generation_ids: list[str] = []
     if intent in (Intent.CHAT, Intent.VISION_QA):
         completion_id, outbox_payloads = await _create_completion_task(
-            db=db,
-            user_id=user_id,
-            user_email=user_email,
-            account_mode=account_mode,
-            assistant_msg=assistant_msg,
-            intent=intent,
-            stored_key=stored_key,
-            attachment_ids=attachment_ids,
-            chat_params=chat_params,
-            system_prompt=system_prompt,
-            request_metadata=request_metadata,
-            credential_pin=credential_pin,
-            chat_wallet_preflight_done=chat_wallet_preflight_done,
-            chat_wallet_preflight=chat_wallet_preflight,
-            ensure_chat_wallet_preflight_fn=ensure_chat_wallet_preflight_fn,
-            billing_allow_negative_fn=billing_allow_negative_fn,
-            write_audit_fn=write_audit_fn,
+            db,
+            CompletionTaskCommand(
+                user_id=user_id,
+                user_email=user_email,
+                account_mode=account_mode,
+                assistant_msg=assistant_msg,
+                intent=intent,
+                stored_key=stored_key,
+                attachment_ids=attachment_ids,
+                chat_params=chat_params,
+                system_prompt=system_prompt,
+                request_metadata=request_metadata,
+                credential_pin=credential_pin,
+                chat_wallet_preflight_done=chat_wallet_preflight_done,
+                chat_wallet_preflight=chat_wallet_preflight,
+            ),
+            CompletionTaskServices(
+                ensure_chat_wallet_preflight=ensure_chat_wallet_preflight_fn,
+                billing_allow_negative=billing_allow_negative_fn,
+                write_audit=write_audit_fn,
+            ),
         )
     else:
         assert resolved_size is not None

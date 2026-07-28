@@ -57,6 +57,24 @@ class MessageTransactionResult:
     reembed_ids: list[str]
 
 
+@dataclass(frozen=True)
+class PersistMessageRequestCommand:
+    user: User
+    conversation: Conversation
+    conversation_id: str
+    body: PostMessageIn
+    intent: Intent
+    user_content: dict[str, Any]
+    image_params: ImageParamsIn
+    chat_params: ChatParamsIn
+    assistant_context: AssistantRequestContext
+    attachment_ids: list[str]
+    mask_image_id: str | None
+    request_metadata: dict[str, Any]
+    account_mode: str
+    now: datetime
+
+
 def is_chat_intent(intent: Intent) -> bool:
     return intent in (Intent.CHAT, Intent.VISION_QA)
 
@@ -226,26 +244,16 @@ async def resolve_assistant_context(
 async def persist_message_request(
     db: AsyncSession,
     runtime: MessageTransactionRuntime,
-    *,
-    user: User,
-    conversation: Conversation,
-    conv_id: str,
-    body: PostMessageIn,
-    intent: Intent,
-    user_content: dict[str, Any],
-    image_params: ImageParamsIn,
-    chat_params: ChatParamsIn,
-    assistant_context: AssistantRequestContext,
-    attachment_ids: list[str],
-    mask_image_id: str | None,
-    request_metadata: dict[str, Any],
-    account_mode: str,
-    now: datetime,
+    command: PersistMessageRequestCommand,
 ) -> MessageTransactionResult:
+    user = command.user
+    conversation = command.conversation
+    body = command.body
+    intent = command.intent
     user_message = Message(
-        conversation_id=conv_id,
+        conversation_id=command.conversation_id,
         role=Role.USER.value,
-        content=user_content,
+        content=command.user_content,
         intent=None,
         status=None,
     )
@@ -265,21 +273,23 @@ async def persist_message_request(
             db=db,
             user_id=user.id,
             user_email=user.email,
-            account_mode=account_mode,
+            account_mode=command.account_mode,
             conv=conversation,
             user_msg=user_message,
             intent=intent,
             idempotency_key=body.idempotency_key,
-            image_params=image_params,
-            chat_params=chat_params,
-            system_prompt=assistant_context.system_prompt,
-            attachment_ids=attachment_ids,
+            image_params=command.image_params,
+            chat_params=command.chat_params,
+            system_prompt=command.assistant_context.system_prompt,
+            attachment_ids=command.attachment_ids,
             text=body.text or "",
-            default_image_output_format=(assistant_context.default_image_output_format),
-            mask_image_id=mask_image_id,
-            credential_pin=assistant_context.credential_pin,
-            credential_pin_resolved=(assistant_context.credential_pin_resolved),
-            request_metadata=request_metadata,
+            default_image_output_format=(
+                command.assistant_context.default_image_output_format
+            ),
+            mask_image_id=command.mask_image_id,
+            credential_pin=command.assistant_context.credential_pin,
+            credential_pin_resolved=(command.assistant_context.credential_pin_resolved),
+            request_metadata=command.request_metadata,
         )
         if is_chat_intent(intent):
             await runtime.apply_explicit_memory_write(
@@ -291,14 +301,14 @@ async def persist_message_request(
                 text=body.text or "",
                 reembed_ids=reembed_ids,
             )
-        conversation.last_activity_at = now
+        conversation.last_activity_at = command.now
         await db.commit()
     except IntegrityError:
         await db.rollback()
         prior = await runtime.lookup_idempotent_post(
             db,
             user.id,
-            conv_id,
+            command.conversation_id,
             body.idempotency_key,
         )
         if prior is not None:
