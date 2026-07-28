@@ -23,10 +23,34 @@ from app.tasks.completion_parts import (
 from app.tasks.completion_parts.image_storage_runtime import (
     CompletionToolImageService,
 )
+from app.tasks.completion_parts.contracts import (
+    CompletionCommand,
+    CompletionOutcome,
+    CompletionPhase,
+    CompletionResult,
+    CompletionServices,
+)
 
 
 def _fake_image_upstream_runtime() -> ImageUpstreamRuntime:
     return ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
+
+
+def test_completion_v2_contracts_are_typed_and_bounded() -> None:
+    command = CompletionCommand.from_arq(
+        {"redis": _fake_image_upstream_runtime(), "worker_id": "worker-1"},
+        "completion-1",
+    )
+    result = CompletionResult(
+        task_id=command.task_id,
+        phase=CompletionPhase.COMPLETE,
+        outcome=CompletionOutcome.SUCCEEDED,
+        attempt=1,
+    )
+
+    assert command.worker_id == "worker-1"
+    assert result.outcome is CompletionOutcome.SUCCEEDED
+    assert len(CompletionServices.__dataclass_fields__) == 7
 
 
 def test_completion_facade_preserves_tool_state_identity() -> None:
