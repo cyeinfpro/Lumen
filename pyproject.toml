@@ -1,9 +1,9 @@
-# 顶层 uv workspace：`uv sync` 会同时装 packages/core、apps/api、apps/worker、apps/tgbot。
+# 顶层 uv workspace：`uv sync` 会同时安装 core、API、worker、tgbot 和 image-job。
 # 不用 uv 也行，在各子包里 `pip install -e .` 也能起。
 
 [project]
 name = "lumen"
-version = "1.2.75"
+version = "1.2.76"
 description = "多模态 AI 工作室 —— Chat / Vision / 文生图 / 图生图，一个对话搞定"
 readme = "README.md"
 license = { text = "PolyForm Noncommercial License 1.0.0 + Commercial License upon request" }

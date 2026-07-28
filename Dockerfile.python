@@ -30,14 +30,18 @@ COPY packages/core/pyproject.toml packages/core/pyproject.toml
 COPY apps/api/pyproject.toml apps/api/pyproject.toml
 COPY apps/worker/pyproject.toml apps/worker/pyproject.toml
 COPY apps/tgbot/pyproject.toml apps/tgbot/pyproject.toml
+COPY image-job/pyproject.toml image-job/pyproject.toml
+COPY image-job/README.md image-job/README.md
 
 # hatchling editable 构建需要 wheel target 目录存在；先放占位 __init__.py
 # 让 uv sync --all-packages 能完成依赖解析与 .venv 物化，随后再拷完整源码。
 RUN mkdir -p packages/core/lumen_core apps/api/app apps/worker/app apps/tgbot/app \
+             image-job/image_job \
     && touch packages/core/lumen_core/__init__.py \
              apps/api/app/__init__.py \
              apps/worker/app/__init__.py \
-             apps/tgbot/app/__init__.py
+             apps/tgbot/app/__init__.py \
+             image-job/image_job/__init__.py
 
 RUN uv sync --frozen --no-dev --all-packages
 
@@ -45,6 +49,7 @@ COPY packages/ packages/
 COPY apps/api/ apps/api/
 COPY apps/worker/ apps/worker/
 COPY apps/tgbot/ apps/tgbot/
+COPY image-job/ image-job/
 
 # Release-time files: 打包到 image 让 update.sh 能在 host 不是 git repo 时用
 # `docker create + docker cp` 从 image 提取出来同步到 host release dir。
