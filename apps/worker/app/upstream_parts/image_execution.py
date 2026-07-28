@@ -7,9 +7,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
+from .generated_payload import GeneratedImageResult
 from .transport import ImageProgressCallback
 
-ImageResult = tuple[str, str | None]
+ImageResult = GeneratedImageResult
 
 
 @dataclass(slots=True)
