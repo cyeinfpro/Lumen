@@ -18,10 +18,6 @@ class ProjectWorkflowOperations(Protocol):
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object: ...
 
-    async def delete_workflow(
-        self, *, workflow_run_id: str, user: object, db: object
-    ) -> object: ...
-
     async def add_workflow_assets(
         self,
         *,
