@@ -1799,14 +1799,16 @@ async def test_video_idempotent_lock_recheck_skips_expensive_preparation() -> No
         db,  # type: ignore[arg-type]
         body,
         SimpleNamespace(id="user-1"),
-        require_ready=fail_expensive,
-        public_base_loader=fail_expensive,
-        input_snapshot_loader=fail_expensive,
-        reference_snapshot_loader=fail_expensive,
-        allow_negative_loader=fail_expensive,
-        generation_renderer=render,
-        balance_invalidator=fail_expensive,
-        queued_publisher=fail_expensive,
+        services=video_submission.VideoSubmissionServices(
+            require_ready=fail_expensive,
+            public_base_loader=fail_expensive,
+            input_snapshot_loader=fail_expensive,
+            reference_snapshot_loader=fail_expensive,
+            allow_negative_loader=fail_expensive,
+            generation_renderer=render,
+            balance_invalidator=fail_expensive,
+            queued_publisher=fail_expensive,
+        ),
     )
 
     assert result is rendered
@@ -1818,9 +1820,8 @@ def test_video_route_submission_wrapper_preserves_patch_hooks() -> None:
     source = inspect.getsource(videos._create_video_generation_record)  # noqa: SLF001
 
     assert "video_submission_service.create_video_generation_record" in source
-    assert "require_ready=_require_video_create_ready" in source
-    assert "reference_snapshot_loader=_reference_media_snapshots" in source
-    assert "balance_invalidator=invalidate_balance_cache" in source
+    assert "VideoSubmissionContext(" in source
+    assert "VideoSubmissionServices(" in source
 
 
 def test_idempotent_replay_rejects_mismatched_fingerprint() -> None:

@@ -145,65 +145,6 @@ class VideoSubmissionServices:
     queued_publisher: AsyncCallback = publish_video_queued
 
 
-_VIDEO_SUBMISSION_CONTEXT_FIELDS = (
-    "input_image_snapshot",
-    "reference_media_snapshot",
-    "workflow_metadata",
-    "defer_commit",
-    "deferred_publish_payload",
-)
-_VIDEO_SUBMISSION_SERVICE_FIELDS = (
-    "require_ready",
-    "public_base_loader",
-    "input_snapshot_loader",
-    "reference_snapshot_loader",
-    "reference_validator",
-    "allow_negative_loader",
-    "generation_renderer",
-    "balance_invalidator",
-    "queued_publisher",
-)
-
-
-def _resolve_video_submission_inputs(
-    *,
-    request: Request | None,
-    context: VideoSubmissionContext | None,
-    services: VideoSubmissionServices | None,
-    legacy: dict[str, Any],
-) -> tuple[VideoSubmissionContext, VideoSubmissionServices]:
-    context_values = {
-        name: legacy.pop(name)
-        for name in _VIDEO_SUBMISSION_CONTEXT_FIELDS
-        if name in legacy
-    }
-    service_values = {
-        name: legacy.pop(name)
-        for name in _VIDEO_SUBMISSION_SERVICE_FIELDS
-        if name in legacy
-    }
-    if legacy:
-        name = next(iter(legacy))
-        raise TypeError(
-            "create_video_generation_record() got an unexpected keyword argument "
-            f"{name!r}"
-        )
-    if context is not None and (request is not None or context_values):
-        raise TypeError(
-            "context cannot be combined with request or legacy context keywords"
-        )
-    if services is not None and service_values:
-        raise TypeError("services cannot be combined with legacy service keywords")
-    return (
-        context
-        or VideoSubmissionContext(
-            request=request,
-            **context_values,
-        ),
-        services or VideoSubmissionServices(**service_values),
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class _VideoSubmissionPlan:
     provider: Any
@@ -457,17 +398,11 @@ async def create_video_generation_record(
     body: VideoCreateIn,
     user: Any,
     *,
-    request: Request | None = None,
     context: VideoSubmissionContext | None = None,
     services: VideoSubmissionServices | None = None,
-    **legacy: Any,
 ) -> VideoGenerationOut:
-    context, services = _resolve_video_submission_inputs(
-        request=request,
-        context=context,
-        services=services,
-        legacy=legacy,
-    )
+    context = context or VideoSubmissionContext()
+    services = services or VideoSubmissionServices()
     request_fingerprint_value = request_fingerprint(body)
     winner = await _find_idempotent_generation(
         db,
