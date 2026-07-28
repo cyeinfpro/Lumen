@@ -37,7 +37,101 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: python3 scripts/version.py assert-tag "${GITHUB_REF_NAME}"
 
+  impact-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      full_mandatory: ${{ steps.split.outputs.full_mandatory }}
+      backend_has_tests: ${{ steps.split.outputs.backend_has_tests }}
+      frontend_has_tests: ${{ steps.split.outputs.frontend_has_tests }}
+      web_build_required: ${{ steps.split.outputs.web_build_required }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Resolve comparison base
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            base="${PR_BASE_SHA}"
+          else
+            base="${PUSH_BEFORE_SHA}"
+          fi
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]] \
+            || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          printf 'base=%s\n' "${base}" >> "${GITHUB_OUTPUT}"
+      - name: Build explainable impact plan
+        run: |
+          python scripts/test_impact.py \
+            --base "${{ steps.base.outputs.base }}" \
+            --head "${GITHUB_SHA}" \
+            --output /tmp/lumen-test-plan.json
+      - name: Split backend and frontend test plans
+        id: split
+        run: |
+          jq '
+            .commands |= map(
+              select(
+                .kind == "test"
+                and ((.command | startswith("cd apps/web")) | not)
+              )
+            )
+          ' /tmp/lumen-test-plan.json > /tmp/lumen-backend-test-plan.json
+          jq '
+            .commands |= map(
+              select(
+                .kind == "test"
+                and (.command | startswith("cd apps/web"))
+              )
+            )
+          ' /tmp/lumen-test-plan.json > /tmp/lumen-frontend-test-plan.json
+          {
+            printf 'full_mandatory=%s\n' \
+              "$(jq -r '.full_mandatory' /tmp/lumen-test-plan.json)"
+            printf 'backend_has_tests=%s\n' \
+              "$(jq -r '.commands | length > 0' /tmp/lumen-backend-test-plan.json)"
+            printf 'frontend_has_tests=%s\n' \
+              "$(jq -r '.commands | length > 0' /tmp/lumen-frontend-test-plan.json)"
+            printf 'web_build_required=%s\n' \
+              "$(jq -r '
+                any(
+                  .changed_files[];
+                  test(
+                    "^apps/web/(src|public)/"
+                    + "|^apps/web/(package(-lock)?\\\\.json"
+                    + "|next\\\\.config\\\\.ts|tsconfig\\\\.json"
+                    + "|postcss\\\\.config\\\\.mjs|Dockerfile)$"
+                  )
+                )
+              ' /tmp/lumen-test-plan.json)"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Reject unexplained empty plans
+        run: |
+          if [[ "$(jq '.commands | length' /tmp/lumen-test-plan.json)" -eq 0 ]] \
+            && [[ "$(jq '.changed_files | length' /tmp/lumen-test-plan.json)" -gt 0 ]] \
+            && [[ "$(jq '.unmatched_changed_files | length' /tmp/lumen-test-plan.json)" -eq 0 ]]; then
+            echo "impact plan selected no commands without unmatched-file evidence" >&2
+            exit 1
+          fi
+      - name: Upload impact plans
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lumen-impact-plan
+          path: |
+            /tmp/lumen-test-plan.json
+            /tmp/lumen-backend-test-plan.json
+            /tmp/lumen-frontend-test-plan.json
+
   backend:
+    needs: [version, impact-plan]
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -87,13 +181,31 @@ jobs:
         run: uv run python scripts/check_complexity.py
       - name: Module runtime state gate
         run: uv run python scripts/module_runtime_state_audit.py
-      - name: Run backend tests (worker / api / core)
+      - name: Download impact plan
+        if: github.event_name == 'pull_request' && needs.impact-plan.outputs.full_mandatory != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lumen-impact-plan
+          path: /tmp/lumen-impact-plan
+      - name: Run impacted backend tests
+        if: >-
+          github.event_name == 'pull_request'
+          && needs.impact-plan.outputs.full_mandatory != 'true'
+          && needs.impact-plan.outputs.backend_has_tests == 'true'
+        run: >-
+          uv run python scripts/run_test_plan.py
+          /tmp/lumen-impact-plan/lumen-backend-test-plan.json
+          --results /tmp/lumen-backend-test-results.json
+          --max-jobs 4
+      - name: Run full backend tests (worker / api / core)
+        if: github.event_name != 'pull_request' || needs.impact-plan.outputs.full_mandatory == 'true'
         env:
           LUMEN_TEST_SKIP_GOVERNANCE: "1"
           LUMEN_TEST_SKIP_WEB: "1"
         run: bash scripts/test.sh
 
   frontend:
+    needs: [version, impact-plan]
     runs-on: ubuntu-latest
     env:
       WEB_GATE_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -109,14 +221,39 @@ jobs:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: apps/web/package-lock.json
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
       - run: npm ci
-      - name: Run frontend tests
+      - name: Download impact plan
+        if: github.event_name == 'pull_request' && needs.impact-plan.outputs.full_mandatory != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lumen-impact-plan
+          path: /tmp/lumen-impact-plan
+      - name: Run impacted frontend tests
+        if: >-
+          github.event_name == 'pull_request'
+          && needs.impact-plan.outputs.full_mandatory != 'true'
+          && needs.impact-plan.outputs.frontend_has_tests == 'true'
+        working-directory: ${{ github.workspace }}
+        run: >-
+          python3 scripts/run_test_plan.py
+          /tmp/lumen-impact-plan/lumen-frontend-test-plan.json
+          --results /tmp/lumen-frontend-test-results.json
+          --max-jobs 4
+      - name: Run full frontend tests
+        if: github.event_name != 'pull_request' || needs.impact-plan.outputs.full_mandatory == 'true'
         run: npm test
       - name: Audit interactive hit areas
         run: node scripts/audit-hit-area.mjs
       - run: npm run lint
       - run: npm run type-check
       - name: Build (smoke test)
+        if: >-
+          github.event_name != 'pull_request'
+          || needs.impact-plan.outputs.full_mandatory == 'true'
+          || needs.impact-plan.outputs.web_build_required == 'true'
         env:
           LUMEN_BACKEND_URL: http://127.0.0.1:8000
           NEXT_PUBLIC_API_BASE: /api
