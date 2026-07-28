@@ -1,0 +1,606 @@
+{
+  "branch": "(detached)",
+  "environment": {
+    "cpu_count": 10,
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "python": "3.12.13"
+  },
+  "fixed_thresholds": {
+    "scheduler_candidate_scan_rtt_growth_limit_per_candidate": 0.05,
+    "scheduler_candidate_scan_rtt_limit_100_candidates": 8,
+    "staged_payload_reduction_target_percent": 30.0
+  },
+  "generated_at": "2026-07-28T23:30:00+08:00",
+  "invariants": [
+    "Current production characterization is reported even when acceptance is not met.",
+    "Fixed thresholds are source constants and are never derived from the measured baseline.",
+    "Synthetic resource and payload models are labeled and are not production SLO proof.",
+    "External before/after commands must run on the same host and representative workload.",
+    "No production code, test manifest, execution ledger, or existing baseline is mutated."
+  ],
+  "scenarios": {
+    "contract_detection": {
+      "dispatch_revision_contract_present": false,
+      "generated_payload_contract_present": false,
+      "legacy_enqueue_dedupe_present": true,
+      "resource_demand_contract_present": false,
+      "status": "observed",
+      "url_download_base64_return_present": true
+    },
+    "enqueue_result_unknown": {
+      "current": {
+        "acceptance": {
+          "max_active_revision_per_attempt": 1,
+          "status": "not_met"
+        },
+        "accepted_active_dispatch_revisions": 2,
+        "dedupe_present_after_unknown": false,
+        "duplicate_active_dispatch_revisions": 1,
+        "enqueue_calls": [
+          {
+            "accepted": true,
+            "args": [
+              "enqueue-unknown"
+            ],
+            "job_id": "legacy-call:1",
+            "kwargs": {},
+            "name": "run_generation",
+            "task_id": "enqueue-unknown"
+          },
+          {
+            "accepted": true,
+            "args": [
+              "enqueue-unknown"
+            ],
+            "job_id": "legacy-call:2",
+            "kwargs": {},
+            "name": "run_generation",
+            "task_id": "enqueue-unknown"
+          }
+        ],
+        "first_return": "False",
+        "implementation": "generation_parts.queue.enqueue_generation_once",
+        "mode": "current_production_facade",
+        "second_return": "True",
+        "status": "measured"
+      },
+      "target_oracle": {
+        "acceptance": {
+          "max_active_revision_per_attempt": 1,
+          "status": "met"
+        },
+        "accepted_active_dispatch_revisions": 1,
+        "attempts": [
+          {
+            "enqueue_outcome": "unknown_after_accept",
+            "kicker": 1,
+            "revision": "enqueue-unknown:attempt-1:revision-1"
+          },
+          {
+            "enqueue_outcome": "reused_active_revision",
+            "kicker": 2,
+            "revision": "enqueue-unknown:attempt-1:revision-1"
+          }
+        ],
+        "duplicate_active_dispatch_revisions": 0,
+        "mode": "stable_dispatch_revision_oracle",
+        "status": "modeled"
+      }
+    },
+    "four_k_payload": {
+      "acceptance": {
+        "fixed_reduction_target_percent": 30.0,
+        "note": "Synthetic acceptance validates the harness oracle only. Production acceptance requires the gated real command comparison.",
+        "status": "met"
+      },
+      "input": {
+        "compressed_payload_bytes": 12582912,
+        "height": 2160,
+        "width": 3840
+      },
+      "invariants": {
+        "base64_expansion_is_at_least_four_thirds": true,
+        "fixed_logical_reduction_target_met": true,
+        "staged_source_matches_input_bytes": true,
+        "staged_temporary_path_removed": true
+      },
+      "real_workload_comparison": {
+        "reason": "Set both LUMEN_WAVE2_4K_BEFORE_COMMAND and LUMEN_WAVE2_4K_AFTER_COMMAND on the same host and workload.",
+        "status": "gated"
+      },
+      "status": "measured",
+      "synthetic_shapes": {
+        "legacy_url_bytes_base64": {
+          "base64_characters": 16777216,
+          "base64_expansion_ratio": 1.3333333333333333,
+          "checksum": 0,
+          "logical_peak_live_bytes": 96354304,
+          "mode": "synthetic_legacy_url_bytes_base64_shape",
+          "peak_rss_bytes": 129679360,
+          "pixel_buffer_bytes": 33177600,
+          "source_payload_bytes": 12582912,
+          "status": "measured",
+          "variant_bytes": [
+            12582912,
+            6291456,
+            2097152,
+            262144
+          ]
+        },
+        "logical_peak_reduction_percent": 51.41982656010883,
+        "peak_rss_reduction_percent": 39.72204674668352,
+        "staged_payload_target": {
+          "logical_peak_live_bytes": 46809088,
+          "max_live_variant_bytes": 12582912,
+          "mode": "synthetic_staged_payload_shape",
+          "peak_rss_bytes": 78168064,
+          "pixel_buffer_bytes": 33177600,
+          "source_payload_bytes": 12582912,
+          "staged_file_bytes": 12582912,
+          "status": "measured",
+          "temporary_path_removed": true,
+          "write_chunk_bytes": 1048576
+        }
+      }
+    },
+    "mixed_resource_demand": {
+      "acceptance": {
+        "status": "met"
+      },
+      "budgets": {
+        "external_lane_units": 4,
+        "global_weighted_units": 14,
+        "per_user_weighted_units": 10
+      },
+      "cleanup_faults": {
+        "idempotent_repeat_released_units": 0,
+        "permit_leaks": 0,
+        "releases": [
+          {
+            "reason": "cancel",
+            "released_units": 8,
+            "task_id": "cancel-edit"
+          },
+          {
+            "reason": "cancel_idempotent_repeat",
+            "released_units": 0,
+            "task_id": "cancel-edit"
+          },
+          {
+            "reason": "lease_lost_after_loser_grace",
+            "released_units": 4,
+            "task_id": "lease-lost-dual"
+          }
+        ]
+      },
+      "completed_count": 13,
+      "demand_by_kind": {
+        "1mp": {
+          "external_lane_units": 1,
+          "output_units": 1,
+          "pixel_units": 1,
+          "postprocess_units": 0,
+          "reference_units": 0,
+          "total": 3
+        },
+        "4k": {
+          "external_lane_units": 1,
+          "output_units": 1,
+          "pixel_units": 4,
+          "postprocess_units": 0,
+          "reference_units": 0,
+          "total": 6
+        },
+        "dual_race": {
+          "external_lane_units": 2,
+          "output_units": 1,
+          "pixel_units": 1,
+          "postprocess_units": 0,
+          "reference_units": 0,
+          "total": 4
+        },
+        "multi_reference_edit": {
+          "external_lane_units": 1,
+          "output_units": 1,
+          "pixel_units": 2,
+          "postprocess_units": 1,
+          "reference_units": 3,
+          "total": 8
+        }
+      },
+      "fixed_weights": {
+        "dual_race_external_lanes": 2,
+        "edit_or_mask_postprocess": 1,
+        "normal_external_lane": 1,
+        "output_unit_per_output": 1,
+        "pixels_1_6_to_4mp": 2,
+        "pixels_above_4mp_or_4k": 4,
+        "pixels_le_1_6mp": 1,
+        "reference_chunk_bytes": 33554432
+      },
+      "invariants": {
+        "active_weighted_units_within_budget": true,
+        "all_tasks_completed": true,
+        "dual_race_uses_two_external_lanes": true,
+        "external_lane_units_within_budget": true,
+        "permit_leaks_after_cancel_or_lease_lost": true
+      },
+      "max_wait_ticks": 15,
+      "mode": "deterministic_resource_demand_oracle",
+      "peak_active_weighted_units": 12,
+      "peak_external_lane_units": 4,
+      "status": "modeled",
+      "timeline": [
+        {
+          "active": [
+            "1mp-01",
+            "1mp-02",
+            "1mp-03",
+            "1mp-04"
+          ],
+          "active_external_lane_units": 4,
+          "active_weighted_units": 12,
+          "admitted": [
+            "1mp-01",
+            "1mp-02",
+            "1mp-03",
+            "1mp-04"
+          ],
+          "queued_count": 9,
+          "released": [],
+          "tick": 1
+        },
+        {
+          "active": [
+            "1mp-01",
+            "1mp-02",
+            "1mp-03",
+            "1mp-04"
+          ],
+          "active_external_lane_units": 4,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 9,
+          "released": [],
+          "tick": 2
+        },
+        {
+          "active": [
+            "1mp-05",
+            "1mp-06",
+            "1mp-07",
+            "1mp-08"
+          ],
+          "active_external_lane_units": 4,
+          "active_weighted_units": 12,
+          "admitted": [
+            "1mp-05",
+            "1mp-06",
+            "1mp-07",
+            "1mp-08"
+          ],
+          "queued_count": 5,
+          "released": [
+            "1mp-01",
+            "1mp-02",
+            "1mp-03",
+            "1mp-04"
+          ],
+          "tick": 3
+        },
+        {
+          "active": [
+            "1mp-05",
+            "1mp-06",
+            "1mp-07",
+            "1mp-08"
+          ],
+          "active_external_lane_units": 4,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 5,
+          "released": [],
+          "tick": 4
+        },
+        {
+          "active": [
+            "4k-01",
+            "4k-02"
+          ],
+          "active_external_lane_units": 2,
+          "active_weighted_units": 12,
+          "admitted": [
+            "4k-01",
+            "4k-02"
+          ],
+          "queued_count": 3,
+          "released": [
+            "1mp-05",
+            "1mp-06",
+            "1mp-07",
+            "1mp-08"
+          ],
+          "tick": 5
+        },
+        {
+          "active": [
+            "4k-01",
+            "4k-02"
+          ],
+          "active_external_lane_units": 2,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 3,
+          "released": [],
+          "tick": 6
+        },
+        {
+          "active": [
+            "4k-01",
+            "4k-02"
+          ],
+          "active_external_lane_units": 2,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 3,
+          "released": [],
+          "tick": 7
+        },
+        {
+          "active": [
+            "4k-01",
+            "4k-02"
+          ],
+          "active_external_lane_units": 2,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 3,
+          "released": [],
+          "tick": 8
+        },
+        {
+          "active": [
+            "4k-01",
+            "4k-02"
+          ],
+          "active_external_lane_units": 2,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 3,
+          "released": [],
+          "tick": 9
+        },
+        {
+          "active": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "active_external_lane_units": 3,
+          "active_weighted_units": 12,
+          "admitted": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "queued_count": 1,
+          "released": [
+            "4k-01",
+            "4k-02"
+          ],
+          "tick": 10
+        },
+        {
+          "active": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "active_external_lane_units": 3,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 1,
+          "released": [],
+          "tick": 11
+        },
+        {
+          "active": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "active_external_lane_units": 3,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 1,
+          "released": [],
+          "tick": 12
+        },
+        {
+          "active": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "active_external_lane_units": 3,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 1,
+          "released": [],
+          "tick": 13
+        },
+        {
+          "active": [
+            "multi-ref-edit-01",
+            "dual-race-01"
+          ],
+          "active_external_lane_units": 3,
+          "active_weighted_units": 12,
+          "admitted": [],
+          "queued_count": 1,
+          "released": [],
+          "tick": 14
+        },
+        {
+          "active": [
+            "multi-ref-edit-01"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 1,
+          "released": [
+            "dual-race-01"
+          ],
+          "tick": 15
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [
+            "multi-ref-edit-02"
+          ],
+          "queued_count": 0,
+          "released": [
+            "multi-ref-edit-01"
+          ],
+          "tick": 16
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [],
+          "tick": 17
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [],
+          "tick": 18
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [],
+          "tick": 19
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [],
+          "tick": 20
+        },
+        {
+          "active": [
+            "multi-ref-edit-02"
+          ],
+          "active_external_lane_units": 1,
+          "active_weighted_units": 8,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [],
+          "tick": 21
+        },
+        {
+          "active": [],
+          "active_external_lane_units": 0,
+          "active_weighted_units": 0,
+          "admitted": [],
+          "queued_count": 0,
+          "released": [
+            "multi-ref-edit-02"
+          ],
+          "tick": 22
+        }
+      ],
+      "workload_counts": {
+        "1mp": 8,
+        "4k": 2,
+        "dual_race": 1,
+        "multi_reference_edit": 2
+      }
+    },
+    "scheduler_tick": {
+      "acceptance": {
+        "candidate_scan_rtt_count_100_met": false,
+        "fixed_candidate_scan_rtt_growth_limit_per_candidate": 0.05,
+        "fixed_candidate_scan_rtt_limit_for_100_candidates": 8,
+        "non_linear_growth_met": false,
+        "status": "not_met"
+      },
+      "candidate_scan_rtt_growth_per_candidate": 1.0,
+      "capacity": 4,
+      "implementation": "generation_parts.queue.kick_image_queue",
+      "measurements": [
+        {
+          "candidate_count": 10,
+          "candidate_scan_round_trips": 13,
+          "elapsed_seconds": 7.529195863753557e-05,
+          "mixed_lane_count": 6,
+          "redis_commands": 29,
+          "redis_commands_by_name": {
+            "enqueue_job": 8,
+            "get": 11,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "redis_round_trips": 29,
+          "redis_round_trips_by_name": {
+            "enqueue_job": 8,
+            "get": 11,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "selected_enqueue_count": 8
+        },
+        {
+          "candidate_count": 100,
+          "candidate_scan_round_trips": 103,
+          "elapsed_seconds": 0.00012020801659673452,
+          "mixed_lane_count": 6,
+          "redis_commands": 119,
+          "redis_commands_by_name": {
+            "enqueue_job": 8,
+            "get": 101,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "redis_round_trips": 119,
+          "redis_round_trips_by_name": {
+            "enqueue_job": 8,
+            "get": 101,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "selected_enqueue_count": 8
+        }
+      ],
+      "mode": "current_production_facade",
+      "status": "measured"
+    }
+  },
+  "schema_version": 1,
+  "work_base_sha": "98172a52582a552b806ab2fc30306cf3b41f5712"
+}
