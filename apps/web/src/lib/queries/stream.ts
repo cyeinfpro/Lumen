@@ -12,6 +12,7 @@ import {
   type InfiniteData,
   useInfiniteQuery,
 } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api/http";
 
 // ---------- types ----------
@@ -39,7 +40,17 @@ export interface GenerationSummary {
     mime?: string;
     display_url?: string;
     preview_url?: string | null;
-    thumb_url: string;
+    thumb_url?: string | null;
+    variant_version?: string | null;
+    variants?: Partial<
+      Record<
+        "thumb256" | "preview1024" | "display2048",
+        "ready" | "pending" | "missing" | "failed"
+      >
+    > | null;
+    thumb_ready?: boolean | null;
+    preview_ready?: boolean | null;
+    display_ready?: boolean | null;
     width: number;
     height: number;
     parent_image_id?: string | null;
@@ -49,12 +60,11 @@ export interface GenerationSummary {
   conversation_id: string;
 }
 
-// 注意：搜索按 spec §6.9 是纯客户端过滤（DesktopStream/MobileStream 自管 q + deferredQ），
-// 不进 filters，避免类型上误导调用方把 q 发给后端。
 export interface StreamFeedFilters {
   ratio?: string;
   has_ref?: boolean;
   fast?: boolean;
+  q?: string | null;
 }
 
 export interface StreamFeedPage {
@@ -65,7 +75,14 @@ export interface StreamFeedPage {
 
 // ---------- helpers ----------
 
-function buildQuery(
+export function normalizeStreamSearchQuery(
+  value: string | null | undefined,
+): string | null {
+  const normalized = value?.trim().replace(/\s+/g, " ");
+  return normalized ? normalized : null;
+}
+
+export function buildStreamFeedQuery(
   filters: StreamFeedFilters,
   limit: number,
   cursor: string | undefined,
@@ -76,18 +93,32 @@ function buildQuery(
   if (filters.ratio) p.set("ratio", filters.ratio);
   if (filters.has_ref) p.set("has_ref", "1");
   if (filters.fast) p.set("fast", "1");
+  const q = normalizeStreamSearchQuery(filters.q);
+  if (q) p.set("q", q);
   return p.toString();
 }
 
 // queryKey 规范化：把 undefined / false / "" 归一，避免缓存碎片。
-function normalizeFilters(filters: StreamFeedFilters) {
+export function normalizeStreamFeedFilters(filters: StreamFeedFilters) {
   return {
     ratio: filters.ratio ?? null,
     has_ref: Boolean(filters.has_ref),
     fast: Boolean(filters.fast),
-    // 注意：客户端搜索按 spec §6.9 做——不把 q 发给后端做分页。
-    // 这里 q 也不进 queryKey，避免每次打字都 refetch。
+    q: normalizeStreamSearchQuery(filters.q),
   };
+}
+
+export function useDebouncedStreamSearch(
+  value: string,
+  delayMs = 300,
+): string | null {
+  const normalized = normalizeStreamSearchQuery(value);
+  const [debounced, setDebounced] = useState<string | null>(normalized);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(normalized), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, normalized]);
+  return debounced;
 }
 
 // ---------- hook ----------
@@ -96,7 +127,7 @@ export function useStreamFeedQuery(
   filters: StreamFeedFilters,
   limit = 30,
 ) {
-  const key = normalizeFilters(filters);
+  const key = normalizeStreamFeedFilters(filters);
   return useInfiniteQuery<
     StreamFeedPage,
     Error,
@@ -105,18 +136,21 @@ export function useStreamFeedQuery(
     string | undefined
   >({
     queryKey: ["stream", "feed", key, limit] as const,
-    queryFn: ({ pageParam }) => {
-      // 注意：搜索是纯客户端过滤（见 StreamFeedFilters 注释），后端只收 ratio/has_ref/fast。
-      const qs = buildQuery(
-        { ratio: filters.ratio, has_ref: filters.has_ref, fast: filters.fast },
+    queryFn: ({ pageParam, signal }) => {
+      const qs = buildStreamFeedQuery(
+        {
+          ratio: filters.ratio,
+          has_ref: filters.has_ref,
+          fast: filters.fast,
+          q: filters.q,
+        },
         limit,
         pageParam,
       );
-      return apiFetch<StreamFeedPage>(`/generations/feed?${qs}`);
+      return apiFetch<StreamFeedPage>(`/generations/feed?${qs}`, { signal });
     },
     initialPageParam: undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    placeholderData: (previousData) => previousData,
     staleTime: 20_000,
     gcTime: 5 * 60_000,
   });

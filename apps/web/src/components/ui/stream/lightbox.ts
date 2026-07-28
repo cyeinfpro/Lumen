@@ -15,7 +15,7 @@ function mimeFromOutputFormat(format: string | null | undefined): string | undef
   return undefined;
 }
 
-function generationToLightboxItem(
+export function generationToLightboxItem(
   item: GenerationSummary,
   options: LightboxSourceOptions = {},
 ): LightboxItem {
@@ -52,6 +52,24 @@ function generationToLightboxItem(
   };
 }
 
+export function streamLightboxWindow(
+  items: GenerationSummary[],
+  initialGenerationId: string,
+  radius = 12,
+): GenerationSummary[] {
+  if (items.length === 0) return [];
+  const currentIndex = items.findIndex(
+    (item) =>
+      item.id === initialGenerationId ||
+      item.image.id === initialGenerationId,
+  );
+  const center = currentIndex >= 0 ? currentIndex : 0;
+  const safeRadius = Math.max(0, Math.floor(radius));
+  const start = Math.max(0, center - safeRadius);
+  const end = Math.min(items.length, center + safeRadius + 1);
+  return items.slice(start, end);
+}
+
 export function openStreamLightbox(
   items: GenerationSummary[],
   initialGenerationId: string,
@@ -61,10 +79,15 @@ export function openStreamLightbox(
   const preferMobilePreview =
     typeof window.matchMedia === "function" &&
     window.matchMedia("(max-width: 767px)").matches;
-  const lbItems = items.map((item) =>
+  const windowItems = streamLightboxWindow(items, initialGenerationId);
+  const lbItems = windowItems.map((item) =>
     generationToLightboxItem(item, { preferMobilePreview }),
   );
-  const current = items.find((it) => it.id === initialGenerationId);
+  const current = windowItems.find(
+    (item) =>
+      item.id === initialGenerationId ||
+      item.image.id === initialGenerationId,
+  );
   const initialId = current ? current.image.id : lbItems[0]?.id;
   if (!initialId) return;
 
