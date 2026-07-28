@@ -214,6 +214,36 @@ def test_completion_facade_preserves_new_leaf_symbol_identity() -> None:
     )
 
 
+def test_reasoning_item_extraction_preserves_chunk_order_and_precedence() -> None:
+    item = {
+        "summary_text": "top summary",
+        "text": "top text",
+        "summary": [
+            "plain summary",
+            {"summary_text": "fallback summary"},
+            {"text": "preferred text", "summary_text": "ignored summary"},
+            {"text": ""},
+            42,
+        ],
+        "content": [
+            {"text": "content text"},
+            {"text": ""},
+            "ignored content",
+        ],
+    }
+
+    assert stream._extract_reasoning_text_from_item(item) == "\n".join(
+        [
+            "top summary",
+            "top text",
+            "plain summary",
+            "fallback summary",
+            "preferred text",
+            "content text",
+        ]
+    )
+
+
 def test_completion_facade_preserves_extracted_wrapper_signatures() -> None:
     assert tuple(inspect.signature(completion._pack_recent_history).parameters) == (
         "session",

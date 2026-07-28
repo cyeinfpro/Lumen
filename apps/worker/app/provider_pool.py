@@ -191,6 +191,22 @@ class _ImageCandidateBuckets:
         return self.mask_url_candidates
 
 
+@dataclass(frozen=True)
+class _ImageCandidateQuery:
+    avoided: set[str]
+    endpoint_kind: str | None
+    ignore_cooldown: bool
+    redis: Any
+    account_limiter: Any
+    wall_now: float
+    mono_now: float
+    requires_mask: bool
+    mask_transport_required: bool
+    task_id: str | None
+    size_bucket: str | None
+    cost_class: str | None
+
+
 class _UntrackedTextProviderAttempt:
     """Compatibility attempt for lightweight pools used by late-bound tests."""
 
@@ -1026,46 +1042,35 @@ class ProviderPool(ProviderProbeMixin):
         self,
         enabled: list[ProviderConfig],
         *,
-        avoided: set[str],
-        endpoint_kind: str | None,
-        ignore_cooldown: bool,
-        redis: Any,
-        account_limiter: Any,
-        wall_now: float,
-        mono_now: float,
-        requires_mask: bool,
-        mask_transport_required: bool,
-        task_id: str | None,
-        size_bucket: str | None,
-        cost_class: str | None,
+        query: _ImageCandidateQuery,
     ) -> tuple[list[_ImageCandidate], list[tuple[str, str]]]:
         buckets = _ImageCandidateBuckets()
         skipped: list[tuple[str, str]] = []
         for provider in enabled:
             candidate, reason = await self._qualify_image_candidate(
                 provider,
-                avoided=avoided,
-                endpoint_kind=endpoint_kind,
-                ignore_cooldown=ignore_cooldown,
-                redis=redis,
-                account_limiter=account_limiter,
-                wall_now=wall_now,
-                mono_now=mono_now,
-                size_bucket=size_bucket,
-                cost_class=cost_class,
+                avoided=query.avoided,
+                endpoint_kind=query.endpoint_kind,
+                ignore_cooldown=query.ignore_cooldown,
+                redis=query.redis,
+                account_limiter=query.account_limiter,
+                wall_now=query.wall_now,
+                mono_now=query.mono_now,
+                size_bucket=query.size_bucket,
+                cost_class=query.cost_class,
             )
             if candidate is None:
                 skipped.append((provider.name, reason or "unavailable"))
                 continue
             buckets.add(
                 candidate,
-                requires_mask=requires_mask,
-                mask_transport_required=mask_transport_required,
+                requires_mask=query.requires_mask,
+                mask_transport_required=query.mask_transport_required,
             )
         return buckets.select(
-            requires_mask=requires_mask,
-            mask_transport_required=mask_transport_required,
-            task_id=task_id,
+            requires_mask=query.requires_mask,
+            mask_transport_required=query.mask_transport_required,
+            task_id=query.task_id,
         ), skipped
 
     async def _select_for_image(
@@ -1121,18 +1126,20 @@ class ProviderPool(ProviderProbeMixin):
         avoided = await _load_avoided_image_providers(redis, task_id)
         candidates, skipped = await self._collect_image_candidates(
             enabled,
-            avoided=avoided,
-            endpoint_kind=endpoint_kind,
-            ignore_cooldown=ignore_cooldown,
-            redis=redis,
-            account_limiter=account_limiter,
-            wall_now=wall_now,
-            mono_now=now,
-            requires_mask=requires_mask,
-            mask_transport_required=mask_transport_required,
-            task_id=task_id,
-            size_bucket=size_bucket,
-            cost_class=cost_class or queue_lane,
+            query=_ImageCandidateQuery(
+                avoided=avoided,
+                endpoint_kind=endpoint_kind,
+                ignore_cooldown=ignore_cooldown,
+                redis=redis,
+                account_limiter=account_limiter,
+                wall_now=wall_now,
+                mono_now=now,
+                requires_mask=requires_mask,
+                mask_transport_required=mask_transport_required,
+                task_id=task_id,
+                size_bucket=size_bucket,
+                cost_class=cost_class or queue_lane,
+            ),
         )
         if not candidates:
             if _only_avoided_image_providers(avoided, skipped):

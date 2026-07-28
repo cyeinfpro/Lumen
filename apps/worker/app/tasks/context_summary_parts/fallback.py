@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict, Unpack
 
 from lumen_core.context_window import estimate_text_tokens
 from lumen_core.models import Message
@@ -25,55 +25,68 @@ class SummaryFallbackRuntime:
     max_segments: int
 
 
+class _SummaryFallbackArgs(TypedDict):
+    conv_id: str
+    messages: Sequence[Message]
+    previous_summary: str | None
+    target_tokens: int
+    model: str
+    input_budget: int
+    timeout_s: float
+    extra_instruction: str | None
+    image_captions: Mapping[str, str] | None
+    redis: Any
+    progress_callback: Callable[[int, int], Awaitable[None]] | None
+    coverage: SummaryCoverage | None
+    runtime: SummaryFallbackRuntime
+
+
+@dataclass(frozen=True)
+class _SummaryFallbackRequest:
+    conv_id: str
+    messages: Sequence[Message]
+    previous_summary: str | None
+    target_tokens: int
+    model: str
+    input_budget: int
+    timeout_s: float
+    extra_instruction: str | None
+    image_captions: Mapping[str, str] | None
+    redis: Any
+    progress_callback: Callable[[int, int], Awaitable[None]] | None
+    coverage: SummaryCoverage | None
+    runtime: SummaryFallbackRuntime
+
+
 async def segment_and_summarize(
-    *,
-    conv_id: str,
-    messages: Sequence[Message],
-    previous_summary: str | None,
-    target_tokens: int,
-    model: str,
-    input_budget: int,
-    timeout_s: float,
-    extra_instruction: str | None,
-    image_captions: Mapping[str, str] | None,
-    redis: Any,
-    progress_callback: Callable[[int, int], Awaitable[None]] | None,
-    coverage: SummaryCoverage | None,
-    runtime: SummaryFallbackRuntime,
+    **kwargs: Unpack[_SummaryFallbackArgs],
 ) -> str | None:
+    request = _SummaryFallbackRequest(**kwargs)
     lines = [
-        runtime.message_to_line(message, image_captions=image_captions)
-        for message in messages
-    ]
-    if not lines and not previous_summary:
-        return None
-    if _fits_input_budget(lines, previous_summary, input_budget):
-        return await _summarize_single_input(
-            lines,
-            messages=messages,
-            previous_summary=previous_summary,
-            target_tokens=target_tokens,
-            model=model,
-            timeout_s=timeout_s,
-            extra_instruction=extra_instruction,
-            coverage=coverage,
-            runtime=runtime,
+        request.runtime.message_to_line(
+            message,
+            image_captions=request.image_captions,
         )
-    return await _summarize_segments(
-        conv_id=conv_id,
-        messages=messages,
-        lines=lines,
-        previous_summary=previous_summary,
-        target_tokens=target_tokens,
-        model=model,
-        input_budget=input_budget,
-        timeout_s=timeout_s,
-        extra_instruction=extra_instruction,
-        redis=redis,
-        progress_callback=progress_callback,
-        coverage=coverage,
-        runtime=runtime,
-    )
+        for message in request.messages
+    ]
+    if not lines and not request.previous_summary:
+        return None
+    if _fits_input_budget(
+        lines,
+        request.previous_summary,
+        request.input_budget,
+    ):
+        result = await request.runtime.call_upstream(
+            request.runtime.compose_input(request.previous_summary, lines),
+            request.target_tokens,
+            request.model,
+            extra_instruction=request.extra_instruction,
+            timeout_s=request.timeout_s,
+        )
+        if result and request.coverage is not None:
+            request.coverage.covered_message_count = len(request.messages)
+        return result
+    return await _summarize_segments(request, lines)
 
 
 def _fits_input_budget(
@@ -87,91 +100,61 @@ def _fits_input_budget(
     return line_tokens <= input_budget
 
 
-async def _summarize_single_input(
-    lines: Sequence[str],
-    *,
-    messages: Sequence[Message],
-    previous_summary: str | None,
-    target_tokens: int,
-    model: str,
-    timeout_s: float,
-    extra_instruction: str | None,
-    coverage: SummaryCoverage | None,
-    runtime: SummaryFallbackRuntime,
-) -> str | None:
-    result = await runtime.call_upstream(
-        runtime.compose_input(previous_summary, lines),
-        target_tokens,
-        model,
-        extra_instruction=extra_instruction,
-        timeout_s=timeout_s,
-    )
-    if result and coverage is not None:
-        coverage.covered_message_count = len(messages)
-    return result
-
-
 async def _summarize_segments(
-    *,
-    conv_id: str,
-    messages: Sequence[Message],
+    request: _SummaryFallbackRequest,
     lines: Sequence[str],
-    previous_summary: str | None,
-    target_tokens: int,
-    model: str,
-    input_budget: int,
-    timeout_s: float,
-    extra_instruction: str | None,
-    redis: Any,
-    progress_callback: Callable[[int, int], Awaitable[None]] | None,
-    coverage: SummaryCoverage | None,
-    runtime: SummaryFallbackRuntime,
 ) -> str | None:
-    all_segments = runtime.plan_segments(lines, max(1, input_budget // 2))
+    runtime = request.runtime
+    all_segments = runtime.plan_segments(lines, max(1, request.input_budget // 2))
     segments, bounded_reason = runtime.bound_segments(all_segments)
     if bounded_reason:
         runtime.logger.warning(
             "context_summary.too_many_segments conv=%s segments=%s planned=%s max=%s",
-            conv_id,
+            request.conv_id,
             len(all_segments),
             len(segments),
             runtime.max_segments,
         )
 
-    current_summary = previous_summary
+    current_summary = request.previous_summary
     last_committable_summary: str | None = None
     for idx, segment in enumerate(segments, start=1):
         current_summary = await runtime.call_upstream(
             runtime.compose_input(current_summary, segment.lines),
-            target_tokens,
-            model,
-            extra_instruction=extra_instruction,
-            timeout_s=timeout_s,
+            request.target_tokens,
+            request.model,
+            extra_instruction=request.extra_instruction,
+            timeout_s=request.timeout_s,
         )
         if not current_summary:
             return _partial_segment_result(
-                conv_id,
+                request.conv_id,
                 idx=idx,
                 total=len(segments),
                 last_committable_summary=last_committable_summary,
-                coverage=coverage,
+                coverage=request.coverage,
                 logger=runtime.logger,
             )
-        await runtime.set_partial(redis, conv_id, current_summary, idx)
+        await runtime.set_partial(
+            request.redis,
+            request.conv_id,
+            current_summary,
+            idx,
+        )
         if segment.ends_at_message_boundary:
             last_committable_summary = current_summary
-            if coverage is not None:
-                coverage.covered_message_count = segment.covered_message_count
+            if request.coverage is not None:
+                request.coverage.covered_message_count = segment.covered_message_count
         await _report_progress(
-            progress_callback,
-            conv_id=conv_id,
+            request.progress_callback,
+            conv_id=request.conv_id,
             current=idx,
             total=len(segments),
             logger=runtime.logger,
         )
 
-    if coverage is not None:
-        coverage.partial_reason = bounded_reason
+    if request.coverage is not None:
+        request.coverage.partial_reason = bounded_reason
     return last_committable_summary
 
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NotRequired, TypedDict, Unpack
 
 
 DIAG_STRING_LIMIT = 500
@@ -351,64 +352,93 @@ def safe_generation_error_summary(
     return " · ".join(parts) if parts else "unknown generation error"
 
 
+class _GenerationDiagnosticsArgs(TypedDict):
+    trace_id: NotRequired[str | None]
+    requested_params: dict[str, Any]
+    effective_params: NotRequired[dict[str, Any] | None]
+    revised_prompt: NotRequired[str | None]
+    provider: NotRequired[str | None]
+    upstream_route: NotRequired[str | None]
+    actual_route: NotRequired[str | None]
+    actual_source: NotRequired[str | None]
+    actual_endpoint: NotRequired[str | None]
+    provider_attempts: NotRequired[list[dict[str, Any]] | None]
+    stage_timings_ms: NotRequired[dict[str, int] | None]
+    route_diagnostics: NotRequired[list[dict[str, Any]] | None]
+    upstream_duration_ms: NotRequired[int | None]
+    duration_ms: NotRequired[int | None]
+    debug_id: NotRequired[str | None]
+    error_summary: NotRequired[Any]
+    expose_provider_diagnostics: NotRequired[bool]
+
+
+@dataclass(frozen=True)
+class _GenerationDiagnostics:
+    requested_params: dict[str, Any]
+    trace_id: str | None = None
+    effective_params: dict[str, Any] | None = None
+    revised_prompt: str | None = None
+    provider: str | None = None
+    upstream_route: str | None = None
+    actual_route: str | None = None
+    actual_source: str | None = None
+    actual_endpoint: str | None = None
+    provider_attempts: list[dict[str, Any]] | None = None
+    stage_timings_ms: dict[str, int] | None = None
+    route_diagnostics: list[dict[str, Any]] | None = None
+    upstream_duration_ms: int | None = None
+    duration_ms: int | None = None
+    debug_id: str | None = None
+    error_summary: Any = None
+    expose_provider_diagnostics: bool = False
+
+
 def build_generation_diagnostics(
-    *,
-    trace_id: str | None = None,
-    requested_params: dict[str, Any],
-    effective_params: dict[str, Any] | None = None,
-    revised_prompt: str | None = None,
-    provider: str | None = None,
-    upstream_route: str | None = None,
-    actual_route: str | None = None,
-    actual_source: str | None = None,
-    actual_endpoint: str | None = None,
-    provider_attempts: list[dict[str, Any]] | None = None,
-    stage_timings_ms: dict[str, int] | None = None,
-    route_diagnostics: list[dict[str, Any]] | None = None,
-    upstream_duration_ms: int | None = None,
-    duration_ms: int | None = None,
-    debug_id: str | None = None,
-    error_summary: str | None = None,
-    expose_provider_diagnostics: bool = False,
+    **kwargs: Unpack[_GenerationDiagnosticsArgs],
 ) -> dict[str, Any]:
-    attempts = provider_attempts or []
+    diagnostics = _GenerationDiagnostics(**kwargs)
+    attempts = diagnostics.provider_attempts or []
     failover_count = sum(
         1
         for attempt in attempts
         if str(attempt.get("status") or "").lower() in {"failover", "failed"}
     )
     out: dict[str, Any] = {
-        "requested_params": requested_params,
-        "debug_id": debug_id,
+        "requested_params": diagnostics.requested_params,
+        "debug_id": diagnostics.debug_id,
     }
     _apply_optional_diagnostic_fields(
         out,
-        trace_id=trace_id,
-        effective_params=effective_params,
-        revised_prompt=revised_prompt,
-        upstream_route=upstream_route,
-        actual_route=actual_route,
-        actual_source=actual_source,
-        actual_endpoint=actual_endpoint,
+        trace_id=diagnostics.trace_id,
+        effective_params=diagnostics.effective_params,
+        revised_prompt=diagnostics.revised_prompt,
+        upstream_route=diagnostics.upstream_route,
+        actual_route=diagnostics.actual_route,
+        actual_source=diagnostics.actual_source,
+        actual_endpoint=diagnostics.actual_endpoint,
         provider_attempts=attempts[:12] if attempts else None,
-        stage_timings_ms=stage_timings_ms,
-        route_diagnostics=(route_diagnostics[:12] if route_diagnostics else None),
-        safe_error_summary=error_summary,
-        error_summary=error_summary,
+        stage_timings_ms=diagnostics.stage_timings_ms,
+        route_diagnostics=(
+            diagnostics.route_diagnostics[:12]
+            if diagnostics.route_diagnostics
+            else None
+        ),
+        safe_error_summary=diagnostics.error_summary,
+        error_summary=diagnostics.error_summary,
     )
-    if provider:
-        out["provider"] = provider
-        out["actual_provider"] = provider
+    if diagnostics.provider:
+        out["provider"] = diagnostics.provider
+        out["actual_provider"] = diagnostics.provider
     if failover_count:
         out["failover"] = True
         out["failover_count"] = failover_count
-    if upstream_duration_ms is not None:
-        out["upstream_duration_ms"] = upstream_duration_ms
-    if duration_ms is not None:
-        out["duration_ms"] = duration_ms
+    if diagnostics.upstream_duration_ms is not None:
+        out["upstream_duration_ms"] = diagnostics.upstream_duration_ms
+    if diagnostics.duration_ms is not None:
+        out["duration_ms"] = diagnostics.duration_ms
     return sanitize_generation_diagnostics_payload(
         out,
-        expose_provider_diagnostics=expose_provider_diagnostics,
+        expose_provider_diagnostics=diagnostics.expose_provider_diagnostics,
     )
 
 

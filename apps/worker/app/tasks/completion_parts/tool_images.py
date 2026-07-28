@@ -7,7 +7,7 @@ import io
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict, Unpack
 
 from PIL import Image as PILImage
 
@@ -558,58 +558,89 @@ def _fallback_completion_usage_tokens(
     return next_in, next_out
 
 
+class _CancelledCompletionBillingArgs(TypedDict):
+    has_partial: bool
+    input_list: list[dict[str, Any]] | None
+    instructions: NotRequired[str | None]
+    usage_is_finalized: NotRequired[bool]
+    accumulated_text: str
+    tokens_in: int
+    tokens_out: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    cache_creation_5m_tokens: int
+    cache_creation_1h_tokens: int
+    reasoning_tokens: int
+    image_output_tokens: int
+    tool_images: list[dict[str, Any]]
+    reserved_tool_image_budget_micro: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class _CancelledCompletionBilling:
+    has_partial: bool
+    input_list: list[dict[str, Any]] | None
+    accumulated_text: str
+    tokens_in: int
+    tokens_out: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    cache_creation_5m_tokens: int
+    cache_creation_1h_tokens: int
+    reasoning_tokens: int
+    image_output_tokens: int
+    tool_images: list[dict[str, Any]]
+    reserved_tool_image_budget_micro: int
+    reason: str
+    instructions: str | None = None
+    usage_is_finalized: bool = False
+
+
+def _persisted_completion_tokens(completion: Any, name: str) -> int:
+    try:
+        return max(0, int(getattr(completion, name, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def _settle_cancelled_completion_billing(
     session: Any,
     completion: Any,
-    *,
-    has_partial: bool,
-    input_list: list[dict[str, Any]] | None,
-    instructions: str | None = None,
-    usage_is_finalized: bool = False,
-    accumulated_text: str,
-    tokens_in: int,
-    tokens_out: int,
-    cache_read_tokens: int,
-    cache_creation_tokens: int,
-    cache_creation_5m_tokens: int,
-    cache_creation_1h_tokens: int,
-    reasoning_tokens: int,
-    image_output_tokens: int,
-    tool_images: list[dict[str, Any]],
-    reserved_tool_image_budget_micro: int,
-    reason: str,
+    **kwargs: Unpack[_CancelledCompletionBillingArgs],
 ) -> None:
-    def persisted_tokens(name: str) -> int:
-        try:
-            return max(0, int(getattr(completion, name, 0) or 0))
-        except (TypeError, ValueError):
-            return 0
-
-    tokens_in = max(tokens_in, persisted_tokens("tokens_in"))
-    tokens_out = max(tokens_out, persisted_tokens("tokens_out"))
+    request = _CancelledCompletionBilling(**kwargs)
+    tokens_in = max(
+        request.tokens_in,
+        _persisted_completion_tokens(completion, "tokens_in"),
+    )
+    tokens_out = max(
+        request.tokens_out,
+        _persisted_completion_tokens(completion, "tokens_out"),
+    )
     cache_read_tokens = max(
-        cache_read_tokens,
-        persisted_tokens("cache_read_tokens"),
+        request.cache_read_tokens,
+        _persisted_completion_tokens(completion, "cache_read_tokens"),
     )
     cache_creation_tokens = max(
-        cache_creation_tokens,
-        persisted_tokens("cache_creation_tokens"),
+        request.cache_creation_tokens,
+        _persisted_completion_tokens(completion, "cache_creation_tokens"),
     )
     cache_creation_5m_tokens = max(
-        cache_creation_5m_tokens,
-        persisted_tokens("cache_creation_5m_tokens"),
+        request.cache_creation_5m_tokens,
+        _persisted_completion_tokens(completion, "cache_creation_5m_tokens"),
     )
     cache_creation_1h_tokens = max(
-        cache_creation_1h_tokens,
-        persisted_tokens("cache_creation_1h_tokens"),
+        request.cache_creation_1h_tokens,
+        _persisted_completion_tokens(completion, "cache_creation_1h_tokens"),
     )
     reasoning_tokens = max(
-        reasoning_tokens,
-        persisted_tokens("reasoning_tokens"),
+        request.reasoning_tokens,
+        _persisted_completion_tokens(completion, "reasoning_tokens"),
     )
     image_output_tokens = max(
-        image_output_tokens,
-        persisted_tokens("image_output_tokens"),
+        request.image_output_tokens,
+        _persisted_completion_tokens(completion, "image_output_tokens"),
     )
     usage_values = (
         tokens_in,
@@ -622,37 +653,39 @@ async def _settle_cancelled_completion_billing(
         image_output_tokens,
     )
     if (
-        not has_partial
-        and input_list is None
+        not request.has_partial
+        and request.input_list is None
         and not any(value > 0 for value in usage_values)
     ):
         await worker_billing.release_completion(
             session,
             completion,
-            reason=reason,
+            reason=request.reason,
         )
         return
 
-    if input_list is not None and not usage_is_finalized:
+    if request.input_list is not None and not request.usage_is_finalized:
         tokens_in, tokens_out = _fallback_completion_usage_tokens(
-            input_list,
-            accumulated_text,
-            instructions=instructions,
+            request.input_list,
+            request.accumulated_text,
+            instructions=request.instructions,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
         )
-    elif accumulated_text and tokens_out <= 0 and not usage_is_finalized:
-        tokens_out = max(1, count_tokens(accumulated_text))
+    elif (
+        request.accumulated_text and tokens_out <= 0 and not request.usage_is_finalized
+    ):
+        tokens_out = max(1, count_tokens(request.accumulated_text))
     if (
-        tool_images
+        request.tool_images
         and image_output_tokens <= 0
-        and reserved_tool_image_budget_micro > 0
+        and request.reserved_tool_image_budget_micro > 0
     ):
         image_output_tokens = (
             await completion_billing.fallback_completion_tool_image_tokens(
                 session,
                 completion,
-                budget_micro=reserved_tool_image_budget_micro,
+                budget_micro=request.reserved_tool_image_budget_micro,
             )
         )
         tokens_out = max(tokens_out, image_output_tokens)
@@ -683,7 +716,7 @@ async def _settle_cancelled_completion_billing(
     await worker_billing.release_completion(
         session,
         completion,
-        reason=reason,
+        reason=request.reason,
     )
 
 

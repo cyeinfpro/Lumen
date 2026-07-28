@@ -57,32 +57,52 @@ def _extract_reasoning_delta(event: dict[str, Any]) -> str:
     return ""
 
 
-def _extract_reasoning_text_from_item(item: dict[str, Any]) -> str:
+def _reasoning_summary_chunks(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if not isinstance(value, list):
+        return []
     chunks: list[str] = []
-    for key in ("summary_text", "text"):
-        value = item.get(key)
-        if isinstance(value, str) and value:
-            chunks.append(value)
-    summary = item.get("summary")
-    if isinstance(summary, str) and summary:
-        chunks.append(summary)
-    elif isinstance(summary, list):
-        for part in summary:
-            if isinstance(part, str) and part:
+    for part in value:
+        if isinstance(part, str):
+            if part:
                 chunks.append(part)
-            elif isinstance(part, dict):
-                for key in ("text", "summary_text"):
-                    value = part.get(key)
-                    if isinstance(value, str) and value:
-                        chunks.append(value)
-                        break
-    content = item.get("content")
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict):
-                value = part.get("text")
-                if isinstance(value, str) and value:
-                    chunks.append(value)
+            continue
+        if not isinstance(part, dict):
+            continue
+        text = next(
+            (
+                candidate
+                for key in ("text", "summary_text")
+                if isinstance((candidate := part.get(key)), str) and candidate
+            ),
+            None,
+        )
+        if text is not None:
+            chunks.append(text)
+    return chunks
+
+
+def _reasoning_content_chunks(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        text
+        for part in value
+        if isinstance(part, dict)
+        and isinstance((text := part.get("text")), str)
+        and text
+    ]
+
+
+def _extract_reasoning_text_from_item(item: dict[str, Any]) -> str:
+    chunks = [
+        value
+        for key in ("summary_text", "text")
+        if isinstance((value := item.get(key)), str) and value
+    ]
+    chunks.extend(_reasoning_summary_chunks(item.get("summary")))
+    chunks.extend(_reasoning_content_chunks(item.get("content")))
     return "\n".join(chunks)
 
 

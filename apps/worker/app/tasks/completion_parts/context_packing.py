@@ -59,6 +59,23 @@ class _RecentSelection:
     used_tokens: int
 
 
+@dataclass(frozen=True)
+class _CompressedContextRequest:
+    conversation_id: str
+    target: Message
+    system_prompt: str | None
+    redis: Any | None
+    conversation: Conversation | None
+    summary: dict[str, Any] | None
+    retention_filter: Any | None
+    all_rows_desc: list[Message]
+    total_used_tokens: int
+    current_user: Message | None
+    selection: _RecentSelection
+    existing_summary_packed: PackedContext | None
+    settings: _CompressionSettings
+
+
 def _empty_context(system_prompt: str | None) -> PackedContext:
     return PackedContext(
         input_list=[],
@@ -538,53 +555,41 @@ def _summary_context(
 async def _pack_compressed_context(
     session: Any,
     *,
-    conversation_id: str,
-    target: Message,
-    system_prompt: str | None,
-    redis: Any | None,
-    conversation: Conversation | None,
-    summary: dict[str, Any] | None,
-    retention_filter: Any | None,
-    all_rows_desc: list[Message],
-    total_used_tokens: int,
-    current_user: Message | None,
-    selection: _RecentSelection,
-    existing_summary_packed: PackedContext | None,
-    settings: _CompressionSettings,
+    request: _CompressedContextRequest,
     hooks: Any,
 ) -> PackedContext:
-    if not selection.summary_rows:
-        packed = existing_summary_packed or _fallback_pack(
-            system_prompt=system_prompt,
-            rows_desc=all_rows_desc,
-            used_tokens=total_used_tokens,
+    if not request.selection.summary_rows:
+        packed = request.existing_summary_packed or _fallback_pack(
+            system_prompt=request.system_prompt,
+            rows_desc=request.all_rows_desc,
+            used_tokens=request.total_used_tokens,
             truncated=False,
             compression_enabled=True,
-            compressor_model=settings.summary_model,
+            compressor_model=request.settings.summary_model,
         )
         return await _with_input(session, packed, hooks)
 
     boundary_message = max(
-        selection.summary_rows,
+        request.selection.summary_rows,
         key=lambda message: (_message_created_at(message), message.id),
     )
     summary_is_recent = _summary_recently_refreshed(
-        summary,
-        settings.min_interval_seconds,
+        request.summary,
+        request.settings.min_interval_seconds,
     )
     if summary_is_recent and not _summary_covers_boundary(
-        summary,
+        request.summary,
         boundary_message,
     ):
         packed = await _load_budget_fallback(
             session,
-            conversation_id=conversation_id,
-            target=target,
-            system_prompt=system_prompt,
-            retention_filter=retention_filter,
-            input_budget=settings.input_budget,
-            current_user=current_user,
-            summary_model=settings.summary_model,
+            conversation_id=request.conversation_id,
+            target=request.target,
+            system_prompt=request.system_prompt,
+            retention_filter=request.retention_filter,
+            input_budget=request.settings.input_budget,
+            current_user=request.current_user,
+            summary_model=request.settings.summary_model,
             reason="rate_limited",
             hooks=hooks,
         )
@@ -592,37 +597,37 @@ async def _pack_compressed_context(
 
     summary, summary_created = await _refresh_summary(
         session,
-        conversation=conversation,
-        conversation_id=conversation_id,
+        conversation=request.conversation,
+        conversation_id=request.conversation_id,
         boundary_message=boundary_message,
-        redis=redis,
-        settings=settings,
-        selection=selection,
-        summary=summary,
+        redis=request.redis,
+        settings=request.settings,
+        selection=request.selection,
+        summary=request.summary,
         hooks=hooks,
     )
     if not _summary_covers_boundary(summary, boundary_message):
         packed = await _load_budget_fallback(
             session,
-            conversation_id=conversation_id,
-            target=target,
-            system_prompt=system_prompt,
-            retention_filter=retention_filter,
-            input_budget=settings.input_budget,
-            current_user=current_user,
-            summary_model=settings.summary_model,
+            conversation_id=request.conversation_id,
+            target=request.target,
+            system_prompt=request.system_prompt,
+            retention_filter=request.retention_filter,
+            input_budget=request.settings.input_budget,
+            current_user=request.current_user,
+            summary_model=request.settings.summary_model,
             reason="summary_failed",
             hooks=hooks,
         )
         return await _with_input(session, packed, hooks)
 
     packed = _summary_context(
-        system_prompt=system_prompt,
+        system_prompt=request.system_prompt,
         summary=cast(dict[str, Any], summary),
         boundary_message=boundary_message,
-        selection=selection,
+        selection=request.selection,
         summary_created=summary_created,
-        summary_model=settings.summary_model,
+        summary_model=request.settings.summary_model,
         hooks=hooks,
     )
     return await _with_input(session, packed, hooks)
@@ -741,19 +746,21 @@ async def pack_recent_history(
     )
     return await _pack_compressed_context(
         session,
-        conversation_id=conversation_id,
-        target=target,
-        system_prompt=system_prompt,
-        redis=redis,
-        conversation=conversation,
-        summary=summary,
-        retention_filter=retention_filter,
-        all_rows_desc=all_rows_desc,
-        total_used_tokens=total_used_tokens,
-        current_user=current_user,
-        selection=selection,
-        existing_summary_packed=existing_summary_packed,
-        settings=settings,
+        request=_CompressedContextRequest(
+            conversation_id=conversation_id,
+            target=target,
+            system_prompt=system_prompt,
+            redis=redis,
+            conversation=conversation,
+            summary=summary,
+            retention_filter=retention_filter,
+            all_rows_desc=all_rows_desc,
+            total_used_tokens=total_used_tokens,
+            current_user=current_user,
+            selection=selection,
+            existing_summary_packed=existing_summary_packed,
+            settings=settings,
+        ),
         hooks=hooks,
     )
 
