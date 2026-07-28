@@ -41,6 +41,7 @@ from app import runtime_settings
 from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
 
 from app.tasks.generation_parts import (
+    admission as generation_admission,
     image_artifact_contracts,
     lease as generation_lease,
     lifecycle,
@@ -269,6 +270,13 @@ class FakeRedis:
 
     async def eval(self, *args: Any) -> int:
         script = args[0]
+        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
+            return 1
+        if script in {
+            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
+            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
+        }:
+            return 1
         if script == generation_dispatch.BEGIN_DISPATCH_LUA:
             (
                 active_key,
@@ -1134,6 +1142,45 @@ async def test_ready_queue_batches_not_before_reads_and_bounds_scan(
     assert scan_limits == [40]
     assert redis.mget_calls == 1
     assert redis.get_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_image_queue_coalesces_concurrent_wakeup_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = FakeRedis()
+    scans = 0
+    services = replace(
+        generation_services,
+        queue=_QueueService(4),
+    )
+
+    async def fake_ready(
+        _redis: Any,
+        _limit: int,
+        *,
+        services: Any,
+    ) -> list[generation_queue.QueuedGenerationCandidate]:
+        nonlocal scans
+        _ = services
+        scans += 1
+        await asyncio.sleep(0)
+        return []
+
+    monkeypatch.setattr(
+        generation_queue,
+        "ready_queued_generation_candidates",
+        fake_ready,
+    )
+
+    await asyncio.gather(
+        *(
+            generation_queue.kick_image_queue(redis, services=services)
+            for _ in range(100)
+        )
+    )
+
+    assert scans == 1
 
 
 @pytest.mark.asyncio

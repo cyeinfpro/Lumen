@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -190,6 +190,19 @@ class GenerationQueueService(Protocol):
     def configured_capacity(self) -> int: ...
 
     async def resolve_capacity(self) -> int: ...
+
+    def resource_budgets(self) -> tuple[int, int, int]: ...
+
+    async def select_providers(
+        self,
+        *,
+        task_id: str,
+        endpoint_kind: str | None,
+        requires_mask: bool,
+        queue_lane: str | None,
+        size_bucket: str | None,
+        cost_class: str | None,
+    ) -> list[Any]: ...
 
 
 class GenerationLeaseService(Protocol):

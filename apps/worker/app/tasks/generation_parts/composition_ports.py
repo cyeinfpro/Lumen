@@ -128,10 +128,7 @@ class DefaultGenerationArtifacts:
             return
         started = asyncio.ensure_future(
             asyncio.gather(
-                *(
-                    asyncio.to_thread(self.backend.delete, key)
-                    for key in unique_keys
-                ),
+                *(asyncio.to_thread(self.backend.delete, key) for key in unique_keys),
                 return_exceptions=True,
             )
         )
@@ -238,6 +235,8 @@ class DefaultGenerationEvents:
 class DefaultGenerationQueue:
     settings: Settings
     provider_cooldowns: dict[str, float] = field(default_factory=dict)
+    _provider_selector: object | None = field(default=None, init=False)
+    _provider_pool_identity: int | None = field(default=None, init=False)
 
     @property
     def expose_provider_diagnostics(self) -> bool:
@@ -246,8 +245,13 @@ class DefaultGenerationQueue:
     def configured_capacity(self) -> int:
         from .queue import coerce_image_queue_capacity
 
-        return coerce_image_queue_capacity(
-            self.settings.image_generation_concurrency
+        return coerce_image_queue_capacity(self.settings.image_generation_concurrency)
+
+    def resource_budgets(self) -> tuple[int, int, int]:
+        return (
+            max(1, int(self.settings.image_generation_resource_units)),
+            max(1, int(self.settings.image_generation_external_lane_units)),
+            max(1, int(self.settings.image_generation_user_resource_units)),
         )
 
     async def resolve_capacity(self) -> int:
@@ -256,12 +260,48 @@ class DefaultGenerationQueue:
             coerce_image_queue_capacity,
         )
 
-        raw = await runtime_settings.resolve(
-            IMAGE_GENERATION_CONCURRENCY_SETTING
-        )
+        raw = await runtime_settings.resolve(IMAGE_GENERATION_CONCURRENCY_SETTING)
         if raw is None:
             return self.configured_capacity()
         return coerce_image_queue_capacity(raw)
+
+    async def select_providers(
+        self,
+        *,
+        task_id: str,
+        endpoint_kind: str | None,
+        requires_mask: bool,
+        queue_lane: str | None,
+        size_bucket: str | None,
+        cost_class: str | None,
+    ) -> list[object]:
+        from ...provider_pool import get_pool
+        from .provider_selector import (
+            GenerationDispatchTask,
+            PoolProviderSelector,
+            ProviderConstraints,
+        )
+
+        pool = await get_pool()
+        pool_identity = id(pool)
+        if (
+            not isinstance(self._provider_selector, PoolProviderSelector)
+            or self._provider_pool_identity != pool_identity
+        ):
+            self._provider_selector = PoolProviderSelector(pool)
+            self._provider_pool_identity = pool_identity
+        return await self._provider_selector.select(
+            task=GenerationDispatchTask(
+                task_id=task_id,
+                endpoint_kind=endpoint_kind,
+            ),
+            constraints=ProviderConstraints(
+                requires_mask=requires_mask,
+                queue_lane=queue_lane,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

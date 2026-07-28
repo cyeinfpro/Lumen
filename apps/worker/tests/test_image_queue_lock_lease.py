@@ -15,6 +15,7 @@ from lumen_core.constants import GenerationErrorCode as EC
 
 from app.provider_runtime.errors import UpstreamError
 from app.tasks.generation_parts import (
+    admission as generation_admission,
     lease,
     queue,
     queue_claim,
@@ -114,10 +115,7 @@ class _TimingRedis:
             if nx and key in self.strings:
                 return False
             self._set_string(key, value, ex=ex, px=px)
-            if (
-                key == queue_lock.IMAGE_QUEUE_LOCK_KEY
-                and self.first_lock_token is None
-            ):
+            if key == queue_lock.IMAGE_QUEUE_LOCK_KEY and self.first_lock_token is None:
                 self.first_lock_token = str(value)
             return True
 
@@ -200,6 +198,13 @@ class _TimingRedis:
         return set()
 
     async def eval(self, script: str, _numkeys: int, *args: Any) -> Any:
+        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
+            return 1
+        if script in {
+            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
+            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
+        }:
+            return 1
         if script == queue.RENEW_IMAGE_QUEUE_LOCK_LUA:
             lock_key, token, ttl_ms = str(args[0]), str(args[1]), int(args[2])
             if self.block_first_renewals and token == self.first_lock_token:
@@ -704,6 +709,7 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     await redis.set(reservation_key, old_reservation)
     await redis.zadd(provider_key, {task_id: old_expiry})
     await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: old_expiry})
+
     async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 
@@ -795,6 +801,7 @@ async def test_reservation_token_releases_after_worker_lease_was_removed(
     await redis.set(reservation_key, reservation_token)
     await redis.zadd(provider_key, {task_id: expiry})
     await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+
     async def no_kick(_redis: Any, **_kwargs: Any) -> None:
         return None
 

@@ -9,7 +9,11 @@ import time
 
 import pytest
 
-from app.tasks.generation_parts import queue as generation_queue, queue_claim
+from app.tasks.generation_parts import (
+    admission as generation_admission,
+    queue as generation_queue,
+    queue_claim,
+)
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
 
 
@@ -120,6 +124,13 @@ class _QueueRedis:
         return len(stale)
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
+        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
+            return 1
+        if script in {
+            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
+            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
+        }:
+            return 1
         if numkeys == 1:
             key, token = keys_and_args[:2]
             if self.strings.get(str(key)) == str(token):
@@ -285,7 +296,10 @@ async def test_ready_scan_skips_active_not_before_and_local_cooldown(
             "ready-a",
             "ready-b",
         ][:limit]
-        return [_candidate(task_id, "image:interactive", idx) for idx, task_id in enumerate(ids)]
+        return [
+            _candidate(task_id, "image:interactive", idx)
+            for idx, task_id in enumerate(ids)
+        ]
 
     monkeypatch.setattr(
         generation_queue,
@@ -348,6 +362,7 @@ async def test_reserve_admits_task_inside_ready_window_when_capacity_gt_one(
         == "provider-a"
     )
     assert "target" in redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY]
-    assert "target" in redis.zsets[
-        generation_queue.image_provider_active_key("provider-a")
-    ]
+    assert (
+        "target"
+        in redis.zsets[generation_queue.image_provider_active_key("provider-a")]
+    )

@@ -9,7 +9,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from redis.exceptions import WatchError
+from lumen_core.generation_resources import ResourceDemand
 
+from .admission import (
+    WeightedPermit,
+    release_weighted_permit,
+    reserve_weighted_permit,
+)
 from .queue import (
     IMAGE_QUEUE_ACTIVE_KEY,
     IMAGE_QUEUE_LANE_CURSOR_KEY,
@@ -158,15 +164,6 @@ return 1
 
 DUAL_RACE_SENTINEL_PREFIX = "__dr:"
 _IMAGE_QUEUE_RESERVATION_TOKEN_PREFIX = "generation:image_queue:reservation:"
-_POOL_SELECT_COMPAT_ARGUMENTS = (
-    "size_bucket",
-    "cost_class",
-    "queue_lane",
-    "requires_mask",
-    "acquire_inflight",
-    "endpoint_kind",
-    "task_id",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -217,39 +214,41 @@ async def _select_queue_provider_candidates(
     queue_lane: str | None,
     size_bucket: str | None,
     cost_class: str | None,
+    services: RunGenerationDeps,
 ) -> list[Any]:
     if provider_override is not None:
         return [provider_override]
-
-    from ...provider_pool import get_pool
-
-    pool = await get_pool()
-    try:
-        return await pool.select(
-            route="image",
+    selector = getattr(services.queue, "select_providers", None)
+    if callable(selector):
+        return await selector(
             task_id=task_id,
             endpoint_kind=endpoint_kind,
-            acquire_inflight=False,
             requires_mask=requires_mask,
             queue_lane=queue_lane,
             size_bucket=size_bucket,
             cost_class=cost_class,
         )
-    except TypeError as exc:
-        if not any(name in str(exc) for name in _POOL_SELECT_COMPAT_ARGUMENTS):
-            raise
 
-    fallback_kwargs = (
-        {"task_id": task_id, "endpoint_kind": endpoint_kind},
-        {"task_id": task_id},
-        {"endpoint_kind": endpoint_kind},
+    from ...provider_pool import get_pool
+    from .provider_selector import (
+        GenerationDispatchTask,
+        PoolProviderSelector,
+        ProviderConstraints,
     )
-    for kwargs in fallback_kwargs:
-        try:
-            return await pool.select(route="image", **kwargs)
-        except TypeError:
-            continue
-    return await pool.select(route="image")
+
+    adapter = PoolProviderSelector(await get_pool())
+    return await adapter.select(
+        task=GenerationDispatchTask(
+            task_id=task_id,
+            endpoint_kind=endpoint_kind,
+        ),
+        constraints=ProviderConstraints(
+            requires_mask=requires_mask,
+            queue_lane=queue_lane,
+            size_bucket=size_bucket,
+            cost_class=cost_class,
+        ),
+    )
 
 
 async def _filter_avoided_queue_providers(
@@ -272,8 +271,7 @@ async def _filter_avoided_queue_providers(
     filtered = [
         provider
         for provider in providers
-        if redis_text(getattr(provider, "name", ""))
-        not in avoided
+        if redis_text(getattr(provider, "name", "")) not in avoided
     ]
     if filtered:
         return filtered
@@ -284,9 +282,7 @@ async def _filter_avoided_queue_providers(
         sorted(avoided),
     )
     with suppress(Exception):
-        await lock.delete_if_owner(
-            image_queue_avoid_key(task_id)
-        )
+        await lock.delete_if_owner(image_queue_avoid_key(task_id))
     return providers
 
 
@@ -298,9 +294,7 @@ async def _existing_reservation_blocks_admission(
     active_members: set[str],
     services: RunGenerationDeps,
 ) -> bool:
-    provider_name = redis_text(
-        await redis.get(image_task_provider_key(task_id))
-    )
+    provider_name = redis_text(await redis.get(image_task_provider_key(task_id)))
     if not provider_name:
         return False
     if is_dual_race_sentinel(provider_name):
@@ -415,9 +409,7 @@ async def _reserve_from_provider_candidates(
 ) -> tuple[Any | None, bool]:
     active_count_failed = False
     for provider in providers:
-        provider_name = redis_text(
-            getattr(provider, "name", "")
-        )
+        provider_name = redis_text(getattr(provider, "name", ""))
         if not provider_name:
             continue
         concurrency = max(
@@ -521,9 +513,7 @@ async def _defer_after_active_count_failure(
         )
     except Exception:  # noqa: BLE001
         pass
-    services.queue.provider_cooldowns[task_id] = (
-        time.monotonic() + cooldown
-    )
+    services.queue.provider_cooldowns[task_id] = time.monotonic() + cooldown
     logger.warning(
         "image queue deferred task=%s after provider active count failure "
         "cooldown=%.1fs redis_set=%s",
@@ -544,6 +534,7 @@ async def reserve_image_queue_slot(
     queue_lane: str | None = None,
     size_bucket: str | None = None,
     cost_class: str | None = None,
+    weighted_permit: WeightedPermit | None = None,
     services: RunGenerationDeps,
 ) -> Any | None:
     """Reserve one global image slot for a task admitted by fair scheduling.
@@ -584,54 +575,97 @@ async def reserve_image_queue_slot(
 
         now = time.time()
         expiry = now + LEASE_TTL_S
-        if dual_race:
-            return await _reserve_dual_race_slot(
-                lock,
-                task_id=task_id,
-                expiry=expiry,
-                fair_rank=fair_rank,
-                active_count=len(active_members),
-                capacity=capacity,
-                services=services,
-            )
-        providers = await _select_queue_provider_candidates(
+        permit = weighted_permit or WeightedPermit(
             task_id=task_id,
-            endpoint_kind=endpoint_kind,
-            requires_mask=requires_mask,
-            provider_override=provider_override,
-            queue_lane=queue_lane,
-            size_bucket=size_bucket,
-            cost_class=cost_class,
+            attempt=1,
+            revision=0,
+            demand=ResourceDemand(
+                pixel_units=1,
+                reference_units=0,
+                postprocess_units=0,
+                external_lane_units=2 if dual_race else 1,
+                output_units=1,
+            ),
+            user_id="unknown",
         )
-        providers = await _filter_avoided_queue_providers(
-            redis,
-            lock,
-            task_id=task_id,
-            providers=providers,
-            services=services,
+        budget_fn = getattr(services.queue, "resource_budgets", None)
+        budgets = (
+            budget_fn()
+            if callable(budget_fn)
+            else (max(1, capacity * 4), max(1, capacity), max(1, capacity * 3))
         )
-        if not providers:
-            return None
-        provider, active_count_failed = await _reserve_from_provider_candidates(
+        permit_reserved = await reserve_weighted_permit(
             redis,
-            lock,
-            task_id=task_id,
-            providers=providers,
+            permit=permit,
+            owner=lock.token,
             now=now,
             expiry=expiry,
-            fair_rank=fair_rank,
-            active_count=len(active_members),
-            capacity=capacity,
-            services=services,
+            global_budget=budgets[0],
+            external_budget=budgets[1],
+            user_budget=budgets[2],
+            lock_key=IMAGE_QUEUE_LOCK_KEY,
         )
-        if provider is not None:
-            return provider
-        if active_count_failed:
-            await _defer_after_active_count_failure(
-                lock,
-                task_id=task_id,
-                services=services,
-            )
+        if not permit_reserved:
+            return None
+        try:
+            if dual_race:
+                provider = await _reserve_dual_race_slot(
+                    lock,
+                    task_id=task_id,
+                    expiry=expiry,
+                    fair_rank=fair_rank,
+                    active_count=len(active_members),
+                    capacity=capacity,
+                    services=services,
+                )
+                if provider is not None:
+                    return provider
+            else:
+                providers = await _select_queue_provider_candidates(
+                    task_id=task_id,
+                    endpoint_kind=endpoint_kind,
+                    requires_mask=requires_mask,
+                    provider_override=provider_override,
+                    queue_lane=queue_lane,
+                    size_bucket=size_bucket,
+                    cost_class=cost_class,
+                    services=services,
+                )
+                providers = await _filter_avoided_queue_providers(
+                    redis,
+                    lock,
+                    task_id=task_id,
+                    providers=providers,
+                    services=services,
+                )
+                if providers:
+                    (
+                        provider,
+                        active_count_failed,
+                    ) = await _reserve_from_provider_candidates(
+                        redis,
+                        lock,
+                        task_id=task_id,
+                        providers=providers,
+                        now=now,
+                        expiry=expiry,
+                        fair_rank=fair_rank,
+                        active_count=len(active_members),
+                        capacity=capacity,
+                        services=services,
+                    )
+                    if provider is not None:
+                        return provider
+                    if active_count_failed:
+                        await _defer_after_active_count_failure(
+                            lock,
+                            task_id=task_id,
+                            services=services,
+                        )
+        except BaseException:
+            await release_weighted_permit(redis, permit=permit)
+            raise
+        await release_weighted_permit(redis, permit=permit)
     return None
 
 
@@ -715,9 +749,7 @@ async def release_image_queue_slot(
 
     if is_dual_race_sentinel(provider_name):
         try:
-            await redis.zrem(
-                IMAGE_QUEUE_ACTIVE_KEY, provider_name
-            )
+            await redis.zrem(IMAGE_QUEUE_ACTIVE_KEY, provider_name)
             await redis.delete(task_provider_key)
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -759,11 +791,7 @@ async def _release_image_queue_slot_fenced(
 ) -> bool:
     """Release only while this task still owns its reservation or worker lease."""
     provider_zset = image_provider_active_key(provider_name)
-    active_member = (
-        provider_name
-        if is_dual_race_sentinel(provider_name)
-        else task_id
-    )
+    active_member = provider_name if is_dual_race_sentinel(provider_name) else task_id
     task_provider_key = image_task_provider_key(task_id)
     task_lease_key = f"task:{task_id}:lease"
     reservation_key = _image_queue_reservation_token_key(task_id)
@@ -810,15 +838,9 @@ async def _release_image_queue_slot_fenced(
                 legacy_provider_lock_key,
             ):
                 await watch(key)
-            current_lease = redis_text(
-                await pipe.get(task_lease_key)
-            )
-            current_provider = redis_text(
-                await pipe.get(task_provider_key)
-            )
-            current_reservation = redis_text(
-                await pipe.get(reservation_key)
-            )
+            current_lease = redis_text(await pipe.get(task_lease_key))
+            current_provider = redis_text(await pipe.get(task_provider_key))
+            current_reservation = redis_text(await pipe.get(reservation_key))
             owns_reservation = bool(
                 reservation_token and current_reservation == reservation_token
             )
@@ -827,9 +849,7 @@ async def _release_image_queue_slot_fenced(
                 not owns_reservation and not owns_lease
             ) or current_provider != provider_name:
                 return False
-            legacy_owner = redis_text(
-                await pipe.get(legacy_provider_lock_key)
-            )
+            legacy_owner = redis_text(await pipe.get(legacy_provider_lock_key))
             pipe.multi()
             pipe.zrem(provider_zset, task_id)
             pipe.zrem(IMAGE_QUEUE_ACTIVE_KEY, active_member)
@@ -882,6 +902,7 @@ async def release_generation_runtime_resources(
     task_id: str,
     lease_token: str,
     provider_name: str | None,
+    weighted_permit: WeightedPermit | None = None,
     clear_avoided_providers: bool,
     services: RunGenerationDeps,
 ) -> None:
@@ -903,6 +924,15 @@ async def release_generation_runtime_resources(
             provider_name,
             exc_info=True,
         )
+    if weighted_permit is not None:
+        try:
+            await release_weighted_permit(redis, permit=weighted_permit)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "generation weighted permit release failed task=%s",
+                task_id,
+                exc_info=True,
+            )
     try:
         await inflight_clear(redis, task_id, services=services)
     except Exception:  # noqa: BLE001
@@ -942,6 +972,7 @@ class GenerationResourceLease:
     lease_token: str
     provider_name: str | None
     clear_avoided_providers: bool
+    weighted_permit: WeightedPermit | None = None
     release_resources: Any | None = None
     _closed: bool = False
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -951,15 +982,13 @@ class GenerationResourceLease:
             if self._closed:
                 return False
             self._closed = True
-        release = (
-            self.release_resources
-            or release_generation_runtime_resources
-        )
+        release = self.release_resources or release_generation_runtime_resources
         await release(
             self.redis,
             task_id=self.task_id,
             lease_token=self.lease_token,
             provider_name=self.provider_name,
+            weighted_permit=self.weighted_permit,
             clear_avoided_providers=self.clear_avoided_providers,
             services=self.services,
         )
