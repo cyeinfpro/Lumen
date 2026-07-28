@@ -83,7 +83,7 @@ All findings were rechecked against the baseline SHA before implementation.
 - [x] Upload F-13
 - [x] CI impact batching
 - [x] Lead review and ownership audit
-- [ ] Wave impact plan passed
+- [x] Wave impact plan passed
 
 ### Wave 3
 
@@ -314,3 +314,23 @@ All findings were rechecked against the baseline SHA before implementation.
 - Rollback: revert `03db73d`
 - Remaining risk: GitHub artifact path/expression behavior needs the required
   live Actions proof
+
+### Wave 2 Lead Evidence
+
+- Plan: `/tmp/lumen-wave2-plan.json`
+- Results: `/tmp/lumen-wave2-results.json`
+- Base: `1eef268a5042fad652de24bd1aae5be8a408737f`
+- Changed files: 25
+- Matched rules: 12, including Outbox, Message/Video, Upload, migrations,
+  shared core, and conservative API/Worker reverse dependencies
+- Commands: 19
+- Full mandatory: true because CI, migration, and shared core changed; the
+  source plan still reserves the single repository-wide gate for Wave 4
+- Result: 19 passed, 0 failed; no failed-node rerun required
+- Test evidence: API 1528 passed with 2 existing skips; Worker 1547 passed
+  with 6 existing skips; Core 561 passed; Image 43 and Upload 50 passed;
+  Message/Video 160 passed; Outbox 57 passed with 3 environment-conditional
+  PostgreSQL skips; migration set 22 passed with 1 existing skip
+- Governance: complexity debt reduced from 33 to 31; runtime-state remained
+  20 instances across 19 modules; no baseline expansion
+- Final Wave result: all selected gates and tests passed
