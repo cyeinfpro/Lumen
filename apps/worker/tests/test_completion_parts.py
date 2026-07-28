@@ -75,12 +75,20 @@ def test_completion_v2_contracts_are_typed_and_bounded() -> None:
 
 def test_completion_public_runtime_has_no_dynamic_symbol_table() -> None:
     runtime_path = Path(completion.__file__).with_name("runtime.py")
-    source = runtime_path.read_text(encoding="utf-8")
+    public_paths = (
+        runtime_path.with_name("contracts.py"),
+        runtime_path,
+    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in public_paths)
 
-    assert "RuntimeSlot" not in source
-    assert "typing import Any" not in source
-    assert "sqlalchemy" not in source.lower()
-    assert "SessionLocal" not in source
+    for forbidden in (
+        "RuntimeSlot",
+        "typing import Any",
+        "sqlalchemy",
+        "SessionLocal",
+        "fastapi",
+    ):
+        assert forbidden not in source
 
 
 def test_completion_facade_preserves_tool_state_identity() -> None:
