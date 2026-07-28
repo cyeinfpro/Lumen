@@ -233,12 +233,22 @@ def test_extracted_routes_preserve_order_signatures_and_openapi_operations() -> 
             if owner is poster_routes
         },
     }
+    direct_slice_routes = {
+        "create_apparel_model_showcase",
+        "create_poster_design_workflow",
+    }
     for route in routes:
         route_function = getattr(route_owners[route.name], route.name)
         operation = getattr(operation_owners[route.name], route.name)
         assert route.endpoint is route_function
         operation_parameters = inspect.signature(operation).parameters
-        assert tuple(inspect.signature(route_function).parameters)[1:] == tuple(
+        route_parameters = tuple(inspect.signature(route_function).parameters)
+        if route.name in direct_slice_routes:
+            assert "application" not in route_parameters
+        else:
+            assert route_parameters[0] == "application"
+            route_parameters = route_parameters[1:]
+        assert route_parameters == tuple(
             name for name in operation_parameters if name != "runtime"
         )
         if "runtime" in operation_parameters:

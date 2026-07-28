@@ -915,10 +915,10 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
     )
     db = _Db([], responses=[[conv]])
 
-    out = await project.delete_workflow(  # noqa: SLF001
-        "run-1",
-        SimpleNamespace(id="user-1"),
-        db,  # type: ignore[arg-type]
+    out = await project.build_project_lifecycle(db).delete(  # type: ignore[arg-type]
+        user_id="user-1",
+        run_id="run-1",
+        account_mode="wallet",
     )
 
     assert out == {"ok": True}
