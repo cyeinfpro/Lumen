@@ -6,6 +6,56 @@ Source plan:
 This file records implementation status and evidence. It does not replace or
 reinterpret the source plan.
 
+## V2 Continuation Baseline
+
+- Date: 2026-07-28
+- Source plan:
+  `Lumen-deep-optimization-v2-current-main-2026-07-28.md`
+- Target: `origin/main`
+- WORK_BASE_SHA: `d2b8c259d52edc0a839b695fecc7b7ab2029bbe3`
+- WORK_BASE_TAG: `v1.2.81`
+- Integration branch: `codex/lumen-deep-optimization-v2-20260728`
+- Initial worktree: clean
+- Frozen-plan delta: none; `WORK_BASE_SHA` equals the V2 audit freeze point
+- Prior ledger status: F-01 through F-13 and prior Wave 0 through Wave 4
+  remain completed and are not being reimplemented
+
+### Branch Consolidation
+
+- `main` was fast-forwarded from `e28346544ce44ddf0598cb195dd15db22573c8f2`
+  to `origin/main` at `WORK_BASE_SHA`.
+- Every previous local optimization branch was checked with
+  `git cherry main <branch>`; all commits were patch-equivalent to `main` or
+  the branch already pointed at an ancestor/current `main`.
+- Five associated worktrees were clean and removed.
+- Eighteen absorbed local branches were deleted.
+- The absorbed remote branch `codex/desktop-mac-win-full-smoke` was deleted.
+- After cleanup, the only persistent branches are `main`, `origin/main`, and
+  the current V2 integration branch.
+
+### V2 Wave 0 In Progress
+
+- Existing impact planner tests:
+  `uv run pytest -q tests/test_test_impact.py tests/test_run_test_plan.py`
+  -> 6 passed.
+- Existing static gates:
+  `uv run ruff check scripts tests` -> passed.
+- Existing backend governance:
+  architecture passed with 3 runtime-coupling findings; complexity passed
+  with 11 findings; runtime-state passed with 15 mutable instances across 14
+  modules.
+- Existing Web runner syntax:
+  `cd apps/web && node --check scripts/run-tests.mjs` -> passed.
+- Confirmed Asset baseline gaps at `WORK_BASE_SHA`: search is limited to
+  loaded pages; grid candidates can fall back to `/binary`; a failed source
+  does not remove the same URL from static `srcSet`; mounted tiles grow with
+  loaded pages; image prewarm has no queue-length bound, cancellation, or
+  timeout.
+- The first parallel Wave 0 command batch hit the host file-descriptor limit
+  (`Too many open files`, soft limit 256) before product commands started.
+  Commands were rerun serially and passed; this is recorded as an environment
+  constraint, not a product failure.
+
 ## Baseline
 
 - Date: 2026-07-28

@@ -15,6 +15,7 @@ full_mandatory_paths = [
   "pyproject.toml",
   "scripts/run_test_plan.py",
   "scripts/test-manifest.toml",
+  "scripts/test_manifest_lint.py",
   "scripts/test.sh",
   "scripts/test_impact.py",
   "uv.lock",
@@ -53,9 +54,11 @@ command = "node --check apps/web/scripts/run-tests.mjs"
 name = "test-infrastructure"
 paths = [
   "scripts/test-manifest.toml",
+  "scripts/test_manifest_lint.py",
   "scripts/test_impact.py",
   "scripts/run_test_plan.py",
   "scripts/test.sh",
+  "tests/test_test_manifest_lint.py",
   "tests/test_test_impact.py",
   "tests/test_run_test_plan.py",
   "apps/web/scripts/run-tests.mjs",
@@ -63,7 +66,7 @@ paths = [
   "**/conftest.py",
 ]
 commands = [
-  "uv run pytest -q tests/test_test_impact.py tests/test_run_test_plan.py",
+  "uv run pytest -q tests/test_test_manifest_lint.py tests/test_test_impact.py tests/test_run_test_plan.py",
   "cd apps/web && node --test __tests__/run-tests-script.test.mjs",
 ]
 gates = ["python-ruff", "web-runner-syntax"]
@@ -178,7 +181,7 @@ resources = ["postgres", "filesystem"]
 name = "api-upload"
 paths = [
   "apps/api/app/images/application/upload.py",
-  "apps/api/app/routes/images.py",
+  "apps/api/app/images/application/http_routes.py",
 ]
 commands = [
   "uv run pytest -q apps/api/tests/test_images_upload.py apps/api/tests/test_upload_pipeline.py apps/api/tests/images/test_storage_capacity.py",
@@ -213,9 +216,7 @@ resources = ["postgres"]
 [[rules]]
 name = "worker-completion"
 paths = [
-  "apps/worker/app/tasks/completion.py",
   "apps/worker/app/tasks/completion_parts/**",
-  "apps/worker/app/services/completion/**",
 ]
 commands = [
   "uv run pytest -q apps/worker/tests/test_completion_parts.py apps/worker/tests/test_completion_context_window.py apps/worker/tests/test_completion_lease.py apps/worker/tests/test_completion_tool_image.py apps/worker/tests/test_completion_web_search.py",
@@ -263,6 +264,111 @@ gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["web-feature-boundary"]
 resources = []
 fallback = true
+allow_empty = true
+
+[[rules]]
+name = "backend-realtime"
+paths = [
+  "apps/api/app/routes/events.py",
+  "apps/api/app/sse_publish.py",
+  "apps/api/app/realtime/**",
+  "apps/worker/app/sse_publish.py",
+  "apps/worker/app/realtime/**",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_events_route.py apps/api/tests/test_worker_sse_publish.py apps/worker/tests/test_sse_publish_observability.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["redis", "sse-replay", "at-least-once-delivery"]
+resources = ["redis"]
+allow_empty = true
+
+[[rules]]
+name = "worker-generation-queue"
+paths = [
+  "apps/worker/app/tasks/generation_parts/queue*.py",
+  "apps/worker/app/tasks/generation_parts/lease.py",
+  "apps/worker/app/tasks/generation_parts/default_runtime.py",
+  "apps/worker/app/tasks/generation_parts/runtime*.py",
+  "apps/worker/app/tasks/generation_parts/admission*.py",
+  "apps/worker/app/tasks/generation_parts/dispatch_store*.py",
+]
+commands = [
+  "uv run pytest -q apps/worker/tests/test_image_queue_lock_lease.py apps/worker/tests/test_generation_multiqueue.py apps/worker/tests/test_generation_storage.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["redis", "postgres", "generation-admission"]
+resources = ["redis", "postgres"]
+allow_empty = true
+
+[[rules]]
+name = "worker-upstream-images"
+paths = [
+  "apps/worker/app/upstream_parts/direct_images.py",
+  "apps/worker/app/upstream_parts/direct_requests.py",
+  "apps/worker/app/upstream_parts/image_dispatch.py",
+  "apps/worker/app/upstream_parts/image_race.py",
+  "apps/worker/app/upstream_parts/transport.py",
+]
+commands = [
+  "uv run pytest -q apps/worker/tests/test_upstream_parts_direct_images.py apps/worker/tests/test_responses_image_fallback.py apps/worker/tests/test_dual_race_bonus_billing.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["provider-failover", "billing", "image-memory"]
+resources = []
+
+[[rules]]
+name = "api-stream-assets"
+paths = [
+  "apps/api/app/routes/generations.py",
+  "apps/api/app/images/application/http_routes.py",
+  "apps/api/app/images/**/*variant*.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_generations_feed.py apps/api/tests/images/test_artifact_runtime_regressions.py apps/api/tests/images/test_variant_service.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["postgres", "filesystem", "asset-loading"]
+resources = ["postgres", "filesystem"]
+
+[[rules]]
+name = "web-stream-assets"
+paths = [
+  "apps/web/src/components/ui/lightbox/**",
+  "apps/web/src/components/ui/stream/**",
+  "apps/web/src/components/ui/shell/DesktopStream.tsx",
+  "apps/web/src/components/ui/shell/MobileStream.tsx",
+  "apps/web/src/lib/queries/stream.ts",
+  "apps/web/src/lib/imagePreload.ts",
+  "apps/web/src/features/assets/**",
+]
+commands = [
+  "cd apps/web && npm test -- __tests__/admin-lightbox-dead-code.test.mjs src/components/ui/shell/StudioLayoutContracts.test.ts",
+]
+gates = ["web-architecture", "web-complexity", "web-typecheck"]
+risk = ["asset-loading"]
+resources = []
+allow_empty = true
 
 [[rules]]
 name = "shared-core"
