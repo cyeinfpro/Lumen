@@ -24,9 +24,9 @@ from app.tasks.completion_parts import (
 from app.tasks.completion_parts.image_storage_runtime import (
     CompletionToolImageService,
 )
-from app.tasks.completion_parts.legacy_adapter import (
-    CompletionToolAdapter,
-    CompletionUpstreamAdapter,
+from app.tasks.completion_parts.services import (
+    CompletionToolService,
+    CompletionUpstreamService,
 )
 from app.tasks.completion_parts.execution import (
     CompletionExecution,
@@ -219,7 +219,7 @@ def test_completion_facade_preserves_extracted_wrapper_signatures() -> None:
     runtime = completion.build_completion_runtime(
         image_upstream_runtime=_fake_image_upstream_runtime(),
     )
-    tools = cast(CompletionToolAdapter, runtime.services.tool_executor)
+    tools = cast(CompletionToolService, runtime.services.tool_executor)
     assert isinstance(
         tools.tool_image_service,
         CompletionToolImageService,
@@ -256,7 +256,7 @@ def test_completion_runtime_binds_injected_tool_image_storage() -> None:
         image_upstream_runtime=_fake_image_upstream_runtime(),
         storage_writes=storage_writes,  # type: ignore[arg-type]
     )
-    tools = cast(CompletionToolAdapter, runtime.services.tool_executor)
+    tools = cast(CompletionToolService, runtime.services.tool_executor)
     service = tools.tool_image_service
 
     assert service.storage.write_files.__self__ is storage_writes
@@ -269,7 +269,7 @@ def test_completion_runtime_binds_explicit_image_upstream_runtime() -> None:
     runtime = completion.build_completion_runtime(
         image_upstream_runtime=image_upstream_runtime,
     )
-    upstream = cast(CompletionUpstreamAdapter, runtime.services.upstream_client)
+    upstream = cast(CompletionUpstreamService, runtime.services.upstream_client)
     bound_stream = upstream.stream_completion
 
     assert runtime.image_upstream_runtime is image_upstream_runtime

@@ -120,7 +120,7 @@ async def _stage_preflight_failure(
     await state.ports.events._deliver_completion_event(state.request.redis, delivery)
 
 
-async def _claim_completion(state: CompletionExecution) -> bool:
+async def claim_completion(state: CompletionExecution) -> bool:
     """Acquire the lease and transition the completion row to streaming."""
     await state.ports.retry._acquire_lease(
         state.request.redis, state.request.task_id, state.request.lease_token
@@ -353,7 +353,7 @@ async def _load_request_context(state: CompletionExecution) -> None:
                 )
 
 
-async def _prepare_request(state: CompletionExecution) -> None:
+async def prepare_completion_request(state: CompletionExecution) -> None:
     await _resolve_runtime_override(state)
     await _load_request_context(state)
     state.preparation.reasoning_effort = (
@@ -460,7 +460,7 @@ async def _store_image_event(
     state.streaming.reserved_tool_image_budget_micro += image_budget_micro
 
 
-async def _handle_tool_call(
+async def handle_completion_tool_call(
     state: CompletionExecution,
     event: dict[str, Any],
     *,
@@ -677,7 +677,7 @@ async def _consume_round(
     finalize_tools: bool,
 ) -> None:
     if not state.usage.dispatch_started_recorded:
-        await _record_completion_upstream_marker(state, response_received=False)
+        await record_completion_upstream_marker(state, response_received=False)
         state.usage.dispatch_started_recorded = True
     stream = state.ports.upstream.stream_completion(
         body,
@@ -691,7 +691,7 @@ async def _consume_round(
         tool_idle_timeout_s=state.streaming.tool_idle_timeout_s,
     ):
         if not state.usage.response_receipt_recorded:
-            await _record_completion_upstream_marker(state, response_received=True)
+            await record_completion_upstream_marker(state, response_received=True)
             state.usage.response_receipt_recorded = True
         if state.settlement.lease_lost.is_set():
             raise state.ports.retry._LeaseLost(f"lease lost during {phase} stream")
@@ -710,7 +710,7 @@ async def _consume_round(
                 )
             continue
         if track_tool_calls:
-            if await _handle_tool_call(
+            if await handle_completion_tool_call(
                 state,
                 event,
                 allow_tool_limit=allow_tool_limit,
@@ -738,7 +738,7 @@ async def _consume_round(
             await _handle_terminal_event(state, event)
 
 
-async def _record_completion_upstream_marker(
+async def record_completion_upstream_marker(
     state: CompletionExecution,
     *,
     response_received: bool,
@@ -775,7 +775,7 @@ async def _record_completion_upstream_marker(
         await session.commit()
 
 
-async def _consume_stream(state: CompletionExecution) -> None:
+async def consume_completion_stream(state: CompletionExecution) -> None:
     if await state.ports.retry._is_cancelled(
         state.request.redis, state.request.task_id
     ):
@@ -952,7 +952,7 @@ async def _cancel_completion_row(
         return delivery
 
 
-async def _settle_cancelled(state: CompletionExecution) -> None:
+async def settle_cancelled_completion(state: CompletionExecution) -> None:
     state.usage.usage_totals.finish_round(
         output_text=state.streaming.accumulated_text[state.usage.round_text_start :],
         reasoning_text=state.streaming.accumulated_thinking[
@@ -1244,7 +1244,7 @@ async def _settle_terminal_failure(
     state.settlement.task_outcome = "failed"
 
 
-async def _handle_failure(
+async def handle_completion_failure(
     state: CompletionExecution,
     exc: BaseException,
 ) -> None:
@@ -1344,7 +1344,7 @@ async def _handle_failure(
     )
 
 
-async def _publish_started(state: CompletionExecution) -> None:
+async def publish_completion_started(state: CompletionExecution) -> None:
     if state.settlement.lease_lost.is_set():
         raise state.ports.retry._LeaseLost("lease lost before completion start event")
     await state.ports.events.publish_event(

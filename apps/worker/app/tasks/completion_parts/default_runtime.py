@@ -26,6 +26,7 @@ from .legacy_adapter import (
     LegacyCompletionAdapter,
 )
 from .runtime import CompletionRuntime
+from .services import build_completion_services
 from .artifact_codec import (
     compute_blurhash as _generation_compute_blurhash,
     make_display as _make_display,
@@ -1465,7 +1466,7 @@ def build_completion_runtime(
         events=_build_completion_events_ports(),
         retry=_build_completion_retry_ports(),
     )
-    services = adapter.services()
+    services = build_completion_services(adapter)
 
     async def execute(command: CompletionCommand) -> CompletionResult:
         return await _run_completion(command, adapter, services)
