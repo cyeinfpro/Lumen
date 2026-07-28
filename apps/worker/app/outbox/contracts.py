@@ -7,6 +7,7 @@ must classify failures here before changing persistence behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, TypeAlias
 from types import MappingProxyType
 
@@ -75,9 +76,22 @@ OutboxKind: TypeAlias = Literal[
 ]
 PendingOutboxDelivery: TypeAlias = tuple[str, str, dict[str, Any]]
 
+
+@dataclass(frozen=True, slots=True)
+class ClaimedOutboxEvent:
+    id: str
+    kind: str
+    payload: object
+    delivery_attempts: int
+    claim_until: datetime
+
+
 OUTBOX_LOCK_KEY = "lock:outbox:publisher"
 OUTBOX_LOCK_TTL_S = 10
 OUTBOX_BATCH = 100
+OUTBOX_CLAIM_TTL_S = 300
+OUTBOX_DELIVERY_CONCURRENCY = 8
+OUTBOX_DELIVERY_TIMEOUT_S = 15.0
 OUTBOX_DLQ_KEY = "outbox:dead-letter"
 OUTBOX_DLQ_MAXLEN = 1000
 OUTBOX_MAX_FAIL_COUNT = 5

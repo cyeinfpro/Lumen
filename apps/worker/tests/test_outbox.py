@@ -25,6 +25,13 @@ from lumen_core.models import (
     User,
 )
 from app import observability, sse_publish
+from app.outbox import publisher as outbox_publisher
+from app.outbox.claims import (
+    DeliveryResult,
+    claim_outbox_events,
+    finalize_outbox_results,
+)
+from app.outbox.contracts import ClaimedOutboxEvent
 from app.tasks import outbox
 
 
@@ -133,9 +140,57 @@ class FakeScalarResult:
         return self._rows[0] if self._rows else None
 
 
+class FakeReturningResult:
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
 class FakeUpdateResult:
     def __init__(self, rowcount: int) -> None:
         self.rowcount = rowcount
+
+
+def _fake_claim_rows(
+    events: list[OutboxEvent],
+    statement: object,
+) -> FakeReturningResult:
+    params = statement.compile().params
+    owner = params["claim_owner"]
+    claim_until = params["claim_until"]
+    cutoff = params["created_at_1"]
+    now = params["claim_until_1"]
+    limit = params["param_1"]
+    claimed: list[object] = []
+    fallback_created_at = datetime.min.replace(tzinfo=timezone.utc)
+    for event in sorted(
+        events,
+        key=lambda row: (row.created_at or fallback_created_at, row.id),
+    ):
+        if len(claimed) >= limit:
+            break
+        created_at = event.created_at or fallback_created_at
+        if (
+            event.published_at is not None
+            or created_at >= cutoff
+            or (event.claim_until is not None and event.claim_until > now)
+        ):
+            continue
+        event.claim_owner = owner
+        event.claim_until = claim_until
+        event.delivery_attempts = int(event.delivery_attempts or 0) + 1
+        claimed.append(
+            SimpleNamespace(
+                id=event.id,
+                kind=event.kind,
+                payload=event.payload,
+                delivery_attempts=event.delivery_attempts,
+                claim_until=event.claim_until,
+            )
+        )
+    return FakeReturningResult(claimed)
 
 
 class FakeTransaction:
@@ -143,17 +198,51 @@ class FakeTransaction:
 
     def __init__(self, session: Any) -> None:
         self.session = session
+        self._event_snapshots: list[tuple[OutboxEvent, tuple[object, ...]]] = []
 
     async def __aenter__(self) -> Any:
+        self.session.transaction_depth = (
+            getattr(self.session, "transaction_depth", 0) + 1
+        )
+        for event in getattr(self.session, "events", []):
+            self._event_snapshots.append(
+                (
+                    event,
+                    (
+                        event.published_at,
+                        event.claim_owner,
+                        event.claim_until,
+                        event.delivery_attempts,
+                        event.last_delivery_error,
+                    ),
+                )
+            )
         return self.session
 
     async def __aexit__(self, exc_type: Any, *_rest: Any) -> None:
-        if exc_type is None:
-            await self.session.commit()
-        else:
-            rollback = getattr(self.session, "rollback", None)
-            if rollback is not None:
-                await rollback()
+        try:
+            if exc_type is None:
+                await self.session.commit()
+            else:
+                await self._rollback()
+        except Exception:
+            await self._rollback()
+            raise
+        finally:
+            self.session.transaction_depth -= 1
+
+    async def _rollback(self) -> None:
+        for event, values in self._event_snapshots:
+            (
+                event.published_at,
+                event.claim_owner,
+                event.claim_until,
+                event.delivery_attempts,
+                event.last_delivery_error,
+            ) = values
+        rollback = getattr(self.session, "rollback", None)
+        if rollback is not None:
+            await rollback()
 
 
 class FakeSession:
@@ -161,6 +250,8 @@ class FakeSession:
         self.events = events
         self.added: list[object] = []
         self.dead_letters: list[OutboxDeadLetter] = []
+        self.transaction_depth = 0
+        self.commits = 0
 
     async def __aenter__(self):
         return self
@@ -169,12 +260,16 @@ class FakeSession:
         return None
 
     def begin(self):
-        # publisher 用例通过 __aexit__ 抛错来模拟「提交失败」，因此这里
-        # 保持返回 self（事务上下文即 session 上下文）。
-        return self
+        return FakeTransaction(self)
 
     async def execute(self, statement):
         statement_text = str(statement)
+        if (
+            getattr(statement, "is_update", False)
+            and "UPDATE outbox_events" in statement_text
+            and "RETURNING" in statement_text
+        ):
+            return _fake_claim_rows(self.events, statement)
         if statement.is_select:
             if "FROM outbox_dead_letter" in statement_text:
                 return FakeScalarResult(
@@ -199,6 +294,10 @@ class FakeSession:
         return FakeUpdateResult(rowcount)
 
     async def commit(self) -> None:
+        self.commits += 1
+        return None
+
+    async def rollback(self) -> None:
         return None
 
     def add(self, row: object) -> None:
@@ -236,6 +335,12 @@ class FakeReconSession:
     async def execute(self, statement):
         text = str(statement)
         arg = getattr(statement, "_for_update_arg", None)
+        if (
+            getattr(statement, "is_update", False)
+            and "UPDATE outbox_events" in text
+            and "RETURNING" in text
+        ):
+            return _fake_claim_rows(self.outbox_events, statement)
         if statement.is_select:
             self.select_skip_locked.append(arg is not None and arg.skip_locked is True)
         if "FROM outbox_events" in text:
@@ -298,6 +403,12 @@ class FakeMemoryReconSession:
     async def execute(self, statement):
         text = str(statement)
         arg = getattr(statement, "_for_update_arg", None)
+        if (
+            getattr(statement, "is_update", False)
+            and "UPDATE outbox_events" in text
+            and "RETURNING" in text
+        ):
+            return _fake_claim_rows(self.outbox_events, statement)
         if statement.is_select:
             self.select_skip_locked.append(arg is not None and arg.skip_locked is True)
             if "FROM memory_extraction_runs" in text:
@@ -509,8 +620,14 @@ def _memory_entities(
 @pytest.mark.asyncio
 async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeypatch):
     events = [_event(task_id="gen-1")]
-    _patch_session_local(monkeypatch, events)
-    redis = FakeRedis()
+    session = _patch_session_local(monkeypatch, events)
+
+    class TransactionAwareRedis(FakeRedis):
+        async def enqueue_job(self, *args, **kwargs):
+            assert session.transaction_depth == 0
+            return await super().enqueue_job(*args, **kwargs)
+
+    redis = TransactionAwareRedis()
 
     processed = await outbox.publish_outbox({"redis": redis})
 
@@ -524,6 +641,149 @@ async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeyp
         )
     ]
     assert events[0].published_at is not None
+    assert session.commits == 2
+
+
+@pytest.mark.asyncio
+async def test_outbox_claim_crash_is_reclaimable_only_after_ttl() -> None:
+    event = _event(event_id="event-claim-crash", task_id="gen-claim-crash")
+    session = FakeSession([event])
+
+    @asynccontextmanager
+    async def session_factory():
+        yield session
+
+    now = datetime.now(timezone.utc)
+    first = await claim_outbox_events(
+        session_factory=session_factory,
+        cutoff=now,
+        limit=1,
+        owner="owner-a",
+        now=now,
+        claim_ttl_s=30,
+    )
+    assert [claimed.id for claimed in first] == [event.id]
+    assert event.claim_owner == "owner-a"
+    assert event.delivery_attempts == 1
+
+    blocked = await claim_outbox_events(
+        session_factory=session_factory,
+        cutoff=now,
+        limit=1,
+        owner="owner-b",
+        now=now + timedelta(seconds=29),
+        claim_ttl_s=30,
+    )
+    assert blocked == []
+    assert event.claim_owner == "owner-a"
+
+    reclaimed = await claim_outbox_events(
+        session_factory=session_factory,
+        cutoff=now,
+        limit=1,
+        owner="owner-b",
+        now=now + timedelta(seconds=31),
+        claim_ttl_s=30,
+    )
+    assert [claimed.id for claimed in reclaimed] == [event.id]
+    assert event.claim_owner == "owner-b"
+    assert event.delivery_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_outbox_finalize_is_conditioned_on_claim_owner() -> None:
+    event = _event(event_id="event-owner-race", task_id="gen-owner-race")
+    now = datetime.now(timezone.utc)
+    event.claim_owner = "owner-b"
+    event.claim_until = now + timedelta(seconds=30)
+    claimed = ClaimedOutboxEvent(
+        id=event.id,
+        kind=event.kind,
+        payload=event.payload,
+        delivery_attempts=1,
+        claim_until=event.claim_until,
+    )
+    session = FakeSession([event])
+
+    @asynccontextmanager
+    async def session_factory():
+        yield session
+
+    finalized = await finalize_outbox_results(
+        session_factory=session_factory,
+        owner="owner-a",
+        results=[DeliveryResult(event=claimed, state="published")],
+        now=now,
+        max_fail_count=outbox._OUTBOX_MAX_FAIL_COUNT,  # noqa: SLF001
+    )
+
+    assert finalized is not None
+    assert finalized.published == 0
+    assert finalized.lost_event_ids == (event.id,)
+    assert event.published_at is None
+    assert event.claim_owner == "owner-b"
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_bounds_delivery_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        _event(event_id=f"event-{index}", task_id=f"gen-{index}")
+        for index in range(outbox._OUTBOX_DELIVERY_CONCURRENCY * 2 + 1)  # noqa: SLF001
+    ]
+    _patch_session_local(monkeypatch, events)
+
+    class SlowRedis(FakeRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def enqueue_job(self, *args, **kwargs):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.005)
+                return await super().enqueue_job(*args, **kwargs)
+            finally:
+                self.active -= 1
+
+    redis = SlowRedis()
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == len(events)
+    assert 1 < redis.max_active <= outbox._OUTBOX_DELIVERY_CONCURRENCY  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_publish_outbox_times_out_one_delivery_without_blocking_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        _event(event_id="event-slow", task_id="gen-slow"),
+        _event(event_id="event-fast", task_id="gen-fast"),
+    ]
+    _patch_session_local(monkeypatch, events)
+    original_timeout = outbox_publisher.OUTBOX_DELIVERY_TIMEOUT_S
+    monkeypatch.setattr(outbox_publisher, "OUTBOX_DELIVERY_TIMEOUT_S", 0.01)
+
+    class PartiallySlowRedis(FakeRedis):
+        async def enqueue_job(self, job_name: str, task_id: str, *args, **kwargs):
+            if task_id == "gen-slow":
+                await asyncio.sleep(1)
+            return await super().enqueue_job(job_name, task_id, *args, **kwargs)
+
+    redis = PartiallySlowRedis()
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert original_timeout > 0.01
+    assert processed == 1
+    assert events[0].published_at is None
+    assert events[0].claim_owner is None
+    assert events[0].last_delivery_error is not None
+    assert events[0].last_delivery_error.startswith("TimeoutError:")
+    assert events[1].published_at is not None
 
 
 @pytest.mark.asyncio
@@ -1290,18 +1550,19 @@ async def test_increment_outbox_fail_count_sets_expiry_atomically() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_outbox_writes_dedupe_only_after_commit(monkeypatch):
+async def test_publish_outbox_replays_after_finalize_commit_failure(monkeypatch):
     class _CommitFailSession(FakeSession):
-        async def __aexit__(self, *exc_info):
-            if exc_info[0] is None:
+        async def commit(self) -> None:
+            self.commits += 1
+            if self.commits == 2:
                 raise RuntimeError("commit failed")
-            return None
 
     events = [_event(task_id="gen-1")]
+    session = _CommitFailSession(events)
 
     @asynccontextmanager
     async def session_local():
-        yield _CommitFailSession(events)
+        yield session
 
     monkeypatch.setattr(outbox, "SessionLocal", session_local)
     redis = FakeRedis()
@@ -1313,6 +1574,16 @@ async def test_publish_outbox_writes_dedupe_only_after_commit(monkeypatch):
     assert not any(
         key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
     )
+    assert events[0].published_at is None
+    assert events[0].claim_owner is not None
+
+    events[0].claim_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    assert processed == 1
+    assert redis.enqueued == [("run_generation", "gen-1")]
+    assert redis.deduped_job_ids == ["lumen:generation:gen-1:outbox:event-1"]
+    assert events[0].published_at is not None
 
 
 @pytest.mark.asyncio
@@ -1355,7 +1626,7 @@ async def test_publish_outbox_malformed_payload_goes_to_dlq_and_logs(
 
 
 @pytest.mark.asyncio
-async def test_publish_outbox_dlq_uses_only_parent_locking_session(
+async def test_publish_outbox_dlq_uses_claim_and_finalize_sessions_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event = _event(task_id="gen-1")
@@ -1367,15 +1638,15 @@ async def test_publish_outbox_dlq_uses_only_parent_locking_session(
     async def session_local():
         nonlocal session_local_calls
         session_local_calls += 1
-        if session_local_calls > 1:
-            raise AssertionError("DLQ persistence must not open a nested transaction")
+        if session_local_calls > 2:
+            raise AssertionError("DLQ persistence must use the finalize transaction")
         yield session
 
     monkeypatch.setattr(outbox, "SessionLocal", session_local)
 
     await outbox.publish_outbox({"redis": FakeRedis()})
 
-    assert session_local_calls == 1
+    assert session_local_calls == 2
     assert len(session.added) == 1
     assert event.published_at is not None
 

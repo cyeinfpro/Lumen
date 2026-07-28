@@ -3,6 +3,9 @@
 from .contracts import (
     FAILURE_MATRIX,
     OUTBOX_BATCH,
+    OUTBOX_CLAIM_TTL_S,
+    OUTBOX_DELIVERY_CONCURRENCY,
+    OUTBOX_DELIVERY_TIMEOUT_S,
     OUTBOX_DLQ_KEY,
     OUTBOX_DLQ_MAXLEN,
     OUTBOX_ENQUEUE_DEDUPE_PREFIX,
@@ -16,6 +19,7 @@ from .contracts import (
     OutboxPayloadError,
     PendingOutboxDelivery,
 )
+from .claims import claim_outbox_events, finalize_outbox_results
 from .delivery import deliver_outbox_event, deliver_staged_outbox_events
 from .dlq import mirror, persist, persist_once, resolve
 from .publisher import process_outbox_batch
@@ -26,6 +30,9 @@ __all__ = (
     "FAILURE_MATRIX",
     "INCR_FAIL_COUNT_LUA",
     "OUTBOX_BATCH",
+    "OUTBOX_CLAIM_TTL_S",
+    "OUTBOX_DELIVERY_CONCURRENCY",
+    "OUTBOX_DELIVERY_TIMEOUT_S",
     "OUTBOX_DLQ_KEY",
     "OUTBOX_DLQ_MAXLEN",
     "OUTBOX_ENQUEUE_DEDUPE_PREFIX",
@@ -38,9 +45,11 @@ __all__ = (
     "OUTBOX_TASK_JOBS",
     "OutboxPayloadError",
     "PendingOutboxDelivery",
+    "claim_outbox_events",
     "deliver_outbox_event",
     "deliver_staged_outbox_events",
     "increment_fail_count",
+    "finalize_outbox_results",
     "mark_staged_outbox_published",
     "mirror",
     "persist",

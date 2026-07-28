@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lumen_core.models import MemoryExtractionRun
+from lumen_core.models import MemoryExtractionRun, OutboxEvent
 from app.locks import owned_redis
 from app.locks import release_owned_lock
 from app.outbox.contracts import FAILURE_MATRIX as OUTBOX_FAILURE_MATRIX
@@ -89,6 +89,22 @@ def test_failure_matrices_freeze_retry_and_fail_closed_invariants() -> None:
     assert exhausted.mutate_task is True
     assert exhausted.release_hold is False
     assert exhausted.stage_outbox is True
+
+
+def test_outbox_claim_model_contract_is_expand_contract_safe() -> None:
+    table = OutboxEvent.__table__
+    assert {
+        "claim_owner",
+        "claim_until",
+        "delivery_attempts",
+        "last_delivery_error",
+    } <= set(table.c.keys())
+    assert table.c.claim_owner.nullable is True
+    assert table.c.claim_until.nullable is True
+    assert table.c.delivery_attempts.nullable is False
+    assert table.c.delivery_attempts.server_default is not None
+    assert table.c.last_delivery_error.nullable is True
+    assert "ix_outbox_claimable" in {index.name for index in table.indexes}
 
 
 def test_domain_reconcilers_implement_shared_protocol() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select, text
@@ -9,6 +10,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.tasks import outbox
+from app.outbox.claims import claim_outbox_events
 from lumen_core.models import OutboxDeadLetter, OutboxEvent
 
 
@@ -152,6 +154,72 @@ async def test_actual_outbox_batch_persists_poison_event_dlq_in_one_transaction(
             assert event is not None and event.published_at is not None
             assert dlq.error_class == "OutboxInvalidPayload"
         assert len(redis.mirrored) == 1
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_actual_outbox_claim_is_durable_and_reclaimable_after_ttl() -> None:
+    admin_engine = create_async_engine(_postgres_url(), pool_pre_ping=True)
+    suffix = uuid.uuid4().hex[:12]
+    schema = f"test_outbox_claim_{suffix}"
+    async with admin_engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+
+    engine = create_async_engine(
+        _postgres_url(),
+        pool_pre_ping=True,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(OutboxEvent.__table__.create)
+
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            event = OutboxEvent(
+                kind="generation",
+                payload={"task_id": "generation-claim"},
+                created_at=now - timedelta(seconds=10),
+            )
+            session.add(event)
+            await session.commit()
+            event_id = event.id
+
+        first = await claim_outbox_events(
+            session_factory=session_factory,
+            cutoff=now,
+            limit=1,
+            owner="owner-a",
+            now=now,
+            claim_ttl_s=30,
+        )
+        assert [event.id for event in first] == [event_id]
+
+        blocked = await claim_outbox_events(
+            session_factory=session_factory,
+            cutoff=now,
+            limit=1,
+            owner="owner-b",
+            now=now + timedelta(seconds=29),
+            claim_ttl_s=30,
+        )
+        assert blocked == []
+
+        reclaimed = await claim_outbox_events(
+            session_factory=session_factory,
+            cutoff=now,
+            limit=1,
+            owner="owner-b",
+            now=now + timedelta(seconds=31),
+            claim_ttl_s=30,
+        )
+        assert [event.id for event in reclaimed] == [event_id]
+        assert reclaimed[0].delivery_attempts == 2
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
