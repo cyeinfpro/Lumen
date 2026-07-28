@@ -38,3 +38,14 @@ from . import (  # noqa: F401
     video_providers,
     volcano_assets,
 )
+from .generation_resources import (
+    ResourceDemand,
+    generation_resource_demand,
+    pixel_resource_units,
+)
+
+__all__ = [
+    "ResourceDemand",
+    "generation_resource_demand",
+    "pixel_resource_units",
+]

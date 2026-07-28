@@ -21,6 +21,7 @@ from lumen_core.constants import (
     MessageStatus,
     task_channel,
 )
+from lumen_core.generation_resources import generation_resource_demand
 from lumen_core.models import Generation, Message, new_uuid7
 from lumen_core.queue_metadata import generation_queue_metadata, merge_queue_metadata
 from lumen_core.sizing import resolve_size
@@ -39,6 +40,7 @@ from ...generation_dispatch import dispatch_identity_from_context
 from ...provider_runtime.errors import UpstreamError
 from ..state import is_generation_terminal
 from . import failure, success
+from .admission import WeightedPermit
 from .diagnostics import (
     StageTimer,
     generation_trace_id,
@@ -199,6 +201,23 @@ async def _load_initial_generation(state: GenerationRunState) -> bool:
         if not may_run:
             await _fail_max_attempts(state, session)
             return False
+        request = state.gen_upstream_request_snapshot or {}
+        metadata = generation_queue_metadata(
+            upstream_request=request,
+            action=state.action,
+            size_requested=state.size_requested,
+            mask_image_id=state.mask_image_id,
+            created_at=state.gen_created_at,
+        )
+        state.resource_demand = generation_resource_demand(
+            pixel_count=metadata.get("pixel_count"),
+            reference_count=len(state.input_image_ids),
+            action=str(state.action),
+            has_mask=bool(state.mask_image_id),
+            transparent=request.get("background") == "transparent",
+            output_count=int(request.get("n") or 1),
+            dual_race=request.get("image_route") == "dual_race",
+        )
     return True
 
 
@@ -635,6 +654,21 @@ async def _reserve_provider(
     queue_metadata: dict[str, Any],
 ) -> int:
     provider_delay = 0
+    demand = state.resource_demand or generation_resource_demand(
+        pixel_count=None,
+        dual_race=state.is_dual_race,
+    )
+    permit = WeightedPermit(
+        task_id=state.task_id,
+        attempt=state.attempt,
+        revision=(
+            state.dispatch_identity.revision
+            if state.dispatch_identity is not None
+            else 0
+        ),
+        demand=demand,
+        user_id=state.user_id,
+    )
     try:
         started = time.monotonic()
         state.reserved_provider = await reserve_image_queue_slot(
@@ -647,8 +681,11 @@ async def _reserve_provider(
             queue_lane=queue_metadata.get("queue_lane"),
             size_bucket=queue_metadata.get("size_bucket"),
             cost_class=queue_metadata.get("cost_class"),
+            weighted_permit=permit,
             services=state.services,
         )
+        if state.reserved_provider is not None:
+            state.weighted_permit = permit
         state.stage_timer.add_elapsed("provider_wait", started)
     except UpstreamError as exc:
         error_code = getattr(exc, "error_code", None)
@@ -863,6 +900,7 @@ async def _publish_generation_started(state: GenerationRunState) -> None:
             state.lease_lost,
             extra_lease_keys=[image_task_provider_key(state.task_id)],
             image_provider_name=state.reserved_provider_name,
+            weighted_permit=state.weighted_permit,
         )
     )
     await state.services.events.publish(
@@ -929,6 +967,7 @@ async def _cleanup_failed_setup(state: GenerationRunState) -> None:
             task_id=state.task_id,
             lease_token=state.lease_token,
             provider_name=state.reserved_provider_name,
+            weighted_permit=state.weighted_permit,
             clear_avoided_providers=True,
             services=state.services,
         )
@@ -1310,6 +1349,7 @@ async def _critical_release_cleanup(state: GenerationRunState) -> None:
             task_id=state.task_id,
             lease_token=state.lease_token,
             provider_name=state.reserved_provider_name,
+            weighted_permit=state.weighted_permit,
             clear_avoided_providers=state.task_outcome != "retry",
         )
     await state.resource_lease.close()

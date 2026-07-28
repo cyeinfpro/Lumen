@@ -235,6 +235,7 @@ async def test_generation_resource_lease_close_is_idempotent(
                 "task_id": "gen-3",
                 "lease_token": "owner:token",
                 "provider_name": "provider-a",
+                "weighted_permit": None,
                 "clear_avoided_providers": True,
                 "services": services,
             },

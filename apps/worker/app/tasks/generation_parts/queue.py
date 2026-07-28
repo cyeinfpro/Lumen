@@ -39,6 +39,7 @@ IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
 IMAGE_QUEUE_NOT_BEFORE_PREFIX = "generation:image_queue:not_before:"
 IMAGE_QUEUE_AVOID_PREFIX = "generation:image_queue:avoid:"
 IMAGE_QUEUE_LANE_CURSOR_KEY = "generation:image_queue:lane_cursor"
+IMAGE_QUEUE_WAKEUP_KEY = "generation:image_queue:wakeup"
 IMAGE_INFLIGHT_PREFIX = "generation:image_inflight:"
 IMAGE_QUEUE_LOCK_TTL_S = 10
 IMAGE_QUEUE_LOCK_WAIT_S = 5.0
@@ -46,6 +47,7 @@ IMAGE_QUEUE_FAIR_SCAN_LIMIT = 1000
 IMAGE_QUEUE_NOT_BEFORE_GRACE_S = 600
 IMAGE_PROVIDER_UNAVAILABLE_RETRY_S = 30
 IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S = 5.0
+IMAGE_QUEUE_WAKEUP_TTL_S = 1
 DUAL_RACE_SENTINEL_PREFIX = "__dr:"
 
 logger = logging.getLogger(__name__)
@@ -700,6 +702,20 @@ async def enqueue_generation_once(
 
 
 async def kick_image_queue(redis: Any, *, services: RunGenerationDeps) -> None:
+    try:
+        claimed = await redis.set(
+            IMAGE_QUEUE_WAKEUP_KEY,
+            str(time.time_ns()),
+            nx=True,
+            ex=IMAGE_QUEUE_WAKEUP_TTL_S,
+        )
+        if not claimed:
+            return
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "image queue wakeup coalescing unavailable; running scan",
+            exc_info=True,
+        )
     capacity = await resolve_image_queue_capacity(services=services)
     try:
         candidates = await ready_queued_generation_candidates(

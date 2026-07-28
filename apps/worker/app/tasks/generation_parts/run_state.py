@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from lumen_core.generation_resources import ResourceDemand
+
 from ...generation_dispatch import DispatchIdentity
+from .admission import WeightedPermit
 from .services import RunGenerationDeps
 
 
@@ -38,6 +41,8 @@ class GenerationRunState:
     route_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     gen_created_at: datetime | None = None
     dispatch_identity: DispatchIdentity | None = None
+    resource_demand: ResourceDemand | None = None
+    weighted_permit: WeightedPermit | None = None
 
     generation: Any | None = None
     user_id: str = ""
