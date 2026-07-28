@@ -38,6 +38,10 @@ from lumen_core.schemas import (
 )
 
 
+def test_workflow_lookup_has_no_module_bootstrap_lock() -> None:
+    assert not hasattr(workflow_lookup, "_LOCAL_BOOTSTRAP_LOCK")
+
+
 # ---------- minimal DB stub --------------------------------------------------
 
 

@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 import fcntl
 import json
@@ -159,9 +158,26 @@ _CATEGORY_ALIASES: MappingProxyType[str, str] = MappingProxyType(
     }
 )
 
-# 只保护同一进程内的短状态临界区；跨进程互斥由 flock + lease 完成。
-# 任何网络请求或大文件 I/O 都不得放在这个锁内。
-_SYNC_LOCK = asyncio.Lock()
+
+class _FileLockCompatibilityContext:
+    """Preserve the sync facade contract while flock owns serialization."""
+
+    __slots__ = ()
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def locked(self) -> bool:
+        return False
+
+
+# ``poster_styles.sync`` still enters this historical runtime attribute around
+# short ``to_thread`` calls. The called functions all acquire the authoritative
+# cross-process file lock below, so this adapter intentionally owns no state.
+_SYNC_LOCK = _FileLockCompatibilityContext()
 
 
 @contextmanager
