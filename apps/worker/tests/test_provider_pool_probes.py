@@ -449,8 +449,7 @@ async def test_probe_one_skips_generation_locked_provider_without_http(
 
 
 @pytest.mark.asyncio
-async def test_probe_image_one_succeeds_with_real_b64(
-) -> None:
+async def test_probe_image_one_succeeds_with_real_b64() -> None:
     pool = _make_pool(_cfg("acc1"))
     # 假装上游返回 ~5KB base64
     fake_b64 = "A" * 5000
@@ -466,8 +465,7 @@ async def test_probe_image_one_succeeds_with_real_b64(
 
 
 @pytest.mark.asyncio
-async def test_probe_image_one_fails_when_b64_too_short(
-) -> None:
+async def test_probe_image_one_fails_when_b64_too_short() -> None:
     pool = _make_pool(_cfg("acc1"))
 
     async def fake_probe(_request: ImageProbeRequest) -> tuple[str, str | None]:
@@ -478,10 +476,9 @@ async def test_probe_image_one_fails_when_b64_too_short(
 
 
 @pytest.mark.asyncio
-async def test_probe_image_one_fails_on_upstream_error(
-) -> None:
+async def test_probe_image_one_fails_on_upstream_error() -> None:
     pool = _make_pool(_cfg("acc1"))
-    from app import upstream
+    from app.upstream_parts import entrypoints as upstream
 
     async def fake_probe(_request: ImageProbeRequest) -> tuple[str, str | None]:
         raise upstream.UpstreamError(
@@ -493,8 +490,9 @@ async def test_probe_image_one_fails_on_upstream_error(
 
 
 @pytest.mark.asyncio
-async def test_probe_image_one_skips_generation_locked_provider_without_responses_call(
-) -> None:
+async def test_probe_image_one_skips_generation_locked_provider_without_responses_call() -> (
+    None
+):
     pool = _make_pool(_locked_cfg())
 
     async def fail_probe(_request: ImageProbeRequest) -> tuple[str, str | None]:
@@ -541,11 +539,10 @@ async def test_image_probe_failure_accumulates_and_triggers_cooldown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_image_all_calls_per_provider_and_reports(
-) -> None:
+async def test_probe_image_all_calls_per_provider_and_reports() -> None:
     """probe_image_all 对每个 enabled provider 跑一次，结果上报到对应 report_*。"""
     pool = _make_pool(_cfg("good"), _cfg("bad"))
-    from app import upstream
+    from app.upstream_parts import entrypoints as upstream
 
     async def fake_probe(request: ImageProbeRequest) -> tuple[str, str | None]:
         if request.provider.api_key == "sk-good":
@@ -574,8 +571,7 @@ async def test_probe_all_skips_generation_locked_provider(
 
 
 @pytest.mark.asyncio
-async def test_probe_image_all_skips_generation_locked_provider(
-) -> None:
+async def test_probe_image_all_skips_generation_locked_provider() -> None:
     pool = _make_pool(_locked_cfg(), _cfg("responses"))
 
     calls: list[str] = []

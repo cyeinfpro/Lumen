@@ -9,12 +9,13 @@ from typing import Any
 
 import pytest
 
-from app import byok_runtime, provider_pool, upstream
+from app import byok_runtime, provider_pool
 from app.provider_runtime import byok_context, contracts, errors
 from app.provider_runtime.probe_runtime import build_provider_probe_runtime
 from app.upstream_parts import (
     direct_failover,
     direct_requests,
+    entrypoints as upstream,
     errors as upstream_errors,
     image_dispatch,
     image_job_failover,
@@ -44,7 +45,7 @@ def _load_architecture_gate() -> Any:
     return module
 
 
-def test_provider_runtime_contracts_keep_facade_identity() -> None:
+def test_provider_runtime_contracts_keep_entrypoint_identity() -> None:
     assert provider_pool.ProviderConfig is contracts.ProviderConfig
     assert provider_pool.ProviderHealth is contracts.ProviderHealth
     assert provider_pool.ResolvedProvider is contracts.ResolvedProvider
@@ -52,8 +53,7 @@ def test_provider_runtime_contracts_keep_facade_identity() -> None:
     assert upstream_errors.UpstreamError is errors.UpstreamError
     assert byok_runtime.UpstreamError is errors.UpstreamError
     assert (
-        byok_runtime.validate_byok_http_target
-        is byok_context.validate_byok_http_target
+        byok_runtime.validate_byok_http_target is byok_context.validate_byok_http_target
     )
 
 
@@ -70,10 +70,14 @@ def test_worker_provider_runtime_graph_is_acyclic() -> None:
     assert check_architecture.strongly_connected_components(graph.edges) == []
 
 
-def test_worker_provider_facades_stay_below_file_size_budget() -> None:
+def test_worker_provider_entrypoints_stay_below_file_size_budget() -> None:
     root = Path(__file__).resolve().parents[1] / "app"
 
-    assert len((root / "upstream.py").read_text().splitlines()) < 1500
+    assert not (root / "upstream.py").exists()
+    assert (
+        len((root / "upstream_parts" / "entrypoints.py").read_text().splitlines())
+        < 1500
+    )
     assert len((root / "provider_pool.py").read_text().splitlines()) < 1500
     assert (
         len((root / "upstream_parts" / "image_jobs.py").read_text().splitlines()) < 1000
@@ -182,8 +186,7 @@ def test_generation_upstream_functions_do_not_read_ambient_registry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_probe_receives_explicit_typed_request(
-) -> None:
+async def test_image_probe_receives_explicit_typed_request() -> None:
     provider = contracts.ProviderConfig(
         name="probe-provider",
         base_url="https://probe.example",

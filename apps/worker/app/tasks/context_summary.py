@@ -35,8 +35,8 @@ from ..observability import (
     context_compaction_duration_seconds,
     context_compaction_total,
 )
+from ..provider_runtime.errors import UpstreamError
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
-from ..upstream import UpstreamError
 from .context_summary_parts.common import (
     LoadedSummaryMessages,
     SummaryCoverage as _SummaryCoverage,
@@ -356,7 +356,7 @@ async def _call_summary_upstream(
     """Call the text provider route through the modular upstream adapter."""
     from ..provider_pool import get_pool
     from ..retry import is_retriable as classify_retriable
-    from ..upstream import responses_call
+    from ..upstream_parts.entrypoints import responses_call
 
     return await _upstream.call_summary_upstream(
         input_text,

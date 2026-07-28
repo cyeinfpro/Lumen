@@ -6,7 +6,7 @@
   (c) 上游没有静默切换默认 model（response.model 必须等于请求的 model）。
 
 实现：
-- 调 `apps.worker.app.upstream.stream_completion`（不直接 httpx，避开 base_url/key 选择
+- 调 `apps.worker.app.upstream_parts.entrypoints.stream_completion`（不直接 httpx，避开 base_url/key 选择
   逻辑的重复实现），消费完整 SSE 流并抽 `response.completed.response`。
 - 失败时 `logger.error` + Sentry capture（软导入）。
 - Prometheus 指标走两路：
@@ -96,7 +96,9 @@ def _record_request(status_code: int, endpoint: str = "probe") -> None:
     try:
         from lumen_core.metrics_upstream import record_upstream_request
     except Exception:  # noqa: BLE001
-        logger.debug("upstream_probe.metrics_upstream import failed (status=%s)", status_code)
+        logger.debug(
+            "upstream_probe.metrics_upstream import failed (status=%s)", status_code
+        )
         return
     try:
         record_upstream_request(status_code=status_code, endpoint=endpoint)
@@ -238,7 +240,7 @@ async def probe_upstream(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     error_repr: str | None = None
 
     # 延迟 import：避免 worker 启动时无关探针把 upstream 模块拉起来（PIL / httpx 都重）。
-    from ..upstream import UpstreamError, stream_completion
+    from ..upstream_parts.entrypoints import UpstreamError, stream_completion
 
     try:
         image_upstream_runtime = _require_image_upstream_runtime(ctx)
@@ -307,7 +309,11 @@ async def probe_upstream(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
                 missing.append(k)
             elif k == "id" and not isinstance(v, str):
                 missing.append(k)
-        got_model = completed_payload.get("model") if isinstance(completed_payload, dict) else None
+        got_model = (
+            completed_payload.get("model")
+            if isinstance(completed_payload, dict)
+            else None
+        )
         if missing:
             schema_drift = True
         if got_model is not None and got_model != probe_model:

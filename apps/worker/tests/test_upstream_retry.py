@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app import upstream
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
@@ -199,7 +199,9 @@ async def test_post_with_retry_honors_retry_after_header(
                 return httpx.Response(503, headers={"retry-after": "2.5"})
             return httpx.Response(200, json={"ok": True})
 
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep
+    )
 
     resp = await TEST_UPSTREAM_SERVICES.core.post_with_retry(
         client=_Client(),  # type: ignore[arg-type]
@@ -269,7 +271,9 @@ async def test_reference_url_live_resolves_public_target_before_head(
             return httpx.Response(204)
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.infrastructure, "resolve_public_http_target", fake_resolve
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "resolve_public_http_target",
+        fake_resolve,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure.httpx, "AsyncClient", _Client
@@ -311,7 +315,9 @@ async def test_reference_url_live_rejects_redirect_response(
             )
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.infrastructure, "resolve_public_http_target", fake_resolve
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "resolve_public_http_target",
+        fake_resolve,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure.httpx, "AsyncClient", _Client
@@ -594,11 +600,9 @@ async def test_image_job_submit_uses_payload_idempotency_key(
             request_context=ImageRequestContext.create(trace_id="trace-not-stable"),
         )
 
-    expected = (
-        TEST_UPSTREAM_SERVICES
-        .infrastructure.hashlib.sha256(b"generation:stable")
-        .hexdigest()
-    )
+    expected = TEST_UPSTREAM_SERVICES.infrastructure.hashlib.sha256(
+        b"generation:stable"
+    ).hexdigest()
     assert seen["headers"]["Idempotency-Key"] == f"lumen-image-job-{expected[:32]}"
     assert seen["headers"]["x-trace-id"] == "trace-not-stable"
     assert (
@@ -675,7 +679,9 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
         exc.error_code
         == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
     )
-    assert exc.payload["timeout_s"] == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
+    assert (
+        exc.payload["timeout_s"] == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
+    )
     assert exc.payload["upstream_result_unknown"] is True
     from app.retry import is_retriable
 
@@ -709,7 +715,9 @@ async def test_direct_edit_timeout_is_result_unknown_not_retryable(
         )
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport,
+        "curl_post_multipart",
+        fake_curl_post_multipart,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
@@ -778,7 +786,9 @@ async def test_responses_image_retry_honors_429_budget(
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.responses, "responses_image_stream", fake_stream
     )
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep
+    )
 
     with pytest.raises(upstream.UpstreamError):
         await TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry(

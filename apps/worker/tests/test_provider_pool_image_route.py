@@ -263,7 +263,7 @@ async def test_select_image_skips_provider_with_open_text_circuit() -> None:
 
 @pytest.mark.asyncio
 async def test_select_image_raises_when_all_unavailable() -> None:
-    from app.upstream import UpstreamError
+    from app.upstream_parts.entrypoints import UpstreamError
 
     pool = _make_pool(_cfg("acc1"), _cfg("acc2"))
     pool._health["acc1"].image_cooldown_until = time.monotonic() + 60.0
@@ -312,7 +312,7 @@ async def test_select_image_fail_closed_when_limiter_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app import account_limiter
-    from app.upstream import UpstreamError
+    from app.upstream_parts.entrypoints import UpstreamError
 
     pool = _make_pool(_cfg("acc1", rate_limit="5/min"))
     pool.attach_redis(object())

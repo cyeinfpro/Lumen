@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.tasks import completion, context_summary, video_generation, volcano_assets
+from app.tasks import context_summary, volcano_assets
+from app.tasks.completion_parts import entrypoints as completion
 from app.tasks.completion_parts import request_metadata
 from app.tasks.context_summary_parts import results as context_summary_results
+from app.tasks.video_generation_parts import entrypoints as video_generation
 from app.tasks.video_generation_parts import errors as video_errors
 from app.tasks.volcano_assets_parts import receipts as volcano_receipts
 

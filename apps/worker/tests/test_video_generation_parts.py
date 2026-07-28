@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.tasks.video_generation_parts import default_runtime as video_generation
 from app.tasks.video_generation_parts import (
+    entrypoints,
     lifecycle,
     persistence,
     polling,
@@ -19,7 +20,7 @@ _PARTS_DIR = _TASKS_DIR / "video_generation_parts"
 
 
 def test_video_generation_production_modules_stay_below_line_budget() -> None:
-    paths = [_TASKS_DIR / "video_generation.py", *_PARTS_DIR.glob("*.py")]
+    paths = list(_PARTS_DIR.glob("*.py"))
     oversized = {
         path.name: len(path.read_text(encoding="utf-8").splitlines())
         for path in paths
@@ -27,6 +28,7 @@ def test_video_generation_production_modules_stay_below_line_budget() -> None:
     }
 
     assert oversized == {}
+    assert not (_TASKS_DIR / "video_generation.py").exists()
 
 
 def test_video_generation_parts_do_not_import_compatibility_facade() -> None:
@@ -53,7 +55,7 @@ def test_video_generation_parts_do_not_import_compatibility_facade() -> None:
     assert forbidden == []
 
 
-def test_facade_reexports_decomposed_task_entrypoints() -> None:
+def test_leaf_modules_expose_decomposed_task_entrypoints() -> None:
     assert video_generation.run_video_generation is submission.run_video_generation
     assert video_generation.run_video_poll is polling.run_video_poll
     assert (
@@ -64,6 +66,9 @@ def test_facade_reexports_decomposed_task_entrypoints() -> None:
         video_generation._provider_for_generation is providers.provider_for_generation
     )
     assert video_generation._finish_success is persistence.finish_success
+    assert entrypoints.run_video_generation.__module__.endswith(".entrypoints")
+    assert entrypoints.run_video_poll.__module__.endswith(".entrypoints")
+    assert entrypoints.reconcile_video_tasks.__module__.endswith(".entrypoints")
 
 
 def test_reference_mime_falls_back_when_upstream_override_is_invalid() -> None:

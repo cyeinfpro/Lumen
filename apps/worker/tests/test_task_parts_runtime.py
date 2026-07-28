@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
-from app.tasks import completion as completion_task
 from app.tasks import generation as generation_task
 from app.task_runtime import (
     BillingAction,
@@ -28,6 +27,7 @@ from app.tasks.completion_parts.decisions import (
     reduce_completion_frame,
 )
 from app.tasks.completion_parts.default_runtime import build_completion_runtime
+from app.tasks.completion_parts import entrypoints as completion_task
 from app.tasks.completion_parts.contracts import (
     CompletionCommand,
     CompletionOutcome,
@@ -395,8 +395,6 @@ def test_owned_task_parts_have_no_dynamic_parent_facades() -> None:
     task_root = Path(__file__).parents[1] / "app" / "tasks"
     paths = [
         task_root / "generation.py",
-        task_root / "completion.py",
-        task_root / "video_generation.py",
         *sorted((task_root / "generation_parts").glob("*.py")),
         *sorted((task_root / "completion_parts").glob("*.py")),
         *sorted((task_root / "video_generation_parts").glob("*.py")),
@@ -408,5 +406,5 @@ def test_owned_task_parts_have_no_dynamic_parent_facades() -> None:
             assert marker not in source, f"{path.name} still contains {marker}"
 
     assert len((task_root / "generation.py").read_text().splitlines()) < 250
-    assert len((task_root / "completion.py").read_text().splitlines()) < 250
-    assert len((task_root / "video_generation.py").read_text().splitlines()) < 250
+    assert not (task_root / "completion.py").exists()
+    assert not (task_root / "video_generation.py").exists()

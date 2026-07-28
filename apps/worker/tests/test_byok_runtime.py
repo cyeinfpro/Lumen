@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app import byok_runtime
-from app.upstream import UpstreamError
+from app.upstream_parts.entrypoints import UpstreamError
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.url_security import PublicHttpTarget
 

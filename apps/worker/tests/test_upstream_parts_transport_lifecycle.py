@@ -8,8 +8,12 @@ from typing import Any
 import httpx
 import pytest
 
-from app import upstream
-from app.upstream_parts import client_lifecycle, errors, transport
+from app.upstream_parts import (
+    client_lifecycle,
+    entrypoints as upstream,
+    errors,
+    transport,
+)
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.url_security import PublicHttpTarget
 
@@ -18,22 +22,23 @@ TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
 TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
-def test_upstream_facade_exports_extracted_contracts_without_state_aliases() -> None:
+def test_upstream_entrypoints_export_extracted_contracts_without_state_aliases() -> (
+    None
+):
     assert upstream.UpstreamError is errors.UpstreamError
     assert (
-        TEST_UPSTREAM_SERVICES.infrastructure.UpstreamCancelled is errors.UpstreamCancelled
+        TEST_UPSTREAM_SERVICES.infrastructure.UpstreamCancelled
+        is errors.UpstreamCancelled
     )
     assert (
-        TEST_UPSTREAM_SERVICES.lifecycle.get_client.func
-        is client_lifecycle._get_client
+        TEST_UPSTREAM_SERVICES.lifecycle.get_client.func is client_lifecycle._get_client
     )
     assert (
         TEST_UPSTREAM_SERVICES.lifecycle.get_client.keywords["runtime"]
         is TEST_UPSTREAM_RUNTIME
     )
     assert (
-        TEST_UPSTREAM_SERVICES.transport.iter_sse_curl.func
-        is transport._iter_sse_curl
+        TEST_UPSTREAM_SERVICES.transport.iter_sse_curl.func is transport._iter_sse_curl
     )
     assert (
         TEST_UPSTREAM_SERVICES.transport.iter_sse_curl.keywords["runtime"]
@@ -132,7 +137,9 @@ def test_direct_pinned_client_uses_validated_transport_without_proxy(
     )
 
     client = TEST_UPSTREAM_SERVICES.lifecycle.build_client(
-        TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(connect=3.0, read=40.0, write=5.0),
+        TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
+            connect=3.0, read=40.0, write=5.0
+        ),
         pinned_target=target,
     )
 
@@ -179,7 +186,9 @@ async def test_explicit_byok_target_pins_direct_images_but_not_proxy(
         TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "build_images_client",
+        fake_build_images_client,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "proxied_images_clients", OrderedDict()
@@ -243,10 +252,14 @@ async def test_ambient_byok_target_does_not_pollute_later_unpinned_origin(
         TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "build_images_client",
+        fake_build_images_client,
     )
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client", None)
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None
+    )
     client_lifecycle._pinned_images_clients.clear()
     try:
         byok_client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client(
@@ -297,10 +310,14 @@ async def test_concurrent_client_selection_keeps_byok_targets_isolated(
         TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "build_images_client",
+        fake_build_images_client,
     )
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client", None)
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core, "images_client_timeout_config", None
+    )
     client_lifecycle._pinned_images_clients.clear()
 
     async def select_clients(
@@ -358,7 +375,9 @@ async def test_client_facade_uses_rebound_proxy_cache(
     )
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "proxied_clients", rebound_cache)
 
-    client = await TEST_UPSTREAM_SERVICES.lifecycle.get_client("http://proxy.example:8080")
+    client = await TEST_UPSTREAM_SERVICES.lifecycle.get_client(
+        "http://proxy.example:8080"
+    )
 
     assert client is built[0]
     assert rebound_cache[(timeout_config, "http://proxy.example:8080")] is client

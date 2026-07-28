@@ -172,7 +172,8 @@ def _half_open_text_pool() -> tuple[Any, Any]:
 async def test_call_summary_upstream_reports_actual_success_and_closes_half_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     pool, health = _half_open_text_pool()
     image_upstream_runtime = object()
@@ -210,7 +211,8 @@ async def test_call_summary_upstream_reports_actual_success_and_closes_half_open
 async def test_call_summary_upstream_reports_actual_failure_and_reopens_half_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     pool, health = _half_open_text_pool()
 
@@ -248,7 +250,8 @@ async def test_call_summary_upstream_reports_actual_failure_and_reopens_half_ope
 async def test_call_summary_upstream_cancellation_only_releases_half_open_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     pool, health = _half_open_text_pool()
 
@@ -284,7 +287,8 @@ async def test_call_summary_upstream_cancellation_only_releases_half_open_slot(
 async def test_call_summary_upstream_local_parse_error_is_not_provider_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     pool, health = _half_open_text_pool()
 

@@ -16,8 +16,9 @@ from typing import Any
 
 import pytest
 
-from app import account_limiter, provider_pool, upstream
+from app import account_limiter, provider_pool
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import ImageExecutionRequest
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.providers import provider_supports_route

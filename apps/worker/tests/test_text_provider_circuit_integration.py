@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app import provider_pool, upstream
+from app import provider_pool
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 from app.tasks import (
     auto_title,
@@ -18,6 +18,7 @@ from app.tasks import (
     model_library_tagging,
     poster_style_tagging,
 )
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 
 
@@ -545,7 +546,9 @@ async def test_upstream_responses_call_reports_provider_failure(
         )
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.core.upstream_responses_client, "responses_call", fail_call
+        TEST_UPSTREAM_SERVICES.core.upstream_responses_client,
+        "responses_call",
+        fail_call,
     )
 
     with pytest.raises(upstream.UpstreamError):
