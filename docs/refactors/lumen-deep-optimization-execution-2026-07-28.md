@@ -296,6 +296,110 @@ integration.
 - Revert `4b00b22` last to restore the temporary enqueue dedupe behavior.
 - No database migration or persisted business row transformation is required.
 
+### V2 Wave 3 Completion
+
+#### Commits And Agent Evidence
+
+- A5 Asset Backend:
+  agent `cf2ee738`, integrated as `510308c`
+  (`feat(assets): expose feed variant readiness`).
+- A6 Asset Web:
+  agent `80847d7`, integrated as `b1d0ab1`
+  (`perf(web): bound asset stream loading`).
+- A8 browser/perf harness:
+  agent `04ce13f`, integrated as `016b08d`
+  (`test(perf): add wave 3 asset browser harness`).
+- A0 integration/test mapping and target-URL harness correction:
+  `2f4684f` (`test(assets): verify integrated stream loading`).
+- A0 display route ORM-expiry regression fix:
+  `e3e662a` (`fix(images): preserve display route identity`).
+
+A5 changed only feed/image visibility code and direct API tests. A6 changed
+only Stream shell/components/query/prewarm code and focused Web tests. A8
+changed only `perf/wave3` and its performance evidence. A0 retained sole
+ownership of the test manifest, ledger, report, formatting, and integration.
+
+#### Behavior And Invariants
+
+- Feed responses preserve the original URL for explicit download/lightbox
+  compatibility, but grid fields no longer fall back to it. They expose
+  `ready|pending|missing|failed` states for thumb, preview, and display,
+  `display_ready`, and a stable `variant_version`.
+- BYOK image visibility is evaluated for a page-sized candidate set with one
+  bounded SQL statement. Array and JSON references are checked in PostgreSQL;
+  full historical arrays/JSON are no longer materialized per image.
+- Search query whitespace is normalized, debounced for 300 ms, included in the
+  query key, sent as server `q`, and cancelled through the query `AbortSignal`.
+- Grid candidates contain only ready thumb/preview variants. Failed
+  `currentSrc` values are mapped back to their candidate and removed from both
+  `src` and `srcSet`. `/binary` and `display2048` are rejected defensively.
+- Virtual masonry keeps mounted tiles independent of total item count:
+  desktop hard budget 160, mobile hard budget 80. Lightbox materialization is
+  limited to the current item and 12 neighbors on each side.
+- The component-owned prewarm scheduler has queue limit 32, image concurrency
+  3, video concurrency 1, cancellation, image/video timeout, priority
+  replacement, dedupe, and visibility/Save-Data/weak-network policy. No new
+  process-wide mutable global was added.
+- Hover/focus requests only a ready preview. Display generation is reserved for
+  confirmed open or neighboring lightbox navigation.
+- The display route freezes the authorized user ID before releasing its read
+  transaction. On-demand display singleflight no longer reads an expired ORM
+  user after `rollback()`.
+- Existing attempt fences, leases, billing, artifact saga/reconcile, ETag,
+  immutable cache, X-Accel delivery, storage path security, and BYOK retention
+  semantics remain intact.
+
+#### Metrics
+
+- Frozen model -> authenticated product:
+  mounted tiles `1000 -> 39` peak while 1000 items entered the query cache.
+- Grid and total `/binary` requests `10 -> 0`; explicit lightbox open used one
+  successful display request.
+- Hover display requests `500 -> 0`.
+- Search pages loaded before finding the page-20 target `20 -> 1`.
+- Failed thumb still present in `srcSet` `56 -> 0`; repeated failed-thumb
+  requests remained zero.
+- Prewarm target oracle queue `497 -> 32`; mobile Save-Data/3g queue peak 1
+  with 500 low-priority skips.
+- Authenticated product forced-GC heap growth after two top-bottom-top cycles:
+  +9.01%, below the fixed +20% threshold.
+- Evidence:
+  `docs/perf/lumen-wave3-after-2026-07-28.{md,json}`.
+
+#### Verification
+
+- Required backend Wave 3 batch:
+  `test_generations_feed.py`,
+  `test_artifact_runtime_regressions.py`, and
+  `test_core_security_infra.py` -> 48 passed.
+- Focused Web Wave 3 tests plus retained Stream layout/dead-code contracts:
+  38 passed; the six new Wave 3 files account for 18 focused assertions.
+- Browser harness contracts:
+  Node 4 passed and Python wrapper 3 passed.
+- Authenticated Chrome product smoke used an isolated PostgreSQL database,
+  Redis port, storage root, and 1000-item fixture. It loaded all 1000 items,
+  mounted 20-39 tiles, performed two top-bottom-top cycles, searched the
+  page-20 target, and opened/closed lightbox. The first run exposed an expired
+  ORM user access after display-route rollback; only the new regression node
+  was added/run, then the product rerun confirmed display 200 with no binary
+  fallback.
+- Changed-file Ruff, Ruff format, ESLint, Web type-check, Web architecture,
+  Web complexity, backend architecture, backend complexity, runtime-state,
+  manifest lint, and `git diff --check` passed.
+- Governance remains `3 / 11 / 15`; no baseline was raised.
+- The repository-wide `bash scripts/test.sh -q` has not run and remains
+  reserved for the single Wave 5 final gate.
+
+#### Rollback
+
+- Revert `e3e662a` to restore the pre-fix display route.
+- Revert `2f4684f` to remove A0 test/harness integration.
+- Revert `016b08d` to remove independent Wave 3 evidence.
+- Revert `b1d0ab1` to restore the previous Web Stream behavior.
+- Revert `510308c` last to restore the previous feed/visibility contract.
+- No database migration was added. The authenticated smoke stack is isolated
+  and disposable.
+
 ## Baseline
 
 - Date: 2026-07-28

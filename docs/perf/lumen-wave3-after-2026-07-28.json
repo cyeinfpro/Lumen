@@ -1,8 +1,607 @@
 {
+  "branch": "codex/lumen-deep-optimization-v2-20260728",
+  "fixedThresholds": {
+    "desktopMountedTiles": 160,
+    "mobileMountedTiles": 80,
+    "prewarmQueueDepth": 32,
+    "heapGrowthPercent": 20,
+    "firstInteractiveRegressionPercent": 10
+  },
   "generatedAt": "2026-07-28T23:59:57+08:00",
-  "reason": "A0 must rerun perf/wave3/run.mjs against the integrated authenticated Stream implementation after A5 and A6 merge.",
-  "requiredCommand": "LUMEN_WAVE3_ASSET_URL=<authenticated-stream-url> node perf/wave3/run.mjs suite --output docs/perf/lumen-wave3-after-2026-07-28.json",
+  "head": "e3e662af9a595700362e1d788224ad0fb63661f5",
+  "invariants": [
+    "The 1000 item fixture distribution is deterministic and exact.",
+    "Fixed mounted DOM and prewarm thresholds are source constants, not baseline-derived.",
+    "Grid binary requests and hover-triggered display requests must remain zero.",
+    "Server search must find the page 20 target with only the initial page loaded.",
+    "Weak-network and Save-Data behavior is measured in a real Chromium session.",
+    "Synthetic fixture acceptance is not production SLO evidence."
+  ],
+  "scenarios": {
+    "fixtureContract": {
+      "count": 1000,
+      "pageSize": 50,
+      "scenarioCounts": {
+        "missing_thumb": 50,
+        "pending": 10,
+        "ready": 920,
+        "thumb_404": 20
+      },
+      "search": {
+        "page": 20,
+        "query": "page20-target",
+        "targetId": "asset-975",
+        "targetIndex": 975
+      },
+      "status": "modeled"
+    },
+    "frozenCurrentModel": {
+      "actionResult": {
+        "resultIds": [
+          "asset-975"
+        ],
+        "status": "measured"
+      },
+      "browser": {
+        "final": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 884656,
+          "layoutCount": 136,
+          "nodes": 50,
+          "recalcStyleCount": 136,
+          "taskDurationSeconds": 4.413729
+        },
+        "forcedGcHeapGrowthPercent": -10.207627909998132,
+        "initial": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 985224,
+          "taskDurationSeconds": 0.067612
+        },
+        "postScroll": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 1067848,
+          "taskDurationSeconds": 4.308882
+        }
+      },
+      "environment": {
+        "effectiveType": "4g",
+        "mobile": false,
+        "saveData": false
+      },
+      "mode": "legacy_synthetic_fixture",
+      "network": {
+        "binaryRequests": 20,
+        "displayRequests": 501,
+        "encodedBytes": 615024,
+        "failed": 9,
+        "requests": 1404,
+        "responses": 1395,
+        "searchRequests": 0
+      },
+      "page": {
+        "diagnostics": {
+          "cancelledPrewarms": 0,
+          "displayRequestsByReason": {
+            "hover": 500,
+            "open": 1,
+            "neighbor": 0
+          },
+          "failedThumbStillInSrcSet": 48,
+          "imageTimeouts": 7,
+          "lowNetworkSkips": 0,
+          "prewarmDrops": 0,
+          "prewarmMaxActive": 3,
+          "prewarmMaxQueueDepth": 497,
+          "repeatedFailedThumbRequests": 0,
+          "scenarioCounts": {
+            "missing_thumb": 50,
+            "pending": 10,
+            "ready": 920,
+            "thumb_404": 20
+          }
+        },
+        "domNodes": 17,
+        "firstInteractiveMs": 53.5,
+        "imageCount": 2,
+        "longTasks": [],
+        "maxMountedTiles": 1000,
+        "mountedTiles": 1,
+        "resourceEntries": 250,
+        "search": {
+          "loadedPagesBeforeSearch": 20,
+          "normalizedQuery": "page20-target",
+          "requestCount": 1,
+          "resultIds": [
+            "asset-975"
+          ]
+        }
+      },
+      "productActions": null,
+      "requestHeadersConfigured": true,
+      "server": {
+        "byKind": {
+          "other": 5,
+          "binary": 10,
+          "thumb": 752,
+          "preview": 57,
+          "display": 501
+        },
+        "serverSearchQueries": [],
+        "total": 1325
+      },
+      "status": "measured",
+      "targetUrl": "http://127.0.0.1:56293/?count=1000&mode=legacy&mobile=0",
+      "tileSelector": ".asset-tile",
+      "workload": {
+        "cycles": 2,
+        "prewarmCandidates": 500,
+        "scrollSamples": {
+          "count": 131,
+          "maxLoaded": 0,
+          "maxMounted": 1000,
+          "minMounted": 1000
+        },
+        "searchQuery": "page20-target"
+      },
+      "acceptance": {
+        "binary_requests": {
+          "limit": 0,
+          "measured": 20,
+          "status": "not_met"
+        },
+        "hover_display_generation": {
+          "limit": 0,
+          "measured": 500,
+          "status": "not_met"
+        },
+        "mounted_tiles": {
+          "limit": 160,
+          "measured": 1000,
+          "status": "not_met"
+        },
+        "prewarm_queue": {
+          "limit": 32,
+          "measured": 497,
+          "status": "not_met"
+        },
+        "server_search_page_20": {
+          "expectedPage": 20,
+          "loadedPagesBeforeSearch": 20,
+          "resultIds": [
+            "asset-975"
+          ],
+          "status": "not_met"
+        },
+        "thumb_fallback_srcset": {
+          "failedCandidateRequests": 0,
+          "failedCandidateStillInSrcSet": 48,
+          "status": "not_met"
+        }
+      }
+    },
+    "realProductAfter": {
+      "actionResult": {
+        "lightboxOpened": true,
+        "status": "measured",
+        "resultIds": [
+          "gen-00000000000000000000000000000975"
+        ],
+        "searchStatus": 200
+      },
+      "browser": {
+        "final": {
+          "jsHeapTotalBytes": 20971520,
+          "jsHeapUsedBytes": 19791724,
+          "layoutCount": 1494,
+          "nodes": 1788,
+          "recalcStyleCount": 1778,
+          "taskDurationSeconds": 9.822986
+        },
+        "forcedGcHeapGrowthPercent": 9.007690128321553,
+        "initial": {
+          "jsHeapTotalBytes": 19398656,
+          "jsHeapUsedBytes": 18156264,
+          "taskDurationSeconds": 0.509847
+        },
+        "postScroll": {
+          "jsHeapTotalBytes": 19922944,
+          "jsHeapUsedBytes": 19107200,
+          "taskDurationSeconds": 9.728723
+        }
+      },
+      "environment": {
+        "effectiveType": "4g",
+        "mobile": false,
+        "saveData": false
+      },
+      "mode": "target_url",
+      "network": {
+        "binaryRequests": 0,
+        "displayRequests": 1,
+        "encodedBytes": 10152120,
+        "failed": 0,
+        "requests": 4586,
+        "responses": 4563,
+        "searchRequests": 1
+      },
+      "page": {
+        "diagnostics": {
+          "failedThumbStillInSrcSet": 0,
+          "displayRequestsByReason": {
+            "hover": 0
+          },
+          "gridBinaryRequests": 0,
+          "repeatedFailedThumbRequests": 0
+        },
+        "domNodes": 1345,
+        "firstInteractiveMs": 69.89999997615814,
+        "imageCount": 36,
+        "longTasks": null,
+        "maxMountedTiles": 39,
+        "mountedTiles": 22,
+        "resourceEntries": 250,
+        "search": {
+          "loadedPagesBeforeSearch": 1,
+          "matchedQuery": true,
+          "normalizedQuery": "page20-target",
+          "requestCount": 1,
+          "resultIds": [
+            "gen-00000000000000000000000000000975"
+          ]
+        }
+      },
+      "productActions": {
+        "hovered": 22,
+        "hoverDisplayRequests": 0
+      },
+      "requestHeadersConfigured": true,
+      "server": null,
+      "status": "measured",
+      "targetUrl": "http://127.0.0.1:13000/stream",
+      "tileSelector": "[data-mounted-tile]",
+      "workload": {
+        "cycles": 2,
+        "prewarmCandidates": 500,
+        "scrollSamples": {
+          "count": 387,
+          "maxLoaded": 1000,
+          "maxMounted": 39,
+          "minMounted": 20
+        },
+        "searchQuery": "page20-target"
+      },
+      "acceptance": {
+        "binary_requests": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "hover_display_generation": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "mounted_tiles": {
+          "limit": 160,
+          "measured": 39,
+          "status": "met"
+        },
+        "prewarm_queue": {
+          "limit": 32,
+          "measured": null,
+          "status": "gated"
+        },
+        "server_search_page_20": {
+          "expectedPage": 20,
+          "loadedPagesBeforeSearch": 1,
+          "resultIds": [
+            "gen-00000000000000000000000000000975"
+          ],
+          "status": "met"
+        },
+        "thumb_fallback_srcset": {
+          "failedCandidateRequests": 0,
+          "failedCandidateStillInSrcSet": 0,
+          "status": "met"
+        }
+      }
+    },
+    "targetOracleDesktop": {
+      "actionResult": {
+        "resultIds": [
+          "asset-975"
+        ],
+        "status": "measured"
+      },
+      "browser": {
+        "final": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 855780,
+          "layoutCount": 232,
+          "nodes": 65,
+          "recalcStyleCount": 161,
+          "taskDurationSeconds": 1.206168
+        },
+        "forcedGcHeapGrowthPercent": 4.769716706251071,
+        "initial": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 816820,
+          "taskDurationSeconds": 0.014432
+        },
+        "postScroll": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 848208,
+          "taskDurationSeconds": 1.193909
+        }
+      },
+      "environment": {
+        "effectiveType": "4g",
+        "mobile": false,
+        "saveData": false
+      },
+      "mode": "target_synthetic_fixture",
+      "network": {
+        "binaryRequests": 0,
+        "displayRequests": 1,
+        "encodedBytes": 385471,
+        "failed": 2,
+        "requests": 2241,
+        "responses": 2239,
+        "searchRequests": 1
+      },
+      "page": {
+        "diagnostics": {
+          "cancelledPrewarms": 32,
+          "displayRequestsByReason": {
+            "hover": 0,
+            "open": 1,
+            "neighbor": 0
+          },
+          "failedThumbStillInSrcSet": 0,
+          "imageTimeouts": 2,
+          "lowNetworkSkips": 0,
+          "prewarmDrops": 465,
+          "prewarmMaxActive": 3,
+          "prewarmMaxQueueDepth": 32,
+          "repeatedFailedThumbRequests": 0,
+          "scenarioCounts": {
+            "missing_thumb": 50,
+            "pending": 10,
+            "ready": 920,
+            "thumb_404": 20
+          }
+        },
+        "domNodes": 17,
+        "firstInteractiveMs": 103.29999995231628,
+        "imageCount": 2,
+        "longTasks": [],
+        "maxMountedTiles": 150,
+        "mountedTiles": 1,
+        "resourceEntries": 250,
+        "search": {
+          "loadedPagesBeforeSearch": 1,
+          "normalizedQuery": "page20-target",
+          "requestCount": 1,
+          "resultIds": [
+            "asset-975"
+          ]
+        }
+      },
+      "productActions": null,
+      "requestHeadersConfigured": true,
+      "server": {
+        "byKind": {
+          "other": 6,
+          "thumb": 942,
+          "preview": 72,
+          "display": 1
+        },
+        "serverSearchQueries": [
+          {
+            "pageSize": 50,
+            "q": "page20-target"
+          }
+        ],
+        "total": 1021
+      },
+      "status": "measured",
+      "targetUrl": "http://127.0.0.1:56348/?count=1000&mode=target&mobile=0",
+      "tileSelector": ".asset-tile",
+      "workload": {
+        "cycles": 2,
+        "prewarmCandidates": 500,
+        "scrollSamples": {
+          "count": 145,
+          "maxLoaded": 0,
+          "maxMounted": 150,
+          "minMounted": 80
+        },
+        "searchQuery": "page20-target"
+      },
+      "acceptance": {
+        "binary_requests": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "hover_display_generation": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "mounted_tiles": {
+          "limit": 160,
+          "measured": 150,
+          "status": "met"
+        },
+        "prewarm_queue": {
+          "limit": 32,
+          "measured": 32,
+          "status": "met"
+        },
+        "server_search_page_20": {
+          "expectedPage": 20,
+          "loadedPagesBeforeSearch": 1,
+          "resultIds": [
+            "asset-975"
+          ],
+          "status": "met"
+        },
+        "thumb_fallback_srcset": {
+          "failedCandidateRequests": 0,
+          "failedCandidateStillInSrcSet": 0,
+          "status": "met"
+        }
+      }
+    },
+    "targetOracleMobileSaveData3g": {
+      "actionResult": {
+        "resultIds": [
+          "asset-975"
+        ],
+        "status": "measured"
+      },
+      "browser": {
+        "final": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 845128,
+          "layoutCount": 358,
+          "nodes": 50,
+          "recalcStyleCount": 325,
+          "taskDurationSeconds": 1.898122
+        },
+        "forcedGcHeapGrowthPercent": 5.6600188033846095,
+        "initial": {
+          "jsHeapTotalBytes": 1835008,
+          "jsHeapUsedBytes": 799856,
+          "taskDurationSeconds": 0.017447
+        },
+        "postScroll": {
+          "jsHeapTotalBytes": 3407872,
+          "jsHeapUsedBytes": 2419752,
+          "taskDurationSeconds": 1.462403
+        }
+      },
+      "environment": {
+        "effectiveType": "3g",
+        "mobile": true,
+        "saveData": true
+      },
+      "mode": "target_synthetic_fixture",
+      "network": {
+        "binaryRequests": 0,
+        "displayRequests": 1,
+        "encodedBytes": 395439,
+        "failed": 2,
+        "requests": 1232,
+        "responses": 1230,
+        "searchRequests": 1
+      },
+      "page": {
+        "diagnostics": {
+          "cancelledPrewarms": 0,
+          "displayRequestsByReason": {
+            "hover": 0,
+            "open": 1,
+            "neighbor": 0
+          },
+          "failedThumbStillInSrcSet": 0,
+          "imageTimeouts": 1,
+          "lowNetworkSkips": 500,
+          "prewarmDrops": 0,
+          "prewarmMaxActive": 1,
+          "prewarmMaxQueueDepth": 1,
+          "repeatedFailedThumbRequests": 0,
+          "scenarioCounts": {
+            "missing_thumb": 50,
+            "pending": 10,
+            "ready": 920,
+            "thumb_404": 20
+          }
+        },
+        "domNodes": 17,
+        "firstInteractiveMs": 1268.6999999284744,
+        "imageCount": 2,
+        "longTasks": [],
+        "maxMountedTiles": 44,
+        "mountedTiles": 1,
+        "resourceEntries": 250,
+        "search": {
+          "loadedPagesBeforeSearch": 1,
+          "normalizedQuery": "page20-target",
+          "requestCount": 1,
+          "resultIds": [
+            "asset-975"
+          ]
+        }
+      },
+      "productActions": null,
+      "requestHeadersConfigured": true,
+      "server": {
+        "byKind": {
+          "other": 6,
+          "thumb": 13,
+          "preview": 990
+        },
+        "serverSearchQueries": [
+          {
+            "pageSize": 50,
+            "q": "page20-target"
+          }
+        ],
+        "total": 1009
+      },
+      "status": "measured",
+      "targetUrl": "http://127.0.0.1:56404/?count=1000&mode=target&mobile=1",
+      "tileSelector": ".asset-tile",
+      "workload": {
+        "cycles": 2,
+        "prewarmCandidates": 500,
+        "scrollSamples": {
+          "count": 317,
+          "maxLoaded": 0,
+          "maxMounted": 44,
+          "minMounted": 26
+        },
+        "searchQuery": "page20-target"
+      },
+      "acceptance": {
+        "binary_requests": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "hover_display_generation": {
+          "limit": 0,
+          "measured": 0,
+          "status": "met"
+        },
+        "mounted_tiles": {
+          "limit": 80,
+          "measured": 44,
+          "status": "met"
+        },
+        "prewarm_queue": {
+          "limit": 32,
+          "measured": 1,
+          "status": "met"
+        },
+        "server_search_page_20": {
+          "expectedPage": 20,
+          "loadedPagesBeforeSearch": 1,
+          "resultIds": [
+            "asset-975"
+          ],
+          "status": "met"
+        },
+        "thumb_fallback_srcset": {
+          "failedCandidateRequests": 0,
+          "failedCandidateStillInSrcSet": 0,
+          "status": "met"
+        }
+      }
+    }
+  },
   "schemaVersion": 1,
-  "status": "pending_product_integration",
-  "workBase": "e103a96afc763cf6ad5fff36b0483f3c8ac16e35"
+  "status": "characterized"
 }
