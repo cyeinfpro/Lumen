@@ -64,6 +64,131 @@ def test_normalize_recoverable_sse_id_accepts_only_redis_stream_ids() -> None:
     )
 
 
+def _live_event_message(
+    *,
+    channel: str,
+    event_name: str,
+    sse_id: str,
+    event_id: str,
+) -> dict[str, str]:
+    return {
+        "channel": channel,
+        "data": json.dumps(
+            {
+                "event": event_name,
+                "sse_id": sse_id,
+                "event_id": event_id,
+                "data": {
+                    "generation_id": "gen-1",
+                    "event_id": event_id,
+                },
+            }
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_live_same_sse_id_emits_one_frame() -> None:
+    state = SimpleNamespace(
+        redis=object(),
+        stream_key="events:user:user-1",
+        event_deduper=events._ConnectionEventDeduper(),  # noqa: SLF001
+        last_upstream=0.0,
+    )
+    task_message = _live_event_message(
+        channel="task:gen-1",
+        event_name="generation.progress",
+        sse_id="1710000000000-0",
+        event_id="evt-progress",
+    )
+    user_message = {**task_message, "channel": "user:user-1"}
+
+    first = await events._standard_pubsub_events(state, task_message)  # noqa: SLF001
+    duplicate = await events._standard_pubsub_events(  # noqa: SLF001
+        state,
+        user_message,
+    )
+
+    assert len(first) == 1
+    assert duplicate == []
+
+
+@pytest.mark.asyncio
+async def test_replay_and_live_share_connection_deduper() -> None:
+    deduper = events._ConnectionEventDeduper()  # noqa: SLF001
+    replay = {
+        "id": "1710000000000-0",
+        "event": "generation.progress",
+        "data": json.dumps(
+            {
+                "generation_id": "gen-1",
+                "sse_id": "1710000000000-0",
+                "event_id": "evt-progress",
+            }
+        ),
+    }
+    assert events._remember_replayed_event(replay, deduper) is True  # noqa: SLF001
+    state = SimpleNamespace(
+        redis=object(),
+        stream_key="events:user:user-1",
+        event_deduper=deduper,
+        last_upstream=0.0,
+    )
+
+    live = await events._standard_pubsub_events(  # noqa: SLF001
+        state,
+        _live_event_message(
+            channel="user:user-1",
+            event_name="generation.progress",
+            sse_id="1710000000000-0",
+            event_id="evt-progress",
+        ),
+    )
+
+    assert live == []
+
+
+@pytest.mark.asyncio
+async def test_connection_deduper_preserves_distinct_terminal_event() -> None:
+    state = SimpleNamespace(
+        redis=object(),
+        stream_key="events:user:user-1",
+        event_deduper=events._ConnectionEventDeduper(),  # noqa: SLF001
+        last_upstream=0.0,
+    )
+
+    progress = await events._standard_pubsub_events(  # noqa: SLF001
+        state,
+        _live_event_message(
+            channel="task:gen-1",
+            event_name="generation.progress",
+            sse_id="1710000000000-0",
+            event_id="evt-progress",
+        ),
+    )
+    terminal = await events._standard_pubsub_events(  # noqa: SLF001
+        state,
+        _live_event_message(
+            channel="task:gen-1",
+            event_name="generation.completed",
+            sse_id="1710000000001-0",
+            event_id="evt-completed",
+        ),
+    )
+
+    assert len(progress) == 1
+    assert len(terminal) == 1
+
+
+def test_connection_deduper_evicts_oldest_key_at_capacity() -> None:
+    deduper = events._ConnectionEventDeduper(max_keys=2)  # noqa: SLF001
+
+    assert deduper.remember(sse_id="1-0") is True
+    assert deduper.remember(sse_id="2-0") is True
+    assert deduper.remember(sse_id="3-0") is True
+    assert deduper.remember(sse_id="1-0") is True
+
+
 @pytest.mark.asyncio
 async def test_sse_connection_slot_limits_and_releases() -> None:
     class Redis:
