@@ -14,7 +14,7 @@ from .contracts import (
     CompletionServices,
 )
 from .execution import CompletionExecution, CompletionRequest
-from .legacy_adapter import LegacyCompletionAdapter
+from .bindings import CompletionBindings
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -44,7 +44,7 @@ from lumen_core.upstream_billing import (
 
 def _new_execution(
     command: CompletionCommand,
-    ports: LegacyCompletionAdapter,
+    ports: CompletionBindings,
     services: CompletionServices,
 ) -> CompletionExecution:
     return CompletionExecution(
@@ -1360,7 +1360,7 @@ async def publish_completion_started(state: CompletionExecution) -> None:
 
 async def run_completion(
     command: CompletionCommand,
-    ports: LegacyCompletionAdapter,
+    ports: CompletionBindings,
     services: CompletionServices,
 ) -> CompletionResult:
     """ARQ entrypoint; phases are split by context, stream, and terminal state."""

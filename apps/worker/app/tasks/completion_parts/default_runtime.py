@@ -15,15 +15,15 @@
 from __future__ import annotations
 
 from .contracts import CompletionCommand, CompletionResult
-from .legacy_adapter import (
-    CompletionBillingAdapter,
-    CompletionContextAdapter,
-    CompletionEventAdapter,
-    CompletionLeaseRetryAdapter,
-    CompletionRepositoryAdapter,
-    CompletionToolAdapter,
-    CompletionUpstreamAdapter,
-    LegacyCompletionAdapter,
+from .bindings import (
+    CompletionBillingBindings,
+    CompletionContextBindings,
+    CompletionEventBindings,
+    CompletionLeaseRetryBindings,
+    CompletionPersistenceBindings,
+    CompletionToolBindings,
+    CompletionUpstreamBindings,
+    CompletionBindings,
 )
 from .runtime import CompletionRuntime
 from .services import build_completion_services
@@ -1320,8 +1320,8 @@ async def _completion_preflight_failure(
     )
 
 
-def _build_completion_context_ports() -> CompletionContextAdapter:
-    return CompletionContextAdapter(
+def _build_completion_context_ports() -> CompletionContextBindings:
+    return CompletionContextBindings(
         DEFAULT_CHAT_MODEL=DEFAULT_CHAT_MODEL,
         _inject_user_memory_context=_inject_user_memory_context,
         _instructions_with_summary_guardrail=_instructions_with_summary_guardrail,
@@ -1333,9 +1333,9 @@ def _build_completion_context_ports() -> CompletionContextAdapter:
 
 def _build_completion_tools_ports(
     storage_writes: StorageWriteCoordinator | None = None,
-) -> CompletionToolAdapter:
+) -> CompletionToolBindings:
     tool_image_service = _build_completion_tool_image_service(storage_writes)
-    return CompletionToolAdapter(
+    return CompletionToolBindings(
         _CompletionToolTracker=_CompletionToolTracker,
         _CompletionUsageAccumulator=_CompletionUsageAccumulator,
         _chat_tools_from_content=_chat_tools_from_content,
@@ -1355,8 +1355,8 @@ def _build_completion_tools_ports(
     )
 
 
-def _build_completion_persistence_ports() -> CompletionRepositoryAdapter:
-    return CompletionRepositoryAdapter(
+def _build_completion_persistence_ports() -> CompletionPersistenceBindings:
+    return CompletionPersistenceBindings(
         Completion=Completion,
         Message=Message,
         SessionLocal=SessionLocal,
@@ -1374,8 +1374,8 @@ def _build_completion_persistence_ports() -> CompletionRepositoryAdapter:
 
 def _build_completion_upstream_ports(
     image_upstream_runtime: ImageUpstreamRuntime,
-) -> CompletionUpstreamAdapter:
-    return CompletionUpstreamAdapter(
+) -> CompletionUpstreamBindings:
+    return CompletionUpstreamBindings(
         UpstreamError=UpstreamError,
         _apply_url_citations=_apply_url_citations,
         _completion_upstream_provider_event=_completion_upstream_provider_event,
@@ -1395,8 +1395,8 @@ def _build_completion_upstream_ports(
     )
 
 
-def _build_completion_billing_ports() -> CompletionBillingAdapter:
-    return CompletionBillingAdapter(
+def _build_completion_billing_ports() -> CompletionBillingBindings:
+    return CompletionBillingBindings(
         _fallback_completion_tool_image_tokens=_fallback_completion_tool_image_tokens,
         _settle_cancelled_completion_billing=_settle_cancelled_completion_billing,
         _settle_failed_completion_billing=_settle_failed_completion_billing,
@@ -1410,8 +1410,8 @@ def _build_completion_billing_ports() -> CompletionBillingAdapter:
     )
 
 
-def _build_completion_events_ports() -> CompletionEventAdapter:
-    return CompletionEventAdapter(
+def _build_completion_events_ports() -> CompletionEventBindings:
+    return CompletionEventBindings(
         _COMPLETION_EVENT_HOOKS=_COMPLETION_EVENT_HOOKS,
         _completion_event_payload=_completion_event_payload,
         _deliver_completion_event=_deliver_completion_event,
@@ -1424,8 +1424,8 @@ def _build_completion_events_ports() -> CompletionEventAdapter:
     )
 
 
-def _build_completion_retry_ports() -> CompletionLeaseRetryAdapter:
-    return CompletionLeaseRetryAdapter(
+def _build_completion_retry_ports() -> CompletionLeaseRetryBindings:
+    return CompletionLeaseRetryBindings(
         RETRY_BACKOFF_SECONDS=RETRY_BACKOFF_SECONDS,
         RetryDecision=RetryDecision,
         _CANCEL_CHECK_EVERY_DELTAS=_CANCEL_CHECK_EVERY_DELTAS,
@@ -1457,7 +1457,7 @@ def build_completion_runtime(
     image_upstream_runtime: ImageUpstreamRuntime,
     storage_writes: StorageWriteCoordinator | None = None,
 ) -> CompletionRuntime:
-    adapter = LegacyCompletionAdapter(
+    adapter = CompletionBindings(
         context=_build_completion_context_ports(),
         tools=_build_completion_tools_ports(storage_writes),
         persistence=_build_completion_persistence_ports(),

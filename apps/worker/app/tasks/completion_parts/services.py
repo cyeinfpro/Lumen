@@ -1,4 +1,4 @@
-"""Behavior services composed over the legacy completion bindings."""
+"""Behavior services composed over the internal completion bindings."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .contracts import (
     RetryResolution,
 )
 from .execution import CompletionExecution
-from .legacy_adapter import LegacyCompletionAdapter
+from .bindings import CompletionBindings
 from .outcomes import settle_success
 from .runner import (
     claim_completion,
@@ -34,7 +34,7 @@ def _execution(view: CompletionExecutionView) -> CompletionExecution:
 
 @dataclass(frozen=True, slots=True)
 class CompletionRepositoryService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     async def claim(self, execution: CompletionExecutionView) -> ClaimResult:
         state = _execution(execution)
@@ -85,7 +85,7 @@ class CompletionRepositoryService:
 
 @dataclass(frozen=True, slots=True)
 class CompletionContextService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     async def prepare(self, execution: CompletionExecutionView) -> None:
         await prepare_completion_request(_execution(execution))
@@ -93,7 +93,7 @@ class CompletionContextService:
 
 @dataclass(frozen=True, slots=True)
 class CompletionToolService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     @property
     def tool_image_service(self):
@@ -123,7 +123,7 @@ class CompletionToolService:
 
 @dataclass(frozen=True, slots=True)
 class CompletionUpstreamService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     @property
     def stream_completion(self):
@@ -134,8 +134,8 @@ class CompletionUpstreamService:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletionBillingServiceAdapter:
-    adapter: LegacyCompletionAdapter
+class CompletionBillingService:
+    adapter: CompletionBindings
 
     async def settle_success(self, execution: CompletionExecutionView) -> None:
         await settle_success(_execution(execution))
@@ -165,7 +165,7 @@ class CompletionBillingServiceAdapter:
 
 @dataclass(frozen=True, slots=True)
 class CompletionEventService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     async def publish_started(self, execution: CompletionExecutionView) -> None:
         await publish_completion_started(_execution(execution))
@@ -180,7 +180,7 @@ class CompletionEventService:
 
 @dataclass(frozen=True, slots=True)
 class CompletionLeaseRetryService:
-    adapter: LegacyCompletionAdapter
+    adapter: CompletionBindings
 
     async def start(self, execution: CompletionExecutionView) -> None:
         state = _execution(execution)
@@ -210,14 +210,14 @@ class CompletionLeaseRetryService:
 
 
 def build_completion_services(
-    adapter: LegacyCompletionAdapter,
+    adapter: CompletionBindings,
 ) -> CompletionServices:
     return CompletionServices(
         repository=CompletionRepositoryService(adapter),
         context_builder=CompletionContextService(adapter),
         tool_executor=CompletionToolService(adapter),
         upstream_client=CompletionUpstreamService(adapter),
-        billing=CompletionBillingServiceAdapter(adapter),
+        billing=CompletionBillingService(adapter),
         events=CompletionEventService(adapter),
         lease_retry=CompletionLeaseRetryService(adapter),
     )
