@@ -4,12 +4,20 @@ import { zhCN } from "date-fns/locale";
 import { imageVariantUrl } from "@/lib/apiClient";
 import type { GenerationSummary } from "@/lib/queries/stream";
 import type { GeneratedImage } from "@/lib/types";
+import {
+  assetCandidateVersion,
+  confirmedOpenCandidates,
+  gridAssetCandidates,
+  hoverPrewarmCandidates,
+  type AssetCandidate,
+} from "./sourceCandidates";
 
 export interface GenerationTileModel {
   imageId: string;
-  imageSources: string[];
-  imageSrcSet: string | undefined;
-  lightboxPrewarmSources: Array<string | null | undefined>;
+  sourceVersion: string;
+  gridCandidates: AssetCandidate[];
+  hoverPrewarmSources: string[];
+  openPrewarmSources: string[];
   age: string;
   width: number;
   height: number;
@@ -51,54 +59,28 @@ function imageMimeFor(item: GenerationSummary): string | undefined {
   return item.image.mime ?? mimeFromOutputFormat(item.output_format);
 }
 
-function uniqueImageSources(item: GenerationSummary): string[] {
-  const seen = new Set<string>();
-  return [
-    item.image.thumb_url,
-    item.image.preview_url,
-    item.image.display_url,
-    item.image.url,
-  ]
-    .filter((source): source is string => Boolean(source?.trim()))
-    .filter((source) => {
-      if (seen.has(source)) return false;
-      seen.add(source);
-      return true;
-    });
-}
-
-function imageSrcSetFor(item: GenerationSummary): string | undefined {
-  const seen = new Set<string>();
-  const candidates: Array<[string | null | undefined, number]> = [
-    [item.image.thumb_url, 256],
-    [item.image.preview_url, 1024],
-  ];
-  const srcSet = candidates
-    .filter(([source]) => Boolean(source?.trim()))
-    .filter(([source]) => {
-      const value = source as string;
-      if (seen.has(value)) return false;
-      seen.add(value);
-      return true;
-    })
-    .map(([source, width]) => `${source} ${width}w`);
-  return srcSet.length > 0 ? srcSet.join(", ") : undefined;
-}
-
 export function createGenerationTileModel(
   item: GenerationSummary,
 ): GenerationTileModel {
   const promptCharacters = Array.from(item.prompt);
-  const lightboxPreview =
-    item.image.display_url ??
-    item.image.preview_url ??
-    imageVariantUrl(item.image.id, "display2048");
+  const openCandidates = confirmedOpenCandidates(item.image);
+  if (!openCandidates.some((entry) => entry.kind === "display2048")) {
+    openCandidates.unshift({
+      kind: "display2048",
+      src: imageVariantUrl(item.image.id, "display2048"),
+      width: 2048,
+      ready: false,
+    });
+  }
 
   return {
     imageId: item.image.id,
-    imageSources: uniqueImageSources(item),
-    imageSrcSet: imageSrcSetFor(item),
-    lightboxPrewarmSources: [lightboxPreview, item.image.preview_url],
+    sourceVersion: assetCandidateVersion(item.image),
+    gridCandidates: gridAssetCandidates(item.image),
+    hoverPrewarmSources: hoverPrewarmCandidates(item.image).map(
+      (entry) => entry.src,
+    ),
+    openPrewarmSources: openCandidates.map((entry) => entry.src),
     age: formatAge(item.created_at),
     width: Math.max(1, item.image.width || 1),
     height: Math.max(1, item.image.height || 1),
@@ -106,13 +88,6 @@ export function createGenerationTileModel(
     promptTruncated: promptCharacters.length > 68,
     altText: promptCharacters.slice(0, 80).join("") || "生成作品",
   };
-}
-
-export function imageSourceFailed(
-  sourceCount: number,
-  sourceIndex: number,
-): boolean {
-  return sourceCount === 0 || sourceIndex >= sourceCount;
 }
 
 export function imageDownloadName(item: GenerationSummary): string {
@@ -128,8 +103,11 @@ export function buildGeneratedImage(
     mime: imageMimeFor(item),
     display_url: item.image.display_url ?? item.image.url,
     preview_url:
-      item.image.preview_url ?? item.image.display_url ?? item.image.thumb_url,
-    thumb_url: item.image.thumb_url,
+      item.image.preview_url ??
+      item.image.display_url ??
+      item.image.thumb_url ??
+      undefined,
+    thumb_url: item.image.thumb_url ?? undefined,
     width: item.image.width,
     height: item.image.height,
     parent_image_id: null,

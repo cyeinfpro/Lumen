@@ -19,6 +19,7 @@ import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
 import {
   flattenFeed,
   feedTotal,
+  useDebouncedStreamSearch,
   useStreamFeedQuery,
   type StreamFeedFilters,
 } from "@/lib/queries/stream";
@@ -146,7 +147,14 @@ export function MobileStream() {
     () => new URLSearchParams(queryString).get("highlight")?.trim() ?? "",
     [queryString],
   );
-  const filters = queryFilters;
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const deferredQ = useDeferredValue(q);
+  const debouncedQ = useDebouncedStreamSearch(q);
+  const filters = useMemo(
+    () => ({ ...queryFilters, q: debouncedQ }),
+    [debouncedQ, queryFilters],
+  );
   const [filterOpen, setFilterOpen] = useState(() => hasAnyFilter(queryFilters));
 
   const applyFilters = useCallback(
@@ -168,9 +176,6 @@ export function MobileStream() {
   const items = useMemo(() => flattenFeed(query.data), [query.data]);
   const total = feedTotal(query.data);
 
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const deferredQ = useDeferredValue(q);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const createMultiShareMutation = useCreateMultiShareMutation();
@@ -303,12 +308,13 @@ export function MobileStream() {
   const isEmptyAll = !isLoading && items.length === 0;
   const isEmptyFiltered =
     !isLoading && items.length > 0 && filteredItems.length === 0;
-  const hasFilters = hasAnyFilter(filters);
+  const hasStructuredFilters = hasAnyFilter(filters);
+  const hasActiveControls = hasStructuredFilters || Boolean(q.trim());
   const showOverview = shouldShowOverview(
     isLoading,
     query.isError,
     items.length,
-    hasFilters,
+    hasActiveControls,
     q,
   );
 
@@ -354,7 +360,7 @@ export function MobileStream() {
         total={total}
         promptCount={promptCount}
         searchActive={searchOpen}
-        filterActive={filterOpen || hasFilters}
+        filterActive={filterOpen || hasStructuredFilters}
         onToggleSearch={onToggleSearch}
         onToggleFilter={onToggleFilter}
       />
@@ -385,7 +391,7 @@ export function MobileStream() {
               }}
             />
             <FilterBar
-              open={filterOpen || hasFilters}
+              open={filterOpen || hasStructuredFilters}
               filters={filters}
               onChange={(next) => applyFilters(next)}
               onClear={clearFilters}
@@ -423,7 +429,7 @@ export function MobileStream() {
               }}
               isLoading={isLoading}
               isEmptyAll={isEmptyAll}
-              hasFilters={hasFilters}
+              hasFilters={hasActiveControls}
               isEmptyFiltered={isEmptyFiltered}
               searchValue={q}
               onClear={clearAllControls}

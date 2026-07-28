@@ -1,10 +1,30 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { isThisWeek, isToday, isYesterday } from "date-fns";
-import { GenerationTile } from "./GenerationTile";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import {
+  createPrewarmScheduler,
+  type PrewarmScheduler,
+} from "@/lib/imagePreload";
 import type { GenerationSummary } from "@/lib/queries/stream";
-import { openStreamLightbox } from "./lightbox";
+import { GenerationTile } from "./GenerationTile";
+import { createGenerationTileModel } from "./generationTileModel";
+import { openStreamLightbox, streamLightboxWindow } from "./lightbox";
+import {
+  layoutVirtualMasonry,
+  mountedTileBudget,
+  selectVirtualMasonryTiles,
+  virtualTileForId,
+  type VirtualMasonryGroup,
+} from "./VirtualMasonry";
 
 export interface GenerationMasonryProps {
   items: GenerationSummary[];
@@ -17,11 +37,6 @@ export interface GenerationMasonryProps {
 }
 
 type Bucket = "today" | "yesterday" | "week" | "older";
-type MasonryEntry = {
-  item: GenerationSummary;
-  index: number;
-  estimatedHeight: number;
-};
 
 const BUCKET_LABEL: Record<Bucket, string> = {
   today: "今天",
@@ -33,51 +48,80 @@ const BUCKET_LABEL: Record<Bucket, string> = {
 const BUCKET_ORDER: Bucket[] = ["today", "yesterday", "week", "older"];
 
 function bucketOf(iso: string): Bucket {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "older";
-  if (isToday(d)) return "today";
-  if (isYesterday(d)) return "yesterday";
-  if (isThisWeek(d, { weekStartsOn: 1 })) return "week";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "older";
+  if (isToday(date)) return "today";
+  if (isYesterday(date)) return "yesterday";
+  if (isThisWeek(date, { weekStartsOn: 1 })) return "week";
   return "older";
 }
 
-function compareFeedOrder(a: GenerationSummary, b: GenerationSummary): number {
-  const aTs = new Date(a.created_at).getTime();
-  const bTs = new Date(b.created_at).getTime();
-  const aValid = !isNaN(aTs);
-  const bValid = !isNaN(bTs);
-  if (aValid && bValid && aTs !== bTs) return bTs - aTs;
+function compareFeedOrder(
+  a: GenerationSummary,
+  b: GenerationSummary,
+): number {
+  const aTimestamp = new Date(a.created_at).getTime();
+  const bTimestamp = new Date(b.created_at).getTime();
+  const aValid = !Number.isNaN(aTimestamp);
+  const bValid = !Number.isNaN(bTimestamp);
+  if (aValid && bValid && aTimestamp !== bTimestamp) {
+    return bTimestamp - aTimestamp;
+  }
   if (aValid !== bValid) return aValid ? -1 : 1;
   return b.id.localeCompare(a.id);
 }
 
-function estimateTileHeight(item: GenerationSummary): number {
-  const w = Math.max(1, item.image.width || 1);
-  const h = Math.max(1, item.image.height || 1);
-  const mediaRatio = h / w;
-  const promptRows = item.prompt.length > 34 ? 2 : 1;
-  return mediaRatio * 1000 + 72 + promptRows * 18;
+function findScrollContainer(root: HTMLElement): HTMLElement | Window {
+  let current = root.parentElement;
+  while (current) {
+    const style = window.getComputedStyle(current);
+    if (/(auto|scroll)/.test(style.overflowY)) return current;
+    current = current.parentElement;
+  }
+  return window;
 }
 
-function distributeByEstimatedHeight(
-  arr: GenerationSummary[],
-  columnCount: number,
-): MasonryEntry[][] {
-  const cols = Array.from(
-    { length: columnCount },
-    () => [] as MasonryEntry[],
+function scrollViewport(
+  root: HTMLElement,
+  scroller: HTMLElement | Window,
+): { start: number; end: number } {
+  const rootRect = root.getBoundingClientRect();
+  if (scroller === window) {
+    const start = Math.max(0, -rootRect.top);
+    return { start, end: start + window.innerHeight };
+  }
+  const element = scroller as HTMLElement;
+  const scrollerRect = element.getBoundingClientRect();
+  const start = Math.max(0, scrollerRect.top - rootRect.top);
+  return { start, end: start + element.clientHeight };
+}
+
+function imageSizesFor(columnCount: number): string {
+  if (columnCount <= 2) return "(max-width: 767px) 50vw, 50vw";
+  if (columnCount === 3) return "(max-width: 1179px) 33vw, 33vw";
+  return "25vw";
+}
+
+function prewarmLightboxWindow(
+  scheduler: PrewarmScheduler,
+  items: GenerationSummary[],
+  initialGenerationId: string,
+): void {
+  const windowItems = streamLightboxWindow(items, initialGenerationId, 2);
+  const currentIndex = windowItems.findIndex(
+    (item) => item.id === initialGenerationId,
   );
-  const heights = Array.from({ length: columnCount }, () => 0);
-  arr.forEach((item, index) => {
-    const estimatedHeight = estimateTileHeight(item);
-    let target = 0;
-    for (let i = 1; i < columnCount; i += 1) {
-      if (heights[i] < heights[target]) target = i;
-    }
-    cols[target].push({ item, index, estimatedHeight });
-    heights[target] += estimatedHeight;
-  });
-  return cols;
+  for (const [index, item] of windowItems.entries()) {
+    const model = createGenerationTileModel(item);
+    scheduler.scheduleImages(
+      model.openPrewarmSources,
+      {
+        priority: index === currentIndex ? "open-intent" : "neighbor",
+        assetKind: "display",
+      },
+      index === currentIndex ? 2 : 1,
+    );
+  }
 }
 
 function GenerationMasonryComponent({
@@ -91,138 +135,195 @@ function GenerationMasonryComponent({
 }: GenerationMasonryProps) {
   const columnCount = Math.max(1, Math.floor(columns));
   const gap = columnCount > 2 ? 14 : 8;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const scrollerRef = useRef<HTMLElement | Window | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const [scheduler] = useState(() => createPrewarmScheduler());
+  const [containerWidth, setContainerWidth] = useState(columnCount * 280);
+  const [viewport, setViewport] = useState({ start: 0, end: 900 });
+
   const orderedFeed = useMemo(
     () => feed.slice().sort(compareFeedOrder),
     [feed],
   );
-  const lightboxItemsRef = useRef(orderedFeed);
-  const tileRefs = useRef(new Map<string, HTMLDivElement>());
+  const groups = useMemo(() => {
+    const grouped = new Map<Bucket, GenerationSummary[]>();
+    for (const item of items) {
+      const bucket = bucketOf(item.created_at);
+      const bucketItems = grouped.get(bucket) ?? [];
+      bucketItems.push(item);
+      grouped.set(bucket, bucketItems);
+    }
+    const result: VirtualMasonryGroup<GenerationSummary>[] = [];
+    for (const bucket of BUCKET_ORDER) {
+      const bucketItems = grouped.get(bucket);
+      if (!bucketItems?.length) continue;
+      result.push({
+        key: bucket,
+        label: BUCKET_LABEL[bucket],
+        items: bucketItems.slice().sort(compareFeedOrder),
+      });
+    }
+    return result;
+  }, [items]);
+  const layout = useMemo(
+    () =>
+      layoutVirtualMasonry(groups, containerWidth, columnCount, gap),
+    [columnCount, containerWidth, gap, groups],
+  );
+  const viewportHeight = Math.max(1, viewport.end - viewport.start);
+  const mountedTiles = useMemo(
+    () =>
+      selectVirtualMasonryTiles(
+        layout.tiles,
+        viewport.start,
+        viewport.end,
+        Math.max(600, viewportHeight * 1.5),
+        mountedTileBudget(columnCount),
+      ),
+    [columnCount, layout.tiles, viewport.end, viewport.start, viewportHeight],
+  );
+  const imageSizes = imageSizesFor(columnCount);
 
   useEffect(() => {
-    lightboxItemsRef.current = orderedFeed;
-  }, [orderedFeed]);
+    scheduler.connect();
+    return () => scheduler.destroy();
+  }, [scheduler]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const scroller = findScrollContainer(root);
+    scrollerRef.current = scroller;
+    const update = () => {
+      frameRef.current = null;
+      setContainerWidth(Math.max(1, root.clientWidth));
+      setViewport(scrollViewport(root, scroller));
+    };
+    const scheduleUpdate = () => {
+      if (frameRef.current !== null) return;
+      frameRef.current = window.requestAnimationFrame(update);
+    };
+    update();
+    scroller.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.addEventListener("resize", scheduleUpdate, { passive: true });
+    const resizeObserver =
+      typeof ResizeObserver === "function"
+        ? new ResizeObserver(scheduleUpdate)
+        : null;
+    resizeObserver?.observe(root);
+    if (scroller !== window) resizeObserver?.observe(scroller as HTMLElement);
+    return () => {
+      scroller.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdate);
+      resizeObserver?.disconnect();
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+      scrollerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const target = highlightId?.trim();
-    if (!target) return;
-    const node = tileRefs.current.get(target);
-    if (!node) return;
-    const timer = window.setTimeout(() => {
-      node.scrollIntoView({ block: "center", behavior: "smooth" });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [highlightId, items]);
+    const root = rootRef.current;
+    const scroller = scrollerRef.current;
+    if (!target || !root || !scroller) return;
+    const tile = virtualTileForId(layout.tiles, target);
+    if (!tile) return;
+    const rootRect = root.getBoundingClientRect();
+    const viewportSize =
+      scroller === window
+        ? window.innerHeight
+        : (scroller as HTMLElement).clientHeight;
+    const scrollerTop =
+      scroller === window
+        ? 0
+        : (scroller as HTMLElement).getBoundingClientRect().top;
+    const delta =
+      rootRect.top -
+      scrollerTop +
+      tile.top -
+      Math.max(0, (viewportSize - tile.height) / 2);
+    scroller.scrollBy({ top: delta, behavior: "smooth" });
+  }, [highlightId, layout.tiles]);
 
-  const onOpenItem = useCallback((itemId: string, rect: DOMRect) => {
-    openStreamLightbox(lightboxItemsRef.current, itemId, rect);
-  }, []);
-
-  const grouped = useMemo(() => {
-    const map = new Map<Bucket, GenerationSummary[]>();
-    for (const it of items) {
-      const b = bucketOf(it.created_at);
-      const arr = map.get(b) ?? [];
-      arr.push(it);
-      map.set(b, arr);
-    }
-    for (const [bucket, arr] of map) {
-      map.set(bucket, arr.slice().sort(compareFeedOrder));
-    }
-    return map;
-  }, [items]);
-  const groupedColumns = useMemo(() => {
-    const map = new Map<Bucket, MasonryEntry[][]>();
-    for (const bucket of BUCKET_ORDER) {
-      const bucketItems = grouped.get(bucket);
-      if (bucketItems?.length) {
-        map.set(
-          bucket,
-          distributeByEstimatedHeight(bucketItems, columnCount),
-        );
-      }
-    }
-    return map;
-  }, [columnCount, grouped]);
+  const onOpenItem = useCallback(
+    (itemId: string, rect: DOMRect) => {
+      prewarmLightboxWindow(scheduler, orderedFeed, itemId);
+      openStreamLightbox(orderedFeed, itemId, rect);
+    },
+    [orderedFeed, scheduler],
+  );
 
   return (
     <div
+      ref={rootRef}
       id="stream-masonry"
-      className="pb-[calc(env(safe-area-inset-bottom,0px)+1rem)]"
+      className="relative pb-[calc(env(safe-area-inset-bottom,0px)+1rem)]"
       style={{
+        height: layout.totalHeight,
         scrollMarginTop: "calc(var(--mobile-topbar-h) + var(--space-4))",
       }}
       aria-live="polite"
+      data-virtual-total={layout.tiles.length}
+      data-mounted-tiles={mountedTiles.length}
     >
-      {BUCKET_ORDER.map((b) => {
-        const arr = grouped.get(b);
-        if (!arr || arr.length === 0) return null;
-        const masonryColumns = groupedColumns.get(b) ?? [];
+      {layout.headers.map((header) => (
+        <div
+          key={header.key}
+          className="absolute left-0 right-0 flex h-[42px] items-center gap-2.5 px-3 md:px-0"
+          style={{ transform: `translateY(${header.top}px)` }}
+        >
+          <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+            {header.label}
+          </span>
+          <span
+            className="text-[11px] tabular-nums text-[var(--fg-2)]"
+            aria-label={`${header.count} 张作品`}
+          >
+            {header.count} 张
+          </span>
+          <span className="h-px flex-1 bg-gradient-to-r from-[var(--border-subtle)] to-transparent" />
+        </div>
+      ))}
+
+      {mountedTiles.map((tile) => {
+        const item = tile.item;
+        const highlighted = Boolean(
+          highlightId &&
+            (item.id === highlightId || item.image.id === highlightId),
+        );
         return (
-          <section key={b} aria-label={BUCKET_LABEL[b]} className="pt-6 first:pt-3 md:pt-7 md:first:pt-4">
-            <div className="mb-2.5 flex items-center gap-2.5 px-3 md:mb-3.5 md:px-0">
-              <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
-                {BUCKET_LABEL[b]}
-              </span>
-              <span className="text-[11px] tabular-nums text-[var(--fg-2)]" aria-label={`${arr.length} 张作品`}>
-                {arr.length} 张
-              </span>
-              <span className="h-px flex-1 bg-gradient-to-r from-[var(--border-subtle)] to-transparent" />
-            </div>
-            <div
-              className="grid px-2 md:px-0"
-              style={{
-                gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
-                gap,
-              }}
-            >
-              {masonryColumns.map((col, colIndex) => (
-                <div
-                  key={`${b}-${colIndex}`}
-                  className="flex min-w-0 flex-col"
-                  style={{ gap }}
-                >
-                  {col.map(({ item, index, estimatedHeight }) => {
-                    const highlighted = Boolean(
-                      highlightId &&
-                        (item.id === highlightId || item.image.id === highlightId),
-                    );
-                    return (
-                      <div
-                        key={item.id}
-                        ref={(node) => {
-                          const keys = [item.id, item.image.id];
-                          for (const key of keys) {
-                            if (node) tileRefs.current.set(key, node);
-                            else tileRefs.current.delete(key);
-                          }
-                        }}
-                        data-highlighted={highlighted ? "true" : undefined}
-                        className={[
-                          "stream-tile-shell animate-stream-tile-in",
-                          highlighted
-                            ? "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--bg-0)]"
-                            : "",
-                        ].join(" ")}
-                        style={{
-                          animationDelay: `${Math.min(index * 26, 360)}ms`,
-                          contentVisibility: "auto",
-                          containIntrinsicSize: `1px ${Math.max(240, Math.min(760, estimatedHeight / 2))}px`,
-                        }}
-                      >
-                        <GenerationTile
-                          item={item}
-                          onOpen={onOpenItem}
-                          selectionMode={selectionMode}
-                          selected={Boolean(selectedIds?.has(item.image.id))}
-                          onToggleSelect={onToggleSelect}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          </section>
+          <div
+            key={item.id}
+            data-mounted-tile
+            data-highlighted={highlighted ? "true" : undefined}
+            className={[
+              "stream-tile-shell absolute top-0 animate-stream-tile-in",
+              highlighted
+                ? "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--bg-0)]"
+                : "",
+            ].join(" ")}
+            style={{
+              width: tile.width,
+              minHeight: tile.height,
+              transform: `translate3d(${tile.left}px, ${tile.top}px, 0)`,
+              animationDelay: `${Math.min(tile.itemIndex * 18, 240)}ms`,
+            }}
+          >
+            <GenerationTile
+              item={item}
+              onOpen={onOpenItem}
+              selectionMode={selectionMode}
+              selected={Boolean(selectedIds?.has(item.image.id))}
+              onToggleSelect={onToggleSelect}
+              prewarmScheduler={scheduler}
+              fetchPriority={tile.itemIndex < 12 ? "high" : "low"}
+              imageSizes={imageSizes}
+            />
+          </div>
         );
       })}
     </div>

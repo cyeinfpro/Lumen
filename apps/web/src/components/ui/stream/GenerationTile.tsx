@@ -15,6 +15,7 @@ import {
   memo,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type SyntheticEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -27,7 +28,10 @@ import {
   ActionSheet,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
-import { prewarmImages } from "@/lib/imagePreload";
+import type {
+  PrewarmHandle,
+  PrewarmScheduler,
+} from "@/lib/imagePreload";
 import type { GenerationSummary } from "@/lib/queries/stream";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/store/useChatStore";
@@ -35,9 +39,13 @@ import {
   buildGeneratedImage,
   createGenerationTileModel,
   imageDownloadName,
-  imageSourceFailed,
   type GenerationTileModel,
 } from "./generationTileModel";
+import {
+  assetCandidateSrcSet,
+  failedAssetCandidateSource,
+  healthyAssetCandidates,
+} from "./sourceCandidates";
 
 export interface GenerationTileProps {
   item: GenerationSummary;
@@ -45,6 +53,9 @@ export interface GenerationTileProps {
   selectionMode?: boolean;
   selected?: boolean;
   onToggleSelect?: (imageId: string) => void;
+  prewarmScheduler: PrewarmScheduler;
+  fetchPriority?: "high" | "low" | "auto";
+  imageSizes?: string;
 }
 
 const LONG_PRESS_MS = 420;
@@ -73,11 +84,21 @@ function GenerationTileComponent({
   selectionMode = false,
   selected = false,
   onToggleSelect,
+  prewarmScheduler,
+  fetchPriority = "low",
+  imageSizes = "(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw",
 }: GenerationTileProps) {
   const [tapped, setTapped] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [sourceIndex, setSourceIndex] = useState(0);
-  const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageState, setImageState] = useState<{
+    sourceVersion: string;
+    failedSources: Set<string>;
+    loaded: boolean;
+  }>(() => ({
+    sourceVersion: "",
+    failedSources: new Set(),
+    loaded: false,
+  }));
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pressStart = useRef<{
@@ -88,21 +109,38 @@ function GenerationTileComponent({
   const suppressNextClick = useRef(false);
   const longPressed = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const hoverPrewarmRef = useRef<PrewarmHandle | null>(null);
   const router = useRouter();
   const promoteImageToReference = useChatStore(
     (state) => state.promoteImageToReference,
   );
   const model = useMemo(() => createGenerationTileModel(item), [item]);
-  const imageSrc = model.imageSources[sourceIndex] ?? null;
-  const imageFailed = imageSourceFailed(
-    model.imageSources.length,
-    sourceIndex,
+  const currentImageState =
+    imageState.sourceVersion === model.sourceVersion
+      ? imageState
+      : {
+        sourceVersion: model.sourceVersion,
+        failedSources: new Set<string>(),
+        loaded: false,
+      };
+  const healthyCandidates = useMemo(
+    () =>
+      healthyAssetCandidates(
+        model.gridCandidates,
+        currentImageState.failedSources,
+      ),
+    [currentImageState.failedSources, model.gridCandidates],
   );
+  const imageSrc = healthyCandidates[0]?.src ?? null;
+  const imageSrcSet = assetCandidateSrcSet(healthyCandidates);
+  const imageFailed = healthyCandidates.length === 0;
+  const imageLoaded = currentImageState.loaded;
 
   useEffect(() => {
     return () => {
       if (pressTimer.current) clearTimeout(pressTimer.current);
       if (tapTimer.current) clearTimeout(tapTimer.current);
+      hoverPrewarmRef.current?.cancel();
     };
   }, []);
 
@@ -117,7 +155,6 @@ function GenerationTileComponent({
   const onPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (selectionMode || !event.isPrimary || event.button !== 0) return;
-      prewarmImages(model.lightboxPrewarmSources, 2);
       longPressed.current = false;
       suppressNextClick.current = false;
       pressStart.current = {
@@ -136,13 +173,26 @@ function GenerationTileComponent({
         }
       }, LONG_PRESS_MS);
     },
-    [model.lightboxPrewarmSources, selectionMode],
+    [selectionMode],
   );
 
   const onPreviewIntent = useCallback(() => {
     if (selectionMode) return;
-    prewarmImages(model.lightboxPrewarmSources, 2);
-  }, [model.lightboxPrewarmSources, selectionMode]);
+    hoverPrewarmRef.current?.cancel();
+    hoverPrewarmRef.current = prewarmScheduler.scheduleImages(
+      model.hoverPrewarmSources,
+      {
+        priority: "hover",
+        assetKind: "preview",
+      },
+      1,
+    );
+  }, [model.hoverPrewarmSources, prewarmScheduler, selectionMode]);
+
+  const clearPreviewIntent = useCallback(() => {
+    hoverPrewarmRef.current?.cancel();
+    hoverPrewarmRef.current = null;
+  }, []);
 
   const onPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -174,7 +224,7 @@ function GenerationTileComponent({
     }
 
     setTapped(true);
-    prewarmImages(model.lightboxPrewarmSources, 2);
+    clearPreviewIntent();
     if (tapTimer.current) clearTimeout(tapTimer.current);
     tapTimer.current = setTimeout(() => setTapped(false), TAP_FEEDBACK_MS);
     const element = rootRef.current;
@@ -184,7 +234,7 @@ function GenerationTileComponent({
   }, [
     item.id,
     model.imageId,
-    model.lightboxPrewarmSources,
+    clearPreviewIntent,
     onOpen,
     onToggleSelect,
     selectionMode,
@@ -247,14 +297,42 @@ function GenerationTileComponent({
   }, [item.conversation_id, item.message_id, router]);
 
   const retryImage = useCallback(() => {
-    setSourceIndex(0);
-    setImageLoaded(false);
-  }, []);
-  const onImageLoad = useCallback(() => setImageLoaded(true), []);
-  const onImageError = useCallback(() => {
-    setImageLoaded(false);
-    setSourceIndex((index) => index + 1);
-  }, []);
+    setImageState({
+      sourceVersion: model.sourceVersion,
+      failedSources: new Set(),
+      loaded: false,
+    });
+  }, [model.sourceVersion]);
+  const onImageLoad = useCallback(() => {
+    setImageState((current) => ({
+      sourceVersion: model.sourceVersion,
+      failedSources:
+        current.sourceVersion === model.sourceVersion
+          ? current.failedSources
+          : new Set(),
+      loaded: true,
+    }));
+  }, [model.sourceVersion]);
+  const onImageError = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
+    const failedSource = failedAssetCandidateSource(
+      healthyCandidates,
+      event.currentTarget.currentSrc || event.currentTarget.src,
+      document.baseURI,
+    ) ?? imageSrc;
+    if (!failedSource) return;
+    setImageState((current) => {
+      const next =
+        current.sourceVersion === model.sourceVersion
+          ? new Set(current.failedSources)
+          : new Set<string>();
+      next.add(failedSource);
+      return {
+        sourceVersion: model.sourceVersion,
+        failedSources: next,
+        loaded: false,
+      };
+    });
+  }, [healthyCandidates, imageSrc, model.sourceVersion]);
   const closeSheet = useCallback(() => setSheetOpen(false), []);
 
   return (
@@ -278,10 +356,14 @@ function GenerationTileComponent({
           onPointerMove={onPointerMove}
           onPointerEnter={onPreviewIntent}
           onPointerUp={clearPress}
-          onPointerLeave={clearPress}
+          onPointerLeave={() => {
+            clearPress();
+            clearPreviewIntent();
+          }}
           onPointerCancel={clearPress}
           onClick={onClick}
           onFocus={onPreviewIntent}
+          onBlur={clearPreviewIntent}
           onKeyDown={onKeyDown}
           className="block w-full cursor-pointer text-left focus-visible:outline-none"
           aria-label={model.promptShort || "查看作品"}
@@ -290,6 +372,7 @@ function GenerationTileComponent({
           <GenerationTileMedia
             model={model}
             imageSrc={imageSrc}
+            imageSrcSet={imageSrcSet}
             imageFailed={imageFailed}
             imageLoaded={imageLoaded}
             selectionMode={selectionMode}
@@ -297,6 +380,8 @@ function GenerationTileComponent({
             onLoad={onImageLoad}
             onError={onImageError}
             onRetry={retryImage}
+            fetchPriority={fetchPriority}
+            imageSizes={imageSizes}
           />
           <GenerationTileMetadata item={item} model={model} />
         </div>
@@ -326,6 +411,7 @@ function GenerationTileComponent({
 function GenerationTileMedia({
   model,
   imageSrc,
+  imageSrcSet,
   imageFailed,
   imageLoaded,
   selectionMode,
@@ -333,16 +419,21 @@ function GenerationTileMedia({
   onLoad,
   onError,
   onRetry,
+  fetchPriority,
+  imageSizes,
 }: {
   model: GenerationTileModel;
   imageSrc: string | null;
+  imageSrcSet: string | undefined;
   imageFailed: boolean;
   imageLoaded: boolean;
   selectionMode: boolean;
   selected: boolean;
   onLoad: () => void;
-  onError: () => void;
+  onError: (event: SyntheticEvent<HTMLImageElement>) => void;
   onRetry: () => void;
+  fetchPriority: "high" | "low" | "auto";
+  imageSizes: string;
 }) {
   return (
     <div
@@ -356,12 +447,12 @@ function GenerationTileMedia({
         // eslint-disable-next-line @next/next/no-img-element
         <img
           src={imageSrc}
-          srcSet={model.imageSrcSet}
-          sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+          srcSet={imageSrcSet}
+          sizes={imageSizes}
           alt={model.altText}
           loading="lazy"
           decoding="async"
-          fetchPriority="low"
+          fetchPriority={fetchPriority}
           draggable={false}
           onLoad={onLoad}
           onError={onError}
