@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
@@ -206,6 +207,31 @@ async def test_canvas_submission_advisory_lock_is_noop_on_sqlite() -> None:
 
 
 @pytest.mark.asyncio
+async def test_canvas_submission_advisory_lock_uses_postgres_xact_lock() -> None:
+    from app.idempotency.advisory import lock_user_key
+
+    statements = []
+
+    class PostgresDb:
+        async def connection(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement):
+            statements.append(statement)
+
+    await lock_user_key(
+        PostgresDb(),  # type: ignore[arg-type]
+        "canvas-submission",
+        "user-1",
+        "same-key",
+    )
+
+    assert len(statements) == 1
+    rendered = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert "pg_advisory_xact_lock" in rendered
+
+
+@pytest.mark.asyncio
 async def test_canvas_run_integrity_error_recovers_committed_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -270,9 +296,7 @@ async def test_canvas_run_integrity_error_without_winner_returns_503(
         )
 
     assert excinfo.value.status_code == 503
-    assert (
-        excinfo.value.detail["error"]["code"] == "canvas_submission_unavailable"
-    )
+    assert excinfo.value.detail["error"]["code"] == "canvas_submission_unavailable"
 
 
 @pytest.mark.asyncio
