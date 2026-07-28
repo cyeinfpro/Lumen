@@ -169,4 +169,3 @@ class CompletionServices:
     billing: CompletionBillingService
     events: CompletionEventSink
     lease_retry: CompletionLeaseRetryPolicy
-

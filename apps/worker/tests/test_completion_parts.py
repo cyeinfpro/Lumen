@@ -5,6 +5,7 @@ import ast
 import inspect
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -22,6 +23,17 @@ from app.tasks.completion_parts import (
 )
 from app.tasks.completion_parts.image_storage_runtime import (
     CompletionToolImageService,
+)
+from app.tasks.completion_parts.legacy_adapter import (
+    CompletionToolAdapter,
+    CompletionUpstreamAdapter,
+)
+from app.tasks.completion_parts.execution import (
+    CompletionExecution,
+    PreparationState,
+    SettlementState,
+    StreamingState,
+    UsageState,
 )
 from app.tasks.completion_parts.contracts import (
     CompletionCommand,
@@ -51,6 +63,24 @@ def test_completion_v2_contracts_are_typed_and_bounded() -> None:
     assert command.worker_id == "worker-1"
     assert result.outcome is CompletionOutcome.SUCCEEDED
     assert len(CompletionServices.__dataclass_fields__) == 7
+    for state_type in (
+        CompletionExecution,
+        PreparationState,
+        StreamingState,
+        UsageState,
+        SettlementState,
+    ):
+        assert len(state_type.__dataclass_fields__) <= 15
+
+
+def test_completion_public_runtime_has_no_dynamic_symbol_table() -> None:
+    runtime_path = Path(completion.__file__).with_name("runtime.py")
+    source = runtime_path.read_text(encoding="utf-8")
+
+    assert "RuntimeSlot" not in source
+    assert "typing import Any" not in source
+    assert "sqlalchemy" not in source.lower()
+    assert "SessionLocal" not in source
 
 
 def test_completion_facade_preserves_tool_state_identity() -> None:
@@ -189,12 +219,13 @@ def test_completion_facade_preserves_extracted_wrapper_signatures() -> None:
     runtime = completion.build_completion_runtime(
         image_upstream_runtime=_fake_image_upstream_runtime(),
     )
+    tools = cast(CompletionToolAdapter, runtime.services.tool_executor)
     assert isinstance(
-        runtime.ports.tools.tool_image_service,
+        tools.tool_image_service,
         CompletionToolImageService,
     )
     assert not hasattr(
-        runtime.ports.tools,
+        tools,
         "_store_and_publish_completion_tool_image",
     )
     assert tuple(
@@ -225,7 +256,8 @@ def test_completion_runtime_binds_injected_tool_image_storage() -> None:
         image_upstream_runtime=_fake_image_upstream_runtime(),
         storage_writes=storage_writes,  # type: ignore[arg-type]
     )
-    service = runtime.ports.tools.tool_image_service
+    tools = cast(CompletionToolAdapter, runtime.services.tool_executor)
+    service = tools.tool_image_service
 
     assert service.storage.write_files.__self__ is storage_writes
     assert service.storage.cleanup_on_error.__self__ is storage_writes
@@ -237,7 +269,8 @@ def test_completion_runtime_binds_explicit_image_upstream_runtime() -> None:
     runtime = completion.build_completion_runtime(
         image_upstream_runtime=image_upstream_runtime,
     )
-    bound_stream = runtime.ports.upstream.stream_completion
+    upstream = cast(CompletionUpstreamAdapter, runtime.services.upstream_client)
+    bound_stream = upstream.stream_completion
 
     assert runtime.image_upstream_runtime is image_upstream_runtime
     assert bound_stream.func is completion.stream_completion  # type: ignore[attr-defined]

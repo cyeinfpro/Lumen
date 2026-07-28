@@ -14,17 +14,18 @@
 
 from __future__ import annotations
 
-from .runtime import (
-    CompletionPorts,
-    CompletionRuntime,
-    CompletionContextPorts,
-    CompletionToolsPorts,
-    CompletionPersistencePorts,
-    CompletionUpstreamPorts,
-    CompletionBillingPorts,
-    CompletionEventsPorts,
-    CompletionRetryPorts,
+from .contracts import CompletionCommand, CompletionResult
+from .legacy_adapter import (
+    CompletionBillingAdapter,
+    CompletionContextAdapter,
+    CompletionEventAdapter,
+    CompletionLeaseRetryAdapter,
+    CompletionRepositoryAdapter,
+    CompletionToolAdapter,
+    CompletionUpstreamAdapter,
+    LegacyCompletionAdapter,
 )
+from .runtime import CompletionRuntime
 from .artifact_codec import (
     compute_blurhash as _generation_compute_blurhash,
     make_display as _make_display,
@@ -184,6 +185,7 @@ from . import context_loading as _completion_context_loading
 from . import stream as _completion_stream
 from . import tool_images as _completion_tool_images
 from .runner import run_completion as _run_completion
+from .. import context_summary, memory_extraction
 from .context_loading import (
     context_circuit_open as _context_circuit_open,
     pick_current_user as _pick_current_user,
@@ -302,17 +304,6 @@ async def _message_retention_filter_for_account(account_mode: str | None):
     if not policy.hide_enabled:
         return None
     return Message.created_at >= byok_retention_cutoffs(policy=policy).visible_after
-
-
-try:
-    from . import context_summary
-except Exception:  # noqa: BLE001
-    context_summary = None  # type: ignore[assignment]
-
-try:
-    from . import memory_extraction
-except Exception:  # noqa: BLE001
-    memory_extraction = None  # type: ignore[assignment]
 
 
 _LEASE_TTL_S = 300
@@ -1328,8 +1319,8 @@ async def _completion_preflight_failure(
     )
 
 
-def _build_completion_context_ports() -> CompletionContextPorts:
-    return CompletionContextPorts(
+def _build_completion_context_ports() -> CompletionContextAdapter:
+    return CompletionContextAdapter(
         DEFAULT_CHAT_MODEL=DEFAULT_CHAT_MODEL,
         _inject_user_memory_context=_inject_user_memory_context,
         _instructions_with_summary_guardrail=_instructions_with_summary_guardrail,
@@ -1341,9 +1332,9 @@ def _build_completion_context_ports() -> CompletionContextPorts:
 
 def _build_completion_tools_ports(
     storage_writes: StorageWriteCoordinator | None = None,
-) -> CompletionToolsPorts:
+) -> CompletionToolAdapter:
     tool_image_service = _build_completion_tool_image_service(storage_writes)
-    return CompletionToolsPorts(
+    return CompletionToolAdapter(
         _CompletionToolTracker=_CompletionToolTracker,
         _CompletionUsageAccumulator=_CompletionUsageAccumulator,
         _chat_tools_from_content=_chat_tools_from_content,
@@ -1363,8 +1354,8 @@ def _build_completion_tools_ports(
     )
 
 
-def _build_completion_persistence_ports() -> CompletionPersistencePorts:
-    return CompletionPersistencePorts(
+def _build_completion_persistence_ports() -> CompletionRepositoryAdapter:
+    return CompletionRepositoryAdapter(
         Completion=Completion,
         Message=Message,
         SessionLocal=SessionLocal,
@@ -1382,8 +1373,8 @@ def _build_completion_persistence_ports() -> CompletionPersistencePorts:
 
 def _build_completion_upstream_ports(
     image_upstream_runtime: ImageUpstreamRuntime,
-) -> CompletionUpstreamPorts:
-    return CompletionUpstreamPorts(
+) -> CompletionUpstreamAdapter:
+    return CompletionUpstreamAdapter(
         UpstreamError=UpstreamError,
         _apply_url_citations=_apply_url_citations,
         _completion_upstream_provider_event=_completion_upstream_provider_event,
@@ -1403,8 +1394,8 @@ def _build_completion_upstream_ports(
     )
 
 
-def _build_completion_billing_ports() -> CompletionBillingPorts:
-    return CompletionBillingPorts(
+def _build_completion_billing_ports() -> CompletionBillingAdapter:
+    return CompletionBillingAdapter(
         _fallback_completion_tool_image_tokens=_fallback_completion_tool_image_tokens,
         _settle_cancelled_completion_billing=_settle_cancelled_completion_billing,
         _settle_failed_completion_billing=_settle_failed_completion_billing,
@@ -1418,8 +1409,8 @@ def _build_completion_billing_ports() -> CompletionBillingPorts:
     )
 
 
-def _build_completion_events_ports() -> CompletionEventsPorts:
-    return CompletionEventsPorts(
+def _build_completion_events_ports() -> CompletionEventAdapter:
+    return CompletionEventAdapter(
         _COMPLETION_EVENT_HOOKS=_COMPLETION_EVENT_HOOKS,
         _completion_event_payload=_completion_event_payload,
         _deliver_completion_event=_deliver_completion_event,
@@ -1432,8 +1423,8 @@ def _build_completion_events_ports() -> CompletionEventsPorts:
     )
 
 
-def _build_completion_retry_ports() -> CompletionRetryPorts:
-    return CompletionRetryPorts(
+def _build_completion_retry_ports() -> CompletionLeaseRetryAdapter:
+    return CompletionLeaseRetryAdapter(
         RETRY_BACKOFF_SECONDS=RETRY_BACKOFF_SECONDS,
         RetryDecision=RetryDecision,
         _CANCEL_CHECK_EVERY_DELTAS=_CANCEL_CHECK_EVERY_DELTAS,
@@ -1465,7 +1456,7 @@ def build_completion_runtime(
     image_upstream_runtime: ImageUpstreamRuntime,
     storage_writes: StorageWriteCoordinator | None = None,
 ) -> CompletionRuntime:
-    ports = CompletionPorts(
+    adapter = LegacyCompletionAdapter(
         context=_build_completion_context_ports(),
         tools=_build_completion_tools_ports(storage_writes),
         persistence=_build_completion_persistence_ports(),
@@ -1474,8 +1465,13 @@ def build_completion_runtime(
         events=_build_completion_events_ports(),
         retry=_build_completion_retry_ports(),
     )
+    services = adapter.services()
+
+    async def execute(command: CompletionCommand) -> CompletionResult:
+        return await _run_completion(command, adapter, services)
+
     return CompletionRuntime(
-        ports=ports,
-        runner=_run_completion,
+        services=services,
+        runner=execute,
         image_upstream_runtime=image_upstream_runtime,
     )
