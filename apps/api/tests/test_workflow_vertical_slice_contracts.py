@@ -12,12 +12,12 @@ MIGRATED_APPLICATION_MODULES = (
     WORKFLOW_ROOT / "application" / "commands.py",
     WORKFLOW_ROOT / "application" / "project_lifecycle.py",
 )
-MIGRATED_PORT_MODULES = (
-    WORKFLOW_ROOT / "ports" / "run_creation.py",
-    WORKFLOW_ROOT / "ports" / "run_reads.py",
-    WORKFLOW_ROOT / "ports" / "project_lifecycle.py",
-    WORKFLOW_ROOT / "ports" / "repositories.py",
-    WORKFLOW_ROOT / "ports" / "queue.py",
+WORKFLOW_PORT_MODULES = tuple(
+    sorted(
+        path
+        for path in (WORKFLOW_ROOT / "ports").glob("*.py")
+        if path.name != "__init__.py"
+    )
 )
 
 
@@ -40,7 +40,7 @@ def test_migrated_workflow_application_has_no_transport_or_orm_imports() -> None
     assert violations == {}
 
 
-def test_migrated_workflow_ports_have_no_opaque_or_framework_types() -> None:
+def test_workflow_ports_have_no_opaque_or_framework_types() -> None:
     forbidden_names = {
         "Any",
         "AsyncSession",
@@ -50,7 +50,7 @@ def test_migrated_workflow_ports_have_no_opaque_or_framework_types() -> None:
         "object",
     }
     violations: list[str] = []
-    for path in MIGRATED_PORT_MODULES:
+    for path in WORKFLOW_PORT_MODULES:
         tree = ast.parse(path.read_text("utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in forbidden_names:
