@@ -37,6 +37,7 @@ from .observability import (
 from .provider_pool import probe_providers
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from . import runtime_settings
+from .runtime import RuntimeLifecycle, WorkerRuntime
 from .services import billing_cache
 from .storage import storage
 from .storage_writes import StorageWriteCoordinator
@@ -114,6 +115,19 @@ async def _cleanup_resource(name: str, cleanup: Callable[[], Any]) -> None:
 
 
 async def _cleanup_resources(ctx: dict[str, Any]) -> None:
+    worker_runtime = ctx.pop("worker_runtime", None)
+    if isinstance(worker_runtime, WorkerRuntime):
+        for key, value in worker_runtime.context_values().items():
+            if ctx.get(key) is value:
+                ctx.pop(key, None)
+        await worker_runtime.close()
+        return
+
+    partial_lifecycle = ctx.pop("_worker_runtime_lifecycle", None)
+    if isinstance(partial_lifecycle, RuntimeLifecycle):
+        await partial_lifecycle.close()
+        return
+
     await _cleanup_resource("billing_cache", billing_cache.shutdown)
     cache = ctx.pop("runtime_settings_cache", None)
     if isinstance(cache, runtime_settings.RuntimeSettingsCache):
@@ -142,10 +156,22 @@ async def _cleanup_resources(ctx: dict[str, Any]) -> None:
 
 async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
+    lifecycle = RuntimeLifecycle("worker", logger=_startup_logger)
+    lifecycle.own("db_engine", engine.dispose)
+    ctx["_worker_runtime_lifecycle"] = lifecycle
     try:
-        ctx["runtime_settings_cache"] = runtime_settings.configure_cache()
+        runtime_settings_cache = runtime_settings.configure_cache()
+        ctx["runtime_settings_cache"] = runtime_settings_cache
+        lifecycle.own(
+            "runtime_settings_cache",
+            lambda: runtime_settings.shutdown_cache(runtime_settings_cache),
+        )
         image_upstream_runtime = build_image_upstream_runtime()
         ctx["image_upstream_runtime"] = image_upstream_runtime
+        lifecycle.own(
+            "upstream_client",
+            lambda: close_client(runtime=image_upstream_runtime),
+        )
         await validate_effective_image_job_configuration(
             runtime=image_upstream_runtime,
         )
@@ -169,17 +195,21 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
         )
         ctx["storage_write_coordinator"] = storage_writes
-        ctx["generation_runtime"] = build_generation_runtime(
+        generation_runtime = build_generation_runtime(
             storage_writes=storage_writes,
             image_upstream_runtime=image_upstream_runtime,
         )
-        ctx["completion_runtime"] = build_completion_runtime(
+        ctx["generation_runtime"] = generation_runtime
+        lifecycle.own("generation_runtime", generation_runtime.shutdown)
+        completion_runtime = build_completion_runtime(
             storage_writes=storage_writes,
             image_upstream_runtime=image_upstream_runtime,
         )
-        ctx["video_generation_runtime"] = build_video_generation_runtime(
+        ctx["completion_runtime"] = completion_runtime
+        video_generation_runtime = build_video_generation_runtime(
             storage_writes=storage_writes
         )
+        ctx["video_generation_runtime"] = video_generation_runtime
         init_sentry(
             settings.sentry_dsn,
             settings.sentry_environment or settings.app_env,
@@ -189,11 +219,27 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         # 必须在 metrics server 起来之前挂好采样函数，否则第一轮 scrape 拿到的是空值。
         bind_db_pool_metrics(engine)
         start_metrics_server(settings.worker_metrics_port, settings.worker_metrics_host)
+        lifecycle.own("metrics_server", stop_metrics_server)
         # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
         # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
         loaded = warm_tiktoken()
         _startup_logger.info("worker.tiktoken_warm loaded=%s", loaded)
         await billing_cache.configure(ctx.get("redis"))
+        lifecycle.own("billing_cache", billing_cache.shutdown)
+
+        worker_runtime = WorkerRuntime(
+            _runtime_settings=runtime_settings_cache,
+            _image_upstream=image_upstream_runtime,
+            _storage_writes=storage_writes,
+            _generation=generation_runtime,
+            _completion=completion_runtime,
+            _video=video_generation_runtime,
+            _lifecycle=lifecycle,
+        )
+        ctx["worker_runtime"] = worker_runtime
+        ctx.update(worker_runtime.context_values())
+        ctx.pop("_worker_runtime_lifecycle", None)
+        worker_runtime.start(logger=_startup_logger)
     except Exception:
         _startup_logger.exception("worker startup failed; cleaning partial resources")
         await _cleanup_resources(ctx)

@@ -28,6 +28,12 @@ from app.tasks.completion_parts.decisions import (
     reduce_completion_frame,
 )
 from app.tasks.completion_parts.default_runtime import build_completion_runtime
+from app.tasks.completion_parts.contracts import (
+    CompletionCommand,
+    CompletionOutcome,
+    CompletionPhase,
+    CompletionResult,
+)
 from app.tasks.completion_parts.runtime import CompletionRuntime
 from app.tasks.generation_parts.decisions import (
     GenerationDomainState,
@@ -328,8 +334,13 @@ async def test_explicit_runtimes_delegate_without_parent_monkeypatches() -> None
     ) -> None:
         calls.append(("generation", task_id))
 
-    async def completion_runner(_ctx: dict[str, Any], task_id: str) -> None:
-        calls.append(("completion", task_id))
+    async def completion_runner(command: CompletionCommand) -> CompletionResult:
+        calls.append(("completion", command.task_id))
+        return CompletionResult(
+            task_id=command.task_id,
+            phase=CompletionPhase.COMPLETE,
+            outcome=CompletionOutcome.SUCCEEDED,
+        )
 
     async def video_submission(_ctx: dict[str, Any], task_id: str) -> None:
         calls.append(("video-submit", task_id))
@@ -349,7 +360,7 @@ async def test_explicit_runtimes_delegate_without_parent_monkeypatches() -> None
         image_upstream_runtime=_fake_image_upstream_runtime(),
     )
     completion_runtime = CompletionRuntime(
-        ports=replace(default_completion_runtime.ports),
+        services=default_completion_runtime.services,
         runner=completion_runner,
         image_upstream_runtime=default_completion_runtime.image_upstream_runtime,
     )
@@ -361,7 +372,13 @@ async def test_explicit_runtimes_delegate_without_parent_monkeypatches() -> None
     )
 
     await generation_runtime.run({}, "gen")
-    await completion_runtime.run({}, "comp")
+    await completion_runtime.run(
+        CompletionCommand(
+            task_id="comp",
+            redis=object(),  # type: ignore[arg-type]
+            worker_id="worker",
+        )
+    )
     await video_runtime.run_submission({}, "vid-submit")
     await video_runtime.run_poll({}, "vid-poll")
     assert await video_runtime.reconcile({}) == 7

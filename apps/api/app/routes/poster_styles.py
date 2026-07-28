@@ -11,14 +11,12 @@ route imports.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import (
     Annotated,
     Any,
     AsyncContextManager,
-    AsyncIterator,
     Awaitable,
     Callable,
     Iterable,
@@ -29,7 +27,6 @@ from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
-    FastAPI,
     HTTPException,
     Query,
     Request,
@@ -73,7 +70,7 @@ from lumen_core.schemas import (
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
-from ..redis_client import get_redis as _get_redis_client
+from ..runtime import ApiRuntime
 from ..runtime_settings import get_setting
 from ..services.poster_styles import generation as poster_style_generation
 from ..services.poster_styles import resources as poster_style_resources
@@ -85,7 +82,6 @@ from ..services.poster_styles.capacity import PosterTaggingCapacityUnavailable
 from ..services.poster_styles.library import *  # noqa: F403
 from ..services.poster_styles.tagging_runtime import (
     PosterTaggingRuntime,
-    build_poster_tagging_runtime,
 )
 from ..workflows.adapters.library_sync_operation import (
     do_poster_style_sync as _do_poster_style_sync,
@@ -106,31 +102,9 @@ _GITHUB_RAW_HOSTS = frozenset(
 )
 _HTTP_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
-_POSTER_TAGGING_RUNTIME_STATE_KEY = "poster_tagging_runtime"
-
-
-@asynccontextmanager
-async def _poster_tagging_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    tagging_runtime = build_poster_tagging_runtime(
-        _get_redis_client(),
-        concurrency=poster_style_tagging.auto_tag_concurrency(),
-    )
-    setattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY, tagging_runtime)
-    try:
-        yield
-    finally:
-        if (
-            getattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY, None)
-            is tagging_runtime
-        ):
-            delattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY)
-        await tagging_runtime.aclose()
-
-
 router = APIRouter(
     prefix="/poster-styles",
     tags=["poster-styles"],
-    lifespan=_poster_tagging_lifespan,
 )
 
 
@@ -153,18 +127,21 @@ def _poster_style_auto_tag_concurrency() -> int:
 
 
 def _poster_tagging_runtime(request: Request) -> PosterTaggingRuntime:
-    runtime = getattr(
-        request.app.state,
-        _POSTER_TAGGING_RUNTIME_STATE_KEY,
-        None,
-    )
-    if not isinstance(runtime, PosterTaggingRuntime):
+    runtime = getattr(request.app.state, "runtime", None)
+    if not isinstance(runtime, ApiRuntime):
         raise _http(
             "poster_tagging_unavailable",
             "poster tagging runtime is unavailable",
             503,
         )
-    return runtime
+    try:
+        return runtime.poster_tagging()
+    except RuntimeError as exc:
+        raise _http(
+            "poster_tagging_unavailable",
+            "poster tagging runtime is unavailable",
+            503,
+        ) from exc
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
