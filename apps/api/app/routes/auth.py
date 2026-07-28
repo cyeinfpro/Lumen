@@ -38,7 +38,6 @@ from lumen_core.models import (
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
     LoginIn,
-    NavigationVisibilityOut,
     RuntimeDefaultsOut,
     SignupByokIn,
     SignupIn,
@@ -536,14 +535,7 @@ class _DatabaseRuntimeDefaultsProvider:
 
     @staticmethod
     def safe_defaults() -> RuntimeDefaultsOut:
-        from .images import MAX_BYTES as IMAGE_UPLOAD_MAX_BYTES
-
-        return RuntimeDefaultsOut(
-            fast=True,
-            upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
-            canvas_enabled=False,
-            nav_visibility=NavigationVisibilityOut(),
-        )
+        return RuntimeDefaultsOut()
 
     async def load(self) -> RuntimeDefaultsOut:
         defaults = self.safe_defaults()
@@ -635,6 +627,29 @@ async def _user_out_with_runtime_defaults(
             )
         out.runtime_defaults = _DatabaseRuntimeDefaultsProvider.safe_defaults()
     return out
+
+
+async def _write_post_commit_audit_best_effort(
+    *,
+    event_type: str,
+    user_id: str,
+    actor_email: str,
+    actor_ip_hash: str | None,
+    details: dict[str, Any],
+) -> None:
+    try:
+        await write_audit_isolated(
+            event_type=event_type,
+            user_id=user_id,
+            actor_email=actor_email,
+            actor_ip_hash=actor_ip_hash,
+            details=details,
+        )
+    except Exception:
+        logger.exception(
+            "auth_post_commit_audit_failed",
+            extra={"event_type": event_type, "user_id": user_id},
+        )
 
 
 async def _create_session(
@@ -867,18 +882,18 @@ async def signup(
             503,
         ) from exc
 
+    _set_auth_cookies(response, session.id, csrf)
     logger.info(
         "signup_succeeded",
         extra={"email_hash": _log_hash(email), "user_id": user.id, "role": role},
     )
-    await write_audit_isolated(
+    await _write_post_commit_audit_best_effort(
         event_type="auth.signup.success",
         user_id=user.id,
         actor_email=email,
         actor_ip_hash=request_ip_hash(request),
         details={"role": role},
     )
-    _set_auth_cookies(response, session.id, csrf)
     return await _user_out_with_runtime_defaults(user_out, db)
 
 
@@ -968,33 +983,7 @@ async def signup_byok(
 
         session, _ = await _create_session(db, user, request)
         csrf, user_out = _auth_response_snapshot(user, session)
-        # Why: write_audit(autocommit=False) returns False on failure and does
-        # NOT raise. If session-bound audit fails the success row would be lost.
-        # Fall back to write_audit_isolated (independent transaction) so the
-        # audit row survives even when the caller's session has issues.
-        audit_ok = await write_audit(
-            db,
-            event_type="auth.signup.byok.success",
-            user_id=user.id,
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"role": role, "supplier_id": pending.supplier_id},
-            autocommit=False,
-        )
         await db.commit()
-        if not audit_ok:
-            # The user is committed; surface the audit gap via isolated retry.
-            await write_audit_isolated(
-                event_type="auth.signup.byok.success",
-                user_id=user.id,
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={
-                    "role": role,
-                    "supplier_id": pending.supplier_id,
-                    "audit_fallback": True,
-                },
-            )
     except IntegrityError as exc:
         await db.rollback()
         await write_audit_isolated(
@@ -1010,6 +999,13 @@ async def signup_byok(
         ) from exc
 
     _set_auth_cookies(response, session.id, csrf)
+    await _write_post_commit_audit_best_effort(
+        event_type="auth.signup.byok.success",
+        user_id=user.id,
+        actor_email=email,
+        actor_ip_hash=request_ip_hash(request),
+        details={"role": role, "supplier_id": pending.supplier_id},
+    )
     return await _user_out_with_runtime_defaults(user_out, db)
 
 

@@ -395,6 +395,78 @@ async def test_login_runtime_defaults_failure_preserves_committed_success(
 
 
 @pytest.mark.asyncio
+async def test_signup_post_commit_failures_preserve_success(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = _Db(results=[None, SimpleNamespace(email="member@example.com")])
+    response = Response()
+    session_calls = 0
+    snapshot_calls = 0
+
+    async def fake_session(*_args, **_kwargs):
+        nonlocal session_calls
+        session_calls += 1
+        return SimpleNamespace(id="session-1"), "refresh-1"
+
+    def fake_snapshot(_user, _session):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        assert db.committed is False
+        return (
+            "csrf-1",
+            auth.UserOut(
+                id="user-1",
+                email="member@example.com",
+                display_name="Member",
+                role="member",
+                account_mode="wallet",
+                notification_email=True,
+            ),
+        )
+
+    async def fail_audit(*_args, **_kwargs):
+        raise RuntimeError("audit unavailable")
+
+    async def fail_runtime_defaults(_db):
+        raise RuntimeError("runtime settings unavailable")
+
+    monkeypatch.setattr(auth, "hash_password", lambda _plain: "hashed")
+    monkeypatch.setattr(auth, "_create_session", fake_session)
+    monkeypatch.setattr(auth, "_auth_response_snapshot", fake_snapshot)
+    monkeypatch.setattr(auth, "write_audit_isolated", fail_audit)
+    monkeypatch.setattr(auth, "_runtime_defaults", fail_runtime_defaults)
+    monkeypatch.setattr(auth, "_record_runtime_defaults_degraded", lambda: None)
+
+    with caplog.at_level("WARNING"):
+        result = await auth.signup(
+            SignupIn(
+                email="member@example.com",
+                password="password123",
+                display_name="Member",
+            ),
+            _request(method="POST"),
+            response,
+            db,  # type: ignore[arg-type]
+        )
+
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
+    assert db.committed is True
+    assert session_calls == 1
+    assert snapshot_calls == 1
+    assert result.id == "user-1"
+    assert result.runtime_defaults == auth.RuntimeDefaultsOut()
+    assert any(cookie.startswith("session=") for cookie in cookies)
+    assert any(cookie.startswith("csrf=") for cookie in cookies)
+    assert "auth_post_commit_audit_failed" in caplog.text
+    assert "auth_runtime_defaults_degraded" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_get_current_user_rejects_soft_deleted_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
