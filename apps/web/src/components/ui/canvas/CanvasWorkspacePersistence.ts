@@ -41,6 +41,7 @@ import type {
   CanvasGraph,
   CanvasOperation,
 } from "@/lib/canvas/types";
+import { createBroadcastChannel } from "@/shared/realtime/browser";
 import { toast } from "@/components/ui/primitives";
 
 interface SavePayload {
@@ -446,7 +447,7 @@ export function useCanvasTabCoordination({
     if (typeof BroadcastChannel === "undefined") return;
     let channel: BroadcastChannel;
     try {
-      channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+      channel = createBroadcastChannel(`lumen:canvas:${canvasId}`);
     } catch {
       return;
     }
@@ -1007,7 +1008,7 @@ function probeCanvasClientPresence(
   if (typeof BroadcastChannel === "undefined") return Promise.resolve(null);
   let channel: BroadcastChannel;
   try {
-    channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+    channel = createBroadcastChannel(`lumen:canvas:${canvasId}`);
   } catch {
     return Promise.resolve(null);
   }

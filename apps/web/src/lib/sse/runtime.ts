@@ -16,7 +16,6 @@ import {
 } from "./crossTabBus";
 import type { CrossTabMessage } from "./crossTabProtocol";
 import {
-  BrowserEventSourceTransport,
   type EventStreamTransport,
   type StreamHandle,
 } from "./eventSourceTransport";
@@ -47,7 +46,7 @@ export type RuntimeSubscriber = {
 export type RealtimeRuntimeOptions = {
   channels: string[];
   tabId?: string;
-  transport?: EventStreamTransport;
+  transport: EventStreamTransport;
   broadcastFactory?: BroadcastChannelFactory;
   leaderClock?: LeaderClock;
   now?: () => number;
@@ -132,7 +131,7 @@ export class RealtimeRuntime {
     this.now = options.now ?? Date.now;
     this.channelKey = [...options.channels].sort().join(",");
     const id = options.tabId ?? tabId();
-    this.transport = options.transport ?? new BrowserEventSourceTransport();
+    this.transport = options.transport;
     this.bus = new CrossTabBus(
       this.channelKey,
       id,

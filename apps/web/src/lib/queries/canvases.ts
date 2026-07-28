@@ -30,6 +30,7 @@ import type {
   CanvasNodeSelection,
   CanvasRun,
 } from "@/lib/canvas/types";
+import { createBroadcastChannel } from "@/shared/realtime/browser";
 
 export const canvasQueryKeys = {
   all: ["canvas"] as const,
@@ -197,7 +198,7 @@ export function useSelectCanvasOutputMutation(canvasId: string) {
     onSuccess(selection) {
       if (typeof BroadcastChannel !== "undefined") {
         try {
-          const channel = new BroadcastChannel(`lumen:canvas:${canvasId}`);
+          const channel = createBroadcastChannel(`lumen:canvas:${canvasId}`);
           channel.postMessage({
             type: "canvas.selection.changed",
             revision: selection.revision,

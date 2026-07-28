@@ -24,6 +24,11 @@ const { RealtimeRuntime } = loadTsModule(
       sseUrl: (_channels: string[], cursor?: string) =>
         `/events${cursor ? `?cursor=${cursor}` : ""}`,
     },
+    "@/shared/realtime/browser": {
+      createBroadcastChannel() {
+        throw new Error("test must inject a BroadcastChannel factory");
+      },
+    },
   },
 ) as {
   RealtimeRuntime: new (options: {

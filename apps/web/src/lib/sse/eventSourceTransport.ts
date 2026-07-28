@@ -1,3 +1,5 @@
+import { createEventSource } from "@/shared/realtime/browser";
+
 export interface EventSourceLike {
   readyState: number;
   onopen: ((event: Event) => void) | null;
@@ -41,9 +43,7 @@ export class BrowserEventSourceTransport implements EventStreamTransport {
   private current: StreamHandle | null = null;
   private readonly factory: EventSourceFactory;
 
-  constructor(
-    factory: EventSourceFactory = (url, init) => new EventSource(url, init),
-  ) {
+  constructor(factory: EventSourceFactory = createEventSource) {
     this.factory = factory;
   }
 

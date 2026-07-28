@@ -10,6 +10,13 @@ import type {
 
 const { BrowserEventSourceTransport } = loadTsModule(
   new URL("./eventSourceTransport.ts", import.meta.url),
+  {
+    "@/shared/realtime/browser": {
+      createEventSource() {
+        throw new Error("test must inject an EventSource factory");
+      },
+    },
+  },
 ) as {
   BrowserEventSourceTransport: new (
     factory: () => EventSourceLike,

@@ -13,6 +13,7 @@ import type {
   AdminStreamStatus,
   AdminUpdateStreamHandle,
 } from "./AdminUpdatePanel.helpers";
+import { createEventSource } from "@/shared/realtime/browser";
 
 const LOG_BUFFER_MAX = 500;
 const SSE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 15000];
@@ -159,7 +160,7 @@ export function useAdminUpdateStream(
       close();
       setStreamStatus("connecting");
       try {
-        eventSource = new EventSource(adminUpdateStreamUrl(), {
+        eventSource = createEventSource(adminUpdateStreamUrl(), {
           withCredentials: true,
         });
       } catch {
