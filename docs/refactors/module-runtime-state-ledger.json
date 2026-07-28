@@ -1,5 +1,5 @@
 {
-  "max_total": 15,
+  "max_total": 8,
   "modules": [
     {
       "max_instances": 1,
@@ -38,31 +38,10 @@
     },
     {
       "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/services/admin_model_cache.py",
-      "retirement_condition": "Admin model cache is provided by an application-scoped cache service.",
-      "symbols": ["_admin_model_cache_state"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/sse_publish.py",
-      "retirement_condition": "SSE timestamp state is owned by an application event publisher instance.",
-      "symbols": ["_sse_publish_state"]
-    },
-    {
-      "max_instances": 1,
       "owner": "worker",
       "path": "apps/worker/app/provider_pool.py",
       "retirement_condition": "Worker startup constructs and closes the provider pool runtime explicitly.",
       "symbols": ["_RUNTIME"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "worker",
-      "path": "apps/worker/app/observability.py",
-      "retirement_condition": "Worker startup owns the metrics server runtime.",
-      "symbols": ["_METRICS_SERVER"]
     },
     {
       "max_instances": 1,
@@ -74,30 +53,9 @@
     {
       "max_instances": 1,
       "owner": "worker",
-      "path": "apps/worker/app/sse_publish.py",
-      "retirement_condition": "SSE publisher timestamp state is injected through a publisher runtime.",
-      "symbols": ["_TIMESTAMP_RUNTIME"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "worker",
       "path": "apps/worker/app/tasks/auto_title.py",
       "retirement_condition": "Auto-title cache is owned by a task application runtime.",
       "symbols": ["_RUNTIME"]
-    },
-    {
-      "max_instances": 2,
-      "owner": "worker",
-      "path": "apps/worker/app/upstream_parts/upstream_impl.py",
-      "retirement_condition": "Worker-owned upstream client lifecycle owns both client synchronization locks.",
-      "symbols": ["_client_lock", "_images_client_lock"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "image-job",
-      "path": "image-job/image_job/adapters/filesystem_artifacts.py",
-      "retirement_condition": "Image verification global lock is owned by the sidecar runtime.",
-      "symbols": ["_IMAGE_VERIFY_LOCK"]
     }
   ],
   "version": 1

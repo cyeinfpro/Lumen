@@ -40,6 +40,7 @@ from .observability import (
 from .ratelimit import user_rate_limits_effective, user_rate_limits_effective_reason
 from .redis_client import get_redis
 from .runtime import ApiRuntime, RuntimeLifecycle
+from .services.admin_model_cache import AdminModelCache
 from .runtime_settings import (
     get_setting,
     migrate_image_primary_route,
@@ -586,6 +587,7 @@ async def lifespan(app: FastAPI):
             _redis=r,
             _arq=arq,
             _billing_cache=billing_cache,
+            _admin_models=AdminModelCache(),
             _poster_tagging=poster_tagging,
             _lifecycle=lifecycle,
             _image_reconciler_enabled=True,

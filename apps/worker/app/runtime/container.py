@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import TypedDict
 
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
+from ..observability import MetricsServerRuntime
 from ..runtime_settings import RuntimeSettingsCache
 from ..storage_writes import StorageWriteCoordinator
 from ..tasks.completion_parts.runtime import CompletionRuntime
@@ -34,6 +35,7 @@ class WorkerRuntimeValues(TypedDict):
     generation_runtime: GenerationRuntime
     completion_runtime: CompletionRuntime
     video_generation_runtime: VideoGenerationRuntime
+    metrics_server_runtime: MetricsServerRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +54,7 @@ class WorkerRuntime:
     _generation: GenerationRuntime
     _completion: CompletionRuntime
     _video: VideoGenerationRuntime
+    _metrics_server: MetricsServerRuntime
     _lifecycle: RuntimeLifecycle
 
     def runtime_settings(self) -> RuntimeSettingsCache:
@@ -72,6 +75,9 @@ class WorkerRuntime:
     def video(self) -> VideoGenerationRuntime:
         return self._video
 
+    def metrics_server(self) -> MetricsServerRuntime:
+        return self._metrics_server
+
     def context_values(self) -> WorkerRuntimeValues:
         return WorkerRuntimeValues(
             runtime_settings_cache=self._runtime_settings,
@@ -80,6 +86,7 @@ class WorkerRuntime:
             generation_runtime=self._generation,
             completion_runtime=self._completion,
             video_generation_runtime=self._video,
+            metrics_server_runtime=self._metrics_server,
         )
 
     def start(self, *, logger: logging.Logger | None = None) -> None:
@@ -98,6 +105,7 @@ class WorkerRuntime:
             RuntimeCapability("provider", CapabilityStatus.ENABLED),
             RuntimeCapability("http_transport", CapabilityStatus.ENABLED),
             RuntimeCapability("storage_writes", CapabilityStatus.ENABLED),
+            RuntimeCapability("metrics_server", CapabilityStatus.ENABLED),
             RuntimeCapability(
                 "postprocess_executor",
                 CapabilityStatus.ENABLED

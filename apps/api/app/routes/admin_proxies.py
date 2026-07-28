@@ -43,7 +43,7 @@ from ..proxy_pool import (
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ..services.admin_model_cache import invalidate_admin_models_cache
+from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import (
     parse_provider_config as _parse_config,
     read_providers as _read_providers,
@@ -325,7 +325,7 @@ async def update_proxies(
         details={"count": len(new_proxies), "names": sorted(seen_names)},
     )
     await db.commit()
-    invalidate_admin_models_cache()
+    admin_model_cache_from_request(request).invalidate()
     logger.info("admin proxies updated count=%d by user=%s", len(new_proxies), admin.id)
 
     return await list_proxies(_admin=admin, db=db)

@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.routes import admin_models
+from app.services.admin_model_cache import AdminModelCache
 
 
 PROVIDERS_RAW = json.dumps(
@@ -120,7 +121,7 @@ async def test_admin_models_cache_avoids_refetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    admin_models.invalidate_admin_models_cache()
+    cache = AdminModelCache()
 
     async def fake_build(_db: object):
         nonlocal calls
@@ -133,9 +134,8 @@ async def test_admin_models_cache_avoids_refetch(
 
     monkeypatch.setattr(admin_models, "_build_models_response", fake_build)
 
-    first = await admin_models.list_admin_models(object(), object())  # type: ignore[arg-type]
-    second = await admin_models.list_admin_models(object(), object())  # type: ignore[arg-type]
+    first = await cache.get(object(), fake_build)  # type: ignore[arg-type]
+    second = await cache.get(object(), fake_build)  # type: ignore[arg-type]
 
     assert first is second
     assert calls == 1
-    admin_models.invalidate_admin_models_cache()

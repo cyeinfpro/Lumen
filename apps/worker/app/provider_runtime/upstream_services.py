@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -127,12 +128,16 @@ class ImageUpstreamRuntime:
 class UpstreamLifecycleState:
     retired_client_close_tasks: set[Any]
     retired_clients: set[Any]
+    client_lock: asyncio.Lock
+    images_client_lock: asyncio.Lock
 
     @classmethod
     def create(cls) -> UpstreamLifecycleState:
         return cls(
             retired_client_close_tasks=set(),
             retired_clients=set(),
+            client_lock=asyncio.Lock(),
+            images_client_lock=asyncio.Lock(),
         )
 
 
@@ -159,7 +164,7 @@ def service_name(name: str) -> str:
 def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
     missing = [
         name
-        for name in ("settings", "lifecycle_state", "upstream_image_requests")
+        for name in ("settings", "upstream_image_requests")
         if name not in namespace
     ]
     missing.extend(
@@ -189,11 +194,15 @@ def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
     groups["responses"].responses_client_call = namespace[
         "upstream_responses_client"
     ].responses_call
-    lifecycle_state = namespace["lifecycle_state"]
+    lifecycle_state = (
+        namespace.get("lifecycle_state") or UpstreamLifecycleState.create()
+    )
     groups[
         "core"
     ].retired_client_close_tasks = lifecycle_state.retired_client_close_tasks
     groups["core"].retired_clients = lifecycle_state.retired_clients
+    groups["core"].client_lock = lifecycle_state.client_lock
+    groups["core"].images_client_lock = lifecycle_state.images_client_lock
     return UpstreamServices(**groups)
 
 

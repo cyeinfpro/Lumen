@@ -57,7 +57,7 @@ from lumen_core.schemas import (
 from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
-from ..services.admin_model_cache import invalidate_admin_models_cache
+from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import (
     ensure_enabled_provider_proxies,
     ensure_enabled_video_provider_proxies,
@@ -707,7 +707,7 @@ async def update_providers(
             details={},
         )
         await db.commit()
-        invalidate_admin_models_cache()
+        admin_model_cache_from_request(request).invalidate()
         return ProvidersOut(items=[], proxies=[], source="none")
 
     _validate_provider_update_names(body)
@@ -741,7 +741,7 @@ async def update_providers(
         },
     )
     await db.commit()
-    invalidate_admin_models_cache()
+    admin_model_cache_from_request(request).invalidate()
     return _provider_update_out(provider_rows, proxy_rows)
 
 
@@ -807,7 +807,7 @@ async def patch_provider_enabled(
         details={"name": provider_name, "enabled": body.enabled},
     )
     await db.commit()
-    invalidate_admin_models_cache()
+    admin_model_cache_from_request(request).invalidate()
     return _to_out(target, target_idx)
 
 

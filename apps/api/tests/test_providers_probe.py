@@ -9,6 +9,7 @@ import pytest
 from fastapi import Request
 
 from lumen_core.schemas import ProvidersUpdateIn
+from app.services.admin_model_cache import AdminModelCache
 
 
 class _StubResponse:
@@ -64,6 +65,8 @@ class _FakeProvidersDb:
 
 
 def _admin_request() -> Request:
+    cache = AdminModelCache()
+    runtime = SimpleNamespace(admin_models=lambda: cache)
     return Request(
         {
             "type": "http",
@@ -71,6 +74,7 @@ def _admin_request() -> Request:
             "path": "/admin/providers",
             "headers": [],
             "client": ("127.0.0.1", 12345),
+            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
         }
     )
 
@@ -351,10 +355,6 @@ async def test_update_providers_allows_disabled_provider_without_api_key(
 
     monkeypatch.setattr(providers, "write_audit", fake_write_audit)
 
-    from app.routes import admin_models
-
-    monkeypatch.setattr(admin_models, "invalidate_admin_models_cache", lambda: None)
-
     out = await providers.update_providers(
         ProvidersUpdateIn(
             items=[
@@ -411,7 +411,7 @@ async def test_update_providers_rejects_enabled_provider_with_disabled_proxy() -
             _admin_request(),
             SimpleNamespace(id="admin-1", email="admin@example.com"),
             db,  # type: ignore[arg-type]
-    )
+        )
 
     assert getattr(excinfo.value, "status_code", None) == 422
     assert "disabled proxy" in excinfo.value.detail["error"]["message"]
@@ -723,11 +723,6 @@ async def test_put_providers_persists_capability_flags(
 
     monkeypatch.setattr(providers, "write_audit", fake_audit)
     monkeypatch.setattr(providers, "validate_providers", lambda raw: None)
-
-    # 引入 admin_models 避免 invalidate cache 报错
-    from app.routes import admin_models
-
-    monkeypatch.setattr(admin_models, "invalidate_admin_models_cache", lambda: None)
 
     body = ProvidersUpdateIn(
         items=[

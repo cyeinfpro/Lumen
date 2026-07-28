@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TypedDict
 
 from lumen_core import sse_durable
@@ -42,16 +42,10 @@ _DURABLE_APPEND_CONFIG = sse_durable.DurableSseAppendConfig(
 )
 
 
-# Per-process monotonic only. Different API workers can still produce
-# non-comparable values, so clients must use Redis stream ids for replay
-# ordering and treat ts_ms as a display hint.
-@dataclass
-class _SSEPublishState:
-    last_ts_ms: int = 0
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-_sse_publish_state = _SSEPublishState()
+# Map the process monotonic clock onto the wall-clock epoch without mutable
+# process state. Redis stream ids remain the replay and ordering authority;
+# ts_ms is only a display hint.
+_MONOTONIC_EPOCH_OFFSET_MS = (time.time_ns() - time.monotonic_ns()) // 1_000_000
 
 
 class SSEPublishEvent(TypedDict):
@@ -70,12 +64,7 @@ class _PreparedSseEvent:
 
 
 async def _monotonic_ts_ms() -> int:
-    async with _sse_publish_state.lock:
-        now = int(time.time() * 1000)
-        if now <= _sse_publish_state.last_ts_ms:
-            now = _sse_publish_state.last_ts_ms + 1
-        _sse_publish_state.last_ts_ms = now
-        return now
+    return _MONOTONIC_EPOCH_OFFSET_MS + time.monotonic_ns() // 1_000_000
 
 
 async def _refresh_stream_ttl(redis: Any, stream_key: str) -> None:

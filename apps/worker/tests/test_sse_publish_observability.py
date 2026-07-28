@@ -145,9 +145,7 @@ def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch)
             raise RuntimeError("thread failed")
 
     httpd = FakeHttpd()
-    monkeypatch.setattr(observability._METRICS_SERVER, "started", False)
-    monkeypatch.setattr(observability._METRICS_SERVER, "httpd", None)
-    monkeypatch.setattr(observability._METRICS_SERVER, "thread", None)
+    runtime = observability.MetricsServerRuntime()
     monkeypatch.setattr(
         observability,
         "make_server",
@@ -156,11 +154,11 @@ def test_metrics_server_closes_bound_socket_when_thread_start_fails(monkeypatch)
     monkeypatch.setattr(observability.threading, "Thread", BrokenThread)
 
     with pytest.raises(RuntimeError, match="metrics server failed"):
-        observability.start_metrics_server(9101)
+        observability.start_metrics_server(9101, runtime=runtime)
 
     assert httpd.closed is True
-    assert observability._METRICS_SERVER.httpd is None
-    assert observability._METRICS_SERVER.started is False
+    assert runtime.httpd is None
+    assert runtime.started is False
 
 
 @pytest.mark.asyncio

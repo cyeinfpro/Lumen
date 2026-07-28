@@ -17,7 +17,6 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
 from typing import Any
 
 from redis.exceptions import WatchError
@@ -75,29 +74,14 @@ class SSEPublishRetryableError(RuntimeError):
         )
 
 
-@dataclass(slots=True)
-class _SseTimestampRuntime:
-    """Worker-process-local monotonic timestamp state."""
-
-    last_ts_ms: int = 0
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-# GEN-P2 ts_ms only orders events within one worker process. Redis stream IDs
-# remain the cross-process replay and ordering authority.
-_TIMESTAMP_RUNTIME = _SseTimestampRuntime()
-# Compatibility read-only reference for existing observability assertions.
-_TS_LOCK = _TIMESTAMP_RUNTIME.lock
+# Map the process monotonic clock onto the wall-clock epoch without mutable
+# process state. Redis stream ids remain the cross-process replay authority;
+# ts_ms is only a display hint.
+_MONOTONIC_EPOCH_OFFSET_MS = (time.time_ns() - time.monotonic_ns()) // 1_000_000
 
 
 async def _monotonic_ts_ms() -> int:
-    runtime = _TIMESTAMP_RUNTIME
-    async with runtime.lock:
-        now = int(time.time() * 1000)
-        if now <= runtime.last_ts_ms:
-            now = runtime.last_ts_ms + 1
-        runtime.last_ts_ms = now
-        return now
+    return _MONOTONIC_EPOCH_OFFSET_MS + time.monotonic_ns() // 1_000_000
 
 
 async def _refresh_stream_ttl(redis: Any, stream_key: str) -> None:
