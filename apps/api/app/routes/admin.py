@@ -45,15 +45,15 @@ from ..db import affected_rows, get_db
 from ..deps import AdminUser, verify_csrf
 from ..images.application.create_variant import CreateVariantService, VariantError
 from ..images.composition import get_variant_service
-from ..redis_client import get_redis
-from ..security import hash_password
-from ..services.admin import request_events as _request_events
-from ._admin_common import admin_http as _http, write_admin_audit
-from .images import (
+from ..images.domain.variants import (
     ALLOWED_VARIANTS,
     DISPLAY_VARIANT,
     VARIANT_MEDIA_TYPE,
 )
+from ..redis_client import get_redis
+from ..security import hash_password
+from ..services.admin import request_events as _request_events
+from ._admin_common import admin_http as _http, write_admin_audit
 from .media_delivery import (
     image_storage_path,
     image_storage_streaming_response,

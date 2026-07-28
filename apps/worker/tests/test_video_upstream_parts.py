@@ -11,7 +11,11 @@ _VIDEO_CLUSTER_PATHS = (
     Path(__file__).parents[1] / "app" / "video_upstream.py",
     Path(__file__).parents[1] / "app" / "video_artifacts.py",
     Path(__file__).parents[1] / "app" / "video_upstream_parts",
-    Path(__file__).parents[1] / "app" / "tasks" / "video_generation.py",
+    Path(__file__).parents[1]
+    / "app"
+    / "tasks"
+    / "video_generation_parts"
+    / "entrypoints.py",
     Path(__file__).parents[1] / "app" / "tasks" / "video_generation_parts",
 )
 

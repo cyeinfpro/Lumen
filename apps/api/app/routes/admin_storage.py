@@ -52,7 +52,7 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..config import settings
-from .images import sweep_orphan_image_files
+from ..images.application.storage_maintenance import sweep_orphan_image_files
 from ..runtime_settings import get_setting, update_settings
 
 
