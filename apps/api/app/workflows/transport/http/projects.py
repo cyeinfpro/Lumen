@@ -59,13 +59,10 @@ from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility e
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
-from ...adapters.operations.projects import (
-    build_project_lifecycle,
-    build_upsert_workflow_project,
-)
 from ...application.http_contracts import WorkflowAssetsAddIn
 from ...application.upsert_project import UpsertWorkflowProjectCommand
 from ...composition import WorkflowApplication
+from ...slices import project_lifecycle, upsert_workflow_project
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
 
@@ -119,7 +116,7 @@ async def patch_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WorkflowRunOut:
     result = await execute_workflow_action(
-        build_upsert_workflow_project(db).execute,
+        upsert_workflow_project(db).execute,
         command=UpsertWorkflowProjectCommand(
             user_id=user.id,
             run_id=workflow_run_id,
@@ -136,7 +133,7 @@ async def delete_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
     return await execute_workflow_action(
-        build_project_lifecycle(db).delete,
+        project_lifecycle(db).delete,
         user_id=user.id,
         run_id=workflow_run_id,
         account_mode=getattr(user, "account_mode", "wallet"),

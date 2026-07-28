@@ -14,9 +14,8 @@ from lumen_core.schema_models.workflows import (
 
 from ...db import get_db
 from ...deps import CurrentUser
-from ...workflows.adapters.sqlalchemy_reads import SQLAlchemyWorkflowRunReadAdapter
 from ...workflows.application.errors import InvalidWorkflowCursorError
-from ...workflows.application.queries import ListWorkflowRuns
+from ...workflows.slices import list_workflow_runs
 
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -31,7 +30,7 @@ async def list_workflows(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> WorkflowRunListOut:
     try:
-        result = await ListWorkflowRuns(SQLAlchemyWorkflowRunReadAdapter(db)).execute(
+        result = await list_workflow_runs(db).execute(
             user_id=user.id,
             workflow_type=type,
             cursor=cursor,
