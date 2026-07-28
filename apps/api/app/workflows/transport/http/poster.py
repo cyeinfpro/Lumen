@@ -21,13 +21,12 @@ from lumen_core.schemas import (
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
-from ...adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
-from ...application.create_run import CreateWorkflowRun
 from ...composition import WorkflowApplication
 from ...ports.run_creation import (
     CreatePosterRunCommand,
     PosterBrandAssets,
 )
+from ...slices import create_workflow_run
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
 
@@ -45,7 +44,7 @@ async def create_poster_design_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PosterDesignWorkflowCreateOut:
     result = await execute_workflow_action(
-        CreateWorkflowRun(SQLAlchemyWorkflowRunCreationAdapter(db, user)).create_poster,
+        create_workflow_run(db, user).create_poster,
         command=CreatePosterRunCommand(
             user_id=user.id,
             conversation_id=body.conversation_id,

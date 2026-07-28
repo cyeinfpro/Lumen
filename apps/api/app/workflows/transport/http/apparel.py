@@ -26,10 +26,9 @@ from lumen_core.schemas import (
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
-from ...adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
-from ...application.create_run import CreateWorkflowRun
 from ...composition import WorkflowApplication
 from ...ports.run_creation import CreateApparelRunCommand
+from ...slices import create_workflow_run
 from .delivery import binary_file_response
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
@@ -49,9 +48,7 @@ async def create_apparel_model_showcase(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApparelWorkflowCreateOut:
     result = await execute_workflow_action(
-        CreateWorkflowRun(
-            SQLAlchemyWorkflowRunCreationAdapter(db, user)
-        ).create_apparel,
+        create_workflow_run(db, user).create_apparel,
         command=CreateApparelRunCommand(
             user_id=user.id,
             product_image_ids=tuple(body.product_image_ids),
