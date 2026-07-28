@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import json
 import os
-from typing import Any
+import warnings
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, AsyncContextManager, AsyncIterator, Awaitable, Callable
 
 import httpx
 from fastapi import HTTPException
+from PIL import Image as PILImage
+from PIL import ImageOps, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.models import Image, ImageVariant
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     build_effective_provider_config,
@@ -22,6 +31,34 @@ from lumen_core.providers import (
 from lumen_core.schemas import PosterStyleAutoTagOut
 
 from .serialization import parse_tagging_text
+from .tagging_runtime import PosterTaggingRuntime
+
+
+POSTER_TAGGING_PREVIEW_MAX_SIDE = 1536
+POSTER_TAGGING_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+POSTER_TAGGING_SOURCE_MAX_BYTES = 64 * 1024 * 1024
+POSTER_TAGGING_MAX_PIXELS = 64_000_000
+POSTER_TAGGING_REQUEST_MAX_BYTES = 3 * 1024 * 1024
+
+
+class PosterTaggingPreviewError(ValueError):
+    pass
+
+
+class PosterTaggingRequestTooLarge(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class PosterTaggingPreview:
+    content: bytes
+    mime: str
+    width: int
+    height: int
+    source_kind: str
+
+    def data_url(self) -> str:
+        return f"data:{self.mime};base64,{base64.b64encode(self.content).decode('ascii')}"
 
 
 def auto_tag_concurrency() -> int:
@@ -76,6 +113,30 @@ def _tagging_request_body(
     }
 
 
+def checked_tagging_request_body(
+    *,
+    image_id: str,
+    image_url: str,
+    instructions: str,
+    max_bytes: int = POSTER_TAGGING_REQUEST_MAX_BYTES,
+) -> dict[str, Any]:
+    body = _tagging_request_body(
+        image_id=image_id,
+        image_url=image_url,
+        instructions=instructions,
+    )
+    encoded = json.dumps(
+        body,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > max_bytes:
+        raise PosterTaggingRequestTooLarge(
+            f"poster tagging request exceeds {max_bytes} bytes"
+        )
+    return body
+
+
 def _response_text(payload: Any) -> str:
     chunks: list[str] = []
     output = payload.get("output") if isinstance(payload, dict) else None
@@ -98,36 +159,175 @@ def _response_text(payload: Any) -> str:
     return "".join(chunks).strip()
 
 
+def _flatten_for_webp(image: PILImage.Image) -> PILImage.Image:
+    if "A" not in image.getbands() and "transparency" not in image.info:
+        return image.convert("RGB")
+    with image.convert("RGBA") as rgba:
+        background = PILImage.new("RGBA", rgba.size, (255, 255, 255, 255))
+        background.alpha_composite(rgba)
+        return background.convert("RGB")
+
+
+def _validate_source_dimensions(image: PILImage.Image) -> None:
+    width, height = image.size
+    if width <= 0 or height <= 0 or width * height > POSTER_TAGGING_MAX_PIXELS:
+        raise PosterTaggingPreviewError("poster tagging source exceeds pixel limit")
+
+
+def _encode_bounded_preview(image: PILImage.Image) -> tuple[bytes, tuple[int, int]]:
+    oriented = ImageOps.exif_transpose(image)
+    try:
+        _validate_source_dimensions(oriented)
+        oriented.thumbnail(
+            (POSTER_TAGGING_PREVIEW_MAX_SIDE, POSTER_TAGGING_PREVIEW_MAX_SIDE),
+            PILImage.Resampling.LANCZOS,
+        )
+        with _flatten_for_webp(oriented) as rgb:
+            for max_side in (1536, 1280, 1024, 768):
+                candidate = rgb.copy()
+                try:
+                    candidate.thumbnail(
+                        (max_side, max_side),
+                        PILImage.Resampling.LANCZOS,
+                    )
+                    for quality in (86, 76, 64, 52):
+                        output = io.BytesIO()
+                        candidate.save(
+                            output,
+                            format="WEBP",
+                            quality=quality,
+                            method=4,
+                        )
+                        content = output.getvalue()
+                        if len(content) <= POSTER_TAGGING_PREVIEW_MAX_BYTES:
+                            return content, candidate.size
+                finally:
+                    candidate.close()
+    finally:
+        if oriented is not image:
+            oriented.close()
+    raise PosterTaggingPreviewError("poster tagging preview exceeds byte limit")
+
+
+def _load_preview_file(
+    path: Path,
+    *,
+    source_kind: str,
+) -> PosterTaggingPreview:
+    size = path.stat().st_size
+    limit = (
+        POSTER_TAGGING_PREVIEW_MAX_BYTES
+        if source_kind == "preview1024"
+        else POSTER_TAGGING_SOURCE_MAX_BYTES
+    )
+    if size <= 0 or size > limit:
+        raise PosterTaggingPreviewError(
+            f"poster tagging {source_kind} exceeds source byte limit"
+        )
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+            with PILImage.open(path) as image:
+                _validate_source_dimensions(image)
+                image.draft(
+                    "RGB",
+                    (POSTER_TAGGING_PREVIEW_MAX_SIDE, POSTER_TAGGING_PREVIEW_MAX_SIDE),
+                )
+                image.load()
+                content, dimensions = _encode_bounded_preview(image)
+    except PosterTaggingPreviewError:
+        raise
+    except (
+        PILImage.DecompressionBombError,
+        PILImage.DecompressionBombWarning,
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise PosterTaggingPreviewError("poster tagging preview is unreadable") from exc
+    return PosterTaggingPreview(
+        content=content,
+        mime="image/webp",
+        width=dimensions[0],
+        height=dimensions[1],
+        source_kind=source_kind,
+    )
+
+
+async def load_tagging_preview(
+    runtime: Any,
+    db: AsyncSession,
+    *,
+    image_id: str,
+    user_id: str,
+) -> PosterTaggingPreview | None:
+    image = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.user_id == user_id,
+                Image.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if image is None:
+        return None
+    variant = (
+        await db.execute(
+            select(ImageVariant).where(
+                ImageVariant.image_id == image_id,
+                ImageVariant.kind == "preview1024",
+            )
+        )
+    ).scalar_one_or_none()
+    source_kind = "preview1024" if variant is not None else "bounded_preview"
+    storage_key = (
+        str(getattr(variant, "storage_key", "") or "")
+        if variant is not None
+        else str(getattr(image, "storage_key", "") or "")
+    )
+    if not storage_key:
+        return None
+    try:
+        return await asyncio.to_thread(
+            _load_preview_file,
+            runtime._storage_path(storage_key),
+            source_kind=source_kind,
+        )
+    except (OSError, PosterTaggingPreviewError) as exc:
+        runtime.logger.info(
+            "poster_tagging_failure reason=preview_unavailable image_id=%s "
+            "source_kind=%s err=%s",
+            image_id,
+            source_kind,
+            exc,
+        )
+        return None
+
+
 async def _request_provider(
+    tagging_runtime: PosterTaggingRuntime,
     provider: Any,
     *,
     request_body: dict[str, Any],
 ) -> tuple[str | None, str | None]:
     try:
         proxy_url = await resolve_provider_proxy_url(provider.proxy)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=25.0,
-                write=25.0,
-                pool=10.0,
-            ),
-            proxy=proxy_url,
-        ) as client:
-            base = provider.base_url.rstrip("/")
-            url = (
-                f"{base}/v1/responses"
-                if not base.endswith("/v1")
-                else f"{base}/responses"
-            )
-            response = await client.post(
-                url,
-                json=request_body,
-                headers={
-                    "authorization": f"Bearer {provider.api_key}",
-                    "content-type": "application/json",
-                },
-            )
+        client = await tagging_runtime.http_clients.client_for(proxy_url)
+        base = provider.base_url.rstrip("/")
+        url = (
+            f"{base}/v1/responses"
+            if not base.endswith("/v1")
+            else f"{base}/responses"
+        )
+        response = await client.post(
+            url,
+            json=request_body,
+            headers={
+                "authorization": f"Bearer {provider.api_key}",
+                "content-type": "application/json",
+            },
+        )
     except httpx.HTTPError as exc:
         return None, f"network: {exc}"
     if response.status_code >= 400:
@@ -145,38 +345,17 @@ async def call_tagging_upstream(
     *,
     image_id: str,
     user_id: str,
+    tagging_runtime: PosterTaggingRuntime,
 ) -> dict[str, Any]:
-    image = (
-        await db.execute(
-            select(runtime.Image).where(
-                runtime.Image.id == image_id,
-                runtime.Image.user_id == user_id,
-                runtime.Image.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if image is None:
-        return {}
-    storage_key = (image.storage_key or "").strip()
-    if not storage_key:
-        return {}
-    try:
-        raw = runtime._storage_path(storage_key).read_bytes()
-    except Exception as exc:  # noqa: BLE001
-        runtime.logger.info(
-            "poster_style auto_tag api: read image failed key=%s err=%s",
-            storage_key,
-            exc,
-        )
-        return {}
-    if not raw:
-        return {}
-    mime = (
-        image.mime
-        if isinstance(image.mime, str) and image.mime.startswith("image/")
-        else "image/png"
+    preview = await load_tagging_preview(
+        runtime,
+        db,
+        image_id=image_id,
+        user_id=user_id,
     )
-    image_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    if preview is None:
+        return {}
+    image_url = preview.data_url()
 
     providers_spec = runtime.get_spec("providers")
     raw_providers = (
@@ -203,14 +382,39 @@ async def call_tagging_upstream(
         return {}
 
     instructions = _tagging_instructions()
-    request_body = _tagging_request_body(
-        image_id=image_id,
-        image_url=image_url,
-        instructions=instructions,
+    try:
+        request_body = checked_tagging_request_body(
+            image_id=image_id,
+            image_url=image_url,
+            instructions=instructions,
+        )
+    except PosterTaggingRequestTooLarge as exc:
+        runtime.logger.info(
+            "poster_tagging_failure reason=request_too_large image_id=%s "
+            "preview_bytes=%s err=%s",
+            image_id,
+            len(preview.content),
+            exc,
+        )
+        return {}
+    runtime.logger.info(
+        "poster_tagging_request image_id=%s source=%s preview_bytes=%s "
+        "request_bytes=%s",
+        image_id,
+        preview.source_kind,
+        len(preview.content),
+        len(
+            json.dumps(
+                request_body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ),
     )
     last_error: str | None = None
     for provider in ordered:
         text, error = await _request_provider(
+            tagging_runtime,
             provider,
             request_body=request_body,
         )
@@ -226,12 +430,19 @@ async def call_tagging_upstream(
     return {}
 
 
+@asynccontextmanager
+async def _unlimited_capacity() -> AsyncIterator[None]:
+    yield
+
+
 async def auto_tag_item(
     runtime: Any,
     *,
     db: AsyncSession,
     user_id: str,
     item_id: str,
+    capacity: AsyncContextManager[None] | None = None,
+    upstream: Callable[..., Awaitable[dict[str, Any]]] | None = None,
 ) -> PosterStyleAutoTagOut:
     row = await runtime._find_user_item(db, user_id=user_id, item_id=item_id)
     if row is None:
@@ -244,8 +455,9 @@ async def auto_tag_item(
             422,
         )
 
-    async with runtime._poster_style_auto_tag_semaphore():
-        raw_payload = await runtime._api_call_poster_style_tagging_upstream(
+    upstream_call = upstream or runtime._api_call_poster_style_tagging_upstream
+    async with capacity or _unlimited_capacity():
+        raw_payload = await upstream_call(
             db,
             image_id=cover_id,
             user_id=user_id,
@@ -318,6 +530,7 @@ async def auto_tag_item(
 
 async def run_auto_tag_in_background(
     runtime: Any,
+    tagging_runtime: PosterTaggingRuntime,
     user_id: str,
     item_id: str,
 ) -> None:
@@ -325,10 +538,27 @@ async def run_auto_tag_in_background(
         from app.db import SessionLocal
 
         async with SessionLocal() as session:
-            await runtime._auto_tag_poster_style_item(
+            async def upstream(
+                db: AsyncSession,
+                *,
+                image_id: str,
+                user_id: str,
+            ) -> dict[str, Any]:
+                return await call_tagging_upstream(
+                    runtime,
+                    db,
+                    image_id=image_id,
+                    user_id=user_id,
+                    tagging_runtime=tagging_runtime,
+                )
+
+            await auto_tag_item(
+                runtime,
                 db=session,
                 user_id=user_id,
                 item_id=item_id,
+                capacity=tagging_runtime.capacity.hold(),
+                upstream=upstream,
             )
     except HTTPException as exc:
         runtime.logger.info(
@@ -344,3 +574,18 @@ async def run_auto_tag_in_background(
             item_id,
             exc,
         )
+
+
+__all__ = [
+    "POSTER_TAGGING_PREVIEW_MAX_BYTES",
+    "POSTER_TAGGING_PREVIEW_MAX_SIDE",
+    "POSTER_TAGGING_REQUEST_MAX_BYTES",
+    "PosterTaggingPreview",
+    "PosterTaggingPreviewError",
+    "PosterTaggingRequestTooLarge",
+    "auto_tag_concurrency",
+    "auto_tag_item",
+    "call_tagging_upstream",
+    "checked_tagging_request_body",
+    "load_tagging_preview",
+]

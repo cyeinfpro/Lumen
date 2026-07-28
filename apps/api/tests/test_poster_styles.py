@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from app.routes import _poster_library as plib
 from app.routes import poster_styles
+from app.services.poster_styles import resources as poster_style_resources
 from app.workflows.adapters import library_sync_operation
 from lumen_core.constants import (
     POSTER_STYLE_CATEGORIES,
@@ -1279,8 +1280,63 @@ async def test_delete_preset_item_does_not_duplicate_existing_hide(
 
 
 @pytest.mark.asyncio
+async def test_create_item_schedules_one_compatibility_background_task() -> None:
+    scheduled: list[tuple[Any, tuple[Any, ...]]] = []
+
+    class BackgroundTasks:
+        def add_task(self, function: Any, *args: Any) -> None:
+            scheduled.append((function, args))
+
+    async def validate_owned_images(
+        _db: Any,
+        *,
+        user_id: str,
+        image_ids: list[str],
+    ) -> None:
+        assert user_id == "user-1"
+        assert image_ids == ["image-1"]
+
+    async def background_task(*_args: Any) -> None:
+        raise AssertionError("background task must not run inline")
+
+    runtime = SimpleNamespace(
+        _validate_owned_image_ids=validate_owned_images,
+        _normalize_category=lambda value: value,
+        _clean_optional_text=lambda value, **_kwargs: value,
+        _normalize_palette=lambda value: value,
+        _normalize_recommended_aspects=lambda value: value,
+        _normalize_style_tags=lambda value: value,
+        _poster_style_folder_for_category=lambda value: value,
+        _item_out_from_row=lambda value: value,
+        _run_auto_tag_in_background=background_task,
+    )
+    tagging_runtime = SimpleNamespace()
+    db = _StubDb()
+
+    row = await poster_style_resources.create_item(
+        runtime,
+        body=PosterStyleCreateIn(
+            cover_image_id="image-1",
+            title="Poster",
+            category="illustration",
+        ),
+        user=_member_user(),
+        db=db,
+        background_tasks=BackgroundTasks(),
+        tagging_runtime=tagging_runtime,
+    )
+
+    assert db.commits == 1
+    assert scheduled == [
+        (
+            background_task,
+            (tagging_runtime, "user-1", row.id),
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
@@ -1290,11 +1346,11 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
     ) -> dict[str, Any]:
         return {}
 
-    monkeypatch.setattr(
-        poster_styles, "_api_call_poster_style_tagging_upstream", _empty_upstream
-    )
     out = await poster_styles._auto_tag_poster_style_item(
-        db=db, user_id="user-1", item_id="user:pstyle-1"
+        db=db,
+        user_id="user-1",
+        item_id="user:pstyle-1",
+        upstream=_empty_upstream,
     )
     assert out.style_tags == []
     assert row.auto_tagged_at is None
@@ -1303,7 +1359,6 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
 
 @pytest.mark.asyncio
 async def test_auto_tag_persists_when_provider_returns_signal(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
@@ -1317,11 +1372,11 @@ async def test_auto_tag_persists_when_provider_returns_signal(
             "notes": "清新现代",
         }
 
-    monkeypatch.setattr(
-        poster_styles, "_api_call_poster_style_tagging_upstream", _vision
-    )
     out = await poster_styles._auto_tag_poster_style_item(
-        db=db, user_id="user-1", item_id="user:pstyle-1"
+        db=db,
+        user_id="user-1",
+        item_id="user:pstyle-1",
+        upstream=_vision,
     )
     assert out.style_tags == ["扁平", "矢量"]
     assert out.category == "illustration"
@@ -1343,8 +1398,7 @@ def test_poster_style_auto_tag_concurrency_env_is_clamped(
 
 
 @pytest.mark.asyncio
-async def test_auto_tag_runs_provider_call_inside_rate_gate(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_auto_tag_runs_provider_call_inside_distributed_capacity(
 ) -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
@@ -1360,22 +1414,27 @@ async def test_auto_tag_runs_provider_call_inside_rate_gate(
             return None
 
     gate = Gate()
-    monkeypatch.setattr(poster_styles, "_poster_style_auto_tag_semaphore", lambda: gate)
 
     async def _vision(_db: Any, *, image_id: str, user_id: str) -> dict[str, Any]:
         assert gate.entered == 1
         return {"style_tags": ["扁平"], "notes": "ok"}
 
-    monkeypatch.setattr(
-        poster_styles, "_api_call_poster_style_tagging_upstream", _vision
-    )
-
     out = await poster_styles._auto_tag_poster_style_item(  # noqa: SLF001
-        db=db, user_id="user-1", item_id="user:pstyle-1"
+        db=db,
+        user_id="user-1",
+        item_id="user:pstyle-1",
+        capacity=gate,
+        upstream=_vision,
     )
 
     assert gate.entered == 1
     assert out.style_tags == ["扁平"]
+
+
+def test_route_module_has_no_mutable_auto_tag_runtime_state() -> None:
+    assert not hasattr(poster_styles, "_AUTO_TAG_SEMAPHORE_STATE")
+    assert not hasattr(poster_styles, "_poster_style_auto_tag_semaphore")
+    assert not hasattr(poster_styles, "_enqueue_poster_style_tagging_background")
 
 
 # --------------------------- Generate prompt --------------------------------
