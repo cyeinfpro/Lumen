@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Awaitable
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.canvas_models import (
@@ -34,6 +35,7 @@ from lumen_core.schemas import (
     VideoReferenceMediaIn,
 )
 
+from ..idempotency.advisory import lock_user_key
 from ..services.task_submission import (
     create_canvas_image_task,
     create_canvas_video_task,
@@ -432,6 +434,81 @@ async def _idempotent_run(
     return run, execution
 
 
+async def _serialized_idempotent_run(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> tuple[CanvasRun, CanvasNodeExecution] | None:
+    replay = await _idempotent_run(
+        db,
+        user_id=user_id,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
+    if replay is not None:
+        return replay
+    await lock_user_key(
+        db,
+        "canvas-submission",
+        user_id,
+        idempotency_key,
+    )
+    return await _idempotent_run(
+        db,
+        user_id=user_id,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+    )
+
+
+async def _flush_run_or_recover(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> tuple[CanvasRun, CanvasNodeExecution] | None:
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        try:
+            winner = await _idempotent_run(
+                db,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+        except HTTPException:
+            raise
+        except Exception as recovery_exc:
+            logger.exception(
+                "canvas submission winner recovery failed user=%s key_hash=%s",
+                user_id,
+                stable_hash({"key": idempotency_key})[:16],
+            )
+            raise canvas_http(
+                "canvas_submission_unavailable",
+                "Canvas submission is temporarily unavailable",
+                503,
+            ) from recovery_exc
+        if winner is not None:
+            return winner
+        logger.exception(
+            "canvas submission conflict had no committed winner user=%s key_hash=%s",
+            user_id,
+            stable_hash({"key": idempotency_key})[:16],
+        )
+        raise canvas_http(
+            "canvas_submission_unavailable",
+            "Canvas submission is temporarily unavailable",
+            503,
+        ) from exc
+    return None
+
+
 def _canvas_attachment_role(handle: str, item: dict[str, Any]) -> str:
     role = item.get("role")
     if handle == "source" and role in {None, "reference"}:
@@ -505,7 +582,7 @@ async def execute_node(
             "auto_select_on_success": body.auto_select_on_success,
         }
     )
-    replay = await _idempotent_run(
+    replay = await _serialized_idempotent_run(
         db,
         user_id=user.id,
         idempotency_key=body.idempotency_key,
@@ -520,14 +597,6 @@ async def execute_node(
         canvas_id=canvas_id,
         lock=True,
     )
-    replay = await _idempotent_run(
-        db,
-        user_id=user.id,
-        idempotency_key=body.idempotency_key,
-        request_fingerprint=request_fingerprint,
-    )
-    if replay is not None:
-        return replay
     active = (
         await db.execute(
             select(CanvasRun, CanvasNodeExecution)
@@ -618,8 +687,16 @@ async def execute_node(
         summary_jsonb={"document_revision": body.document_revision},
         started_at=now,
     )
+    # The unique constraint remains the second defense after advisory locking.
     db.add(run)
-    await db.flush()
+    replay = await _flush_run_or_recover(
+        db,
+        user_id=run.user_id,
+        idempotency_key=run.idempotency_key,
+        request_fingerprint=run.request_fingerprint,
+    )
+    if replay is not None:
+        return replay
     config = dict(resolved.node.get("config") or {})
     definition_hash = canvas_node_definition_hash(resolved.node)
     input_hash = canvas_input_hash(resolved.snapshot)

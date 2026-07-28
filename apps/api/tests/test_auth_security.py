@@ -44,6 +44,7 @@ class _Db:
         self.results_seen = []
         self.added = []
         self.rolled_back = False
+        self.committed = False
 
     async def execute(self, stmt):
         self.results_seen.append(stmt)
@@ -63,7 +64,7 @@ class _Db:
         return None
 
     async def commit(self):
-        return None
+        self.committed = True
 
     async def rollback(self):
         self.rolled_back = True
@@ -314,6 +315,83 @@ async def test_runtime_defaults_include_navigation_visibility(
     assert defaults.nav_visibility.projects is True
     assert defaults.nav_visibility.assets is False
     assert defaults.canvas_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_login_runtime_defaults_failure_preserves_committed_success(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    user = SimpleNamespace(
+        id="user-1",
+        email="member@example.com",
+        display_name="Member",
+        role="member",
+        account_mode="wallet",
+        notification_email=True,
+        default_system_prompt_id=None,
+        password_hash="hash",
+        deleted_at=None,
+    )
+    db = _Db(results=[user])
+    response = Response()
+    degraded_count = 0
+
+    async def no_limit(*_args, **_kwargs) -> None:
+        return None
+
+    async def no_audit(*_args, **_kwargs) -> bool:
+        return True
+
+    async def fake_session(*_args, **_kwargs):
+        return SimpleNamespace(id="session-1"), "refresh-1"
+
+    async def fail_runtime_defaults(_db):
+        raise RuntimeError("runtime settings unavailable")
+
+    def record_degraded() -> None:
+        nonlocal degraded_count
+        degraded_count += 1
+
+    monkeypatch.setattr(auth, "get_redis", lambda: object())
+    monkeypatch.setattr(auth.AUTH_ADMIN_LOGIN_LIMITER, "check", no_limit)
+    monkeypatch.setattr(auth, "verify_password", lambda *_args: True)
+    monkeypatch.setattr(auth, "_create_session", fake_session)
+    monkeypatch.setattr(auth, "write_audit", no_audit)
+    monkeypatch.setattr(auth, "_runtime_defaults", fail_runtime_defaults)
+    monkeypatch.setattr(
+        auth,
+        "_record_runtime_defaults_degraded",
+        record_degraded,
+    )
+
+    with caplog.at_level("WARNING"):
+        result = await auth.login(
+            LoginIn(email=user.email, password="password123"),
+            _request(method="POST"),
+            response,
+            db,  # type: ignore[arg-type]
+        )
+
+    cookies = [
+        value.decode().lower()
+        for name, value in response.raw_headers
+        if name == b"set-cookie"
+    ]
+    assert db.committed is True
+    assert result.id == user.id
+    assert result.runtime_defaults.fast is True
+    assert result.runtime_defaults.canvas_enabled is False
+    assert result.runtime_defaults.nav_visibility.model_dump() == {
+        "studio": True,
+        "video": True,
+        "projects": True,
+        "assets": True,
+    }
+    assert any(cookie.startswith("session=") for cookie in cookies)
+    assert any(cookie.startswith("csrf=") for cookie in cookies)
+    assert degraded_count == 1
+    assert "auth_runtime_defaults_degraded" in caplog.text
 
 
 @pytest.mark.asyncio
