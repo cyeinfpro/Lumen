@@ -19,6 +19,7 @@ from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
     EVENTS_STREAM_TTL_SECONDS,
+    user_channel,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,23 @@ async def _refresh_stream_ttl(redis: Any, stream_key: str) -> None:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _live_channels(channel: str, user_id: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((channel, user_channel(user_id))))
+
+
+def _queue_live_event_publish(
+    pipe: Any,
+    *,
+    event: SSEPublishEvent,
+    envelope: dict[str, Any],
+    stream_id: str,
+) -> None:
+    envelope["sse_id"] = stream_id
+    payload_json = _json(envelope)
+    for live_channel in _live_channels(event["channel"], event["user_id"]):
+        pipe.publish(live_channel, payload_json)
 
 
 def _payload_event_id(payload: dict[str, Any]) -> str:
@@ -436,8 +454,12 @@ async def publish_sse_events(
         await _refresh_stream_ttl(redis, stream_key)
     publish_pipe = pipe_fn(transaction=False)
     for event, envelope, stream_id in zip(events, envelopes, stream_ids, strict=False):
-        envelope["sse_id"] = stream_id
-        publish_pipe.publish(event["channel"], _json(envelope))
+        _queue_live_event_publish(
+            publish_pipe,
+            event=event,
+            envelope=envelope,
+            stream_id=stream_id,
+        )
     await publish_pipe.execute()
     return stream_ids
 
@@ -489,7 +511,9 @@ async def _publish_sse_event_single(
 
     await _refresh_stream_ttl(redis, stream_key)
     envelope["sse_id"] = stream_id
-    await redis.publish(channel, _json(envelope))
+    payload_json = _json(envelope)
+    for live_channel in _live_channels(channel, user_id):
+        await redis.publish(live_channel, payload_json)
     return stream_id
 
 

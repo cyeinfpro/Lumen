@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import email.utils
 import inspect
 import os
@@ -11,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.upstream_parts import direct_requests
 from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
@@ -697,6 +699,54 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
         exc,
         retriable=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_has_wall_clock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_post_with_retry(**_kwargs: Any) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def fake_image_request_timeout(
+        _size: str,
+        *,
+        runtime: object | None = None,
+    ) -> tuple[httpx.Timeout, float]:
+        _ = runtime
+        return httpx.Timeout(1.0), 0.01
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core, "post_with_retry", fake_post_with_retry
+    )
+    monkeypatch.setattr(
+        direct_requests,
+        "_image_request_timeout",
+        fake_image_request_timeout,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+            _image_request(),
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+
+    exc = exc_info.value
+    assert (
+        exc.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+    )
+    assert exc.payload["timeout_s"] == 0.01
+    assert exc.payload["upstream_result_unknown"] is True
+    assert exc.payload["exception"] == "TimeoutError"
 
 
 @pytest.mark.asyncio

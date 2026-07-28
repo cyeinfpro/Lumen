@@ -1,8 +1,8 @@
 """SSE 事件发布辅助。
 
 两个动作组成一次事件发布：
-1. `PUBLISH {channel}` —— API 侧 SSE Hub 订阅了 task:{id} / user:{uid} / conv:{cid}
-   PubSub 通道，用于实时推送给在线浏览器；消息体是 `{"event": name, "data": {...}}`。
+1. `PUBLISH {channel}` + `PUBLISH user:{uid}` —— 保留任务/会话专用消费者，
+   同时让 Web 用稳定用户频道接收全部实时事件；消息体共享同一 `sse_id`。
 2. `XADD events:user:{uid}` —— 回放 buffer。用户断线重连后用 Last-Event-ID 从这条
    Stream 里补齐未看到的事件。MAXLEN ≈ 86400（~24h）按 DESIGN §8.2。
 
@@ -26,6 +26,7 @@ from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
     EVENTS_STREAM_TTL_SECONDS,
+    user_channel,
 )
 from lumen_core.models import OutboxDeadLetter
 
@@ -749,26 +750,28 @@ async def publish_event(
 
     payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
 
-    # GEN-P1-1: PUBLISH 加 1 次轻量重试。订阅者已经能从 XADD stream 回放，
-    # 这里更多是给短暂抖动一个第二次机会，避免在线用户进度卡住。
-    for attempt in range(2):
-        try:
-            await redis.publish(channel, payload_json)
-            break
-        except Exception as exc:  # noqa: BLE001
-            if attempt == 0:
+    # GEN-P1-1: PUBLISH 加 1 次轻量重试。专用频道服务 Telegram 等消费者；
+    # 用户频道让 Web 在任务集合变化时不必重建 EventSource。
+    live_channels = tuple(dict.fromkeys((channel, user_channel(user_id))))
+    for live_channel in live_channels:
+        for attempt in range(2):
+            try:
+                await redis.publish(live_channel, payload_json)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 0:
+                    logger.warning(
+                        "publish_event: PUBLISH retry channel=%s err=%s",
+                        live_channel,
+                        exc,
+                    )
+                    await asyncio.sleep(0.05)
+                    continue
                 logger.warning(
-                    "publish_event: PUBLISH retry channel=%s err=%s",
-                    channel,
+                    "publish_event: PUBLISH failed channel=%s err=%s",
+                    live_channel,
                     exc,
                 )
-                await asyncio.sleep(0.05)
-                continue
-            logger.warning(
-                "publish_event: PUBLISH failed channel=%s err=%s",
-                channel,
-                exc,
-            )
 
 
 async def _persist_sse_dlq(

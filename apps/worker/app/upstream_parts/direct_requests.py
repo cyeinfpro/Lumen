@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -357,16 +358,17 @@ async def _direct_generate_image_once(
     ) = await _image_request_timeout(size, runtime=runtime)
     started = services.infrastructure.time.monotonic()
     try:
-        resp = await services.core.post_with_retry(
-            client=client,
-            url=url,
-            headers=headers,
-            json_body=body,
-            timeout=request_timeout,
-            retry_httpx_exceptions=False,
-            before_attempt=before_attempt,
-        )
-    except services.infrastructure.httpx.TimeoutException as exc:
+        async with asyncio.timeout(read_timeout_s):
+            resp = await services.core.post_with_retry(
+                client=client,
+                url=url,
+                headers=headers,
+                json_body=body,
+                timeout=request_timeout,
+                retry_httpx_exceptions=False,
+                before_attempt=before_attempt,
+            )
+    except (TimeoutError, services.infrastructure.httpx.TimeoutException) as exc:
         duration_ms = (
             services.infrastructure.time.monotonic() - started
         ) * 1000.0

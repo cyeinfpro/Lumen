@@ -1,4 +1,10 @@
-import { deepStrictEqual, equal } from "node:assert/strict";
+import {
+  deepStrictEqual,
+  doesNotMatch,
+  equal,
+  match,
+} from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { loadTsModule } from "../../../test-support/load-ts-module.mjs";
 
@@ -107,4 +113,18 @@ test("invalid json, shape, version, and unknown event are observable", () => {
     }),
     { kind: "unknown", type: "future.event" },
   );
+});
+
+test("web realtime uses one stable user channel across task changes", () => {
+  const source = readFileSync(
+    new URL("./useLumenRealtime.ts", import.meta.url),
+    "utf8",
+  );
+  match(
+    source,
+    /function channelsFor\(userId: string \| null\): string\[\]/,
+  );
+  match(source, /return userId \? \[`user:\$\{userId\}`\] : \[\];/);
+  doesNotMatch(source, /add\(`task:/);
+  doesNotMatch(source, /generationTaskIds|assistantTaskIds/);
 });

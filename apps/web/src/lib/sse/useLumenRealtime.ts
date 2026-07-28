@@ -31,7 +31,6 @@ import {
 } from "@/store/useChatStore";
 import type {
   AssistantMessage,
-  Generation,
   Message,
 } from "@/lib/types";
 import {
@@ -69,7 +68,6 @@ const EVENT_NAMES = [
   "account_settings_updated",
 ] as const;
 
-const MAX_CHANNELS = 62;
 const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
 
 function sortedTaskIds(ids: Iterable<string>): string[] {
@@ -77,51 +75,6 @@ function sortedTaskIds(ids: Iterable<string>): string[] {
   // MAX_CHANNELS 名额。completion_id 各处已有真值判断，但 generation_ids 数组元素
   // 只判了前缀（`"".startsWith("opt-")` 为 false 会漏过），故在汇聚点统一过滤。
   return [...new Set(ids)].filter((id) => id.length > 0).sort();
-}
-
-function generationTaskIds(
-  generations: Record<string, Generation>,
-): string[] {
-  return sortedTaskIds(
-    Object.values(generations)
-      .filter(
-        (generation) =>
-          (generation.status === "queued" ||
-            generation.status === "running") &&
-          !generation.id.startsWith("opt-"),
-      )
-      .map((generation) => generation.id),
-  );
-}
-
-function assistantTaskIds(messages: Message[]): string[] {
-  const ids: string[] = [];
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    const assistant = message as AssistantMessage;
-    if (
-      assistant.status !== "pending" &&
-      assistant.status !== "streaming"
-    ) {
-      continue;
-    }
-    if (
-      assistant.completion_id &&
-      !assistant.completion_id.startsWith("opt-")
-    ) {
-      ids.push(assistant.completion_id);
-    }
-    for (const generationId of assistant.generation_ids ?? []) {
-      if (!generationId.startsWith("opt-")) ids.push(generationId);
-    }
-    if (
-      assistant.generation_id &&
-      !assistant.generation_id.startsWith("opt-")
-    ) {
-      ids.push(assistant.generation_id);
-    }
-  }
-  return sortedTaskIds(ids);
 }
 
 function completionIds(messages: Message[]): string[] {
@@ -231,21 +184,8 @@ async function refreshCompletions(): Promise<void> {
   );
 }
 
-function channelsFor(
-  userId: string | null,
-  conversationId: string | null,
-  taskIds: readonly string[],
-): string[] {
-  const channels: string[] = [];
-  const add = (channel: string) => {
-    if (!channels.includes(channel) && channels.length < MAX_CHANNELS) {
-      channels.push(channel);
-    }
-  };
-  if (userId) add(`user:${userId}`);
-  if (conversationId) add(`conv:${conversationId}`);
-  for (const id of taskIds) add(`task:${id}`);
-  return channels;
+function channelsFor(userId: string | null): string[] {
+  return userId ? [`user:${userId}`] : [];
 }
 
 async function invalidateSnapshotQueries(
@@ -285,23 +225,10 @@ async function invalidateSnapshotQueries(
 
 export function useLumenRealtime(): void {
   const userId = useChatStore((state) => state.currentUserId);
-  const conversationId = useChatStore((state) => state.currentConvId);
-  const generations = useChatStore((state) => state.generations);
-  const messages = useChatStore((state) => state.messages);
   const queryClient = useQueryClient();
   const lastSnapshotAt = useRef(0);
 
-  const taskIds = useMemo(
-    () => sortedTaskIds([
-      ...generationTaskIds(generations),
-      ...assistantTaskIds(messages),
-    ]),
-    [generations, messages],
-  );
-  const channels = useMemo(
-    () => channelsFor(userId, conversationId, taskIds),
-    [conversationId, taskIds, userId],
-  );
+  const channels = useMemo(() => channelsFor(userId), [userId]);
 
   const effectContext = useMemo<LumenRealtimeEffectContext>(
     () => ({

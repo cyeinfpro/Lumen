@@ -2905,7 +2905,10 @@ async def test_api_sse_publish_falls_back_when_lua_cannot_xadd() -> None:
     assert redis.deleted == [dedupe_key]
     assert redis.kv[dedupe_key] == "1710000000000-7"
     assert redis.stream_entries[0][0] == "events:user:user-1"
-    assert redis.published[0][0] == "conv:conv-1"
+    assert [channel for channel, _payload in redis.published] == [
+        "conv:conv-1",
+        "user:user-1",
+    ]
     published = json.loads(redis.published[0][1])
     assert published["sse_id"] == "1710000000000-7"
 
@@ -3044,19 +3047,31 @@ async def test_publish_message_appended_batches_multiple_messages() -> None:
 
     assert len(redis.pipes) == 2
     assert [call[0] for call in redis.pipes[0].calls] == ["eval", "eval"]
-    assert [call[0] for call in redis.pipes[1].calls] == ["publish", "publish"]
+    assert [call[0] for call in redis.pipes[1].calls] == ["publish"] * 4
     publish_payloads = [json.loads(call[1][1]) for call in redis.pipes[1].calls]
     assert [payload["sse_id"] for payload in publish_payloads] == [
         "1710000000000-0",
+        "1710000000000-0",
+        "1710000000000-1",
         "1710000000000-1",
     ]
     assert [payload["channel"] for payload in publish_payloads] == [
         "conv:conv-1",
         "conv:conv-1",
+        "conv:conv-1",
+        "conv:conv-1",
     ]
     assert [payload["data"]["message_id"] for payload in publish_payloads] == [
         "msg-1",
+        "msg-1",
         "msg-2",
+        "msg-2",
+    ]
+    assert [call[1][0] for call in redis.pipes[1].calls] == [
+        "conv:conv-1",
+        "user:user-1",
+        "conv:conv-1",
+        "user:user-1",
     ]
 
 
