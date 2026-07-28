@@ -128,16 +128,32 @@ resources = ["filesystem", "postgres"]
 [[rules]]
 name = "web-realtime"
 paths = [
-  "apps/web/src/lib/useSSE.ts",
-  "apps/web/src/lib/sse/**",
+  "apps/web/src/features/realtime/**",
+  "apps/web/src/shared/realtime/**",
   "apps/web/src/components/SSEProvider.tsx",
 ]
 commands = [
-  "cd apps/web && npm test -- src/lib/useSSE.test.ts src/components/SSEProvider.test.ts src/lib/sse/connectionMachine.test.ts src/lib/sse/eventSourceTransport.test.ts src/lib/sse/leaderElection.test.ts src/lib/sse/replayCoordinator.test.ts src/lib/sse/runtime.test.ts src/lib/sse/validation.test.ts",
-  "cd apps/web && npm test -- src/lib/sse/progressCoalescer.test.ts",
+  "cd apps/web && npm test -- src/features/realtime/model/useSSE.test.ts src/components/SSEProvider.test.ts src/features/realtime/model/connectionMachine.test.ts src/features/realtime/api/eventSourceTransport.test.ts src/features/realtime/model/leaderElection.test.ts src/features/realtime/model/replayCoordinator.test.ts src/features/realtime/model/runtime.test.ts src/features/realtime/model/validation.test.ts src/features/realtime/model/progressCoalescer.test.ts src/features/featureArchitecture.test.ts",
 ]
 gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["sse-replay"]
+resources = []
+
+[[rules]]
+name = "web-generation"
+paths = [
+  "apps/web/src/features/generation/**",
+  "apps/web/src/store/chat/generationActions.ts",
+  "apps/web/src/store/chat/runtime.ts",
+  "apps/web/src/store/chat/sseEventActions.ts",
+  "apps/web/src/store/chat/taskRecovery.ts",
+  "apps/web/src/store/useChatStore.ts",
+]
+commands = [
+  "cd apps/web && npm test -- src/features/generation/model/generationState.test.ts src/features/generation/model/lifecycleEvents.test.ts src/features/featureArchitecture.test.ts __tests__/chat-hardening.test.mjs __tests__/worker-ui-hardening.test.mjs",
+]
+gates = ["web-architecture", "web-complexity", "web-typecheck"]
+risk = ["generation-state", "web-feature-boundary"]
 resources = []
 
 [[rules]]
@@ -277,7 +293,7 @@ paths = [
   "apps/worker/app/realtime/**",
 ]
 commands = [
-  "uv run pytest -q apps/api/tests/test_events_route.py apps/api/tests/test_worker_sse_publish.py apps/worker/tests/test_sse_publish_observability.py",
+  "uv run pytest -q apps/api/tests/test_events_route.py apps/api/tests/test_realtime_module_boundaries.py apps/api/tests/test_worker_sse_publish.py apps/worker/tests/test_sse_publish_observability.py",
 ]
 gates = [
   "python-ruff",
@@ -298,9 +314,11 @@ paths = [
   "apps/worker/app/tasks/generation_parts/runtime*.py",
   "apps/worker/app/tasks/generation_parts/admission*.py",
   "apps/worker/app/tasks/generation_parts/dispatch_store*.py",
+  "apps/worker/app/tasks/generation_parts/runner*.py",
+  "apps/worker/app/tasks/generation_parts/__init__.py",
 ]
 commands = [
-  "uv run pytest -q apps/worker/tests/test_image_queue_lock_lease.py apps/worker/tests/test_generation_multiqueue.py apps/worker/tests/test_generation_storage.py",
+  "uv run pytest -q apps/worker/tests/test_image_queue_lock_lease.py apps/worker/tests/test_generation_multiqueue.py apps/worker/tests/test_generation_storage.py apps/worker/tests/test_generation_scheduler_decomposition.py",
 ]
 gates = [
   "python-ruff",
@@ -356,16 +374,13 @@ resources = ["postgres", "filesystem"]
 [[rules]]
 name = "web-stream-assets"
 paths = [
+  "apps/web/src/app/assets/page.tsx",
+  "apps/web/src/app/stream/page.tsx",
   "apps/web/src/components/ui/lightbox/**",
-  "apps/web/src/components/ui/stream/**",
-  "apps/web/src/components/ui/shell/DesktopStream.tsx",
-  "apps/web/src/components/ui/shell/MobileStream.tsx",
-  "apps/web/src/lib/queries/stream.ts",
-  "apps/web/src/lib/imagePreload.ts",
   "apps/web/src/features/assets/**",
 ]
 commands = [
-  "cd apps/web && npm test -- src/components/ui/stream/sourceCandidates.test.ts src/components/ui/stream/VirtualMasonry.test.ts src/lib/prewarmScheduler.test.ts src/lib/streamQuery.test.ts src/components/ui/stream/AssetTile.test.ts src/components/ui/shell/StreamSearchWiring.test.ts __tests__/admin-lightbox-dead-code.test.mjs src/components/ui/shell/StudioLayoutContracts.test.ts",
+  "cd apps/web && npm test -- src/features/assets/model/sourceCandidates.test.ts src/features/assets/model/virtualMasonry.test.ts src/features/assets/model/prewarmScheduler.test.ts src/features/assets/api/queries.test.ts src/features/assets/ui/AssetTile.test.ts src/features/assets/containers/AssetStreamWiring.test.ts src/features/featureArchitecture.test.ts __tests__/admin-lightbox-dead-code.test.mjs src/components/ui/shell/StudioLayoutContracts.test.ts",
 ]
 gates = ["web-architecture", "web-complexity", "web-typecheck"]
 risk = ["asset-loading"]
