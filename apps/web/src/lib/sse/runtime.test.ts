@@ -277,6 +277,58 @@ test("shared runtime recovers with only the subscribers that provide adapters", 
   unsubscribePassive();
 });
 
+test("shared runtime fails recovery when any real adapter fails", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const successfulStatuses: RealtimeStatus[] = [];
+  const failingStatuses: RealtimeStatus[] = [];
+  let successfulCalls = 0;
+  let failingCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribeSuccessful = instance.subscribe(
+    subscriber(successfulStatuses, async () => {
+      successfulCalls += 1;
+      return { cursor: "should-not-open", syncedAt: 100 };
+    }),
+  );
+  const unsubscribeFailing = instance.subscribe(
+    subscriber(failingStatuses, async () => {
+      failingCalls += 1;
+      throw new Error("snapshot unavailable");
+    }),
+  );
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(
+    0,
+    "recovery_required",
+    JSON.stringify({ reason: "connection_slot_lost", cursor: "10-0" }),
+  );
+  await flushPromises();
+
+  equal(successfulCalls, 1);
+  equal(failingCalls, 1);
+  equal(transport.opens.length, 1);
+  equal(successfulStatuses.at(-1), "error");
+  equal(failingStatuses.at(-1), "error");
+  equal(
+    hub.messages.filter(
+      (message) => (message as { type?: string }).type === "recovery_failed",
+    ).length,
+    1,
+  );
+  equal(
+    hub.messages.filter(
+      (message) => (message as { type?: string }).type === "recovery_complete",
+    ).length,
+    0,
+  );
+  unsubscribeSuccessful();
+  unsubscribeFailing();
+});
+
 test("last subscriber aborts recovery and stale completion has no effects", async () => {
   const clock = new FakeClock();
   const hub = new FakeBroadcastHub();
