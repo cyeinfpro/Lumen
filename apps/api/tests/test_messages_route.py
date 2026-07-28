@@ -1440,9 +1440,7 @@ async def test_silent_generation_creation_persists_request_hash_on_every_generat
     )
 
     expected_hash = messages._silent_generation_request_hash(body)  # noqa: SLF001
-    generations = [
-        item for item in db.added if isinstance(item, messages.Generation)
-    ]
+    generations = [item for item in db.added if isinstance(item, messages.Generation)]
     assert out.generation_ids == [generation.id for generation in generations]
     assert len(generations) == 2
     assert all(
@@ -1627,6 +1625,31 @@ async def test_post_message_returns_when_post_commit_publish_times_out(
 
     assert out.user_message.id
     assert assistant_published == [out.assistant_message.id]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_publishes_share_one_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[str] = []
+
+    async def slow_publish(label: str) -> None:
+        started.append(label)
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(messages, "_POST_COMMIT_PUBLISH_TIMEOUT_S", 0.01)
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    await messages._await_post_commit_publishes(  # noqa: SLF001
+        ("message_appended", slow_publish("message_appended"), None),
+        ("assistant_task", slow_publish("assistant_task"), "assistant-1"),
+        user_id="user-1",
+        conv_id="conv-1",
+    )
+
+    assert set(started) == {"message_appended", "assistant_task"}
+    assert loop.time() - started_at < 0.05
 
 
 @pytest.mark.asyncio

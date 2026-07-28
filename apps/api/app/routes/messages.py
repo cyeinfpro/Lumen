@@ -682,9 +682,54 @@ async def _await_post_commit_publish(
     conv_id: str,
     assistant_msg_id: str | None = None,
 ) -> None:
-    try:
-        await asyncio.wait_for(awaitable, timeout=_POST_COMMIT_PUBLISH_TIMEOUT_S)
-    except TimeoutError:
+    await _await_post_commit_publishes(
+        (label, awaitable, assistant_msg_id),
+        user_id=user_id,
+        conv_id=conv_id,
+    )
+
+
+async def _await_post_commit_publishes(
+    *publishes: tuple[str, Awaitable[Any], str | None],
+    user_id: str,
+    conv_id: str,
+) -> None:
+    async def run_one(
+        label: str,
+        awaitable: Awaitable[Any],
+        assistant_msg_id: str | None,
+    ) -> None:
+        try:
+            await awaitable
+        except Exception:
+            logger.warning(
+                "post_commit_publish failed label=%s user=%s conv=%s msg=%s",
+                label,
+                user_id,
+                conv_id,
+                assistant_msg_id,
+                exc_info=True,
+            )
+
+    scheduled = [
+        (
+            label,
+            assistant_msg_id,
+            asyncio.ensure_future(run_one(label, awaitable, assistant_msg_id)),
+        )
+        for label, awaitable, assistant_msg_id in publishes
+    ]
+    if not scheduled:
+        return
+    _, pending = await asyncio.wait(
+        [task for _, _, task in scheduled],
+        timeout=_POST_COMMIT_PUBLISH_TIMEOUT_S,
+    )
+    if not pending:
+        return
+    for label, assistant_msg_id, task in scheduled:
+        if task not in pending:
+            continue
         logger.warning(
             "post_commit_publish timeout label=%s user=%s conv=%s msg=%s timeout_s=%.1f",
             label,
@@ -693,15 +738,8 @@ async def _await_post_commit_publish(
             assistant_msg_id,
             _POST_COMMIT_PUBLISH_TIMEOUT_S,
         )
-    except Exception:
-        logger.warning(
-            "post_commit_publish failed label=%s user=%s conv=%s msg=%s",
-            label,
-            user_id,
-            conv_id,
-            assistant_msg_id,
-            exc_info=True,
-        )
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _lookup_idempotent_post(
@@ -983,31 +1021,32 @@ async def submit_user_message(
         await _enqueue_memory_reembed("memory", memory_id)
 
     # ---- best-effort publish ----
-    await _await_post_commit_publish(
-        "message_appended",
-        _publish_message_appended(
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            message_ids=[user_msg.id, result.assistant_msg.id],
+    await _await_post_commit_publishes(
+        (
+            "message_appended",
+            _publish_message_appended(
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                message_ids=[user_msg.id, result.assistant_msg.id],
+            ),
+            None,
+        ),
+        (
+            "assistant_task",
+            _publish_assistant_task(
+                db=db,
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                assistant_msg_id=result.assistant_msg.id,
+                outbox_payloads=result.outbox_payloads,
+                outbox_rows=result.outbox_rows,
+            ),
+            result.assistant_msg.id,
         ),
         user_id=user.id,
         conv_id=conv_id,
-    )
-    await _await_post_commit_publish(
-        "assistant_task",
-        _publish_assistant_task(
-            db=db,
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            assistant_msg_id=result.assistant_msg.id,
-            outbox_payloads=result.outbox_payloads,
-            outbox_rows=result.outbox_rows,
-        ),
-        user_id=user.id,
-        conv_id=conv_id,
-        assistant_msg_id=result.assistant_msg.id,
     )
 
     return PostMessageOut(
@@ -1315,31 +1354,32 @@ async def create_silent_generation(
 
     await db.refresh(result.assistant_msg)
 
-    await _await_post_commit_publish(
-        "message_appended",
-        _publish_message_appended(
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            message_ids=[result.assistant_msg.id],
+    await _await_post_commit_publishes(
+        (
+            "message_appended",
+            _publish_message_appended(
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                message_ids=[result.assistant_msg.id],
+            ),
+            None,
+        ),
+        (
+            "assistant_task",
+            _publish_assistant_task(
+                db=db,
+                redis=redis,
+                user_id=user.id,
+                conv_id=conv_id,
+                assistant_msg_id=result.assistant_msg.id,
+                outbox_payloads=result.outbox_payloads,
+                outbox_rows=result.outbox_rows,
+            ),
+            result.assistant_msg.id,
         ),
         user_id=user.id,
         conv_id=conv_id,
-    )
-    await _await_post_commit_publish(
-        "assistant_task",
-        _publish_assistant_task(
-            db=db,
-            redis=redis,
-            user_id=user.id,
-            conv_id=conv_id,
-            assistant_msg_id=result.assistant_msg.id,
-            outbox_payloads=result.outbox_payloads,
-            outbox_rows=result.outbox_rows,
-        ),
-        user_id=user.id,
-        conv_id=conv_id,
-        assistant_msg_id=result.assistant_msg.id,
     )
 
     return SilentGenerationOut(
@@ -1379,5 +1419,6 @@ async def get_message(
 publish_message_appended = _publish_message_appended
 DEFAULT_IMAGE_OUTPUT_FORMAT = _DEFAULT_IMAGE_OUTPUT_FORMAT
 await_post_commit_publish = _await_post_commit_publish
+await_post_commit_publishes = _await_post_commit_publishes
 idempotency_lookup_keys = _idempotency_lookup_keys
 message_alive_filters = _message_alive_filters
