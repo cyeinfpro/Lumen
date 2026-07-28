@@ -5,14 +5,52 @@ from typing import Any
 import pytest
 
 from app.upstream_parts import upstream_impl as upstream
+from app.upstream_parts import StagedImageFile, cleanup_owned_generated_payload
 from lumen_core.url_security import (
     PublicHttpBodyTooLarge,
     PublicHttpDownload,
+    PublicHttpStagedDownload,
 )
 
 
 TEST_UPSTREAM_RUNTIME = upstream.build_image_upstream_runtime()
 TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+
+
+@pytest.mark.asyncio
+async def test_result_download_streams_to_owned_staged_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_download(
+        url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        destination = kwargs["destination"]
+        destination.write_bytes(b"png-bytes")
+        return PublicHttpStagedDownload(
+            url=url,
+            status_code=200,
+            headers={"content-type": "image/png"},
+            path=destination,
+            size=9,
+            sha256=upstream.hashlib.sha256(b"png-bytes").hexdigest(),
+        )
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        fake_download,
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.fetch_image_url_as_bytes(
+        "https://cdn.example/result.png"
+    )
+
+    assert isinstance(result, StagedImageFile)
+    assert result.path.read_bytes() == b"png-bytes"
+    assert result.owned is True
+    cleanup_owned_generated_payload(result)
+    assert not result.path.exists()
 
 
 @pytest.mark.asyncio
@@ -57,13 +95,13 @@ async def test_image_job_result_uses_bounded_dns_pinned_downloader(
 async def test_result_download_rejects_non_public_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def reject_result_url(url: str, **_kwargs: Any) -> PublicHttpDownload:
+    async def reject_result_url(url: str, **_kwargs: Any) -> PublicHttpStagedDownload:
         assert url == "http://169.254.169.254/latest/meta-data"
         raise ValueError("base_url host is not allowed")
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure,
-        "download_public_http_url",
+        "download_public_http_url_to_file",
         reject_result_url,
     )
 
@@ -81,7 +119,7 @@ async def test_result_download_rejects_non_public_url(
 async def test_result_download_maps_stream_limit_to_stream_too_large(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def oversized(url: str, **_kwargs: Any) -> PublicHttpDownload:
+    async def oversized(url: str, **_kwargs: Any) -> PublicHttpStagedDownload:
         raise PublicHttpBodyTooLarge(
             url=url,
             max_bytes=TEST_UPSTREAM_SERVICES.core.IMAGE_JOB_DOWNLOAD_MAX_BYTES,
@@ -91,6 +129,11 @@ async def test_result_download_maps_stream_limit_to_stream_too_large(
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure, "download_public_http_url", oversized
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        oversized,
     )
 
     with pytest.raises(upstream.UpstreamError) as excinfo:
@@ -110,17 +153,27 @@ async def test_result_download_maps_stream_limit_to_stream_too_large(
 async def test_result_download_reports_final_redirect_http_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def missing(_url: str, **_kwargs: Any) -> PublicHttpDownload:
-        return PublicHttpDownload(
+    async def missing(
+        _url: str,
+        **kwargs: Any,
+    ) -> PublicHttpStagedDownload:
+        return PublicHttpStagedDownload(
             url="https://cdn.example/missing.png",
             status_code=404,
             headers={"content-type": "application/json"},
-            body=b'{"error":"missing"}',
+            path=kwargs["destination"],
+            size=0,
+            sha256="0" * 64,
             redirects=1,
         )
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure, "download_public_http_url", missing
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure,
+        "download_public_http_url_to_file",
+        missing,
     )
 
     with pytest.raises(upstream.UpstreamError) as excinfo:

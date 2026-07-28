@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import socket
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
+from pathlib import Path
 from time import monotonic
 from typing import Any, cast
 from urllib.parse import urljoin, urlsplit
@@ -55,6 +57,19 @@ class PublicHttpDownload:
     headers: dict[str, str]
     body: bytes
     body_truncated: bool = False
+    redirects: int = 0
+
+
+@dataclass(frozen=True)
+class PublicHttpStagedDownload:
+    """A bounded response streamed to a caller-owned local file."""
+
+    url: str
+    status_code: int
+    headers: dict[str, str]
+    path: Path
+    size: int
+    sha256: str
     redirects: int = 0
 
 
@@ -538,15 +553,159 @@ async def download_public_http_url(
                 )
 
 
+async def _stream_response_to_file(
+    response: Any,
+    *,
+    destination: Path,
+    max_bytes: int,
+    url: str,
+    status_code: int,
+) -> tuple[int, str]:
+    received = 0
+    digest = hashlib.sha256()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with destination.open("wb") as output:
+            async for chunk in response.aiter_bytes():
+                received += len(chunk)
+                if received > max_bytes:
+                    raise PublicHttpBodyTooLarge(
+                        url=url,
+                        max_bytes=max_bytes,
+                        received_bytes=received,
+                        status_code=status_code,
+                    )
+                output.write(chunk)
+                digest.update(chunk)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    return received, digest.hexdigest()
+
+
+async def download_public_http_url_to_file(
+    url: str,
+    *,
+    destination: Path,
+    max_bytes: int,
+    max_redirects: int = 5,
+    allow_http: bool = True,
+    allowed_private_origins: Sequence[str] = (),
+    dns_timeout_s: float = 2.0,
+    timeout: Any = None,
+    headers: Mapping[str, str] | None = None,
+) -> PublicHttpStagedDownload:
+    """Stream a DNS-pinned public response to a bounded staging file."""
+
+    import httpx
+
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    if max_redirects < 0:
+        raise ValueError("max_redirects must be non-negative")
+
+    trusted_origins = {_http_origin(origin) for origin in allowed_private_origins}
+    request_headers = {
+        key: value
+        for key, value in (headers or {}).items()
+        if key.lower() not in {"accept-encoding", "host"}
+    }
+    request_headers["Accept-Encoding"] = "identity"
+    request_timeout = timeout or httpx.Timeout(30.0, connect=5.0)
+    current_url = url.strip()
+    redirects = 0
+
+    while True:
+        allow_private = bool(trusted_origins) and (
+            _http_origin(current_url) in trusted_origins
+        )
+        target = await resolve_public_http_target(
+            current_url,
+            allow_http=allow_http,
+            allow_private=allow_private,
+            allow_unresolved=False,
+            dns_timeout_s=dns_timeout_s,
+            strip_trailing_slash=False,
+        )
+        transport = pinned_async_http_transport(target)
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=request_timeout,
+        ) as client:
+            async with client.stream(
+                "GET",
+                target.url,
+                headers=request_headers,
+            ) as response:
+                status_code = response.status_code
+                response_headers = dict(response.headers)
+                if status_code in _REDIRECT_STATUSES:
+                    location = (response.headers.get("location") or "").strip()
+                    if not location:
+                        raise PublicHttpRedirectError(
+                            "redirect response is missing Location",
+                            url=target.url,
+                            status_code=status_code,
+                        )
+                    if redirects >= max_redirects:
+                        raise PublicHttpRedirectError(
+                            "too many redirects",
+                            url=target.url,
+                            status_code=status_code,
+                        )
+                    current_url = urljoin(target.url, location)
+                    redirects += 1
+                    continue
+
+                if not 200 <= status_code < 300:
+                    return PublicHttpStagedDownload(
+                        url=target.url,
+                        status_code=status_code,
+                        headers=response_headers,
+                        path=destination,
+                        size=0,
+                        sha256=hashlib.sha256(b"").hexdigest(),
+                        redirects=redirects,
+                    )
+                declared_size = _content_length(response.headers)
+                if declared_size is not None and declared_size > max_bytes:
+                    raise PublicHttpBodyTooLarge(
+                        url=target.url,
+                        max_bytes=max_bytes,
+                        received_bytes=declared_size,
+                        status_code=status_code,
+                    )
+                received, digest = await _stream_response_to_file(
+                    response,
+                    destination=destination,
+                    max_bytes=max_bytes,
+                    url=target.url,
+                    status_code=status_code,
+                )
+                return PublicHttpStagedDownload(
+                    url=target.url,
+                    status_code=status_code,
+                    headers=response_headers,
+                    path=destination,
+                    size=received,
+                    sha256=digest,
+                    redirects=redirects,
+                )
+
+
 __all__ = [
     "assert_public_http_target",
     "canonical_host",
     "download_public_http_url",
+    "download_public_http_url_to_file",
     "is_forbidden_ip",
     "is_private_host",
     "pinned_async_http_transport",
     "PublicHttpBodyTooLarge",
     "PublicHttpDownload",
+    "PublicHttpStagedDownload",
     "PublicHttpRedirectError",
     "PublicHttpTarget",
     "resolve_public_http_target",

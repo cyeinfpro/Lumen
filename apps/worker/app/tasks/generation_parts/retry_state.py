@@ -26,6 +26,7 @@ from lumen_core.constants import (
 from lumen_core.models import Generation, Message
 
 from ...provider_runtime.errors import UpstreamError
+from ...upstream_parts import GeneratedImageResult
 from ...generation_dispatch import DispatchIdentity
 from ...retry import RetryDecision, is_moderation_block, is_retriable
 from ...storage import StorageDiskFullError
@@ -461,7 +462,7 @@ async def await_with_lease_guard(
 
 
 async def consume_image_iter_close_result(
-    image_iter: AsyncIterator[tuple[str, str | None]] | None,
+    image_iter: AsyncIterator[GeneratedImageResult] | None,
     *,
     task_id: str,
 ) -> None:
@@ -482,12 +483,12 @@ async def consume_image_iter_close_result(
 
 
 async def anext_image_with_guards(
-    image_iter: AsyncIterator[tuple[str, str | None]],
+    image_iter: AsyncIterator[GeneratedImageResult],
     lease_lost: asyncio.Event,
     *,
     redis: Any,
     task_id: str,
-) -> tuple[str, str | None] | None:
+) -> GeneratedImageResult | None:
     try:
         return await await_with_lease_guard(
             image_iter.__anext__(),

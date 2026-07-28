@@ -19,6 +19,7 @@ _INFRASTRUCTURE_NAMES = frozenset(
         "base64",
         "close_provider_proxy_tunnels",
         "download_public_http_url",
+        "download_public_http_url_to_file",
         "endpoint_kind_allowed",
         "hashlib",
         "httpx",
@@ -166,7 +167,9 @@ def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
     )
     if missing:
         names = ", ".join(sorted(missing))
-        raise RuntimeError(f"upstream composition is missing required dependencies: {names}")
+        raise RuntimeError(
+            f"upstream composition is missing required dependencies: {names}"
+        )
 
     groups: dict[str, SimpleNamespace] = {
         field: SimpleNamespace() for field in UpstreamServices.__dataclass_fields__

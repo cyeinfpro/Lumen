@@ -24,6 +24,7 @@ from ...byok_runtime import (
 from ...config import Settings
 from ...provider_runtime.contracts import ResolvedProvider
 from ...provider_runtime.upstream_services import ImageUpstreamRuntime
+from ...upstream_parts import GeneratedImageResult
 from ...storage import LocalStorage
 from ...storage_writes import StorageWriteCoordinator
 from ...upstream_parts.image_dispatch import edit_image, generate_image
@@ -567,7 +568,7 @@ class DefaultGenerationProvider:
     def generate(
         self,
         request: GenerationProviderRequest,
-    ) -> AsyncIterator[tuple[str, str | None]]:
+    ) -> AsyncIterator[GeneratedImageResult]:
         request_context = ImageRequestContext.create(
             trace_id=request.context.trace_id,
             retry_attempt=request.context.retry_attempt,
@@ -600,7 +601,7 @@ class DefaultGenerationProvider:
     def edit(
         self,
         request: GenerationProviderEditRequest,
-    ) -> AsyncIterator[tuple[str, str | None]]:
+    ) -> AsyncIterator[GeneratedImageResult]:
         common = request.request
         request_context = ImageRequestContext.create(
             trace_id=common.context.trace_id,

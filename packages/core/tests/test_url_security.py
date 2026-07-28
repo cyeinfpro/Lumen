@@ -13,6 +13,7 @@ from lumen_core.url_security import (
     PublicHttpTarget,
     assert_public_http_target,
     download_public_http_url,
+    download_public_http_url_to_file,
     is_forbidden_ip,
     is_private_host,
     pinned_async_http_transport,
@@ -359,6 +360,39 @@ async def test_download_public_http_url_revalidates_each_redirect(
     assert result.url == "https://cdn.example/final.png"
     assert result.body == b"abcdef"
     assert result.redirects == 1
+    assert body_stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_download_public_http_url_to_file_streams_without_body_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    body_stream = _ChunkStream([b"abc", b"def"])
+
+    async def fake_resolve(url: str, **_kwargs: Any) -> PublicHttpTarget:
+        return PublicHttpTarget(url, ("93.184.216.34",))
+
+    monkeypatch.setattr(url_security, "resolve_public_http_target", fake_resolve)
+    monkeypatch.setattr(
+        url_security,
+        "pinned_async_http_transport",
+        lambda *_args, **_kwargs: httpx.MockTransport(
+            lambda _request: httpx.Response(200, stream=body_stream)
+        ),
+    )
+    destination = tmp_path / "result.part"
+
+    result = await download_public_http_url_to_file(
+        "https://cdn.example/result.png",
+        destination=destination,
+        max_bytes=16,
+    )
+
+    assert result.path == destination
+    assert result.size == 6
+    assert result.sha256 == url_security.hashlib.sha256(b"abcdef").hexdigest()
+    assert destination.read_bytes() == b"abcdef"
     assert body_stream.closed is True
 
 

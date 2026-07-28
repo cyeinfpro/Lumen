@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import Generation
 
 from ...provider_runtime.contracts import ResolvedProvider
+from ...upstream_parts import GeneratedImageResult
 from .event_delivery import GenerationEventDelivery
 from .image_artifact_contracts import PostprocessedGeneratedImage
 
@@ -172,12 +173,12 @@ class GenerationProviderService(Protocol):
     def generate(
         self,
         request: GenerationProviderRequest,
-    ) -> AsyncIterator[tuple[str, str | None]]: ...
+    ) -> AsyncIterator[GeneratedImageResult]: ...
 
     def edit(
         self,
         request: GenerationProviderEditRequest,
-    ) -> AsyncIterator[tuple[str, str | None]]: ...
+    ) -> AsyncIterator[GeneratedImageResult]: ...
 
 
 class GenerationQueueService(Protocol):

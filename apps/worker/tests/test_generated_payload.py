@@ -16,6 +16,7 @@ from app.upstream_parts.generated_payload import (
     decode_inline_image_base64,
     generated_payload_size,
     generated_payload_to_base64,
+    materialize_generated_payload,
     read_generated_payload_bytes,
     validate_remote_image_url,
 )
@@ -50,6 +51,12 @@ def test_legacy_bytes_are_wrapped_without_copying() -> None:
 
     assert payload == InlineImageBytes(raw)
     assert payload.data is raw
+
+
+def test_materialize_inline_payload_reuses_bytes_without_base64() -> None:
+    raw = b"direct-bytes"
+
+    assert materialize_generated_payload(InlineImageBytes(raw)) is raw
 
 
 def test_payload_size_is_known_only_after_remote_download() -> None:
@@ -118,9 +125,7 @@ def test_staged_payload_materialization_verifies_size_and_hash(
     )
 
     assert read_generated_payload_bytes(payload) == raw
-    assert generated_payload_to_base64(payload) == base64.b64encode(raw).decode(
-        "ascii"
-    )
+    assert generated_payload_to_base64(payload) == base64.b64encode(raw).decode("ascii")
 
 
 def test_staged_payload_materialization_rejects_metadata_mismatch(

@@ -65,6 +65,7 @@ from lumen_core.providers import (
 from lumen_core.url_security import (
     PublicHttpBodyTooLarge,  # noqa: F401 - late-bound request facade
     download_public_http_url,  # noqa: F401 - late-bound request facade
+    download_public_http_url_to_file,  # noqa: F401 - late-bound request facade
     pinned_async_http_transport,  # noqa: F401 - late-bound reference facade
     resolve_public_http_target,  # noqa: F401 - late-bound reference facade
 )
@@ -589,9 +590,7 @@ def _transparent_matte_upstream_options(
         output_format=output_format,
         background=background,
         hooks=upstream_image_requests.TransparentMatteHooks(
-            is_transparent_image_request=(
-                services.core.is_transparent_image_request
-            ),
+            is_transparent_image_request=(services.core.is_transparent_image_request),
             append_transparent_matte_prompt=(
                 services.core.append_transparent_matte_prompt
             ),
