@@ -84,7 +84,7 @@ export function RuntimeResilienceStatus() {
           onClick={recover}
           aria-label={unauthorized ? "登录" : "立即恢复实时连接"}
           title={unauthorized ? "登录" : "立即恢复实时连接"}
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-[var(--focus-outline)]"
+          className="inline-flex h-8 min-h-11 w-8 min-w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-[var(--focus-outline)] md:min-h-8 md:min-w-8"
         >
           <ActionIcon className="h-4 w-4" aria-hidden />
         </button>
