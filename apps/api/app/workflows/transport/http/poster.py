@@ -45,9 +45,7 @@ async def create_poster_design_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PosterDesignWorkflowCreateOut:
     result = await execute_workflow_action(
-        CreateWorkflowRun(
-            SQLAlchemyWorkflowRunCreationAdapter(db, user)
-        ).create_poster,
+        CreateWorkflowRun(SQLAlchemyWorkflowRunCreationAdapter(db, user)).create_poster,
         command=CreatePosterRunCommand(
             user_id=user.id,
             conversation_id=body.conversation_id,

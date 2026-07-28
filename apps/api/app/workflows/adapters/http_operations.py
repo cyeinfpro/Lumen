@@ -309,9 +309,7 @@ class ModelLibraryWorkflowOperationsAdapter:
     async def clear_apparel_model_library_jobs(
         self, *, user: object, db: object
     ) -> object:
-        return await model_library.clear_apparel_model_library_jobs(
-            user=user, db=db
-        )
+        return await model_library.clear_apparel_model_library_jobs(user=user, db=db)
 
     async def save_apparel_model_library_job_item(
         self,

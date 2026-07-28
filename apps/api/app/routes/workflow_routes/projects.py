@@ -31,9 +31,7 @@ async def list_workflows(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> WorkflowRunListOut:
     try:
-        result = await ListWorkflowRuns(
-            SQLAlchemyWorkflowRunReadAdapter(db)
-        ).execute(
+        result = await ListWorkflowRuns(SQLAlchemyWorkflowRunReadAdapter(db)).execute(
             user_id=user.id,
             workflow_type=type,
             cursor=cursor,
