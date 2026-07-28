@@ -9,12 +9,13 @@ from typing import Any
 from lumen_core.constants import DEFAULT_CHAT_INSTRUCTIONS, DEFAULT_CHAT_MODEL
 from lumen_core.models import Message
 
-from .runtime import CompletionPorts
+from .contracts import CompletionRedis, CompletionServices
+from .legacy_adapter import LegacyCompletionAdapter
 
 
 @dataclass(frozen=True, slots=True)
 class CompletionRequest:
-    redis: Any
+    redis: CompletionRedis
     task_id: str
     lease_token: str
     task_start: float
@@ -93,7 +94,8 @@ class SettlementState:
 
 @dataclass(slots=True)
 class CompletionExecution:
-    ports: CompletionPorts
+    ports: LegacyCompletionAdapter
+    services: CompletionServices
     request: CompletionRequest
     preparation: PreparationState = field(default_factory=PreparationState)
     streaming: StreamingState = field(default_factory=StreamingState)

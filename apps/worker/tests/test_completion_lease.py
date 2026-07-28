@@ -3,15 +3,17 @@ from __future__ import annotations
 # ruff: noqa: E402
 
 import asyncio
+from contextlib import contextmanager
+from dataclasses import fields
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 import pytest
 
 from app import sse_publish
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.tasks.completion_parts import default_runtime as completion
-from .task_parts_runtime_testing import synchronize_module_ports
+from app.tasks.completion_parts.contracts import CompletionCommand, CompletionServices
 from lumen_core.constants import (
     EV_COMP_DELTA,
     EV_COMP_FAILED,
@@ -19,6 +21,47 @@ from lumen_core.constants import (
     EV_COMP_STARTED,
     EV_COMP_SUCCEEDED,
 )
+
+
+@contextmanager
+def _synchronize_completion_services(
+    monkeypatch: pytest.MonkeyPatch,
+    services: CompletionServices,
+) -> Iterator[None]:
+    adapters = (
+        services.repository,
+        services.context_builder,
+        services.tool_executor,
+        services.upstream_client,
+        services.billing,
+        services.events,
+        services.lease_retry,
+    )
+    bindings: dict[str, tuple[Any, Any]] = {}
+    for adapter in adapters:
+        for field in fields(adapter):
+            bindings[field.name] = (adapter, getattr(adapter, field.name))
+
+    original_setattr = monkeypatch.setattr
+
+    def synchronized_setattr(
+        target: Any,
+        name: str,
+        value: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        original_setattr(target, name, value, *args, **kwargs)
+        if target is completion and name in bindings:
+            owner, _original = bindings[name]
+            object.__setattr__(owner, name, value)
+
+    monkeypatch.setattr = synchronized_setattr  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        for name, (owner, value) in bindings.items():
+            object.__setattr__(owner, name, value)
 
 
 @pytest.fixture(autouse=True)
@@ -30,13 +73,13 @@ def _sync_completion_ports(
             services=object(),  # type: ignore[arg-type]
         ),
     )
-    with synchronize_module_ports(
+    with _synchronize_completion_services(
         monkeypatch,
-        completion,
-        runtime.ports,
+        runtime.services,
     ):
+
         async def run_completion(ctx: dict[str, Any], task_id: str) -> None:
-            await runtime.run(ctx, task_id)
+            await runtime.run(CompletionCommand.from_arq(ctx, task_id))
 
         monkeypatch.setattr(completion, "run_completion", run_completion)
         yield runtime
