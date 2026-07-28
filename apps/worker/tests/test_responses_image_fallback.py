@@ -13,7 +13,6 @@ import pytest
 from PIL import Image as _PILImage
 
 from app import provider_pool
-from app import upstream
 from app.tasks.generation_parts import request_options
 from app.upstream_clients.image_job_auth import (
     image_job_headers,
@@ -28,6 +27,7 @@ from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
 )
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
@@ -1121,9 +1121,7 @@ def test_retry_attempt_injects_cache_busters() -> None:
     assert body3["prompt_cache_key"] != body2["prompt_cache_key"]
 
     # 后续默认请求保持 attempt=1，不受前两次显式构建影响。
-    body_after = _responses_body(
-        **base_kwargs
-    )  # noqa: SLF001
+    body_after = _responses_body(**base_kwargs)  # noqa: SLF001
     assert "prompt_cache_key" not in body_after
 
 
@@ -1627,7 +1625,9 @@ async def test_direct_edit_transparent_background_uses_matte_png_request(
         return 200, {"data": [{"b64_json": PNG_B64}]}
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport,
+        "curl_post_multipart",
+        fake_curl_post_multipart,
     )
 
     await TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once(
@@ -2165,7 +2165,9 @@ def test_normalize_reference_image_converts_non_rgb_modes_to_rgb() -> None:
     _PILImage.new("L", (3, 3), color=200).save(buf, format="PNG")
     gray_png = buf.getvalue()
 
-    out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(gray_png)
+    out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(
+        gray_png
+    )
     assert mime == "image/webp"
     _assert_webp_bytes(out_bytes)
     with _PILImage.open(_io.BytesIO(out_bytes)) as reloaded:
@@ -2176,7 +2178,9 @@ def test_normalize_reference_image_converts_non_rgb_modes_to_rgb() -> None:
 
 def test_normalize_reference_image_raises_on_undecodable() -> None:
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        TEST_UPSTREAM_SERVICES.references.normalize_reference_image(b"not an image at all")
+        TEST_UPSTREAM_SERVICES.references.normalize_reference_image(
+            b"not an image at all"
+        )
     assert exc_info.value.error_code == "bad_reference_image"
 
 

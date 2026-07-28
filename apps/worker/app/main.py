@@ -44,21 +44,24 @@ from .storage_writes import StorageWriteCoordinator
 from .tasks import auto_title as auto_title_tasks
 from .tasks import byok_retention as byok_retention_tasks
 from .tasks import canvas_execution_reconcile as canvas_reconcile_tasks
-from .tasks import completion as completion_tasks
 from .tasks import context_summary as context_summary_tasks
 from .tasks import generation as generation_tasks
 from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
-from .tasks import video_generation as video_generation_tasks
 from .tasks import volcano_assets as volcano_asset_tasks
+from .tasks.completion_parts import entrypoints as completion_tasks
 from .tasks.completion_parts.default_runtime import build_completion_runtime
 from .tasks.generation_parts.default_runtime import build_generation_runtime
+from .tasks.video_generation_parts import entrypoints as video_generation_tasks
 from .tasks.video_generation_parts.default_runtime import (
     build_video_generation_runtime,
 )
+from .upstream_parts.entrypoints import (
+    close_client,
+    validate_effective_image_job_configuration,
+)
 from .upstream_parts.upstream_impl import build_image_upstream_runtime
-from .upstream import close_client, validate_effective_image_job_configuration
 
 _startup_logger = logging.getLogger(__name__)
 _PROVIDER_CRON_TIMEOUT_S = 30.0

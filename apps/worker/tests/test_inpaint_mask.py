@@ -20,11 +20,11 @@ from typing import Any
 import pytest
 from PIL import Image as _PILImage
 
-from app import upstream
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 from app.tasks.generation_parts import composition_support as support
 from app.tasks.generation_parts import references
 from app.upstream_parts.image_execution import ImageExecutionRequest
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.constants import GenerationErrorCode as EC
 
@@ -128,7 +128,9 @@ async def test_direct_edit_image_once_includes_mask_field(
         return None
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport,
+        "curl_post_multipart",
+        fake_curl_post_multipart,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
@@ -187,7 +189,9 @@ async def test_direct_edit_image_once_omits_mask_when_none(
         return None
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport,
+        "curl_post_multipart",
+        fake_curl_post_multipart,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.infrastructure,
@@ -819,7 +823,9 @@ def _install_run_image_once_stubs(
         fake_direct_edit_failover,
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.race, "dual_race_image_action", fake_dual_race_image_action
+        TEST_UPSTREAM_SERVICES.race,
+        "dual_race_image_action",
+        fake_dual_race_image_action,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.race,

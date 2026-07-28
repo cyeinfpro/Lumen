@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from redis.exceptions import WatchError
 
-from app import account_limiter, observability, sse_publish, upstream, video_artifacts
+from app import account_limiter, observability, sse_publish, video_artifacts
 from app import runtime_settings as worker_runtime_settings
 from app.provider_pool import ProviderConfig, ProviderPool
 from app.tasks import (
@@ -40,6 +40,7 @@ from app.tasks.generation_parts.errors import LeaseLost
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
 from app.tasks.generation_parts.runtime import GenerationRuntime
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+from app.upstream_parts import entrypoints as upstream
 from app.tasks.video_generation_parts import default_runtime as video_runtime
 from app.video_provider_slots import VIDEO_PROVIDER_SLOT_TTL_S
 from app.video_upstream_parts.contracts import (
@@ -1693,9 +1694,7 @@ async def test_generation_release_lease_requires_atomic_cas() -> None:
 
 def test_run_generation_uses_unique_lease_token_for_owner_cas() -> None:
     state_source = inspect.getsource(generation_runner._new_run_state)
-    acquire_source = inspect.getsource(
-        generation_runner._acquire_generation_lease
-    )
+    acquire_source = inspect.getsource(generation_runner._acquire_generation_lease)
 
     assert 'lease_token=f"{worker_id}:{new_uuid7()}"' in state_source
     assert "await acquire_lease(" in acquire_source
@@ -1820,9 +1819,7 @@ def test_generation_attempt_update_can_guard_current_status() -> None:
 
 
 def test_generation_success_write_requires_running_status() -> None:
-    success_update = inspect.getsource(
-        generation_success._mark_generation_succeeded
-    )
+    success_update = inspect.getsource(generation_success._mark_generation_succeeded)
 
     assert "statuses=RUNNING_GENERATION_STATUSES" in success_update
 
@@ -1969,7 +1966,8 @@ async def test_memory_llm_extract_logs_usage(
             "usage": {"input_tokens": 11, "output_tokens": 7},
         }
 
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
     monkeypatch.setattr(upstream, "responses_call", fake_responses_call)
@@ -2319,10 +2317,7 @@ async def test_image_queue_lock_acquisition_failure_is_fail_closed() -> None:
             entered = True
 
     assert entered is False
-    assert (
-        exc_info.value.error_code
-        == generation_queue_lock.EC.LOCAL_QUEUE_FULL.value
-    )
+    assert exc_info.value.error_code == generation_queue_lock.EC.LOCAL_QUEUE_FULL.value
     assert exc_info.value.payload["retry_after"] > 0
 
 

@@ -9,8 +9,8 @@ import pytest
 
 from app.storage import LocalStorage
 from app.storage_writes import StorageWriteCoordinator
-from app.tasks import video_generation
 from app.tasks.video_generation_parts import persistence
+from app.tasks.video_generation_parts import entrypoints as video_generation
 from app.tasks.video_generation_parts.default_runtime import (
     build_video_generation_runtime,
 )

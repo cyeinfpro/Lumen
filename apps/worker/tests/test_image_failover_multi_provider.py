@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 from PIL import Image as _PILImage
 
-from app import provider_pool, upstream
+from app import provider_pool
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import ImageExecutionRequest
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 

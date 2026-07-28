@@ -1,4 +1,4 @@
-"""Public ARQ and cron entrypoints for video generation."""
+"""ARQ and cron entrypoints for video generation."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from typing import Any
 
 from arq.cron import cron
 
-from .video_generation_parts.runtime import VideoGenerationRuntime
+from .runtime import VideoGenerationRuntime
 
 
 class _CronJobs(tuple[Any, ...]):
-    """Immutable schedules that still compose with legacy list-based schedules."""
+    """Immutable schedules that still compose with list-based schedules."""
 
     def __radd__(self, other: list[Any]) -> list[Any]:
         return [*other, *self]

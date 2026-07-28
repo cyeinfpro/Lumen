@@ -13,7 +13,8 @@ from lumen_core.memory import ExtractedMemory
 async def test_llm_extraction_passes_explicit_image_upstream_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, upstream
+    from app import provider_pool
+    from app.upstream_parts import entrypoints as upstream
 
     class Provider:
         name = "memory-provider"

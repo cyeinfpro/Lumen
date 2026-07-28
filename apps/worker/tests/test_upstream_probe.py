@@ -7,14 +7,13 @@
   4. 上游 5xx（UpstreamError）→ ok=False，schema_drift=1（无完成帧也算）。
 
 测试约束：
-- 不允许真打 httpx；通过 monkeypatch 替换 `app.upstream.stream_completion`。
+- 不允许真打 httpx；通过 monkeypatch 替换 leaf entrypoint 的 `stream_completion`。
 - 同一进程多次注册同名 Gauge 会冲突——直接复用模块级单例，验证它的 set() 调用结果。
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Any, AsyncIterator, cast
 
 import pytest
@@ -22,7 +21,7 @@ import pytest
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.jobs import upstream_probe
 from app.jobs.upstream_probe import EXPECTED_FIELDS, probe_upstream
-from app import upstream as upstream_mod
+from app.upstream_parts import entrypoints as upstream_mod
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +85,6 @@ def _probe_context() -> dict[str, Any]:
 @pytest.fixture
 def probe_model(monkeypatch: pytest.MonkeyPatch) -> str:
     fixed = "gpt-5.4"
-    monkeypatch.setitem(sys.modules, "app.upstream", upstream_mod)
-    monkeypatch.setitem(sys.modules, "app.jobs.upstream_probe", upstream_probe)
     monkeypatch.setattr(upstream_probe, "_resolve_probe_model", lambda: fixed)
     return fixed
 
@@ -159,9 +156,7 @@ async def test_probe_schema_drift_when_multiple_fields_missing(
     monkeypatch.setattr(
         upstream_mod,
         "stream_completion",
-        _make_stream(
-            [_completed_event(probe_model, drop=("output", "created_at"))]
-        ),
+        _make_stream([_completed_event(probe_model, drop=("output", "created_at"))]),
     )
 
     result = await probe_upstream(_probe_context())

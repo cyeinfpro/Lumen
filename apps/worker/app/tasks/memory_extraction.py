@@ -396,7 +396,7 @@ async def _try_llm_extract(
     try:
         from ..provider_pool import get_pool, text_provider_attempt
         from ..retry import is_retriable as classify_retriable
-        from ..upstream import responses_call
+        from ..upstream_parts.entrypoints import responses_call
 
         pool = await get_pool()
         providers = await pool.select(purpose="chat")

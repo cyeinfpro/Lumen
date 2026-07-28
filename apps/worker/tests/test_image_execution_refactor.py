@@ -6,8 +6,9 @@ from typing import Any
 
 import pytest
 
-from app import provider_pool, upstream
+from app import provider_pool
 from app.upstream_parts import image_dispatch
+from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import ImageExecutionRequest
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 
@@ -60,7 +61,9 @@ async def test_auto_provider_without_image_jobs_does_not_read_sidecar_config(
         raise AssertionError("disabled image jobs must not read sidecar config")
 
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_sidecar_token", unexpected_token_read
+        TEST_UPSTREAM_SERVICES.image_jobs,
+        "image_job_sidecar_token",
+        unexpected_token_read,
     )
 
     route = await image_dispatch._prepare_provider_route(

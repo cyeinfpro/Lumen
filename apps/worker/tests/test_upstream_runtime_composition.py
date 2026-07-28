@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from app import upstream
 from app.config import settings
 from app.provider_runtime.contracts import (
     ImageProbeRequest,
@@ -15,7 +14,7 @@ from app.tasks.generation_parts.services import (
     GenerationProviderContext,
     GenerationProviderRequest,
 )
-from app.upstream_parts import upstream_impl
+from app.upstream_parts import entrypoints as upstream, upstream_impl
 
 
 TEST_UPSTREAM_RUNTIME = upstream_impl.build_image_upstream_runtime()
@@ -128,18 +127,24 @@ async def test_image_runtime_bound_helpers_share_explicit_service_graph() -> Non
     assert services.retry.fallback_retry_backoff_seconds(3) == 4.0
     assert services.direct.wrap_inpaint_prompt("replace the object")
     assert services.references.reference_cache_keys("user-1")[0].endswith("user-1")
-    assert services.providers.provider_attempt_context(
-        ResolvedProvider(
-            name="explicit-provider",
-            base_url="https://provider.example/v1",
-            api_key="sk-explicit",
-        )
-    )["byok"] is False
-    assert services.image_jobs.image_job_payload(
-        request_type="generations",
-        endpoint="/v1/images/generations",
-        body={"prompt": "test"},
-    )["request_type"] == "generations"
+    assert (
+        services.providers.provider_attempt_context(
+            ResolvedProvider(
+                name="explicit-provider",
+                base_url="https://provider.example/v1",
+                api_key="sk-explicit",
+            )
+        )["byok"]
+        is False
+    )
+    assert (
+        services.image_jobs.image_job_payload(
+            request_type="generations",
+            endpoint="/v1/images/generations",
+            body={"prompt": "test"},
+        )["request_type"]
+        == "generations"
+    )
     await services.transport.emit_image_progress(None, "completed")
 
 
