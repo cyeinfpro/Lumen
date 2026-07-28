@@ -12,7 +12,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import (
     APIRouter,
@@ -57,6 +57,17 @@ from ..deps import (
     require_active_session_user,
     verify_csrf_session,
 )
+from ..public_urls import resolve_public_base_url
+from ..ratelimit import (
+    AUTH_ADMIN_LOGIN_LIMITER,
+    AUTH_LOGIN_LIMITER,
+    AUTH_SIGNUP_LIMITER,
+    RateLimiter,
+    client_ip,
+    require_client_ip,
+)
+from ..redis_client import get_redis
+from ..runtime_settings import get_setting
 from ..security import (
     generate_csrf_token,
     generate_refresh_token,
@@ -66,17 +77,6 @@ from ..security import (
     parse_session_cookie,
     verify_password,
 )
-from ..ratelimit import (
-    AUTH_ADMIN_LOGIN_LIMITER,
-    AUTH_LOGIN_LIMITER,
-    AUTH_SIGNUP_LIMITER,
-    RateLimiter,
-    client_ip,
-    require_client_ip,
-)
-from ..public_urls import resolve_public_base_url
-from ..redis_client import get_redis
-from ..runtime_settings import get_setting
 from ..services.email import EmailDeliveryError, send_password_reset_email
 
 
@@ -524,44 +524,116 @@ class OkOut(BaseModel):
     ok: bool
 
 
-async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
-    from .images import MAX_BYTES as IMAGE_UPLOAD_MAX_BYTES
+class RuntimeDefaultsProvider(Protocol):
+    async def load(self) -> RuntimeDefaultsOut: ...
 
-    # 默认 fast=True：未配置 generation.fast_default 或值不是 "0"/"1" 时
-    # 走 V1 体验偏好（Fast 模式默认开启）。get_setting 已包含 env fallback。
-    fast_default = True
-    spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
-    if spec is not None:
-        raw = await get_setting(db, spec)
-        if raw in {"0", "1"}:
-            fast_default = raw == "1"
-    nav_visibility: dict[str, bool] = {}
-    for nav_key, setting_key in _NAV_VISIBILITY_SETTING_KEYS.items():
-        visible = True
-        nav_spec = get_spec(setting_key)
-        if nav_spec is not None:
-            raw = await get_setting(db, nav_spec)
+    def safe_defaults(self) -> RuntimeDefaultsOut: ...
+
+
+class _DatabaseRuntimeDefaultsProvider:
+    def __init__(self, db: AsyncSession) -> None:
+        self._db = db
+
+    @staticmethod
+    def safe_defaults() -> RuntimeDefaultsOut:
+        from .images import MAX_BYTES as IMAGE_UPLOAD_MAX_BYTES
+
+        return RuntimeDefaultsOut(
+            fast=True,
+            upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
+            canvas_enabled=False,
+            nav_visibility=NavigationVisibilityOut(),
+        )
+
+    async def load(self) -> RuntimeDefaultsOut:
+        defaults = self.safe_defaults()
+
+        spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
+        if spec is not None:
+            raw = await get_setting(self._db, spec)
             if raw in {"0", "1"}:
-                visible = raw == "1"
-        nav_visibility[nav_key] = visible
-    canvas_enabled = False
-    canvas_spec = get_spec(_CANVAS_ENABLED_KEY)
-    if canvas_spec is not None:
-        canvas_enabled = await get_setting(db, canvas_spec) == "1"
-    return RuntimeDefaultsOut(
-        fast=fast_default,
-        upload_max_source_bytes=IMAGE_UPLOAD_MAX_BYTES,
-        canvas_enabled=canvas_enabled,
-        nav_visibility=NavigationVisibilityOut(**nav_visibility),
+                defaults.fast = raw == "1"
+        for nav_key, setting_key in _NAV_VISIBILITY_SETTING_KEYS.items():
+            nav_spec = get_spec(setting_key)
+            if nav_spec is None:
+                continue
+            raw = await get_setting(self._db, nav_spec)
+            if raw in {"0", "1"}:
+                setattr(defaults.nav_visibility, nav_key, raw == "1")
+        canvas_spec = get_spec(_CANVAS_ENABLED_KEY)
+        if canvas_spec is not None:
+            defaults.canvas_enabled = await get_setting(self._db, canvas_spec) == "1"
+        return defaults
+
+
+async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
+    provider: RuntimeDefaultsProvider = _DatabaseRuntimeDefaultsProvider(db)
+    return await provider.load()
+
+
+def _record_runtime_defaults_degraded() -> None:
+    if not settings.metrics_enabled:
+        return
+    from prometheus_client import REGISTRY, Counter
+
+    name = "lumen_auth_runtime_defaults_degraded"
+    counter = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+    if counter is None:
+        counter = Counter(
+            name,
+            "Number of auth responses that used safe runtime defaults.",
+        )
+    counter.inc()
+
+
+def _user_out_snapshot(user: User) -> UserOut:
+    notification_email = getattr(user, "notification_email", None)
+    return UserOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        role=user.role,
+        account_mode=getattr(user, "account_mode", None) or "wallet",
+        notification_email=(
+            True if notification_email is None else bool(notification_email)
+        ),
+        default_system_prompt_id=getattr(user, "default_system_prompt_id", None),
     )
 
 
-async def _user_out_with_runtime_defaults(
+def _auth_response_snapshot(
     user: User,
+    session: AuthSession,
+) -> tuple[str, UserOut]:
+    return generate_csrf_token(session.id), _user_out_snapshot(user)
+
+
+async def _user_out_with_runtime_defaults(
+    user: User | UserOut,
     db: AsyncSession,
 ) -> UserOut:
-    out = UserOut.model_validate(user)
-    out.runtime_defaults = await _runtime_defaults(db)
+    out = (
+        user.model_copy(deep=True)
+        if isinstance(user, UserOut)
+        else _user_out_snapshot(user)
+    )
+    try:
+        out.runtime_defaults = await _runtime_defaults(db)
+    except Exception:
+        logger.warning(
+            "auth_runtime_defaults_degraded",
+            extra={"user_id": out.id},
+            exc_info=True,
+        )
+        try:
+            _record_runtime_defaults_degraded()
+        except Exception:
+            logger.warning(
+                "auth_runtime_defaults_degraded_metric_failed",
+                extra={"user_id": out.id},
+                exc_info=True,
+            )
+        out.runtime_defaults = _DatabaseRuntimeDefaultsProvider.safe_defaults()
     return out
 
 
@@ -742,7 +814,7 @@ async def signup(
                 db.add(AllowedEmail(email=email, invited_by=invite.created_by))
 
         session, _ = await _create_session(db, user, request)
-        csrf = generate_csrf_token(session.id)
+        csrf, user_out = _auth_response_snapshot(user, session)
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
@@ -807,7 +879,7 @@ async def signup(
         details={"role": role},
     )
     _set_auth_cookies(response, session.id, csrf)
-    return await _user_out_with_runtime_defaults(user, db)
+    return await _user_out_with_runtime_defaults(user_out, db)
 
 
 @router.post(
@@ -895,7 +967,7 @@ async def signup_byok(
             db.add(AllowedEmail(email=email, invited_by=None))
 
         session, _ = await _create_session(db, user, request)
-        csrf = generate_csrf_token(session.id)
+        csrf, user_out = _auth_response_snapshot(user, session)
         # Why: write_audit(autocommit=False) returns False on failure and does
         # NOT raise. If session-bound audit fails the success row would be lost.
         # Fall back to write_audit_isolated (independent transaction) so the
@@ -938,7 +1010,7 @@ async def signup_byok(
         ) from exc
 
     _set_auth_cookies(response, session.id, csrf)
-    return await _user_out_with_runtime_defaults(user, db)
+    return await _user_out_with_runtime_defaults(user_out, db)
 
 
 @router.post(
@@ -989,7 +1061,7 @@ async def login(
         raise _bad("invalid_credentials", "wrong email or password", 401)
 
     session, _ = await _create_session(db, user, request)
-    csrf = generate_csrf_token(session.id)
+    csrf, user_out = _auth_response_snapshot(user, session)
     await write_audit(
         db,
         event_type="auth.login.success",
@@ -1004,7 +1076,7 @@ async def login(
         extra={"email_hash": _log_hash(email), "user_id": user.id},
     )
     _set_auth_cookies(response, session.id, csrf)
-    return await _user_out_with_runtime_defaults(user, db)
+    return await _user_out_with_runtime_defaults(user_out, db)
 
 
 @router.post("/password/reset-request", response_model=OkOut)

@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
@@ -26,6 +27,7 @@ from lumen_core.canvas_models import (
 from lumen_core.models import Base, Image, VideoGeneration
 from lumen_core.schemas import VideoModelOptionOut, VideoOptionsOut
 
+from app.canvas_services import execution_service
 from app.canvas_services.api_schemas import CanvasCreateIn, CanvasExecuteIn
 from app.canvas_services.document_service import create_canvas
 from app.canvas_services.execution_service import (
@@ -133,6 +135,176 @@ def _request() -> Request:
             "server": ("test", 80),
         }
     )
+
+
+def test_canvas_submission_advisory_key_is_stable_signed_int64() -> None:
+    from app.idempotency.advisory import advisory_lock_key
+
+    first = advisory_lock_key("canvas-submission", "user-1", "key-1")
+    second = advisory_lock_key("canvas-submission", "user-1", "key-1")
+    different = advisory_lock_key("canvas-submission", "user-1", "key-2")
+
+    assert first == second
+    assert first != different
+    assert -(2**63) <= first < 2**63
+
+
+@pytest.mark.asyncio
+async def test_execute_node_locks_and_rechecks_before_canvas_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    winner = (SimpleNamespace(id="run-1"), SimpleNamespace(id="execution-1"))
+    lookup_results = [None, winner]
+
+    async def fake_idempotent_run(*_args, **_kwargs):
+        events.append("lookup")
+        return lookup_results.pop(0)
+
+    async def fake_lock(*_args, **_kwargs) -> None:
+        events.append("lock")
+
+    async def fail_canvas_load(*_args, **_kwargs):
+        raise AssertionError("Canvas load must not run after lock recheck finds winner")
+
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "_idempotent_run",
+        fake_idempotent_run,
+    )
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "lock_user_key",
+        fake_lock,
+    )
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "get_owned_canvas",
+        fail_canvas_load,
+    )
+
+    result = await execute_node(
+        object(),  # type: ignore[arg-type]
+        user=SimpleNamespace(id="user-1"),
+        canvas_id="canvas-1",
+        node_id="image-1",
+        body=CanvasExecuteIn(document_revision=1, idempotency_key="same-key"),
+        header_idempotency_key="same-key",
+        request=_request(),
+    )
+
+    assert result == winner
+    assert events == ["lookup", "lock", "lookup"]
+
+
+@pytest.mark.asyncio
+async def test_canvas_submission_advisory_lock_is_noop_on_sqlite() -> None:
+    from app.idempotency.advisory import lock_user_key
+
+    async with _session() as db:
+        await lock_user_key(db, "canvas-submission", "user-1", "same-key")
+
+
+@pytest.mark.asyncio
+async def test_canvas_run_integrity_error_recovers_committed_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConflictDb:
+        rolled_back = False
+
+        async def flush(self) -> None:
+            raise IntegrityError("insert canvas run", {}, RuntimeError("duplicate"))
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    winner = (SimpleNamespace(id="run-1"), SimpleNamespace(id="execution-1"))
+
+    async def fake_idempotent_run(*_args, **_kwargs):
+        return winner
+
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "_idempotent_run",
+        fake_idempotent_run,
+    )
+    db = ConflictDb()
+
+    result = await execution_service._flush_run_or_recover(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        idempotency_key="same-key",
+        request_fingerprint="fingerprint-1",
+    )
+
+    assert result == winner
+    assert db.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_canvas_run_integrity_error_without_winner_returns_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConflictDb:
+        async def flush(self) -> None:
+            raise IntegrityError("insert canvas run", {}, RuntimeError("duplicate"))
+
+        async def rollback(self) -> None:
+            return None
+
+    async def fake_idempotent_run(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "_idempotent_run",
+        fake_idempotent_run,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await execution_service._flush_run_or_recover(  # noqa: SLF001
+            ConflictDb(),  # type: ignore[arg-type]
+            user_id="user-1",
+            idempotency_key="same-key",
+            request_fingerprint="fingerprint-1",
+        )
+
+    assert excinfo.value.status_code == 503
+    assert (
+        excinfo.value.detail["error"]["code"] == "canvas_submission_unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_canvas_run_integrity_error_preserves_fingerprint_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConflictDb:
+        async def flush(self) -> None:
+            raise IntegrityError("insert canvas run", {}, RuntimeError("duplicate"))
+
+        async def rollback(self) -> None:
+            return None
+
+    async def fake_idempotent_run(*_args, **_kwargs):
+        raise execution_service.idempotency_conflict()
+
+    monkeypatch.setitem(
+        execution_service.execute_node.__globals__,
+        "_idempotent_run",
+        fake_idempotent_run,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await execution_service._flush_run_or_recover(  # noqa: SLF001
+            ConflictDb(),  # type: ignore[arg-type]
+            user_id="user-1",
+            idempotency_key="same-key",
+            request_fingerprint="fingerprint-2",
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
 
 
 @pytest.mark.asyncio
