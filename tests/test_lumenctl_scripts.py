@@ -3544,6 +3544,10 @@ esac
 
     export LUMEN_DEPLOY_ROOT="${{DEPLOY_ROOT}}"
     export LUMEN_DATA_ROOT="${{DATA_ROOT}}"
+    export LUMEN_SYSTEMD_UNIT_DIR="${{SIM_ROOT}}/systemd"
+    export LUMEN_SYSTEMD_RUNTIME_DIR="${{SIM_ROOT}}/no-systemd-runtime"
+    export LUMEN_LOCAL_SBIN_DIR="${{SIM_ROOT}}/sbin"
+    mkdir -p "${{LUMEN_SYSTEMD_UNIT_DIR}}" "${{LUMEN_LOCAL_SBIN_DIR}}"
     export LUMEN_NONINTERACTIVE=1
     export LUMEN_ADMIN_EMAIL=admin@example.com
     export LUMEN_ADMIN_PASSWORD=password123456
