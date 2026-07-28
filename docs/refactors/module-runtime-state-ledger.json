@@ -1,5 +1,5 @@
 {
-  "max_total": 21,
+  "max_total": 20,
   "modules": [
     {
       "max_instances": 1,
@@ -77,13 +77,6 @@
       "path": "apps/api/app/routes/admin_release.py",
       "retirement_condition": "Release marker cleanup is owned by the admin release application service.",
       "symbols": ["_marker_cleanup_runtime"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/routes/poster_styles.py",
-      "retirement_condition": "Poster auto-tag concurrency is owned by an application service.",
-      "symbols": ["_AUTO_TAG_SEMAPHORE_STATE"]
     },
     {
       "max_instances": 1,
