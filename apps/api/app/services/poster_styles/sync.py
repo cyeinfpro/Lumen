@@ -469,8 +469,7 @@ def claim_library_sync_lease_sync(runtime: Any) -> tuple[str | None, dict[str, A
 async def claim_library_sync_lease(
     runtime: Any,
 ) -> tuple[str | None, dict[str, Any]]:
-    async with runtime._SYNC_LOCK:
-        return await asyncio.to_thread(runtime._claim_library_sync_lease_sync)
+    return await asyncio.to_thread(runtime._claim_library_sync_lease_sync)
 
 
 def renew_library_sync_lease_sync(runtime: Any, token: str) -> bool:
@@ -497,11 +496,10 @@ def renew_library_sync_lease_sync(runtime: Any, token: str) -> bool:
 
 
 async def renew_library_sync_lease(runtime: Any, token: str) -> bool:
-    async with runtime._SYNC_LOCK:
-        return await asyncio.to_thread(
-            runtime._renew_library_sync_lease_sync,
-            token,
-        )
+    return await asyncio.to_thread(
+        runtime._renew_library_sync_lease_sync,
+        token,
+    )
 
 
 def complete_library_sync_lease_sync(
@@ -534,14 +532,13 @@ async def complete_library_sync_lease(
     result: dict[str, Any],
     completed_at: datetime,
 ) -> None:
-    async with runtime._SYNC_LOCK:
-        await asyncio.to_thread(
-            runtime._complete_library_sync_lease_sync,
-            token,
-            index,
-            result,
-            completed_at,
-        )
+    await asyncio.to_thread(
+        runtime._complete_library_sync_lease_sync,
+        token,
+        index,
+        result,
+        completed_at,
+    )
 
 
 def fail_library_sync_lease_sync(
@@ -573,13 +570,12 @@ async def fail_library_sync_lease(
     message: str,
     result: dict[str, Any],
 ) -> bool:
-    async with runtime._SYNC_LOCK:
-        return await asyncio.to_thread(
-            runtime._fail_library_sync_lease_sync,
-            token,
-            message=message,
-            result=result,
-        )
+    return await asyncio.to_thread(
+        runtime._fail_library_sync_lease_sync,
+        token,
+        message=message,
+        result=result,
+    )
 
 
 def cached_sync_response(runtime: Any, state: dict[str, Any]) -> PosterStyleSyncOut:
@@ -731,11 +727,10 @@ async def bootstrap_local_presets_if_empty(runtime: Any) -> None:
         )
         for parsed in scanned
     ]
-    async with runtime._SYNC_LOCK:
-        published = await asyncio.to_thread(
-            runtime._publish_local_bootstrap_sync,
-            items,
-        )
+    published = await asyncio.to_thread(
+        runtime._publish_local_bootstrap_sync,
+        items,
+    )
     if published:
         runtime.logger.info(
             "poster style: bootstrapped %d presets from local assets",

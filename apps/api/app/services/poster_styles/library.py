@@ -159,27 +159,6 @@ _CATEGORY_ALIASES: MappingProxyType[str, str] = MappingProxyType(
 )
 
 
-class _FileLockCompatibilityContext:
-    """Preserve the sync facade contract while flock owns serialization."""
-
-    __slots__ = ()
-
-    async def __aenter__(self) -> None:
-        return None
-
-    async def __aexit__(self, *_exc: object) -> None:
-        return None
-
-    def locked(self) -> bool:
-        return False
-
-
-# ``poster_styles.sync`` still enters this historical runtime attribute around
-# short ``to_thread`` calls. The called functions all acquire the authoritative
-# cross-process file lock below, so this adapter intentionally owns no state.
-_SYNC_LOCK = _FileLockCompatibilityContext()
-
-
 @contextmanager
 def _poster_style_sync_file_lock(path: Path) -> Iterator[None]:
     """Serialize short sync-state mutations across API worker processes."""
@@ -523,7 +502,6 @@ __all__ = [
     "WORKFLOW_TYPE_POSTER_STYLE_GENERATE",
     "_DEFAULT_GITHUB_CONTENTS_URL",
     "_DEFAULT_SYNC_MODE",
-    "_SYNC_LOCK",
     "_category_from_folder_name",
     "_clean_optional_text",
     "_clean_str_list",
