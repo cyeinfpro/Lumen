@@ -92,7 +92,7 @@ All findings were rechecked against the baseline SHA before implementation.
 - [x] API/Worker runtime container
 - [x] Web feature boundary gate
 - [x] Lead review and ownership audit
-- [ ] Wave impact plan passed
+- [x] Wave impact plan passed
 
 ### Wave 4
 
@@ -439,3 +439,31 @@ All findings were rechecked against the baseline SHA before implementation.
 - Rollback: revert `f24006f`, then `8bee447`
 - Remaining risk: the current tree has no `src/features` directories yet, so
   feature rules are proven by fixtures and will become active on first slice
+
+### Wave 3 Lead Evidence
+
+- Plan: `/tmp/lumen-wave3-plan.json`
+- Initial results: `/tmp/lumen-wave3-results.json`
+- Base: `b17ed266b167c7b4b78149ad4ca87550f62f30ca`
+- Changed files: 65 before failed-node contract fixes
+- Matched rules: 9, covering Workflow, Completion, API/Worker runtime,
+  Poster, Web feature/realtime, and conservative API/Worker/Web fallbacks
+- Commands: 15; full mandatory false
+- Initial result: 12 passed, 3 failed
+- Passed evidence: API 1532 passed with 2 existing skips; runtime lifecycle 30;
+  Poster 68; Workflow 24; Completion 77; all architecture/complexity/
+  runtime-state/type-check gates passed
+- Web failure: both the full Web command and realtime target command identified
+  only `src/lib/sse/leaderElection.test.ts`, whose local TypeScript loader
+  lacked the new canonical browser-factory dependency; only that file was
+  rerun and passed 2 tests
+- Worker failure: collection identified one stale import of removed
+  `completion_ports`; after migrating the module to typed services, its
+  failed-file run passed 69 of 70 tests, then only
+  `test_startup_failure_closes_upstream_clients` was rerun and passed
+- No full command was rerun after either failure; the failed file/node
+  discipline was preserved
+- Governance: Web architecture passed with 552 files, 2113 edges, and zero
+  baselined findings; backend complexity remained 31 and runtime-state 20,
+  both scheduled for Wave 4 reductions
+- Final Wave result: every selected gate and failed node passed
