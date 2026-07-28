@@ -1,0 +1,8 @@
+{
+  "generatedAt": "2026-07-28T23:59:57+08:00",
+  "reason": "A0 must rerun perf/wave3/run.mjs against the integrated authenticated Stream implementation after A5 and A6 merge.",
+  "requiredCommand": "LUMEN_WAVE3_ASSET_URL=<authenticated-stream-url> node perf/wave3/run.mjs suite --output docs/perf/lumen-wave3-after-2026-07-28.json",
+  "schemaVersion": 1,
+  "status": "pending_product_integration",
+  "workBase": "e103a96afc763cf6ad5fff36b0483f3c8ac16e35"
+}
