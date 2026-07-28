@@ -1,0 +1,213 @@
+{
+  "branch": "codex/a8-perf-observability-wave0-20260728",
+  "environment": {
+    "cpu_count": 10,
+    "node": "v22.22.0",
+    "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.3"
+  },
+  "generated_at": "2026-07-28T16:15:42Z",
+  "invariants": [
+    "Harness imports current production paths but does not mutate business code.",
+    "Synthetic scenarios are labeled and are not presented as production SLO proof.",
+    "Environment-gated scenarios return a structured gated result instead of passing silently.",
+    "Raw measurements are emitted as JSON for same-environment comparisons."
+  ],
+  "scenarios": {
+    "assets_browser": {
+      "browser": {
+        "js_heap_total_bytes": 2359296,
+        "js_heap_used_bytes": 737424,
+        "layout_count": 37,
+        "nodes": 8270,
+        "recalc_style_count": 12,
+        "task_duration_seconds": 0.248006
+      },
+      "mode": "synthetic_contract_fixture",
+      "network": {
+        "encodedBytes": 228366,
+        "failed": 0,
+        "requests": 1013,
+        "responses": 1063
+      },
+      "page": {
+        "binary_requests": 0,
+        "dom_nodes": 3009,
+        "first_interactive_ms": 35.60000002384186,
+        "fixture": {
+          "count": 1000,
+          "image_errors": 20,
+          "long_tasks": [],
+          "preview_fallbacks": 20,
+          "scenario_counts": {
+            "missing_thumb": 50,
+            "pending": 10,
+            "thumb_404": 20
+          }
+        },
+        "images": 1000,
+        "mounted_tiles": 1000,
+        "resource_entries": 250
+      },
+      "request_headers_configured": false,
+      "status": "measured",
+      "tile_selector": ".asset-tile",
+      "url": "http://127.0.0.1:64756/?count=1000"
+    },
+    "feed_search": {
+      "reason": "LUMEN_WAVE0_FEED_URL is not set",
+      "required_environment": [
+        "LUMEN_WAVE0_FEED_URL",
+        "LUMEN_WAVE0_AUTHORIZATION (when authentication is required)",
+        "LUMEN_WAVE0_COOKIE (optional)",
+        "LUMEN_WAVE0_SEARCH_QUERY (optional)"
+      ],
+      "status": "gated"
+    },
+    "generation_rss": {
+      "note": "Synthetic memory shapes are the low-cost default. Set the per-scenario command environment variable to measure a real generation path.",
+      "scenarios": {
+        "1mp": {
+          "allocated_payload_bytes": 20971520,
+          "buffer_count": 5,
+          "checksum": 0,
+          "height": 1024,
+          "mode": "synthetic_memory_shape",
+          "peak_rss_bytes": 55197696,
+          "real_workload_env": "LUMEN_WAVE0_RSS_1MP_COMMAND",
+          "scenario": "1mp",
+          "status": "measured",
+          "width": 1024
+        },
+        "4k": {
+          "allocated_payload_bytes": 132710400,
+          "buffer_count": 4,
+          "checksum": 0,
+          "height": 2160,
+          "mode": "synthetic_memory_shape",
+          "peak_rss_bytes": 166838272,
+          "real_workload_env": "LUMEN_WAVE0_RSS_4K_COMMAND",
+          "scenario": "4k",
+          "status": "measured",
+          "width": 3840
+        },
+        "dual_race": {
+          "allocated_payload_bytes": 167772160,
+          "buffer_count": 10,
+          "checksum": 0,
+          "height": 2048,
+          "mode": "synthetic_memory_shape",
+          "peak_rss_bytes": 201736192,
+          "real_workload_env": "LUMEN_WAVE0_RSS_DUAL_RACE_COMMAND",
+          "scenario": "dual_race",
+          "status": "measured",
+          "width": 2048
+        },
+        "edit": {
+          "allocated_payload_bytes": 117440512,
+          "buffer_count": 7,
+          "checksum": 0,
+          "height": 2048,
+          "mode": "synthetic_memory_shape",
+          "peak_rss_bytes": 151240704,
+          "real_workload_env": "LUMEN_WAVE0_RSS_EDIT_COMMAND",
+          "scenario": "edit",
+          "status": "measured",
+          "width": 2048
+        }
+      },
+      "status": "measured"
+    },
+    "queue_tick": {
+      "capacity": 4,
+      "implementation": "apps/worker generation_parts.queue.kick_image_queue",
+      "measurements": [
+        {
+          "candidate_count": 10,
+          "elapsed_seconds": 5.141599103808403e-05,
+          "redis_commands": 29,
+          "redis_commands_by_name": {
+            "enqueue_job": 8,
+            "get": 11,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "selected_enqueue_count": 8
+        },
+        {
+          "candidate_count": 100,
+          "elapsed_seconds": 9.895802941173315e-05,
+          "redis_commands": 119,
+          "redis_commands_by_name": {
+            "enqueue_job": 8,
+            "get": 101,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "selected_enqueue_count": 8
+        },
+        {
+          "candidate_count": 1000,
+          "elapsed_seconds": 0.0004241249989718199,
+          "redis_commands": 1019,
+          "redis_commands_by_name": {
+            "enqueue_job": 8,
+            "get": 1001,
+            "set": 8,
+            "zrange": 1,
+            "zremrangebyscore": 1
+          },
+          "selected_enqueue_count": 8
+        }
+      ],
+      "redis_command_growth_per_candidate": 1.0,
+      "status": "measured"
+    },
+    "realtime": {
+      "api": {
+        "fanout_bytes_per_event": 272,
+        "fanout_channels": [
+          "task:task-1",
+          "user:user-1"
+        ],
+        "fault_error": "ConnectionError",
+        "fault_first_channel": "task:task-1",
+        "fault_publish_attempts": [
+          "task:task-1"
+        ],
+        "implementation": "apps/api current code path",
+        "live_live_frames_for_same_sse_id": 2,
+        "normal_publish_attempts": [
+          "task:task-1",
+          "user:user-1"
+        ],
+        "parser_elapsed_seconds": 0.030149542028084397,
+        "parser_events_per_second": 165839.99834367246,
+        "parser_frames": 5000,
+        "parser_iterations": 5000,
+        "payload_bytes": 136,
+        "replay_live_frames_for_same_sse_id": 0,
+        "status": "measured"
+      },
+      "worker": {
+        "fault_first_channel": "task:task-1",
+        "fault_publish_attempts": [
+          "task:task-1",
+          "task:task-1",
+          "user:user-1"
+        ],
+        "fault_user_channel_reached": true,
+        "implementation": "apps/worker current code path",
+        "normal_publish_attempts": [
+          "task:task-1",
+          "user:user-1"
+        ],
+        "status": "measured"
+      }
+    }
+  },
+  "schema_version": 1,
+  "work_base_sha": "d2b8c259d52edc0a839b695fecc7b7ab2029bbe3"
+}
