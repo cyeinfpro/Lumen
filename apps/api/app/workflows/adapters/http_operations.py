@@ -26,18 +26,6 @@ class ProjectWorkflowOperationsAdapter:
             workflow_run_id=workflow_run_id, user=user, db=db
         )
 
-    async def patch_workflow(
-        self,
-        *,
-        workflow_run_id: str,
-        body: object,
-        user: object,
-        db: object,
-    ) -> object:
-        return await projects.patch_workflow(
-            workflow_run_id=workflow_run_id, body=body, user=user, db=db
-        )
-
     async def delete_workflow(
         self, *, workflow_run_id: str, user: object, db: object
     ) -> object:

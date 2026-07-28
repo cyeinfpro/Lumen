@@ -14,6 +14,10 @@ from app.workflows.application.project_candidate_rules import (
     saved_library_item_ids,
 )
 from app.workflows.application.project_lifecycle import ProjectLifecycle
+from app.workflows.application.upsert_project import (
+    UpsertWorkflowProject,
+    UpsertWorkflowProjectCommand,
+)
 
 
 class _ProjectPort:
@@ -75,7 +79,7 @@ class _ProjectPort:
         self.events.append("commit")
 
 
-def _lifecycle(run: Any, port: _ProjectPort) -> ProjectLifecycle:
+def _lifecycle(port: _ProjectPort) -> ProjectLifecycle:
     return ProjectLifecycle(
         repository=port,
         outputs=port,
@@ -95,12 +99,15 @@ async def test_project_lifecycle_owns_title_and_cleanup_transaction_order() -> N
         deleted_at=None,
     )
     port = _ProjectPort(run)
-    lifecycle = _lifecycle(run, port)
-
-    out = await lifecycle.patch_title(
-        user_id="user-1",
-        run_id="run-1",
-        title="  New title  ",
+    out = await UpsertWorkflowProject(
+        repository=port,
+        outputs=port,
+    ).execute(
+        UpsertWorkflowProjectCommand(
+            user_id="user-1",
+            run_id="run-1",
+            title="  New title  ",
+        )
     )
 
     assert out is run
@@ -109,7 +116,7 @@ async def test_project_lifecycle_owns_title_and_cleanup_transaction_order() -> N
     assert port.events[-2:] == ["build", "commit"]
 
     port.events.clear()
-    assert await lifecycle.delete(
+    assert await _lifecycle(port).delete(
         user_id="user-1",
         run_id="run-1",
         account_mode="wallet",
@@ -131,10 +138,15 @@ async def test_project_lifecycle_rejects_blank_title_before_commit() -> None:
     port = _ProjectPort(run)
 
     with pytest.raises(WorkflowRequestError) as excinfo:
-        await _lifecycle(run, port).patch_title(
-            user_id="user-1",
-            run_id="run-1",
-            title="   ",
+        await UpsertWorkflowProject(
+            repository=port,
+            outputs=port,
+        ).execute(
+            UpsertWorkflowProjectCommand(
+                user_id="user-1",
+                run_id="run-1",
+                title="   ",
+            )
         )
 
     assert excinfo.value.status_code == 422

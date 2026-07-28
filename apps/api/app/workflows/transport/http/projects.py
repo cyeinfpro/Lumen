@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility exports
     AccessoryPlanIn,  # noqa: F401 - showcase facade dependency
@@ -58,7 +59,9 @@ from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility e
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
+from ...adapters.operations.projects import build_upsert_workflow_project
 from ...application.http_contracts import WorkflowAssetsAddIn
+from ...application.upsert_project import UpsertWorkflowProjectCommand
 from ...composition import WorkflowApplication
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
@@ -107,19 +110,20 @@ async def reconcile_workflow(
     dependencies=[Depends(verify_csrf)],
 )
 async def patch_workflow(
-    application: Annotated[WorkflowApplication, Depends(get_workflow_application)],
     workflow_run_id: str,
     body: WorkflowRunPatchIn,
     user: CurrentUser,
-    db: Annotated[Any, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
-        application.require_http().patch_workflow,
-        workflow_run_id=workflow_run_id,
-        body=body,
-        user=user,
-        db=db,
+    result = await execute_workflow_action(
+        build_upsert_workflow_project(db).execute,
+        command=UpsertWorkflowProjectCommand(
+            user_id=user.id,
+            run_id=workflow_run_id,
+            title=body.title,
+        ),
     )
+    return WorkflowRunOut.model_validate(result)
 
 
 @core_router.delete("/{workflow_run_id}", dependencies=[Depends(verify_csrf)])
