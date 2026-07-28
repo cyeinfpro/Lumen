@@ -50,7 +50,7 @@ All findings were rechecked against the baseline SHA before implementation.
 | F-06 | Phase 1 fixed | Poster tagging sends a bounded preview, reuses lifecycle-owned HTTP clients, and uses a Redis TTL/owner-token capacity lease; durable worker/outbox migration remains for a later wave. |
 | F-07 | Fixed | `useSSE` registers only real recovery adapters while retaining the rule that every registered adapter must succeed. |
 | F-08 | Fixed | Auth response snapshots are captured before commit and runtime-default/audit enrichment failures fall back without changing committed success semantics. |
-| F-09 | Confirmed | Completion ports expose extensive `Any`, ORM/SQL/private helpers and RuntimeSlot state; internal capability imports use broad `except Exception`. |
+| F-09 | Fixed | Completion now exposes typed command/result and seven behavioral services; public runtime/contracts contain no `Any`, ORM/SQL/private helpers or RuntimeSlot, phase state is explicit, and capability imports fail deterministically. |
 | F-10 | Fixed | Outbox rows are claimed in a short owner/TTL transaction; Redis/SSE delivery runs after commit with bounded concurrency, owner-checked finalization, stable job IDs, retries, and DLQ handling. |
 | F-11 | Fixed | Message and task post-commit publishers start together under one total latency budget; failures are isolated and pending publishers are cancelled after the shared deadline. |
 | F-12 | Fixed | Video submission computes the idempotency fingerprint first, checks the winner before expensive work, then serializes and rechecks under a transaction advisory lock before provider/media/pricing work. |
@@ -87,11 +87,11 @@ All findings were rechecked against the baseline SHA before implementation.
 
 ### Wave 3
 
-- [ ] Workflow typed vertical slices
-- [ ] Completion runtime C1/C2/C3
-- [ ] API/Worker runtime container
-- [ ] Web feature boundary gate
-- [ ] Lead review and ownership audit
+- [x] Workflow typed vertical slices
+- [x] Completion runtime C1/C2/C3
+- [x] API/Worker runtime container
+- [x] Web feature boundary gate
+- [x] Lead review and ownership audit
 - [ ] Wave impact plan passed
 
 ### Wave 4
@@ -334,3 +334,108 @@ All findings were rechecked against the baseline SHA before implementation.
 - Governance: complexity debt reduced from 33 to 31; runtime-state remained
   20 instances across 19 modules; no baseline expansion
 - Final Wave result: all selected gates and tests passed
+
+### A7: Workflow Typed Vertical Slices
+
+- Baseline SHA: `b17ed266b167c7b4b78149ad4ca87550f62f30ca`
+- Commits: `5afb3800`, `33108da5`, `127b46d6`, `b5ae3723`,
+  `c367cc97`, `a1000641`, `d890105f`
+- Changed files: 24 Workflow route/application/port/adapter/transport files
+  and directly corresponding tests; Lead-owned composition remained untouched
+- Invariants: migrated routes construct typed commands/queries; migrated
+  application modules import neither FastAPI nor SQLAlchemy; migrated public
+  ports contain no opaque transport/ORM types; project cleanup stays
+  post-commit
+- Confirmed risk: list/upsert/create/cancel routes crossed a generic HTTP
+  facade carrying request/session/user objects
+- Implementation: independently revertible list-runs, project-upsert,
+  run-creation, and project-cancellation slices plus stateless slice assembly;
+  no retry route exists in the current API
+- Targeted tests: 202 passed; two stale facade-contract nodes passed on
+  failed-node-only rerun
+- Static gates: Ruff, format, architecture, complexity, and runtime-state
+  passed
+- Not run: full API or repository suite
+- Metrics: migrated forbidden port types `5 -> 0`; generic facade methods
+  `39 -> 34`; opaque generic facade occurrences `146 -> 129`
+- Rollback: revert the commits in reverse order per vertical slice
+- Remaining risk: non-migrated apparel/model-library/poster operations retain
+  the generic facade and must continue to ratchet down
+
+### A8: Completion C1 / C2 / C3
+
+- Baseline SHA: `b17ed266b167c7b4b78149ad4ca87550f62f30ca`
+- Commits: `9b9d7391`, `62cd5399`, `8caf30e7`, `77022083`
+- Changed files: completion entrypoint, contracts/runtime/execution/runner/
+  services/default bindings/outcomes, and focused completion tests
+- Invariants: retry, lease, settlement, cancellation, BYOK billing, tool-image,
+  and epoch-fencing semantics remain covered
+- Confirmed risk: the public runtime was a seven-group dynamic symbol table
+  containing `Any`, ORM/SQL/private helpers and a process-default RuntimeSlot
+- Implementation: typed command/value/result and seven behavioral services;
+  five explicit phase state objects; runner no longer reads RuntimeSlot;
+  deterministic capability imports and composition-facing typed runtime
+- Targeted tests: 77 passed
+- Static gates: Ruff, format, architecture, complexity, and runtime-state
+  passed
+- Not run: other Worker domains, full Worker suite, or external integration
+- Metrics: public runtime/contracts forbidden types `-> 0`; largest state has
+  15 fields; largest phase 118 lines; phase parameters at most 2
+- Rollback: revert the four commits in reverse order
+- Remaining risk: internal `LegacyCompletionAdapter` remains an implementation
+  bridge and is scheduled for a real deletion commit in Wave 4
+
+### A9: API / Worker Runtime Containers
+
+- Baseline SHA: `b17ed266b167c7b4b78149ad4ca87550f62f30ca`
+- Agent commit: `582925e92499d805bc3e98ef925f5d22769b9716`
+  (integrated as `ffd3c35`)
+- Lead composition commit: `9361cc5`
+- Changed files: typed API/Worker runtime and lifecycle modules, composition
+  roots, Poster route lifecycle, and focused lifecycle/startup tests
+- Invariants: no mutable global container; resources close once in reverse
+  registration order; cleanup failures do not skip later resources;
+  repeated/concurrent shutdown is idempotent
+- Confirmed risk: API resources were embedded in lifespan and Worker cleanup
+  depended on scattered mutable context keys without one typed owner
+- Implementation: `ApiRuntime` in `app.state.runtime`; `WorkerRuntime` in arq
+  context; typed capability diagnostics; Poster tagging moved out of router
+  lifespan; partial startup uses the same lifecycle registry
+- Targeted tests: Agent 30 passed; Lead merged run reached 88 passed and three
+  stale-fake failures, then only those three node IDs passed
+- Static gates: Ruff, format, architecture, complexity, runtime-state, and Web
+  architecture passed
+- Not run: full API/Worker suites
+- Metrics/logging: startup capability matrix and owner/resource cleanup
+  failures; runtime-state remained 20 pending Wave 4 owner retirement
+- Rollback: revert `9361cc5`, then `ffd3c35`
+- Remaining risk: Redis/ARQ/billing/provider/metrics/SSE compatibility owners
+  still need removal before the runtime baseline can fall
+
+### Web Agent: Feature Architecture Gate
+
+- Baseline SHA: `b17ed266b167c7b4b78149ad4ca87550f62f30ca`
+- Agent commit: `be1fc78f0cdb65f03fdff43418020c5b502a0bb4`
+  (integrated as `8bee447`)
+- Lead ownership commit: `f24006f`
+- Changed files: Web architecture checker/tests and canonical
+  `shared/realtime` browser/runtime factories with seven migrated callers
+- Invariants: cross-feature imports use public entries; feature/file cycles and
+  server-to-browser paths report shortest paths; presentational UI, store, and
+  realtime ownership rules fail closed
+- Confirmed risk: the prior checker covered layer inversion and SCCs but not
+  feature deep imports, browser chains, API side-effect ownership, store
+  coupling, or realtime construction ownership
+- Implementation: graph/fact analysis and six focused fixture tests; Lead
+  rejected a proposed seven-finding baseline and moved every existing runtime
+  constructor to `shared/realtime`
+- Targeted tests: Agent 15/16 then failed-node-only 1 passed; Lead target set
+  initially had two loader dependency failures, then only those two files
+  passed with six tests
+- Static gates: architecture passed with 552 files, 2113 edges, zero
+  baselined findings; complexity, type-check, ESLint, and diff check passed
+- Not run: full Web suite or build
+- Metrics: zero feature/realtime/browser ownership baseline
+- Rollback: revert `f24006f`, then `8bee447`
+- Remaining risk: the current tree has no `src/features` directories yet, so
+  feature rules are proven by fixtures and will become active on first slice
