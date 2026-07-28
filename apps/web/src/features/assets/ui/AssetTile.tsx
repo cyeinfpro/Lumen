@@ -466,6 +466,7 @@ function GenerationTileMedia({
         <ImageLoadFailure onRetry={onRetry} />
       )}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/20 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+      {/* @ui-governance-allow media: age metadata overlays the generated asset. */}
       {model.age && (
         <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-black/45 px-1.5 py-1 text-[10px] tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
           {model.age}
@@ -474,6 +475,7 @@ function GenerationTileMedia({
       {selectionMode && (
         <span
           className={cn(
+            // @ui-governance-allow media: selection control overlays the asset thumbnail.
             "absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-md transition-colors md:h-8 md:w-8",
             selected
               ? "border-[rgba(242,169,58,0.55)] bg-[var(--amber-400)] text-black"
@@ -667,7 +669,10 @@ function TileAction({
         event.stopPropagation();
         onClick();
       }}
-      className="pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9"
+      className={cn(
+        // @ui-governance-allow media: quick action overlays the generated asset.
+        "pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9",
+      )}
     >
       {children}
     </button>
