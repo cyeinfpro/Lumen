@@ -47,6 +47,7 @@ from .serialization import (
     item_out_from_row,
     safe_datetime,
 )
+from .tagging_runtime import PosterTaggingRuntime
 
 
 def storage_root(runtime: Any) -> Path:
@@ -636,6 +637,7 @@ async def create_item(
     user: Any,
     db: AsyncSession,
     background_tasks: Any,
+    tagging_runtime: PosterTaggingRuntime,
 ) -> PosterStyleItemOut:
     extra_samples = [
         image_id
@@ -673,7 +675,12 @@ async def create_item(
     await db.commit()
     await db.refresh(row)
     if body.auto_tag:
-        background_tasks.add_task(runtime._run_auto_tag_in_background, user.id, row.id)
+        background_tasks.add_task(
+            runtime._run_auto_tag_in_background,
+            tagging_runtime,
+            user.id,
+            row.id,
+        )
     return runtime._item_out_from_row(row)
 
 

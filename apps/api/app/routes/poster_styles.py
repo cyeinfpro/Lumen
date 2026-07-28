@@ -10,18 +10,26 @@ route imports.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Iterable
+from typing import (
+    Annotated,
+    Any,
+    AsyncContextManager,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+)
 
 import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
+    FastAPI,
     HTTPException,
     Query,
     Request,
@@ -65,13 +73,20 @@ from lumen_core.schemas import (
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
+from ..redis_client import get_redis as _get_redis_client
 from ..runtime_settings import get_setting
 from ..services.poster_styles import generation as poster_style_generation
 from ..services.poster_styles import resources as poster_style_resources
 from ..services.poster_styles import serialization as poster_style_serialization
+from ..services.poster_styles import storage as poster_style_storage
 from ..services.poster_styles import sync as poster_style_sync
 from ..services.poster_styles import tagging as poster_style_tagging
-from ..services.poster_styles import storage as poster_style_storage
+from ..services.poster_styles.capacity import PosterTaggingCapacityUnavailable
+from ..services.poster_styles.library import *  # noqa: F403
+from ..services.poster_styles.tagging_runtime import (
+    PosterTaggingRuntime,
+    build_poster_tagging_runtime,
+)
 from ..workflows.adapters.library_sync_operation import (
     do_poster_style_sync as _do_poster_style_sync,
 )
@@ -79,9 +94,7 @@ from .messages import (
     create_assistant_task as _create_assistant_task,
     publish_assistant_task as _publish_assistant_task,
 )
-from ..services.poster_styles.library import *  # noqa: F403
 
-router = APIRouter(prefix="/poster-styles", tags=["poster-styles"])
 logger = logging.getLogger(__name__)
 
 _GITHUB_API_HOST = "api.github.com"
@@ -93,16 +106,32 @@ _GITHUB_RAW_HOSTS = frozenset(
 )
 _HTTP_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
-_POSTER_STYLE_AUTO_TAG_CONCURRENCY = poster_style_tagging.auto_tag_concurrency()
+_POSTER_TAGGING_RUNTIME_STATE_KEY = "poster_tagging_runtime"
 
 
-@dataclass
-class _AutoTagSemaphoreState:
-    semaphore: asyncio.Semaphore | None = None
-    loop: asyncio.AbstractEventLoop | None = None
+@asynccontextmanager
+async def _poster_tagging_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    tagging_runtime = build_poster_tagging_runtime(
+        _get_redis_client(),
+        concurrency=poster_style_tagging.auto_tag_concurrency(),
+    )
+    setattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY, tagging_runtime)
+    try:
+        yield
+    finally:
+        if (
+            getattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY, None)
+            is tagging_runtime
+        ):
+            delattr(app.state, _POSTER_TAGGING_RUNTIME_STATE_KEY)
+        await tagging_runtime.aclose()
 
 
-_AUTO_TAG_SEMAPHORE_STATE = _AutoTagSemaphoreState()
+router = APIRouter(
+    prefix="/poster-styles",
+    tags=["poster-styles"],
+    lifespan=_poster_tagging_lifespan,
+)
 
 
 def _runtime() -> Any:
@@ -123,13 +152,19 @@ def _poster_style_auto_tag_concurrency() -> int:
     return poster_style_tagging.auto_tag_concurrency()
 
 
-def _poster_style_auto_tag_semaphore() -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    state = _AUTO_TAG_SEMAPHORE_STATE
-    if state.semaphore is None or state.loop is not loop:
-        state.semaphore = asyncio.Semaphore(_poster_style_auto_tag_concurrency())
-        state.loop = loop
-    return state.semaphore
+def _poster_tagging_runtime(request: Request) -> PosterTaggingRuntime:
+    runtime = getattr(
+        request.app.state,
+        _POSTER_TAGGING_RUNTIME_STATE_KEY,
+        None,
+    )
+    if not isinstance(runtime, PosterTaggingRuntime):
+        raise _http(
+            "poster_tagging_unavailable",
+            "poster tagging runtime is unavailable",
+            503,
+        )
+    return runtime
 
 
 def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
@@ -749,6 +784,7 @@ async def get_poster_style_sample(
 )
 async def create_poster_style_item(
     body: PosterStyleCreateIn,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     background_tasks: BackgroundTasks,
@@ -759,6 +795,7 @@ async def create_poster_style_item(
         user=user,
         db=db,
         background_tasks=background_tasks,
+        tagging_runtime=_poster_tagging_runtime(request),
     )
 
 
@@ -1000,9 +1037,14 @@ async def list_poster_style_jobs(
 # ----- Vision auto-tag facade ----------------------------------------------
 
 
-async def _run_auto_tag_in_background(user_id: str, item_id: str) -> None:
+async def _run_auto_tag_in_background(
+    tagging_runtime: PosterTaggingRuntime,
+    user_id: str,
+    item_id: str,
+) -> None:
     await poster_style_tagging.run_auto_tag_in_background(
         _runtime(),
+        tagging_runtime,
         user_id,
         item_id,
     )
@@ -1013,12 +1055,14 @@ async def _api_call_poster_style_tagging_upstream(
     *,
     image_id: str,
     user_id: str,
+    tagging_runtime: PosterTaggingRuntime,
 ) -> dict[str, Any]:
     return await poster_style_tagging.call_tagging_upstream(
         _runtime(),
         db,
         image_id=image_id,
         user_id=user_id,
+        tagging_runtime=tagging_runtime,
     )
 
 
@@ -1031,12 +1075,16 @@ async def _auto_tag_poster_style_item(
     db: AsyncSession,
     user_id: str,
     item_id: str,
+    capacity: AsyncContextManager[None] | None = None,
+    upstream: Callable[..., Awaitable[dict[str, Any]]] | None = None,
 ) -> PosterStyleAutoTagOut:
     return await poster_style_tagging.auto_tag_item(
         _runtime(),
         db=db,
         user_id=user_id,
         item_id=item_id,
+        capacity=capacity,
+        upstream=upstream,
     )
 
 
@@ -1047,14 +1095,39 @@ async def _auto_tag_poster_style_item(
 )
 async def auto_tag_poster_style_item(
     item_id: str,
+    request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PosterStyleAutoTagOut:
-    return await _auto_tag_poster_style_item(
-        db=db,
-        user_id=user.id,
-        item_id=item_id,
-    )
+    tagging_runtime = _poster_tagging_runtime(request)
+
+    async def upstream(
+        session: AsyncSession,
+        *,
+        image_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        return await _api_call_poster_style_tagging_upstream(
+            session,
+            image_id=image_id,
+            user_id=user_id,
+            tagging_runtime=tagging_runtime,
+        )
+
+    try:
+        return await _auto_tag_poster_style_item(
+            db=db,
+            user_id=user.id,
+            item_id=item_id,
+            capacity=tagging_runtime.capacity.hold(),
+            upstream=upstream,
+        )
+    except PosterTaggingCapacityUnavailable as exc:
+        raise _http(
+            "poster_tagging_capacity_unavailable",
+            "poster tagging capacity is temporarily unavailable",
+            503,
+        ) from exc
 
 
 # ----- Detail catch-all -----------------------------------------------------
