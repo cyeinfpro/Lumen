@@ -9,7 +9,8 @@ from typing import Any, BinaryIO, Callable, Generator, Iterator, cast
 import pytest
 from fastapi import HTTPException
 
-from app.routes import images, shares
+from app.images.application import http_routes as images
+from app.routes import shares
 from app.services import storage_files
 
 

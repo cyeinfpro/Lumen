@@ -775,7 +775,8 @@ async def readyz(
 
 
 # 路由挂载
-from .routes import conversations, events, images, messages, tasks, videos  # noqa: E402
+from .images.application import http_routes as images  # noqa: E402
+from .routes import conversations, events, messages, tasks, videos  # noqa: E402
 from .routes import generations as generations_router  # noqa: E402
 from .routes import prompts as prompts_router  # noqa: E402
 from .routes import regenerate as regenerate_router  # noqa: E402

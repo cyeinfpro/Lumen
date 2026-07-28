@@ -13,12 +13,6 @@
       "status": "active"
     },
     {
-      "owner": "api",
-      "path": "apps/api/app/routes/images.py",
-      "retirement_condition": "API registration and compatibility tests import the images application routes and helpers directly.",
-      "status": "active"
-    },
-    {
       "owner": "worker",
       "path": "apps/worker/app/upstream.py",
       "retirement_condition": "All callers use upstream_parts and provider_runtime contracts without facade monkeypatch hooks.",
