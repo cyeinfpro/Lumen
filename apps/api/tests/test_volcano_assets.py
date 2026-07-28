@@ -130,7 +130,7 @@ class _Redis:
 
 
 def test_signed_request_is_deterministic_and_uses_region_host() -> None:
-    from app.volcano_assets import build_signed_asset_request
+    from lumen_core.volcano_assets import build_signed_asset_request
 
     kwargs = {
         "action": "ListAssetGroups",
@@ -168,7 +168,7 @@ def test_signed_request_is_deterministic_and_uses_region_host() -> None:
 
 
 def test_signed_request_rejects_unsafe_region() -> None:
-    from app.volcano_assets import build_signed_asset_request
+    from lumen_core.volcano_assets import build_signed_asset_request
 
     with pytest.raises(ValueError, match="invalid Volcano region"):
         build_signed_asset_request(
@@ -204,7 +204,7 @@ def test_volcano_reference_url_uses_safe_lumen_filename() -> None:
 
 
 def test_result_and_asset_error_normalization() -> None:
-    from app.volcano_assets import (
+    from lumen_core.volcano_assets import (
         normalize_asset_list,
         normalize_volcano_result,
     )
@@ -1306,7 +1306,7 @@ async def test_queue_operation_recovers_lost_redis_set_response_without_duplicat
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     provider = _provider()
     redis = _Redis()
@@ -1472,7 +1472,7 @@ async def test_create_asset_returns_structured_429_before_enqueue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import VolcanoAssetCreateRateLimited
+    from lumen_core.volcano_assets import VolcanoAssetCreateRateLimited
 
     provider = _provider()
 
@@ -1522,7 +1522,7 @@ async def test_operation_status_is_user_scoped_and_stable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     operation = {
@@ -1566,7 +1566,7 @@ async def test_asset_compat_poll_follows_completed_operation_to_real_asset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     provider = _provider()
     redis = _Redis()
@@ -1632,7 +1632,7 @@ async def test_old_operation_without_provider_binding_cannot_follow_current_asse
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     provider = _provider()
     redis = _Redis()
@@ -1743,7 +1743,7 @@ async def test_failed_operation_can_be_retried_without_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     operation = {
@@ -1828,7 +1828,7 @@ async def test_retry_supports_every_action_and_only_rates_create_asset(
     action: str,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     operation = {
@@ -1894,7 +1894,7 @@ async def test_retry_operation_rejects_other_owner_before_rate_reservation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     redis.values[volcano_asset_operation_key("operation-1")] = json.dumps(
@@ -1933,7 +1933,7 @@ async def test_retry_operation_enqueues_after_lost_cas_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     operation = {
@@ -1999,7 +1999,7 @@ async def test_retry_rejects_model_scope_change_after_cas_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
-    from app.volcano_assets import volcano_asset_operation_key
+    from lumen_core.volcano_assets import volcano_asset_operation_key
 
     redis = _Redis()
     operation = {
@@ -2255,7 +2255,7 @@ async def test_non_create_enqueue_failure_is_pollable_without_qpm_admission(
 async def test_client_maps_rate_limit_and_uses_configured_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import volcano_assets
+    from app.services import volcano_asset_client as volcano_assets
 
     captured: dict[str, Any] = {}
     response = httpx.Response(
@@ -2312,7 +2312,7 @@ async def test_client_maps_rate_limit_and_uses_configured_proxy(
 async def test_client_maps_already_deleted_to_idempotent_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import volcano_assets
+    from app.services import volcano_asset_client as volcano_assets
 
     response = httpx.Response(
         409,
@@ -2356,7 +2356,7 @@ async def test_client_maps_already_deleted_to_idempotent_not_found(
 async def test_client_maps_upstream_5xx_without_leaking_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import volcano_assets
+    from app.services import volcano_asset_client as volcano_assets
 
     response = httpx.Response(
         503,

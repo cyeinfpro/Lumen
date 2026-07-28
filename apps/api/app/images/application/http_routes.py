@@ -55,6 +55,10 @@ from lumen_core.model_image_metadata import (
     model_image_filename,
 )
 from lumen_core.schemas import ImageOut
+from lumen_core.volcano_asset_media import (
+    VOLCANO_ASSET_IMAGE_KIND,
+    VOLCANO_ASSET_IMAGE_MIME,
+)
 from lumen_core.volcano_assets import volcano_asset_safe_filename
 
 from ...audit import hash_email, request_ip_hash, write_audit
@@ -78,10 +82,6 @@ from ._file_delivery import (
     storage_streaming_response as _build_storage_streaming_response,
 )
 from ...services import storage_files
-from ...volcano_asset_media import (
-    VOLCANO_ASSET_IMAGE_KIND,
-    VOLCANO_ASSET_IMAGE_MIME,
-)
 from ..composition import (
     create_image_route_lifespan,
     get_upload_command_service,
