@@ -73,3 +73,7 @@ async def test_worker_publish_event_envelope_contains_channel(
     publish_payload = json.loads(redis.published[0][1])
     assert stream_payload["channel"] == "task:completion-1"
     assert publish_payload["channel"] == "task:completion-1"
+    assert [channel for channel, _payload in redis.published] == [
+        "task:completion-1",
+        "user:user-1",
+    ]
