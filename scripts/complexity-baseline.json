@@ -10,40 +10,20 @@
   "metrics": {
     "function_lines": {
       "apps/api/app/canvas_services/execution_service.py::execute_node": 305,
-      "apps/api/app/routes/auth.py::signup": 205,
-      "apps/api/app/services/message_submission.py::_create_generation_tasks": 202,
-      "apps/worker/app/tasks/memory_extraction_parts/run_state.py::finalize_memory_extraction": 304
+      "apps/api/app/services/message_submission.py::_create_generation_tasks": 202
     },
     "function_parameters": {
-      "apps/api/app/routes/tasks.py::list_tasks": 13,
-      "apps/api/app/services/message_request.py::persist_message_request": 16,
-      "apps/api/app/services/message_submission.py::_create_completion_task": 17,
       "apps/api/app/services/message_submission.py::_create_generation_tasks": 22,
       "apps/api/app/services/message_submission.py::create_assistant_task": 29,
-      "apps/api/app/services/task_listing.py::build_task_list": 13,
-      "apps/api/app/services/video/options.py::_record_model_capability": 13,
-      "apps/api/app/services/video/submission.py::create_video_generation_record": 18,
       "apps/api/app/workflows/adapters/apparel_scene_planner.py::compose_image_prompt_with_gpt55": 13,
       "apps/api/app/workflows/adapters/apparel_scene_planner.py::plan_scene_cards_with_gpt55": 18,
       "apps/api/app/workflows/adapters/showcase_orchestration.py::_prepare_showcase_preflight_impl": 20,
       "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt": 16,
-      "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt_brief": 15,
-      "apps/worker/app/http_retry.py::post_with_retry": 13,
-      "apps/worker/app/provider_pool.py::ProviderPool._collect_image_candidates": 14,
-      "apps/worker/app/tasks/completion_parts/context_packing.py::_pack_compressed_context": 15,
-      "apps/worker/app/tasks/completion_parts/tool_images.py::_settle_cancelled_completion_billing": 18,
-      "apps/worker/app/tasks/context_summary_parts/fallback.py::_summarize_segments": 13,
-      "apps/worker/app/tasks/context_summary_parts/fallback.py::segment_and_summarize": 13,
-      "apps/worker/app/tasks/context_summary_parts/planning.py::build_summary_plan": 21,
-      "apps/worker/app/tasks/generation_parts/diagnostics.py::build_generation_diagnostics": 17,
-      "apps/worker/app/upstream_image_requests.py::_build_responses_image_body": 14
+      "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt_brief": 15
     },
     "nesting_depth": {
-      "apps/api/app/routes/me.py::export_my_data": 7,
       "apps/api/app/workflows/application/model_library_generation.py::model_library_generate_prompt": 7,
-      "apps/worker/app/tasks/completion_parts/stream.py::_extract_reasoning_text_from_item": 7,
-      "apps/worker/app/video_upstream.py::_download_video_url": 7,
-      "apps/worker/app/video_upstream_parts/parsing.py::_http_error": 7
+      "apps/worker/app/video_upstream.py::_download_video_url": 7
     }
   },
   "oversized_files": {},
