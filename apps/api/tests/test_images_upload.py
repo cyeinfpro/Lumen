@@ -16,7 +16,7 @@ from app.canvas_services import asset_ref_service
 from app.config import settings
 from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
 from app.routes import images
-from app.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
+from lumen_core.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
 
 

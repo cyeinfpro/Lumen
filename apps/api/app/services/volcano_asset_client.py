@@ -8,7 +8,6 @@ from fastapi import HTTPException
 
 from lumen_core import volcano_assets as _shared
 from lumen_core.providers import resolve_provider_proxy_url
-from lumen_core.volcano_assets import *  # noqa: F403
 
 
 httpx = _shared.httpx
@@ -28,8 +27,8 @@ def _http_from_service_error(exc: _shared.VolcanoAssetServiceError) -> HTTPExcep
 
 
 class VolcanoAssetClient(_shared.VolcanoAssetClient):
-    def __init__(self, provider):
-        async def _resolve(proxy):
+    def __init__(self, provider: Any) -> None:
+        async def _resolve(proxy: Any) -> str | None:
             return await resolve_provider_proxy_url(proxy)
 
         super().__init__(provider, proxy_resolver=_resolve)
@@ -41,8 +40,4 @@ class VolcanoAssetClient(_shared.VolcanoAssetClient):
             raise _http_from_service_error(exc) from exc
 
 
-def __getattr__(name: str):
-    return getattr(_shared, name)
-
-
-__all__ = [*_shared.__all__, "VolcanoAssetClient"]
+__all__ = ["VolcanoAssetClient"]

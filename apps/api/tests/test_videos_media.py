@@ -16,7 +16,7 @@ from lumen_core.video_providers import VideoProviderDefinition
 from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
 from app.routes import events, videos
 from app.services.video import submission as video_submission
-from app.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
+from lumen_core.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
 from app.video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,

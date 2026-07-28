@@ -44,6 +44,11 @@ from lumen_core.models import (
     Video,
     VideoGeneration,
 )
+from lumen_core.volcano_asset_media import (
+    VOLCANO_ASSET_VIDEO_KIND,
+    VOLCANO_ASSET_VIDEO_MIME,
+    volcano_asset_video_variant_metadata,
+)
 from lumen_core.schemas import (
     VideoCreateIn,
     VideoGenerationOut,
@@ -69,11 +74,6 @@ from ..services.video import submission as video_submission_service
 from ..services.video.errors import video_http_error
 from ..services.video_publish import publish_video_queued
 from ..sse_publish import publish_sse_event  # noqa: F401 - test patch surface
-from ..volcano_asset_media import (
-    VOLCANO_ASSET_VIDEO_KIND,
-    VOLCANO_ASSET_VIDEO_MIME,
-    volcano_asset_video_variant_metadata,
-)
 from ..video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_MIME,

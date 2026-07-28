@@ -20,15 +20,15 @@ from lumen_core.schemas import (
     normalize_asset_reference_url,
 )
 from lumen_core.url_security import is_private_host, resolve_public_http_target
+from lumen_core.volcano_asset_media import (
+    VOLCANO_ASSET_IMAGE_KIND,
+    VOLCANO_ASSET_VIDEO_KIND,
+)
 from lumen_core.volcano_assets import volcano_asset_reference_url
 
 from ...config import settings
 from ...images.domain.variants import VIDEO_REFERENCE_VARIANT
 from ...public_urls import resolve_public_base_url
-from ...volcano_asset_media import (
-    VOLCANO_ASSET_IMAGE_KIND,
-    VOLCANO_ASSET_VIDEO_KIND,
-)
 from ...video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
     VIDEO_REFERENCE_VIDEO_MIME,

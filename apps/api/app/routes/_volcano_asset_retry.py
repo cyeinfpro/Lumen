@@ -9,8 +9,7 @@ import time
 from typing import Any
 
 from fastapi import HTTPException
-
-from ..volcano_assets import (
+from lumen_core.volcano_assets import (
     VolcanoAssetCreateRateLimited,
     VolcanoAssetOperationOwnershipError,
     VolcanoAssetQuotaKey,
