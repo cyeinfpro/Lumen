@@ -155,13 +155,6 @@ class WorkflowHttpUseCases:
             workflow_run_id=workflow_run_id, user=user, db=db
         )
 
-    async def create_apparel_model_showcase(
-        self, *, body: object, user: object, db: object
-    ) -> object:
-        return await self.apparel.create_apparel_model_showcase(
-            body=body, user=user, db=db
-        )
-
     async def list_apparel_model_library(
         self,
         *,
@@ -346,13 +339,6 @@ class WorkflowHttpUseCases:
     ) -> object:
         return await self.model_library.auto_tag_apparel_model_library_item(
             item_id=item_id, user=user, db=db
-        )
-
-    async def create_poster_design_workflow(
-        self, *, body: object, user: object, db: object
-    ) -> object:
-        return await self.poster.create_poster_design_workflow(
-            body=body, user=user, db=db
         )
 
     async def approve_copy_analysis(

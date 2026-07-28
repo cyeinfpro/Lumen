@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (
     AgeSegment,
@@ -25,7 +26,10 @@ from lumen_core.schemas import (
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
+from ...adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
+from ...application.create_run import CreateWorkflowRun
 from ...composition import WorkflowApplication
+from ...ports.run_creation import CreateApparelRunCommand
 from .delivery import binary_file_response
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
@@ -40,16 +44,26 @@ project_router = APIRouter()
     dependencies=[Depends(verify_csrf)],
 )
 async def create_apparel_model_showcase(
-    application: Annotated[WorkflowApplication, Depends(get_workflow_application)],
     body: ApparelWorkflowCreateIn,
     user: CurrentUser,
-    db: Annotated[Any, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ApparelWorkflowCreateOut:
-    return await execute_workflow_action(
-        application.require_http().create_apparel_model_showcase,
-        body=body,
-        user=user,
-        db=db,
+    result = await execute_workflow_action(
+        CreateWorkflowRun(
+            SQLAlchemyWorkflowRunCreationAdapter(db, user)
+        ).create_apparel,
+        command=CreateApparelRunCommand(
+            user_id=user.id,
+            product_image_ids=tuple(body.product_image_ids),
+            user_prompt=body.user_prompt,
+            quality_mode=body.quality_mode,
+            title=body.title,
+        ),
+    )
+    return ApparelWorkflowCreateOut(
+        workflow_run_id=result.workflow_run_id,
+        status=result.status,
+        current_step=result.current_step,
     )
 
 

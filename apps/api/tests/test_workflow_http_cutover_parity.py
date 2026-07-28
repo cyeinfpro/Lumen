@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,9 +11,16 @@ from app.workflows.adapters.http_operations import (
     PosterWorkflowOperationsAdapter,
     ProjectWorkflowOperationsAdapter,
 )
+from app.workflows.adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
 from app.workflows.adapters.operations import apparel, model_library, poster, projects
+from app.workflows.application.create_run import CreateWorkflowRun
 from app.workflows.application.http_operations import WorkflowHttpUseCases
 from app.workflows.application.runtime_state import WorkflowRuntimeState
+from app.workflows.ports.run_creation import (
+    CreatePosterRunCommand,
+    PosterBrandAssets,
+    WorkflowRunCreated,
+)
 
 
 def _application() -> tuple[
@@ -124,18 +132,37 @@ async def test_poster_http_cutover_preserves_adapter_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, Any]] = []
-    expected = {"id": "poster-workflow-1", "status": "running"}
+    expected = SimpleNamespace(
+        workflow_run_id="poster-workflow-1",
+        status="running",
+        current_step="copy_analysis",
+    )
 
-    async def fake_create(**kwargs: Any) -> object:
-        calls.append(kwargs)
+    async def fake_create(*args: Any, **kwargs: Any) -> object:
+        calls.append({"args": args, "kwargs": kwargs})
         return expected
 
     monkeypatch.setattr(poster, "create_poster_design_workflow", fake_create)
-    application, _, _, _, adapter = _application()
-    arguments = {"body": object(), "user": object(), "db": object()}
+    adapter = SQLAlchemyWorkflowRunCreationAdapter(
+        object(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+    )
+    result = await CreateWorkflowRun(adapter).create_poster(
+        CreatePosterRunCommand(
+            user_id="user-1",
+            conversation_id=None,
+            copy_text="launch",
+            style_id="style-1",
+            target_aspects=("1:1",),
+            brand_assets=PosterBrandAssets(None, None, None, None),
+            quality_mode="premium",
+            title=None,
+        )
+    )
 
-    old_result = await adapter.create_poster_design_workflow(**arguments)
-    new_result = await application.create_poster_design_workflow(**arguments)
-
-    assert new_result == old_result == expected
-    assert calls == [arguments, arguments]
+    assert result == WorkflowRunCreated(
+        workflow_run_id="poster-workflow-1",
+        status="running",
+        current_step="copy_analysis",
+    )
+    assert len(calls) == 1

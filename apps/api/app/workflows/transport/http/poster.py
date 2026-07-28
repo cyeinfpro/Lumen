@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
@@ -20,7 +21,13 @@ from lumen_core.schemas import (
 
 from ....db import get_db
 from ....deps import CurrentUser, verify_csrf
+from ...adapters.run_creation import SQLAlchemyWorkflowRunCreationAdapter
+from ...application.create_run import CreateWorkflowRun
 from ...composition import WorkflowApplication
+from ...ports.run_creation import (
+    CreatePosterRunCommand,
+    PosterBrandAssets,
+)
 from .dependencies import get_workflow_application
 from .execution import execute_workflow_action
 
@@ -33,16 +40,34 @@ router = APIRouter()
     dependencies=[Depends(verify_csrf)],
 )
 async def create_poster_design_workflow(
-    application: Annotated[WorkflowApplication, Depends(get_workflow_application)],
     body: PosterDesignWorkflowCreateIn,
     user: CurrentUser,
-    db: Annotated[Any, Depends(get_db)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PosterDesignWorkflowCreateOut:
-    return await execute_workflow_action(
-        application.require_http().create_poster_design_workflow,
-        body=body,
-        user=user,
-        db=db,
+    result = await execute_workflow_action(
+        CreateWorkflowRun(
+            SQLAlchemyWorkflowRunCreationAdapter(db, user)
+        ).create_poster,
+        command=CreatePosterRunCommand(
+            user_id=user.id,
+            conversation_id=body.conversation_id,
+            copy_text=body.copy_text,
+            style_id=body.style_id,
+            target_aspects=tuple(body.target_aspects),
+            brand_assets=PosterBrandAssets(
+                logo_image_id=body.brand_assets.logo_image_id,
+                product_image_id=body.brand_assets.product_image_id,
+                primary_color=body.brand_assets.primary_color,
+                font_family=body.brand_assets.font_family,
+            ),
+            quality_mode=body.quality_mode,
+            title=body.title,
+        ),
+    )
+    return PosterDesignWorkflowCreateOut(
+        workflow_run_id=result.workflow_run_id,
+        status=result.status,
+        current_step=result.current_step,
     )
 
 

@@ -157,13 +157,6 @@ class ProjectWorkflowOperationsAdapter:
 class ApparelWorkflowOperationsAdapter:
     runtime: WorkflowRuntimeState
 
-    async def create_apparel_model_showcase(
-        self, *, body: object, user: object, db: object
-    ) -> object:
-        return await apparel.create_apparel_model_showcase(
-            body=body, user=user, db=db
-        )
-
     async def list_apparel_model_library(
         self,
         *,
@@ -356,13 +349,6 @@ class ModelLibraryWorkflowOperationsAdapter:
 
 @dataclass(frozen=True, slots=True)
 class PosterWorkflowOperationsAdapter:
-    async def create_poster_design_workflow(
-        self, *, body: object, user: object, db: object
-    ) -> object:
-        return await poster.create_poster_design_workflow(
-            body=body, user=user, db=db
-        )
-
     async def approve_copy_analysis(
         self,
         *,
