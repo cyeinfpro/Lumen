@@ -22,6 +22,7 @@ from typing import Any
 
 from redis.exceptions import WatchError
 
+from lumen_core import sse_durable
 from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
@@ -29,6 +30,12 @@ from lumen_core.constants import (
     user_channel,
 )
 from lumen_core.models import OutboxDeadLetter
+
+from app.observability import (
+    sse_live_publish_bytes_total,
+    sse_live_publish_duration_seconds,
+    sse_live_publish_total,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,47 +51,7 @@ _DEDUPE_RESERVATION_STALE_SECONDS = 2.0
 _DEDUPE_RECOVERY_SCAN_COUNT = 100
 _TRANSACTION_RETRIES = 3
 _XADD_RETRY_DELAYS_SECONDS = (0.5, 2.0)
-_XADD_IDEMPOTENT_LUA = """
-local existing = redis.call('GET', KEYS[2])
-local function is_reservation(value)
-  return value == '' or string.sub(value, 1, string.len(ARGV[7])) == ARGV[7]
-end
-if existing and not is_reservation(existing) then
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
-  return existing
-end
-local reserved = redis.call('SET', KEYS[2], ARGV[8], 'NX', 'EX', tonumber(ARGV[5]))
-if not reserved then
-  existing = redis.call('GET', KEYS[2])
-  if existing and not is_reservation(existing) then
-    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
-    return existing
-  end
-  return redis.error_reply('sse dedupe reservation has no stream id')
-end
-local stream_id = redis.call(
-  'XADD',
-  KEYS[1],
-  'MAXLEN',
-  '~',
-  tonumber(ARGV[4]),
-  '*',
-  'event',
-  ARGV[2],
-  'data',
-  ARGV[3],
-  'event_id',
-  ARGV[1]
-)
-local ttl_set = redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
-if ttl_set ~= 1 then
-  redis.call('XDEL', KEYS[1], stream_id)
-  redis.call('DEL', KEYS[2])
-  return redis.error_reply('sse stream ttl was not established')
-end
-redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
-return stream_id
-"""
+_XADD_IDEMPOTENT_LUA = sse_durable.XADD_IDEMPOTENT_LUA
 
 
 class SSEPublishRetryableError(RuntimeError):
@@ -163,6 +130,67 @@ async def _envelope(
     }
 
 
+def _live_channels(channel: str, user_id: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((user_channel(user_id), channel)))
+
+
+def _live_channel_kind(channel: str, user_id: str) -> str:
+    return "user" if channel == user_channel(user_id) else "compat"
+
+
+async def _publish_live_channel(
+    redis: Any,
+    *,
+    user_id: str,
+    channel: str,
+    payload_json: str,
+) -> sse_durable.SseLivePublishOutcome:
+    started = time.monotonic()
+    payload_bytes = len(payload_json.encode("utf-8"))
+    channel_kind = _live_channel_kind(channel, user_id)
+    attempts = 0
+    outcome = "failed"
+    for attempts in range(1, 3):
+        try:
+            await redis.publish(channel, payload_json)
+            outcome = "success"
+            break
+        except Exception as exc:  # noqa: BLE001
+            if attempts == 1:
+                logger.warning(
+                    "publish_event: PUBLISH retry channel=%s kind=%s err=%s",
+                    channel,
+                    channel_kind,
+                    exc,
+                )
+                await asyncio.sleep(0.05)
+                continue
+            logger.warning(
+                "publish_event: PUBLISH failed channel=%s kind=%s err=%s",
+                channel,
+                channel_kind,
+                exc,
+            )
+    duration = max(0.0, time.monotonic() - started)
+    sse_live_publish_total.labels(
+        channel_kind=channel_kind,
+        outcome=outcome,
+    ).inc()
+    sse_live_publish_bytes_total.labels(channel_kind=channel_kind).inc(payload_bytes)
+    sse_live_publish_duration_seconds.labels(
+        channel_kind=channel_kind,
+        outcome=outcome,
+    ).observe(duration)
+    return sse_durable.SseLivePublishOutcome(
+        channel=channel,
+        channel_kind=channel_kind,
+        outcome=outcome,
+        attempts=attempts,
+        payload_bytes=payload_bytes,
+        duration_seconds=duration,
+    )
+
+
 def _decode_redis_value(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("ascii", errors="replace")
@@ -170,35 +198,35 @@ def _decode_redis_value(value: Any) -> str:
 
 
 def _has_stream_id(value: Any) -> bool:
-    if value is None:
-        return False
-    decoded = _decode_redis_value(value)
-    return decoded != "" and not decoded.startswith(_DEDUPE_RESERVATION_PREFIX)
-
-
-def _is_dedupe_reservation_pending(exc: Exception) -> bool:
-    return _DEDUPE_RESERVATION_PENDING_ERROR in str(exc).lower()
-
-
-def _is_lua_xadd_unsupported(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return "unknown redis command called from script" in message or (
-        "xadd" in message
-        and "script" in message
-        and (
-            "unknown" in message or "unsupported" in message or "not allowed" in message
-        )
+    return sse_durable.has_stream_id(
+        value,
+        reservation_prefix=_DEDUPE_RESERVATION_PREFIX,
     )
 
 
+def _is_dedupe_reservation_pending(exc: Exception) -> bool:
+    return sse_durable.is_reservation_pending(exc)
+
+
+def _is_lua_xadd_unsupported(exc: Exception) -> bool:
+    return sse_durable.is_lua_xadd_unsupported(exc)
+
+
 def _is_stream_command_unsupported(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return (
-        "unknown command" in message
-        or "unknown redis command" in message
-        or (
-            "xadd" in message and ("unsupported" in message or "not allowed" in message)
-        )
+    return sse_durable.is_stream_command_unsupported(exc)
+
+
+def _durable_append_config() -> sse_durable.DurableSseAppendConfig:
+    return sse_durable.DurableSseAppendConfig(
+        maxlen=EVENTS_STREAM_MAXLEN,
+        dedupe_ttl_seconds=_EVENTS_DEDUPE_TTL_SECONDS,
+        stream_ttl_seconds=EVENTS_STREAM_TTL_SECONDS,
+        reservation_prefix=_DEDUPE_RESERVATION_PREFIX,
+        reservation_wait_seconds=_DEDUPE_RESERVATION_WAIT_SECONDS,
+        reservation_poll_seconds=_DEDUPE_RESERVATION_POLL_SECONDS,
+        reservation_stale_seconds=_DEDUPE_RESERVATION_STALE_SECONDS,
+        recovery_scan_count=_DEDUPE_RECOVERY_SCAN_COUNT,
+        transaction_retries=_TRANSACTION_RETRIES,
     )
 
 
@@ -504,80 +532,16 @@ async def _xadd_event_without_lua(
     reclaim_empty_reservation: bool = False,
     reservation_token: str | None = None,
 ) -> str:
-    dedupe_key = f"{stream_key}:dedupe:{event_id}"
-    owner_token = reservation_token or (
-        f"{_DEDUPE_RESERVATION_PREFIX}{uuid.uuid4().hex}"
-    )
-    current = await _read_dedupe_value(redis, dedupe_key)
-    if _has_stream_id(current):
-        return current or ""
-
-    reserved = current == owner_token or await _reserve_dedupe_key(
-        redis,
-        dedupe_key,
-        owner_token,
-    )
-    if not reserved:
-        existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
-        if existing is not None:
-            return existing
-        recovered = await _recover_dedupe_stream_id(
-            redis,
-            stream_key=stream_key,
-            dedupe_key=dedupe_key,
-            event_id=event_id,
-        )
-        if recovered is not None:
-            return recovered
-        if not reclaim_empty_reservation:
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        if not await _reservation_stale_enough_to_reclaim(redis, dedupe_key):
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        stale_owner = await _read_dedupe_value(redis, dedupe_key)
-        if stale_owner is None or _has_stream_id(stale_owner):
-            existing = await _read_dedupe_stream_id(redis, dedupe_key)
-            if existing is not None:
-                return existing
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        if not await _compare_delete_reservation(
-            redis,
-            dedupe_key=dedupe_key,
-            owner_token=stale_owner,
-        ):
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        reserved = await _reserve_dedupe_key(redis, dedupe_key, owner_token)
-        if not reserved:
-            existing = await _wait_for_dedupe_stream_id(redis, dedupe_key)
-            if existing is not None:
-                return existing
-            raise RuntimeError(_DEDUPE_RESERVATION_PENDING_ERROR)
-        # The previous owner may have completed XADD immediately before its token
-        # was compare-deleted. Re-scan after takeover before issuing another XADD.
-        recovered = await _recover_dedupe_stream_id(
-            redis,
-            stream_key=stream_key,
-            dedupe_key=dedupe_key,
-            event_id=event_id,
-        )
-        if recovered is not None:
-            return recovered
-
-    stream_id = await _xadd_with_transactional_ttl(
+    return await sse_durable.append_sse_event_without_lua(
         redis,
         stream_key=stream_key,
-        dedupe_key=dedupe_key,
-        owner_token=owner_token,
         event_name=event_name,
         event_id=event_id,
         payload_json=payload_json,
+        config=_durable_append_config(),
+        reclaim_reservation=reclaim_empty_reservation,
+        reservation_token=reservation_token,
     )
-    await _store_dedupe_stream_id(
-        redis,
-        dedupe_key=dedupe_key,
-        stream_id=stream_id,
-        owner_token=owner_token,
-    )
-    return stream_id
 
 
 async def _xadd_event_once(
@@ -588,64 +552,14 @@ async def _xadd_event_once(
     envelope: dict[str, Any],
     payload_json: str,
 ) -> str:
-    event_id = str(envelope["event_id"])
-    reservation_token = f"{_DEDUPE_RESERVATION_PREFIX}{uuid.uuid4().hex}"
-    eval_fn = getattr(redis, "eval", None)
-    if not callable(eval_fn):
-        return await _xadd_event_without_lua(
-            redis,
-            stream_key=stream_key,
-            event_name=event_name,
-            event_id=event_id,
-            payload_json=payload_json,
-            reservation_token=reservation_token,
-        )
-    try:
-        stream_id = await eval_fn(
-            _XADD_IDEMPOTENT_LUA,
-            2,
-            stream_key,
-            f"{stream_key}:dedupe:{event_id}",
-            event_id,
-            event_name,
-            payload_json,
-            str(EVENTS_STREAM_MAXLEN),
-            str(_EVENTS_DEDUPE_TTL_SECONDS),
-            str(EVENTS_STREAM_TTL_SECONDS),
-            _DEDUPE_RESERVATION_PREFIX,
-            reservation_token,
-        )
-    except Exception as exc:  # noqa: BLE001
-        if _is_dedupe_reservation_pending(exc):
-            dedupe_key = f"{stream_key}:dedupe:{event_id}"
-            existing = await _wait_for_dedupe_stream_id(
-                redis,
-                dedupe_key,
-            )
-            if existing is not None:
-                return existing
-            return await _xadd_event_without_lua(
-                redis,
-                stream_key=stream_key,
-                event_name=event_name,
-                event_id=event_id,
-                payload_json=payload_json,
-                reclaim_empty_reservation=True,
-            )
-        if not _is_lua_xadd_unsupported(exc):
-            raise
-        return await _xadd_event_without_lua(
-            redis,
-            stream_key=stream_key,
-            event_name=event_name,
-            event_id=event_id,
-            payload_json=payload_json,
-            reclaim_empty_reservation=True,
-            reservation_token=reservation_token,
-        )
-    if isinstance(stream_id, bytes):
-        return stream_id.decode("ascii", errors="replace")
-    return str(stream_id)
+    return await sse_durable.append_sse_event_once(
+        redis,
+        stream_key=stream_key,
+        event_name=event_name,
+        event_id=str(envelope["event_id"]),
+        payload_json=payload_json,
+        config=_durable_append_config(),
+    )
 
 
 async def publish_event(
@@ -750,28 +664,13 @@ async def publish_event(
 
     payload_json = json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
 
-    # GEN-P1-1: PUBLISH 加 1 次轻量重试。专用频道服务 Telegram 等消费者；
-    # 用户频道让 Web 在任务集合变化时不必重建 EventSource。
-    live_channels = tuple(dict.fromkeys((channel, user_channel(user_id))))
-    for live_channel in live_channels:
-        for attempt in range(2):
-            try:
-                await redis.publish(live_channel, payload_json)
-                break
-            except Exception as exc:  # noqa: BLE001
-                if attempt == 0:
-                    logger.warning(
-                        "publish_event: PUBLISH retry channel=%s err=%s",
-                        live_channel,
-                        exc,
-                    )
-                    await asyncio.sleep(0.05)
-                    continue
-                logger.warning(
-                    "publish_event: PUBLISH failed channel=%s err=%s",
-                    live_channel,
-                    exc,
-                )
+    for live_channel in _live_channels(channel, user_id):
+        await _publish_live_channel(
+            redis,
+            user_id=user_id,
+            channel=live_channel,
+            payload_json=payload_json,
+        )
 
 
 async def _persist_sse_dlq(

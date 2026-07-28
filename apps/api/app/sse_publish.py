@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
+from lumen_core import sse_durable
 from lumen_core.constants import (
     EVENTS_STREAM_MAXLEN,
     EVENTS_STREAM_PREFIX,
@@ -22,40 +23,23 @@ from lumen_core.constants import (
     user_channel,
 )
 
+from .observability import (
+    sse_live_publish_bytes_total,
+    sse_live_publish_duration_seconds,
+    sse_live_publish_total,
+)
+
 logger = logging.getLogger(__name__)
 
 _XADD_RETRY_DELAYS_SECONDS = (0.05, 0.2)
+_LIVE_PUBLISH_RETRY_DELAYS_SECONDS = (0.05,)
 _EVENTS_DEDUPE_TTL_SECONDS = 24 * 60 * 60
-_XADD_IDEMPOTENT_LUA = """
-local existing = redis.call('GET', KEYS[2])
-if existing and existing ~= '' then
-  return existing
-end
-local reserved = redis.call('SET', KEYS[2], '', 'NX', 'EX', tonumber(ARGV[5]))
-if not reserved then
-  existing = redis.call('GET', KEYS[2])
-  if existing and existing ~= '' then
-    return existing
-  end
-  return redis.error_reply('sse dedupe reservation has no stream id')
-end
-local stream_id = redis.call(
-  'XADD',
-  KEYS[1],
-  'MAXLEN',
-  '~',
-  tonumber(ARGV[4]),
-  '*',
-  'event',
-  ARGV[2],
-  'data',
-  ARGV[3],
-  'event_id',
-  ARGV[1]
+_XADD_IDEMPOTENT_LUA = sse_durable.XADD_IDEMPOTENT_LUA
+_DURABLE_APPEND_CONFIG = sse_durable.DurableSseAppendConfig(
+    maxlen=EVENTS_STREAM_MAXLEN,
+    dedupe_ttl_seconds=_EVENTS_DEDUPE_TTL_SECONDS,
+    stream_ttl_seconds=EVENTS_STREAM_TTL_SECONDS,
 )
-redis.call('SET', KEYS[2], stream_id, 'XX', 'EX', tonumber(ARGV[5]))
-return stream_id
-"""
 
 
 # Per-process monotonic only. Different API workers can still produce
@@ -75,6 +59,14 @@ class SSEPublishEvent(TypedDict):
     channel: str
     event_name: str
     data: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _PreparedSseEvent:
+    event: SSEPublishEvent
+    stream_key: str
+    envelope: dict[str, Any]
+    payload_json: str
 
 
 async def _monotonic_ts_ms() -> int:
@@ -105,20 +97,64 @@ def _json(value: Any) -> str:
 
 
 def _live_channels(channel: str, user_id: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys((channel, user_channel(user_id))))
+    return tuple(dict.fromkeys((user_channel(user_id), channel)))
 
 
-def _queue_live_event_publish(
-    pipe: Any,
+def _live_channel_kind(channel: str, user_id: str) -> str:
+    return "user" if channel == user_channel(user_id) else "compat"
+
+
+async def _publish_live_channel(
+    redis: Any,
     *,
-    event: SSEPublishEvent,
-    envelope: dict[str, Any],
-    stream_id: str,
-) -> None:
-    envelope["sse_id"] = stream_id
-    payload_json = _json(envelope)
-    for live_channel in _live_channels(event["channel"], event["user_id"]):
-        pipe.publish(live_channel, payload_json)
+    user_id: str,
+    channel: str,
+    payload_json: str,
+) -> sse_durable.SseLivePublishOutcome:
+    started = time.monotonic()
+    payload_bytes = len(payload_json.encode("utf-8"))
+    channel_kind = _live_channel_kind(channel, user_id)
+    attempts = 0
+    outcome = "failed"
+    for attempts in range(1, len(_LIVE_PUBLISH_RETRY_DELAYS_SECONDS) + 2):
+        try:
+            await redis.publish(channel, payload_json)
+            outcome = "success"
+            break
+        except Exception as exc:  # noqa: BLE001
+            if attempts <= len(_LIVE_PUBLISH_RETRY_DELAYS_SECONDS):
+                logger.warning(
+                    "api sse live publish retry channel=%s kind=%s err=%s",
+                    channel,
+                    channel_kind,
+                    exc,
+                )
+                await asyncio.sleep(_LIVE_PUBLISH_RETRY_DELAYS_SECONDS[attempts - 1])
+                continue
+            logger.warning(
+                "api sse live publish failed channel=%s kind=%s err=%s",
+                channel,
+                channel_kind,
+                exc,
+            )
+    duration = max(0.0, time.monotonic() - started)
+    sse_live_publish_total.labels(
+        channel_kind=channel_kind,
+        outcome=outcome,
+    ).inc()
+    sse_live_publish_bytes_total.labels(channel_kind=channel_kind).inc(payload_bytes)
+    sse_live_publish_duration_seconds.labels(
+        channel_kind=channel_kind,
+        outcome=outcome,
+    ).observe(duration)
+    return sse_durable.SseLivePublishOutcome(
+        channel=channel,
+        channel_kind=channel_kind,
+        outcome=outcome,
+        attempts=attempts,
+        payload_bytes=payload_bytes,
+        duration_seconds=duration,
+    )
 
 
 def _payload_event_id(payload: dict[str, Any]) -> str:
@@ -134,130 +170,14 @@ def _decode_redis_value(value: Any) -> str:
     return str(value)
 
 
-def _has_stream_id(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bytes):
-        return value != b""
-    return str(value) != ""
-
-
 def _is_lua_xadd_unsupported(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return (
-        "unknown redis command called from script" in message
-        or "sse dedupe reservation has no stream id" in message
-        or (
-            "xadd" in message
-            and "script" in message
-            and (
-                "unknown" in message
-                or "unsupported" in message
-                or "not allowed" in message
-            )
-        )
-    )
+    return sse_durable.is_lua_xadd_unsupported(
+        exc
+    ) or sse_durable.is_reservation_pending(exc)
 
 
 def _is_stream_command_unsupported(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return (
-        "unknown command" in message
-        or "unknown redis command" in message
-        or (
-            "xadd" in message and ("unsupported" in message or "not allowed" in message)
-        )
-    )
-
-
-async def _read_dedupe_stream_id(redis: Any, dedupe_key: str) -> str | None:
-    get_fn = getattr(redis, "get", None)
-    if not callable(get_fn):
-        return None
-    existing = await get_fn(dedupe_key)
-    if not _has_stream_id(existing):
-        return None
-    return _decode_redis_value(existing)
-
-
-async def _reserve_dedupe_key(redis: Any, dedupe_key: str) -> bool:
-    set_fn = getattr(redis, "set", None)
-    if not callable(set_fn):
-        return True
-    return bool(
-        await set_fn(
-            dedupe_key,
-            "",
-            nx=True,
-            ex=_EVENTS_DEDUPE_TTL_SECONDS,
-        )
-    )
-
-
-async def _store_dedupe_stream_id(
-    redis: Any, *, dedupe_key: str, stream_id: str
-) -> None:
-    set_fn = getattr(redis, "set", None)
-    if not callable(set_fn):
-        return
-    try:
-        await set_fn(
-            dedupe_key,
-            stream_id,
-            xx=True,
-            ex=_EVENTS_DEDUPE_TTL_SECONDS,
-        )
-    except TypeError:
-        await set_fn(dedupe_key, stream_id)
-
-
-async def _xadd_event_without_lua(
-    redis: Any,
-    *,
-    stream_key: str,
-    event_name: str,
-    event_id: str,
-    payload_json: str,
-) -> str:
-    dedupe_key = f"{stream_key}:dedupe:{event_id}"
-    existing = await _read_dedupe_stream_id(redis, dedupe_key)
-    if existing is not None:
-        return existing
-
-    reserved = await _reserve_dedupe_key(redis, dedupe_key)
-    if not reserved:
-        existing = await _read_dedupe_stream_id(redis, dedupe_key)
-        if existing is not None:
-            return existing
-        # Garnet can leave an empty reservation when a Lua script reaches XADD
-        # and then rejects that command. Take over that empty reservation.
-        delete_fn = getattr(redis, "delete", None)
-        if callable(delete_fn):
-            await delete_fn(dedupe_key)
-            reserved = await _reserve_dedupe_key(redis, dedupe_key)
-        if not reserved:
-            raise RuntimeError("sse dedupe reservation has no stream id")
-
-    try:
-        stream_id = await redis.xadd(
-            stream_key,
-            {
-                "event": event_name,
-                "data": payload_json,
-                "event_id": event_id,
-            },
-            maxlen=EVENTS_STREAM_MAXLEN,
-            approximate=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        if _is_stream_command_unsupported(exc):
-            raise RuntimeError(
-                "redis stream xadd unsupported; cannot create recoverable sse id"
-            ) from exc
-        raise
-    decoded = _decode_redis_value(stream_id)
-    await _store_dedupe_stream_id(redis, dedupe_key=dedupe_key, stream_id=decoded)
-    return decoded
+    return sse_durable.is_stream_command_unsupported(exc)
 
 
 async def _xadd_event_once(
@@ -268,41 +188,14 @@ async def _xadd_event_once(
     event_id: str,
     payload_json: str,
 ) -> str:
-    eval_fn = getattr(redis, "eval", None)
-    if callable(eval_fn):
-        try:
-            stream_id = await eval_fn(
-                _XADD_IDEMPOTENT_LUA,
-                2,
-                stream_key,
-                f"{stream_key}:dedupe:{event_id}",
-                event_id,
-                event_name,
-                payload_json,
-                str(EVENTS_STREAM_MAXLEN),
-                str(_EVENTS_DEDUPE_TTL_SECONDS),
-            )
-        except Exception as exc:  # noqa: BLE001
-            if not _is_lua_xadd_unsupported(exc):
-                raise
-            return await _xadd_event_without_lua(
-                redis,
-                stream_key=stream_key,
-                event_name=event_name,
-                event_id=event_id,
-                payload_json=payload_json,
-            )
-    else:
-        return await _xadd_event_without_lua(
-            redis,
-            stream_key=stream_key,
-            event_name=event_name,
-            event_id=event_id,
-            payload_json=payload_json,
-        )
-    if isinstance(stream_id, bytes):
-        return stream_id.decode("ascii", errors="replace")
-    return str(stream_id)
+    return await sse_durable.append_sse_event_once(
+        redis,
+        stream_key=stream_key,
+        event_name=event_name,
+        event_id=event_id,
+        payload_json=payload_json,
+        config=_DURABLE_APPEND_CONFIG,
+    )
 
 
 async def publish_sse_event(
@@ -328,40 +221,26 @@ async def publish_sse_event(
     )[0]
 
 
-async def publish_sse_events(
+async def _publish_sse_events_individually(
     redis: Any,
     events: list[SSEPublishEvent],
 ) -> list[str]:
-    if not events:
-        return []
-    if len(events) == 1:
-        event = events[0]
-        return [
-            await _publish_sse_event_single(
-                redis,
-                user_id=event["user_id"],
-                channel=event["channel"],
-                event_name=event["event_name"],
-                data=event["data"],
-            )
-        ]
+    return [
+        await _publish_sse_event_single(
+            redis,
+            user_id=event["user_id"],
+            channel=event["channel"],
+            event_name=event["event_name"],
+            data=event["data"],
+        )
+        for event in events
+    ]
 
-    pipe_fn = getattr(redis, "pipeline", None)
-    if not callable(pipe_fn):
-        return [
-            await _publish_sse_event_single(
-                redis,
-                user_id=event["user_id"],
-                channel=event["channel"],
-                event_name=event["event_name"],
-                data=event["data"],
-            )
-            for event in events
-        ]
 
-    stream_keys: list[str] = []
-    envelopes: list[dict[str, Any]] = []
-    payload_jsons: list[str] = []
+async def _prepare_sse_events(
+    events: list[SSEPublishEvent],
+) -> list[_PreparedSseEvent]:
+    prepared: list[_PreparedSseEvent] = []
     for event in events:
         payload = dict(event["data"])
         event_id = _payload_event_id(payload)
@@ -373,94 +252,112 @@ async def publish_sse_events(
             "ts_ms": await _monotonic_ts_ms(),
             "data": payload,
         }
-        stream_keys.append(f"{EVENTS_STREAM_PREFIX}{event['user_id']}")
-        envelopes.append(envelope)
-        payload_jsons.append(_json(envelope))
+        prepared.append(
+            _PreparedSseEvent(
+                event=event,
+                stream_key=f"{EVENTS_STREAM_PREFIX}{event['user_id']}",
+                envelope=envelope,
+                payload_json=_json(envelope),
+            )
+        )
+    return prepared
 
-    stream_ids: list[str] | None = None
+
+def _queue_batch_xadd(pipe_eval: Any, prepared: _PreparedSseEvent) -> None:
+    event_id = str(prepared.envelope["event_id"])
+    pipe_eval(
+        _XADD_IDEMPOTENT_LUA,
+        2,
+        prepared.stream_key,
+        f"{prepared.stream_key}:dedupe:{event_id}",
+        event_id,
+        prepared.event["event_name"],
+        prepared.payload_json,
+        str(EVENTS_STREAM_MAXLEN),
+        str(_EVENTS_DEDUPE_TTL_SECONDS),
+        str(EVENTS_STREAM_TTL_SECONDS),
+        _DURABLE_APPEND_CONFIG.reservation_prefix,
+        f"{_DURABLE_APPEND_CONFIG.reservation_prefix}{uuid.uuid4().hex}",
+    )
+
+
+async def _append_sse_event_batch(
+    pipe_fn: Any,
+    prepared: list[_PreparedSseEvent],
+) -> list[str] | None:
     for attempt in range(3):
         pipe = pipe_fn(transaction=False)
         pipe_eval = getattr(pipe, "eval", None)
         if not callable(pipe_eval):
-            return [
-                await _publish_sse_event_single(
-                    redis,
-                    user_id=event["user_id"],
-                    channel=event["channel"],
-                    event_name=event["event_name"],
-                    data=event["data"],
-                )
-                for event in events
-            ]
-        for event, stream_key, envelope, payload_json in zip(
-            events, stream_keys, envelopes, payload_jsons, strict=False
-        ):
-            event_id = str(envelope["event_id"])
-            pipe_eval(
-                _XADD_IDEMPOTENT_LUA,
-                2,
-                stream_key,
-                f"{stream_key}:dedupe:{event_id}",
-                event_id,
-                event["event_name"],
-                payload_json,
-                str(EVENTS_STREAM_MAXLEN),
-                str(_EVENTS_DEDUPE_TTL_SECONDS),
-            )
+            return None
+        for item in prepared:
+            _queue_batch_xadd(pipe_eval, item)
         try:
             raw_ids = await pipe.execute()
-            ids = [
-                item.decode("ascii", errors="replace")
-                if isinstance(item, bytes)
-                else str(item)
-                for item in raw_ids
-            ]
-            if len(ids) != len(events):
+            stream_ids = [_decode_redis_value(item) for item in raw_ids]
+            if len(stream_ids) != len(prepared):
                 raise RuntimeError(
-                    f"xadd returned {len(ids)} ids for {len(events)} events"
+                    f"xadd returned {len(stream_ids)} ids for {len(prepared)} events"
                 )
-            stream_ids = ids
-            break
+            return stream_ids
         except Exception as exc:  # noqa: BLE001
             if _is_lua_xadd_unsupported(exc):
                 logger.warning(
                     "api publish_sse_events xadd batch lua fallback count=%d err=%s",
-                    len(events),
+                    len(prepared),
                     exc,
                 )
-                return [
-                    await _publish_sse_event_single(
-                        redis,
-                        user_id=event["user_id"],
-                        channel=event["channel"],
-                        event_name=event["event_name"],
-                        data=event["data"],
-                    )
-                    for event in events
-                ]
+                return None
             logger.warning(
                 "api publish_sse_events xadd batch failed count=%d attempt=%d err=%s",
-                len(events),
+                len(prepared),
                 attempt + 1,
                 exc,
             )
             if attempt < len(_XADD_RETRY_DELAYS_SECONDS):
                 await asyncio.sleep(_XADD_RETRY_DELAYS_SECONDS[attempt])
+    raise RuntimeError(f"publish_sse_events: xadd failed for {len(prepared)} events")
 
-    if stream_ids is None:
-        raise RuntimeError(f"publish_sse_events: xadd failed for {len(events)} events")
 
-    for stream_key in set(stream_keys):
+async def _publish_sse_event_batch_live(
+    redis: Any,
+    prepared: list[_PreparedSseEvent],
+    stream_ids: list[str],
+) -> None:
+    for stream_key in {item.stream_key for item in prepared}:
         await _refresh_stream_ttl(redis, stream_key)
-    publish_pipe = pipe_fn(transaction=False)
-    for event, envelope, stream_id in zip(events, envelopes, stream_ids, strict=False):
-        _queue_live_event_publish(
-            publish_pipe,
-            event=event,
-            envelope=envelope,
-            stream_id=stream_id,
-        )
-    await publish_pipe.execute()
+    for item, stream_id in zip(prepared, stream_ids, strict=False):
+        item.envelope["sse_id"] = stream_id
+        payload_json = _json(item.envelope)
+        for live_channel in _live_channels(
+            item.event["channel"],
+            item.event["user_id"],
+        ):
+            await _publish_live_channel(
+                redis,
+                user_id=item.event["user_id"],
+                channel=live_channel,
+                payload_json=payload_json,
+            )
+
+
+async def publish_sse_events(
+    redis: Any,
+    events: list[SSEPublishEvent],
+) -> list[str]:
+    if not events:
+        return []
+    if len(events) == 1:
+        return await _publish_sse_events_individually(redis, events)
+
+    pipe_fn = getattr(redis, "pipeline", None)
+    if not callable(pipe_fn):
+        return await _publish_sse_events_individually(redis, events)
+    prepared = await _prepare_sse_events(events)
+    stream_ids = await _append_sse_event_batch(pipe_fn, prepared)
+    if stream_ids is None:
+        return await _publish_sse_events_individually(redis, events)
+    await _publish_sse_event_batch_live(redis, prepared, stream_ids)
     return stream_ids
 
 
@@ -513,7 +410,12 @@ async def _publish_sse_event_single(
     envelope["sse_id"] = stream_id
     payload_json = _json(envelope)
     for live_channel in _live_channels(channel, user_id):
-        await redis.publish(live_channel, payload_json)
+        await _publish_live_channel(
+            redis,
+            user_id=user_id,
+            channel=live_channel,
+            payload_json=payload_json,
+        )
     return stream_id
 
 

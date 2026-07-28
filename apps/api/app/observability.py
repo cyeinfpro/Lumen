@@ -45,6 +45,11 @@ class _NoopGauge(_NoopCounter):
         return None
 
 
+class _NoopHistogram(_NoopCounter):
+    def observe(self, _amount: float) -> None:
+        return None
+
+
 def _counter(
     name: str,
     documentation: str,
@@ -80,6 +85,23 @@ def _gauge(
     if existing is not None:
         return existing
     return Gauge(name, documentation, labelnames=labelnames)
+
+
+def _histogram(
+    name: str,
+    documentation: str,
+    *,
+    labelnames: tuple[str, ...],
+) -> Any:
+    if not settings.metrics_enabled:
+        return _NoopHistogram(name)
+
+    from prometheus_client import REGISTRY, Histogram
+
+    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+    if existing is not None:
+        return existing
+    return Histogram(name, documentation, labelnames=labelnames)
 
 
 # ---------- Sentry PII 脱敏 ----------
@@ -199,6 +221,24 @@ task_publish_errors_total = _counter(
     "lumen_task_publish_errors_total",
     "Number of best-effort task publish failures, labeled by task kind.",
     labelnames=("kind",),
+)
+
+sse_live_publish_total = _counter(
+    "lumen_sse_live_publish_total",
+    "SSE live fanout attempts by channel kind and outcome.",
+    labelnames=("channel_kind", "outcome"),
+)
+
+sse_live_publish_bytes_total = _counter(
+    "lumen_sse_live_publish_bytes_total",
+    "SSE live fanout payload bytes by channel kind.",
+    labelnames=("channel_kind",),
+)
+
+sse_live_publish_duration_seconds = _histogram(
+    "lumen_sse_live_publish_duration_seconds",
+    "SSE live fanout duration by channel kind and outcome.",
+    labelnames=("channel_kind", "outcome"),
 )
 
 http_errors_total = _counter(
@@ -386,6 +426,9 @@ __all__ = [
     "init_otel",
     "setup_prometheus",
     "tasks_enqueued_total",
+    "sse_live_publish_total",
+    "sse_live_publish_bytes_total",
+    "sse_live_publish_duration_seconds",
     "http_errors_total",
     "apparel_model_library_generate_mode_total",
     "apparel_model_library_reference_extract_total",

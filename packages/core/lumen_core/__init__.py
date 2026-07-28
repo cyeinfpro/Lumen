@@ -31,6 +31,7 @@ from . import (  # noqa: F401
     runtime_settings,
     schemas,
     sizing,
+    sse_durable,
     storage_capacity,
     utils,
     video_billing,
