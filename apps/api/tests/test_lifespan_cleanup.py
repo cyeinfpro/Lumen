@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
+from arq.connections import ArqRedis
 
 import app.main as main
 from app.images.application import reconcile_runtime
+from app.redis_client import ReconnectingRedis
 from app.routes import billing
+from app.runtime import (
+    ApiRuntime,
+    CapabilityStatus,
+    LifecycleState,
+    RuntimeLifecycle,
+)
+from app.services.billing_cache import BillingCacheService
 
 
 class _Session:
@@ -151,3 +161,69 @@ async def test_lifespan_cancels_reconcile_task_when_warmup_fails(
     assert cache.stopped is True
     assert redis.closed is True
     assert configured == [cache, None]
+
+
+@pytest.mark.asyncio
+async def test_api_runtime_closes_owned_resources_once_in_reverse_order() -> None:
+    calls: list[str] = []
+    lifecycle = RuntimeLifecycle("api")
+
+    async def close_redis() -> None:
+        calls.append("redis")
+
+    async def close_billing() -> None:
+        calls.append("billing")
+
+    async def close_arq() -> None:
+        calls.append("arq")
+
+    lifecycle.own("redis", close_redis)
+    lifecycle.own("billing", close_billing)
+    lifecycle.own("arq", close_arq)
+    runtime = ApiRuntime(
+        _redis=cast(ReconnectingRedis, _Redis()),
+        _arq=cast(ArqRedis, object()),
+        _billing_cache=cast(BillingCacheService, _BillingCache()),
+        _lifecycle=lifecycle,
+        _image_reconciler_enabled=True,
+    )
+
+    runtime.start()
+    await asyncio.gather(runtime.close(), runtime.close())
+
+    assert calls == ["arq", "billing", "redis"]
+    diagnostics = runtime.diagnostics()
+    assert diagnostics.lifecycle.state is LifecycleState.CLOSED
+    assert diagnostics.lifecycle.cleanup_failures == ()
+    assert {
+        capability.name: capability.status for capability in diagnostics.capabilities
+    }["image_reconciler"] is CapabilityStatus.ENABLED
+
+
+@pytest.mark.asyncio
+async def test_api_runtime_reports_cleanup_failure_without_skipping_resources() -> None:
+    calls: list[str] = []
+    lifecycle = RuntimeLifecycle("api")
+
+    async def close_redis() -> None:
+        calls.append("redis")
+
+    async def fail_arq() -> None:
+        calls.append("arq")
+        raise RuntimeError("close failed")
+
+    lifecycle.own("redis", close_redis)
+    lifecycle.own("arq", fail_arq)
+    runtime = ApiRuntime(
+        _redis=cast(ReconnectingRedis, _Redis()),
+        _arq=cast(ArqRedis, object()),
+        _billing_cache=cast(BillingCacheService, _BillingCache()),
+        _lifecycle=lifecycle,
+    )
+
+    runtime.start()
+    await runtime.close()
+
+    assert calls == ["arq", "redis"]
+    assert runtime.diagnostics().lifecycle.cleanup_failures[0].resource == "arq"
+    assert runtime.capability_matrix()[0].status is CapabilityStatus.DEGRADED

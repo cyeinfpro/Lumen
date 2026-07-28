@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from app import main
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
+from app.runtime import (
+    CapabilityStatus,
+    LifecycleState,
+    RuntimeLifecycle,
+    WorkerRuntime,
+)
+from app.runtime_settings import RuntimeSettingsCache
+from app.storage_writes import StorageWriteCoordinator
+from app.tasks.completion_parts.runtime import CompletionRuntime
+from app.tasks.generation_parts.runtime import GenerationRuntime
+from app.tasks.video_generation_parts.runtime import VideoGenerationRuntime
 
 
 @pytest.mark.asyncio
@@ -251,9 +263,7 @@ async def test_startup_injects_one_storage_coordinator_into_all_media_runtimes(
         main,
         "build_generation_runtime",
         lambda *, storage_writes, image_upstream_runtime: (
-            injected.append(
-                ("generation", storage_writes, image_upstream_runtime)
-            )
+            injected.append(("generation", storage_writes, image_upstream_runtime))
             or image_upstream_runtime
         ),
     )
@@ -261,9 +271,7 @@ async def test_startup_injects_one_storage_coordinator_into_all_media_runtimes(
         main,
         "build_completion_runtime",
         lambda *, storage_writes, image_upstream_runtime: (
-            injected.append(
-                ("completion", storage_writes, image_upstream_runtime)
-            )
+            injected.append(("completion", storage_writes, image_upstream_runtime))
             or object()
         ),
     )
@@ -271,9 +279,7 @@ async def test_startup_injects_one_storage_coordinator_into_all_media_runtimes(
         main,
         "build_video_generation_runtime",
         lambda *, storage_writes: (
-            injected.append(
-                ("video", storage_writes, image_upstream_runtime)
-            )
+            injected.append(("video", storage_writes, image_upstream_runtime))
             or object()
         ),
     )
@@ -304,3 +310,60 @@ def test_provider_cron_has_hard_timeout() -> None:
 
     assert probe_job.timeout_s == main._PROVIDER_CRON_TIMEOUT_S
     assert probe_job.timeout_s > 0
+
+
+@pytest.mark.asyncio
+async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() -> None:
+    calls: list[str] = []
+    lifecycle = RuntimeLifecycle("worker")
+
+    async def close_generation() -> None:
+        calls.append("generation")
+
+    async def close_upstream() -> None:
+        calls.append("upstream")
+
+    async def close_engine() -> None:
+        calls.append("engine")
+
+    lifecycle.own("engine", close_engine)
+    lifecycle.own("upstream", close_upstream)
+    lifecycle.own("generation", close_generation)
+    runtime_settings = cast(RuntimeSettingsCache, object())
+    image_upstream = cast(ImageUpstreamRuntime, object())
+    storage_writes = cast(StorageWriteCoordinator, object())
+    generation = cast(
+        GenerationRuntime,
+        SimpleNamespace(postprocess_runtime=SimpleNamespace(executor=None)),
+    )
+    completion = cast(CompletionRuntime, object())
+    video = cast(VideoGenerationRuntime, object())
+    runtime = WorkerRuntime(
+        _runtime_settings=runtime_settings,
+        _image_upstream=image_upstream,
+        _storage_writes=storage_writes,
+        _generation=generation,
+        _completion=completion,
+        _video=video,
+        _lifecycle=lifecycle,
+    )
+
+    runtime.start()
+    values = runtime.context_values()
+    await runtime.close()
+    await runtime.close()
+
+    assert values == {
+        "runtime_settings_cache": runtime_settings,
+        "image_upstream_runtime": image_upstream,
+        "storage_write_coordinator": storage_writes,
+        "generation_runtime": generation,
+        "completion_runtime": completion,
+        "video_generation_runtime": video,
+    }
+    assert calls == ["generation", "upstream", "engine"]
+    diagnostics = runtime.diagnostics()
+    assert diagnostics.lifecycle.state is LifecycleState.CLOSED
+    assert {
+        capability.name: capability.status for capability in diagnostics.capabilities
+    }["postprocess_executor"] is CapabilityStatus.DISABLED

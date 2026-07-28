@@ -31,6 +31,10 @@ class ClockPort(Protocol):
     def monotonic(self) -> float: ...
 
 
+class AsyncCloseable(Protocol):
+    async def close(self) -> None: ...
+
+
 class SystemClock:
     def now(self) -> datetime:
         return datetime.now(timezone.utc)
