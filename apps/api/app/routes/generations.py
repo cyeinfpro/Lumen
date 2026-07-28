@@ -536,8 +536,7 @@ def _feed_item(
         (
             f"{image.sha256}|"
             + "|".join(
-                f"{kind}:{getattr(variant_states, kind)}"
-                for kind in FEED_VARIANT_KINDS
+                f"{kind}:{getattr(variant_states, kind)}" for kind in FEED_VARIANT_KINDS
             )
         ).encode("utf-8")
     ).hexdigest()[:20]

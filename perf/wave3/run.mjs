@@ -152,4 +152,3 @@ else throw new Error(`unknown command: ${options.command}`);
 const rendered = `${JSON.stringify(result, null, 2)}\n`;
 if (options.output) await writeFile(options.output, rendered, "utf8");
 process.stdout.write(rendered);
-

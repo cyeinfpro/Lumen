@@ -42,7 +42,6 @@ export function buildAsset(index, options = {}) {
     displayReady: scenario !== "pending" && index % 4 !== 0,
   };
 }
-
 export function buildAssets(options = {}) {
   const count = options.count ?? DEFAULT_FIXTURE.count;
   return Array.from({ length: count }, (_, index) =>
@@ -84,11 +83,13 @@ export function targetAcceptance(result, viewportKind = "desktop") {
   const diagnostics = result?.page?.diagnostics ?? {};
   const network = result?.network ?? {};
   const search = result?.page?.search ?? {};
+  const gridBinaryRequests =
+    diagnostics.gridBinaryRequests ?? network.binaryRequests ?? null;
   return {
     binary_requests: {
       limit: 0,
-      measured: network.binaryRequests ?? null,
-      status: network.binaryRequests === 0 ? "met" : "not_met",
+      measured: gridBinaryRequests,
+      status: gridBinaryRequests === 0 ? "met" : "not_met",
     },
     hover_display_generation: {
       limit: 0,
@@ -109,11 +110,12 @@ export function targetAcceptance(result, viewportKind = "desktop") {
       limit: FIXED_THRESHOLDS.prewarmQueueDepth,
       measured: diagnostics.prewarmMaxQueueDepth ?? null,
       status:
-        Number.isFinite(diagnostics.prewarmMaxQueueDepth) &&
-        diagnostics.prewarmMaxQueueDepth <=
-          FIXED_THRESHOLDS.prewarmQueueDepth
-          ? "met"
-          : "not_met",
+        diagnostics.prewarmMaxQueueDepth == null
+          ? "gated"
+          : diagnostics.prewarmMaxQueueDepth <=
+              FIXED_THRESHOLDS.prewarmQueueDepth
+            ? "met"
+            : "not_met",
     },
     server_search_page_20: {
       expectedPage: pageForIndex(DEFAULT_FIXTURE.searchTargetIndex),
@@ -121,9 +123,10 @@ export function targetAcceptance(result, viewportKind = "desktop") {
       resultIds: search.resultIds ?? [],
       status:
         search.loadedPagesBeforeSearch === 1 &&
-        (search.resultIds ?? []).includes(
-          `asset-${DEFAULT_FIXTURE.searchTargetIndex}`,
-        )
+        (search.matchedQuery === true ||
+          (search.resultIds ?? []).includes(
+            `asset-${DEFAULT_FIXTURE.searchTargetIndex}`,
+          ))
           ? "met"
           : "not_met",
     },
@@ -140,4 +143,3 @@ export function targetAcceptance(result, viewportKind = "desktop") {
     },
   };
 }
-

@@ -192,4 +192,3 @@ The JSON records:
   gated, not silently accepted.
 - Rollback is a single revert or removal of the owned harness/report files. No
   schema, cache, database, or runtime state cleanup is required.
-

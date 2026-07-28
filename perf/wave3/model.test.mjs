@@ -31,7 +31,6 @@ test("search target is on page 20 and can be found without prior pages", () => {
     ["asset-975"],
   );
 });
-
 test("fixed target acceptance rejects unbounded current behavior", () => {
   const result = {
     network: { binaryRequests: 1 },
@@ -78,4 +77,3 @@ test("fixed target acceptance permits bounded target behavior", () => {
     Object.values(acceptance).every((measurement) => measurement.status === "met"),
   );
 });
-
