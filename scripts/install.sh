@@ -799,6 +799,14 @@ env_file_get() {
     lumen_read_dotenv_value "$1" "$2"
 }
 
+# 检查 .env 是否存在指定 key 且非空，不输出 value。
+env_key_present() {
+    local file="$1"
+    local key="$2"
+    [ -f "${file}" ] || return 1
+    grep -qE "^${key}=.+" "${file}"
+}
+
 lumen_env_truthy() {
     case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
         1|true|yes|on) return 0 ;;

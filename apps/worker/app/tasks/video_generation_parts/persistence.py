@@ -21,6 +21,7 @@ from lumen_core.constants import (
 from lumen_core.models import Video, VideoGeneration
 
 from ...storage import StorageDiskFullError
+from ...storage_writes import StorageWriteOperation
 from ...video_artifacts import (
     DownloadedVideo,
     ProcessedVideoFile,
@@ -345,6 +346,81 @@ async def put_video_storage_bytes(
     return bool(result.created)
 
 
+def _byte_write_operation(
+    key: str,
+    data: bytes,
+) -> StorageWriteOperation:
+    storage = video_ports().storage
+
+    def write() -> bool:
+        result = storage.put_bytes_result(
+            key,
+            data,
+            max_bytes=len(data),
+        )
+        return bool(result.created)
+
+    return StorageWriteOperation(
+        key=key,
+        size_bytes=len(data),
+        write=write,
+    )
+
+
+def _poster_write_operation(
+    key: str,
+    data: bytes,
+    *,
+    diagnostics: dict[str, Any],
+    stored: list[bool],
+) -> StorageWriteOperation:
+    storage = video_ports().storage
+
+    def write() -> bool:
+        try:
+            result = storage.put_bytes_result(
+                key,
+                data,
+                max_bytes=len(data),
+            )
+        except StorageDiskFullError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            diagnostics["poster_store_error"] = str(exc)[:500]
+            return False
+        stored.append(True)
+        return bool(result.created)
+
+    return StorageWriteOperation(
+        key=key,
+        size_bytes=len(data),
+        write=write,
+    )
+
+
+async def _store_byte_artifacts_with_capacity(
+    *,
+    video_key: str,
+    poster_key: str,
+    video_bytes: bytes,
+    poster_bytes: bytes | None,
+    diagnostics: dict[str, Any],
+) -> tuple[list[str], str | None]:
+    operations = [_byte_write_operation(video_key, video_bytes)]
+    poster_stored: list[bool] = []
+    if poster_bytes:
+        operations.append(
+            _poster_write_operation(
+                poster_key,
+                poster_bytes,
+                diagnostics=diagnostics,
+                stored=poster_stored,
+            )
+        )
+    created_keys = await video_ports().storage_writes.write_operations(operations)
+    return created_keys, poster_key if poster_stored else None
+
+
 def _stored_video_from_bytes(
     generation: VideoGeneration,
     *,
@@ -418,33 +494,42 @@ async def store_video_asset(
             lease_lost,
             "video poll lease lost before byte artifact storage",
         )
-        if await video_ports()._put_video_storage_bytes(
-            video_key,
-            video_bytes,
-            track_created=track_created,
-        ):
-            created_keys.append(video_key)
+        poster_bytes = processed.get("poster_bytes")
+        if video_ports().storage_writes is not None:
+            (
+                created_keys,
+                poster_storage_key,
+            ) = await _store_byte_artifacts_with_capacity(
+                video_key=video_key,
+                poster_key=poster_key,
+                video_bytes=video_bytes,
+                poster_bytes=poster_bytes,
+                diagnostics=diagnostics,
+            )
+        else:
+            if await video_ports()._put_video_storage_bytes(
+                video_key,
+                video_bytes,
+                track_created=track_created,
+            ):
+                created_keys.append(video_key)
+            poster_storage_key = None
+            if poster_bytes:
+                try:
+                    if await video_ports()._put_video_storage_bytes(
+                        poster_key,
+                        poster_bytes,
+                        track_created=track_created,
+                    ):
+                        created_keys.append(poster_key)
+                    poster_storage_key = poster_key
+                except StorageDiskFullError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    diagnostics["poster_store_error"] = str(exc)[:500]
         video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost after byte artifact storage",
-        )
-        poster_storage_key = None
-        if processed.get("poster_bytes"):
-            try:
-                if await video_ports()._put_video_storage_bytes(
-                    poster_key,
-                    processed["poster_bytes"],
-                    track_created=track_created,
-                ):
-                    created_keys.append(poster_key)
-                poster_storage_key = poster_key
-            except StorageDiskFullError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                diagnostics["poster_store_error"] = str(exc)[:500]
-        video_ports()._raise_if_video_lease_lost(
-            lease_lost,
-            "video poll lease lost after byte poster storage",
         )
         if artifact_attempt_id is not None:
             diagnostics["artifact_attempt_id"] = artifact_attempt_id
@@ -480,6 +565,57 @@ async def _copy_processed_video(
             raise StorageDiskFullError(video_key) from exc
         raise
     return bool(write_result.created)
+
+
+def _file_copy_operation(
+    processed: ProcessedVideoFile,
+    *,
+    video_key: str,
+) -> StorageWriteOperation:
+    storage = video_ports().storage
+    copy_file = video_ports().copy_video_file_exclusive_result
+
+    def write() -> bool:
+        try:
+            result = copy_file(
+                processed.path,
+                storage.path_for(video_key),
+                expected_sha256=processed.sha256,
+                expected_size=processed.size_bytes,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise StorageDiskFullError(video_key) from exc
+            raise
+        return bool(result.created)
+
+    return StorageWriteOperation(
+        key=video_key,
+        size_bytes=processed.size_bytes,
+        write=write,
+    )
+
+
+async def _store_file_artifacts_with_capacity(
+    processed: ProcessedVideoFile,
+    *,
+    video_key: str,
+    poster_key: str,
+    diagnostics: dict[str, Any],
+) -> tuple[list[str], str | None]:
+    operations = [_file_copy_operation(processed, video_key=video_key)]
+    poster_stored: list[bool] = []
+    if processed.poster_bytes:
+        operations.append(
+            _poster_write_operation(
+                poster_key,
+                processed.poster_bytes,
+                diagnostics=diagnostics,
+                stored=poster_stored,
+            )
+        )
+    created_keys = await video_ports().storage_writes.write_operations(operations)
+    return created_keys, poster_key if poster_stored else None
 
 
 async def _store_processed_poster(
@@ -568,22 +704,29 @@ async def store_downloaded_video_asset(
             processed.extension,
             artifact_attempt_id=artifact_attempt_id,
         )
-        if await _copy_processed_video(processed, video_key=video_key):
-            created_keys.append(video_key)
+        diagnostics = dict(processed.metadata)
+        if video_ports().storage_writes is not None:
+            (
+                created_keys,
+                poster_storage_key,
+            ) = await _store_file_artifacts_with_capacity(
+                processed,
+                video_key=video_key,
+                poster_key=poster_key,
+                diagnostics=diagnostics,
+            )
+        else:
+            if await _copy_processed_video(processed, video_key=video_key):
+                created_keys.append(video_key)
+            poster_storage_key = await _store_processed_poster(
+                processed,
+                poster_key=poster_key,
+                diagnostics=diagnostics,
+                created_keys=created_keys,
+            )
         video_ports()._raise_if_video_lease_lost(
             lease_lost,
             "video poll lease lost after video artifact storage",
-        )
-        diagnostics = dict(processed.metadata)
-        poster_storage_key = await _store_processed_poster(
-            processed,
-            poster_key=poster_key,
-            diagnostics=diagnostics,
-            created_keys=created_keys,
-        )
-        video_ports()._raise_if_video_lease_lost(
-            lease_lost,
-            "video poll lease lost after video poster storage",
         )
         if artifact_attempt_id is not None:
             diagnostics["artifact_attempt_id"] = artifact_attempt_id

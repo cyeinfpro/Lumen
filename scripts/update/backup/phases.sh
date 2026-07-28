@@ -97,6 +97,8 @@ if [ "${LUMEN_UPDATE_MODE}" = "fast" ]; then
     _alembic_current_pre="$(current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true)"
     if [ -n "${_alembic_heads_pre}" ] && [ "${_alembic_current_pre}" = "${_alembic_heads_pre}" ]; then
         MIGRATE_NEEDED=0
+        UPDATE_MIGRATION_VERIFIED=1
+        UPDATE_MIGRATION_HEAD="${_alembic_heads_pre}"
         log_info "[migrate_db] fast 模式：DB 已在目标 head=${_alembic_heads_pre}，跳过 stop api/worker 与 alembic upgrade。"
         emit_info migrate_db action "skip_already_at_head"
         emit_info migrate_db head "${_alembic_heads_pre}"
@@ -185,6 +187,7 @@ if [ "${MIGRATE_NEEDED}" = "1" ] && { [ "${_migrate_run_failed}" = "1" ] \
 fi
 if [ "${MIGRATE_NEEDED}" = "1" ]; then
     UPDATE_MIGRATION_VERIFIED=1
+    UPDATE_MIGRATION_HEAD="${_alembic_heads}"
     emit_done migrate_db 0
 fi
 }

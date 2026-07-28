@@ -14,10 +14,13 @@ from PIL import Image as PILImage
 
 from app.canvas_services import asset_ref_service
 from app.config import settings
+from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
 from app.routes import images
 from app.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
-from app.video_reference_images import VIDEO_REFERENCE_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
+
+
+VIDEO_REFERENCE_IMAGE_KIND = VIDEO_REFERENCE_VARIANT
 
 
 class _ScalarResult:
@@ -34,6 +37,7 @@ class _Db:
         self.added = []
         self.committed = False
         self.flushed = False
+        self.rolled_back = False
 
     async def execute(self, _stmt):
         return _ScalarResult(self.result)
@@ -46,6 +50,9 @@ class _Db:
 
     async def commit(self):
         self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
 
 
 class _UploadFile:
@@ -88,6 +95,10 @@ def _jpeg_bytes(size: tuple[int, int], color) -> bytes:
     buf = io.BytesIO()
     PILImage.new("RGB", size, color=color).save(buf, format="JPEG")
     return buf.getvalue()
+
+
+async def _unexpected_image_out(*_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("image output serialization should not be reached")
 
 
 def test_storage_path_rejects_traversal(tmp_path: Path) -> None:
@@ -204,6 +215,7 @@ async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> No
         db,  # type: ignore[arg-type]
         storage_root=str(tmp_path),
         dry_run=False,
+        minimum_age_seconds=0,
     )
     assert deleted["deleted"] == 2
     assert not orphan.exists()
@@ -245,10 +257,7 @@ def test_upload_write_falls_back_when_hardlink_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_upload_route_delegates_commit_recovery_to_command_service(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_upload_route_delegates_commit_recovery_to_command_service() -> None:
     class _FailingService:
         async def execute(self, **_kwargs: Any) -> Any:
             raise RuntimeError("commit outcome unresolved")
@@ -256,21 +265,18 @@ async def test_upload_route_delegates_commit_recovery_to_command_service(
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
-    monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
-    monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
-    monkeypatch.setattr(
-        images,
-        "_upload_command_service",
-        lambda: _FailingService(),
-    )
-
     with pytest.raises(RuntimeError, match="commit outcome unresolved"):
-        await images.upload_image(
+        await images.upload_image_impl(
             SimpleNamespace(id="user-1"),
             object(),  # type: ignore[arg-type]
             file=_UploadFile(_png_bytes("RGB", (16, 16), (10, 20, 30))),  # type: ignore[arg-type]
             purpose=None,
+            reference_width=None,
+            reference_height=None,
+            check_upload_rate_limit=no_rate_limit,
+            ensure_storage_free_space=lambda _size: None,
+            upload_command_service=_FailingService(),  # type: ignore[arg-type]
+            image_out=_unexpected_image_out,
         )
 
 
@@ -351,10 +357,7 @@ def test_volcano_asset_upload_still_enforces_absolute_long_side_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upload_image_passes_volcano_asset_dimension_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_upload_image_passes_volcano_asset_dimension_policy() -> None:
     captured: dict[str, Any] = {}
 
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
@@ -365,21 +368,18 @@ async def test_upload_image_passes_volcano_asset_dimension_policy(
             captured["policy"] = kwargs["policy"]
             raise RuntimeError("stop after policy")
 
-    monkeypatch.setattr(images, "_check_upload_rate_limit", no_rate_limit)
-    monkeypatch.setattr(images, "_ensure_storage_free_space", lambda _size: None)
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
-    monkeypatch.setattr(
-        images,
-        "_upload_command_service",
-        lambda: _CaptureService(),
-    )
-
     with pytest.raises(RuntimeError, match="stop after policy"):
-        await images.upload_image(
+        await images.upload_image_impl(
             SimpleNamespace(id="user-1"),
             object(),  # type: ignore[arg-type]
             file=_UploadFile(b"image"),  # type: ignore[arg-type]
             purpose="volcano_asset",
+            reference_width=None,
+            reference_height=None,
+            check_upload_rate_limit=no_rate_limit,
+            ensure_storage_free_space=lambda _size: None,
+            upload_command_service=_CaptureService(),  # type: ignore[arg-type]
+            image_out=_unexpected_image_out,
         )
 
     assert captured["policy"].max_long_side == images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
@@ -473,15 +473,6 @@ async def test_reference_image_binary_serves_video_reference_variant(
     ref_path.parent.mkdir(parents=True)
     ref_path.write_bytes(b"jpeg-bytes")
 
-    async def fake_ensure(_db, image_arg, *, storage_root: str):
-        assert storage_root == str(tmp_path)
-        return SimpleNamespace(
-            image_id=image_arg.id,
-            kind=VIDEO_REFERENCE_IMAGE_KIND,
-            storage_key=ref_key,
-        )
-
-    monkeypatch.setattr(images, "ensure_video_reference_image_variant", fake_ensure)
     img = SimpleNamespace(
         id="image-1",
         metadata_jsonb={"video_reference_access_token": "x" * 16},
@@ -491,13 +482,25 @@ async def test_reference_image_binary_serves_video_reference_variant(
         deleted_at=None,
         updated_at=datetime.now(timezone.utc),
     )
+    db = _Db(img)
+
+    class VariantService:
+        async def ensure_video_reference_variant(self, image_id: str):
+            assert db.rolled_back
+            return SimpleNamespace(
+                image_id=image_id,
+                kind=VIDEO_REFERENCE_IMAGE_KIND,
+                storage_key=ref_key,
+            )
+
     try:
         response = await images.reference_image_binary(
             "image-1",
             _request("GET"),
-            _Db(img),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
             token="x" * 16,
             variant=VIDEO_REFERENCE_IMAGE_KIND,
+            variant_service=VariantService(),
         )
     finally:
         settings.storage_root = old
@@ -505,6 +508,7 @@ async def test_reference_image_binary_serves_video_reference_variant(
     assert response.headers["content-type"].startswith("image/jpeg")
     assert response.headers["content-length"] == str(len(b"jpeg-bytes"))
     assert response.headers["etag"] == f'"image-1-{VIDEO_REFERENCE_IMAGE_KIND}"'
+    assert db.rolled_back
 
 
 @pytest.mark.asyncio

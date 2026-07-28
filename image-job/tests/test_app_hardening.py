@@ -1010,19 +1010,27 @@ def test_fail_interrupted_running_jobs_requeues_when_auth_present(
     app.init_storage_sync()
 
     async def _setup_and_run() -> tuple[str, str | None, int | None]:
-        # 1) 插入两条 running：一条有 auth，一条无 auth
+        # 1) 插入两条 running：一条有加密 credential，一条无 credential。
+        encrypted = app._credential_vault.encrypt(
+            "Bearer sk-keep",
+            job_id="job-with-auth",
+            owner_hash="h1",
+        )
         await app.db_exec(
             """
             INSERT INTO jobs (
-                job_id, auth_hash, auth_header, request_type, endpoint,
+                job_id, auth_hash, auth_ciphertext, auth_nonce, auth_key_id,
+                request_type, endpoint,
                 payload_json, status, relay_url, retention_days,
                 created_at, updated_at, started_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "job-with-auth",
                 "h1",
-                "Bearer sk-keep",
+                encrypted.ciphertext,
+                encrypted.nonce,
+                encrypted.key_id,
                 "responses",
                 "/v1/responses",
                 "{}",
@@ -1154,7 +1162,11 @@ def test_image_job_service_auth_is_separate_from_upstream_bearer(
     assert row is not None
     assert row["auth_hash"] == app.auth_hash(f"Bearer {sidecar_token}")
     assert row["upstream_auth_hash"] == app.auth_hash(f"Bearer {upstream_key}")
-    assert row["auth_header"] == f"Bearer {upstream_key}"
+    assert row["auth_header"] is None
+    assert row["auth_ciphertext"] is not None
+    assert row["auth_nonce"] is not None
+    assert row["auth_key_id"] == "test-v1"
+    assert app._credential_vault.decrypt_job_row(row) == f"Bearer {upstream_key}"
     assert upstream_key not in row["payload_json"]
     assert row["request_hash"] == app.scoped_request_hash(
         app.validate_payload(request.payload),

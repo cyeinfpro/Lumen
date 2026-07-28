@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from .runtime import (
-    generation_domain_ports,
-    generation_persistence_ports,
-    generation_queue_ports,
-    generation_events_ports,
-    generation_provider_ports,
-    generation_lease_ports,
-)
+import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from types import MappingProxyType
 from datetime import datetime
+from types import MappingProxyType
 from typing import Any
 
+from sqlalchemy import select
+
+from lumen_core.constants import GenerationErrorCode as EC, GenerationStatus
+from lumen_core.models import Generation
+from lumen_core.queue_metadata import generation_queue_metadata
+
+from ...provider_runtime.errors import UpstreamError
 from . import queue_lock as _queue_lock
+from .runtime_contracts import GENERATION_LEASE_TTL_S
+from .services import RunGenerationDeps
 
 DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA = _queue_lock.DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA
 ImageQueueLockLease = _queue_lock.ImageQueueLockLease
@@ -42,14 +44,11 @@ IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S = 30
 IMAGE_QUEUE_NOT_BEFORE_GRACE_S = 600
 IMAGE_PROVIDER_UNAVAILABLE_RETRY_S = 30
 IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S = 5.0
+DUAL_RACE_SENTINEL_PREFIX = "__dr:"
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
-class QueueRuntime:
-    provider_cooldowns: dict[str, float]
-
-
-QUEUE_RUNTIME = QueueRuntime(provider_cooldowns={})
 IMAGE_QUEUE_AVOID_TTL_S = 120
 IMAGE_QUEUE_DEFAULT_LANE = "image:interactive:unknown"
 IMAGE_QUEUE_LANE_WEIGHTS = MappingProxyType(
@@ -136,31 +135,20 @@ def coerce_image_queue_capacity(raw: Any) -> int:
         return 4
 
 
-def image_queue_capacity() -> int:
-    return generation_queue_ports()._coerce_image_queue_capacity(
-        getattr(generation_queue_ports().settings, "image_generation_concurrency", 4)
-    )
+def image_queue_capacity(*, services: RunGenerationDeps) -> int:
+    return services.queue.configured_capacity()
 
 
-async def resolve_image_queue_capacity() -> int:
+async def resolve_image_queue_capacity(*, services: RunGenerationDeps) -> int:
     try:
-        raw = await generation_queue_ports().runtime_settings.resolve(
-            generation_queue_ports()._IMAGE_GENERATION_CONCURRENCY_SETTING
-        )
+        return await services.queue.resolve_capacity()
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
-            "image queue capacity resolve failed err=%s", exc
-        )
-        return generation_queue_ports()._image_queue_capacity()
-    if raw is None:
-        return generation_queue_ports()._image_queue_capacity()
-    return generation_queue_ports()._coerce_image_queue_capacity(raw)
+        logger.warning("image queue capacity resolve failed err=%s", exc)
+        return image_queue_capacity(services=services)
 
 
 def image_provider_lock_key(provider_name: str) -> str:
-    return (
-        f"{generation_queue_ports()._IMAGE_QUEUE_PROVIDER_LOCK_PREFIX}{provider_name}"
-    )
+    return f"{IMAGE_QUEUE_PROVIDER_LOCK_PREFIX}{provider_name}"
 
 
 def image_provider_active_key(provider_name: str) -> str:
@@ -168,55 +156,55 @@ def image_provider_active_key(provider_name: str) -> str:
 
 
 def image_task_provider_key(task_id: str) -> str:
-    return f"{generation_queue_ports()._IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}"
+    return f"{IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}"
 
 
 def image_queue_enqueue_dedupe_key(task_id: str) -> str:
-    return f"{generation_queue_ports()._IMAGE_QUEUE_ENQUEUE_DEDUPE_PREFIX}{task_id}"
+    return f"{IMAGE_QUEUE_ENQUEUE_DEDUPE_PREFIX}{task_id}"
 
 
 def image_queue_not_before_key(task_id: str) -> str:
-    return f"{generation_queue_ports()._IMAGE_QUEUE_NOT_BEFORE_PREFIX}{task_id}"
+    return f"{IMAGE_QUEUE_NOT_BEFORE_PREFIX}{task_id}"
 
 
 def image_queue_avoid_key(task_id: str) -> str:
-    return f"{generation_queue_ports()._IMAGE_QUEUE_AVOID_PREFIX}{task_id}"
+    return f"{IMAGE_QUEUE_AVOID_PREFIX}{task_id}"
 
 
-async def avoid_provider_for_task(redis: Any, task_id: str, provider_name: str) -> None:
+async def avoid_provider_for_task(redis: Any, task_id: str, provider_name: str, *, services: RunGenerationDeps) -> None:
     if not provider_name:
         return
     try:
-        key = generation_queue_ports()._image_queue_avoid_key(task_id)
+        key = image_queue_avoid_key(task_id)
         await redis.sadd(key, provider_name)
-        await redis.expire(key, generation_queue_ports()._IMAGE_QUEUE_AVOID_TTL_S)
+        await redis.expire(key, IMAGE_QUEUE_AVOID_TTL_S)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.debug(
+        logger.debug(
             "avoid_provider write failed", exc_info=True
         )
 
 
-async def get_avoided_providers(redis: Any, task_id: str) -> set[str]:
+async def get_avoided_providers(redis: Any, task_id: str, *, services: RunGenerationDeps) -> set[str]:
     try:
         raw = await redis.smembers(
-            generation_queue_ports()._image_queue_avoid_key(task_id)
+            image_queue_avoid_key(task_id)
         )
     except Exception:  # noqa: BLE001
         return set()
     return {
         name
         for item in raw or []
-        if (name := generation_queue_ports()._redis_text(item))
+        if (name := redis_text(item))
     }
 
 
-async def clear_avoided_providers(redis: Any, task_id: str) -> None:
+async def clear_avoided_providers(redis: Any, task_id: str, *, services: RunGenerationDeps) -> None:
     with suppress(Exception):
-        await redis.delete(generation_queue_ports()._image_queue_avoid_key(task_id))
+        await redis.delete(image_queue_avoid_key(task_id))
 
 
 def image_inflight_key(task_id: str) -> str:
-    return f"{generation_queue_ports()._IMAGE_INFLIGHT_PREFIX}{task_id}"
+    return f"{IMAGE_INFLIGHT_PREFIX}{task_id}"
 
 
 def classify_inflight_lane(route: str | None, endpoint: str | None) -> str:
@@ -234,7 +222,7 @@ def classify_inflight_lane(route: str | None, endpoint: str | None) -> str:
     return "lane_a"
 
 
-async def inflight_set_fields(redis: Any, task_id: str, fields: dict[str, str]) -> None:
+async def inflight_set_fields(redis: Any, task_id: str, fields: dict[str, str], *, services: RunGenerationDeps) -> None:
     if not fields:
         return
     payload = {key: value for key, value in fields.items() if value not in (None, "")}
@@ -242,29 +230,30 @@ async def inflight_set_fields(redis: Any, task_id: str, fields: dict[str, str]) 
         return
     payload["updated_at"] = str(int(time.time() * 1000))
     try:
-        key = generation_queue_ports()._image_inflight_key(task_id)
+        key = image_inflight_key(task_id)
         await redis.hset(key, mapping=payload)
-        await redis.expire(key, generation_lease_ports()._LEASE_TTL_S * 4)
+        await redis.expire(key, GENERATION_LEASE_TTL_S * 4)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.debug(
+        logger.debug(
             "image_inflight write failed task=%s", task_id, exc_info=True
         )
 
 
-async def inflight_clear(redis: Any, task_id: str) -> None:
+async def inflight_clear(redis: Any, task_id: str, *, services: RunGenerationDeps) -> None:
     with suppress(Exception):
-        await redis.delete(generation_queue_ports()._image_inflight_key(task_id))
+        await redis.delete(image_inflight_key(task_id))
 
 
 async def cleanup_image_queue_active(
     redis: Any,
     *,
     lock: ImageQueueLockLease | None = None,
+    services: RunGenerationDeps,
 ) -> None:
     try:
         if lock is None:
             await redis.zremrangebyscore(
-                generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
+                IMAGE_QUEUE_ACTIVE_KEY,
                 "-inf",
                 time.time(),
             )
@@ -272,8 +261,8 @@ async def cleanup_image_queue_active(
             await lock.eval_fenced(
                 CLEANUP_IMAGE_QUEUE_ACTIVE_LUA,
                 2,
-                generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
-                generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
+                IMAGE_QUEUE_ACTIVE_KEY,
+                IMAGE_QUEUE_LOCK_KEY,
                 lock.token,
                 str(time.time()),
                 lost_result=-1,
@@ -281,26 +270,26 @@ async def cleanup_image_queue_active(
     except ImageQueueLockLost:
         raise
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.debug(
+        logger.debug(
             "image queue active cleanup failed", exc_info=True
         )
 
 
-async def active_image_provider_names(redis: Any) -> set[str]:
+async def active_image_provider_names(redis: Any, *, services: RunGenerationDeps) -> set[str]:
     try:
         raw_names = await redis.zrange(
-            generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY, 0, -1
+            IMAGE_QUEUE_ACTIVE_KEY, 0, -1
         )
     except Exception as exc:  # noqa: BLE001
-        raise generation_provider_ports().UpstreamError(
+        raise UpstreamError(
             "image queue active set unavailable",
-            error_code=generation_domain_ports().EC.LOCAL_QUEUE_FULL.value,
+            error_code=EC.LOCAL_QUEUE_FULL.value,
             status_code=None,
         ) from exc
     return {
         name
         for item in raw_names or []
-        if (name := generation_queue_ports()._redis_text(item))
+        if (name := redis_text(item))
     }
 
 
@@ -309,8 +298,9 @@ async def provider_active_count(
     provider_name: str,
     *,
     lock: ImageQueueLockLease | None = None,
+    services: RunGenerationDeps,
 ) -> int | None:
-    key = generation_queue_ports()._image_provider_active_key(provider_name)
+    key = image_provider_active_key(provider_name)
     try:
         if lock is None:
             await redis.zremrangebyscore(key, "-inf", time.time())
@@ -320,14 +310,14 @@ async def provider_active_count(
                 CLEANUP_IMAGE_QUEUE_PROVIDER_LUA,
                 2,
                 key,
-                generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
+                IMAGE_QUEUE_LOCK_KEY,
                 lock.token,
                 str(time.time()),
                 lost_result=-1,
                 lose_on_error=False,
             )
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "image queue active_count failed provider=%s err=%s",
             provider_name,
             exc,
@@ -345,21 +335,22 @@ async def clear_stale_image_queue_reservation(
     *,
     task_id: str,
     provider_name: str,
+    services: RunGenerationDeps,
 ) -> bool:
     """Clear one stale reservation only while this lock token still owns the fence."""
-    provider_zset = generation_queue_ports()._image_provider_active_key(provider_name)
+    provider_zset = image_provider_active_key(provider_name)
     active_member = (
         provider_name
-        if generation_queue_ports()._is_dual_race_sentinel(provider_name)
+        if is_dual_race_sentinel(provider_name)
         else task_id
     )
     result = await lock.eval_fenced(
         CLEAR_STALE_IMAGE_QUEUE_RESERVATION_LUA,
         4,
         provider_zset,
-        generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
-        generation_queue_ports()._image_task_provider_key(task_id),
-        generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
+        IMAGE_QUEUE_ACTIVE_KEY,
+        image_task_provider_key(task_id),
+        IMAGE_QUEUE_LOCK_KEY,
         lock.token,
         provider_name,
         task_id,
@@ -369,20 +360,18 @@ async def clear_stale_image_queue_reservation(
     return int(result or 0) == 1
 
 
-async def queued_generation_ids(limit: int) -> list[str]:
-    async with generation_persistence_ports().SessionLocal() as session:
+async def queued_generation_ids(limit: int, *, services: RunGenerationDeps) -> list[str]:
+    async with services.store.session() as session:
         rows = (
             (
                 await session.execute(
-                    generation_persistence_ports()
-                    .select(generation_persistence_ports().Generation.id)
+                    select(Generation.id)
                     .where(
-                        generation_persistence_ports().Generation.status
-                        == generation_domain_ports().GenerationStatus.QUEUED.value
+                        Generation.status == GenerationStatus.QUEUED.value
                     )
                     .order_by(
-                        generation_persistence_ports().Generation.created_at.asc(),
-                        generation_persistence_ports().Generation.id.asc(),
+                        Generation.created_at.asc(),
+                        Generation.id.asc(),
                     )
                     .limit(limit)
                 )
@@ -393,34 +382,37 @@ async def queued_generation_ids(limit: int) -> list[str]:
     return [str(row) for row in rows]
 
 
-def queue_lane_weight(lane: str | None) -> int:
+def queue_lane_weight(lane: str | None, *, services: RunGenerationDeps) -> int:
     if not lane:
         return 1
-    return max(1, int(generation_queue_ports()._IMAGE_QUEUE_LANE_WEIGHTS.get(lane, 1)))
+    return max(1, int(IMAGE_QUEUE_LANE_WEIGHTS.get(lane, 1)))
 
 
-def queue_lane_sort_key(lane: str) -> tuple[int, int, str]:
+def queue_lane_sort_key(lane: str, *, services: RunGenerationDeps) -> tuple[int, int, str]:
     return (
-        generation_queue_ports()._IMAGE_QUEUE_LANE_RANK.get(
+        IMAGE_QUEUE_LANE_RANK.get(
             lane,
-            len(generation_queue_ports()._IMAGE_QUEUE_LANE_RANK),
+            len(IMAGE_QUEUE_LANE_RANK),
         ),
-        -generation_queue_ports()._queue_lane_weight(lane),
+        -queue_lane_weight(lane, services=services),
         lane,
     )
 
 
-def weighted_queue_lane_slots(lanes: list[str]) -> list[str]:
-    ordered = sorted(lanes, key=generation_queue_ports()._queue_lane_sort_key)
+def weighted_queue_lane_slots(lanes: list[str], *, services: RunGenerationDeps) -> list[str]:
+    ordered = sorted(
+        lanes,
+        key=lambda lane: queue_lane_sort_key(lane, services=services),
+    )
     if not ordered:
         return []
     max_weight = max(
-        generation_queue_ports()._queue_lane_weight(lane) for lane in ordered
+        queue_lane_weight(lane, services=services) for lane in ordered
     )
     slots: list[str] = []
     for level in range(max_weight):
         for lane in ordered:
-            if generation_queue_ports()._queue_lane_weight(lane) > level:
+            if queue_lane_weight(lane, services=services) > level:
                 slots.append(lane)
     return slots
 
@@ -429,6 +421,7 @@ def queued_candidate_from_mapping(
     row: Any,
     *,
     default_id: str | None = None,
+    services: RunGenerationDeps,
 ) -> QueuedGenerationCandidate:
     mapping = getattr(row, "_mapping", None)
 
@@ -438,7 +431,7 @@ def queued_candidate_from_mapping(
         return getattr(row, name, default)
 
     generation_id = str(value("id", default_id or ""))
-    metadata = generation_queue_ports().generation_queue_metadata(
+    metadata = generation_queue_metadata(
         upstream_request=value("upstream_request", None),
         action=value("action", None),
         size_requested=value("size_requested", None),
@@ -447,9 +440,9 @@ def queued_candidate_from_mapping(
         upstream_pixels=value("upstream_pixels", None),
     )
     lane = str(
-        metadata.get("queue_lane") or generation_queue_ports()._IMAGE_QUEUE_DEFAULT_LANE
+        metadata.get("queue_lane") or IMAGE_QUEUE_DEFAULT_LANE
     )
-    return generation_queue_ports()._QueuedGenerationCandidate(
+    return QueuedGenerationCandidate(
         id=generation_id,
         queue_lane=lane,
         size_bucket=metadata.get("size_bucket"),
@@ -458,51 +451,51 @@ def queued_candidate_from_mapping(
     )
 
 
-def fallback_queued_candidate(generation_id: str) -> QueuedGenerationCandidate:
-    return generation_queue_ports()._QueuedGenerationCandidate(id=str(generation_id))
+def fallback_queued_candidate(generation_id: str, *, services: RunGenerationDeps) -> QueuedGenerationCandidate:
+    return QueuedGenerationCandidate(id=str(generation_id))
 
 
 async def queued_generation_candidates(
     limit: int,
+    services: RunGenerationDeps,
 ) -> list[QueuedGenerationCandidate]:
-    ids = await generation_queue_ports()._queued_generation_ids(limit)
+    ids = await queued_generation_ids(limit, services=services)
     if not ids:
         return []
     try:
-        async with generation_persistence_ports().SessionLocal() as session:
+        async with services.store.session() as session:
             rows = (
                 await session.execute(
-                    generation_persistence_ports()
-                    .select(
-                        generation_persistence_ports().Generation.id,
-                        generation_persistence_ports().Generation.upstream_request,
-                        generation_persistence_ports().Generation.action,
-                        generation_persistence_ports().Generation.size_requested,
-                        generation_persistence_ports().Generation.mask_image_id,
-                        generation_persistence_ports().Generation.created_at,
-                        generation_persistence_ports().Generation.upstream_pixels,
+                    select(
+                        Generation.id,
+                        Generation.upstream_request,
+                        Generation.action,
+                        Generation.size_requested,
+                        Generation.mask_image_id,
+                        Generation.created_at,
+                        Generation.upstream_pixels,
                     )
-                    .where(generation_persistence_ports().Generation.id.in_(ids))
+                    .where(Generation.id.in_(ids))
                 )
             ).all()
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.debug(
+        logger.debug(
             "image queue candidate enrichment failed: %s", exc
         )
         return [
-            generation_queue_ports()._fallback_queued_candidate(generation_id)
+            fallback_queued_candidate(generation_id, services=services)
             for generation_id in ids
         ]
 
     by_id: dict[str, QueuedGenerationCandidate] = {}
     for row in rows:
-        candidate = generation_queue_ports()._queued_candidate_from_mapping(row)
+        candidate = queued_candidate_from_mapping(row, services=services)
         if candidate.id:
             by_id[candidate.id] = candidate
     return [
         by_id.get(
             str(generation_id),
-            generation_queue_ports()._fallback_queued_candidate(str(generation_id)),
+            fallback_queued_candidate(str(generation_id), services=services),
         )
         for generation_id in ids
     ]
@@ -514,14 +507,15 @@ async def select_ready_generation_ids_by_lane(
     limit: int,
     *,
     advance_cursor: bool = False,
+    services: RunGenerationDeps,
 ) -> list[str]:
-    slots = generation_queue_ports()._weighted_queue_lane_slots(list(ready_by_lane))
+    slots = weighted_queue_lane_slots(list(ready_by_lane), services=services)
     if not slots:
         return []
     raw_cursor: str | None = None
     with suppress(Exception):
-        raw_cursor = generation_queue_ports()._redis_text(
-            await redis.get(generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY)
+        raw_cursor = redis_text(
+            await redis.get(IMAGE_QUEUE_LANE_CURSOR_KEY)
         )
     try:
         cursor = int(raw_cursor) if raw_cursor else 0
@@ -542,7 +536,7 @@ async def select_ready_generation_ids_by_lane(
     if advance_cursor:
         with suppress(Exception):
             await redis.set(
-                generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY,
+                IMAGE_QUEUE_LANE_CURSOR_KEY,
                 str(cursor),
                 ex=3600,
             )
@@ -554,6 +548,7 @@ async def advance_image_queue_lane_cursor(
     steps: int = 1,
     *,
     lock: ImageQueueLockLease | None = None,
+    services: RunGenerationDeps,
 ) -> None:
     if steps <= 0:
         return
@@ -561,8 +556,8 @@ async def advance_image_queue_lane_cursor(
         await lock.eval_fenced(
             ADVANCE_IMAGE_QUEUE_CURSOR_LUA,
             2,
-            generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY,
-            generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
+            IMAGE_QUEUE_LANE_CURSOR_KEY,
+            IMAGE_QUEUE_LOCK_KEY,
             lock.token,
             int(steps),
             lost_result=-1,
@@ -570,9 +565,9 @@ async def advance_image_queue_lane_cursor(
         return
     with suppress(Exception):
         await redis.incrby(
-            generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY, int(steps)
+            IMAGE_QUEUE_LANE_CURSOR_KEY, int(steps)
         )
-        await redis.expire(generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY, 3600)
+        await redis.expire(IMAGE_QUEUE_LANE_CURSOR_KEY, 3600)
 
 
 async def ready_queued_generation_ids(
@@ -581,9 +576,11 @@ async def ready_queued_generation_ids(
     *,
     advance_cursor: bool = False,
     lock: ImageQueueLockLease | None = None,
+    services: RunGenerationDeps,
 ) -> list[str]:
-    candidates = await generation_queue_ports()._queued_generation_candidates(
-        max(limit, generation_queue_ports()._IMAGE_QUEUE_FAIR_SCAN_LIMIT)
+    candidates = await queued_generation_candidates(
+        max(limit, IMAGE_QUEUE_FAIR_SCAN_LIMIT),
+        services,
     )
     if not candidates:
         return []
@@ -592,27 +589,27 @@ async def ready_queued_generation_ids(
     now = time.time()
     now_mono = time.monotonic()
     active_members: set[str] = set()
-    with suppress(generation_provider_ports().UpstreamError):
-        await generation_queue_ports()._cleanup_image_queue_active(redis, lock=lock)
-    with suppress(generation_provider_ports().UpstreamError):
-        active_members = await generation_queue_ports()._active_image_provider_names(
-            redis
+    with suppress(UpstreamError):
+        await cleanup_image_queue_active(redis, lock=lock, services=services)
+    with suppress(UpstreamError):
+        active_members = await active_image_provider_names(
+            redis,
+            services=services,
         )
     for candidate in candidates:
         queued_id = candidate.id
         if (
             queued_id in active_members
-            or generation_queue_ports()._dual_race_sentinel_name(queued_id)
-            in active_members
+            or dual_race_sentinel_name(queued_id) in active_members
         ):
             continue
-        local_until = generation_queue_ports()._PROVIDER_COOLDOWN_LOCAL.get(queued_id)
+        local_until = services.queue.provider_cooldowns.get(queued_id)
         if local_until is not None:
             if local_until > now_mono:
                 continue
-            generation_queue_ports()._PROVIDER_COOLDOWN_LOCAL.pop(queued_id, None)
-        not_before_key = generation_queue_ports()._image_queue_not_before_key(queued_id)
-        raw_not_before = generation_queue_ports()._redis_text(
+            services.queue.provider_cooldowns.pop(queued_id, None)
+        not_before_key = image_queue_not_before_key(queued_id)
+        raw_not_before = redis_text(
             await redis.get(not_before_key)
         )
         if raw_not_before:
@@ -627,7 +624,7 @@ async def ready_queued_generation_ids(
                         await redis.delete(not_before_key)
         ready_fifo.append(queued_id)
         ready_by_lane.setdefault(
-            candidate.queue_lane or generation_queue_ports()._IMAGE_QUEUE_DEFAULT_LANE,
+            candidate.queue_lane or IMAGE_QUEUE_DEFAULT_LANE,
             [],
         ).append(candidate)
     if not ready_by_lane:
@@ -635,16 +632,17 @@ async def ready_queued_generation_ids(
     if len(ready_by_lane) == 1:
         return ready_fifo[:limit]
     try:
-        selected = await generation_queue_ports()._select_ready_generation_ids_by_lane(
+        selected = await select_ready_generation_ids_by_lane(
             redis,
             {lane: list(values) for lane, values in ready_by_lane.items()},
             limit,
             advance_cursor=advance_cursor,
+            services=services,
         )
         if selected:
             return selected
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "image queue weighted lane selection failed err=%s", exc
         )
     return ready_fifo[:limit]
@@ -656,14 +654,15 @@ async def enqueue_generation_once(
     *,
     defer_by: int | float | None = None,
     job_try: int | None = None,
+    services: RunGenerationDeps,
 ) -> bool:
-    dedupe_key = generation_queue_ports()._image_queue_enqueue_dedupe_key(task_id)
+    dedupe_key = image_queue_enqueue_dedupe_key(task_id)
     try:
         first = await redis.set(
             dedupe_key,
             "1",
             nx=True,
-            ex=generation_queue_ports()._IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S,
+            ex=IMAGE_QUEUE_ENQUEUE_DEDUPE_TTL_S,
         )
         if not first:
             return False
@@ -677,30 +676,39 @@ async def enqueue_generation_once(
     except Exception as exc:  # noqa: BLE001
         with suppress(Exception):
             await redis.delete(dedupe_key)
-        generation_events_ports().logger.warning(
+        logger.warning(
             "image queue enqueue failed task=%s err=%s", task_id, exc
         )
         return False
 
 
-async def clear_image_queue_enqueue_dedupe(redis: Any, task_id: str) -> None:
+async def clear_image_queue_enqueue_dedupe(redis: Any, task_id: str, *, services: RunGenerationDeps) -> None:
     with suppress(Exception):
         await redis.delete(
-            generation_queue_ports()._image_queue_enqueue_dedupe_key(task_id)
+            image_queue_enqueue_dedupe_key(task_id)
         )
 
 
-async def kick_image_queue(redis: Any) -> None:
-    capacity = await generation_queue_ports()._resolve_image_queue_capacity()
+async def kick_image_queue(redis: Any, *, services: RunGenerationDeps) -> None:
+    capacity = await resolve_image_queue_capacity(services=services)
     try:
-        ids = await generation_queue_ports()._ready_queued_generation_ids(
+        ids = await ready_queued_generation_ids(
             redis,
-            max(generation_queue_ports()._IMAGE_QUEUE_SCAN_LIMIT, capacity * 2),
+            max(IMAGE_QUEUE_SCAN_LIMIT, capacity * 2),
+            services=services,
         )
     except Exception as exc:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "image queue kick scan failed err=%s", exc
         )
         return
     for queued_id in ids[: max(1, capacity * 2)]:
-        await generation_queue_ports()._enqueue_generation_once(redis, queued_id)
+        await enqueue_generation_once(redis, queued_id, services=services)
+
+
+def dual_race_sentinel_name(task_id: str) -> str:
+    return f"{DUAL_RACE_SENTINEL_PREFIX}{task_id}"
+
+
+def is_dual_race_sentinel(name: str | None) -> bool:
+    return bool(name and name.startswith(DUAL_RACE_SENTINEL_PREFIX))

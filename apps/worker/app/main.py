@@ -22,6 +22,7 @@ from redis.exceptions import BusyLoadingError
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from lumen_core.context_window import warm_tiktoken
+from lumen_core.storage_capacity import build_storage_capacity
 
 from .config import settings
 from .db import engine
@@ -34,9 +35,11 @@ from .observability import (
     stop_metrics_server,
 )
 from .provider_pool import probe_providers
+from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from . import runtime_settings
 from .services import billing_cache
 from .storage import storage
+from .storage_writes import StorageWriteCoordinator
 from .tasks import auto_title as auto_title_tasks
 from .tasks import byok_retention as byok_retention_tasks
 from .tasks import canvas_execution_reconcile as canvas_reconcile_tasks
@@ -48,6 +51,12 @@ from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import video_generation as video_generation_tasks
 from .tasks import volcano_assets as volcano_asset_tasks
+from .tasks.completion_parts.default_runtime import build_completion_runtime
+from .tasks.generation_parts.default_runtime import build_generation_runtime
+from .tasks.video_generation_parts.default_runtime import (
+    build_video_generation_runtime,
+)
+from .upstream_parts.upstream_impl import build_image_upstream_runtime
 from .upstream import close_client, validate_effective_image_job_configuration
 
 _startup_logger = logging.getLogger(__name__)
@@ -115,7 +124,15 @@ async def _cleanup_resources(ctx: dict[str, Any]) -> None:
     generation_runtime = ctx.pop("generation_runtime", None)
     if isinstance(generation_runtime, generation_tasks.GenerationRuntime):
         await _cleanup_resource("generation_runtime", generation_runtime.shutdown)
-    await _cleanup_resource("upstream_client", close_client)
+    image_upstream_runtime = ctx.pop("image_upstream_runtime", None)
+    ctx.pop("completion_runtime", None)
+    ctx.pop("video_generation_runtime", None)
+    ctx.pop("storage_write_coordinator", None)
+    if isinstance(image_upstream_runtime, ImageUpstreamRuntime):
+        await _cleanup_resource(
+            "upstream_client",
+            lambda: close_client(runtime=image_upstream_runtime),
+        )
     await _cleanup_resource("metrics_server", stop_metrics_server)
     # 引擎最后释放：上面的清理动作（billing_cache flush、generation_runtime
     # 收尾）都可能还要用连接。不 dispose 会在 PG 侧留下 IDLE 连接，
@@ -127,9 +144,42 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """arq WorkerSettings.on_startup 钩子：初始化观测层（幂等）。"""
     try:
         ctx["runtime_settings_cache"] = runtime_settings.configure_cache()
-        ctx["generation_runtime"] = generation_tasks.DEFAULT_GENERATION_RUNTIME
-        await validate_effective_image_job_configuration()
+        image_upstream_runtime = build_image_upstream_runtime()
+        ctx["image_upstream_runtime"] = image_upstream_runtime
+        await validate_effective_image_job_configuration(
+            runtime=image_upstream_runtime,
+        )
         storage.ensure_ready()
+        configured_policy = settings.image_upload_capacity_degraded_policy.strip()
+        degraded_policy = configured_policy or (
+            "scaled_local"
+            if settings.app_env.strip().lower()
+            in {"dev", "development", "local", "test"}
+            else "fail_closed"
+        )
+        storage_writes = StorageWriteCoordinator(
+            storage=storage,
+            capacity=build_storage_capacity(
+                ctx["redis"],
+                settings.storage_root,
+                minimum_free_bytes=settings.minimum_storage_free_bytes,
+                lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
+                degraded_policy=degraded_policy,
+            ),
+            lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
+        )
+        ctx["storage_write_coordinator"] = storage_writes
+        ctx["generation_runtime"] = build_generation_runtime(
+            storage_writes=storage_writes,
+            image_upstream_runtime=image_upstream_runtime,
+        )
+        ctx["completion_runtime"] = build_completion_runtime(
+            storage_writes=storage_writes,
+            image_upstream_runtime=image_upstream_runtime,
+        )
+        ctx["video_generation_runtime"] = build_video_generation_runtime(
+            storage_writes=storage_writes
+        )
         init_sentry(
             settings.sentry_dsn,
             settings.sentry_environment or settings.app_env,

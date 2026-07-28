@@ -73,22 +73,15 @@ async def test_sse_connection_slot_limits_and_releases() -> None:
 
         async def eval(self, script: str, _numkeys: int, key: str, *args: Any) -> int:
             assert key == "sse:connections:user-1"
-            if "zcard" in script and "zadd" in script:
-                now = float(args[0])
-                ttl = int(args[1])
-                limit = int(args[2])
-                expires_at = float(args[3])
-                token = str(args[4])
+            if "ZCARD" in script and "ZADD" in script:
+                ttl = int(args[0])
+                limit = int(args[1])
+                token = str(args[2])
                 assert ttl == 90
-                self.tokens = {
-                    current_token: expires
-                    for current_token, expires in self.tokens.items()
-                    if expires > now
-                }
                 self.expire_calls += 1
                 if len(self.tokens) >= limit:
                     return 0
-                self.tokens[token] = expires_at
+                self.tokens[token] = 1_000_000 + ttl
                 return 1
             if "zrem" in script:
                 token = str(args[0])
@@ -118,6 +111,23 @@ async def test_sse_connection_slot_limits_and_releases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sse_connection_limiter_fails_closed_outside_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Redis:
+        async def eval(self, *_args: Any) -> int:
+            raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(events.settings, "app_env", "production")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await events._acquire_sse_connection_slot(Redis(), "user-1")
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"]["code"] == "sse_connection_limiter_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_sse_connection_slot_refreshes_only_its_own_token() -> None:
     class Redis:
         def __init__(self) -> None:
@@ -125,18 +135,11 @@ async def test_sse_connection_slot_refreshes_only_its_own_token() -> None:
 
         async def eval(self, script: str, _numkeys: int, key: str, *args: Any) -> int:
             assert key == "sse:connections:user-1"
-            if "zscore" in script:
-                now = float(args[0])
-                token = str(args[2])
-                expires_at = float(args[3])
-                self.tokens = {
-                    current_token: expires
-                    for current_token, expires in self.tokens.items()
-                    if expires > now
-                }
+            if "ZSCORE" in script:
+                token = str(args[0])
                 if token not in self.tokens:
                     return 0
-                self.tokens[token] = expires_at
+                self.tokens[token] = 1_000_000 + int(args[1])
                 return 1
             if "zrem" in script:
                 self.tokens.pop(str(args[0]), None)
@@ -145,18 +148,32 @@ async def test_sse_connection_slot_refreshes_only_its_own_token() -> None:
 
     redis = Redis()
 
-    await events._refresh_sse_connection_slot(
-        redis,
-        ("sse:connections:user-1", "missing"),
+    assert (
+        await events._refresh_sse_connection_slot(
+            redis,
+            ("sse:connections:user-1", "missing"),
+        )
+        is False
     )
 
     assert set(redis.tokens) == {"other"}
 
     redis.tokens["mine"] = time.time() + 1
-    await events._refresh_sse_connection_slot(redis, ("sse:connections:user-1", "mine"))
+    assert (
+        await events._refresh_sse_connection_slot(
+            redis,
+            ("sse:connections:user-1", "mine"),
+        )
+        is True
+    )
 
     assert set(redis.tokens) == {"other", "mine"}
-    assert redis.tokens["mine"] > time.time() + 80
+    assert redis.tokens["mine"] == 1_000_090
+
+
+def test_sse_slot_scripts_use_redis_server_time() -> None:
+    assert "redis.call('TIME')" in events._ACQUIRE_SSE_SLOT_LUA
+    assert "redis.call('TIME')" in events._REFRESH_SSE_SLOT_LUA
 
 
 def test_replay_payload_filter_matches_requested_channels() -> None:
@@ -466,6 +483,7 @@ async def test_events_logs_replay_failure_and_acloses_pubsub(
         def __init__(self) -> None:
             self.aclose_called = False
             self.close_called = False
+            self.get_message_calls = 0
 
         async def subscribe(self, *_channels: str) -> None:
             return None
@@ -480,7 +498,8 @@ async def test_events_logs_replay_failure_and_acloses_pubsub(
             self.close_called = True
 
         async def get_message(self, **_kwargs: Any) -> None:
-            return None
+            self.get_message_calls += 1
+            raise AssertionError("live PubSub must not start after replay failure")
 
     class Redis:
         def __init__(self) -> None:
@@ -499,27 +518,28 @@ async def test_events_logs_replay_failure_and_acloses_pubsub(
     # "超出 24h 重放窗口" 拒绝，replay 分支被跳过，logger 不会 emit。
     sane_event_id = f"{int(time.time() * 1000)}-0"
 
-    class DisconnectedRequest:
+    class ConnectedRequest:
         headers = {"Last-Event-ID": sane_event_id}
 
         async def is_disconnected(self) -> bool:
-            return True
+            return False
 
     redis = Redis()
     monkeypatch.setattr(events, "get_redis", lambda: redis)
 
     response = await events.events(
-        DisconnectedRequest(),  # type: ignore[arg-type]
+        ConnectedRequest(),  # type: ignore[arg-type]
         SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         channels="",
     )
 
     with caplog.at_level("WARNING"):
-        async for _chunk in response.body_iterator:
-            pass
+        chunks = [chunk async for chunk in response.body_iterator]
 
     assert "sse replay failed" in caplog.text
+    assert chunks[0]["event"] == "recovery_required"
+    assert redis.pubsub_obj.get_message_calls == 0
     assert redis.pubsub_obj.aclose_called is True
     assert redis.pubsub_obj.close_called is False
 

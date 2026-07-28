@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import main
+from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 
 
 @pytest.mark.asyncio
@@ -19,14 +20,18 @@ async def test_startup_failure_closes_partial_resources(
     async def fake_billing_shutdown() -> None:
         calls.append("billing_shutdown")
 
-    async def fake_close_client() -> None:
+    image_upstream_runtime = ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
+
+    async def fake_close_client(*, runtime: ImageUpstreamRuntime) -> None:
+        assert runtime is image_upstream_runtime
         calls.append("close_client")
 
     monkeypatch.setattr(
         main.storage, "ensure_ready", lambda: calls.append("storage_ready")
     )
 
-    async def valid_image_job_configuration() -> None:
+    async def valid_image_job_configuration(*, runtime: object) -> None:
+        assert runtime is not None
         return None
 
     monkeypatch.setattr(
@@ -43,6 +48,32 @@ async def test_startup_failure_closes_partial_resources(
     monkeypatch.setattr(main, "warm_tiktoken", fail_warm_tiktoken)
     monkeypatch.setattr(main.billing_cache, "shutdown", fake_billing_shutdown)
     monkeypatch.setattr(main, "close_client", fake_close_client)
+    monkeypatch.setattr(
+        main,
+        "build_image_upstream_runtime",
+        lambda: image_upstream_runtime,
+    )
+    monkeypatch.setattr(main, "build_storage_capacity", lambda *_a, **_kw: object())
+    monkeypatch.setattr(
+        main,
+        "StorageWriteCoordinator",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_generation_runtime",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_completion_runtime",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_video_generation_runtime",
+        lambda **_kwargs: object(),
+    )
 
     with pytest.raises(RuntimeError, match="startup failed"):
         await main._on_startup({"redis": object()})
@@ -61,7 +92,8 @@ async def test_startup_rejects_invalid_effective_image_job_channel(
 ) -> None:
     calls: list[str] = []
 
-    async def invalid_image_job_configuration() -> None:
+    async def invalid_image_job_configuration(*, runtime: object) -> None:
+        assert runtime is not None
         raise RuntimeError("effective image_jobs_only configuration is invalid")
 
     monkeypatch.setattr(
@@ -75,7 +107,7 @@ async def test_startup_rejects_invalid_effective_image_job_channel(
         lambda: calls.append("storage_ready"),
     )
     monkeypatch.setattr(main.billing_cache, "shutdown", lambda: None)
-    monkeypatch.setattr(main, "close_client", lambda: None)
+    monkeypatch.setattr(main, "close_client", lambda *, runtime: None)
     monkeypatch.setattr(main, "stop_metrics_server", lambda: None)
 
     with pytest.raises(RuntimeError, match="effective image_jobs_only"):
@@ -94,7 +126,10 @@ async def test_shutdown_attempts_each_cleanup_after_one_fails(
         calls.append("billing")
         raise RuntimeError("billing cleanup failed")
 
-    async def fake_close_client() -> None:
+    image_upstream_runtime = ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
+
+    async def fake_close_client(*, runtime: ImageUpstreamRuntime) -> None:
+        assert runtime is image_upstream_runtime
         calls.append("upstream")
 
     def fake_stop_metrics() -> None:
@@ -108,7 +143,7 @@ async def test_shutdown_attempts_each_cleanup_after_one_fails(
     monkeypatch.setattr(main, "stop_metrics_server", fake_stop_metrics)
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=fake_dispose))
 
-    await main._on_shutdown({})
+    await main._on_shutdown({"image_upstream_runtime": image_upstream_runtime})
 
     # 引擎必须最后 dispose：前面的清理仍可能借用连接。
     assert calls == ["billing", "upstream", "metrics", "engine"]
@@ -121,7 +156,10 @@ async def test_shutdown_disposes_engine_even_when_earlier_cleanup_raises(
     """E-5：任一清理项失败都不得跳过 engine.dispose，否则连接持续泄漏。"""
     disposed: list[str] = []
 
-    async def failing_close_client() -> None:
+    image_upstream_runtime = ImageUpstreamRuntime(services=object())  # type: ignore[arg-type]
+
+    async def failing_close_client(*, runtime: ImageUpstreamRuntime) -> None:
+        assert runtime is image_upstream_runtime
         raise RuntimeError("upstream client close failed")
 
     def failing_stop_metrics() -> None:
@@ -135,7 +173,7 @@ async def test_shutdown_disposes_engine_even_when_earlier_cleanup_raises(
     monkeypatch.setattr(main, "stop_metrics_server", failing_stop_metrics)
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=fake_dispose))
 
-    await main._on_shutdown({})
+    await main._on_shutdown({"image_upstream_runtime": image_upstream_runtime})
 
     assert disposed == ["engine"]
 
@@ -174,6 +212,87 @@ def test_worker_settings_use_hardened_redis_settings() -> None:
         main._REDIS_MAX_CONNECTIONS
     )
     assert main.WorkerSettings.redis_settings.retry_on_timeout is True
+
+
+@pytest.mark.asyncio
+async def test_startup_injects_one_storage_coordinator_into_all_media_runtimes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = object()
+    image_upstream_runtime = object()
+    injected: list[tuple[str, object, object]] = []
+    ctx = {"redis": object()}
+
+    async def valid_image_job_configuration(*, runtime: object) -> None:
+        assert runtime is image_upstream_runtime
+        return None
+
+    async def configure_billing(_redis: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        main,
+        "validate_effective_image_job_configuration",
+        valid_image_job_configuration,
+    )
+    monkeypatch.setattr(
+        main,
+        "build_image_upstream_runtime",
+        lambda: image_upstream_runtime,
+    )
+    monkeypatch.setattr(main.storage, "ensure_ready", lambda: None)
+    monkeypatch.setattr(main, "build_storage_capacity", lambda *_a, **_kw: object())
+    monkeypatch.setattr(
+        main,
+        "StorageWriteCoordinator",
+        lambda **_kwargs: coordinator,
+    )
+    monkeypatch.setattr(
+        main,
+        "build_generation_runtime",
+        lambda *, storage_writes, image_upstream_runtime: (
+            injected.append(
+                ("generation", storage_writes, image_upstream_runtime)
+            )
+            or image_upstream_runtime
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_completion_runtime",
+        lambda *, storage_writes, image_upstream_runtime: (
+            injected.append(
+                ("completion", storage_writes, image_upstream_runtime)
+            )
+            or object()
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "build_video_generation_runtime",
+        lambda *, storage_writes: (
+            injected.append(
+                ("video", storage_writes, image_upstream_runtime)
+            )
+            or object()
+        ),
+    )
+    monkeypatch.setattr(main, "init_sentry", lambda *_a, **_kw: None)
+    monkeypatch.setattr(main, "init_otel", lambda *_a, **_kw: None)
+    monkeypatch.setattr(main, "bind_db_pool_metrics", lambda *_a, **_kw: None)
+    monkeypatch.setattr(main, "start_metrics_server", lambda *_a, **_kw: None)
+    monkeypatch.setattr(main, "warm_tiktoken", lambda: True)
+    monkeypatch.setattr(main.billing_cache, "configure", configure_billing)
+
+    await main._on_startup(ctx)
+
+    assert injected == [
+        ("generation", coordinator, image_upstream_runtime),
+        ("completion", coordinator, image_upstream_runtime),
+        ("video", coordinator, image_upstream_runtime),
+    ]
+    assert ctx["storage_write_coordinator"] is coordinator
+    assert ctx["image_upstream_runtime"] is image_upstream_runtime
 
 
 def test_provider_cron_has_hard_timeout() -> None:

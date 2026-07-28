@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import inspect
 from typing import Any
 
 import pytest
 
 from app.upstream_parts import responses
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 @pytest.mark.parametrize(
@@ -101,24 +104,25 @@ def test_extract_image_billable_count(payload: Any, expected: int | None) -> Non
     assert responses._extract_image_billable_count(payload) == expected
 
 
-def test_upstream_facades_keep_legacy_parameter_signatures() -> None:
+def test_upstream_facades_expose_explicit_runtime_parameter() -> None:
     expected_parameters = {
-        "_extract_response_image_b64": ("event",),
-        "_extract_response_revised_prompt": ("event",),
-        "_b64_value_if_str": ("value",),
-        "_extract_image_b64_from_payload": ("payload",),
-        "_extract_image_billable_count": ("payload",),
+        "_extract_response_image_b64": "event",
+        "_extract_response_revised_prompt": "event",
+        "_b64_value_if_str": "value",
+        "_extract_image_b64_from_payload": "payload",
+        "_extract_image_billable_count": "payload",
     }
 
-    for name, expected in expected_parameters.items():
+    for name, value_parameter_name in expected_parameters.items():
         signature = inspect.signature(
-            getattr(upstream_services().core, name.lstrip("_"))
+            getattr(TEST_UPSTREAM_SERVICES.core, name.lstrip("_"))
         )
-        assert tuple(signature.parameters) == expected
-        assert all(
-            parameter.default is inspect.Parameter.empty
-            for parameter in signature.parameters.values()
-        )
+        assert tuple(signature.parameters) == (value_parameter_name, "runtime")
+        value_parameter = signature.parameters[value_parameter_name]
+        runtime_parameter = signature.parameters["runtime"]
+        assert value_parameter.default is inspect.Parameter.empty
+        assert runtime_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert runtime_parameter.default is TEST_UPSTREAM_RUNTIME
 
 
 def test_upstream_payload_facade_uses_current_nested_b64_facade(
@@ -131,11 +135,11 @@ def test_upstream_payload_facade_uses_current_nested_b64_facade(
         return "patched-b64" if value == "selected" else None
 
     monkeypatch.setattr(
-        upstream_services().core, "b64_value_if_str", fake_b64_value_if_str
+        TEST_UPSTREAM_SERVICES.core, "b64_value_if_str", fake_b64_value_if_str
     )
 
     assert (
-        upstream_services().core.extract_image_b64_from_payload(
+        TEST_UPSTREAM_SERVICES.core.extract_image_b64_from_payload(
             {"result": "skip", "b64_json": "selected"}
         )
         == "patched-b64"
@@ -150,12 +154,12 @@ def test_upstream_facades_resolve_extracted_helpers_at_call_time(
         return f"leaf:{event['result']}"
 
     monkeypatch.setattr(
-        upstream_services().responses,
+        TEST_UPSTREAM_SERVICES.responses,
         "extract_response_image_b64",
         fake_extract,
     )
 
     assert (
-        upstream_services().core.extract_response_image_b64({"result": "image"})
+        TEST_UPSTREAM_SERVICES.core.extract_response_image_b64({"result": "image"})
         == "leaf:image"
     )

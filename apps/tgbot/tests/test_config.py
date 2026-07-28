@@ -129,6 +129,17 @@ def test_polling_error_classification_is_explicit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_backoff_is_interrupted_by_stop_event() -> None:
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(main._sleep_or_stop(stop_event, 60.0))
+    await asyncio.sleep(0)
+
+    stop_event.set()
+
+    assert await asyncio.wait_for(task, timeout=0.2) is True
+
+
+@pytest.mark.asyncio
 async def test_polling_supervisor_treats_stop_as_normal() -> None:
     stop_event = asyncio.Event()
 
@@ -279,6 +290,50 @@ async def test_control_listener_turns_admin_restart_into_clean_stop(
 
 
 @pytest.mark.asyncio
+async def test_control_listener_stop_interrupts_reconnect_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    class FakePubSub:
+        async def subscribe(self, _channel: str) -> None:
+            raise OSError("redis unavailable")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeRedis:
+        def pubsub(self) -> FakePubSub:
+            return FakePubSub()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def fake_sleep_or_stop(
+        stop_event: asyncio.Event,
+        delay: float,
+    ) -> bool:
+        waits.append(delay)
+        stop_event.set()
+        return True
+
+    monkeypatch.setattr(
+        main.aioredis,
+        "from_url",
+        lambda *_args, **_kwargs: FakeRedis(),
+    )
+    stop_event = asyncio.Event()
+
+    await main._run_control_listener(
+        stop_event,
+        sleep_or_stop=fake_sleep_or_stop,
+    )
+
+    assert stop_event.is_set()
+    assert waits == [1.0]
+
+
+@pytest.mark.asyncio
 async def test_main_pauses_before_api_client_without_shared_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,6 +392,97 @@ class _FakeApi:
     ) -> dict[str, object]:
         assert avoid == []
         return self.runtime_configs.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_main_closes_api_when_runtime_bootstrap_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+
+    class CrashingProxyManager:
+        def __init__(self, received_api: _FakeApi) -> None:
+            assert received_api is api
+
+        async def initial_load(self) -> dict[str, object]:
+            raise RuntimeError("unexpected bootstrap failure")
+
+    monkeypatch.setattr(main.settings, "telegram_bot_shared_secret", "s" * 32)
+    monkeypatch.setattr(main, "LumenApi", lambda: api)
+    monkeypatch.setattr(main, "ProxyManager", CrashingProxyManager)
+
+    with pytest.raises(RuntimeError, match="unexpected bootstrap failure"):
+        await main._amain()
+
+    assert api.closed is True
+
+
+@pytest.mark.asyncio
+async def test_main_closes_bot_and_fsm_when_dispatcher_setup_crashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+
+    class FakeProxyManager:
+        current_name = None
+
+        def __init__(self, received_api: _FakeApi) -> None:
+            assert received_api is api
+
+        async def initial_load(self) -> dict[str, object]:
+            return {
+                "bot_enabled": True,
+                "bot_token": "test-token",
+                "proxy": {},
+            }
+
+    class FakeSession:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeBot:
+        instance = None
+
+        def __init__(self, **_kwargs: object) -> None:
+            self.session = FakeSession()
+            FakeBot.instance = self
+
+    class FakeRedis:
+        closed = False
+
+        async def ping(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    redis = FakeRedis()
+
+    def crash_dispatcher(**_kwargs: object) -> None:
+        raise RuntimeError("dispatcher setup failed")
+
+    monkeypatch.setattr(main.settings, "telegram_bot_shared_secret", "s" * 32)
+    monkeypatch.setattr(main.settings, "telegram_bot_token", "")
+    monkeypatch.setattr(main.settings, "telegram_proxy_url", "")
+    monkeypatch.setattr(main, "LumenApi", lambda: api)
+    monkeypatch.setattr(main, "ProxyManager", FakeProxyManager)
+    monkeypatch.setattr(main, "Bot", FakeBot)
+    monkeypatch.setattr(main, "Dispatcher", crash_dispatcher)
+    monkeypatch.setattr(
+        main.aioredis,
+        "from_url",
+        lambda *_args, **_kwargs: redis,
+    )
+
+    with pytest.raises(RuntimeError, match="dispatcher setup failed"):
+        await main._amain()
+
+    assert FakeBot.instance is not None
+    assert FakeBot.instance.session.closed is True
+    assert redis.closed is True
+    assert api.closed is True
 
 
 @pytest.mark.asyncio

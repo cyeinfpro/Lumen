@@ -60,6 +60,21 @@ class ProgressPort(Protocol):
     async def emit(self, event: ImageProgressEvent) -> None: ...
 
 
+@dataclass(frozen=True)
+class ImageProbeRequest:
+    prompt: str
+    size: str
+    quality: str
+    provider: "ProviderConfig"
+
+
+class ImageProbePort(Protocol):
+    async def __call__(
+        self,
+        request: ImageProbeRequest,
+    ) -> tuple[str, str | None]: ...
+
+
 class ClockPort(Protocol):
     def monotonic(self) -> float: ...
 

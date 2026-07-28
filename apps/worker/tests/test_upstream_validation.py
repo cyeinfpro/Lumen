@@ -1,27 +1,31 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import logging
 import math
 import sys
 
 import pytest
 
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+
 
 def test_curl_timeout_arg_rounds_up_and_never_disables_timeout() -> None:
 
-    assert upstream_services().transport.curl_timeout_arg(0.1) == "1"
-    assert upstream_services().transport.curl_timeout_arg(0.999) == "1"
-    assert upstream_services().transport.curl_timeout_arg(1.1) == "2"
-    assert upstream_services().transport.curl_timeout_arg(10.0) == "10"
-    assert upstream_services().transport.curl_timeout_arg(-5.0) == "1"
-    assert upstream_services().transport.curl_timeout_arg(math.inf) == "1"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(0.1) == "1"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(0.999) == "1"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(1.1) == "2"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(10.0) == "10"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(-5.0) == "1"
+    assert TEST_UPSTREAM_SERVICES.transport.curl_timeout_arg(math.inf) == "1"
 
 
 def test_upstream_error_detail_summary_redacts_sensitive_text() -> None:
 
-    summary = upstream_services().core.summarize_upstream_error_detail(
+    summary = TEST_UPSTREAM_SERVICES.core.summarize_upstream_error_detail(
         {
             "code": "policy_violation",
             "type": "invalid_request_error",
@@ -43,17 +47,17 @@ def test_configure_pil_max_image_pixels_logs_failure(
 ) -> None:
 
     class BrokenPIL:
-        MAX_IMAGE_PIXELS = upstream_services().core.MAX_REFERENCE_IMAGE_PIXELS + 1
+        MAX_IMAGE_PIXELS = TEST_UPSTREAM_SERVICES.core.MAX_REFERENCE_IMAGE_PIXELS + 1
 
         def __setattr__(self, _name: str, _value: object) -> None:
             raise RuntimeError("cannot configure")
 
-    monkeypatch.setattr(upstream_services().infrastructure, "PILImage", BrokenPIL())
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "PILImage", BrokenPIL())
 
     with caplog.at_level(
-        logging.WARNING, logger=upstream_services().infrastructure.logger.name
+        logging.WARNING, logger=TEST_UPSTREAM_SERVICES.infrastructure.logger.name
     ):
-        upstream_services().core.configure_pil_max_image_pixels()
+        TEST_UPSTREAM_SERVICES.core.configure_pil_max_image_pixels()
 
     assert "failed to configure PIL MAX_IMAGE_PIXELS" in caplog.text
 

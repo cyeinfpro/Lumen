@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from PIL import Image as PILImage
 
@@ -26,14 +26,75 @@ from ...provider_runtime.errors import UpstreamError
 
 _IMAGE_POSTPROCESS_MODES = frozenset({"inline", "thread", "process_pool"})
 
-ImageVariantMaker = Callable[[bytes], image_artifacts._ImageVariantBundle]
+
+class ImageVariantMaker(Protocol):
+    def __call__(
+        self,
+        raw_image: bytes,
+    ) -> image_artifacts._ImageVariantBundle: ...
+
+
+class ImagePostprocessModeResolver(Protocol):
+    def __call__(self, mode: str | None) -> str: ...
+
+
+class ExecutorProvider(Protocol):
+    def __call__(self) -> Executor: ...
+
+
+class ExecutorResetter(Protocol):
+    def __call__(self) -> None: ...
+
+
+class TransparentProcessor(Protocol):
+    async def __call__(
+        self,
+        image: PILImage.Image,
+        *,
+        prompt: str,
+    ) -> TransparentPipelineOutput: ...
+
+
+class ImageVariantPostprocessor(Protocol):
+    async def __call__(
+        self,
+        raw_image: bytes,
+        *,
+        mode: str | None = None,
+    ) -> tuple[image_artifacts._ImageVariantBundle, str]: ...
+
+
+class UpstreamErrorFactory(Protocol):
+    def __call__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        status_code: int | None,
+        payload: dict[str, Any] | None = None,
+    ) -> UpstreamError: ...
+
+
+class InspectionFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        orig_format: str,
+        width: int,
+        height: int,
+        has_transparency: bool,
+    ) -> image_artifacts._GeneratedImageInspection: ...
+
+
+class ProcessPoolFactory(Protocol):
+    def __call__(self, *, max_workers: int) -> ProcessPoolExecutor: ...
 
 
 @dataclass(frozen=True)
 class ImageVariantExecutionHooks:
-    resolve_mode: Callable[[str | None], str]
-    get_executor: Callable[[], Executor]
-    reset_executor: Callable[[], None]
+    resolve_mode: ImagePostprocessModeResolver
+    get_executor: ExecutorProvider
+    reset_executor: ExecutorResetter
     make_variants_sync: ImageVariantMaker
     make_variants_pil_only_sync: ImageVariantMaker
     broken_process_pool_type: type[BrokenProcessPool]
@@ -45,23 +106,15 @@ class GeneratedImagePostprocessHooks:
         [bytes], image_artifacts._GeneratedImageInspection
     ]
     sha256: Callable[[bytes], str]
-    process_transparent_request: Callable[..., Awaitable[TransparentPipelineOutput]]
+    process_transparent_request: TransparentProcessor
     transparent_pipeline_failure_type: type[TransparentPipelineFailure]
     sanitize_transparent_qc_payload: Callable[[dict[str, Any]], dict[str, Any]]
-    postprocess_image_variants: Callable[
-        ...,
-        Awaitable[tuple[image_artifacts._ImageVariantBundle, str]],
-    ]
+    postprocess_image_variants: ImageVariantPostprocessor
     compute_blurhash: Callable[[PILImage.Image], str | None]
     image_decode_upstream_error: Callable[[Exception], UpstreamError]
-    upstream_error_type: Callable[..., UpstreamError]
+    upstream_error_type: UpstreamErrorFactory
     bad_response_error_code: str
-    generated_image_inspection_type: Callable[
-        ..., image_artifacts._GeneratedImageInspection
-    ]
-    postprocessed_generated_image_type: Callable[
-        ..., image_artifacts._PostprocessedGeneratedImage
-    ]
+    generated_image_inspection_type: InspectionFactory
 
 
 def _resolve_image_postprocess_mode(
@@ -102,7 +155,7 @@ def _get_image_postprocess_executor(
     executor: ProcessPoolExecutor | None,
     *,
     resolve_workers: Callable[[], int],
-    executor_type: Callable[..., ProcessPoolExecutor],
+    executor_type: ProcessPoolFactory,
 ) -> ProcessPoolExecutor:
     if executor is None:
         executor = executor_type(max_workers=resolve_workers())
@@ -170,7 +223,7 @@ async def _postprocess_image_variants(
 def _image_decode_upstream_error(
     exc: Exception,
     *,
-    upstream_error_type: Callable[..., UpstreamError],
+    upstream_error_type: UpstreamErrorFactory,
     bad_response_error_code: str = EC.BAD_RESPONSE.value,
 ) -> UpstreamError:
     message = str(exc)
@@ -262,7 +315,7 @@ async def _postprocess_raw_generated_image(
     except Exception as exc:  # noqa: BLE001
         raise hooks.image_decode_upstream_error(exc) from exc
 
-    return hooks.postprocessed_generated_image_type(
+    return image_artifacts._PostprocessedGeneratedImage(
         raw_image=raw_image,
         sha256=sha,
         orig_format=variants.orig_format,

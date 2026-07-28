@@ -8,9 +8,9 @@ generation._decide_moderation_retry_upgrade() 在多 provider 部署下叠加上
 from __future__ import annotations
 
 from app.retry import RetryDecision
-from app.tasks.generation_parts.default_runtime import (
-    _MODERATION_RETRY_CAP,
-    _decide_moderation_retry_upgrade,
+from app.tasks.generation_parts.retry_state import (
+    MODERATION_RETRY_CAP,
+    decide_moderation_retry_upgrade,
 )
 
 
@@ -29,7 +29,7 @@ def _upgrade(**overrides):
         already_avoided_count=0,
     )
     base.update(overrides)
-    return _decide_moderation_retry_upgrade(**base)
+    return decide_moderation_retry_upgrade(**base)
 
 
 def test_upgrade_when_room_remains() -> None:
@@ -67,7 +67,7 @@ def test_no_upgrade_when_cap_reached() -> None:
     # avoided=cap-1 时本次失败后正好达 cap，不再升级。
     assert (
         _upgrade(
-            already_avoided_count=_MODERATION_RETRY_CAP - 1,
+            already_avoided_count=MODERATION_RETRY_CAP - 1,
             enabled_provider_count=10,
         )
         is None
@@ -85,8 +85,8 @@ def test_upgrade_keeps_soft_avoid_before_last_provider() -> None:
 
 
 def test_upgrade_until_cap_with_many_providers() -> None:
-    # 10 个 provider 时上限受 _MODERATION_RETRY_CAP 控制——不会试完所有 10 个。
-    last_upgrade = _MODERATION_RETRY_CAP - 2
+    # 10 个 provider 时上限受 MODERATION_RETRY_CAP 控制——不会试完所有 10 个。
+    last_upgrade = MODERATION_RETRY_CAP - 2
     assert (
         _upgrade(already_avoided_count=last_upgrade, enabled_provider_count=10)
         is not None

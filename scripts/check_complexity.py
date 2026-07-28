@@ -33,7 +33,7 @@ DEFAULT_LINE_PATHS = (
 )
 MAX_COMPLEXITY = 15
 MAX_FILE_LINES = 1500
-MAX_SHELL_FILE_LINES = 599
+MAX_SHELL_FILE_LINES = 400
 MAX_FUNCTION_LINES = 200
 MAX_FUNCTION_PARAMETERS = 12
 MAX_NESTING_DEPTH = 6
@@ -53,6 +53,29 @@ class ComplexityBudget:
 @dataclass(frozen=True)
 class MetricBudget:
     value: int
+
+
+class ComplexityScanError(RuntimeError):
+    def __init__(self, failures: dict[str, str]) -> None:
+        ordered = dict(sorted(failures.items()))
+        self.failures = ordered
+        self.unscanned_files = tuple(ordered)
+        details = "\n".join(f"- {path}: {reason}" for path, reason in ordered.items())
+        super().__init__(f"unscanned files:\n{details}")
+
+
+def _display_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _scan_failure(path: Path, error: BaseException) -> ComplexityScanError:
+    return ComplexityScanError(
+        {_display_path(path): f"{type(error).__name__}: {error}"}
+    )
 
 
 class _FunctionIdentityVisitor(ast.NodeVisitor):
@@ -91,9 +114,12 @@ class _FunctionIdentityVisitor(ast.NodeVisitor):
 
 def function_identities(path: Path) -> dict[tuple[int, str], str]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return {}
+        tree = ast.parse(
+            path.read_text(encoding="utf-8"),
+            filename=str(path),
+        )
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        raise _scan_failure(path, exc) from exc
     visitor = _FunctionIdentityVisitor()
     visitor.visit(tree)
     return visitor.by_location
@@ -207,24 +233,37 @@ def collect_python_metrics(
         "function_parameters": {},
         "nesting_depth": {},
     }
+    failures: dict[str, str] = {}
     for raw_path in paths:
         path = ROOT / raw_path
-        candidates = [path] if path.is_file() else path.rglob("*.py")
+        try:
+            candidates = [path] if path.is_file() else list(path.rglob("*.py"))
+        except OSError as exc:
+            failures.update(_scan_failure(path, exc).failures)
+            continue
         for candidate in candidates:
-            if not candidate.is_file() or candidate.suffix != ".py":
+            try:
+                is_file = candidate.is_file()
+            except OSError as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
+                continue
+            if not is_file or candidate.suffix != ".py":
                 continue
             try:
                 tree = ast.parse(
                     candidate.read_text(encoding="utf-8"),
                     filename=str(candidate),
                 )
-            except (OSError, SyntaxError):
+            except (OSError, SyntaxError, UnicodeError) as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
                 continue
-            relative = candidate.relative_to(ROOT).as_posix()
+            relative = _display_path(candidate)
             visitor = _FunctionMetricVisitor(relative)
             visitor.visit(tree)
             for dimension, findings in visitor.metrics.items():
                 metrics[dimension].update(findings)
+    if failures:
+        raise ComplexityScanError(failures)
     return {
         dimension: dict(sorted(findings.items()))
         for dimension, findings in metrics.items()
@@ -233,19 +272,36 @@ def collect_python_metrics(
 
 def collect_oversized_files(paths: tuple[str, ...]) -> dict[str, int]:
     oversized: dict[str, int] = {}
+    failures: dict[str, str] = {}
     for raw_path in paths:
         path = ROOT / raw_path
-        candidates = [path] if path.is_file() else path.rglob("*")
+        try:
+            candidates = [path] if path.is_file() else list(path.rglob("*"))
+        except OSError as exc:
+            failures.update(_scan_failure(path, exc).failures)
+            continue
         for candidate in candidates:
-            if not candidate.is_file() or candidate.suffix not in SOURCE_SUFFIXES:
+            try:
+                is_file = candidate.is_file()
+            except OSError as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
                 continue
-            line_count = len(candidate.read_text(encoding="utf-8").splitlines())
+            if not is_file or candidate.suffix not in SOURCE_SUFFIXES:
+                continue
+            try:
+                source = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
+                continue
+            line_count = len(source.splitlines())
             threshold = (
                 MAX_SHELL_FILE_LINES if candidate.suffix == ".sh" else MAX_FILE_LINES
             )
             if line_count > threshold:
-                relative = candidate.relative_to(ROOT).as_posix()
+                relative = _display_path(candidate)
                 oversized[relative] = line_count
+    if failures:
+        raise ComplexityScanError(failures)
     return dict(sorted(oversized.items()))
 
 
@@ -261,13 +317,18 @@ def collect_violations(paths: tuple[str, ...]) -> dict[str, ComplexityBudget]:
         "--output-format",
         "json",
     ]
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise ComplexityScanError(
+            {raw_path: f"{type(exc).__name__}: {exc}" for raw_path in sorted(paths)}
+        ) from exc
     if result.returncode not in {0, 1}:
         print(result.stdout, end="", file=sys.stderr)
         print(result.stderr, end="", file=sys.stderr)
@@ -276,25 +337,40 @@ def collect_violations(paths: tuple[str, ...]) -> dict[str, ComplexityBudget]:
     findings = json.loads(result.stdout or "[]")
     violations: dict[str, ComplexityBudget] = {}
     identity_cache: dict[Path, dict[tuple[int, str], str]] = {}
+    failures: dict[str, str] = {}
     for finding in findings:
         match = MESSAGE_RE.fullmatch(str(finding.get("message") or ""))
         if match is None:
+            filename = Path(str(finding.get("filename") or "<unknown>"))
+            if not filename.is_absolute():
+                filename = ROOT / filename
+            failures[_display_path(filename)] = (
+                f"ruff {finding.get('code') or 'scan error'}: "
+                f"{finding.get('message') or 'unknown scanner error'}"
+            )
             continue
         absolute_filename = Path(str(finding["filename"])).resolve()
-        filename = absolute_filename.relative_to(ROOT)
+        filename = _display_path(absolute_filename)
         location = finding.get("location")
         row = int(location.get("row") or 0) if isinstance(location, dict) else 0
         name = match.group("name")
-        identities = identity_cache.setdefault(
-            absolute_filename,
-            function_identities(absolute_filename),
-        )
+        if absolute_filename not in identity_cache:
+            try:
+                identity_cache[absolute_filename] = function_identities(
+                    absolute_filename
+                )
+            except ComplexityScanError as exc:
+                failures.update(exc.failures)
+                continue
+        identities = identity_cache[absolute_filename]
         identity = identities.get((row, name), name)
-        key = f"{filename.as_posix()}::{identity}"
+        key = f"{filename}::{identity}"
         violations[key] = ComplexityBudget(
             max_complexity=int(match.group("complexity")),
             count=1,
         )
+    if failures:
+        raise ComplexityScanError(failures)
     return dict(sorted(violations.items()))
 
 
@@ -375,10 +451,22 @@ def compare_budgets(
                 f"complexity grew: {key} "
                 f"{allowed.max_complexity} -> {budget.max_complexity}"
             )
+        elif budget.max_complexity < allowed.max_complexity:
+            errors.append(
+                f"complexity baseline is stale: {key} "
+                f"{allowed.max_complexity} -> {budget.max_complexity}"
+            )
         if budget.count > allowed.count:
             errors.append(
                 f"violation count grew: {key} {allowed.count} -> {budget.count}"
             )
+        elif budget.count < allowed.count:
+            errors.append(
+                f"violation-count baseline is stale: {key} "
+                f"{allowed.count} -> {budget.count}"
+            )
+    for key in sorted(baseline.keys() - current.keys()):
+        errors.append(f"complexity baseline is stale: {key} is no longer a violation")
     return errors
 
 
@@ -398,6 +486,14 @@ def compare_file_budgets(
             errors.append(
                 f"oversized source file grew: {path} {allowed} -> {line_count}"
             )
+        elif line_count < allowed:
+            errors.append(
+                f"oversized-file baseline is stale: {path} {allowed} -> {line_count}"
+            )
+    for path in sorted(baseline.keys() - current.keys()):
+        errors.append(
+            f"oversized-file baseline is stale: {path} is no longer oversized"
+        )
     return errors
 
 
@@ -418,6 +514,17 @@ def compare_metric_budgets(
                 errors.append(
                     f"{dimension} grew: {key} {allowed.value} -> {budget.value}"
                 )
+            elif budget.value < allowed.value:
+                errors.append(
+                    f"{dimension} baseline is stale: {key} "
+                    f"{allowed.value} -> {budget.value}"
+                )
+    for dimension, allowed_findings in baseline.items():
+        findings = current.get(dimension, {})
+        for key in sorted(allowed_findings.keys() - findings.keys()):
+            errors.append(
+                f"{dimension} baseline is stale: {key} is no longer a violation"
+            )
     return errors
 
 
@@ -472,9 +579,32 @@ def main() -> int:
     args = parser.parse_args()
 
     scan_paths = tuple(args.paths)
-    current = collect_violations(scan_paths)
-    oversized_files = collect_oversized_files(DEFAULT_LINE_PATHS)
-    metrics = collect_python_metrics(scan_paths)
+    failures: dict[str, str] = {}
+    try:
+        current = collect_violations(scan_paths)
+    except ComplexityScanError as exc:
+        failures.update(exc.failures)
+        current = {}
+    try:
+        oversized_files = collect_oversized_files(DEFAULT_LINE_PATHS)
+    except ComplexityScanError as exc:
+        failures.update(exc.failures)
+        oversized_files = {}
+    try:
+        metrics = collect_python_metrics(scan_paths)
+    except ComplexityScanError as exc:
+        failures.update(exc.failures)
+        metrics = {
+            "function_lines": {},
+            "function_parameters": {},
+            "nesting_depth": {},
+        }
+    if failures:
+        print("Complexity scan failed closed; unscanned files:", file=sys.stderr)
+        for path, reason in sorted(failures.items()):
+            print(f"- {path}: {reason}", file=sys.stderr)
+        return 1
+
     if args.update_baseline:
         write_baseline(args.baseline, current, oversized_files, metrics)
         metric_count = sum(len(findings) for findings in metrics.values())
@@ -501,17 +631,12 @@ def main() -> int:
         )
         return 1
 
-    improved = len(set(baseline) - set(current))
     metric_count = sum(len(findings) for findings in metrics.values())
-    metric_removed = sum(
-        len(set(metric_baseline.get(dimension, {})) - set(findings))
-        for dimension, findings in metrics.items()
-    )
     print(
         "Complexity budget passed: "
-        f"{len(current)} grandfathered violations, {improved} removed; "
+        f"{len(current)} grandfathered violations; "
         f"{len(oversized_files)} grandfathered oversized files; "
-        f"{metric_count} multi-dimensional findings, {metric_removed} removed."
+        f"{metric_count} multi-dimensional findings."
     )
     return 0
 

@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +16,12 @@ from typing import Any
 import pytest
 
 from app.provider_runtime.errors import UpstreamCancelled, UpstreamError
+from app.upstream_parts.image_execution import ImageExecutionRequest
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 async def _first_image_result(image_iter: Any) -> tuple[str, str | None]:
@@ -26,17 +30,47 @@ async def _first_image_result(image_iter: Any) -> tuple[str, str | None]:
     raise AssertionError("image iterator yielded no result")
 
 
+def _request(**overrides: Any) -> ImageExecutionRequest:
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "hi",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "high",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "upstream_runtime": TEST_UPSTREAM_RUNTIME,
+    }
+    values.update(overrides)
+    return ImageExecutionRequest(**values)
+
+
 @pytest.mark.asyncio
 async def test_dual_race_image2_wins_cancels_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cancelled = asyncio.Event()
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
         return [("img-from-image2", "https://x/image2.png")]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         try:
             await asyncio.sleep(5.0)
             return ("img-from-responses", None)
@@ -45,28 +79,16 @@ async def test_dual_race_image2_wins_cancels_responses(
             raise
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
-    image_iter = upstream_services().race.dual_race_image_action(
-        action="generate",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
-        provider_override=None,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+        _request()
     )
     result = await _first_image_result(image_iter)
     await image_iter.aclose()
@@ -78,37 +100,32 @@ async def test_dual_race_image2_wins_cancels_responses(
 async def test_dual_race_simultaneous_success_yields_second_result_as_bonus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         return [("winner-img", None)]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         return ("bonus-img", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     results = [
         item
-        async for item in upstream_services().race.dual_race_image_action(
-            action="generate",
-            prompt="hi",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
-            provider_override=None,
+        async for item in TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+            _request()
         )
     ]
 
@@ -119,37 +136,36 @@ async def test_dual_race_simultaneous_success_yields_second_result_as_bonus(
 async def test_dual_race_responses_wins_when_image2_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         raise UpstreamError("image2 server_error", error_code="server_error")
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         await asyncio.sleep(0.01)
         return ("img-from-responses", "https://x/responses.png")
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_edit_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_edit_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     result = await _first_image_result(
-        upstream_services().race.dual_race_image_action(
-            action="edit",
-            prompt="hi",
-            size="2160x3840",
-            images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
-            provider_override=None,
+        TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+            _request(
+                action="edit",
+                size="2160x3840",
+                images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
+            )
         )
     )
     assert result == ("img-from-responses", "https://x/responses.png")
@@ -161,7 +177,9 @@ async def test_dual_race_image2_result_unknown_cancels_responses(
 ) -> None:
     responses_cancelled = asyncio.Event()
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
         raise UpstreamError(
             "image2 result unknown",
@@ -169,7 +187,12 @@ async def test_dual_race_image2_result_unknown_cancels_responses(
             error_code="direct_image_result_unknown",
         )
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         try:
             await asyncio.sleep(5.0)
             return ("img-from-responses", None)
@@ -178,30 +201,18 @@ async def test_dual_race_image2_result_unknown_cancels_responses(
             raise
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     with pytest.raises(UpstreamError) as exc_info:
         await _first_image_result(
-            upstream_services().race.dual_race_image_action(
-                action="generate",
-                prompt="hi",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
-                provider_override=None,
+            TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+                _request()
             )
         )
 
@@ -213,39 +224,37 @@ async def test_dual_race_image2_result_unknown_cancels_responses(
 async def test_dual_race_both_lanes_fail_merges_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         raise UpstreamError(
             "direct edit boom", error_code="all_direct_image_providers_failed"
         )
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         raise UpstreamError("responses boom", error_code="all_providers_failed")
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_edit_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_edit_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     with pytest.raises(UpstreamError) as exc_info:
         await _first_image_result(
-            upstream_services().race.dual_race_image_action(
-                action="edit",
-                prompt="hi",
-                size="1024x1024",
-                images=[b"\x89PNG"],
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
-                provider_override=None,
+            TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+                _request(
+                    action="edit",
+                    images=[b"\x89PNG"],
+                )
             )
         )
     msg = str(exc_info.value)
@@ -270,7 +279,7 @@ def test_truncate_lane_summary_keeps_core_fields_and_drops_payload_html() -> Non
         },
     )
 
-    summary = upstream_services().retry.truncate_lane_summary("responses", exc)
+    summary = TEST_UPSTREAM_SERVICES.retry.truncate_lane_summary("responses", exc)
 
     assert summary["lane"] == "responses"
     assert summary["type"] == "UpstreamError"
@@ -294,7 +303,9 @@ async def test_dual_race_caller_cancel_propagates(
     image2_cancelled = asyncio.Event()
     responses_cancelled = asyncio.Event()
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         try:
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
@@ -302,35 +313,28 @@ async def test_dual_race_caller_cancel_propagates(
             raise
         return [("never", None)]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         # 第一路就抛 UpstreamCancelled（模拟调用方主动取消）
         raise UpstreamCancelled("caller cancelled")
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     with pytest.raises(UpstreamCancelled):
         await _first_image_result(
-            upstream_services().race.dual_race_image_action(
-                action="generate",
-                prompt="hi",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
-                provider_override=None,
+            TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+                _request()
             )
         )
     # image2 lane 应该已经被 cancel
@@ -345,41 +349,35 @@ async def test_dual_race_provider_override_skips_race(
     """provider_override 给定时不进 race，直接走 responses 单路（原有语义）。"""
     image2_called = False
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         nonlocal image2_called
         image2_called = True
         return [("never", None)]
 
-    async def fake_responses(**kw: Any) -> tuple[str, str | None]:
-        # 收到 provider_override 透传
-        assert kw.get("provider_override") is not None
+    async def fake_responses(
+        request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
+        assert request.provider_override is not None
         return ("img-from-responses", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
 
     sentinel = object()
     result = await _first_image_result(
-        upstream_services().race.dual_race_image_action(
-            action="generate",
-            prompt="hi",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
-            provider_override=sentinel,
+        TEST_UPSTREAM_SERVICES.race.dual_race_image_action(
+            _request(provider_override=sentinel)
         )
     )
     assert result == ("img-from-responses", None)
@@ -413,12 +411,12 @@ async def test_resolve_route_dual_race_wins_over_image_jobs_provider(
     async def fake_get_pool() -> _FakePool:
         return _FakePool(has_image_jobs=True)
 
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     from app import provider_pool as pp
 
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
-    route = await upstream_services().core.resolve_image_primary_route()
+    route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
     assert route == "dual_race"
 
 
@@ -434,12 +432,12 @@ async def test_resolve_route_image_jobs_auto_when_provider_opted_in(
     async def fake_get_pool() -> _FakePool:
         return _FakePool(has_image_jobs=True)
 
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     from app import provider_pool as pp
 
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
-    route = await upstream_services().core.resolve_image_primary_route()
+    route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
     assert route == "responses"
 
 
@@ -455,12 +453,12 @@ async def test_resolve_route_responses_default_no_provider_opt_in(
     async def fake_get_pool() -> _FakePool:
         return _FakePool(has_image_jobs=False)
 
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     from app import provider_pool as pp
 
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
-    route = await upstream_services().core.resolve_image_primary_route()
+    route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
     assert route == "responses"
 
 
@@ -478,12 +476,12 @@ async def test_resolve_route_dual_race_falls_through_to_image2_responses_when_no
     async def fake_get_pool() -> _FakePool:
         return _FakePool(has_image_jobs=False)
 
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     from app import provider_pool as pp
 
     monkeypatch.setattr(pp, "get_pool", fake_get_pool)
 
-    route = await upstream_services().core.resolve_image_primary_route()
+    route = await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
     assert route == "dual_race"
 
 
@@ -502,45 +500,39 @@ async def test_dispatch_dual_race_uses_image_jobs_when_selected_provider_support
     """channel=auto + selected provider supports jobs → dual_race uses image-job race."""
     image2_called = False
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         nonlocal image2_called
         image2_called = True
         return [("never", None)]
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         # 每条 lane 给一个明显的 fingerprint 以便断言
         await asyncio.sleep(0.01 if endpoint_override == "generations" else 0.05)
         return (f"img-from-{endpoint_override}", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
-    image_iter = upstream_services().dispatch.run_image_once_for_provider(
-        action="generate",
-        provider=SimpleNamespace(
-            name="jobs",
-            image_jobs_enabled=True,
-            image_jobs_base_url="https://image-job.test.internal",
+    image_iter = TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+        _request(
+            provider_override=SimpleNamespace(
+                name="jobs",
+                image_jobs_enabled=True,
+                image_jobs_base_url="https://image-job.test.internal",
+            ),
         ),
         channel="auto",
         engine="dual_race",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
     )
     result = await _first_image_result(image_iter)
     await image_iter.aclose()
@@ -556,47 +548,50 @@ async def test_dispatch_auto_dual_race_streams_when_provider_has_no_jobs(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
         return [("img-from-image2", None)]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         await asyncio.sleep(0.05)
         return ("img-from-responses", None)
 
-    async def fake_image_job(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        _request: ImageExecutionRequest,
+        **_kw: Any,
+    ) -> tuple[str, str | None]:
         nonlocal image_job_called
         image_job_called = True
         return ("never", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
-    image_iter = upstream_services().dispatch.run_image_once_for_provider(
-        action="generate",
-        provider=SimpleNamespace(name="stream", image_jobs_enabled=False),
+    image_iter = TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+        _request(
+            provider_override=SimpleNamespace(
+                name="stream",
+                image_jobs_enabled=False,
+            ),
+        ),
         channel="auto",
         engine="dual_race",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
     )
     result = await _first_image_result(image_iter)
     await image_iter.aclose()
@@ -610,47 +605,50 @@ async def test_dispatch_auto_dual_race_treats_string_false_jobs_as_disabled(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
         return [("img-from-image2", None)]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         await asyncio.sleep(0.05)
         return ("img-from-responses", None)
 
-    async def fake_image_job(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        _request: ImageExecutionRequest,
+        **_kw: Any,
+    ) -> tuple[str, str | None]:
         nonlocal image_job_called
         image_job_called = True
         return ("never", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
-    image_iter = upstream_services().dispatch.run_image_once_for_provider(
-        action="generate",
-        provider=SimpleNamespace(name="stream", image_jobs_enabled="false"),
+    image_iter = TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+        _request(
+            provider_override=SimpleNamespace(
+                name="stream",
+                image_jobs_enabled="false",
+            ),
+        ),
         channel="auto",
         engine="dual_race",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
     )
     result = await _first_image_result(image_iter)
     await image_iter.aclose()
@@ -662,22 +660,15 @@ async def test_dispatch_auto_dual_race_treats_string_false_jobs_as_disabled(
 async def test_dispatch_image_jobs_only_rejects_provider_without_jobs() -> None:
     with pytest.raises(UpstreamError) as exc_info:
         await _first_image_result(
-            upstream_services().dispatch.run_image_once_for_provider(
-                action="generate",
-                provider=SimpleNamespace(name="plain", image_jobs_enabled=False),
+            TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+                _request(
+                    provider_override=SimpleNamespace(
+                        name="plain",
+                        image_jobs_enabled=False,
+                    ),
+                ),
                 channel="image_jobs_only",
                 engine="responses",
-                prompt="hi",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
             )
         )
     assert exc_info.value.status_code == 503
@@ -708,14 +699,22 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_wrapped_failur
     async def fake_engine() -> str:
         return "responses"
 
-    async def fake_candidates(_provider_override: Any | None) -> list[Any]:
+    async def fake_candidates(
+        _provider_override: Any | None,
+        *,
+        engine: str,
+        runtime: Any | None = None,
+    ) -> list[Any]:
+        _ = engine, runtime
         return providers
 
     async def fake_image_job(
-        *, provider_override: Any, **_kw: Any
+        request: ImageExecutionRequest,
+        **_kw: Any,
     ) -> tuple[str, str | None]:
-        calls.append(provider_override.name)
-        if provider_override.name == "acc1":
+        provider = request.provider_override
+        calls.append(provider.name)
+        if provider.name == "acc1":
             raise UpstreamError(
                 "all 1 image job providers failed",
                 status_code=200,
@@ -723,31 +722,19 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_wrapped_failur
             )
         return ("img-from-acc2", None)
 
-    monkeypatch.setattr(upstream_services().core, "resolve_image_channel", fake_channel)
-    monkeypatch.setattr(upstream_services().core, "resolve_image_engine", fake_engine)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_image_channel", fake_channel)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_image_engine", fake_engine)
     monkeypatch.setattr(
-        upstream_services().dispatch, "image_dispatch_candidates", fake_candidates
+        TEST_UPSTREAM_SERVICES.dispatch, "image_dispatch_candidates", fake_candidates
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
     progress_events: list[dict[str, Any]] = []
     result = await _first_image_result(
-        upstream_services().dispatch.dispatch_image(
-            action="generate",
-            prompt="hi",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=progress_events.append,
-            provider_override=None,
+        TEST_UPSTREAM_SERVICES.dispatch.dispatch_image(
+            _request(progress_callback=progress_events.append)
         )
     )
 
@@ -787,14 +774,22 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_safety_error(
     async def fake_engine() -> str:
         return "responses"
 
-    async def fake_candidates(_provider_override: Any | None) -> list[Any]:
+    async def fake_candidates(
+        _provider_override: Any | None,
+        *,
+        engine: str,
+        runtime: Any | None = None,
+    ) -> list[Any]:
+        _ = engine, runtime
         return providers
 
     async def fake_image_job(
-        *, provider_override: Any, **_kw: Any
+        request: ImageExecutionRequest,
+        **_kw: Any,
     ) -> tuple[str, str | None]:
-        calls.append(provider_override.name)
-        if provider_override.name == "acc1":
+        provider = request.provider_override
+        calls.append(provider.name)
+        if provider.name == "acc1":
             raise UpstreamError(
                 "blocked by this upstream",
                 status_code=200,
@@ -802,30 +797,18 @@ async def test_dispatch_image_jobs_provider_failover_continues_on_safety_error(
             )
         return ("img-from-acc2", None)
 
-    monkeypatch.setattr(upstream_services().core, "resolve_image_channel", fake_channel)
-    monkeypatch.setattr(upstream_services().core, "resolve_image_engine", fake_engine)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_image_channel", fake_channel)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_image_engine", fake_engine)
     monkeypatch.setattr(
-        upstream_services().dispatch, "image_dispatch_candidates", fake_candidates
+        TEST_UPSTREAM_SERVICES.dispatch, "image_dispatch_candidates", fake_candidates
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
     result = await _first_image_result(
-        upstream_services().dispatch.dispatch_image(
-            action="generate",
-            prompt="hi",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
-            provider_override=None,
+        TEST_UPSTREAM_SERVICES.dispatch.dispatch_image(
+            _request()
         )
     )
 
@@ -839,47 +822,50 @@ async def test_dispatch_stream_only_dual_race_ignores_jobs_enabled(
 ) -> None:
     image_job_called = False
 
-    async def fake_image2(**_kw: Any) -> list[tuple[str, str | None]]:
+    async def fake_image2(
+        _request: ImageExecutionRequest,
+    ) -> list[tuple[str, str | None]]:
         await asyncio.sleep(0.01)
         return [("img-from-image2", None)]
 
-    async def fake_responses(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_responses(
+        _request: ImageExecutionRequest,
+        *,
+        use_httpx: bool,
+    ) -> tuple[str, str | None]:
+        _ = use_httpx
         await asyncio.sleep(0.05)
         return ("img-from-responses", None)
 
-    async def fake_image_job(**_kw: Any) -> tuple[str, str | None]:
+    async def fake_image_job(
+        _request: ImageExecutionRequest,
+        **_kw: Any,
+    ) -> tuple[str, str | None]:
         nonlocal image_job_called
         image_job_called = True
         return ("never", None)
 
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_with_failover", fake_image2
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_with_failover", fake_image2
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "responses_image_stream_with_failover",
         fake_responses,
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
-    image_iter = upstream_services().dispatch.run_image_once_for_provider(
-        action="generate",
-        provider=SimpleNamespace(name="jobs", image_jobs_enabled=True),
+    image_iter = TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+        _request(
+            provider_override=SimpleNamespace(
+                name="jobs",
+                image_jobs_enabled=True,
+            ),
+        ),
         channel="stream_only",
         engine="dual_race",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
     )
     result = await _first_image_result(image_iter)
     await image_iter.aclose()
@@ -894,7 +880,9 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
     """winner yield 后 loser 在 grace 内成功 → 二次 yield bonus 图。"""
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             # GHA runner CPU 抢占下 0.01 vs 0.05 的差距会被调度抖动颠倒,
@@ -906,27 +894,16 @@ async def test_image_jobs_dual_race_winner_then_bonus_yield(
         return ("bonus-img", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
     monkeypatch.setattr(
-        upstream_services().core,
+        TEST_UPSTREAM_SERVICES.core,
         "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S",
         5.0,
     )
 
-    image_iter = upstream_services().race.dual_race_image_jobs_action(
-        action="generate",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+        _request()
     )
     results = []
     async for item in image_iter:
@@ -939,29 +916,20 @@ async def test_image_jobs_dual_race_simultaneous_success_keeps_bonus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         return (f"{endpoint_override}-img", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
     results = [
         item
-        async for item in upstream_services().race.dual_race_image_jobs_action(
-            action="generate",
-            prompt="hi",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="high",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
+        async for item in TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+            _request()
         )
     ]
 
@@ -975,7 +943,9 @@ async def test_image_jobs_dual_race_loser_fails_silently(
     """winner 成功 / loser 在 grace 内失败 → 只 yield 一次（吞 loser 异常）。"""
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             await asyncio.sleep(0.01)
@@ -984,27 +954,16 @@ async def test_image_jobs_dual_race_loser_fails_silently(
         raise UpstreamError("loser boom", error_code="server_error")
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
     monkeypatch.setattr(
-        upstream_services().core,
+        TEST_UPSTREAM_SERVICES.core,
         "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S",
         5.0,
     )
 
-    image_iter = upstream_services().race.dual_race_image_jobs_action(
-        action="generate",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+        _request()
     )
     results = []
     async for item in image_iter:
@@ -1020,7 +979,9 @@ async def test_image_jobs_dual_race_loser_grace_timeout_cancels(
     loser_cancelled = asyncio.Event()
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         if endpoint_override == "generations":
             await asyncio.sleep(0.01)
@@ -1033,26 +994,15 @@ async def test_image_jobs_dual_race_loser_grace_timeout_cancels(
         return ("never", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
     # 把 grace 收紧到 50ms 触发超时
     monkeypatch.setattr(
-        upstream_services().core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 0.05
+        TEST_UPSTREAM_SERVICES.core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 0.05
     )
 
-    image_iter = upstream_services().race.dual_race_image_jobs_action(
-        action="generate",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+        _request()
     )
     results = []
     async for item in image_iter:
@@ -1068,7 +1018,9 @@ async def test_image_jobs_dual_race_both_lanes_fail_merged(
     """两路都失败 → 抛 fallback_lanes_failed，message 含两条 lane 标识。"""
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         raise UpstreamError(
             f"{endpoint_override} boom",
@@ -1076,24 +1028,13 @@ async def test_image_jobs_dual_race_both_lanes_fail_merged(
         )
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
     with pytest.raises(UpstreamError) as exc_info:
         await _first_image_result(
-            upstream_services().race.dual_race_image_jobs_action(
-                action="generate",
-                prompt="hi",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
+            TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+                _request()
             )
         )
     msg = str(exc_info.value)
@@ -1115,7 +1056,9 @@ async def test_image_jobs_dual_race_4k_still_races_both_endpoints(
     calls: list[str] = []
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         calls.append(endpoint_override)
         if endpoint_override == "generations":
@@ -1125,25 +1068,14 @@ async def test_image_jobs_dual_race_4k_still_races_both_endpoints(
         return ("img-4k-responses-bonus", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
     monkeypatch.setattr(
-        upstream_services().core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S", 5.0
+        TEST_UPSTREAM_SERVICES.core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S", 5.0
     )
 
-    image_iter = upstream_services().race.dual_race_image_jobs_action(
-        action="generate",
-        prompt="hi",
-        size="3840x2160",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=None,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+        _request(size="3840x2160")
     )
     results = [item async for item in image_iter]
     # 4K 同样 race：generations winner + responses bonus
@@ -1162,7 +1094,9 @@ async def test_image_jobs_dual_race_caller_cancel_propagates(
     other_cancelled = asyncio.Event()
 
     async def fake_image_job(
-        *, endpoint_override: str, **_kw: Any
+        _request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
         if endpoint_override == "responses":
             raise UpstreamCancelled("caller cancelled")
@@ -1174,24 +1108,13 @@ async def test_image_jobs_dual_race_caller_cancel_propagates(
         return ("never", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
 
     with pytest.raises(UpstreamCancelled):
         await _first_image_result(
-            upstream_services().race.dual_race_image_jobs_action(
-                action="generate",
-                prompt="hi",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
+            TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+                _request()
             )
         )
     assert other_cancelled.is_set()
@@ -1205,8 +1128,11 @@ async def test_image_jobs_dual_race_progress_only_from_generations_lane(
     events: list[dict[str, Any]] = []
 
     async def fake_image_job(
-        *, endpoint_override: str, progress_callback: Any, **_kw: Any
+        request: ImageExecutionRequest,
+        *,
+        endpoint_override: str,
     ) -> tuple[str, str | None]:
+        progress_callback = request.progress_callback
         # 模拟 _image_job_with_failover success 推 provider_used + final_image + completed
         if progress_callback is not None:
             await progress_callback(
@@ -1226,28 +1152,17 @@ async def test_image_jobs_dual_race_progress_only_from_generations_lane(
         return (f"img-{endpoint_override}", None)
 
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_with_failover", fake_image_job
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_with_failover", fake_image_job
     )
     monkeypatch.setattr(
-        upstream_services().core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 5.0
+        TEST_UPSTREAM_SERVICES.core, "DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S", 5.0
     )
 
     async def collect(event: dict[str, Any]) -> None:
         events.append(event)
 
-    image_iter = upstream_services().race.dual_race_image_jobs_action(
-        action="generate",
-        prompt="hi",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="high",
-        output_format=None,
-        output_compression=None,
-        background=None,
-        moderation=None,
-        model=None,
-        progress_callback=collect,
+    image_iter = TEST_UPSTREAM_SERVICES.race.dual_race_image_jobs_action(
+        _request(progress_callback=collect)
     )
     async for _ in image_iter:
         pass

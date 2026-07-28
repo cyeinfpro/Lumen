@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import hashlib
 import json
 from typing import Any
 
 import pytest
+
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 class _FakeRedis:
@@ -117,13 +121,13 @@ async def test_reference_cache_miss_uploads_and_stores(
         return True
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
     )
     monkeypatch.setattr(
-        upstream_services().references, "reference_url_is_live", fake_live
+        TEST_UPSTREAM_SERVICES.references, "reference_url_is_live", fake_live
     )
     monkeypatch.setattr(
-        upstream_services().references,
+        TEST_UPSTREAM_SERVICES.references,
         "push_reference_to_image_job",
         fake_push_reference,
     )
@@ -132,7 +136,7 @@ async def test_reference_cache_miss_uploads_and_stores(
     user_id = "user-1"
     digest = hashlib.sha256(ref).hexdigest()
 
-    result = await upstream_services().references.get_or_upload_reference(
+    result = await TEST_UPSTREAM_SERVICES.references.get_or_upload_reference(
         ref,
         "image/webp",
         base_url="https://sidecar.example",
@@ -140,7 +144,7 @@ async def test_reference_cache_miss_uploads_and_stores(
         user_id=user_id,
     )
 
-    cache_key, lru_key = upstream_services().references.reference_cache_keys(user_id)
+    cache_key, lru_key = TEST_UPSTREAM_SERVICES.references.reference_cache_keys(user_id)
     assert result == "https://refs.example/uploaded.webp"
     assert upload_calls == [(ref, "image/webp", "https://sidecar.example", "sk-test")]
     assert await redis.zcard(lru_key) == 1
@@ -176,13 +180,13 @@ async def test_reference_cache_hit_skips_upload_when_head_ok(
         return True
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
     )
     monkeypatch.setattr(
-        upstream_services().references, "reference_url_is_live", fake_live
+        TEST_UPSTREAM_SERVICES.references, "reference_url_is_live", fake_live
     )
     monkeypatch.setattr(
-        upstream_services().references,
+        TEST_UPSTREAM_SERVICES.references,
         "push_reference_to_image_job",
         fake_push_reference,
     )
@@ -191,7 +195,7 @@ async def test_reference_cache_hit_skips_upload_when_head_ok(
     user_id = "user-2"
     digest = hashlib.sha256(ref).hexdigest()
     cached_url = "https://refs.example/cached.webp"
-    await upstream_services().references.reference_cache_store(
+    await TEST_UPSTREAM_SERVICES.references.reference_cache_store(
         redis,
         user_id=user_id,
         digest=digest,
@@ -199,7 +203,7 @@ async def test_reference_cache_hit_skips_upload_when_head_ok(
         size=len(ref),
     )
 
-    result = await upstream_services().references.get_or_upload_reference(
+    result = await TEST_UPSTREAM_SERVICES.references.get_or_upload_reference(
         ref,
         "image/webp",
         base_url="https://sidecar.example",
@@ -207,7 +211,7 @@ async def test_reference_cache_hit_skips_upload_when_head_ok(
         user_id=user_id,
     )
 
-    cache_key, _lru_key = upstream_services().references.reference_cache_keys(user_id)
+    cache_key, _lru_key = TEST_UPSTREAM_SERVICES.references.reference_cache_keys(user_id)
     assert result == cached_url
     assert upload_calls == []
     assert (
@@ -240,13 +244,13 @@ async def test_reference_cache_head_failure_invalidates_and_reuploads(
         return False
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
     )
     monkeypatch.setattr(
-        upstream_services().references, "reference_url_is_live", fake_live
+        TEST_UPSTREAM_SERVICES.references, "reference_url_is_live", fake_live
     )
     monkeypatch.setattr(
-        upstream_services().references,
+        TEST_UPSTREAM_SERVICES.references,
         "push_reference_to_image_job",
         fake_push_reference,
     )
@@ -255,7 +259,7 @@ async def test_reference_cache_head_failure_invalidates_and_reuploads(
     user_id = "user-3"
     digest = hashlib.sha256(ref).hexdigest()
     stale_url = "https://refs.example/stale.webp"
-    await upstream_services().references.reference_cache_store(
+    await TEST_UPSTREAM_SERVICES.references.reference_cache_store(
         redis,
         user_id=user_id,
         digest=digest,
@@ -263,7 +267,7 @@ async def test_reference_cache_head_failure_invalidates_and_reuploads(
         size=len(ref),
     )
 
-    result = await upstream_services().references.get_or_upload_reference(
+    result = await TEST_UPSTREAM_SERVICES.references.get_or_upload_reference(
         ref,
         "image/webp",
         base_url="https://sidecar.example",
@@ -271,7 +275,7 @@ async def test_reference_cache_head_failure_invalidates_and_reuploads(
         user_id=user_id,
     )
 
-    cache_key, _lru_key = upstream_services().references.reference_cache_keys(user_id)
+    cache_key, _lru_key = TEST_UPSTREAM_SERVICES.references.reference_cache_keys(user_id)
     assert result == "https://refs.example/reuploaded.webp"
     assert upload_calls == [ref]
     item = json.loads(await redis.hget(cache_key, digest) or "{}")
@@ -292,14 +296,14 @@ async def test_reference_cache_lru_trims_to_ten_entries(
         current += 1.0
         return current
 
-    monkeypatch.setattr(upstream_services().infrastructure.time, "time", fake_time)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure.time, "time", fake_time)
 
     digests: list[str] = []
     for idx in range(11):
         ref = f"reference-{idx}".encode("utf-8")
         digest = hashlib.sha256(ref).hexdigest()
         digests.append(digest)
-        await upstream_services().references.reference_cache_store(
+        await TEST_UPSTREAM_SERVICES.references.reference_cache_store(
             redis,
             user_id=user_id,
             digest=digest,
@@ -307,7 +311,7 @@ async def test_reference_cache_lru_trims_to_ten_entries(
             size=len(ref),
         )
 
-    cache_key, lru_key = upstream_services().references.reference_cache_keys(user_id)
+    cache_key, lru_key = TEST_UPSTREAM_SERVICES.references.reference_cache_keys(user_id)
     assert await redis.zcard(lru_key) == 10
     assert len(redis.hashes[cache_key]) == 10
     assert digests[0] not in redis.hashes[cache_key]

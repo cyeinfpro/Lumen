@@ -18,7 +18,11 @@ from typing import Any
 import pytest
 
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
-from app.provider_runtime.upstream_services import upstream_services
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 class _QuotaMetricsRedis:
@@ -538,7 +542,7 @@ def test_is_image_rate_limit_error_classification(
 
     msg = exc_kwargs.pop("message_in", "boom")
     exc = UpstreamError(msg, **exc_kwargs)
-    is_rl, retry_after = upstream_services().providers.is_image_rate_limit_error(exc)
+    is_rl, retry_after = TEST_UPSTREAM_SERVICES.providers.is_image_rate_limit_error(exc)
     assert is_rl is expected_is_rl
     if expected_retry_after is not None:
         assert retry_after == expected_retry_after

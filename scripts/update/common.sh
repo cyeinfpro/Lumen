@@ -10,15 +10,21 @@
 _UPDATE_LAST_PHASE=""
 _UPDATE_LAST_PHASE_START_TS=""
 emit_start() {
-    local _phase="$1"
-    lumen_update_failpoint before "${_phase}"
-    lumen_update_journal_phase_start "${_phase}"
+    local _phase="$1" _rc=0
+    lumen_update_failpoint before "${_phase}" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        exit "${_rc}"
+    fi
+    lumen_update_journal_phase_start "${_phase}" || _rc=$?
+    if [ "${_rc}" -ne 0 ]; then
+        exit "${_rc}"
+    fi
     _UPDATE_LAST_PHASE="${_phase}"
     _UPDATE_LAST_PHASE_START_TS="$(date +%s 2>/dev/null || echo 0)"
     lumen_emit_step "phase=${_phase}" "status=start"
 }
 emit_done()  {
-    local _phase="$1" _rc="${2:-0}"
+    local _phase="$1" _rc="${2:-0}" _phase_rc=0
     local _dur_arg=""
     if [ "${_UPDATE_LAST_PHASE}" = "${_phase}" ] \
             && [ -n "${_UPDATE_LAST_PHASE_START_TS}" ] \
@@ -33,9 +39,23 @@ emit_done()  {
         _UPDATE_LAST_PHASE=""
         _UPDATE_LAST_PHASE_START_TS=""
     fi
+    lumen_update_failpoint before_done "${_phase}" || _phase_rc=$?
+    if [ "${_phase_rc}" -ne 0 ]; then
+        exit "${_phase_rc}"
+    fi
+    lumen_update_journal_phase_done "${_phase}" || _phase_rc=$?
+    if [ "${_phase_rc}" -ne 0 ]; then
+        exit "${_phase_rc}"
+    fi
     lumen_emit_step "phase=${_phase}" "status=done" "rc=${_rc}" ${_dur_arg:+"${_dur_arg}"}
-    lumen_update_journal_phase_done "${_phase}"
-    lumen_update_failpoint after "${_phase}"
+    lumen_update_failpoint after_done "${_phase}" || _phase_rc=$?
+    if [ "${_phase_rc}" -ne 0 ]; then
+        exit "${_phase_rc}"
+    fi
+    lumen_update_failpoint after "${_phase}" || _phase_rc=$?
+    if [ "${_phase_rc}" -ne 0 ]; then
+        exit "${_phase_rc}"
+    fi
 }
 emit_fail()  {
     local _phase="$1" _rc="${2:-1}"

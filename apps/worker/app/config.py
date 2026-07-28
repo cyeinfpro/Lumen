@@ -83,6 +83,19 @@ class Settings(BaseSettings):
     )
 
     storage_root: str = "/opt/lumendata/storage"
+    minimum_storage_free_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=0,
+    )
+    image_upload_lease_ttl_seconds: int = Field(
+        default=120,
+        ge=10,
+        le=3600,
+    )
+    image_upload_capacity_degraded_policy: str = Field(
+        default="",
+        pattern=r"^(|fail_closed|scaled_local)$",
+    )
 
     # 并发 / 超时（DESIGN §6.5 / §6.7）
     # P2-10 timeout 分层（用户明确约束）：

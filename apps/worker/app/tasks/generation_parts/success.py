@@ -1,11 +1,61 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import binascii
+import io
+import logging
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from .runtime import GenerationRunState
+from PIL import Image as PILImage
+
+from lumen_core.constants import (
+    EV_GEN_PROGRESS,
+    GenerationAction,
+    GenerationErrorCode as EC,
+    GenerationStage,
+    GenerationStatus,
+    ImageSource,
+    MessageStatus,
+)
+from lumen_core.models import Image, ImageVariant, Message, new_uuid7
+
+from ...provider_runtime.errors import UpstreamError
+from .diagnostics import (
+    build_generation_diagnostics,
+    image_effective_params_snapshot,
+    request_event_provider_from_attempts,
+    sanitize_generation_upstream_request,
+)
+from .errors import LeaseLost, TaskCancelled
+from .event_delivery import stage_generation_success_event
+from .image_artifact_contracts import decode_upstream_image_b64, sha256
+from .lifecycle import raise_if_generation_interrupted
+from .persistence import (
+    BonusGenerationContext,
+    compact_image_payload_meta,
+    ensure_generation_conversation_alive,
+    handle_dual_race_bonus_image,
+    maybe_embed_model_image_metadata_bytes,
+    model_image_metadata_from_request,
+)
+from .queue import redis_text
+from .retry_state import (
+    RUNNING_GENERATION_STATUSES,
+    anext_image_with_guards,
+    await_with_lease_guard,
+    consume_image_iter_close_result,
+    ensure_generation_attempt_current,
+    ensure_generation_updated,
+    generation_attempt_update,
+)
+from .run_state import GenerationRunState
+from .services import RunGenerationDeps
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -39,7 +89,10 @@ class GeneratedArtifact:
     generation_diagnostics: dict[str, Any] | None = None
 
 
-async def finalize_generation_success(state: GenerationRunState, g: Any) -> None:
+async def finalize_generation_success(
+    state: GenerationRunState,
+    g: RunGenerationDeps,
+) -> None:
     await _validate_result_and_publish_finalizing(state, g)
     artifact = await _postprocess_generated_image(state, g)
     created_storage_keys = await _write_artifact_files(state, artifact, g)
@@ -57,15 +110,15 @@ async def finalize_generation_success(state: GenerationRunState, g: Any) -> None
 
 async def _validate_result_and_publish_finalizing(
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     if not state.b64_result:
-        raise g.provider.UpstreamError(
+        raise UpstreamError(
             "upstream returned no image (tool_choice downgrade?)",
-            error_code=g.domain.EC.NO_IMAGE_RETURNED.value,
+            error_code=EC.NO_IMAGE_RETURNED.value,
             status_code=200,
         )
-    await g.lease._raise_if_generation_interrupted(
+    await raise_if_generation_interrupted(
         state.redis,
         state.task_id,
         state.lease_lost,
@@ -74,30 +127,30 @@ async def _validate_result_and_publish_finalizing(
     await _publish_finalizing_stage(
         state,
         g,
-        g.domain.GenerationStage.FINAL_RECEIVED.value,
+        GenerationStage.FINAL_RECEIVED.value,
     )
     await _publish_finalizing_stage(
         state,
         g,
-        g.domain.GenerationStage.PROCESSING.value,
+        GenerationStage.PROCESSING.value,
     )
 
 
 async def _publish_finalizing_stage(
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
     substage: str,
 ) -> None:
-    await g.events.publish_event(
+    await g.events.publish(
         state.redis,
         state.user_id,
         state.channel,
-        g.events.EV_GEN_PROGRESS,
+        EV_GEN_PROGRESS,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
-            "stage": g.domain.GenerationStage.FINALIZING.value,
+            "stage": GenerationStage.FINALIZING.value,
             "substage": substage,
         },
     )
@@ -105,16 +158,16 @@ async def _publish_finalizing_stage(
 
 async def _postprocess_generated_image(
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> GeneratedArtifact:
-    started = g.domain.time.monotonic()
+    started = time.monotonic()
     raw_image = _decode_upstream_result(state.b64_result, g)
     _raise_if_sha_echo(state, raw_image, g)
     transparent_requested = (
         state.image_request_options.get("background") == "transparent"
     )
-    processed = await g.provider._await_with_lease_guard(
-        g.persistence._postprocess_raw_generated_image(
+    processed = await await_with_lease_guard(
+        g.provider.postprocess(
             raw_image,
             prompt=state.prompt,
             transparent_requested=transparent_requested,
@@ -127,13 +180,13 @@ async def _postprocess_generated_image(
     return _build_artifact(state, processed, g)
 
 
-def _decode_upstream_result(b64_result: str | None, g: Any) -> bytes:
+def _decode_upstream_result(b64_result: str | None, g: RunGenerationDeps) -> bytes:
     try:
-        return g.persistence._decode_upstream_image_b64(b64_result or "")
-    except g.provider.binascii.Error as exc:
-        raise g.provider.UpstreamError(
+        return decode_upstream_image_b64(b64_result or "")
+    except binascii.Error as exc:
+        raise UpstreamError(
             f"bad base64 from upstream: {exc}",
-            error_code=g.domain.EC.BAD_RESPONSE.value,
+            error_code=EC.BAD_RESPONSE.value,
             status_code=200,
         ) from exc
 
@@ -141,15 +194,15 @@ def _decode_upstream_result(b64_result: str | None, g: Any) -> bytes:
 def _raise_if_sha_echo(
     state: GenerationRunState,
     raw_image: bytes,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    if state.action != g.domain.GenerationAction.EDIT:
+    if state.action != GenerationAction.EDIT:
         return
-    sha = g.persistence._sha256(raw_image)
+    sha = sha256(raw_image)
     if any(sha == reference_sha for reference_sha, _ in state.references):
-        raise g.provider.UpstreamError(
+        raise UpstreamError(
             "upstream returned original image unchanged (sha echo)",
-            error_code=g.domain.EC.SHA_ECHO.value,
+            error_code=EC.SHA_ECHO.value,
             status_code=200,
         )
 
@@ -157,16 +210,16 @@ def _raise_if_sha_echo(
 def _build_artifact(
     state: GenerationRunState,
     processed: Any,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> GeneratedArtifact:
-    image_id = g.domain.new_uuid7()
+    image_id = new_uuid7()
     orig_ext = {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}[processed.orig_format]
     orig_mime = {
         "PNG": "image/png",
         "WEBP": "image/webp",
         "JPEG": "image/jpeg",
     }[processed.orig_format]
-    model_metadata = g.persistence._model_image_metadata_from_request(
+    model_metadata = model_image_metadata_from_request(
         image_id=image_id,
         mime=orig_mime,
         request=state.gen_upstream_request_snapshot,
@@ -180,7 +233,7 @@ def _build_artifact(
         model_metadata,
         g,
     )
-    effective_params = g.provider._image_effective_params_snapshot(
+    effective_params = image_effective_params_snapshot(
         state.image_request_options,
         size=state.inpaint_size_override or state.resolved.size,
         width=processed.width,
@@ -224,22 +277,22 @@ def _embed_model_metadata(
     sha: str,
     orig_format: str,
     model_metadata: dict[str, Any],
-    g: Any,
+    g: RunGenerationDeps,
 ) -> tuple[bytes, str]:
     if not model_metadata:
         return raw_image, sha
     try:
-        with g.provider.PILImage.open(g.provider.io.BytesIO(raw_image)) as image:
+        with PILImage.open(io.BytesIO(raw_image)) as image:
             image.load()
-            raw_image = g.persistence._maybe_embed_model_image_metadata_bytes(
+            raw_image = maybe_embed_model_image_metadata_bytes(
                 image=image,
                 fmt=orig_format,
                 raw_image=raw_image,
                 metadata=model_metadata,
             )
-        return raw_image, g.persistence._sha256(raw_image)
+        return raw_image, sha256(raw_image)
     except Exception as exc:  # noqa: BLE001
-        g.events.logger.info(
+        logger.info(
             "model_library image metadata embed skipped task=%s err=%s",
             state.task_id,
             exc,
@@ -250,18 +303,18 @@ def _embed_model_metadata(
 async def _write_artifact_files(
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> list[str]:
-    await g.lease._raise_if_generation_interrupted(
+    await raise_if_generation_interrupted(
         state.redis,
         state.task_id,
         state.lease_lost,
         "cancelled before storage write",
     )
-    await _publish_finalizing_stage(state, g, g.domain.GenerationStage.STORING.value)
-    started = g.domain.time.monotonic()
-    created_keys = await g.provider._await_with_lease_guard(
-        g.persistence._write_generation_files(
+    await _publish_finalizing_stage(state, g, GenerationStage.STORING.value)
+    started = time.monotonic()
+    created_keys = await await_with_lease_guard(
+        g.artifacts.write_files(
             [
                 (artifact.key_orig, artifact.raw_image),
                 (artifact.key_display, artifact.display_bytes),
@@ -284,9 +337,9 @@ async def _write_artifact_files(
 def _success_diagnostics(
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> dict[str, Any]:
-    return g.events._build_generation_diagnostics(
+    return build_generation_diagnostics(
         trace_id=state.trace_id,
         requested_params=state.requested_params_for_diag,
         effective_params=artifact.effective_params,
@@ -301,9 +354,9 @@ def _success_diagnostics(
         stage_timings_ms=state.stage_timer.snapshot(),
         route_diagnostics=state.route_diagnostics,
         upstream_duration_ms=state.upstream_duration_ms,
-        duration_ms=int(max(0.0, g.domain.time.monotonic() - state.task_start) * 1000),
+        duration_ms=int(max(0.0, time.monotonic() - state.task_start) * 1000),
         debug_id=state.task_id,
-        expose_provider_diagnostics=g.queue.settings.expose_provider_diagnostics,
+        expose_provider_diagnostics=g.queue.expose_provider_diagnostics,
     )
 
 
@@ -311,23 +364,23 @@ async def _persist_generation_success(
     state: GenerationRunState,
     artifact: GeneratedArtifact,
     created_storage_keys: list[str],
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    async with g.persistence._cleanup_storage_on_error(created_storage_keys):
-        await g.lease._raise_if_generation_interrupted(
+    async with g.artifacts.cleanup_on_error(created_storage_keys):
+        await raise_if_generation_interrupted(
             state.redis,
             state.task_id,
             state.lease_lost,
             "cancelled before generation persistence",
         )
-        async with g.persistence.SessionLocal() as session:
-            await g.persistence._ensure_generation_attempt_current(
+        async with g.store.session() as session:
+            await ensure_generation_attempt_current(
                 session,
                 state.task_id,
                 state.attempt,
             )
             state.conversation_id_for_title = (
-                await g.persistence._ensure_generation_conversation_alive(
+                await ensure_generation_conversation_alive(
                     session,
                     message_id=state.message_id,
                     user_id=state.user_id,
@@ -346,13 +399,13 @@ async def _persist_generation_success(
             )
             await _attach_image_to_message(session, state, artifact, g)
             await _record_success_hooks(session, state, artifact.image_id, g)
-            await g.lease._raise_if_generation_interrupted(
+            await raise_if_generation_interrupted(
                 state.redis,
                 state.task_id,
                 state.lease_lost,
                 "cancelled before billing settlement",
             )
-            await g.billing.worker_billing.settle_generation(
+            await g.billing.settle(
                 session,
                 state.generation,
                 width=artifact.width,
@@ -365,27 +418,27 @@ async def _persist_generation_success(
             # 笔上游成本——纯转嫁要杜绝的。中断只允许发生在 settle 之前。
             success_delivery = _stage_success_event(session, state, artifact, g)
             await session.commit()
-            await g.billing.worker_billing.flush_balance_cache_refreshes(session)
-    await g.events._deliver_generation_event(state.redis, success_delivery)
+            await g.billing.flush_after_commit(session)
+    await g.events.deliver(state.redis, success_delivery)
 
 
 def _add_image_rows(
     session: Any,
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     parent_image_id = (
         state.primary_input_image_id
-        if state.action == g.domain.GenerationAction.EDIT
+        if state.action == GenerationAction.EDIT
         else None
     )
     session.add(
-        g.persistence.Image(
+        Image(
             id=artifact.image_id,
             user_id=state.user_id,
             owner_generation_id=state.task_id,
-            source=g.domain.ImageSource.GENERATED.value,
+            source=ImageSource.GENERATED.value,
             parent_image_id=parent_image_id,
             storage_key=artifact.key_orig,
             mime=artifact.orig_mime,
@@ -404,7 +457,7 @@ def _add_image_rows(
         ("thumb256", artifact.key_thumb, artifact.thumb_size),
     ):
         session.add(
-            g.persistence.ImageVariant(
+            ImageVariant(
                 image_id=artifact.image_id,
                 kind=kind,
                 storage_key=key,
@@ -417,7 +470,7 @@ def _add_image_rows(
 def _success_upstream_request(
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> dict[str, Any]:
     generation = state.generation
     upstream_request = (
@@ -444,16 +497,16 @@ def _success_upstream_request(
     )
     _apply_route_and_provider_fields(upstream_request, state, g)
     _apply_optional_success_fields(upstream_request, state, artifact)
-    return g.provider._sanitize_generation_upstream_request(
+    return sanitize_generation_upstream_request(
         upstream_request,
-        expose_provider_diagnostics=g.queue.settings.expose_provider_diagnostics,
+        expose_provider_diagnostics=g.queue.expose_provider_diagnostics,
     )
 
 
 def _apply_route_and_provider_fields(
     upstream_request: dict[str, Any],
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     if state.route_diagnostics:
         upstream_request["route_diagnostics"] = state.route_diagnostics[:12]
@@ -462,7 +515,10 @@ def _apply_route_and_provider_fields(
     request_provider = (
         state.actual_upstream_provider
         or (state.upstream_provider_label if not state.is_dual_race else None)
-        or g.events._request_event_provider_from_attempts(state.provider_attempt_log)
+        or request_event_provider_from_attempts(
+            state.provider_attempt_log,
+            redis_text=redis_text,
+        )
     )
     if state.actual_upstream_provider:
         upstream_request["provider"] = state.actual_upstream_provider
@@ -505,16 +561,16 @@ async def _mark_generation_succeeded(
     state: GenerationRunState,
     artifact: GeneratedArtifact,
     upstream_request: dict[str, Any],
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     result = await session.execute(
-        g.persistence._generation_attempt_update(
+        generation_attempt_update(
             state.task_id,
             state.attempt,
-            statuses=g.domain._RUNNING_GENERATION_STATUSES,
+            statuses=RUNNING_GENERATION_STATUSES,
         ).values(
-            status=g.domain.GenerationStatus.SUCCEEDED.value,
-            progress_stage=g.domain.GenerationStage.FINALIZING,
+            status=GenerationStatus.SUCCEEDED.value,
+            progress_stage=GenerationStage.FINALIZING,
             finished_at=datetime.now(timezone.utc),
             upstream_pixels=artifact.width * artifact.height,
             upstream_request=upstream_request,
@@ -522,17 +578,17 @@ async def _mark_generation_succeeded(
             error_message=None,
         )
     )
-    g.persistence._ensure_generation_updated(result, state.task_id, state.attempt)
+    ensure_generation_updated(result, state.task_id, state.attempt)
 
 
 async def _attach_image_to_message(
     session: Any,
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    row = await session.get(g.persistence.Message, state.message_id)
-    if row is None or row.status == g.domain.MessageStatus.CANCELED:
+    row = await session.get(Message, state.message_id)
+    if row is None or row.status == MessageStatus.CANCELED:
         return
     content = dict(row.content or {})
     images = list(content.get("images") or [])
@@ -543,34 +599,34 @@ async def _attach_image_to_message(
             "width": artifact.width,
             "height": artifact.height,
             "mime": artifact.orig_mime,
-            "url": g.persistence.storage.public_url(artifact.key_orig),
+            "url": g.artifacts.public_url(artifact.key_orig),
             "display_url": (f"/api/images/{artifact.image_id}/variants/display2048"),
             "preview_url": (f"/api/images/{artifact.image_id}/variants/preview1024"),
             "thumb_url": f"/api/images/{artifact.image_id}/variants/thumb256",
             "filename": artifact.model_metadata.get("suggested_filename"),
-            **g.events._compact_image_payload_meta(artifact.image_metadata),
+            **compact_image_payload_meta(artifact.image_metadata),
         }
     )
     content["images"] = images
     row.content = content
-    row.status = g.domain.MessageStatus.SUCCEEDED
+    row.status = MessageStatus.SUCCEEDED
 
 
 async def _record_success_hooks(
     session: Any,
     state: GenerationRunState,
     image_id: str,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     hooks = (
         (
             "model_library_generate",
-            g.persistence._maybe_record_model_library_generate_image,
+            g.workflows.record_model_library_generate_image,
         ),
-        ("poster_workflow", g.persistence._maybe_record_poster_workflow_image),
+        ("poster_workflow", g.workflows.record_poster_workflow_image),
         (
             "poster_style_library_generate",
-            g.persistence._maybe_record_poster_style_library_generate_image,
+            g.workflows.record_poster_style_library_generate_image,
         ),
     )
     for label, hook in hooks:
@@ -584,7 +640,7 @@ async def _record_success_hooks(
         except (TimeoutError, asyncio.CancelledError):
             raise
         except Exception as exc:  # noqa: BLE001
-            g.events.logger.warning(
+            logger.warning(
                 "%s post-success hook failed task=%s err=%s",
                 label,
                 state.task_id,
@@ -596,9 +652,9 @@ def _stage_success_event(
     session: Any,
     state: GenerationRunState,
     artifact: GeneratedArtifact,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> Any:
-    return g.events._stage_generation_success_event(
+    return stage_generation_success_event(
         session,
         state.user_id,
         state.channel,
@@ -607,9 +663,9 @@ def _stage_success_event(
         image_id=artifact.image_id,
         actual_size=f"{artifact.width}x{artifact.height}",
         mime=artifact.orig_mime,
-        image_url=g.persistence.storage.public_url(artifact.key_orig),
+        image_url=g.artifacts.public_url(artifact.key_orig),
         filename=artifact.model_metadata.get("suggested_filename"),
-        image_payload_meta=g.events._compact_image_payload_meta(
+        image_payload_meta=compact_image_payload_meta(
             artifact.image_metadata
         ),
         diagnostics=artifact.generation_diagnostics,
@@ -619,41 +675,41 @@ def _stage_success_event(
 async def _finalize_batch_extra_images(
     state: GenerationRunState,
     actual_image_count: int,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     for batch_index, (extra_b64, extra_revised) in state.batch_extra_pairs:
         try:
-            await g.persistence._handle_dual_race_bonus_image(
-                **_bonus_common_kwargs(state),
-                b64_result=extra_b64,
-                revised_prompt=extra_revised,
-                upstream_provider=state.actual_upstream_provider,
-                upstream_actual_route=state.actual_upstream_route,
-                upstream_actual_source=state.actual_upstream_source,
-                upstream_actual_endpoint=state.actual_upstream_endpoint,
-                billing_meta={
-                    "billing_free": False,
-                    "billing_label": "billable",
-                    "billing_policy": "batch_extra_settled_separately",
-                },
-                idempotency_suffix=f":n{batch_index}",
-                extra_upstream_fields={
-                    "batch_parent_generation_id": state.task_id,
-                    "batch_index": batch_index,
-                    "batch_count": actual_image_count,
-                },
-                record_model_library_candidate=False,
-                settle_billing=True,
-                log_label="image2 n result",
+            await handle_dual_race_bonus_image(
+                replace(
+                    _bonus_context(state, extra_b64, extra_revised),
+                    upstream_provider=state.actual_upstream_provider,
+                    upstream_actual_route=state.actual_upstream_route,
+                    upstream_actual_source=state.actual_upstream_source,
+                    upstream_actual_endpoint=state.actual_upstream_endpoint,
+                    billing_meta={
+                        "billing_free": False,
+                        "billing_label": "billable",
+                        "billing_policy": "batch_extra_settled_separately",
+                    },
+                    idempotency_suffix=f":n{batch_index}",
+                    extra_upstream_fields={
+                        "batch_parent_generation_id": state.task_id,
+                        "batch_index": batch_index,
+                        "batch_count": actual_image_count,
+                    },
+                    record_model_library_candidate=False,
+                    settle_billing=True,
+                    log_label="image2 n result",
+                )
             )
-        except (g.lease._LeaseLost, g.lease._TaskCancelled, asyncio.CancelledError):
-            g.events.logger.info(
+        except (LeaseLost, TaskCancelled, asyncio.CancelledError):
+            logger.info(
                 "image2 n result finalize aborted by cancel/lease task=%s index=%s",
                 state.task_id,
                 batch_index,
             )
         except Exception as exc:  # noqa: BLE001
-            g.events.logger.warning(
+            logger.warning(
                 "image2 n result finalize unexpected error task=%s index=%s err=%r",
                 state.task_id,
                 batch_index,
@@ -674,7 +730,7 @@ async def _enqueue_auto_title(state: GenerationRunState) -> None:
 
 async def _finalize_dual_race_bonus(
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     if state.image_iter is None:
         return
@@ -684,23 +740,23 @@ async def _finalize_dual_race_bonus(
     bonus_b64, bonus_revised = bonus_pair
     provider_event = state.progress_publisher.pop_provider_used_event()
     try:
-        await g.persistence._handle_dual_race_bonus_image(
-            **_bonus_common_kwargs(state),
-            b64_result=bonus_b64,
-            revised_prompt=bonus_revised,
-            upstream_provider=provider_event.get("provider"),
-            upstream_actual_route=provider_event.get("route"),
-            upstream_actual_source=provider_event.get("source"),
-            upstream_actual_endpoint=provider_event.get("endpoint"),
-            settle_billing=True,
+        await handle_dual_race_bonus_image(
+            replace(
+                _bonus_context(state, bonus_b64, bonus_revised),
+                upstream_provider=provider_event.get("provider"),
+                upstream_actual_route=provider_event.get("route"),
+                upstream_actual_source=provider_event.get("source"),
+                upstream_actual_endpoint=provider_event.get("endpoint"),
+                settle_billing=True,
+            )
         )
-    except (g.lease._LeaseLost, g.lease._TaskCancelled, asyncio.CancelledError):
-        g.events.logger.info(
+    except (LeaseLost, TaskCancelled, asyncio.CancelledError):
+        logger.info(
             "dual_race bonus finalize aborted by cancel/lease task=%s",
             state.task_id,
         )
     except Exception as exc:  # noqa: BLE001
-        g.events.logger.warning(
+        logger.warning(
             "dual_race bonus finalize unexpected error task=%s err=%r",
             state.task_id,
             exc,
@@ -709,28 +765,28 @@ async def _finalize_dual_race_bonus(
 
 async def _next_bonus_pair(
     state: GenerationRunState,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> tuple[str, str | None] | None:
     try:
-        return await g.provider._anext_image_with_guards(
+        return await anext_image_with_guards(
             state.image_iter,
             state.lease_lost,
             redis=state.redis,
             task_id=state.task_id,
         )
-    except (g.lease._LeaseLost, g.lease._TaskCancelled, asyncio.CancelledError):
-        g.events.logger.info(
+    except (LeaseLost, TaskCancelled, asyncio.CancelledError):
+        logger.info(
             "dual_race bonus iter aborted by cancel/lease task=%s",
             state.task_id,
         )
-        await g.provider._consume_image_iter_close_result(
+        await consume_image_iter_close_result(
             state.image_iter,
             task_id=state.task_id,
         )
         state.image_iter = None
         return None
     except Exception as exc:  # noqa: BLE001
-        g.events.logger.warning(
+        logger.warning(
             "dual_race bonus iter failed task=%s err=%r",
             state.task_id,
             exc,
@@ -738,25 +794,42 @@ async def _next_bonus_pair(
         return None
 
 
-def _bonus_common_kwargs(state: GenerationRunState) -> dict[str, Any]:
-    return {
-        "redis": state.redis,
-        "user_id": state.user_id,
-        "channel": state.channel,
-        "parent_task_id": state.task_id,
-        "parent_idempotency_key": state.gen_idempotency_key,
-        "parent_upstream_request": (
+def _bonus_context(
+    state: GenerationRunState,
+    b64_result: str,
+    revised_prompt: str | None,
+) -> BonusGenerationContext:
+    return BonusGenerationContext(
+        services=state.services,
+        redis=state.redis,
+        user_id=state.user_id,
+        channel=state.channel,
+        parent_task_id=state.task_id,
+        parent_idempotency_key=state.gen_idempotency_key,
+        parent_upstream_request=(
             state.parent_upstream_request_for_bonus
             or state.gen_upstream_request_snapshot
         ),
-        "message_id": state.message_id,
-        "action": str(state.action),
-        "model": state.gen_model,
-        "prompt": state.prompt,
-        "size_requested": state.size_requested,
-        "aspect_ratio": state.aspect_ratio,
-        "input_image_ids": state.input_image_ids,
-        "primary_input_image_id": state.primary_input_image_id,
-        "references": state.references,
-        "image_request_options": state.image_request_options,
-    }
+        message_id=state.message_id,
+        action=str(state.action),
+        model=state.gen_model,
+        prompt=state.prompt,
+        size_requested=state.size_requested,
+        aspect_ratio=state.aspect_ratio,
+        input_image_ids=state.input_image_ids,
+        primary_input_image_id=state.primary_input_image_id,
+        references=state.references,
+        image_request_options=state.image_request_options,
+        b64_result=b64_result,
+        revised_prompt=revised_prompt,
+        upstream_provider=None,
+        upstream_actual_route=None,
+        upstream_actual_source=None,
+        upstream_actual_endpoint=None,
+        billing_meta=None,
+        idempotency_suffix=":b",
+        extra_upstream_fields=None,
+        record_model_library_candidate=True,
+        settle_billing=False,
+        log_label="dual_race bonus",
+    )

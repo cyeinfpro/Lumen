@@ -5,13 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import HTTPException, Request, Response
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from lumen_core.models import Image, ImageVariant
 
 from ..config import settings
-from ..images.adapters.filesystem_store import FileSystemArtifactStore
-from ..images.application.create_variant import CreateVariantService, VariantError
 from ..images.application.deliver import DeliverySpec, deliver_artifact
 from ..services import storage_files
 from ..images.application._file_delivery import (
@@ -21,9 +16,6 @@ from ..images.application._file_delivery import (
     open_regular_file_no_symlink,
     storage_streaming_response,
 )
-
-
-_MAX_IMAGE_PIXELS = 64_000_000
 
 
 def _http(code: str, message: str, status_code: int) -> HTTPException:
@@ -39,19 +31,6 @@ def image_storage_path(storage_key: str) -> Path:
         storage_key,
         error_factory=_http,
     )
-
-
-async def ensure_display_variant(
-    db: AsyncSession,
-    image: Image,
-) -> ImageVariant:
-    try:
-        return await CreateVariantService(
-            artifacts=FileSystemArtifactStore(settings.storage_root),
-            max_pixels=_MAX_IMAGE_PIXELS,
-        ).ensure_display_variant(db, image)
-    except VariantError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
 
 
 def image_storage_streaming_response(

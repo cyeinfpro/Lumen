@@ -17,19 +17,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from arq import Retry
-from lumen_core.models import AuditLog, Image, Video
+from lumen_core.models import AuditLog
 from lumen_core.video_providers import (
     VideoProviderDefinition,
     parse_video_provider_config_json,
     video_provider_binding_fingerprint,
 )
-from lumen_core.volcano_asset_media import (
-    VOLCANO_ASSET_IMAGE_KIND,
-    VOLCANO_ASSET_VIDEO_KIND,
-    VolcanoAssetMediaError,
-    ensure_volcano_asset_image_variant,
-    ensure_volcano_asset_video_variant,
-)
+from lumen_core.volcano_asset_media import VolcanoAssetMediaError
 from lumen_core.volcano_assets import (
     VOLCANO_ASSET_MAX_ASSETS,  # noqa: F401 - compatibility runtime export
     VOLCANO_ASSET_MAX_GROUPS,  # noqa: F401 - compatibility runtime export
@@ -50,13 +44,10 @@ from lumen_core.volcano_assets import (
     reserve_volcano_asset_quota,  # noqa: F401 - compatibility runtime export
     volcano_asset_operation_key,
     volcano_asset_quota_key,  # noqa: F401 - compatibility runtime export
-    volcano_asset_reference_url,
 )
-from sqlalchemy import select
-
 from .. import runtime_settings
-from ..config import settings
 from ..db import SessionLocal
+from ..storage_writes import StorageWriteCoordinator
 from . import (
     volcano_asset_actions as _action_parts,
 )
@@ -67,6 +58,12 @@ from . import (
     volcano_asset_dispatch as _dispatch_parts,
 )
 from .volcano_asset_runtime import VolcanoAssetRuntimeContext
+from .volcano_asset_source_media import (
+    ensure_reference_token as _ensure_reference_token,  # noqa: F401
+)
+from .volcano_asset_source_media import (
+    normalized_source_url as _normalized_source_url,
+)
 from .volcano_assets_parts.receipts import (
     AIGC_GROUP_TYPE as _AIGC_GROUP_TYPE,
     LEGACY_SUCCESS_RECEIPT_EVENT as _LEGACY_SUCCESS_RECEIPT_EVENT,  # noqa: F401
@@ -91,7 +88,6 @@ _action_parts.install_runtime(_RUNTIME_CONTEXT)
 _create_parts.install_runtime(_RUNTIME_CONTEXT)
 _dispatch_parts.install_runtime(_RUNTIME_CONTEXT)
 
-_REFERENCE_TOKEN_TTL = timedelta(hours=24)
 _JOB_NAME = "process_volcano_asset_operation"
 _OPERATION_LOCK_TTL_SECONDS = 10 * 60
 _OPERATION_LOCK_RENEW_INTERVAL_SECONDS = 60
@@ -506,158 +502,6 @@ async def _provider_for_operation(
     return selected
 
 
-def _ensure_reference_token(
-    metadata: dict[str, Any],
-    *,
-    token_key: str,
-    expires_key: str,
-) -> str:
-    existing_token = str(metadata.get(token_key) or "")
-    raw_expires_at = str(metadata.get(expires_key) or "")
-    try:
-        expires_at = datetime.fromisoformat(raw_expires_at)
-    except ValueError:
-        expires_at = None
-    if expires_at is not None:
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if existing_token and expires_at > datetime.now(timezone.utc):
-            return existing_token
-    token = secrets.token_urlsafe(32)
-    metadata[token_key] = token
-    metadata[expires_key] = (
-        datetime.now(timezone.utc) + _REFERENCE_TOKEN_TTL
-    ).isoformat()
-    return token
-
-
-async def _normalized_source_url(
-    operation: dict[str, Any],
-) -> tuple[str, str]:
-    source_id = str(operation.get("local_source_id") or "")
-    user_id = str(operation.get("user_id") or "")
-    asset_type = str(operation.get("asset_type") or "")
-    public_base_url = str(operation.get("public_base_url") or "")
-    async with SessionLocal() as session:
-        if asset_type == "Image":
-            image = (
-                await session.execute(
-                    select(Image).where(
-                        Image.id == source_id,
-                        Image.user_id == user_id,
-                        Image.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            if image is None:
-                raise _OperationFailure(
-                    "video_asset_image_not_found",
-                    "asset image was not found",
-                    retryable=False,
-                )
-            await ensure_volcano_asset_image_variant(
-                session,
-                image,
-                storage_root=settings.storage_root,
-            )
-            image = (
-                await session.execute(
-                    select(Image)
-                    .where(
-                        Image.id == source_id,
-                        Image.user_id == user_id,
-                        Image.deleted_at.is_(None),
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if image is None:
-                raise _OperationFailure(
-                    "video_asset_image_not_found",
-                    "asset image was not found",
-                    retryable=False,
-                )
-            metadata = dict(image.metadata_jsonb or {})
-            token = _ensure_reference_token(
-                metadata,
-                token_key="video_reference_access_token",
-                expires_key="video_reference_access_token_expires_at",
-            )
-            image.metadata_jsonb = metadata
-            await session.commit()
-            return (
-                volcano_asset_reference_url(
-                    public_base_url,
-                    resource_id=image.id,
-                    asset_type="Image",
-                    token=token,
-                ),
-                VOLCANO_ASSET_IMAGE_KIND,
-            )
-
-        if asset_type == "Video":
-            video = (
-                await session.execute(
-                    select(Video).where(
-                        Video.id == source_id,
-                        Video.user_id == user_id,
-                        Video.deleted_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-            if video is None:
-                raise _OperationFailure(
-                    "video_asset_video_not_found",
-                    "asset video was not found",
-                    retryable=False,
-                )
-            await ensure_volcano_asset_video_variant(
-                session,
-                video,
-                storage_root=settings.storage_root,
-            )
-            video = (
-                await session.execute(
-                    select(Video)
-                    .where(
-                        Video.id == source_id,
-                        Video.user_id == user_id,
-                        Video.deleted_at.is_(None),
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if video is None:
-                raise _OperationFailure(
-                    "video_asset_video_not_found",
-                    "asset video was not found",
-                    retryable=False,
-                )
-            metadata = dict(video.metadata_jsonb or {})
-            token = _ensure_reference_token(
-                metadata,
-                token_key="reference_access_token",
-                expires_key="reference_access_token_expires_at",
-            )
-            video.metadata_jsonb = metadata
-            await session.commit()
-            return (
-                volcano_asset_reference_url(
-                    public_base_url,
-                    resource_id=video.id,
-                    asset_type="Video",
-                    token=token,
-                ),
-                VOLCANO_ASSET_VIDEO_KIND,
-            )
-
-    raise _OperationFailure(
-        "video_asset_type_invalid",
-        "asset type must be Image or Video",
-        retryable=False,
-    )
-
-
 def _require_group_scope(
     raw: Any,
     provider: VideoProviderDefinition,
@@ -768,10 +612,17 @@ def _source_url_is_fresh(operation: dict[str, Any]) -> bool:
 async def _source_url_for_submit(
     persistence: _OperationPersistence,
     operation: dict[str, Any],
+    storage_writes: StorageWriteCoordinator | None = None,
 ) -> str:
     if _source_url_is_fresh(operation):
         return str(operation["source_url"])
-    public_url, variant_kind = await _normalized_source_url(operation)
+    if storage_writes is None:
+        public_url, variant_kind = await _normalized_source_url(operation)
+    else:
+        public_url, variant_kind = await _normalized_source_url(
+            operation,
+            storage_writes=storage_writes,
+        )
     await persistence.update(
         operation,
         source_url=public_url,

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.routing import APIRoute
 from sqlalchemy import (
     Column,
     DateTime,
@@ -27,8 +30,13 @@ from app.images.adapters.sqlalchemy_repository import (
     _reconcile_candidate_condition,
     _reconcile_priority,
 )
-from app.images.application import reconcile_runtime
-from app.routes import images
+from app.images.application import http_routes, reconcile_runtime
+from app.images.composition import (
+    ImageRouteComposition,
+    compose_image_routes,
+    create_image_route_lifespan,
+    get_upload_command_service,
+)
 
 
 def test_reconcile_candidates_do_not_starve_behind_old_ready_rows() -> None:
@@ -98,18 +106,22 @@ def test_reconcile_candidates_do_not_starve_behind_old_ready_rows() -> None:
             due_before=now,
             stale_before=now - timedelta(minutes=5),
         )
-        result = connection.execute(
-            select(image_rows.c.id)
-            .where(condition)
-            .order_by(
-                _reconcile_priority(image_rows.c.artifact_status),
-                case((image_rows.c.reconcile_after.is_(None), 1), else_=0),
-                image_rows.c.reconcile_after.asc(),
-                image_rows.c.updated_at.asc(),
-                image_rows.c.id.asc(),
+        result = (
+            connection.execute(
+                select(image_rows.c.id)
+                .where(condition)
+                .order_by(
+                    _reconcile_priority(image_rows.c.artifact_status),
+                    case((image_rows.c.reconcile_after.is_(None), 1), else_=0),
+                    image_rows.c.reconcile_after.asc(),
+                    image_rows.c.updated_at.asc(),
+                    image_rows.c.id.asc(),
+                )
+                .limit(100)
             )
-            .limit(100)
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert result == [
         "publishing-due",
@@ -133,8 +145,9 @@ class _LeaseRedis:
         self.value = value
         return True
 
-    async def eval(self, script: str, _keys: int, _key: str, *args: str) -> int:
-        token = args[0]
+    async def eval(self, script: str, keys: int, *args: str) -> int:
+        assert keys == 1
+        _lock_key, token, *_rest = args
         if "DEL" in script:
             if self.value == token:
                 self.value = None
@@ -155,8 +168,9 @@ async def test_only_one_reconciler_runs_across_competing_workers(
     calls = 0
 
     class _Reconciler:
-        async def run_once(self) -> Any:
+        async def run_once(self, *, lease_guard: Any) -> Any:
             nonlocal calls
+            assert lease_guard is not None
             calls += 1
             entered.set()
             await release.wait()
@@ -176,6 +190,11 @@ async def test_only_one_reconciler_runs_across_competing_workers(
         "build_image_artifact_reconciler",
         lambda: reconciler,
     )
+    monkeypatch.setattr(
+        reconcile_runtime,
+        "_next_reconcile_fence",
+        lambda: asyncio.sleep(0, result=1),
+    )
 
     first = asyncio.create_task(reconcile_runtime.run_image_artifact_reconciler_once())
     await entered.wait()
@@ -188,26 +207,79 @@ async def test_only_one_reconciler_runs_across_competing_workers(
     assert calls == 1
 
 
-def test_upload_service_is_shared_for_the_api_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.asyncio
+async def test_upload_service_is_owned_by_the_router_lifespan() -> None:
     marker = object()
     calls = 0
 
-    def build() -> object:
+    def build() -> ImageRouteComposition:
         nonlocal calls
         calls += 1
-        return marker
+        return ImageRouteComposition(
+            upload_command_service=marker,  # type: ignore[arg-type]
+        )
 
-    images._shared_upload_command_service.cache_clear()
-    monkeypatch.setattr(images, "_build_upload_command_service", build)
-    try:
-        assert images._upload_command_service() is marker
-        assert images._upload_command_service() is marker
-        assert images._endpoints._upload_command_service() is marker
+    app = FastAPI()
+    app.include_router(APIRouter(lifespan=create_image_route_lifespan(build)))
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/images/upload",
+            "headers": [],
+            "app": app,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="not active"):
+        get_upload_command_service(request)
+
+    async with app.router.lifespan_context(app):
+        assert get_upload_command_service(request) is marker
+        assert get_upload_command_service(request) is marker
         assert calls == 1
+
+    with pytest.raises(RuntimeError, match="not active"):
+        get_upload_command_service(request)
+
+
+@pytest.mark.asyncio
+async def test_upload_and_variant_services_share_process_resources(
+    tmp_path: Path,
+) -> None:
+    composition = compose_image_routes(
+        storage_root=str(tmp_path),
+        redis=object(),
+        session_factory=object(),  # type: ignore[arg-type]
+    )
+    variant_service = composition.variant_service
+    assert variant_service is not None
+    try:
+        assert composition.upload_command_service.artifacts is variant_service.artifacts
+        assert composition.upload_command_service.capacity is variant_service.capacity
+        assert (
+            composition.upload_command_service.storage_capacity
+            is variant_service.storage_capacity
+        )
+        assert (
+            composition.upload_command_service.processing_executor
+            is variant_service.processing_executor
+        )
     finally:
-        images._shared_upload_command_service.cache_clear()
+        await composition.upload_command_service.aclose()
+
+
+def test_registered_upload_route_uses_composed_service_dependency() -> None:
+    route = next(
+        route
+        for route in http_routes.router.routes
+        if isinstance(route, APIRoute) and route.path == "/upload"
+    )
+
+    assert route.endpoint is http_routes.upload_image
+    assert get_upload_command_service in {
+        dependency.call for dependency in route.dependant.dependencies
+    }
 
 
 def test_lumen_api_workers_controls_capacity_scaling(
@@ -237,14 +309,20 @@ def test_capacity_scaling_uses_compose_worker_default_when_env_is_absent(
 
 
 def test_implicit_capacity_default_accepts_one_large_upload() -> None:
-    assert _effective_global_peak_bytes(
-        512 * 1024 * 1024,
-        explicitly_configured=False,
-    ) == 1536 * 1024 * 1024
-    assert _effective_global_peak_bytes(
-        512 * 1024 * 1024,
-        explicitly_configured=True,
-    ) == 512 * 1024 * 1024
+    assert (
+        _effective_global_peak_bytes(
+            512 * 1024 * 1024,
+            explicitly_configured=False,
+        )
+        == 1536 * 1024 * 1024
+    )
+    assert (
+        _effective_global_peak_bytes(
+            512 * 1024 * 1024,
+            explicitly_configured=True,
+        )
+        == 512 * 1024 * 1024
+    )
 
 
 def test_process_guard_keeps_full_limit_while_degraded_fallback_is_scaled(

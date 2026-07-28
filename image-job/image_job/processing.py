@@ -4,27 +4,27 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 import httpx
-from image_artifacts import ImageArtifactFacade
-from image_candidates import ImageCandidate, ImageCandidateFacade
-from image_url_security import (
+
+from .artifacts import ImageArtifactFacade
+from .candidates import ImageCandidate, ImageCandidateFacade
+from .url_security import (
     ImageDownloadResolutionError,
     PublicImageDownloadTarget,
     pinned_async_http_transport,
     resolve_public_image_download_target,
 )
-from request_bodies import (
+from .http_bodies import (
     SseLineDecoder,
     parse_content_length,
     parse_json_bytes,
     read_download_body_bounded,
     read_response_body_bounded,
 )
-from upstream_runtime import UpstreamFacade
-
+from .upstream import UpstreamFacade
 from .config import ImageJobSettings
 from .contracts import (
     ERROR_CLASS_IMAGE_SAVE,
@@ -43,6 +43,7 @@ from .payloads import (
     normalize_image_edit_input_transport,
     upstream_idempotency_key,
 )
+from .ports.jobs import JobHeartbeatPort
 
 
 class ImageProcessing:
@@ -53,12 +54,12 @@ class ImageProcessing:
         settings: ImageJobSettings,
         *,
         http_client: Callable[[], Any | None],
-        touch_running: Callable[[str], Awaitable[None]] | None = None,
+        heartbeat: JobHeartbeatPort,
         logger: logging.Logger | None = None,
     ) -> None:
         self.settings = settings
         self.http_client = http_client
-        self.touch_running = touch_running or self._noop_touch
+        self.heartbeat = heartbeat
         self.log = logger or logging.getLogger("image-job.processing")
         self.candidate_facade = ImageCandidateFacade(
             max_image_bytes=lambda: self.settings.max_image_bytes,
@@ -96,7 +97,7 @@ class ImageProcessing:
             ),
             resolve_public_image_download_target=resolve_public_image_download_target,
             image_download_resolution_error=ImageDownloadResolutionError,
-            touch_running=lambda job_id: self.touch_running(job_id),
+            touch_running=self.heartbeat.touch_running,
             download_image_url_fn=(
                 lambda client, url, **kwargs: self.download_image_url(
                     client,
@@ -224,9 +225,6 @@ class ImageProcessing:
             log=self.log,
         )
 
-    async def _noop_touch(self, _job_id: str) -> None:
-        return None
-
     def new_pinned_download_client(
         self,
         target: PublicImageDownloadTarget,
@@ -244,15 +242,6 @@ class ImageProcessing:
                 "User-Agent": "lumen-image",
             },
         )
-
-    def __getattr__(self, name: str) -> Any:
-        if hasattr(self.candidate_facade, name):
-            return getattr(self.candidate_facade, name)
-        if hasattr(self.artifact_facade, name):
-            return getattr(self.artifact_facade, name)
-        if hasattr(self.upstream_facade, name):
-            return getattr(self.upstream_facade, name)
-        raise AttributeError(name)
 
     async def download_image_url(self, *args: Any, **kwargs: Any) -> Any:
         return await self.candidate_facade.download_image_url(*args, **kwargs)
@@ -328,5 +317,13 @@ class ImageProcessing:
     ) -> tuple[int, list[dict[str, Any]]]:
         return await self.upstream_facade.call_upstream_once(*args, **kwargs)
 
-    async def call_upstream(self, row: Any) -> tuple[int, list[dict[str, Any]]]:
-        return await self.upstream_facade.call_upstream(row)
+    async def call_upstream(
+        self,
+        row: Any,
+        *,
+        authorization: str,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        return await self.upstream_facade.call_upstream(
+            row,
+            authorization=authorization,
+        )

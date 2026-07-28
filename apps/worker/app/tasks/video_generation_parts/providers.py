@@ -248,15 +248,39 @@ def _clean_optional_text(value: Any, *, lowercase: bool = False) -> str | None:
     return cleaned.lower() if lowercase else cleaned
 
 
-def _reference_storage_key(item: dict[str, Any]) -> str | None:
-    return _clean_optional_text(
-        item.get("upstream_reference_storage_key") or item.get("storage_key")
+def _reference_source(
+    item: dict[str, Any],
+    *,
+    clean_url: str | None,
+) -> tuple[str | None, str | None]:
+    upstream_storage_key = _clean_optional_text(
+        item.get("upstream_reference_storage_key")
+    )
+    upstream_variant = _clean_optional_text(item.get("upstream_reference_variant"))
+    lazy_variant = bool(clean_url and upstream_variant and not upstream_storage_key)
+    if upstream_storage_key or lazy_variant:
+        return (
+            upstream_storage_key,
+            _clean_optional_text(item.get("upstream_reference_mime")),
+        )
+    return (
+        _clean_optional_text(item.get("storage_key")),
+        _clean_optional_text(item.get("mime")),
     )
 
 
+def _reference_storage_key(item: dict[str, Any]) -> str | None:
+    return _reference_source(
+        item,
+        clean_url=_clean_optional_text(item.get("url")),
+    )[0]
+
+
 def _reference_mime(item: dict[str, Any]) -> str | None:
-    upstream_mime = _clean_optional_text(item.get("upstream_reference_mime"))
-    return upstream_mime or _clean_optional_text(item.get("mime"))
+    return _reference_source(
+        item,
+        clean_url=_clean_optional_text(item.get("url")),
+    )[1]
 
 
 async def _reference_image_bytes(
@@ -303,13 +327,12 @@ async def _reference_media_from_item(
     if kind not in {"image", "video", "audio"}:
         return None
     clean_url = _clean_optional_text(item.get("url"))
-    storage_key = _reference_storage_key(item)
+    storage_key, mime = _reference_source(item, clean_url=clean_url)
     _validate_reference_location(
         kind=kind,
         clean_url=clean_url,
         storage_key=storage_key,
     )
-    mime = _reference_mime(item)
     data = (
         await _reference_image_bytes(
             clean_url=clean_url,

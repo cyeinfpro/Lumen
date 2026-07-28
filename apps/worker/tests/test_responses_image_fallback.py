@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 import base64
 import io as _io
@@ -16,7 +14,7 @@ from PIL import Image as _PILImage
 
 from app import provider_pool
 from app import upstream
-from app.tasks.generation_parts import default_runtime as generation
+from app.tasks.generation_parts import request_options
 from app.upstream_clients.image_job_auth import (
     image_job_headers,
     image_job_submit_headers,
@@ -26,12 +24,20 @@ from app.upstream_clients.image_job_models import (
     ImageJobStatus,
     UploadedReference,
 )
+from app.upstream_parts.image_execution import (
+    ImageExecutionRequest,
+    ImageRequestContext,
+)
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.constants import (
     DEFAULT_IMAGE_RESPONSES_MODEL,
     DEFAULT_IMAGE_RESPONSES_MODEL_FAST,
     UPSTREAM_MODEL,
 )
 from lumen_core.url_security import PublicHttpDownload
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 PNG_B64 = base64.b64encode(b"fake-png-bytes").decode("ascii")
 
@@ -47,8 +53,47 @@ def _make_tiny_png(
 TINY_PNG = _make_tiny_png()
 
 
+def _image_request(**changes: Any) -> ImageExecutionRequest:
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "test",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "high",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "upstream_runtime": TEST_UPSTREAM_RUNTIME,
+    }
+    values.update(changes)
+    return ImageExecutionRequest(**values)
+
+
+def _responses_body(
+    *,
+    image_urls: list[str] | None = None,
+    retry_attempt: int = 1,
+    **changes: Any,
+) -> dict[str, Any]:
+    request = _image_request(
+        **changes,
+        request_context=ImageRequestContext.create(retry_attempt=retry_attempt),
+    )
+    return TEST_UPSTREAM_SERVICES.image_jobs.build_responses_image_body(
+        request,
+        image_urls=image_urls,
+    )
+
+
 def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
-    medium_4k = generation._image_request_options(  # noqa: SLF001
+    medium_4k = request_options.image_request_options(
         {"render_quality": "medium", "fast": False},
         size="3840x2160",
     )
@@ -56,7 +101,7 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
     assert medium_4k["responses_model"] == DEFAULT_IMAGE_RESPONSES_MODEL
     assert medium_4k["output_compression"] == 100
 
-    fast_4k = generation._image_request_options(  # noqa: SLF001
+    fast_4k = request_options.image_request_options(
         {"render_quality": "high", "fast": True, "output_compression": 95},
         size="3840x2160",
     )
@@ -66,7 +111,7 @@ def test_image_request_options_respect_render_quality_for_4k_and_fast() -> None:
 
 
 def test_image_request_options_treat_string_false_fast_as_disabled() -> None:
-    options = generation._image_request_options(  # noqa: SLF001
+    options = request_options.image_request_options(
         {"render_quality": "high", "fast": "false"},
         size="1024x1024",
     )
@@ -89,7 +134,7 @@ def _patch_provider_pool_to_use_resolved_runtime(
 ) -> None:
     """Keep these upstream tests isolated from DB-backed runtime settings.
 
-    The tests already monkeypatch `upstream_services().core.resolve_runtime`; image generation now
+    The tests already monkeypatch `TEST_UPSTREAM_SERVICES.core.resolve_runtime`; image generation now
     enters through ProviderPool first, so the fake pool delegates back to that same
     patched resolver.
     """
@@ -103,11 +148,11 @@ def _patch_provider_pool_to_use_resolved_runtime(
             self, *, route: str = "text", ignore_cooldown: bool = False
         ) -> list[provider_pool.ResolvedProvider]:
             _ = route, ignore_cooldown
-            base_url, api_key = await upstream_services().core.resolve_runtime()
+            base_url, api_key = await TEST_UPSTREAM_SERVICES.core.resolve_runtime()
             image_jobs_enabled = False
             try:
                 image_jobs_enabled = (
-                    await upstream_services().infrastructure.resolve(
+                    await TEST_UPSTREAM_SERVICES.infrastructure.resolve(
                         "image.primary_route"
                     )
                 ) == "image_jobs"
@@ -178,7 +223,7 @@ def _patch_provider_pool_to_use_resolved_runtime(
         url: str,
         **_kwargs: Any,
     ) -> PublicHttpDownload:
-        client = await upstream_services().lifecycle.get_images_client()
+        client = await TEST_UPSTREAM_SERVICES.lifecycle.get_images_client()
         response = await client.get(url)
         return PublicHttpDownload(
             url=url,
@@ -188,14 +233,14 @@ def _patch_provider_pool_to_use_resolved_runtime(
         )
 
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     monkeypatch.setattr(
-        upstream_services().infrastructure,
+        TEST_UPSTREAM_SERVICES.infrastructure,
         "resolve_public_http_target",
         fake_resolve_public_http_target,
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure,
+        TEST_UPSTREAM_SERVICES.infrastructure,
         "download_public_http_url",
         fake_download_public_http_url,
     )
@@ -510,7 +555,7 @@ class ExplicitImageJobClientFake:
         if before_attempt is not None:
             await before_attempt(1)
         headers = image_job_submit_headers(
-            service_token=upstream_services().image_jobs.image_job_sidecar_token(),
+            service_token=TEST_UPSTREAM_SERVICES.image_jobs.image_job_sidecar_token(),
             upstream_api_key=upstream_api_key,
             trace_id=trace_id,
             payload=payload,
@@ -535,7 +580,7 @@ class ExplicitImageJobClientFake:
         response = await self.legacy.get(
             f"{self.base_url}/v1/image-jobs/{handle.job_id}",
             headers=image_job_headers(
-                service_token=upstream_services().image_jobs.image_job_sidecar_token(),
+                service_token=TEST_UPSTREAM_SERVICES.image_jobs.image_job_sidecar_token(),
                 upstream_api_key=handle.upstream_api_key,
                 trace_id=trace_id,
             ),
@@ -590,12 +635,12 @@ def install_explicit_image_job_fake(
         return TINY_PNG
 
     monkeypatch.setattr(
-        upstream_services().image_jobs,
+        TEST_UPSTREAM_SERVICES.image_jobs,
         "build_image_job_client",
         build_client,
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs,
+        TEST_UPSTREAM_SERVICES.image_jobs,
         "download_image_job_result",
         download_result,
     )
@@ -641,8 +686,8 @@ async def _events_from_stream_response(response: Any, url: str):
     if response.status_code >= 400:
         raw = await response.aread()
         payload = json.loads(raw.decode("utf-8"))
-        raise upstream_services().core.with_error_context(
-            upstream_services().core.parse_error(payload, response.status_code),
+        raise TEST_UPSTREAM_SERVICES.core.with_error_context(
+            TEST_UPSTREAM_SERVICES.core.parse_error(payload, response.status_code),
             path="responses",
             method="POST",
             url=url,
@@ -707,7 +752,7 @@ def patch_responses_stream(
             yield event
 
     monkeypatch.setattr(
-        upstream_services().transport, "iter_sse_curl", fake_iter_sse_curl
+        TEST_UPSTREAM_SERVICES.transport, "iter_sse_curl", fake_iter_sse_curl
     )
 
 
@@ -740,11 +785,11 @@ async def test_iter_sse_curl_handles_large_single_line_image_event(
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
-    monkeypatch.setattr(upstream_services().core, "CURL_BIN", str(fake_curl))
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "CURL_BIN", str(fake_curl))
 
     events = [
         event
-        async for event in upstream_services().transport.iter_sse_curl(
+        async for event in TEST_UPSTREAM_SERVICES.transport.iter_sse_curl(
             url="https://upstream.example/v1/responses",
             json_body={"stream": True},
             headers={"authorization": "Bearer test-key"},
@@ -784,11 +829,11 @@ async def test_iter_sse_curl_does_not_set_curl_total_timeout(
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
-    monkeypatch.setattr(upstream_services().core, "CURL_BIN", str(fake_curl))
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "CURL_BIN", str(fake_curl))
 
     events = [
         event
-        async for event in upstream_services().transport.iter_sse_curl(
+        async for event in TEST_UPSTREAM_SERVICES.transport.iter_sse_curl(
             url="https://upstream.example/v1/responses",
             json_body={"stream": True},
             headers={"authorization": "Bearer test-key"},
@@ -825,12 +870,12 @@ async def test_iter_sse_curl_idle_timeout_raises(
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
-    monkeypatch.setattr(upstream_services().core, "CURL_BIN", str(fake_curl))
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "CURL_BIN", str(fake_curl))
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         _ = [
             event
-            async for event in upstream_services().transport.iter_sse_curl(
+            async for event in TEST_UPSTREAM_SERVICES.transport.iter_sse_curl(
                 url="https://upstream.example/v1/responses",
                 json_body={"stream": True},
                 headers={"authorization": "Bearer test-key"},
@@ -849,7 +894,7 @@ async def test_stage_multipart_unlinks_tmp_files_on_partial_failure(
     tmp_path,
 ) -> None:
     created_paths: list[str] = []
-    real_mkstemp = upstream_services().core.tempfile.mkstemp
+    real_mkstemp = TEST_UPSTREAM_SERVICES.core.tempfile.mkstemp
 
     def fake_mkstemp(*, prefix: str, suffix: str):
         fd, path = real_mkstemp(prefix=prefix, suffix=suffix, dir=tmp_path)
@@ -861,13 +906,13 @@ async def test_stage_multipart_unlinks_tmp_files_on_partial_failure(
             raise OSError("disk full")
         os.write(fd, raw)
 
-    monkeypatch.setattr(upstream_services().core.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core.tempfile, "mkstemp", fake_mkstemp)
     monkeypatch.setattr(
-        upstream_services().transport, "write_bytes_file", fake_write_bytes_file
+        TEST_UPSTREAM_SERVICES.transport, "write_bytes_file", fake_write_bytes_file
     )
 
     with pytest.raises(OSError):
-        await upstream_services().transport.stage_multipart_bytes_to_tmp(
+        await TEST_UPSTREAM_SERVICES.transport.stage_multipart_bytes_to_tmp(
             [
                 ("image[]", ("ok.png", b"ok", "image/png")),
                 ("image[]", ("bad.png", b"boom", "image/png")),
@@ -900,10 +945,10 @@ async def test_curl_post_multipart_kills_child_on_cancellation(
         encoding="utf-8",
     )
     fake_curl.chmod(0o755)
-    monkeypatch.setattr(upstream_services().core, "CURL_BIN", str(fake_curl))
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "CURL_BIN", str(fake_curl))
 
     task = asyncio.create_task(
-        upstream_services().transport.curl_post_multipart(
+        TEST_UPSTREAM_SERVICES.transport.curl_post_multipart(
             url="https://upstream.example/v1/images/edits",
             data={"model": "gpt-image-2", "prompt": "edit"},
             files=[("image[]", ("input.png", TINY_PNG, "image/png"))],
@@ -945,18 +990,20 @@ async def test_generate_image_uses_responses_stream(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="make a 4k landscape",
-            size="3840x2160",
-            n=1,
-            quality="high",
-            progress_callback=progress_events.append,
+            _image_request(
+                prompt="make a 4k landscape",
+                size="3840x2160",
+                n=1,
+                quality="high",
+                progress_callback=progress_events.append,
+            )
         )
     )
 
@@ -1009,7 +1056,7 @@ async def test_generate_image_uses_responses_stream(
 
 
 def test_fast_responses_body_uses_mini_model_without_forcing_image_options() -> None:
-    body = upstream_services().image_jobs.build_responses_image_body(  # noqa: SLF001
+    body = _responses_body(
         action="generate",
         prompt="make a fast 4k landscape",
         size="3840x2160",
@@ -1048,16 +1095,15 @@ def test_retry_attempt_injects_cache_busters() -> None:
     )
 
     # attempt=1 默认值——不打散，body 保持原样
-    body1 = upstream_services().image_jobs.build_responses_image_body(**base_kwargs)  # noqa: SLF001
+    body1 = _responses_body(**base_kwargs)
     assert "prompt_cache_key" not in body1
     assert body1["reasoning"] == {"effort": "medium", "summary": "auto"}
 
-    # attempt=2/3/4 通过 ContextVar 触发打散
-    cv_token = upstream_services().core.push_image_retry_attempt(2)
-    try:
-        body2 = upstream_services().image_jobs.build_responses_image_body(**base_kwargs)  # noqa: SLF001
-    finally:
-        upstream_services().core.pop_image_retry_attempt(cv_token)
+    # attempt=2/3/4 通过显式请求参数触发打散
+    body2 = _responses_body(
+        **base_kwargs,
+        retry_attempt=2,
+    )
     assert body2["prompt_cache_key"].startswith("lumen-retry-")
     # effort rotation: 2 → minimal
     assert body2["reasoning"] == {"effort": "minimal", "summary": "auto"}
@@ -1066,17 +1112,16 @@ def test_retry_attempt_injects_cache_busters() -> None:
     assert "partial_images" not in body2["tools"][0]
 
     # attempt=3 → high
-    cv_token = upstream_services().core.push_image_retry_attempt(3)
-    try:
-        body3 = upstream_services().image_jobs.build_responses_image_body(**base_kwargs)  # noqa: SLF001
-    finally:
-        upstream_services().core.pop_image_retry_attempt(cv_token)
+    body3 = _responses_body(
+        **base_kwargs,
+        retry_attempt=3,
+    )
     assert body3["reasoning"]["effort"] == "high"
     # 不同 attempt 必须给不同 prompt_cache_key（cache miss 才能跳出故障 cache）
     assert body3["prompt_cache_key"] != body2["prompt_cache_key"]
 
-    # 验证 push/pop 后 ContextVar 恢复默认（不漂移）
-    body_after = upstream_services().image_jobs.build_responses_image_body(
+    # 后续默认请求保持 attempt=1，不受前两次显式构建影响。
+    body_after = _responses_body(
         **base_kwargs
     )  # noqa: SLF001
     assert "prompt_cache_key" not in body_after
@@ -1096,14 +1141,13 @@ def test_retry_cache_busters_remove_partial_images_for_small_size() -> None:
         moderation="low",
         model=None,
     )
-    body1 = upstream_services().image_jobs.build_responses_image_body(**base_kwargs)  # noqa: SLF001
+    body1 = _responses_body(**base_kwargs)
     assert body1["tools"][0].get("partial_images") == 3
 
-    cv_token = upstream_services().core.push_image_retry_attempt(2)
-    try:
-        body2 = upstream_services().image_jobs.build_responses_image_body(**base_kwargs)  # noqa: SLF001
-    finally:
-        upstream_services().core.pop_image_retry_attempt(cv_token)
+    body2 = _responses_body(
+        **base_kwargs,
+        retry_attempt=2,
+    )
     # retry 时 partial_images 必须被移除
     assert "partial_images" not in body2["tools"][0]
 
@@ -1127,20 +1171,22 @@ async def test_generate_image_can_use_image2_direct_route(
         return "image2"
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="make a 4k landscape",
-            size="3840x2160",
-            n=1,
-            quality="high",
-            progress_callback=progress_events.append,
+            _image_request(
+                prompt="make a 4k landscape",
+                size="3840x2160",
+                n=1,
+                quality="high",
+                progress_callback=progress_events.append,
+            )
         )
     )
 
@@ -1189,20 +1235,22 @@ async def test_generate_image_direct_image2_yields_all_n_results(
         return "image2"
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
 
     results = [
         item
         async for item in upstream.generate_image(
-            prompt="make three images",
-            size="1024x1024",
-            n=3,
-            quality="high",
+            _image_request(
+                prompt="make three images",
+                size="1024x1024",
+                n=3,
+                quality="high",
+            )
         )
     ]
 
@@ -1232,19 +1280,21 @@ async def test_image_jobs_responses_falls_back_to_generations(
         return None
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
-    monkeypatch.setattr(upstream_services().core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
     install_explicit_image_job_fake(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="make a product image",
-            size="1024x1024",
-            n=1,
-            quality="medium",
-            progress_callback=progress_events.append,
+            _image_request(
+                prompt="make a product image",
+                size="1024x1024",
+                n=1,
+                quality="medium",
+                progress_callback=progress_events.append,
+            )
         )
     )
 
@@ -1280,21 +1330,23 @@ async def test_stream_responses_falls_back_to_direct_image2_on_moderation(
         return None
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     patch_responses_stream(monkeypatch, client, ModerationBlockedStreamResponse)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="try the paired route",
-            size="1024x1024",
-            n=1,
-            quality="high",
+            _image_request(
+                prompt="try the paired route",
+                size="1024x1024",
+                n=1,
+                quality="high",
+            )
         )
     )
 
@@ -1323,19 +1375,21 @@ async def test_generate_image_can_use_image_jobs_route(
         return None
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
-    monkeypatch.setattr(upstream_services().core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
     install_explicit_image_job_fake(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="make a product image",
-            size="1024x1024",
-            n=1,
-            quality="medium",
-            progress_callback=progress_events.append,
+            _image_request(
+                prompt="make a product image",
+                size="1024x1024",
+                n=1,
+                quality="medium",
+                progress_callback=progress_events.append,
+            )
         )
     )
 
@@ -1398,20 +1452,23 @@ async def test_edit_image_can_use_image_jobs_route(
         return None
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
-    monkeypatch.setattr(upstream_services().core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "IMAGE_JOB_POLL_INTERVAL_S", 0.0)
     install_explicit_image_job_fake(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.edit_image(
-            prompt="change the background",
-            size="1024x1024",
-            images=[TINY_PNG],
-            n=1,
-            quality="medium",
-            progress_callback=progress_events.append,
+            _image_request(
+                action="edit",
+                prompt="change the background",
+                size="1024x1024",
+                images=[TINY_PNG],
+                n=1,
+                quality="medium",
+                progress_callback=progress_events.append,
+            )
         )
     )
 
@@ -1453,7 +1510,7 @@ async def test_edit_image_can_use_image_jobs_route(
 
 def test_transparent_background_converts_to_matte_upstream_options() -> None:
     prompt, output_format, background = (
-        upstream_services().core.transparent_matte_upstream_options(
+        TEST_UPSTREAM_SERVICES.core.transparent_matte_upstream_options(
             prompt="clean product badge",
             output_format="webp",
             background="transparent",
@@ -1480,20 +1537,22 @@ async def test_responses_transparent_background_uses_matte_png_request(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client)
 
     await _first_image_result(
         upstream.generate_image(
-            prompt="clean product badge",
-            size="3840x2160",
-            n=1,
-            quality="high",
-            output_format="webp",
-            output_compression=90,
-            background="transparent",
+            _image_request(
+                prompt="clean product badge",
+                size="3840x2160",
+                n=1,
+                quality="high",
+                output_format="webp",
+                output_compression=90,
+                background="transparent",
+            )
         )
     )
 
@@ -1526,22 +1585,24 @@ async def test_direct_transparent_background_uses_matte_png_request(
         return "image2"
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
 
     await _first_image_result(
         upstream.generate_image(
-            prompt="clean product badge",
-            size="1024x1024",
-            n=1,
-            quality="high",
-            output_format="webp",
-            output_compression=90,
-            background="transparent",
+            _image_request(
+                prompt="clean product badge",
+                size="1024x1024",
+                n=1,
+                quality="high",
+                output_format="webp",
+                output_compression=90,
+                background="transparent",
+            )
         )
     )
 
@@ -1566,19 +1627,19 @@ async def test_direct_edit_transparent_background_uses_matte_png_request(
         return 200, {"data": [{"b64_json": PNG_B64}]}
 
     monkeypatch.setattr(
-        upstream_services().transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
     )
 
-    await upstream_services().direct.direct_edit_image_once(
-        prompt="clean product badge",
-        size="1024x1024",
-        images=[TINY_PNG],
-        n=1,
-        quality="high",
-        output_format="webp",
-        output_compression=90,
-        background="transparent",
-        moderation="low",
+    await TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once(
+        _image_request(
+            action="edit",
+            prompt="clean product badge",
+            images=[TINY_PNG],
+            output_format="webp",
+            output_compression=90,
+            background="transparent",
+            moderation="low",
+        ),
         base_url_override="https://upstream.example/v1",
         api_key_override="test-key",
     )
@@ -1610,20 +1671,22 @@ async def test_generate_image_image2_route_falls_back_to_responses(
         return "image2"
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     patch_responses_stream(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.generate_image(
-            prompt="make an image",
-            size="1536x864",
-            n=1,
-            quality="high",
+            _image_request(
+                prompt="make an image",
+                size="1536x864",
+                n=1,
+                quality="high",
+            )
         )
     )
 
@@ -1651,30 +1714,32 @@ async def test_generate_image_image2_result_unknown_does_not_fallback(
         assert key == "image.primary_route"
         return "image2"
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
-        return upstream_services().lifecycle.TimeoutConfig(
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
+        return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
             connect=10.0, read=20.0, write=30.0
         )
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
-    monkeypatch.setattr(upstream_services().infrastructure, "resolve", fake_resolve)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
     patch_responses_stream(monkeypatch, client)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await _first_image_result(
             upstream.generate_image(
-                prompt="make an image",
-                size="1024x1024",
-                n=1,
-                quality="high",
+                _image_request(
+                    prompt="make an image",
+                    size="1024x1024",
+                    n=1,
+                    quality="high",
+                )
             )
         )
 
@@ -1687,7 +1752,10 @@ async def test_generate_image_image2_result_unknown_does_not_fallback(
 async def test_responses_primary_image2_result_unknown_is_not_merged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_race_responses_image(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_race_responses_image(
+        _request: ImageExecutionRequest,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
         raise upstream.UpstreamError(
             "responses temporarily failed",
             status_code=503,
@@ -1695,6 +1763,7 @@ async def test_responses_primary_image2_result_unknown_is_not_merged(
         )
 
     async def fake_direct_generate_image_with_failover(
+        _request: ImageExecutionRequest,
         **_kwargs: Any,
     ) -> list[tuple[str, str | None]]:
         raise upstream.UpstreamError(
@@ -1705,10 +1774,10 @@ async def test_responses_primary_image2_result_unknown_is_not_merged(
         )
 
     monkeypatch.setattr(
-        upstream_services().race, "race_responses_image", fake_race_responses_image
+        TEST_UPSTREAM_SERVICES.race, "race_responses_image", fake_race_responses_image
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "direct_generate_image_with_failover",
         fake_direct_generate_image_with_failover,
     )
@@ -1721,22 +1790,14 @@ async def test_responses_primary_image2_result_unknown_is_not_merged(
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await _first_image_result(
-            upstream_services().dispatch.run_image_once_for_provider(
-                action="generate",
-                provider=provider,
+            TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+                _image_request(
+                    prompt="make an image",
+                    size="1024x1024",
+                    provider_override=provider,
+                ),
                 channel="stream_only",
                 engine="responses",
-                prompt="make an image",
-                size="1024x1024",
-                images=None,
-                n=1,
-                quality="high",
-                output_format=None,
-                output_compression=None,
-                background=None,
-                moderation=None,
-                model=None,
-                progress_callback=None,
             )
         )
 
@@ -1758,17 +1819,19 @@ async def test_generate_small_size_keeps_partial_images(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client)
 
     await _first_image_result(
         upstream.generate_image(
-            prompt="small image",
-            size="1536x864",  # 1.3M 像素 — 在阈值内
-            n=1,
-            quality="high",
+            _image_request(
+                prompt="small image",
+                size="1536x864",  # 1.3M 像素 — 在阈值内
+                n=1,
+                quality="high",
+            )
         )
     )
     tool = client.streams[0]["json"]["tools"][0]
@@ -1789,17 +1852,19 @@ async def test_generate_low_quality_omits_partial_images(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client)
 
     await _first_image_result(
         upstream.generate_image(
-            prompt="small draft",
-            size="1024x1024",
-            n=1,
-            quality="low",
+            _image_request(
+                prompt="small draft",
+                size="1024x1024",
+                n=1,
+                quality="low",
+            )
         )
     )
     tool = client.streams[0]["json"]["tools"][0]
@@ -1823,21 +1888,24 @@ async def test_edit_image_falls_back_with_input_images(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     patch_responses_stream(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.edit_image(
-            prompt="upscale/edit this image",
-            size="3840x2160",
-            images=[TINY_PNG],
-            n=1,
-            quality="high",
+            _image_request(
+                action="edit",
+                prompt="upscale/edit this image",
+                size="3840x2160",
+                images=[TINY_PNG],
+                n=1,
+                quality="high",
+            )
         )
     )
 
@@ -1856,7 +1924,7 @@ async def test_edit_image_falls_back_with_input_images(
 
 
 def test_parse_error_surfaces_fastapi_detail_payload() -> None:
-    err = upstream_services().core.parse_error(
+    err = TEST_UPSTREAM_SERVICES.core.parse_error(
         {"detail": "Instructions are required"}, 400
     )
 
@@ -1880,21 +1948,24 @@ async def test_edit_image_uses_responses_stream(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     patch_responses_stream(monkeypatch, client)
 
     b64, revised = await _first_image_result(
         upstream.edit_image(
-            prompt="edit this image",
-            size="3840x2160",
-            images=[TINY_PNG],
-            n=1,
-            quality="high",
+            _image_request(
+                action="edit",
+                prompt="edit this image",
+                size="3840x2160",
+                images=[TINY_PNG],
+                n=1,
+                quality="high",
+            )
         )
     )
 
@@ -1918,17 +1989,17 @@ async def test_responses_fallback_accepts_real_gateway_partial_field(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client, RealGatewayStreamResponse)
 
-    b64, revised = await upstream_services().responses.responses_image_stream(
-        prompt="make an image",
-        size="3840x2160",
-        action="generate",
-        quality="high",
-        progress_callback=progress_events.append,
+    b64, revised = await TEST_UPSTREAM_SERVICES.responses.responses_image_stream(
+        _image_request(
+            prompt="make an image",
+            size="3840x2160",
+            progress_callback=progress_events.append,
+        )
     )
 
     assert b64 == PNG_B64
@@ -1953,17 +2024,17 @@ async def test_responses_fallback_no_image_has_diagnostic_payload(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client, NoImageStreamResponse)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().responses.responses_image_stream(
-            prompt="make an image",
-            size="3840x2160",
-            action="generate",
-            quality="high",
+        await TEST_UPSTREAM_SERVICES.responses.responses_image_stream(
+            _image_request(
+                prompt="make an image",
+                size="3840x2160",
+            )
         )
 
     assert exc_info.value.error_code == "no_image_returned"
@@ -1985,21 +2056,23 @@ async def test_fallback_stream_error_includes_path_diagnostics(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_client
     )
     patch_responses_stream(monkeypatch, client, ErrorStreamResponse)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await _first_image_result(
             upstream.generate_image(
-                prompt="make an image",
-                size="3840x2160",
-                n=1,
-                quality="high",
+                _image_request(
+                    prompt="make an image",
+                    size="3840x2160",
+                    n=1,
+                    quality="high",
+                )
             )
         )
 
@@ -2029,17 +2102,17 @@ async def test_fallback_stream_interruption_is_classified(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client, InterruptedStreamResponse)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().responses.responses_image_stream(
-            prompt="make an image",
-            size="3840x2160",
-            action="generate",
-            quality="high",
+        await TEST_UPSTREAM_SERVICES.responses.responses_image_stream(
+            _image_request(
+                prompt="make an image",
+                size="3840x2160",
+            )
         )
 
     assert exc_info.value.error_code == "stream_interrupted"
@@ -2050,17 +2123,17 @@ def test_sniff_image_mime_detects_real_formats() -> None:
     png = b"\x89PNG\r\n\x1a\n" + b"rest"
     jpeg = b"\xff\xd8\xff\xe0" + b"rest"
     webp = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"rest"
-    assert upstream_services().references.sniff_image_mime(png) == "image/png"
-    assert upstream_services().references.sniff_image_mime(jpeg) == "image/jpeg"
-    assert upstream_services().references.sniff_image_mime(webp) == "image/webp"
-    assert upstream_services().references.sniff_image_mime(b"garbage") is None
+    assert TEST_UPSTREAM_SERVICES.references.sniff_image_mime(png) == "image/png"
+    assert TEST_UPSTREAM_SERVICES.references.sniff_image_mime(jpeg) == "image/jpeg"
+    assert TEST_UPSTREAM_SERVICES.references.sniff_image_mime(webp) == "image/webp"
+    assert TEST_UPSTREAM_SERVICES.references.sniff_image_mime(b"garbage") is None
 
 
 def test_normalize_reference_image_reencodes_png_to_clean_webp() -> None:
     # 即使输入已经是 PNG，也要过一次 PIL 洗掉潜在的 EXIF/ICC/非标 filter——
     # 这是 OpenAI image_generation 稳定性关键（用户相册原图 raw PNG 会让上游报 server_error）。
     src = _make_tiny_png(size=(5, 5), color=(10, 20, 30))
-    out_bytes, mime = upstream_services().references.normalize_reference_image(src)
+    out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(src)
     assert mime == "image/webp"
     _assert_webp_bytes(out_bytes)
     with _PILImage.open(_io.BytesIO(out_bytes)) as reloaded:
@@ -2074,7 +2147,7 @@ def test_normalize_reference_image_reencodes_non_webp_to_webp() -> None:
     _PILImage.new("RGB", (4, 4), color=(1, 2, 3)).save(buf, format="GIF")
     gif_bytes = buf.getvalue()
 
-    out_bytes, mime = upstream_services().references.normalize_reference_image(
+    out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(
         gif_bytes
     )
     assert mime == "image/webp"
@@ -2092,7 +2165,7 @@ def test_normalize_reference_image_converts_non_rgb_modes_to_rgb() -> None:
     _PILImage.new("L", (3, 3), color=200).save(buf, format="PNG")
     gray_png = buf.getvalue()
 
-    out_bytes, mime = upstream_services().references.normalize_reference_image(gray_png)
+    out_bytes, mime = TEST_UPSTREAM_SERVICES.references.normalize_reference_image(gray_png)
     assert mime == "image/webp"
     _assert_webp_bytes(out_bytes)
     with _PILImage.open(_io.BytesIO(out_bytes)) as reloaded:
@@ -2103,7 +2176,7 @@ def test_normalize_reference_image_converts_non_rgb_modes_to_rgb() -> None:
 
 def test_normalize_reference_image_raises_on_undecodable() -> None:
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        upstream_services().references.normalize_reference_image(b"not an image at all")
+        TEST_UPSTREAM_SERVICES.references.normalize_reference_image(b"not an image at all")
     assert exc_info.value.error_code == "bad_reference_image"
 
 
@@ -2118,7 +2191,7 @@ async def test_responses_image_stream_uses_httpx_when_flag_set(
         raise AssertionError("_iter_sse_curl must not be called when use_httpx=True")
 
     monkeypatch.setattr(
-        upstream_services().transport, "iter_sse_curl", curl_must_not_run
+        TEST_UPSTREAM_SERVICES.transport, "iter_sse_curl", curl_must_not_run
     )
 
     client = DummyClient()
@@ -2130,15 +2203,15 @@ async def test_responses_image_stream_uses_httpx_when_flag_set(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
 
-    b64, _ = await upstream_services().responses.responses_image_stream(
-        prompt="hello",
-        size="3840x2160",
-        action="generate",
-        quality="high",
+    b64, _ = await TEST_UPSTREAM_SERVICES.responses.responses_image_stream(
+        _image_request(
+            prompt="hello",
+            size="3840x2160",
+        ),
         use_httpx=True,
     )
 
@@ -2152,11 +2225,14 @@ async def test_edit_image_rejects_empty_images() -> None:
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await _first_image_result(
             upstream.edit_image(
-                prompt="edit",
-                size="3840x2160",
-                images=[],
-                n=1,
-                quality="high",
+                _image_request(
+                    action="edit",
+                    prompt="edit",
+                    size="3840x2160",
+                    images=[],
+                    n=1,
+                    quality="high",
+                )
             )
         )
     assert exc_info.value.error_code == "missing_input_images"
@@ -2179,11 +2255,11 @@ async def test_edit_image_reencodes_jpeg_input_to_webp(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     patch_responses_stream(monkeypatch, client)
 
@@ -2192,11 +2268,14 @@ async def test_edit_image_reencodes_jpeg_input_to_webp(
     jpeg_bytes = jpeg_buf.getvalue()
     await _first_image_result(
         upstream.edit_image(
-            prompt="edit",
-            size="3840x2160",
-            images=[jpeg_bytes],
-            n=1,
-            quality="high",
+            _image_request(
+                action="edit",
+                prompt="edit",
+                size="3840x2160",
+                images=[jpeg_bytes],
+                n=1,
+                quality="high",
+            )
         )
     )
 
@@ -2219,17 +2298,17 @@ async def test_responses_image_stream_surfaces_moderation_code(
         return client
 
     monkeypatch.setattr(
-        upstream_services().core, "resolve_runtime", fake_resolve_runtime
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
     )
-    monkeypatch.setattr(upstream_services().lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
     patch_responses_stream(monkeypatch, client, ModerationBlockedStreamResponse)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().responses.responses_image_stream(
-            prompt="some prompt",
-            size="3840x2160",
-            action="generate",
-            quality="high",
+        await TEST_UPSTREAM_SERVICES.responses.responses_image_stream(
+            _image_request(
+                prompt="some prompt",
+                size="3840x2160",
+            )
         )
 
     assert exc_info.value.error_code == "moderation_blocked"
@@ -2239,7 +2318,13 @@ async def test_responses_image_stream_surfaces_moderation_code(
 @pytest.mark.asyncio
 async def test_extract_image_result_accepts_b64_json() -> None:
     payload = {"data": [{"b64_json": PNG_B64, "revised_prompt": "rp"}]}
-    b64, revised = await upstream_services().core.extract_image_result(payload, 200)
+    b64, revised = await TEST_UPSTREAM_SERVICES.core.extract_image_result(
+        payload,
+        200,
+        request_context=ImageRequestContext.create(
+            upstream_runtime=TEST_UPSTREAM_RUNTIME
+        ),
+    )
     assert b64 == PNG_B64
     assert revised == "rp"
 
@@ -2253,7 +2338,7 @@ async def test_extract_image_results_accepts_multiple_b64_json() -> None:
         ]
     }
 
-    assert await upstream_services().core.extract_image_results(payload, 200) == [
+    assert await TEST_UPSTREAM_SERVICES.core.extract_image_results(payload, 200) == [
         ("aW1hZ2UtMQ==", "one"),
         ("aW1hZ2UtMg==", "two"),
     ]
@@ -2276,7 +2361,7 @@ async def test_extract_image_result_falls_back_to_url(
         return _UrlClient()
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
 
     payload = {
@@ -2287,7 +2372,13 @@ async def test_extract_image_result_falls_back_to_url(
             }
         ]
     }
-    b64, revised = await upstream_services().core.extract_image_result(payload, 200)
+    b64, revised = await TEST_UPSTREAM_SERVICES.core.extract_image_result(
+        payload,
+        200,
+        request_context=ImageRequestContext.create(
+            upstream_runtime=TEST_UPSTREAM_RUNTIME
+        ),
+    )
 
     assert base64.b64decode(b64) == raw_bytes
     assert revised == "via url"
@@ -2298,7 +2389,7 @@ async def test_extract_image_result_falls_back_to_url(
 async def test_extract_image_result_raises_when_neither_b64_nor_url() -> None:
     payload = {"data": [{"revised_prompt": "no image"}]}
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().core.extract_image_result(payload, 200)
+        await TEST_UPSTREAM_SERVICES.core.extract_image_result(payload, 200)
     assert exc_info.value.error_code == "no_image_returned"
 
 
@@ -2314,11 +2405,17 @@ async def test_extract_image_result_url_download_failure_raises_upstream_error(
         return _BadUrlClient()
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
 
     payload = {"data": [{"url": "https://cdn.example/missing.png"}]}
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().core.extract_image_result(payload, 200)
+        await TEST_UPSTREAM_SERVICES.core.extract_image_result(
+            payload,
+            200,
+            request_context=ImageRequestContext.create(
+                upstream_runtime=TEST_UPSTREAM_RUNTIME
+            ),
+        )
     assert exc_info.value.status_code == 404
     assert "image url download" in str(exc_info.value).lower()

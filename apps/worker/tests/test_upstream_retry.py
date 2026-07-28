@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import email.utils
+import inspect
 import os
 import stat
 from datetime import datetime, timedelta, timezone
@@ -12,8 +11,44 @@ from typing import Any
 import httpx
 import pytest
 
-from app import byok_runtime, upstream
+from app import upstream
+from app.upstream_parts.image_execution import (
+    ImageExecutionRequest,
+    ImageRequestContext,
+)
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.url_security import PublicHttpTarget
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
+
+
+def _image_request(**overrides: Any) -> ImageExecutionRequest:
+    request_context = ImageRequestContext.create(
+        upstream_runtime=TEST_UPSTREAM_RUNTIME,
+    )
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "test",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "high",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "request_context": request_context,
+        "upstream_runtime": TEST_UPSTREAM_RUNTIME,
+    }
+    values.update(overrides)
+    return ImageExecutionRequest(**values)
 
 
 @pytest.mark.asyncio
@@ -21,32 +56,24 @@ async def test_responses_image_retry_keeps_progress_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     callbacks_seen: list[bool] = []
+    retry_attempts_seen: list[int] = []
+    trace_ids_seen: list[str] = []
 
     async def fake_stream(
+        request: ImageExecutionRequest,
         *,
-        prompt: str,
-        size: str,
-        action: str,
-        images: list[bytes] | None,
-        quality: str,
-        model: str | None = None,
-        progress_callback: Any = None,
         use_httpx: bool = False,
         base_url_override: str | None = None,
         api_key_override: str | None = None,
     ) -> tuple[str, str | None]:
         _ = (
-            prompt,
-            size,
-            action,
-            images,
-            quality,
-            model,
             use_httpx,
             base_url_override,
             api_key_override,
         )
-        callbacks_seen.append(progress_callback is not None)
+        callbacks_seen.append(request.progress_callback is not None)
+        retry_attempts_seen.append(request.request_context.retry_attempt)
+        trace_ids_seen.append(request.request_context.trace_id)
         if len(callbacks_seen) == 1:
             raise upstream.UpstreamError(
                 "temporary failure",
@@ -56,41 +83,84 @@ async def test_responses_image_retry_keeps_progress_callback(
         return "ZmFrZS1wbmc=", None
 
     monkeypatch.setattr(
-        upstream_services().responses, "responses_image_stream", fake_stream
+        TEST_UPSTREAM_SERVICES.responses, "responses_image_stream", fake_stream
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio, "sleep", lambda _delay: _done()
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", lambda _delay: _done()
     )
 
     async def progress(_event: dict[str, Any]) -> None:
         return None
 
-    result = await upstream_services().retry.responses_image_stream_with_retry(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=progress,
+    result = await TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry(
+        _image_request(progress_callback=progress),
         use_httpx=False,
     )
 
     assert result == ("ZmFrZS1wbmc=", None)
     assert callbacks_seen == [True, True]
+    assert retry_attempts_seen == [1, 2]
+    assert len(set(trace_ids_seen)) == 1
+
+
+def test_direct_responses_interfaces_use_typed_request_carrier() -> None:
+    expected_parameters = {
+        TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once: (
+            "request",
+            "base_url_override",
+            "api_key_override",
+            "proxy_override",
+            "pinned_target_override",
+            "before_attempt",
+        ),
+        TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once: (
+            "request",
+            "base_url_override",
+            "api_key_override",
+            "proxy_override",
+            "pinned_target_override",
+        ),
+        TEST_UPSTREAM_SERVICES.direct.direct_generate_image_with_failover: ("request",),
+        TEST_UPSTREAM_SERVICES.direct.direct_edit_image_with_failover: ("request",),
+        TEST_UPSTREAM_SERVICES.direct.responses_image_stream_with_failover: (
+            "request",
+            "use_httpx",
+        ),
+        TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry: (
+            "request",
+            "use_httpx",
+            "base_url_override",
+            "api_key_override",
+            "proxy_override",
+            "pinned_target_override",
+            "before_attempt",
+        ),
+        TEST_UPSTREAM_SERVICES.responses.responses_image_stream: (
+            "request",
+            "use_httpx",
+            "base_url_override",
+            "api_key_override",
+            "proxy_override",
+            "pinned_target_override",
+        ),
+    }
+
+    for function, expected in expected_parameters.items():
+        assert tuple(inspect.signature(function).parameters) == expected
 
 
 def test_bare_httpx_timeout_exception_is_retryable() -> None:
-    assert upstream_services().retry.is_retryable_fallback_exception(
+    assert TEST_UPSTREAM_SERVICES.retry.is_retryable_fallback_exception(
         httpx.TimeoutException("curl guard timeout")
     )
 
 
 def test_fallback_retry_backoff_clamps_at_four_seconds() -> None:
-    assert upstream_services().retry.fallback_retry_backoff_seconds(1) == 1.0
-    assert upstream_services().retry.fallback_retry_backoff_seconds(2) == 2.0
-    assert upstream_services().retry.fallback_retry_backoff_seconds(3) == 4.0
-    assert upstream_services().retry.fallback_retry_backoff_seconds(4) == 4.0
-    assert upstream_services().retry.fallback_retry_backoff_seconds(6) == 4.0
+    assert TEST_UPSTREAM_SERVICES.retry.fallback_retry_backoff_seconds(1) == 1.0
+    assert TEST_UPSTREAM_SERVICES.retry.fallback_retry_backoff_seconds(2) == 2.0
+    assert TEST_UPSTREAM_SERVICES.retry.fallback_retry_backoff_seconds(3) == 4.0
+    assert TEST_UPSTREAM_SERVICES.retry.fallback_retry_backoff_seconds(4) == 4.0
+    assert TEST_UPSTREAM_SERVICES.retry.fallback_retry_backoff_seconds(6) == 4.0
 
 
 def test_max_attempts_for_5xx_is_three() -> None:
@@ -99,12 +169,12 @@ def test_max_attempts_for_5xx_is_three() -> None:
         status_code=503,
         error_code="server_error",
     )
-    assert upstream_services().retry.max_attempts_for_exception(exc) == 3
+    assert TEST_UPSTREAM_SERVICES.retry.max_attempts_for_exception(exc) == 3
 
 
 def test_parse_retry_after_accepts_http_date() -> None:
     retry_at = datetime.now(timezone.utc) + timedelta(seconds=60)
-    parsed = upstream_services().core.parse_retry_after_seconds(
+    parsed = TEST_UPSTREAM_SERVICES.core.parse_retry_after_seconds(
         email.utils.format_datetime(retry_at)
     )
 
@@ -129,9 +199,9 @@ async def test_post_with_retry_honors_retry_after_header(
                 return httpx.Response(503, headers={"retry-after": "2.5"})
             return httpx.Response(200, json={"ok": True})
 
-    monkeypatch.setattr(upstream_services().infrastructure.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep)
 
-    resp = await upstream_services().core.post_with_retry(
+    resp = await TEST_UPSTREAM_SERVICES.core.post_with_retry(
         client=_Client(),  # type: ignore[arg-type]
         url="https://example.invalid/v1/images/generations",
         headers={},
@@ -159,10 +229,10 @@ async def test_post_with_retry_claims_quota_for_every_physical_post(
         attempts.append(attempt)
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio, "sleep", lambda _delay: _done()
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", lambda _delay: _done()
     )
 
-    response = await upstream_services().core.post_with_retry(
+    response = await TEST_UPSTREAM_SERVICES.core.post_with_retry(
         client=_Client(),  # type: ignore[arg-type]
         url="https://example.invalid/v1/images/generations",
         headers={},
@@ -199,13 +269,13 @@ async def test_reference_url_live_resolves_public_target_before_head(
             return httpx.Response(204)
 
     monkeypatch.setattr(
-        upstream_services().infrastructure, "resolve_public_http_target", fake_resolve
+        TEST_UPSTREAM_SERVICES.infrastructure, "resolve_public_http_target", fake_resolve
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure.httpx, "AsyncClient", _Client
+        TEST_UPSTREAM_SERVICES.infrastructure.httpx, "AsyncClient", _Client
     )
 
-    assert await upstream_services().references.reference_url_is_live(
+    assert await TEST_UPSTREAM_SERVICES.references.reference_url_is_live(
         "https://user.example/ref.png"
     )
     assert seen["resolved"] == ("https://user.example/ref.png", True)
@@ -241,13 +311,13 @@ async def test_reference_url_live_rejects_redirect_response(
             )
 
     monkeypatch.setattr(
-        upstream_services().infrastructure, "resolve_public_http_target", fake_resolve
+        TEST_UPSTREAM_SERVICES.infrastructure, "resolve_public_http_target", fake_resolve
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure.httpx, "AsyncClient", _Client
+        TEST_UPSTREAM_SERVICES.infrastructure.httpx, "AsyncClient", _Client
     )
 
-    assert not await upstream_services().references.reference_url_is_live(
+    assert not await TEST_UPSTREAM_SERVICES.references.reference_url_is_live(
         " https://user.example/ref.png "
     )
     assert seen["resolved"] == ("https://user.example/ref.png", True)
@@ -268,7 +338,7 @@ async def test_post_with_retry_can_disable_httpx_exception_retries() -> None:
     client = _Client()
 
     with pytest.raises(httpx.ReadTimeout):
-        await upstream_services().core.post_with_retry(
+        await TEST_UPSTREAM_SERVICES.core.post_with_retry(
             client=client,  # type: ignore[arg-type]
             url="https://example.invalid/v1/images/generations",
             headers={},
@@ -294,13 +364,13 @@ async def test_curl_multipart_rc28_is_timeout(
         return _Proc()
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio,
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
 
     with pytest.raises(httpx.TimeoutException):
-        await upstream_services().transport.curl_post_multipart_using_paths(
+        await TEST_UPSTREAM_SERVICES.transport.curl_post_multipart_using_paths(
             url="https://example.invalid/v1/images/edits",
             data={"prompt": "test"},
             staged_files=[],
@@ -351,7 +421,7 @@ async def test_curl_multipart_keeps_secrets_out_of_argv_and_uses_form_string(
         return _Proc()
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio,
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
@@ -360,31 +430,29 @@ async def test_curl_multipart_keeps_secrets_out_of_argv_and_uses_form_string(
         "https://example.invalid/v1",
         ("203.0.113.20",),
     )
-    token = byok_runtime.bind_byok_http_target(target)
-    try:
-        (
-            status,
-            payload,
-        ) = await upstream_services().transport.curl_post_multipart_using_paths(
-            url="https://example.invalid/v1/images/edits",
-            data={"prompt": "@/etc/passwd", "note": "<~/.ssh/id_rsa"},
-            staged_files=[],
-            headers={"Authorization": "Bearer sk-secret"},
-            timeout_s=30,
-            proxy_url="http://proxy-user:proxy-pass@proxy.example:8080",
-        )
-        (
-            direct_status,
-            _,
-        ) = await upstream_services().transport.curl_post_multipart_using_paths(
-            url="https://example.invalid/v1/images/edits",
-            data={"prompt": "direct"},
-            staged_files=[],
-            headers={"Authorization": "Bearer sk-secret"},
-            timeout_s=30,
-        )
-    finally:
-        byok_runtime.reset_byok_http_target(token)
+    (
+        status,
+        payload,
+    ) = await TEST_UPSTREAM_SERVICES.transport.curl_post_multipart_using_paths(
+        url="https://example.invalid/v1/images/edits",
+        data={"prompt": "@/etc/passwd", "note": "<~/.ssh/id_rsa"},
+        staged_files=[],
+        headers={"Authorization": "Bearer sk-secret"},
+        timeout_s=30,
+        proxy_url="http://proxy-user:proxy-pass@proxy.example:8080",
+        pinned_target=target,
+    )
+    (
+        direct_status,
+        _,
+    ) = await TEST_UPSTREAM_SERVICES.transport.curl_post_multipart_using_paths(
+        url="https://example.invalid/v1/images/edits",
+        data={"prompt": "direct"},
+        staged_files=[],
+        headers={"Authorization": "Bearer sk-secret"},
+        timeout_s=30,
+        pinned_target=target,
+    )
 
     argv = tuple(str(arg) for arg in captured["argv"][0])
     argv_text = "\0".join(argv)
@@ -409,20 +477,20 @@ def test_image_idempotency_key_uses_stable_file_fingerprints() -> None:
         ("image[]", ("ref.png", b"secret-image-bytes", "image/png")),
         ("mask", ("mask.png", b"mask-bytes", "image/png")),
     ]
-    key_a = upstream_services().core.image_idempotency_key(
+    key_a = TEST_UPSTREAM_SERVICES.core.image_idempotency_key(
         trace_id="gen-fixed",
         endpoint="images/edits",
         body={"size": "1024x1024", "prompt": "edit"},
         files=files,
     )
-    key_b = upstream_services().core.image_idempotency_key(
+    key_b = TEST_UPSTREAM_SERVICES.core.image_idempotency_key(
         trace_id="gen-fixed",
         endpoint="images/edits",
         body={"prompt": "edit", "size": "1024x1024"},
         files=files,
     )
-    fingerprints = upstream_services().core.image_file_fingerprints(files)
-    serialized = upstream_services().core.json_dumps_stable({"files": fingerprints})
+    fingerprints = TEST_UPSTREAM_SERVICES.core.image_file_fingerprints(files)
+    serialized = TEST_UPSTREAM_SERVICES.core.json_dumps_stable({"files": fingerprints})
 
     assert key_a == key_b
     assert "secret-image-bytes" not in serialized
@@ -449,48 +517,42 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
             json={"data": [{"b64_json": "ZmFrZQ==", "revised_prompt": "ok"}]},
         )
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
-        return upstream_services().lifecycle.TimeoutConfig(
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
+        return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
             connect=10.0, read=20.0, write=30.0
         )
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     monkeypatch.setattr(
-        upstream_services().core, "post_with_retry", fake_post_with_retry
+        TEST_UPSTREAM_SERVICES.core, "post_with_retry", fake_post_with_retry
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
 
-    token = upstream_services().core.push_image_trace_id("gen-fixed")
-    try:
-        result = await upstream_services().direct.direct_generate_image_once(
-            prompt="test",
-            size="1024x1024",
-            n=1,
-            quality="high",
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+        _image_request(
             output_format="png",
-            output_compression=None,
             background="auto",
             moderation="auto",
-            base_url_override="https://example.invalid/v1",
-            api_key_override="sk-test",
-        )
-    finally:
-        upstream_services().core.pop_image_trace_id(token)
+            request_context=ImageRequestContext.create(trace_id="gen-fixed"),
+        ),
+        base_url_override="https://example.invalid/v1",
+        api_key_override="sk-test",
+    )
 
     assert result == [("ZmFrZQ==", "ok")]
     headers = seen["headers"]
-    expected_key = upstream_services().core.image_idempotency_key(
+    expected_key = TEST_UPSTREAM_SERVICES.core.image_idempotency_key(
         trace_id="gen-fixed",
         endpoint="images/generations",
         body=seen["json_body"],
     )
     assert headers["x-trace-id"] == "gen-fixed"
     assert headers["Idempotency-Key"] == expected_key
-    assert seen["timeout"].read == upstream_services().core.IMAGE_READ_TIMEOUT_MIN_S
+    assert seen["timeout"].read == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
     assert seen["retry_httpx_exceptions"] is False
 
 
@@ -512,17 +574,13 @@ async def test_image_job_submit_uses_payload_idempotency_key(
         )
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     monkeypatch.setattr(
-        upstream_services().core, "post_with_retry", fake_post_with_retry
+        TEST_UPSTREAM_SERVICES.core, "post_with_retry", fake_post_with_retry
     )
-    monkeypatch.setattr(
-        upstream_services().core, "generate_trace_id", lambda: "trace-not-stable"
-    )
-
     with pytest.raises(upstream.UpstreamError):
-        await upstream_services().image_jobs.submit_and_wait_image_job(
+        await TEST_UPSTREAM_SERVICES.image_jobs.submit_and_wait_image_job(
             payload={
                 "endpoint": "/v1/images/generations",
                 "request_type": "generations",
@@ -533,10 +591,11 @@ async def test_image_job_submit_uses_payload_idempotency_key(
             api_key="sk-test",
             proxy=None,
             progress_callback=None,
+            request_context=ImageRequestContext.create(trace_id="trace-not-stable"),
         )
 
     expected = (
-        upstream_services()
+        TEST_UPSTREAM_SERVICES
         .infrastructure.hashlib.sha256(b"generation:stable")
         .hexdigest()
     )
@@ -554,11 +613,11 @@ async def test_image_job_submit_does_not_fall_back_to_upstream_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        upstream_services().infrastructure.settings, "image_job_sidecar_token", ""
+        TEST_UPSTREAM_SERVICES.infrastructure.settings, "image_job_sidecar_token", ""
     )
 
     with pytest.raises(upstream.UpstreamError) as exc:
-        await upstream_services().image_jobs.submit_and_wait_image_job(
+        await TEST_UPSTREAM_SERVICES.image_jobs.submit_and_wait_image_job(
             payload={
                 "endpoint": "/v1/images/generations",
                 "request_type": "generations",
@@ -585,31 +644,28 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
     async def fake_post_with_retry(**_kwargs: Any) -> httpx.Response:
         raise httpx.ReadTimeout("client gave up")
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
-        return upstream_services().lifecycle.TimeoutConfig(
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
+        return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
             connect=10.0, read=20.0, write=30.0
         )
 
     monkeypatch.setattr(
-        upstream_services().lifecycle, "get_images_client", fake_get_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
     )
     monkeypatch.setattr(
-        upstream_services().core, "post_with_retry", fake_post_with_retry
+        TEST_UPSTREAM_SERVICES.core, "post_with_retry", fake_post_with_retry
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().direct.direct_generate_image_once(
-            prompt="test",
-            size="1024x1024",
-            n=1,
-            quality="high",
-            output_format="png",
-            output_compression=None,
-            background="auto",
-            moderation="auto",
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+            _image_request(
+                output_format="png",
+                background="auto",
+                moderation="auto",
+            ),
             base_url_override="https://example.invalid/v1",
             api_key_override="sk-test",
         )
@@ -617,9 +673,9 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
     exc = exc_info.value
     assert (
         exc.error_code
-        == upstream_services().infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
     )
-    assert exc.payload["timeout_s"] == upstream_services().core.IMAGE_READ_TIMEOUT_MIN_S
+    assert exc.payload["timeout_s"] == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
     assert exc.payload["upstream_result_unknown"] is True
     from app.retry import is_retriable
 
@@ -631,7 +687,7 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
         ).retriable
         is False
     )
-    assert not upstream_services().retry.should_continue_image_provider_failover(
+    assert not TEST_UPSTREAM_SERVICES.retry.should_continue_image_provider_failover(
         exc,
         retriable=False,
     )
@@ -647,39 +703,37 @@ async def test_direct_edit_timeout_is_result_unknown_not_retryable(
         seen["timeout_s"] = kwargs["timeout_s"]
         raise httpx.TimeoutException("curl image edit timed out")
 
-    async def fake_timeout_config() -> upstream_services().lifecycle.TimeoutConfig:
-        return upstream_services().lifecycle.TimeoutConfig(
+    async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
+        return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
             connect=10.0, read=20.0, write=30.0
         )
 
     monkeypatch.setattr(
-        upstream_services().transport, "curl_post_multipart", fake_curl_post_multipart
+        TEST_UPSTREAM_SERVICES.transport, "curl_post_multipart", fake_curl_post_multipart
     )
     monkeypatch.setattr(
-        upstream_services().lifecycle, "resolve_timeout_config", fake_timeout_config
+        TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
     )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
-        await upstream_services().direct.direct_edit_image_once(
-            prompt="test edit",
-            size="1024x1024",
-            images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
-            mask=None,
-            n=1,
-            quality="high",
-            output_format="png",
-            output_compression=None,
-            background="auto",
-            moderation="auto",
+        await TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once(
+            _image_request(
+                action="edit",
+                prompt="test edit",
+                images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
+                output_format="png",
+                background="auto",
+                moderation="auto",
+            ),
             base_url_override="https://example.invalid/v1",
             api_key_override="sk-test",
         )
 
     exc = exc_info.value
-    assert seen["timeout_s"] == upstream_services().core.IMAGE_READ_TIMEOUT_MIN_S
+    assert seen["timeout_s"] == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
     assert (
         exc.error_code
-        == upstream_services().infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
     )
     assert exc.payload["path"] == "images/edits"
     assert exc.payload["upstream_result_unknown"] is True
@@ -693,7 +747,7 @@ async def test_direct_edit_timeout_is_result_unknown_not_retryable(
         ).retriable
         is False
     )
-    assert not upstream_services().retry.should_continue_image_provider_failover(
+    assert not TEST_UPSTREAM_SERVICES.retry.should_continue_image_provider_failover(
         exc,
         retriable=False,
     )
@@ -706,7 +760,10 @@ async def test_responses_image_retry_honors_429_budget(
     calls = 0
     sleeps: list[float] = []
 
-    async def fake_stream(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_stream(
+        _request: ImageExecutionRequest,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
         nonlocal calls
         calls += 1
         raise upstream.UpstreamError(
@@ -719,18 +776,13 @@ async def test_responses_image_retry_honors_429_budget(
         sleeps.append(delay)
 
     monkeypatch.setattr(
-        upstream_services().responses, "responses_image_stream", fake_stream
+        TEST_UPSTREAM_SERVICES.responses, "responses_image_stream", fake_stream
     )
-    monkeypatch.setattr(upstream_services().infrastructure.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", fake_sleep)
 
     with pytest.raises(upstream.UpstreamError):
-        await upstream_services().retry.responses_image_stream_with_retry(
-            prompt="test",
-            size="1024x1024",
-            action="generate",
-            images=None,
-            quality="high",
-            progress_callback=None,
+        await TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry(
+            _image_request(),
             use_httpx=False,
         )
 
@@ -745,7 +797,10 @@ async def test_responses_image_retry_claims_each_physical_stream_attempt(
     claims: list[int] = []
     calls = 0
 
-    async def fake_stream(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_stream(
+        _request: ImageExecutionRequest,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -760,19 +815,14 @@ async def test_responses_image_retry_claims_each_physical_stream_attempt(
         claims.append(attempt)
 
     monkeypatch.setattr(
-        upstream_services().responses, "responses_image_stream", fake_stream
+        TEST_UPSTREAM_SERVICES.responses, "responses_image_stream", fake_stream
     )
     monkeypatch.setattr(
-        upstream_services().infrastructure.asyncio, "sleep", lambda _delay: _done()
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio, "sleep", lambda _delay: _done()
     )
 
-    result = await upstream_services().retry.responses_image_stream_with_retry(
-        prompt="test",
-        size="1024x1024",
-        action="generate",
-        images=None,
-        quality="high",
-        progress_callback=None,
+    result = await TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry(
+        _image_request(),
         use_httpx=False,
         before_attempt=before_attempt,
     )

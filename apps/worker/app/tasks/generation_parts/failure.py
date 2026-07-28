@@ -1,12 +1,60 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from lumen_core.constants import (
+    EV_GEN_PROGRESS,
+    EV_GEN_RETRYING,
+    GenerationStage,
+    GenerationStatus,
+    MessageStatus,
+    task_channel,
+)
+from lumen_core.models import Generation, Message
 from lumen_core.upstream_billing import decide_image_failure_billing
 
-from .runtime import GenerationRunState
+from ...retry import RetryDecision, is_moderation_block
+from .diagnostics import (
+    build_generation_diagnostics,
+    request_event_provider_from_attempts,
+    safe_generation_error_summary,
+    sanitize_generation_upstream_request,
+)
+from .errors import StaleGenerationAttempt
+from .event_delivery import stage_generation_failure_event
+from .lease import cancel_renewer_task, release_lease
+from .lifecycle import finalize_running_generation_cancel
+from .queue import (
+    avoid_provider_for_task,
+    get_avoided_providers,
+    image_queue_not_before_key,
+    is_dual_race_sentinel,
+    redis_text,
+)
+from .retry_state import (
+    MAX_ATTEMPTS,
+    MODERATION_RETRY_CAP,
+    RUNNING_GENERATION_STATUSES,
+    classify_exception,
+    decide_moderation_retry_upgrade,
+    ensure_generation_updated,
+    generation_attempt_update,
+    mark_generation_attempt_failed,
+    mark_generation_attempt_retrying,
+    maybe_requeue_stale_generation_attempt,
+    retry_delay_seconds,
+    retry_not_before_ttl,
+    safe_generation_error_details,
+)
+from .run_state import GenerationRunState
+from .services import RunGenerationDeps
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -25,16 +73,16 @@ class GenerationFailure:
 async def handle_lease_lost(
     state: GenerationRunState,
     exc: BaseException,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    g.events.logger.warning(
+    logger.warning(
         "generation lease lost task=%s attempt=%s err=%s",
         state.task_id,
         state.attempt,
         exc,
     )
-    if state.attempt >= g.domain._MAX_ATTEMPTS:
-        await g.persistence._mark_generation_attempt_failed(
+    if state.attempt >= MAX_ATTEMPTS:
+        await mark_generation_attempt_failed(
             state.redis,
             task_id=state.task_id,
             message_id=state.message_id,
@@ -43,11 +91,12 @@ async def handle_lease_lost(
             error_code="lease_lost_max_attempts",
             error_message="lease lost after max attempts",
             retriable=False,
+            services=g,
         )
         state.task_outcome = "failed"
         return
-    delay = g.domain._retry_delay_seconds(state.attempt)
-    requeued = await g.persistence._mark_generation_attempt_retrying(
+    delay = retry_delay_seconds(state.attempt)
+    requeued = await mark_generation_attempt_retrying(
         state.redis,
         task_id=state.task_id,
         message_id=state.message_id,
@@ -57,7 +106,8 @@ async def handle_lease_lost(
         error_message="generation lease lost; task will be retried",
         delay=delay,
         reason="lease_lost",
-        max_attempts=g.domain._MAX_ATTEMPTS,
+        max_attempts=MAX_ATTEMPTS,
+        services=g,
     )
     state.task_outcome = "retry" if requeued else "lease_lost"
 
@@ -65,19 +115,20 @@ async def handle_lease_lost(
 async def handle_stale_attempt(
     state: GenerationRunState,
     exc: BaseException,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    g.events.logger.info(
+    logger.info(
         "generation stale attempt task=%s attempt=%s err=%s",
         state.task_id,
         state.attempt,
         exc,
     )
-    requeued = await g.persistence._maybe_requeue_stale_generation_attempt(
+    requeued = await maybe_requeue_stale_generation_attempt(
         state.redis,
         task_id=state.task_id,
         attempt=state.attempt,
         reason=type(exc).__name__,
+        services=g,
     )
     state.task_outcome = "retry" if requeued else "stale_attempt"
 
@@ -85,22 +136,23 @@ async def handle_stale_attempt(
 async def handle_cancel(
     state: GenerationRunState,
     exc: BaseException,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    state.task_outcome = await g.persistence._finalize_running_generation_cancel(
+    state.task_outcome = await finalize_running_generation_cancel(
         state.redis,
         task_id=state.task_id,
         message_id=state.message_id,
         user_id=state.user_id,
         attempt=state.attempt,
         reason=exc,
+        services=g,
     )
 
 
 async def handle_generation_exception(
     state: GenerationRunState,
     exc: Exception,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     failure = await _build_failure(state, exc, g)
     failure = await _apply_moderation_retry_policy(state, exc, failure, g)
@@ -117,16 +169,16 @@ async def handle_generation_exception(
 async def _build_failure(
     state: GenerationRunState,
     exc: Exception,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> GenerationFailure:
-    decision = g.provider._classify_exception(exc, state.has_partial)
-    _byok_terminal, runtime_byok_error = g.billing.classify_user_credential_error(exc)
+    decision = classify_exception(exc, state.has_partial)
+    _byok_terminal, runtime_byok_error = g.credentials.classify_error(exc)
     if state.user_api_credential_id and runtime_byok_error:
-        await g.billing.record_user_credential_runtime_error(
+        await g.credentials.record_runtime_error(
             state.user_api_credential_id,
             exc,
         )
-        decision = g.domain.RetryDecision(False, f"byok {runtime_byok_error}")
+        decision = RetryDecision(False, f"byok {runtime_byok_error}")
     _log_generation_failure(state, exc, decision, g)
     error_code, error_message = _generation_error_identity(
         state,
@@ -134,8 +186,8 @@ async def _build_failure(
         runtime_byok_error,
         g,
     )
-    error_details = g.provider._safe_generation_error_details(exc)
-    safe_summary = g.provider._safe_generation_error_summary(
+    error_details = safe_generation_error_details(exc)
+    safe_summary = safe_generation_error_summary(
         code=str(error_code) if error_code else None,
         message=error_message,
         status_code=getattr(exc, "status_code", None),
@@ -155,7 +207,7 @@ async def _build_failure(
         safe_error_summary=safe_summary,
         diagnostics=diagnostics,
         upstream_request=upstream_request,
-        effective_max_attempts=g.domain._MAX_ATTEMPTS,
+        effective_max_attempts=MAX_ATTEMPTS,
     )
 
 
@@ -163,12 +215,12 @@ def _log_generation_failure(
     state: GenerationRunState,
     exc: Exception,
     decision: Any,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     error_code = getattr(exc, "error_code", None) or type(exc).__name__
     status = getattr(exc, "status_code", None)
     provider = (getattr(exc, "payload", None) or {}).get("provider", "")
-    g.events.logger.warning(
+    logger.warning(
         "generation failed task=%s attempt=%s retriable=%s reason=%s "
         "error_code=%s http_status=%s provider=%s",
         state.task_id,
@@ -179,7 +231,7 @@ def _log_generation_failure(
         status,
         provider,
     )
-    g.events.logger.debug(
+    logger.debug(
         "generation exc trace task=%s",
         state.task_id,
         exc_info=True,
@@ -190,12 +242,12 @@ def _generation_error_identity(
     state: GenerationRunState,
     exc: Exception,
     runtime_byok_error: str | None,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> tuple[str, str]:
     if state.user_api_credential_id and runtime_byok_error:
         return (
-            g.billing.byok_error_to_generation_code(runtime_byok_error),
-            g.billing.byok_error_message(runtime_byok_error),
+            g.credentials.generation_error_code(runtime_byok_error),
+            g.credentials.error_message(runtime_byok_error),
         )
     error_code = (
         "timeout"
@@ -208,23 +260,23 @@ def _generation_error_identity(
 def _error_diagnostics(
     state: GenerationRunState,
     safe_summary: dict[str, Any],
-    g: Any,
+    g: RunGenerationDeps,
 ) -> dict[str, Any]:
     provider = (
         None
-        if g.queue._is_dual_race_sentinel(state.reserved_provider_name)
+        if is_dual_race_sentinel(state.reserved_provider_name)
         else state.reserved_provider_name
     )
-    return g.events._build_generation_diagnostics(
+    return build_generation_diagnostics(
         requested_params=state.requested_params_for_diag,
         provider=provider,
         upstream_route=state.image_route,
         provider_attempts=state.provider_attempt_log,
         upstream_duration_ms=state.upstream_duration_ms,
-        duration_ms=int(max(0.0, g.domain.time.monotonic() - state.task_start) * 1000),
+        duration_ms=int(max(0.0, time.monotonic() - state.task_start) * 1000),
         debug_id=state.task_id,
         error_summary=safe_summary,
-        expose_provider_diagnostics=g.queue.settings.expose_provider_diagnostics,
+        expose_provider_diagnostics=g.queue.expose_provider_diagnostics,
     )
 
 
@@ -232,7 +284,7 @@ def _error_upstream_request(
     state: GenerationRunState,
     diagnostics: dict[str, Any],
     safe_summary: str,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> dict[str, Any]:
     request = dict(state.gen_upstream_request_snapshot or {})
     request.update(
@@ -250,16 +302,19 @@ def _error_upstream_request(
         request["upstream_duration_ms"] = state.upstream_duration_ms
     provider = (
         None
-        if g.queue._is_dual_race_sentinel(state.reserved_provider_name)
+        if is_dual_race_sentinel(state.reserved_provider_name)
         else state.reserved_provider_name
-    ) or g.events._request_event_provider_from_attempts(state.provider_attempt_log)
+    ) or request_event_provider_from_attempts(
+        state.provider_attempt_log,
+        redis_text=redis_text,
+    )
     if provider:
         request["request_event_provider"] = provider
     else:
         request.pop("request_event_provider", None)
-    return g.provider._sanitize_generation_upstream_request(
+    return sanitize_generation_upstream_request(
         request,
-        expose_provider_diagnostics=g.queue.settings.expose_provider_diagnostics,
+        expose_provider_diagnostics=g.queue.expose_provider_diagnostics,
     )
 
 
@@ -267,17 +322,21 @@ async def _apply_moderation_retry_policy(
     state: GenerationRunState,
     exc: Exception,
     failure: GenerationFailure,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> GenerationFailure:
     if not _can_upgrade_moderation_retry(state, exc, failure, g):
         return failure
     enabled_count = await _enabled_provider_count(g)
     avoided = (
-        await g.queue._get_avoided_providers(state.redis, state.task_id)
+        await get_avoided_providers(
+            state.redis,
+            state.task_id,
+            services=g,
+        )
         if enabled_count > 1
         else set()
     )
-    upgraded = g.provider._decide_moderation_retry_upgrade(
+    upgraded = decide_moderation_retry_upgrade(
         base_decision=failure.decision,
         err_code=getattr(exc, "error_code", None),
         err_msg=failure.error_message,
@@ -293,7 +352,7 @@ async def _apply_moderation_retry_policy(
     failure.moderation_upgrade = True
     failure.effective_max_attempts = max(
         state.attempt + 1,
-        min(g.provider._MODERATION_RETRY_CAP, max(1, enabled_count)),
+        min(MODERATION_RETRY_CAP, max(1, enabled_count)),
     )
     return failure
 
@@ -302,20 +361,20 @@ def _can_upgrade_moderation_retry(
     state: GenerationRunState,
     exc: Exception,
     failure: GenerationFailure,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> bool:
     return bool(
         not failure.decision.retriable
-        and not g.queue._is_dual_race_sentinel(state.reserved_provider_name)
+        and not is_dual_race_sentinel(state.reserved_provider_name)
         and state.reserved_provider_name
-        and g.provider.is_moderation_block(
+        and is_moderation_block(
             getattr(exc, "error_code", None),
             failure.error_message,
         )
     )
 
 
-async def _enabled_provider_count(g: Any) -> int:
+async def _enabled_provider_count(g: RunGenerationDeps) -> int:
     try:
         from ...provider_pool import get_pool
 
@@ -329,9 +388,9 @@ def _log_moderation_upgrade(
     state: GenerationRunState,
     enabled_count: int,
     avoided_count: int,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    g.events.logger.info(
+    logger.info(
         "moderation retry upgrade task=%s attempt=%s from_provider=%s "
         "enabled=%d avoided=%d cap=%d",
         state.task_id,
@@ -339,62 +398,67 @@ def _log_moderation_upgrade(
         state.reserved_provider_name,
         enabled_count,
         avoided_count,
-        g.provider._MODERATION_RETRY_CAP,
+        MODERATION_RETRY_CAP,
     )
 
 
 async def _retry_generation(
     state: GenerationRunState,
     failure: GenerationFailure,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     await _avoid_failed_provider(state, g)
-    delay = g.domain._retry_delay_seconds(state.attempt)
+    delay = retry_delay_seconds(state.attempt)
     if not await _persist_retry_state(state, failure, g):
         return
-    await g.lease._cancel_renewer_task(state.renewer)
+    await cancel_renewer_task(state.renewer)
     state.renewer = None
-    await g.lease._release_lease(state.redis, state.task_id, state.lease_token)
+    await release_lease(state.redis, state.task_id, state.lease_token)
     if not await _enqueue_retry(state, failure, delay, g):
         return
     await _publish_retry_events(state, failure, delay, g)
 
 
-async def _avoid_failed_provider(state: GenerationRunState, g: Any) -> None:
+async def _avoid_failed_provider(state: GenerationRunState, g: RunGenerationDeps) -> None:
     provider = state.reserved_provider_name
-    if provider and not g.queue._is_dual_race_sentinel(provider):
-        await g.queue._avoid_provider_for_task(state.redis, state.task_id, provider)
+    if provider and not is_dual_race_sentinel(provider):
+        await avoid_provider_for_task(
+            state.redis,
+            state.task_id,
+            provider,
+            services=g,
+        )
 
 
 async def _persist_retry_state(
     state: GenerationRunState,
     failure: GenerationFailure,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> bool:
     try:
-        async with g.persistence.SessionLocal() as session:
+        async with g.store.session() as session:
             result = await session.execute(
-                g.persistence._generation_attempt_update(
+                generation_attempt_update(
                     state.task_id,
                     state.attempt,
-                    statuses=g.domain._RUNNING_GENERATION_STATUSES,
+                    statuses=RUNNING_GENERATION_STATUSES,
                 ).values(
-                    status=g.domain.GenerationStatus.QUEUED.value,
-                    progress_stage=g.domain.GenerationStage.QUEUED,
+                    status=GenerationStatus.QUEUED.value,
+                    progress_stage=GenerationStage.QUEUED,
                     error_code=failure.error_code,
                     error_message=failure.error_message,
                     upstream_request=failure.upstream_request,
                 )
             )
-            g.persistence._ensure_generation_updated(
+            ensure_generation_updated(
                 result,
                 state.task_id,
                 state.attempt,
             )
             await session.commit()
         return True
-    except g.domain._StaleGenerationAttempt as exc:
-        g.events.logger.info(
+    except StaleGenerationAttempt as exc:
+        logger.info(
             "generation retry stale attempt task=%s attempt=%s err=%s",
             state.task_id,
             state.attempt,
@@ -408,13 +472,13 @@ async def _enqueue_retry(
     state: GenerationRunState,
     failure: GenerationFailure,
     delay: float,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> bool:
     try:
         await state.redis.set(
-            g.queue._image_queue_not_before_key(state.task_id),
-            str(g.domain.time.time() + delay),
-            ex=g.domain._retry_not_before_ttl(delay),
+            image_queue_not_before_key(state.task_id),
+            str(time.time() + delay),
+            ex=retry_not_before_ttl(delay),
         )
         await state.redis.enqueue_job(
             "run_generation",
@@ -424,12 +488,12 @@ async def _enqueue_retry(
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        g.events.logger.error(
+        logger.error(
             "re-enqueue failed task=%s err=%s",
             state.task_id,
             exc,
         )
-        await g.persistence._mark_generation_attempt_failed(
+        await mark_generation_attempt_failed(
             state.redis,
             task_id=state.task_id,
             message_id=state.message_id,
@@ -439,9 +503,10 @@ async def _enqueue_retry(
             error_message=f"failed to enqueue retry: {exc}"[:2000],
             retriable=False,
             statuses=(
-                g.domain.GenerationStatus.QUEUED.value,
-                g.domain.GenerationStatus.RUNNING.value,
+                GenerationStatus.QUEUED.value,
+                GenerationStatus.RUNNING.value,
             ),
+            services=g,
         )
         state.task_outcome = "failed"
         return False
@@ -451,30 +516,30 @@ async def _publish_retry_events(
     state: GenerationRunState,
     failure: GenerationFailure,
     delay: float,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     if failure.moderation_upgrade:
-        await g.events.publish_event(
+        await g.events.publish(
             state.redis,
             state.user_id,
             state.channel,
-            g.events.EV_GEN_PROGRESS,
+            EV_GEN_PROGRESS,
             {
                 "generation_id": state.task_id,
                 "message_id": state.message_id,
-                "stage": g.domain.GenerationStage.RENDERING.value,
-                "substage": g.domain.GenerationStage.PROVIDER_SELECTED.value,
+                "stage": GenerationStage.RENDERING.value,
+                "substage": GenerationStage.PROVIDER_SELECTED.value,
                 "provider_failover": True,
                 "from_provider": state.reserved_provider_name,
                 "reason": "moderation_retry",
                 "route": "image",
             },
         )
-    await g.events.publish_event(
+    await g.events.publish(
         state.redis,
         state.user_id,
-        g.events.task_channel(state.task_id),
-        g.events.EV_GEN_RETRYING,
+        task_channel(state.task_id),
+        EV_GEN_RETRYING,
         {
             "generation_id": state.task_id,
             "message_id": state.message_id,
@@ -495,25 +560,25 @@ async def _publish_retry_events(
 async def _fail_generation_terminal(
     state: GenerationRunState,
     failure: GenerationFailure,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
     try:
-        async with g.persistence.SessionLocal() as session:
+        async with g.store.session() as session:
             result = await session.execute(
-                g.persistence._generation_attempt_update(
+                generation_attempt_update(
                     state.task_id,
                     state.attempt,
-                    statuses=g.domain._RUNNING_GENERATION_STATUSES,
+                    statuses=RUNNING_GENERATION_STATUSES,
                 ).values(
-                    status=g.domain.GenerationStatus.FAILED.value,
-                    progress_stage=g.domain.GenerationStage.FINALIZING,
+                    status=GenerationStatus.FAILED.value,
+                    progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
                     error_code=failure.error_code,
                     error_message=failure.error_message,
                     upstream_request=failure.upstream_request,
                 )
             )
-            g.persistence._ensure_generation_updated(
+            ensure_generation_updated(
                 result,
                 state.task_id,
                 state.attempt,
@@ -524,7 +589,7 @@ async def _fail_generation_terminal(
                 failure.error_code,
                 g,
             )
-            delivery = g.events._stage_generation_failure_event(
+            delivery = stage_generation_failure_event(
                 session,
                 state.user_id,
                 state.channel,
@@ -537,9 +602,9 @@ async def _fail_generation_terminal(
                 error_details=failure.error_details,
             )
             await session.commit()
-            await g.billing.worker_billing.flush_balance_cache_refreshes(session)
-    except g.domain._StaleGenerationAttempt as exc:
-        g.events.logger.info(
+            await g.billing.flush_after_commit(session)
+    except StaleGenerationAttempt as exc:
+        logger.info(
             "generation terminal stale attempt task=%s attempt=%s err=%s",
             state.task_id,
             state.attempt,
@@ -547,30 +612,30 @@ async def _fail_generation_terminal(
         )
         state.task_outcome = "stale_attempt"
         return
-    await g.events._deliver_generation_event(state.redis, delivery)
+    await g.events.deliver(state.redis, delivery)
 
 
 async def _mark_message_and_release_billing(
     session: Any,
     state: GenerationRunState,
     error_code: str,
-    g: Any,
+    g: RunGenerationDeps,
 ) -> None:
-    message = await session.get(g.persistence.Message, state.message_id)
-    if message is not None and message.status != g.domain.MessageStatus.CANCELED:
-        message.status = g.domain.MessageStatus.FAILED
-    generation = await session.get(g.persistence.Generation, state.task_id)
+    message = await session.get(Message, state.message_id)
+    if message is not None and message.status != MessageStatus.CANCELED:
+        message.status = MessageStatus.FAILED
+    generation = await session.get(Generation, state.task_id)
     if generation is None:
         return
     decision = decide_image_failure_billing(error_code)
     if decision.released:
-        await g.billing.worker_billing.release_generation(
+        await g.billing.release(
             session,
             generation,
             reason=error_code,
         )
         return
-    await g.billing.worker_billing.settle_generation_unknown_upstream(
+    await g.billing.settle_unknown_upstream(
         session,
         generation,
         reason=error_code,

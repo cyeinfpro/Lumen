@@ -1,4 +1,4 @@
-import { equal } from "node:assert/strict";
+import { deepEqual, equal } from "node:assert/strict";
 import { test } from "node:test";
 import { loadTsModule } from "../../../test-support/load-ts-module.mjs";
 import type {
@@ -26,7 +26,7 @@ const { LeaderElection } = loadTsModule(
   LeaderElection: new (
     tabId: string,
     bus: CrossTabBusType,
-    clock: LeaderClock,
+    clock?: LeaderClock,
   ) => LeaderElectionType;
 };
 
@@ -137,4 +137,93 @@ test("two tabs elect one leader and follower takes over after leader exits", () 
   equal(second.isLeader(), true);
   second.stop();
   secondBus.close();
+});
+
+test("default browser clock preserves the global timer receiver", () => {
+  const originalTimerDescriptors = {
+    setTimeout: Object.getOwnPropertyDescriptor(globalThis, "setTimeout")!,
+    clearTimeout: Object.getOwnPropertyDescriptor(globalThis, "clearTimeout")!,
+    setInterval: Object.getOwnPropertyDescriptor(globalThis, "setInterval")!,
+    clearInterval: Object.getOwnPropertyDescriptor(globalThis, "clearInterval")!,
+  };
+  let nextTimer = 1;
+  const scheduled: Array<{ kind: "timeout" | "interval"; delayMs: number }> = [];
+  const cleared: Array<{ kind: "timeout" | "interval"; timer: unknown }> = [];
+
+  const strictSetTimeout = function (
+    this: unknown,
+    callback: TimerHandler,
+    delayMs?: number,
+  ) {
+    equal(this, globalThis);
+    equal(typeof callback, "function");
+    scheduled.push({ kind: "timeout", delayMs: delayMs ?? 0 });
+    return nextTimer++ as unknown as ReturnType<typeof setTimeout>;
+  };
+  const strictClearTimeout = function (this: unknown, timer: unknown) {
+    equal(this, globalThis);
+    cleared.push({ kind: "timeout", timer });
+  };
+  const strictSetInterval = function (
+    this: unknown,
+    callback: TimerHandler,
+    delayMs?: number,
+  ) {
+    equal(this, globalThis);
+    equal(typeof callback, "function");
+    scheduled.push({ kind: "interval", delayMs: delayMs ?? 0 });
+    return nextTimer++ as unknown as ReturnType<typeof setInterval>;
+  };
+  const strictClearInterval = function (this: unknown, timer: unknown) {
+    equal(this, globalThis);
+    cleared.push({ kind: "interval", timer });
+  };
+
+  Object.defineProperties(globalThis, {
+    setTimeout: { configurable: true, writable: true, value: strictSetTimeout },
+    clearTimeout: {
+      configurable: true,
+      writable: true,
+      value: strictClearTimeout,
+    },
+    setInterval: {
+      configurable: true,
+      writable: true,
+      value: strictSetInterval,
+    },
+    clearInterval: {
+      configurable: true,
+      writable: true,
+      value: strictClearInterval,
+    },
+  });
+
+  try {
+    const strictModule = loadTsModule(
+      new URL("./leaderElection.ts", import.meta.url),
+    ) as {
+      LeaderElection: new (
+        tabId: string,
+        bus: CrossTabBusType,
+      ) => LeaderElectionType;
+    };
+    const hub = new FakeBroadcastHub();
+    const bus = new CrossTabBus("user:u1", "tab-a", hub.create);
+    const election = new strictModule.LeaderElection("tab-a", bus);
+
+    election.start();
+    election.stop();
+    bus.close();
+
+    deepEqual(scheduled, [
+      { kind: "timeout", delayMs: 50 },
+      { kind: "interval", delayMs: 2_000 },
+    ]);
+    deepEqual(cleared, [
+      { kind: "timeout", timer: 1 },
+      { kind: "interval", timer: 2 },
+    ]);
+  } finally {
+    Object.defineProperties(globalThis, originalTimerDescriptors);
+  }
 });

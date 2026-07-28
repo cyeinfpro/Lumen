@@ -6,7 +6,6 @@ from typing import Any
 
 from arq.cron import cron
 
-from .video_generation_parts.default_runtime import DEFAULT_VIDEO_GENERATION_RUNTIME
 from .video_generation_parts.runtime import VideoGenerationRuntime
 
 
@@ -18,7 +17,7 @@ class _CronJobs(tuple[Any, ...]):
 
 
 def _runtime(ctx: dict[str, Any]) -> VideoGenerationRuntime:
-    runtime = ctx.get("video_generation_runtime", DEFAULT_VIDEO_GENERATION_RUNTIME)
+    runtime = ctx.get("video_generation_runtime")
     if not isinstance(runtime, VideoGenerationRuntime):
         raise TypeError(
             "ctx['video_generation_runtime'] must be VideoGenerationRuntime"

@@ -16,10 +16,11 @@ from lumen_core.schemas import (
 )
 
 from app.routes import workflows
-from app.workflow_services import (
-    apparel_endpoints as apparel,
-    model_library_endpoints as model_library,
-    poster_endpoints as poster,
+from app.workflows.adapters.operations import apparel, model_library, poster
+from app.workflows.transport.http import (
+    apparel as apparel_routes,
+    model_library as model_library_routes,
+    poster as poster_routes,
 )
 
 
@@ -173,13 +174,77 @@ def test_extracted_routes_preserve_order_signatures_and_openapi_operations() -> 
     assert [
         (next(iter(route.methods or set())), route.path, route.name) for route in routes
     ] == EXTRACTED_ROUTE_ORDER
+    route_owners = {
+        **{
+            name: apparel_routes
+            for name in (
+                "create_apparel_model_showcase",
+                "list_apparel_model_library",
+                "sync_apparel_model_library_presets",
+                "get_apparel_model_library_item_binary",
+                "get_apparel_model_library_item_thumb",
+                "create_apparel_model_library_item",
+                "patch_apparel_model_library_item",
+                "delete_apparel_model_library_item",
+                "batch_delete_apparel_model_library_items",
+                "approve_product_analysis",
+                "create_model_candidates",
+                "select_apparel_model_library_item",
+            )
+        },
+        **{
+            name: model_library_routes
+            for name in (
+                "generate_apparel_model_library_job",
+                "list_apparel_model_library_jobs",
+                "delete_apparel_model_library_job",
+                "clear_apparel_model_library_jobs",
+                "save_apparel_model_library_job_item",
+                "auto_tag_apparel_model_library_item",
+            )
+        },
+        **{
+            name: poster_routes
+            for name in (
+                "create_poster_design_workflow",
+                "approve_copy_analysis",
+                "create_poster_masters",
+                "approve_poster_master",
+                "create_poster_renders",
+                "revise_poster_render",
+                "inpaint_poster_render",
+            )
+        },
+    }
+    operation_owners = {
+        **{
+            name: apparel
+            for name, owner in route_owners.items()
+            if owner is apparel_routes
+        },
+        **{
+            name: model_library
+            for name, owner in route_owners.items()
+            if owner is model_library_routes
+        },
+        **{
+            name: poster
+            for name, owner in route_owners.items()
+            if owner is poster_routes
+        },
+    }
     for route in routes:
-        assert inspect.signature(getattr(workflows, route.name)) == inspect.signature(
-            route.endpoint
+        route_function = getattr(route_owners[route.name], route.name)
+        operation = getattr(operation_owners[route.name], route.name)
+        assert route.endpoint is route_function
+        operation_parameters = inspect.signature(operation).parameters
+        assert tuple(inspect.signature(route_function).parameters)[1:] == tuple(
+            name for name in operation_parameters if name != "runtime"
         )
-    assert inspect.signature(
-        apparel.create_apparel_model_showcase
-    ) == inspect.signature(workflows.create_apparel_model_showcase)
+        if "runtime" in operation_parameters:
+            assert (
+                operation_parameters["runtime"].kind is inspect.Parameter.KEYWORD_ONLY
+            )
 
     app = FastAPI()
     app.include_router(workflows.router)
@@ -281,7 +346,7 @@ async def test_apparel_create_commits_before_outbox_publish_via_legacy_facade(
     monkeypatch.setattr(apparel, "_create_workflow_task", fake_create_task)
     monkeypatch.setattr(apparel, "_publish_bundles", fake_publish)
 
-    result = await workflows.create_apparel_model_showcase(
+    result = await apparel.create_apparel_model_showcase(
         ApparelWorkflowCreateIn(product_image_ids=["image-1"]),
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -353,7 +418,7 @@ async def test_model_library_generate_commits_before_outbox_publish(
     monkeypatch.setattr(model_library, "_get_run", fake_get_run)
     monkeypatch.setattr(model_library, "_job_from_library_run", fake_job)
 
-    result = await workflows.generate_apparel_model_library_job(
+    result = await model_library.generate_apparel_model_library_job(
         ApparelModelLibraryGenerateIn(age_segment="young_adult", count=1),
         SimpleNamespace(id="user-1", account_mode="wallet"),
         db,  # type: ignore[arg-type]
@@ -373,7 +438,7 @@ async def test_poster_generation_commits_before_outbox_publish(
         id="run-1",
         user_id="user-1",
         conversation_id="conv-1",
-        type=workflows.POSTER_WORKFLOW_TYPE,
+        type=poster.POSTER_WORKFLOW_TYPE,
         status="needs_review",
         current_step="master_generation",
         quality_mode="premium",
@@ -416,14 +481,14 @@ async def test_poster_generation_commits_before_outbox_publish(
         return current_run
 
     monkeypatch.setattr(poster, "_get_run", fake_get_run)
-    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync)
     monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
     monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
     monkeypatch.setattr(poster, "_publish_bundles", fake_publish)
     monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
-    result = await workflows.create_poster_masters(
+    result = await poster.create_poster_masters(
         "run-1",
         PosterMastersCreateIn(candidate_count=1),
         SimpleNamespace(id="user-1"),
@@ -451,7 +516,7 @@ async def test_model_library_background_task_is_registered_after_commit(
     async def fake_get_run(*_args: Any, **_kwargs: Any) -> Any:
         return SimpleNamespace(
             id="run-1",
-            type=workflows.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
+            type=model_library.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE,
         )
 
     async def fake_load_steps(*_args: Any, **_kwargs: Any) -> list[Any]:
@@ -473,7 +538,7 @@ async def test_model_library_background_task_is_registered_after_commit(
     monkeypatch.setattr(model_library, "_add_user_library_item", fake_add)
     monkeypatch.setattr(model_library, "_model_library_item_out", lambda item: item)
 
-    result = await workflows.save_apparel_model_library_job_item(
+    result = await model_library.save_apparel_model_library_job_item(
         "run-1",
         "image-1",
         ApparelModelLibrarySaveJobItemIn(
@@ -490,5 +555,5 @@ async def test_model_library_background_task_is_registered_after_commit(
     assert result == {"id": "item-1"}
     assert events == [
         "commit",
-        "background:_run_auto_tag_in_background:user-1:item-1",
+        "background:run_auto_tag_in_background:user-1:item-1",
     ]

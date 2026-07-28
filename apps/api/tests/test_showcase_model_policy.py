@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.routes import workflows
-from app.workflow_domain import showcase_model_policy as policy
+from app.workflows.domain import showcase_model_policy as policy
 
 
 @pytest.mark.parametrize(

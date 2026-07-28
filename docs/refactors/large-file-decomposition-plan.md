@@ -18,7 +18,7 @@ file remains above 3,000 lines.
 | `apps/web/src/lib/apiClient.ts` | 4,321 | 2,563 | `lib/api/` |
 | `apps/web/src/app/video/page.tsx` | 4,048 | 2,397 | video domain, lifecycle, task and UI modules |
 | `apps/api/app/routes/billing.py` | 3,333 | 2,933 | `services/billing/` |
-| `image-job/app.py` | 3,305 | 2,198 | runtime config, persistence, payload and artifact modules |
+| `image-job/app.py` | 3,305 | 7 | `image_job/` package |
 | `apps/api/app/routes/poster_styles.py` | 3,056 | 2,633 | `services/poster_styles/`, workflow sync service |
 | `scripts/lib.sh` | 2,940 | 1,902 | `scripts/lib/*.sh` |
 
@@ -27,7 +27,8 @@ exceptions are still below the 1,500-line source budget:
 `workflow_routes/model_library.py` (1,450),
 `workflow_routes/poster.py` (1,432),
 `workflow_services/library_sync_operation.py` (1,055),
-`image-job/job_persistence.py` (949),
+`image-job/image_job/persistence.py` (1,041),
+`image-job/image_job/candidates.py` (912),
 `completion_parts/context_loading.py` (928), and
 `scripts/lib/runtime.sh` (843).
 
@@ -146,11 +147,12 @@ the only workspace files above that threshold were generated mypy caches.
   `apiClient.ts` preserves its named export surface through a compatibility
   re-export and continues to use the shared `apiFetch` implementation. The
   facade dropped from 4,321 to 3,966 lines.
-- Extracted bounded request parsing into `image-job/request_bodies.py` and
-  pinned-download SSRF protection into `image-job/image_url_security.py`.
-  `image-job/app.py` dropped from 3,305 to 2,986 lines, while the installer now
-  copies every runtime module and the existing monkeypatch surface remains
-  compatible.
+- Extracted bounded request parsing into `image-job/image_job/http_bodies.py`
+  and pinned-download SSRF protection into
+  `image-job/image_job/url_security.py`. The remaining persistence, payload,
+  artifact, candidate, and upstream implementations also live inside the
+  `image_job` package; `image-job/app.py` is now a seven-line deployment entry
+  point, and upgrades remove obsolete root-level module copies.
 - Extracted `StoryboardMediaFrame.tsx` from `StoryboardPages.tsx`, replacing
   four duplicated image/empty-state branches with one authenticated dynamic
   image component. The page dropped from 1,102 to 1,078 lines and no longer

@@ -71,6 +71,12 @@
       "status": "active"
     },
     {
+      "owner": "api",
+      "path": "apps/api/app/routes/images.py",
+      "retirement_condition": "API registration and compatibility tests import the images application routes and helpers directly.",
+      "status": "active"
+    },
+    {
       "owner": "worker",
       "path": "apps/worker/app/upstream.py",
       "retirement_condition": "All callers use upstream_parts and provider_runtime contracts without facade monkeypatch hooks.",
@@ -85,12 +91,6 @@
     {
       "owner": "worker",
       "path": "apps/worker/app/tasks/completion.py",
-      "retirement_condition": "Task registration and tests no longer depend on late-bound facade globals.",
-      "status": "active"
-    },
-    {
-      "owner": "worker",
-      "path": "apps/worker/app/tasks/generation.py",
       "retirement_condition": "Task registration and tests no longer depend on late-bound facade globals.",
       "status": "active"
     },

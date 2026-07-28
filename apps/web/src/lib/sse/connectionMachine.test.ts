@@ -68,6 +68,21 @@ test("offline, replay recovery, failure, success, and unauthorized are explicit"
   equal(gap.state.kind, "recovering");
   ok(gap.effects.some((effect) => effect.kind === "recoverSnapshot"));
 
+  const required = transitionConnection(
+    open,
+    {
+      type: "recovery_required",
+      reason: "connection_slot_lost",
+      cursor: "9-1",
+    },
+    config,
+  );
+  equal(required.state.kind, "recovering");
+  if (required.state.kind === "recovering") {
+    equal(required.state.reason.kind, "recovery_required");
+    equal(required.state.reason.reason, "connection_slot_lost");
+  }
+
   const failed = transitionConnection(
     gap.state,
     { type: "snapshot_failure" },

@@ -7,12 +7,11 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import HTTPException
-
 from app.config import settings
-from app.workflow_domain import apparel_library
-from app.workflow_services import (
-    apparel_endpoints as apparel,
+from app.workflows.application.errors import WorkflowRequestError
+from app.workflows.adapters.operations import apparel
+from app.workflows.application.runtime_state import WorkflowRuntimeState
+from app.workflows.adapters import (
     library_github,
     library_lease,
     library_storage,
@@ -51,7 +50,7 @@ def test_model_library_json_read_is_size_bounded(
     index_path = tmp_path / "index.json"
     index_path.write_bytes(b'{"large":true}')
 
-    with pytest.raises(HTTPException) as excinfo:
+    with pytest.raises(WorkflowRequestError) as excinfo:
         library_storage.read_json_file(index_path, {})  # noqa: SLF001
 
     assert excinfo.value.status_code == 500
@@ -92,6 +91,10 @@ async def test_sync_releases_process_lock_before_external_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = library_storage.default_sync_state()  # noqa: SLF001
+    runtime = WorkflowRuntimeState()
+    dependencies = library_sync.ApparelLibrarySyncDependencies(
+        runtime.library_sync_lock
+    )
 
     async def fake_claim() -> tuple[str, dict[str, Any]]:
         return "lease-token", state
@@ -107,16 +110,16 @@ async def test_sync_releases_process_lock_before_external_io(
         assert claimed_state is state
         assert proxy_url is None
         assert lease_token == "lease-token"
-        assert apparel_library.SYNC_LOCK.locked() is False  # noqa: SLF001
+        assert runtime.library_sync_lock.locked() is False
         return ApparelModelLibrarySyncOut(status="ok")
 
-    dependencies = library_sync.APPAREL_LIBRARY_SYNC_DEPENDENCIES
     monkeypatch.setattr(dependencies, "_claim_library_sync_lease", fake_claim)
     monkeypatch.setattr(dependencies, "_do_sync_library_presets", fake_do_sync)
 
     out = await library_sync.sync_library_presets_from_github_folder(  # noqa: SLF001
         "https://api.github.com/repos/cyeinfpro/Lumen/contents/"
-        "assets/apparel-model-presets?ref=main"
+        "assets/apparel-model-presets?ref=main",
+        dependencies=dependencies,
     )
 
     assert out.status == "ok"
@@ -236,6 +239,10 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    runtime = WorkflowRuntimeState()
+    dependencies = library_sync.ApparelLibrarySyncDependencies(
+        runtime.library_sync_lock
+    )
     image_bytes = b"bounded-image"
     thumb_bytes = b"bounded-thumb"
     raw_requests: list[str] = []
@@ -251,7 +258,7 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert apparel_library.SYNC_LOCK.locked() is False  # noqa: SLF001
+        assert runtime.library_sync_lock.locked() is False
         if request.url.host == "api.github.com":
             return httpx.Response(
                 200,
@@ -289,7 +296,8 @@ async def test_sync_end_to_end_publishes_index_and_clears_lease(
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
 
     out = await library_sync.sync_library_presets_from_github_folder(  # noqa: SLF001
-        contents_url
+        contents_url,
+        dependencies=dependencies,
     )
 
     assert out.status == "ok"
@@ -327,6 +335,7 @@ async def test_sync_route_closes_db_transaction_before_network(
             self.rolled_back = True
 
     db = _Db()
+    runtime = WorkflowRuntimeState()
 
     async def fake_proxy(_db: Any) -> tuple[None, None]:
         assert db.rolled_back is False
@@ -335,10 +344,12 @@ async def test_sync_route_closes_db_transaction_before_network(
     async def fake_sync(
         contents_url: str,
         *,
+        dependencies: Any,
         proxy_url: str | None,
     ) -> ApparelModelLibrarySyncOut:
         assert db.rolled_back is True
         assert contents_url
+        assert dependencies.sync_lock is runtime.library_sync_lock
         assert proxy_url is None
         return ApparelModelLibrarySyncOut(status="skipped")
 
@@ -352,6 +363,7 @@ async def test_sync_route_closes_db_transaction_before_network(
     out = await apparel.sync_apparel_model_library_presets(
         SimpleNamespace(role="admin"),
         db,  # type: ignore[arg-type]
+        runtime=runtime,
     )
 
     assert out.status == "skipped"

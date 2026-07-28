@@ -41,12 +41,18 @@ from lumen_core.providers import (
 from .config import settings as _cfg
 from .provider_runtime.contracts import (
     EndpointStat,  # noqa: F401 - compatibility export
+    ImageProbeRequest,
     ProviderConfig,
     ProviderHealth,
     ResolvedProvider,
 )
 from .provider_runtime.errors import UpstreamError
+from .provider_runtime.probe_runtime import (
+    ProviderProbeRuntime,
+    build_provider_probe_runtime,
+)
 from .provider_runtime.probes import ProviderProbeMixin
+from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from .validation import validate_provider_base_url
 
 logger = logging.getLogger(__name__)
@@ -368,7 +374,12 @@ async def _validate_provider_base_url(raw_base: str) -> str:
 # ProviderPool
 # ---------------------------------------------------------------------------
 class ProviderPool(ProviderProbeMixin):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        probe_runtime: ProviderProbeRuntime | None = None,
+    ) -> None:
+        self._probe_runtime = probe_runtime or build_provider_probe_runtime()
         self._providers: list[ProviderConfig] = []
         self._proxies: dict[str, ProviderProxyDefinition] = {}
         self._health: dict[str, ProviderHealth] = {}
@@ -1298,7 +1309,20 @@ async def probe_providers(ctx: dict[str, Any]) -> int | None:
     if image_interval > 0 and now - _RUNTIME.last_image_probe_at >= image_interval:
         _RUNTIME.last_image_probe_at = now
         try:
-            image_results = await pool.probe_image_all()
+            from .upstream_parts.image_stream import run_image_probe
+
+            image_runtime = ctx.get("image_upstream_runtime")
+            if not isinstance(image_runtime, ImageUpstreamRuntime):
+                raise RuntimeError(
+                    "ctx['image_upstream_runtime'] must be ImageUpstreamRuntime"
+                )
+
+            async def probe_image(
+                request: ImageProbeRequest,
+            ) -> tuple[str, str | None]:
+                return await run_image_probe(request, runtime=image_runtime)
+
+            image_results = await pool.probe_image_all(probe_image)
         except Exception:  # noqa: BLE001
             logger.warning("probe_image_all failed", exc_info=True)
             image_results = {}

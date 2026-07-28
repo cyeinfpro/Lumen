@@ -28,6 +28,30 @@ class WorkflowNotFoundError(WorkflowApplicationError):
         super().__init__(f"workflow run was not found: {run_id}")
 
 
+class InvalidWorkflowCursorError(WorkflowApplicationError):
+    code = "invalid_cursor"
+
+    def __init__(self) -> None:
+        super().__init__("workflow cursor is invalid")
+
+
+class WorkflowRequestError(WorkflowApplicationError):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        error: dict[str, object] = {"code": code, "message": message}
+        if details:
+            error["details"] = details
+        self.status_code = status_code
+        self.detail = {"error": error}
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class WorkflowValidationError(WorkflowApplicationError):
     issues: tuple[ValidationIssue, ...]
@@ -38,8 +62,10 @@ class WorkflowValidationError(WorkflowApplicationError):
 
 
 __all__ = [
+    "InvalidWorkflowCursorError",
     "WorkflowApplicationError",
     "WorkflowNotFoundError",
     "WorkflowPolicyNotFoundError",
+    "WorkflowRequestError",
     "WorkflowValidationError",
 ]

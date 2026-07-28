@@ -864,6 +864,54 @@ async def test_hold_rechecks_idempotency_after_wallet_lock(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("amount_micro", "ref_id", "meta"),
+    [
+        (600, "gen-1", {"source": "initial"}),
+        (500, "gen-2", {"source": "initial"}),
+        (500, "gen-1", {"source": "changed"}),
+    ],
+)
+async def test_hold_rejects_idempotency_semantic_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    amount_micro: int,
+    ref_id: str,
+    meta: dict[str, str],
+) -> None:
+    existing_tx = SimpleNamespace(
+        kind="hold",
+        amount_micro=-500,
+        ref_type="generation",
+        ref_id="gen-1",
+        meta={"hold_delta": 500, "source": "initial"},
+        created_by_admin=None,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> Any:
+        return existing_tx
+
+    async def fail_get_wallet(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("conflicting replay must fail before wallet locking")
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fail_get_wallet)
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.hold(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            amount_micro,
+            ref_type="generation",
+            ref_id=ref_id,
+            idempotency_key="hold:gen-1",
+            meta=meta,
+        )
+
+    assert exc.value.code == "IDEMPOTENCY_CONFLICT"
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_hold_rejects_nonpositive_amount(monkeypatch: pytest.MonkeyPatch):
     async def fake_existing_tx(*_args: Any) -> None:
         return None

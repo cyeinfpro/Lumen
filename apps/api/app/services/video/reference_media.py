@@ -23,15 +23,11 @@ from lumen_core.url_security import is_private_host, resolve_public_http_target
 from lumen_core.volcano_assets import volcano_asset_reference_url
 
 from ...config import settings
+from ...images.domain.variants import VIDEO_REFERENCE_VARIANT
 from ...public_urls import resolve_public_base_url
 from ...volcano_asset_media import (
     VOLCANO_ASSET_IMAGE_KIND,
     VOLCANO_ASSET_VIDEO_KIND,
-)
-from ...video_reference_images import (
-    VIDEO_REFERENCE_IMAGE_KIND,
-    VideoReferenceImageError,
-    ensure_video_reference_image_variant,
 )
 from ...video_reference_videos import (
     VIDEO_REFERENCE_VIDEO_KIND,
@@ -43,7 +39,6 @@ from .errors import video_http_error
 from .reference_snapshots import build_reference_media_snapshots
 
 
-ImageVariantLoader = Callable[..., Awaitable[Any]]
 VideoVariantLoader = Callable[..., Awaitable[Any]]
 PublicBaseResolver = Callable[[Request, AsyncSession], Awaitable[str]]
 PublicTargetResolver = Callable[..., Awaitable[Any]]
@@ -200,63 +195,17 @@ async def reference_image_upstream_public_url(
     public_base_url: str,
     *,
     required: bool = False,
-    variant_loader: ImageVariantLoader = ensure_video_reference_image_variant,
 ) -> tuple[str | None, dict[str, Any]]:
-    try:
-        variant = await variant_loader(
-            db,
-            image,
-            storage_root=settings.storage_root,
-        )
-    except VideoReferenceImageError as exc:
-        if required:
-            raise video_http_error(exc.code, exc.message, exc.status_code) from exc
-        logger.warning(
-            "video reference image variant unavailable; falling back to inline "
-            "media image_id=%s code=%s",
-            image.id,
-            exc.code,
-            exc_info=True,
-        )
-        return None, {
-            "upstream_reference_variant": None,
-            "upstream_reference_variant_error": {
-                "code": exc.code,
-                "message": exc.message[:300],
-            },
-        }
-    except Exception as exc:  # noqa: BLE001
-        if required:
-            raise video_http_error(
-                "video_reference_variant_failed",
-                "video reference image variant failed",
-                503,
-            ) from exc
-        logger.warning(
-            "video reference image variant failed; falling back to inline media "
-            "image_id=%s",
-            image.id,
-            exc_info=True,
-        )
-        return None, {
-            "upstream_reference_variant": None,
-            "upstream_reference_variant_error": {
-                "code": "video_reference_variant_failed",
-                "message": str(exc)[:300],
-            },
-        }
+    del db, required
     return (
         reference_image_public_url(
             image,
             public_base_url,
-            variant=VIDEO_REFERENCE_IMAGE_KIND,
+            variant=VIDEO_REFERENCE_VARIANT,
         ),
         {
-            "upstream_reference_variant": VIDEO_REFERENCE_IMAGE_KIND,
-            "upstream_reference_storage_key": variant.storage_key,
+            "upstream_reference_variant": VIDEO_REFERENCE_VARIANT,
             "upstream_reference_mime": "image/jpeg",
-            "upstream_reference_width": variant.width,
-            "upstream_reference_height": variant.height,
         },
     )
 

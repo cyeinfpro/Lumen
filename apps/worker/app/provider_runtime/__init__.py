@@ -10,7 +10,6 @@ from .contracts import (
     UpstreamTimeouts,
 )
 from .errors import UpstreamCancelled, UpstreamError
-from .runtime import UpstreamRuntime
 
 __all__ = [
     "EndpointStat",
@@ -21,6 +20,5 @@ __all__ = [
     "ResolvedProvider",
     "UpstreamCancelled",
     "UpstreamError",
-    "UpstreamRuntime",
     "UpstreamTimeouts",
 ]

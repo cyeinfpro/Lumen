@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 from PIL import Image as PILImage
 
 from app.routes import workflows
-from app.workflow_services import serialization
+from app.workflows.adapters import serialization
+from app.workflows.application.errors import WorkflowRequestError
 
 
 def test_route_does_not_reexport_serialization_helpers() -> None:
@@ -25,14 +24,11 @@ def test_route_does_not_reexport_serialization_helpers() -> None:
         "_clean_string_list",
         "_safe_datetime",
         "_dict_or_empty",
-        "_encode_workflow_cursor",
-        "_decode_workflow_cursor",
         "_iso_now",
         "_storage_root",
         "_storage_path",
         "_showcase_gpt55_reference_data_url",
         "_SHOWCASE_GPT55_REFERENCE_MAX_BYTES",
-        "_WORKFLOW_CURSOR_VERSION",
     )
     for name in names:
         assert not hasattr(workflows, name)
@@ -54,40 +50,20 @@ def test_cleaning_helpers_preserve_order_limits_and_truncation() -> None:
     assert serialization._dict_or_empty([]) == {}
 
 
-def test_datetime_and_cursor_round_trip() -> None:
+def test_safe_datetime_normalizes_to_utc() -> None:
     naive = datetime(2026, 7, 11, 12, 30)
-    run = SimpleNamespace(id="run-1", updated_at=naive)
-    cursor = serialization._encode_workflow_cursor(  # type: ignore[arg-type]
-        run,
-        workflow_type="apparel",
-    )
-    decoded = serialization._decode_workflow_cursor(
-        cursor,
-        workflow_type="apparel",
-    )
-    assert decoded == (naive.replace(tzinfo=timezone.utc), "run-1")
     assert serialization._safe_datetime("2026-07-11T12:30:00Z") == naive.replace(
         tzinfo=timezone.utc
     )
     assert serialization._safe_datetime("invalid") is None
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"v": 999, "type": "", "id": "run-1", "updated_at": "2026-07-11T00:00:00Z"},
-        {"v": 1, "type": "wrong", "id": "run-1", "updated_at": "2026-07-11T00:00:00Z"},
-        {"v": 1, "type": "", "id": "", "updated_at": "2026-07-11T00:00:00Z"},
-        {"v": 1, "type": "", "id": "run-1", "updated_at": "2026-07-11T00:00:00"},
-    ],
-)
-def test_cursor_rejects_invalid_payloads(payload: dict[str, object]) -> None:
-    raw = json.dumps(payload).encode()
-    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    with pytest.raises(HTTPException) as excinfo:
-        serialization._decode_workflow_cursor(cursor, workflow_type=None)
-    assert excinfo.value.status_code == 422
-    assert excinfo.value.detail["error"]["code"] == "invalid_cursor"
+def test_legacy_workflow_cursor_codec_is_removed() -> None:
+    assert not hasattr(serialization, "_encode_workflow_cursor")
+    assert not hasattr(serialization, "_decode_workflow_cursor")
+    assert not hasattr(serialization, "encode_workflow_cursor")
+    assert not hasattr(serialization, "decode_workflow_cursor")
+    assert not hasattr(serialization, "WORKFLOW_CURSOR_VERSION")
 
 
 def test_storage_path_stays_inside_configured_root(
@@ -100,7 +76,7 @@ def test_storage_path_stays_inside_configured_root(
         == (tmp_path / "nested" / "file.json").resolve()
     )
     for invalid in ("", "\x00", "../escape", str((tmp_path / "absolute").resolve())):
-        with pytest.raises(HTTPException):
+        with pytest.raises(WorkflowRequestError):
             serialization._storage_path(invalid)
 
 

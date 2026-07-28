@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import asyncio
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +18,12 @@ import pytest
 from redis.exceptions import WatchError
 
 from app import account_limiter
+from app.upstream_parts.image_execution import ImageRequestContext
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 class FakeRedis:
@@ -818,7 +822,7 @@ async def test_upstream_accounting_unavailable_does_not_discard_success(
 
     monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
 
-    recorded = await upstream_services().providers.record_admin_image_call_or_raise(
+    recorded = await TEST_UPSTREAM_SERVICES.providers.record_admin_image_call_or_raise(
         Pool(),
         SimpleNamespace(
             name="acc1",
@@ -845,20 +849,24 @@ async def test_upstream_reservation_uses_stable_task_attempt_call_identity() -> 
         image_daily_quota=80,
         purposes=("image",),
     )
-    token = upstream_services().core.push_image_quota_context("task-1", 3)
-    try:
-        first = await upstream_services().providers.reserve_admin_image_call(  # noqa: SLF001
-            Pool(),
-            provider,
-            route="responses",
-        )
-        second = await upstream_services().providers.reserve_admin_image_call(  # noqa: SLF001
-            Pool(),
-            provider,
-            route="generations",
-        )
-    finally:
-        upstream_services().core.pop_image_quota_context(token)
+    request_context = ImageRequestContext.create(
+        trace_id="trace-1",
+        retry_attempt=3,
+        quota_task_id="task-1",
+        quota_attempt_epoch=3,
+    )
+    first = await TEST_UPSTREAM_SERVICES.providers.reserve_admin_image_call(  # noqa: SLF001
+        Pool(),
+        provider,
+        route="responses",
+        request_context=request_context,
+    )
+    second = await TEST_UPSTREAM_SERVICES.providers.reserve_admin_image_call(  # noqa: SLF001
+        Pool(),
+        provider,
+        route="generations",
+        request_context=request_context,
+    )
 
     assert first is not None
     assert second is not None
@@ -886,26 +894,29 @@ async def test_upstream_quota_claim_confirms_without_post_success_redis_write(
         raise AssertionError("reserved success must not perform a second Redis write")
 
     monkeypatch.setattr(account_limiter, "record_image_call", fail_record)
-    scope_token = upstream_services().core.push_image_quota_context("task-1", 1)
-    try:
-        async with upstream_services().providers.image_quota_claim(  # noqa: SLF001
-            Pool(),
-            provider,
-            route="responses",
-        ) as reservation:
-            assert reservation is not None
-            reservation.state = "started"
-            confirmed = (
-                await upstream_services().providers.record_admin_image_call_or_raise(
-                    Pool(),
-                    provider,
-                    task_id="task-1",
-                )
+    request_context = ImageRequestContext.create(
+        trace_id="trace-1",
+        quota_task_id="task-1",
+        quota_attempt_epoch=1,
+    )
+    async with TEST_UPSTREAM_SERVICES.providers.image_quota_claim(  # noqa: SLF001
+        Pool(),
+        provider,
+        route="responses",
+        request_context=request_context,
+    ) as reservation:
+        assert reservation is not None
+        reservation.state = "started"
+        confirmed = (
+            await TEST_UPSTREAM_SERVICES.providers.record_admin_image_call_or_raise(
+                Pool(),
+                provider,
+                task_id="task-1",
+                reservation=reservation,
             )
-            assert confirmed is True
-            assert reservation.state == "confirmed"
-    finally:
-        upstream_services().core.pop_image_quota_context(scope_token)
+        )
+        assert confirmed is True
+        assert reservation.state == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -921,18 +932,20 @@ async def test_upstream_quota_claim_releases_when_request_never_started() -> Non
         image_rate_limit="1/min",
         image_daily_quota=80,
     )
-    scope_token = upstream_services().core.push_image_quota_context("task-1", 1)
-    try:
-        async with upstream_services().providers.image_quota_claim(  # noqa: SLF001
-            Pool(),
-            provider,
-            route="responses",
-        ) as reservation:
-            assert reservation is not None
-            assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
-        assert reservation.state == "released"
-    finally:
-        upstream_services().core.pop_image_quota_context(scope_token)
+    request_context = ImageRequestContext.create(
+        trace_id="trace-1",
+        quota_task_id="task-1",
+        quota_attempt_epoch=1,
+    )
+    async with TEST_UPSTREAM_SERVICES.providers.image_quota_claim(  # noqa: SLF001
+        Pool(),
+        provider,
+        route="responses",
+        request_context=request_context,
+    ) as reservation:
+        assert reservation is not None
+        assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
+    assert reservation.state == "released"
 
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
 

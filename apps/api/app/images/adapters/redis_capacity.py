@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import time
 import uuid
 from typing import Any
 
@@ -21,12 +20,14 @@ logger = logging.getLogger(__name__)
 _RESERVE_LUA = """
 local leases = KEYS[1]
 local weights = KEYS[2]
-local now_ms = tonumber(ARGV[1])
-local expires_ms = tonumber(ARGV[2])
-local lease_id = ARGV[3]
-local weight = tonumber(ARGV[4])
-local max_count = tonumber(ARGV[5])
-local max_weight = tonumber(ARGV[6])
+local server_time = redis.call('TIME')
+local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
+local lease_id = ARGV[1]
+local weight = tonumber(ARGV[2])
+local max_count = tonumber(ARGV[3])
+local max_weight = tonumber(ARGV[4])
+local ttl_ms = tonumber(ARGV[5])
+local expires_ms = now_ms + ttl_ms
 
 local expired = redis.call('ZRANGEBYSCORE', leases, '-inf', now_ms)
 if #expired > 0 then
@@ -47,7 +48,7 @@ end
 
 redis.call('ZADD', leases, expires_ms, lease_id)
 redis.call('HSET', weights, lease_id, weight)
-local ttl = math.max(60, math.ceil((expires_ms - now_ms) / 1000) * 2)
+local ttl = math.max(60, math.ceil(ttl_ms / 1000) * 2)
 redis.call('EXPIRE', leases, ttl)
 redis.call('EXPIRE', weights, ttl)
 return {1, current_count + 1, current_weight + weight}
@@ -57,9 +58,13 @@ _RENEW_LUA = """
 if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 0 then
   return 0
 end
-redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
-redis.call('EXPIRE', KEYS[1], ARGV[3])
-redis.call('EXPIRE', KEYS[2], ARGV[3])
+local server_time = redis.call('TIME')
+local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
+local ttl_ms = tonumber(ARGV[2])
+redis.call('ZADD', KEYS[1], now_ms + ttl_ms, ARGV[1])
+local ttl = math.max(60, math.ceil(ttl_ms / 1000) * 2)
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
 return 1
 """
 
@@ -113,8 +118,6 @@ class RedisCapacity:
         self,
         estimate: ImageResourceEstimate,
     ) -> _RedisCapacityLease:
-        now_ms = int(time.time() * 1000)
-        expires_ms = now_ms + self.limits.lease_ttl_seconds * 1000
         lease_id = uuid.uuid4().hex
         result = await _resolve(
             self.redis.eval(
@@ -122,12 +125,11 @@ class RedisCapacity:
                 2,
                 self.leases_key,
                 self.weights_key,
-                str(now_ms),
-                str(expires_ms),
                 lease_id,
                 str(estimate.peak_bytes),
                 str(self.limits.max_concurrency),
                 str(self.limits.max_peak_bytes),
+                str(self.limits.lease_ttl_seconds * 1000),
             )
         )
         if int(result[0]) != 1:
@@ -135,7 +137,6 @@ class RedisCapacity:
         return _RedisCapacityLease(self, lease_id)
 
     async def _renew(self, lease_id: str) -> bool:
-        expires_ms = int(time.time() * 1000) + self.limits.lease_ttl_seconds * 1000
         result = await _resolve(
             self.redis.eval(
                 _RENEW_LUA,
@@ -143,8 +144,7 @@ class RedisCapacity:
                 self.leases_key,
                 self.weights_key,
                 lease_id,
-                str(expires_ms),
-                str(self.limits.lease_ttl_seconds * 2),
+                str(self.limits.lease_ttl_seconds * 1000),
             )
         )
         return int(result) == 1

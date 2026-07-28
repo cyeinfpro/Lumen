@@ -10,11 +10,13 @@ export type LeaderClock = {
 };
 
 const BROWSER_CLOCK: LeaderClock = {
-  now: Date.now,
-  setTimeout,
-  clearTimeout,
-  setInterval,
-  clearInterval,
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) =>
+    globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (timer) => globalThis.clearTimeout(timer),
+  setInterval: (callback, delayMs) =>
+    globalThis.setInterval(callback, delayMs),
+  clearInterval: (timer) => globalThis.clearInterval(timer),
 };
 
 export class LeaderElection {

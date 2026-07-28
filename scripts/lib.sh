@@ -748,44 +748,6 @@ lumen_env_value() {
     printf '%s' "${raw}"
 }
 
-lumen_set_env_value_in_file() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    if [ -z "${file}" ] || [ -z "${key}" ]; then
-        log_error "lumen_set_env_value_in_file：参数不完整。"
-        return 1
-    fi
-    if [ ! -f "${file}" ]; then
-        log_error "lumen_set_env_value_in_file：${file} 不存在。"
-        return 1
-    fi
-    if [[ ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        log_error "lumen_set_env_value_in_file：非法 key=${key}。"
-        return 1
-    fi
-    if printf '%s' "${value}" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-        log_error "lumen_set_env_value_in_file：${key} 不能包含控制字符。"
-        return 1
-    fi
-    local tmp
-    tmp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
-    awk -v k="${key}" -v v="${value}" '
-        BEGIN { done = 0 }
-        $0 ~ "^" k "=" {
-            if (done == 0) {
-                print k "=" v
-                done = 1
-            }
-            next
-        }
-        { print }
-        END {
-            if (done == 0) print k "=" v
-        }
-    ' "${file}" > "${tmp}" && mv "${tmp}" "${file}"
-}
-
 lumen_find_shared_env() {
     local script_root="${1:-}"
     local candidate

@@ -7,8 +7,7 @@ from typing import Any
 from fastapi import Request, Response
 from fastapi.responses import PlainTextResponse
 
-import request_bodies
-
+from . import http_bodies
 from .application.auth import AuthFailure, authenticate, upstream_credential
 from .application.job_service import JobServiceFailure
 from .application.reference_service import ReferenceFailure
@@ -72,7 +71,7 @@ async def create_image_job_handler(
 
     try:
         upstream = upstream_credential(request.headers, identity)
-        raw = await request_bodies.read_request_body_bounded(
+        raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=runtime.settings.max_request_bytes,
         )
@@ -123,7 +122,7 @@ async def upload_reference_handler(
     identity,
 ) -> dict[str, object]:
     try:
-        raw = await request_bodies.read_request_body_bounded(
+        raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=runtime.settings.max_ref_bytes,
         )

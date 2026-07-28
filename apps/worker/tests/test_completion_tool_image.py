@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,9 +11,17 @@ import pytest
 from PIL import Image as PILImage
 
 from app.storage import LocalStorage
+from app.storage_writes import StorageWriteCoordinator
 from app.tasks.completion_parts import default_runtime as completion
-from app.tasks.generation_parts import default_runtime as generation
 from app.tasks.completion_parts import tool_images
+from app.tasks.completion_parts.image_storage_runtime import (
+    CompletionToolImageBudget,
+    CompletionToolImageCodec,
+    CompletionToolImageEvents,
+    CompletionToolImageRepository,
+    CompletionToolImageService,
+    CompletionToolImageStorage,
+)
 
 
 def _png_bytes(width: int, height: int) -> bytes:
@@ -89,7 +98,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         async def commit(self) -> None:
             events.append("commit")
 
-    async def store(**kwargs: Any) -> dict[str, Any]:
+    async def store(_self: Any, **kwargs: Any) -> dict[str, Any]:
         events.append("storage_orm_stage")
         assert kwargs["raw_image"] == b"raw-image"
         await kwargs["session"].commit()
@@ -98,17 +107,46 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
     async def publish(*_args: Any, **_kwargs: Any) -> None:
         events.append("sse_publish")
 
-    monkeypatch.setattr(
-        completion,
-        "_ensure_completion_tool_image_wallet_budget",
-        ensure_budget,
-    )
-    monkeypatch.setattr(completion, "_decode_upstream_image_b64", decode)
-    monkeypatch.setattr(completion, "SessionLocal", lambda: Session())
-    monkeypatch.setattr(completion, "_store_completion_tool_image", store)
-    monkeypatch.setattr(completion, "publish_event", publish)
+    @asynccontextmanager
+    async def cleanup(_keys: list[str]):
+        yield
 
-    payload, reserved = await completion._store_and_publish_completion_tool_image(
+    async def write_files(_files: list[tuple[str, bytes]]) -> list[str]:
+        return []
+
+    async def record_usage(**_kwargs: Any) -> None:
+        return None
+
+    service = CompletionToolImageService(
+        budget=CompletionToolImageBudget(reserve=ensure_budget),
+        codec=CompletionToolImageCodec(
+            decode=decode,
+            format_and_meta=lambda _raw: (),
+            sha256=lambda _raw: "",
+            upstream_error_type=RuntimeError,
+            bad_response_error_code="bad_response",
+        ),
+        repository=CompletionToolImageRepository(
+            session_factory=lambda: Session(),
+            new_id=lambda: "image-1",
+            record_usage=record_usage,
+            image_model=object,
+            image_variant_model=object,
+            message_model=object,
+            public_url=str,
+        ),
+        storage=CompletionToolImageStorage(
+            write_files=write_files,
+            cleanup_on_error=cleanup,
+        ),
+        events=CompletionToolImageEvents(
+            publish=publish,
+            image_event="completion.image",
+        ),
+    )
+    monkeypatch.setattr(CompletionToolImageService, "store_tool_image", store)
+
+    payload, reserved = await service.store_and_publish_tool_image(
         redis=object(),
         user_id="user-1",
         channel="task:comp-1",
@@ -458,6 +496,23 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
 ) -> None:
     local_storage = LocalStorage(tmp_path)
     message = SimpleNamespace(content={})
+    reserved: list[int] = []
+
+    class Lease:
+        released = 0
+
+        async def renew(self) -> bool:
+            return True
+
+        async def release(self) -> None:
+            self.released += 1
+
+    lease = Lease()
+
+    class Capacity:
+        async def reserve(self, bytes_required: int) -> Lease:
+            reserved.append(bytes_required)
+            return lease
 
     class Session:
         def __init__(self) -> None:
@@ -475,16 +530,22 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
     async def record_usage(**_kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(completion, "storage", local_storage)
-    monkeypatch.setattr(generation, "storage", local_storage)
     monkeypatch.setattr(
         tool_images,
         "_record_completion_tool_image_usage",
         record_usage,
     )
+    coordinator = StorageWriteCoordinator(
+        storage=local_storage,
+        capacity=Capacity(),  # type: ignore[arg-type]
+        lease_ttl_seconds=60,
+    )
+    service = completion._build_completion_tool_image_service(  # noqa: SLF001
+        coordinator
+    )
 
     with pytest.raises(RuntimeError, match="commit failed"):
-        await completion._store_completion_tool_image(
+        await service.store_tool_image(
             session=Session(),
             task_id="comp-commit-failure",
             attempt_epoch=1,
@@ -495,4 +556,7 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
             billing_budget_micro=100,
         )
 
+    assert len(reserved) == 1
+    assert reserved[0] > len(_png_bytes(32, 24))
+    assert lease.released == 1
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []

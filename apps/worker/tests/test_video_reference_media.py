@@ -52,6 +52,7 @@ from lumen_core.video_providers import VideoProviderDefinition
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png"
 _JPEG_BYTES = b"\xff\xd8\xff\xe0fake-jpeg"
+_WEBP_BYTES = b"RIFF\x10\x00\x00\x00WEBPfake"
 
 
 def test_provider_task_path_segment_encodes_reserved_characters() -> None:
@@ -128,7 +129,7 @@ async def test_reference_media_bytes_accepts_audio_url_snapshots() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
+async def test_reference_media_bytes_reads_eager_upstream_variant_key_and_mime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generation = SimpleNamespace(
@@ -140,6 +141,9 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
                     "label": "图片 1",
                     "ref_id": "ref:image:1",
                     "url": "https://lumen.example/api/images/reference/image-1/binary",
+                    "storage_key": "u/user-1/original.webp",
+                    "mime": "image/webp",
+                    "upstream_reference_variant": "video_ref_2048_jpg",
                     "upstream_reference_storage_key": "u/user-1/ref.jpg",
                     "upstream_reference_mime": "image/jpeg",
                 }
@@ -149,7 +153,7 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
 
     async def fake_get_bytes(key: str) -> bytes:
         assert key == "u/user-1/ref.jpg"
-        return b"image"
+        return _JPEG_BYTES
 
     monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", fake_get_bytes)
 
@@ -160,7 +164,57 @@ async def test_reference_media_bytes_preserves_image_url_snapshot_bytes(
     assert result[0].label == "图片 1"
     assert result[0].ref_id == "ref:image:1"
     assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
-    assert result[0].data == b"image"
+    assert result[0].data == _JPEG_BYTES
+    assert result[0].mime == "image/jpeg"
+
+
+@pytest.mark.parametrize(
+    ("storage_key", "original_mime"),
+    [
+        ("u/user-1/original.png", "image/png"),
+        ("u/user-1/original.webp", "image/webp"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reference_media_bytes_keeps_lazy_variant_url_without_original_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_key: str,
+    original_mime: str,
+) -> None:
+    url = (
+        "https://lumen.example/api/images/reference/image-1/binary"
+        "?variant=video_ref_2048_jpg"
+    )
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "url": url,
+                    "storage_key": storage_key,
+                    "mime": original_mime,
+                    "upstream_reference_variant": "video_ref_2048_jpg",
+                    "upstream_reference_mime": "image/jpeg",
+                }
+            ]
+        },
+    )
+    read_keys: list[str] = []
+
+    async def fake_get_bytes(key: str) -> bytes:
+        read_keys.append(key)
+        return b"unexpected-original-bytes"
+
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", fake_get_bytes)
+
+    result = await _reference_media_bytes(generation)
+
+    assert read_keys == []
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].url == url
+    assert result[0].data is None
     assert result[0].mime == "image/jpeg"
 
 
@@ -175,25 +229,97 @@ async def test_reference_media_bytes_url_snapshot_survives_missing_variant_bytes
                 {
                     "kind": "image",
                     "url": "https://lumen.example/api/images/reference/image-1/binary",
+                    "storage_key": "u/user-1/original.png",
+                    "mime": "image/png",
+                    "upstream_reference_variant": "video_ref_2048_jpg",
                     "upstream_reference_storage_key": "u/user-1/ref.jpg",
                     "upstream_reference_mime": "image/jpeg",
                 }
             ]
         },
     )
+    read_keys: list[str] = []
 
     async def failing_get_bytes(key: str) -> bytes:
+        read_keys.append(key)
         raise FileNotFoundError(key)
 
     monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", failing_get_bytes)
 
     result = await _reference_media_bytes(generation)
 
+    assert read_keys == ["u/user-1/ref.jpg"]
     assert len(result) == 1
     assert result[0].kind == "image"
     assert result[0].url == "https://lumen.example/api/images/reference/image-1/binary"
     assert result[0].data is None
     assert result[0].mime == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_pairs_local_inline_original_key_and_mime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "storage_key": "u/user-1/original.webp",
+                    "mime": "image/webp",
+                }
+            ]
+        },
+    )
+
+    async def fake_get_bytes(key: str) -> bytes:
+        assert key == "u/user-1/original.webp"
+        return _WEBP_BYTES
+
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", fake_get_bytes)
+
+    result = await _reference_media_bytes(generation)
+
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].url is None
+    assert result[0].data == _WEBP_BYTES
+    assert result[0].mime == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_ignores_variant_without_url_or_upstream_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "storage_key": "u/user-1/original.png",
+                    "mime": "image/png",
+                    "upstream_reference_variant": "video_ref_2048_jpg",
+                    "upstream_reference_mime": "image/jpeg",
+                }
+            ]
+        },
+    )
+
+    async def fake_get_bytes(key: str) -> bytes:
+        assert key == "u/user-1/original.png"
+        return _PNG_BYTES
+
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", fake_get_bytes)
+
+    result = await _reference_media_bytes(generation)
+
+    assert len(result) == 1
+    assert result[0].kind == "image"
+    assert result[0].url is None
+    assert result[0].data == _PNG_BYTES
+    assert result[0].mime == "image/png"
 
 
 @pytest.mark.asyncio
@@ -1313,6 +1439,72 @@ async def test_unified_video_create_retries_invalid_url_with_data_urls() -> None
     assert client.requests[1]["body"]["images"] == [
         "data:image/jpeg;base64," + base64.b64encode(_JPEG_BYTES).decode("ascii")
     ]
+
+
+@pytest.mark.asyncio
+async def test_unified_video_create_retries_lazy_reference_url_by_fetching_data_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="google-omni-flash",
+        kind="omni_flash",
+        base_url="https://gateway.example.com",
+        api_key="sk-test",
+        models={"omni-flash:reference": "gemini_omni_flash"},
+    )
+    adapter = UnifiedVideoCreateAdapter(provider)
+    client = SequentialThirdPartyCaptureClient(
+        [
+            httpx.Response(400, json={"error": {"message": "Invalid URL"}}),
+            httpx.Response(200, json={"data": {"task_id": "omni-task-1"}}),
+        ]
+    )
+    adapter._client = lambda: client  # type: ignore[method-assign]
+    url = "https://lumen.example/api/images/reference/image-1/binary"
+    data_url = "data:image/jpeg;base64," + base64.b64encode(_JPEG_BYTES).decode("ascii")
+
+    async def fake_fetch_image_url_data_url(
+        raw_url: str,
+        *,
+        field: str,
+        fallback_mime: str | None = None,
+    ) -> str:
+        assert raw_url == url
+        assert field == "Omni Flash reference image"
+        assert fallback_mime == "image/jpeg"
+        return data_url
+
+    monkeypatch.setattr(
+        adapter,
+        "_fetch_image_url_data_url",
+        fake_fetch_image_url_data_url,
+    )
+
+    result = await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-1",
+            user_id="user-1",
+            action="reference",
+            model="omni-flash",
+            upstream_model="gemini_omni_flash",
+            prompt="keep these references consistent",
+            duration_s=6,
+            resolution="720p",
+            aspect_ratio="16:9",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="image",
+                    url=url,
+                    mime="image/jpeg",
+                )
+            ],
+        )
+    )
+
+    assert result.provider_task_id == "omni-task-1"
+    assert len(client.requests) == 2
+    assert client.requests[0]["body"]["images"] == [url]
+    assert client.requests[1]["body"]["images"] == [data_url]
 
 
 @pytest.mark.asyncio

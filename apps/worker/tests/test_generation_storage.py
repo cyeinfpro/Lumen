@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,35 +26,109 @@ os.environ.setdefault(
 from lumen_core.constants import (
     EV_GEN_FAILED,
     EV_GEN_RETRYING,
+    RETRY_BACKOFF_SECONDS,
+    GenerationErrorCode as EC,
     GenerationStatus,
     MessageStatus,
 )
+from lumen_core.models import PosterMaster, PosterRender
 from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
+from app.config import settings
+from app.provider_runtime.errors import UpstreamError
+from app import runtime_settings
 from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
-
-
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
-
 
 from app.tasks.generation_parts import (
+    image_artifact_contracts,
+    lease as generation_lease,
     lifecycle,
+    persistence,
     queue as generation_queue,
+    queue_claim,
+    request_options,
+    retry_state,
     success as generation_success,
+    workflow_service,
     workflow_hooks,
 )
+from app.tasks.generation_parts.default_runtime import build_generation_runtime
+from app.tasks.generation_parts.composition_ports import (
+    DefaultGenerationArtifacts,
+)
+from app.tasks.generation_parts.errors import (
+    LeaseLost,
+    StaleGenerationAttempt,
+    TaskCancelled,
+)
+
+
+generation_runtime = build_generation_runtime()
+generation_services = generation_runtime.deps
+
+
+class _SessionStore:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def session(self) -> Any:
+        return self._session
+
+
+class _FakeEvents:
+    def __init__(
+        self,
+        *,
+        publish: Any | None = None,
+        deliver: Any | None = None,
+    ) -> None:
+        self._publish = publish
+        self._deliver = deliver
+
+    async def publish(self, *args: Any, **kwargs: Any) -> None:
+        if self._publish is not None:
+            await self._publish(*args, **kwargs)
+
+    async def deliver(self, *args: Any, **kwargs: Any) -> None:
+        if self._deliver is not None:
+            await self._deliver(*args, **kwargs)
+
+    async def deliver_many(self, redis: Any, deliveries: list[Any]) -> None:
+        for delivery in deliveries:
+            await self.deliver(redis, delivery)
+
+
+class _NoopBilling:
+    async def release(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def settle(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def flush_after_commit(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def settle_unknown_upstream(
+        self,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        return None
+
+
+class _QueueService:
+    expose_provider_diagnostics = False
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.provider_cooldowns: dict[str, float] = {}
+
+    def configured_capacity(self) -> int:
+        return self.capacity
+
+    async def resolve_capacity(self) -> int:
+        return self.capacity
 
 
 class FakeStorage:
@@ -186,7 +261,7 @@ class FakeRedis:
 
     async def eval(self, *args: Any) -> int:
         script = args[0]
-        if script == generation._RELEASE_LEASE_LUA:
+        if script == generation_lease.RELEASE_LEASE_LUA:
             key = args[2]
             token = args[3]
             if self.store.get(key) == token:
@@ -242,7 +317,7 @@ class FakeRedis:
             await self.zrem(provider_key, task_id)
             await self.zrem(global_key, active_member)
             return await self.delete(task_provider_key)
-        if script != generation._RESERVE_IMAGE_SLOT_LUA:
+        if script != queue_claim.RESERVE_IMAGE_SLOT_LUA:
             raise NotImplementedError(script)
         (
             provider_zset,
@@ -293,8 +368,8 @@ class FakeRedis:
 async def test_generation_conversation_alive_check_filters_deleted_rows() -> None:
     session = FakeStatementSession()
 
-    with pytest.raises(generation._TaskCancelled):
-        await generation._ensure_generation_conversation_alive(
+    with pytest.raises(TaskCancelled):
+        await persistence.ensure_generation_conversation_alive(
             session,
             message_id="msg-1",
             user_id="user-1",
@@ -326,8 +401,8 @@ async def test_await_with_lease_guard_cancels_work_when_cancel_flag_appears() ->
         finally:
             cancelled = True
 
-    with pytest.raises(generation._TaskCancelled):
-        await generation._await_with_lease_guard(
+    with pytest.raises(TaskCancelled):
+        await retry_state.await_with_lease_guard(
             work(),
             asyncio.Event(),
             redis=redis,
@@ -344,10 +419,10 @@ async def test_cancel_after_upstream_result_aborts_before_local_finalize() -> No
     await redis.set("task:gen-after-upstream:cancel", "1")
 
     with pytest.raises(
-        generation._TaskCancelled,
+        TaskCancelled,
         match="cancelled after upstream result",
     ):
-        await generation._raise_if_generation_interrupted(
+        await lifecycle.raise_if_generation_interrupted(
             redis,
             "gen-after-upstream",
             asyncio.Event(),
@@ -367,18 +442,18 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
         generation_success._validate_result_and_publish_finalizing
     )
     assert '"cancelled after upstream result"' in validation_source
-    assert "_postprocess_raw_generated_image(" in inspect.getsource(
+    assert "g.provider.postprocess(" in inspect.getsource(
         generation_success._postprocess_generated_image
     )
 
     storage_source = inspect.getsource(generation_success._write_artifact_files)
     storage_guard = storage_source.index('"cancelled before storage write"')
     storage_write = storage_source.index(
-        "_write_generation_files(",
+        "g.artifacts.write_files(",
         storage_guard,
     )
     lease_guard = storage_source.rindex(
-        "_await_with_lease_guard(",
+        "await_with_lease_guard(",
         0,
         storage_write,
     )
@@ -391,7 +466,7 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
         '"cancelled before generation persistence"'
     )
     attempt_fence = persistence_source.index(
-        "_ensure_generation_attempt_current(",
+        "ensure_generation_attempt_current(",
         persistence_guard,
     )
     billing_guard = persistence_source.index(
@@ -399,7 +474,7 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
         attempt_fence,
     )
     settle = persistence_source.index(
-        "worker_billing.settle_generation(",
+        "g.billing.settle(",
         billing_guard,
     )
     commit = persistence_source.index("await session.commit()", settle)
@@ -415,23 +490,23 @@ def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
     source = inspect.getsource(lifecycle.settle_existing_generated_image)
 
     cancel_check = source.index(
-        "if await generation_lease_ports()._is_cancelled(redis, task_id):"
+        "if await is_cancelled(redis, task_id):"
     )
     release = source.index(
-        "await generation_billing_ports().worker_billing.release_generation("
+        "await services.billing.release("
     )
     success_update = source.index(
-        "status=generation_domain_ports().GenerationStatus.SUCCEEDED.value"
+        "status=GenerationStatus.SUCCEEDED.value"
     )
     settle = source.index(
-        "await generation_billing_ports().worker_billing.settle_generation("
+        "await services.billing.settle("
     )
 
     assert cancel_check < release < success_update < settle
 
 
 def test_classify_disk_full_as_retriable() -> None:
-    decision = generation._classify_exception(
+    decision = retry_state.classify_exception(
         StorageDiskFullError("u/user/g/gen/orig.png"), has_partial=False
     )
 
@@ -440,7 +515,7 @@ def test_classify_disk_full_as_retriable() -> None:
 
 
 def test_classify_generation_timeout_as_retriable() -> None:
-    decision = generation._classify_exception(TimeoutError(), has_partial=False)
+    decision = retry_state.classify_exception(TimeoutError(), has_partial=False)
 
     assert decision.retriable is True
     assert "timeout" in decision.reason
@@ -450,7 +525,7 @@ def test_display_variant_preserves_alpha_for_transparent_png() -> None:
     src = PILImage.new("RGBA", (16, 16), (255, 0, 0, 0))
     src.putpixel((0, 0), (255, 0, 0, 255))
 
-    data, size = generation._make_display(src)
+    data, size = image_artifact_contracts.make_display(src)
 
     assert size == (16, 16)
     with PILImage.open(io.BytesIO(data)) as reloaded:
@@ -466,7 +541,7 @@ def test_generation_blurhash_skips_tiny_images(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setitem(sys.modules, "blurhash", SimpleNamespace(encode=fail_encode))
     tiny = PILImage.new("RGB", (3, 4), "white")
 
-    assert generation._compute_blurhash(tiny) is None  # noqa: SLF001
+    assert image_artifact_contracts.compute_blurhash(tiny) is None  # noqa: SLF001
 
 
 def test_recover_solid_background_transparency_from_opaque_image() -> None:
@@ -514,7 +589,7 @@ def test_recover_solid_background_transparency_rejects_noisy_edges() -> None:
 
 
 def test_image_request_options_force_png_for_transparent_background() -> None:
-    options = generation._image_request_options(
+    options = request_options.image_request_options(
         {
             "output_format": "webp",
             "output_compression": 90,
@@ -529,28 +604,28 @@ def test_image_request_options_force_png_for_transparent_background() -> None:
 
 
 def test_generation_epoch_update_requires_matching_row() -> None:
-    with pytest.raises(generation._StaleGenerationAttempt):
-        generation._ensure_generation_updated(FakeResult(0), "gen-1", 2)
+    with pytest.raises(StaleGenerationAttempt):
+        retry_state.ensure_generation_updated(FakeResult(0), "gen-1", 2)
 
-    generation._ensure_generation_updated(FakeResult(1), "gen-1", 2)
+    retry_state.ensure_generation_updated(FakeResult(1), "gen-1", 2)
 
 
 def test_validate_resolved_size_accepts_valid_preset() -> None:
-    assert generation._validate_resolved_size("3840x2160", "16:9") == (3840, 2160)
+    assert request_options.validate_resolved_size("3840x2160", "16:9") == (3840, 2160)
 
 
 def test_validate_resolved_size_rejects_hard_limit_violation() -> None:
     with pytest.raises(ValueError, match="longest side"):
-        generation._validate_resolved_size("3856x2160", "16:9")
+        request_options.validate_resolved_size("3856x2160", "16:9")
 
 
 def test_validate_resolved_size_rejects_aspect_drift() -> None:
     with pytest.raises(ValueError, match="aspect ratio drift"):
-        generation._validate_resolved_size("1024x1024", "16:9")
+        request_options.validate_resolved_size("1024x1024", "16:9")
 
 
 def test_validate_resolved_size_can_skip_aspect_drift_for_fixed_size() -> None:
-    assert generation._validate_resolved_size(
+    assert request_options.validate_resolved_size(
         "1024x1024",
         "16:9",
         validate_aspect_ratio=False,
@@ -558,7 +633,7 @@ def test_validate_resolved_size_can_skip_aspect_drift_for_fixed_size() -> None:
 
 
 def test_prompt_with_aspect_ratio_constraint_adds_square_guard() -> None:
-    prompt = generation._prompt_with_aspect_ratio_constraint(
+    prompt = request_options.prompt_with_aspect_ratio_constraint(
         "画一张活动分享图",
         "1:1",
     )
@@ -569,22 +644,22 @@ def test_prompt_with_aspect_ratio_constraint_adds_square_guard() -> None:
 
 
 def test_retry_delay_adds_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(generation.random, "uniform", lambda low, high: high)
+    monkeypatch.setattr(retry_state.random, "uniform", lambda low, high: high)
 
-    assert generation._retry_delay_seconds(1) == pytest.approx(12.0)
+    assert retry_state.retry_delay_seconds(1) == pytest.approx(12.0)
 
 
 def test_retry_backoff_grows_after_configured_table() -> None:
-    first_tail_attempt = len(generation.RETRY_BACKOFF_SECONDS) + 1
-    assert generation._base_retry_backoff_seconds(first_tail_attempt) == (
-        generation.RETRY_BACKOFF_SECONDS[-1] * 2
+    first_tail_attempt = len(RETRY_BACKOFF_SECONDS) + 1
+    assert retry_state.base_retry_backoff_seconds(first_tail_attempt) == (
+        RETRY_BACKOFF_SECONDS[-1] * 2
     )
 
 
 def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
-    exc = generation.UpstreamError(
+    exc = UpstreamError(
         "transparent material pipeline failed",
-        error_code=generation.EC.BAD_RESPONSE.value,
+        error_code=EC.BAD_RESPONSE.value,
         payload={
             "transparent_qc": {
                 "passed": False,
@@ -602,7 +677,7 @@ def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
         },
     )
 
-    assert generation._safe_generation_error_details(exc) == {
+    assert retry_state.safe_generation_error_details(exc) == {
         "transparent_qc": {
             "passed": False,
             "score": 0.1235,
@@ -618,25 +693,117 @@ def test_safe_generation_error_details_keeps_transparent_context_only() -> None:
 
 
 def test_primary_input_image_id_must_be_in_input_image_ids() -> None:
-    assert generation._primary_input_image_id_valid(None, []) is True
-    assert generation._primary_input_image_id_valid("img-1", ["img-1"]) is True
-    assert generation._primary_input_image_id_valid("img-2", ["img-1"]) is False
+    assert request_options.primary_input_image_id_valid(None, []) is True
+    assert request_options.primary_input_image_id_valid("img-1", ["img-1"]) is True
+    assert request_options.primary_input_image_id_valid("img-2", ["img-1"]) is False
 
 
 @pytest.mark.asyncio
 async def test_lease_renewer_sets_event_without_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = 0.0
+    attempts = 0
+
     class _Redis:
-        async def expire(self, *_args) -> None:
+        async def eval(self, *_args) -> None:
+            nonlocal attempts
+            attempts += 1
             raise RuntimeError("redis down")
 
-    monkeypatch.setattr(generation, "_LEASE_RENEW_S", 0)
+    async def _sleep(delay: float) -> None:
+        nonlocal clock
+        clock += delay
+
+    monkeypatch.setattr(generation_lease, "LEASE_TTL_S", 4)
+    monkeypatch.setattr(generation_lease, "LEASE_RENEW_S", 0)
+    monkeypatch.setattr(generation_lease, "LEASE_RENEW_RETRY_S", 0.25)
     lease_lost = asyncio.Event()
 
-    await generation._lease_renewer(_Redis(), "gen-1", "worker-1", lease_lost)
+    await generation_lease.lease_renewer(
+        _Redis(),
+        "gen-1",
+        "worker-1",
+        lease_lost,
+        monotonic=lambda: clock,
+        sleep=_sleep,
+    )
 
     assert lease_lost.is_set()
+    assert clock == pytest.approx(3.0)
+    assert attempts == 12
+
+
+@pytest.mark.asyncio
+async def test_lease_renewer_times_out_a_stalled_redis_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Redis:
+        async def eval(self, *_args) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(generation_lease, "LEASE_TTL_S", 0.04)
+    monkeypatch.setattr(generation_lease, "LEASE_RENEW_S", 0)
+    lease_lost = asyncio.Event()
+
+    await asyncio.wait_for(
+        generation_lease.lease_renewer(
+            _Redis(),
+            "gen-stalled",
+            "worker-1",
+            lease_lost,
+        ),
+        timeout=0.5,
+    )
+
+    assert lease_lost.is_set()
+
+
+@pytest.mark.asyncio
+async def test_lease_renewer_uses_redis_time_for_queue_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    zadds: list[tuple[str, dict[str, float]]] = []
+
+    class _Redis:
+        async def eval(self, *_args) -> int:
+            return 1
+
+        async def expire(self, *_args) -> int:
+            return 1
+
+        async def time(self) -> tuple[int, int]:
+            return (123, 500_000)
+
+        async def zadd(self, key: str, values: dict[str, float]) -> None:
+            zadds.append((key, values))
+
+    async def _stop_after_renewal(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(generation_lease, "LEASE_TTL_S", 60)
+    monkeypatch.setattr(generation_lease, "LEASE_RENEW_S", 10)
+
+    with pytest.raises(asyncio.CancelledError):
+        await generation_lease.lease_renewer(
+            _Redis(),
+            "gen-redis-time",
+            "worker-1",
+            asyncio.Event(),
+            image_provider_name="provider-a",
+            sleep=_stop_after_renewal,
+        )
+
+    assert zadds == [
+        (
+            generation_queue.IMAGE_QUEUE_ACTIVE_KEY,
+            {"gen-redis-time": pytest.approx(183.5)},
+        ),
+        (
+            generation_queue.image_provider_active_key("provider-a"),
+            {"gen-redis-time": pytest.approx(183.5)},
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -653,7 +820,7 @@ async def test_cancel_renewer_task_awaits_cancel_cleanup() -> None:
     task = asyncio.create_task(renewer())
     await asyncio.sleep(0)
 
-    await generation._cancel_renewer_task(task)
+    await generation_lease.cancel_renewer_task(task)
 
     assert cleaned.is_set()
     assert task.cancelled()
@@ -661,7 +828,6 @@ async def test_cancel_renewer_task_awaits_cancel_cleanup() -> None:
 
 @pytest.mark.asyncio
 async def test_mark_generation_attempt_retrying_requeues_and_publishes(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = FakeRedis()
     published: list[dict] = []
@@ -694,10 +860,13 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
             }
         )
 
-    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
-    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+    services = replace(
+        generation_services,
+        store=_SessionStore(session),
+        events=_FakeEvents(publish=fake_publish_event),
+    )
 
-    ok = await generation._mark_generation_attempt_retrying(
+    ok = await retry_state.mark_generation_attempt_retrying(
         redis,
         task_id="gen-1",
         message_id="msg-1",
@@ -708,6 +877,7 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
         delay=3.5,
         reason="lease_lost",
         max_attempts=5,
+        services=services,
     )
 
     assert ok is True
@@ -715,14 +885,13 @@ async def test_mark_generation_attempt_retrying_requeues_and_publishes(
     assert redis.enqueued == [
         ("run_generation", ("gen-1",), {"_defer_by": 3.5, "_job_try": 3})
     ]
-    assert generation._image_queue_not_before_key("gen-1") in redis.store
+    assert generation_queue.image_queue_not_before_key("gen-1") in redis.store
     assert published[0]["event_name"] == EV_GEN_RETRYING
     assert published[0]["data"]["reason"] == "lease_lost"
 
 
 @pytest.mark.asyncio
 async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attempt(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = FakeRedis()
     published: list[dict[str, Any]] = []
@@ -764,15 +933,19 @@ async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attem
             }
         )
 
-    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
-    monkeypatch.setattr(generation, "publish_event", fake_publish_event)
+    services = replace(
+        generation_services,
+        store=_SessionStore(session),
+        events=_FakeEvents(publish=fake_publish_event),
+    )
 
-    ok = await generation._maybe_requeue_stale_generation_attempt(
+    ok = await retry_state.maybe_requeue_stale_generation_attempt(
         redis,
         task_id="gen-1",
         attempt=2,
         reason="row_lock_lost",
         delay=1.25,
+        services=services,
     )
 
     assert ok is True
@@ -795,7 +968,6 @@ async def test_maybe_requeue_stale_generation_attempt_only_for_same_queued_attem
 
 @pytest.mark.asyncio
 async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = FakeRedis()
 
@@ -816,15 +988,19 @@ async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows(
     async def fail_publish(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("non-actionable stale rows must not publish")
 
-    monkeypatch.setattr(generation, "SessionLocal", lambda: _Session())
-    monkeypatch.setattr(generation, "publish_event", fail_publish)
+    services = replace(
+        generation_services,
+        store=_SessionStore(_Session()),
+        events=_FakeEvents(publish=fail_publish),
+    )
 
-    ok = await generation._maybe_requeue_stale_generation_attempt(
+    ok = await retry_state.maybe_requeue_stale_generation_attempt(
         redis,
         task_id="gen-1",
         attempt=2,
         reason="superseded",
         delay=1.0,
+        services=services,
     )
 
     assert ok is False
@@ -832,71 +1008,32 @@ async def test_maybe_requeue_stale_generation_attempt_skips_non_actionable_rows(
 
 
 @pytest.mark.asyncio
-async def test_redis_semaphore_does_not_fallback_to_non_atomic_incr() -> None:
-    class _Redis:
-        async def eval(self, *_args) -> None:
-            raise RuntimeError("lua disabled")
-
-        async def incr(self, *_args) -> int:
-            raise AssertionError("non-atomic fallback must not be used")
-
-    sem = generation._RedisSemaphore(_Redis(), "sem:test", 1, wait_s=0)
-
-    with pytest.raises(generation.UpstreamError) as exc_info:
-        await sem.__aenter__()
-
-    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
-
-
-@pytest.mark.asyncio
-async def test_redis_semaphore_sets_ttl_and_releases_with_lua() -> None:
-    class _Redis:
-        def __init__(self) -> None:
-            self.eval_calls: list[tuple[Any, ...]] = []
-
-        async def eval(self, *args: Any) -> int:
-            self.eval_calls.append(args)
-            if args[0] == generation._ACQUIRE_LUA:
-                return 1
-            if args[0] == generation._RELEASE_LUA:
-                return 0
-            raise AssertionError("unexpected lua script")
-
-        async def decr(self, *_args: Any) -> int:
-            raise AssertionError("release must use lua")
-
-    redis = _Redis()
-
-    async with generation._RedisSemaphore(redis, "sem:test", 2, wait_s=0):
-        pass
-
-    assert redis.eval_calls[0] == (
-        generation._ACQUIRE_LUA,
-        1,
-        "sem:test",
-        2,
-        generation._IMAGE_SEMAPHORE_KEY_TTL_S,
-    )
-    assert redis.eval_calls[1] == (generation._RELEASE_LUA, 1, "sem:test")
-
-
-@pytest.mark.asyncio
 async def test_image_queue_kick_skips_not_before_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = FakeRedis()
-    redis.store[generation._image_queue_not_before_key("gen-old")] = str(
+    redis.store[generation_queue.image_queue_not_before_key("gen-old")] = str(
         time.time() + 60
     )
 
-    async def fake_queued_generation_ids(_limit: int) -> list[str]:
+    async def fake_queued_generation_ids(
+        _limit: int,
+        *,
+        services: Any,
+    ) -> list[str]:
+        _ = services
         return ["gen-old", "gen-ready"]
 
     monkeypatch.setattr(
-        generation, "_queued_generation_ids", fake_queued_generation_ids
+        generation_queue,
+        "queued_generation_ids",
+        fake_queued_generation_ids,
     )
 
-    await generation._kick_image_queue(redis)
+    await generation_queue.kick_image_queue(
+        redis,
+        services=generation_services,
+    )
 
     assert [args[0] for _name, args, _kwargs in redis.enqueued] == ["gen-ready"]
 
@@ -908,18 +1045,25 @@ async def test_image_queue_does_not_select_provider_when_full(
     from app import provider_pool
 
     redis = FakeRedis()
-    redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY] = {
+    redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY] = {
         "acc1": time.time() + 60,
         "acc2": time.time() + 60,
     }
-    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 2)
+    services = replace(
+        generation_services,
+        queue=_QueueService(2),
+    )
 
     async def fail_get_pool():
         raise AssertionError("provider pool should not be touched when queue is full")
 
     monkeypatch.setattr(provider_pool, "get_pool", fail_get_pool)
 
-    reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
+    reserved = await queue_claim.reserve_image_queue_slot(
+        redis,
+        "gen-1",
+        services=services,
+    )
 
     assert reserved is None
 
@@ -936,14 +1080,18 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
     # ``_image_provider_active_key("acc1")`` and the global active set has the
     # corresponding task_id member with a future expiry score.
     other_task_expiry = time.time() + 60
-    redis.zsets[generation._image_provider_active_key("acc1")] = {
+    redis.zsets[generation_queue.image_provider_active_key("acc1")] = {
         "other-task": other_task_expiry,
     }
-    redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY] = {
+    redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY] = {
         "other-task": other_task_expiry,
     }
 
-    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+    async def fake_ready_generation_ids(
+        _redis: Any,
+        _limit: int,
+        **_kwargs: Any,
+    ) -> list[str]:
         return ["gen-1"]
 
     class _Pool:
@@ -974,21 +1122,31 @@ async def test_image_queue_reserves_different_provider_and_blocks_duplicate_task
     async def fake_get_pool():
         return _Pool()
 
-    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
     monkeypatch.setattr(
-        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+        queue_claim,
+        "ready_queued_generation_ids",
+        fake_ready_generation_ids,
     )
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    services = replace(generation_services, queue=_QueueService(4))
 
-    reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
-    duplicate = await generation._reserve_image_queue_slot(redis, "gen-1")
+    reserved = await queue_claim.reserve_image_queue_slot(
+        redis,
+        "gen-1",
+        services=services,
+    )
+    duplicate = await queue_claim.reserve_image_queue_slot(
+        redis,
+        "gen-1",
+        services=services,
+    )
 
     assert reserved is not None
     assert reserved.name == "acc2"
     assert duplicate is None
-    assert "gen-1" in redis.zsets[generation._image_provider_active_key("acc2")]
-    assert redis.store[generation._image_task_provider_key("gen-1")] == "acc2"
-    assert "gen-1" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
+    assert "gen-1" in redis.zsets[generation_queue.image_provider_active_key("acc2")]
+    assert redis.store[generation_queue.image_task_provider_key("gen-1")] == "acc2"
+    assert "gen-1" in redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY]
 
 
 @pytest.mark.asyncio
@@ -1003,7 +1161,7 @@ async def test_image_queue_reservation_survives_lock_release_failure(
             return value
 
         async def eval(self, *args: Any) -> int:
-            if args[0] == generation._RELEASE_LEASE_LUA:
+            if args[0] == generation_lease.RELEASE_LEASE_LUA:
                 raise RuntimeError("owner-CAS release unavailable")
             return await super().eval(*args)
 
@@ -1015,26 +1173,33 @@ async def test_image_queue_reservation_survives_lock_release_failure(
         image_concurrency=1,
     )
 
-    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+    async def fake_ready_generation_ids(
+        _redis: Any,
+        _limit: int,
+        **_kwargs: Any,
+    ) -> list[str]:
         return ["gen-1"]
 
-    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
     monkeypatch.setattr(
-        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+        queue_claim,
+        "ready_queued_generation_ids",
+        fake_ready_generation_ids,
     )
+    services = replace(generation_services, queue=_QueueService(4))
 
-    with caplog.at_level("ERROR", logger=generation.logger.name):
-        reserved = await generation._reserve_image_queue_slot(
+    with caplog.at_level("ERROR", logger=generation_queue.logger.name):
+        reserved = await queue_claim.reserve_image_queue_slot(
             redis,
             "gen-1",
             provider_override=provider,
+            services=services,
         )
 
     assert reserved is provider
-    assert redis.store[generation._image_task_provider_key("gen-1")] == "acc1"
-    assert "gen-1" in redis.zsets[generation._image_provider_active_key("acc1")]
-    assert "gen-1" in redis.zsets[generation._IMAGE_QUEUE_ACTIVE_KEY]
-    assert redis.store[generation._IMAGE_QUEUE_LANE_CURSOR_KEY] == "1"
+    assert redis.store[generation_queue.image_task_provider_key("gen-1")] == "acc1"
+    assert "gen-1" in redis.zsets[generation_queue.image_provider_active_key("acc1")]
+    assert "gen-1" in redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY]
+    assert redis.store[generation_queue.IMAGE_QUEUE_LANE_CURSOR_KEY] == "1"
     assert "preserving critical-section result" in caplog.text
 
 
@@ -1047,15 +1212,19 @@ async def test_image_queue_reserve_rejects_non_atomic_lock_release(
 
     redis = NonAtomicRedis()
 
-    with caplog.at_level("ERROR", logger=generation.logger.name):
-        with pytest.raises(generation.UpstreamError) as exc_info:
-            await generation._reserve_image_queue_slot(redis, "gen-1")
+    with caplog.at_level("ERROR", logger=generation_queue.logger.name):
+        with pytest.raises(UpstreamError) as exc_info:
+            await queue_claim.reserve_image_queue_slot(
+                redis,
+                "gen-1",
+                services=generation_services,
+            )
 
-    assert exc_info.value.error_code == generation.EC.LOCAL_QUEUE_FULL.value
+    assert exc_info.value.error_code == EC.LOCAL_QUEUE_FULL.value
     assert exc_info.value.payload["retry_after"] > 0
     assert "requires Redis EVAL or WATCH transaction" in str(exc_info.value)
     assert "refused without atomic release support" in caplog.text
-    assert generation._IMAGE_QUEUE_LOCK_KEY not in redis.store
+    assert generation_queue.IMAGE_QUEUE_LOCK_KEY not in redis.store
 
 
 @pytest.mark.asyncio
@@ -1066,13 +1235,17 @@ async def test_image_queue_provider_active_count_failure_defers_without_admit(
 
     class ActiveCountBrokenRedis(FakeRedis):
         async def zremrangebyscore(self, key: str, min_score, max_score) -> int:
-            if key == generation._image_provider_active_key("acc1"):
+            if key == generation_queue.image_provider_active_key("acc1"):
                 raise RuntimeError("redis down")
             return await super().zremrangebyscore(key, min_score, max_score)
 
     redis = ActiveCountBrokenRedis()
 
-    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+    async def fake_ready_generation_ids(
+        _redis: Any,
+        _limit: int,
+        **_kwargs: Any,
+    ) -> list[str]:
         return ["gen-1"]
 
     class _Pool:
@@ -1091,18 +1264,24 @@ async def test_image_queue_provider_active_count_failure_defers_without_admit(
     async def fake_get_pool():
         return _Pool()
 
-    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 4)
     monkeypatch.setattr(
-        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+        queue_claim,
+        "ready_queued_generation_ids",
+        fake_ready_generation_ids,
     )
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    services = replace(generation_services, queue=_QueueService(4))
 
-    reserved = await generation._reserve_image_queue_slot(redis, "gen-1")
+    reserved = await queue_claim.reserve_image_queue_slot(
+        redis,
+        "gen-1",
+        services=services,
+    )
 
     assert reserved is None
-    assert generation._image_task_provider_key("gen-1") not in redis.store
-    assert "gen-1" not in redis.zsets.get(generation._IMAGE_QUEUE_ACTIVE_KEY, {})
-    assert generation._image_queue_not_before_key("gen-1") in redis.store
+    assert generation_queue.image_task_provider_key("gen-1") not in redis.store
+    assert "gen-1" not in redis.zsets.get(generation_queue.IMAGE_QUEUE_ACTIVE_KEY, {})
+    assert generation_queue.image_queue_not_before_key("gen-1") in redis.store
 
 
 @pytest.mark.asyncio
@@ -1116,7 +1295,11 @@ async def test_image_queue_per_provider_concurrency_admits_multiple(
 
     queue: list[str] = ["gen-1", "gen-2", "gen-3", "gen-4"]
 
-    async def fake_ready_generation_ids(_redis, _limit: int) -> list[str]:
+    async def fake_ready_generation_ids(
+        _redis: Any,
+        _limit: int,
+        **_kwargs: Any,
+    ) -> list[str]:
         return queue[:1] if queue else []
 
     class _Pool:
@@ -1141,18 +1324,24 @@ async def test_image_queue_per_provider_concurrency_admits_multiple(
     async def fake_get_pool():
         return _Pool()
 
-    monkeypatch.setattr(generation, "_image_queue_capacity", lambda: 10)
     monkeypatch.setattr(
-        generation, "_ready_queued_generation_ids", fake_ready_generation_ids
+        queue_claim,
+        "ready_queued_generation_ids",
+        fake_ready_generation_ids,
     )
     monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    services = replace(generation_services, queue=_QueueService(10))
 
     admitted = []
     for _ in range(4):
         if not queue:
             break
         task_id = queue[0]
-        reserved = await generation._reserve_image_queue_slot(redis, task_id)
+        reserved = await queue_claim.reserve_image_queue_slot(
+            redis,
+            task_id,
+            services=services,
+        )
         if reserved is None:
             break
         admitted.append((task_id, reserved.name))
@@ -1161,30 +1350,40 @@ async def test_image_queue_per_provider_concurrency_admits_multiple(
     assert [name for _, name in admitted] == ["solo", "solo", "solo"]
     # 4th task can't be admitted — concurrency cap reached on the only provider.
     assert "gen-4" in queue
-    assert len(redis.zsets[generation._image_provider_active_key("solo")]) == 3
+    assert len(redis.zsets[generation_queue.image_provider_active_key("solo")]) == 3
 
 
 def test_image_queue_capacity_allows_high_provider_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(generation.settings, "image_generation_concurrency", 20)
+    monkeypatch.setattr(settings, "image_generation_concurrency", 20)
 
-    assert generation._image_queue_capacity() == 20
+    assert (
+        generation_queue.image_queue_capacity(
+            services=generation_services,
+        )
+        == 20
+    )
 
 
 @pytest.mark.asyncio
 async def test_image_queue_capacity_uses_runtime_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(generation.settings, "image_generation_concurrency", 4)
+    monkeypatch.setattr(settings, "image_generation_concurrency", 4)
 
     async def fake_resolve(key: str) -> str:
         assert key == "image.generation_concurrency"
         return "12"
 
-    monkeypatch.setattr(generation.runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
 
-    assert await generation._resolve_image_queue_capacity() == 12
+    assert (
+        await generation_queue.resolve_image_queue_capacity(
+            services=generation_services,
+        )
+        == 12
+    )
 
 
 @pytest.mark.asyncio
@@ -1196,7 +1395,6 @@ async def test_image_queue_capacity_uses_runtime_setting(
     ],
 )
 async def test_mark_generation_attempt_failed_preserves_canceled_message(
-    monkeypatch: pytest.MonkeyPatch,
     initial_message_status: MessageStatus | None,
     expected_message_status: MessageStatus,
 ) -> None:
@@ -1248,14 +1446,14 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
             }
         )
 
-    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
-    monkeypatch.setattr(
-        generation,
-        "_deliver_generation_event",
-        fake_deliver_generation_event,
+    services = replace(
+        generation_services,
+        store=_SessionStore(session),
+        billing=_NoopBilling(),
+        events=_FakeEvents(deliver=fake_deliver_generation_event),
     )
 
-    ok = await generation._mark_generation_attempt_failed(
+    ok = await retry_state.mark_generation_attempt_failed(
         object(),
         task_id="gen-1",
         message_id="msg-1",
@@ -1264,6 +1462,7 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
         error_code="retry_enqueue_failed",
         error_message="failed to enqueue retry",
         retriable=False,
+        services=services,
     )
 
     assert ok is True
@@ -1275,13 +1474,18 @@ async def test_mark_generation_attempt_failed_preserves_canceled_message(
 
 @pytest.mark.asyncio
 async def test_write_generation_files_deletes_created_keys_on_failure(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_storage = FakeStorage(fail_keys={"bad"})
-    monkeypatch.setattr(generation, "storage", fake_storage)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(fake_storage),
+    )
 
     with pytest.raises(StorageDiskFullError):
-        await generation._write_generation_files([("ok", b"1"), ("bad", b"2")])
+        await persistence.write_generation_files(
+            [("ok", b"1"), ("bad", b"2")],
+            services,
+        )
 
     assert set(fake_storage.put_keys) == {"ok", "bad"}
     assert fake_storage.deleted == ["ok"]
@@ -1289,14 +1493,17 @@ async def test_write_generation_files_deletes_created_keys_on_failure(
 
 @pytest.mark.asyncio
 async def test_write_generation_files_cleanup_continues_when_delete_fails(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_storage = FakeStorage(fail_keys={"bad"}, fail_delete_keys={"ok1"})
-    monkeypatch.setattr(generation, "storage", fake_storage)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(fake_storage),
+    )
 
     with pytest.raises(StorageDiskFullError):
-        await generation._write_generation_files(
-            [("ok1", b"1"), ("bad", b"2"), ("ok2", b"3")]
+        await persistence.write_generation_files(
+            [("ok1", b"1"), ("bad", b"2"), ("ok2", b"3")],
+            services,
         )
 
     assert set(fake_storage.deleted) == {"ok1", "ok2"}
@@ -1304,13 +1511,18 @@ async def test_write_generation_files_cleanup_continues_when_delete_fails(
 
 @pytest.mark.asyncio
 async def test_cleanup_storage_on_error_deletes_created_keys(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_storage = FakeStorage()
-    monkeypatch.setattr(generation, "storage", fake_storage)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(fake_storage),
+    )
 
     with pytest.raises(RuntimeError, match="commit failed"):
-        async with generation._cleanup_storage_on_error(["orig", "display"]):
+        async with persistence.cleanup_storage_on_error(
+            ["orig", "display"],
+            services,
+        ):
             raise RuntimeError("commit failed")
 
     assert set(fake_storage.deleted) == {"orig", "display"}
@@ -1320,8 +1532,8 @@ async def test_cleanup_storage_on_error_deletes_created_keys(
 @pytest.mark.parametrize(
     ("interrupt", "expected_exception"),
     [
-        ("lease", generation._LeaseLost),
-        ("cancel", generation._TaskCancelled),
+        ("lease", LeaseLost),
+        ("cancel", TaskCancelled),
     ],
 )
 async def test_generation_write_interrupt_cleans_real_storage_and_allows_retry(
@@ -1342,14 +1554,20 @@ async def test_generation_write_interrupt_cleans_real_storage_and_allows_retry(
         return original_put(key, data)
 
     monkeypatch.setattr(local_storage, "put_bytes_result", blocking_put)
-    monkeypatch.setattr(generation, "storage", local_storage)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(local_storage),
+    )
 
     redis = FakeRedis()
     lease_lost = asyncio.Event()
     key = "u/user-1/g/gen-write-race/orig.png"
     guarded_write = asyncio.create_task(
-        generation._await_with_lease_guard(
-            generation._write_generation_files([(key, b"first-attempt")]),
+        retry_state.await_with_lease_guard(
+            persistence.write_generation_files(
+                [(key, b"first-attempt")],
+                services,
+            ),
             lease_lost,
             redis=redis,
             task_id="gen-write-race",
@@ -1371,8 +1589,14 @@ async def test_generation_write_interrupt_cleans_real_storage_and_allows_retry(
     assert not local_storage.path_for(key).exists()
 
     retry_storage = LocalStorage(tmp_path)
-    monkeypatch.setattr(generation, "storage", retry_storage)
-    assert await generation._write_generation_files([(key, b"retry")]) == [key]
+    retry_services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(retry_storage),
+    )
+    assert await persistence.write_generation_files(
+        [(key, b"retry")],
+        retry_services,
+    ) == [key]
     assert retry_storage.get_bytes(key) == b"retry"
 
 
@@ -1384,11 +1608,14 @@ async def test_cleanup_storage_on_custom_base_exception_waits_for_delete(
     local_storage = LocalStorage(tmp_path)
     key = "u/user-1/g/gen-base-exception/orig.png"
     local_storage.put_bytes(key, b"image")
-    monkeypatch.setattr(generation, "storage", local_storage)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(local_storage),
+    )
 
-    with pytest.raises(generation._TaskCancelled):
-        async with generation._cleanup_storage_on_error([key]):
-            raise generation._TaskCancelled("cancelled during persistence")
+    with pytest.raises(TaskCancelled):
+        async with persistence.cleanup_storage_on_error([key], services):
+            raise TaskCancelled("cancelled during persistence")
 
     assert not local_storage.path_for(key).exists()
 
@@ -1442,7 +1669,7 @@ async def test_model_library_generate_hook_waits_for_all_multi_gender_tasks() ->
     )
     session = _ModelLibraryHookSession(run, step)
 
-    await generation._maybe_record_model_library_generate_image(
+    await workflow_service.record_model_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_model_library_generation(),
@@ -1473,7 +1700,7 @@ async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
     )
     session = _ModelLibraryHookSession(run, step)
 
-    await generation._maybe_record_model_library_generate_image(
+    await workflow_service.record_model_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_model_library_generation("task-4"),
@@ -1488,7 +1715,7 @@ async def test_model_library_generate_hook_completes_after_all_tasks() -> None:
 
 def test_workflow_hook_facade_keeps_requested_count_alias() -> None:
     assert (
-        generation._model_library_requested_count_from_step
+        workflow_service.model_library_requested_count_from_step
         is workflow_hooks.model_library_requested_count_from_step
     )
 
@@ -1507,12 +1734,12 @@ async def test_model_library_hook_injects_current_requested_count(
     )
     session = _ModelLibraryHookSession(run, step)
     monkeypatch.setattr(
-        generation,
-        "_model_library_requested_count_from_step",
+        workflow_hooks,
+        "model_library_requested_count_from_step",
         lambda _step: 1,
     )
 
-    await generation._maybe_record_model_library_generate_image(
+    await workflow_service.record_model_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_model_library_generation(),
@@ -1541,13 +1768,13 @@ async def test_model_library_hook_propagates_tagger_cancellation(
         raise asyncio.CancelledError
 
     monkeypatch.setattr(
-        generation,
+        workflow_service,
         "_load_model_library_tagger",
         lambda: cancel_tagger,
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await generation._maybe_record_model_library_generate_image(
+        await workflow_service.record_model_library_generate_image(
             session=session,
             user_id="user-1",
             generation=_model_library_generation(),
@@ -1567,7 +1794,7 @@ async def test_model_library_candidate_hook_locks_step_output_json_row() -> None
     )
     session = _ModelLibraryHookSession(run, step)
 
-    await generation._maybe_record_model_library_candidate_image(
+    await workflow_service.record_model_library_candidate_image(
         session=session,
         user_id="user-1",
         parent_upstream_request={
@@ -1641,7 +1868,7 @@ async def test_poster_style_library_hook_inserts_item_and_keeps_step_running() -
     )
     session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=None)
 
-    await generation._maybe_record_poster_style_library_generate_image(
+    await workflow_service.record_poster_style_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_poster_style_generation(),
@@ -1690,7 +1917,7 @@ async def test_poster_style_library_hook_completes_step_when_all_tasks_done() ->
     )
     session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=None)
 
-    await generation._maybe_record_poster_style_library_generate_image(
+    await workflow_service.record_poster_style_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_poster_style_generation("task-4"),
@@ -1722,7 +1949,7 @@ async def test_poster_style_library_hook_no_op_for_unrelated_workflow_action() -
         upstream_request={"workflow_action": "model_library_generate"},
     )
 
-    await generation._maybe_record_poster_style_library_generate_image(
+    await workflow_service.record_poster_style_library_generate_image(
         session=session,
         user_id="user-1",
         generation=unrelated,
@@ -1764,7 +1991,7 @@ async def test_poster_style_library_hook_skips_duplicate_cover_image() -> None:
     )
     session = _PosterStyleLibraryHookSession(run=run, step=step, existing_item=existing)
 
-    await generation._maybe_record_poster_style_library_generate_image(
+    await workflow_service.record_poster_style_library_generate_image(
         session=session,
         user_id="user-1",
         generation=_poster_style_generation("task-1"),
@@ -1809,7 +2036,7 @@ async def test_poster_workflow_hook_preserves_master_image_and_marks_ready() -> 
         }
     )
 
-    await generation._maybe_record_poster_workflow_image(
+    await workflow_service.record_poster_workflow_image(
         session=session,
         user_id="user-1",
         generation=generation_row,
@@ -1818,7 +2045,7 @@ async def test_poster_workflow_hook_preserves_master_image_and_marks_ready() -> 
 
     assert master.image_id == "existing-image"
     assert master.status == "ready"
-    assert session.get_calls == [(generation.PosterMaster, "master-1")]
+    assert session.get_calls == [(PosterMaster, "master-1")]
 
 
 @pytest.mark.asyncio
@@ -1839,7 +2066,7 @@ async def test_poster_workflow_hook_replaces_render_image_and_marks_ready() -> N
         }
     )
 
-    await generation._maybe_record_poster_workflow_image(
+    await workflow_service.record_poster_workflow_image(
         session=session,
         user_id="user-1",
         generation=generation_row,
@@ -1848,18 +2075,18 @@ async def test_poster_workflow_hook_replaces_render_image_and_marks_ready() -> N
 
     assert render.image_id == "new-image"
     assert render.status == "ready"
-    assert session.get_calls == [(generation.PosterRender, "render-1")]
+    assert session.get_calls == [(PosterRender, "render-1")]
 
 
 def test_run_generation_records_workflows_before_billing_and_commit() -> None:
     hook_source = inspect.getsource(generation_success._record_success_hooks)
-    model_hook = hook_source.index("_maybe_record_model_library_generate_image")
+    model_hook = hook_source.index("record_model_library_generate_image")
     poster_hook = hook_source.index(
-        "_maybe_record_poster_workflow_image",
+        "record_poster_workflow_image",
         model_hook,
     )
     style_hook = hook_source.index(
-        "_maybe_record_poster_style_library_generate_image",
+        "record_poster_style_library_generate_image",
         poster_hook,
     )
     assert model_hook < poster_hook < style_hook
@@ -1869,7 +2096,7 @@ def test_run_generation_records_workflows_before_billing_and_commit() -> None:
     )
     hooks = persistence_source.index("_record_success_hooks(")
     settle = persistence_source.index(
-        "worker_billing.settle_generation(",
+        "g.billing.settle(",
         hooks,
     )
     commit = persistence_source.index("await session.commit()", settle)
@@ -1887,10 +2114,10 @@ async def test_await_with_lease_guard_aborts_work() -> None:
         return "done"
 
     task = asyncio.create_task(
-        generation._await_with_lease_guard(slow_work(), lease_lost)
+        retry_state.await_with_lease_guard(slow_work(), lease_lost)
     )
     await started.wait()
     lease_lost.set()
 
-    with pytest.raises(generation._LeaseLost):
+    with pytest.raises(LeaseLost):
         await task

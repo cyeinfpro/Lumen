@@ -56,11 +56,20 @@ implementation is the normal `image_job` package, and `create_app()` stores an
 isolated runtime in `app.state.runtime`; importing the module does not start
 workers.
 
+`app.py` is the only production Python module at the deployment root. Database,
+payload, bounded-body, artifact, candidate, URL-security, and upstream
+implementations live under `image_job/`; upgrades remove legacy root-level
+copies before installing the package.
+
 Lumen authenticates to the sidecar with
 `Authorization: Bearer <IMAGE_JOB_SIDECAR_TOKEN>`. Job creation also sends the
 provider credential in `X-Lumen-Upstream-Authorization`; the sidecar stores and
-forwards that value only to the configured upstream. The two credentials must
-be generated and rotated independently.
+forwards that value only to the configured upstream. Queued/running credentials
+are persisted as AES-GCM ciphertext with `job_id` and owner hash bound as AAD,
+then erased on terminal, cancelled, or expired jobs. Configure and preserve
+`IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID` plus a dedicated
+`IMAGE_JOB_CREDENTIAL_MASTER_SECRET` of at least 32 bytes. The sidecar,
+provider, and encryption credentials must be generated independently.
 
 On the Lumen side, `stream_only` does not require this service. `auto` checks
 the sidecar URL and token only when a provider with image jobs enabled is

@@ -2,27 +2,32 @@
 
 from __future__ import annotations
 
-from ..provider_runtime.upstream_services import upstream_services
-
 from typing import Any
 from urllib.parse import quote
 
+from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    resolve_image_upstream_services,
+)
 from ..upstream_clients.url_validation import validate_image_job_control_url
 
 
 def _validated_byok_target_for_request(
     target: Any | None,
     url: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> Any | None:
     from ..provider_runtime.byok_context import validate_byok_http_target
 
     try:
         return validate_byok_http_target(target, url)
     except ValueError as exc:
-        raise upstream_services().infrastructure.UpstreamError(
+        services = resolve_image_upstream_services(runtime)
+        raise services.infrastructure.UpstreamError(
             "validated BYOK target does not match request URL",
             status_code=403,
-            error_code=upstream_services().infrastructure.EC.UPSTREAM_INVALID_REQUEST.value,
+            error_code=services.infrastructure.EC.UPSTREAM_INVALID_REQUEST.value,
             payload={"url": url},
         ) from exc
 
@@ -52,17 +57,22 @@ def _image_job_status_url(base: str, job_id: str) -> str:
     return f"{_image_jobs_url(base)}/{quote(job_id, safe='')}"
 
 
-def _validate_image_job_base_url(raw_base: str) -> str:
+def _validate_image_job_base_url(
+    raw_base: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> str:
     try:
         return validate_image_job_control_url(
             raw_base,
             allow_private_http=True,
         )
     except ValueError as exc:
-        raise upstream_services().infrastructure.UpstreamError(
+        services = resolve_image_upstream_services(runtime)
+        raise services.infrastructure.UpstreamError(
             f"image job configuration unavailable: {exc}",
             status_code=503,
-            error_code=upstream_services().infrastructure.EC.SERVICE_UNAVAILABLE.value,
+            error_code=services.infrastructure.EC.SERVICE_UNAVAILABLE.value,
             payload={
                 "path": "image-jobs",
                 "configuration": "sidecar_url",

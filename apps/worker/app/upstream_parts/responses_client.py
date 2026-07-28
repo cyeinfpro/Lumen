@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from ..provider_runtime.upstream_services import upstream_services
+from ..provider_runtime.upstream_services import (
+    ImageUpstreamRuntime,
+    UpstreamServices,
+    resolve_image_upstream_services,
+)
 
 import asyncio
 import json
@@ -37,6 +41,7 @@ def _runtime_pinned_target(
     *,
     base: str,
     proxy_url: str | None,
+    services: UpstreamServices,
 ) -> Any | None:
     if proxy_url is not None:
         return None
@@ -44,10 +49,10 @@ def _runtime_pinned_target(
     if target is None or not getattr(target, "resolved_ips", ()):
         return None
     if _http_origin(str(getattr(target, "url", ""))) != _http_origin(base):
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "validated BYOK target does not match runtime base URL",
             status_code=403,
-            error_code=upstream_services().infrastructure.EC.UPSTREAM_INVALID_REQUEST.value,
+            error_code=services.infrastructure.EC.UPSTREAM_INVALID_REQUEST.value,
         )
     return target
 
@@ -100,14 +105,15 @@ async def _bounded_body_or_upstream_error(
     label: str,
     url: str,
     trace_id: str,
+    services: UpstreamServices,
 ) -> bytes:
     try:
         return await _read_response_body_limited(response, max_bytes=max_bytes)
     except _ResponseBodyTooLarge as exc:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{label} exceeds max bytes",
             status_code=response.status_code,
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=services.infrastructure.EC.STREAM_TOO_LARGE.value,
             payload={
                 "path": "responses",
                 "method": "POST",
@@ -124,16 +130,17 @@ async def _select_response_client(
     timeout_config: Any,
     proxy_url: str | None,
     pinned_target: Any | None,
+    services: UpstreamServices,
 ) -> tuple[Any, Any | None]:
     if proxy_url is not None:
-        return await upstream_services().lifecycle.get_client(proxy_url), None
+        return await services.lifecycle.get_client(proxy_url), None
     if pinned_target is not None:
-        client = upstream_services().lifecycle.build_client(
+        client = services.lifecycle.build_client(
             timeout_config,
             pinned_target=pinned_target,
         )
         return client, client
-    return await upstream_services().lifecycle.get_client(), None
+    return await services.lifecycle.get_client(), None
 
 
 def _count_sse_line(
@@ -142,26 +149,27 @@ def _count_sse_line(
     line_count: int,
     byte_count: int,
     status_code: int,
+    services: UpstreamServices,
 ) -> tuple[int, int]:
     line_bytes = len(line.encode("utf-8"))
     line_count += 1
     byte_count += line_bytes
-    if line_count > upstream_services().core.SSE_MAX_LINES:
-        raise upstream_services().infrastructure.UpstreamError(
+    if line_count > services.core.SSE_MAX_LINES:
+        raise services.infrastructure.UpstreamError(
             "sse exceeded max lines",
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=services.infrastructure.EC.STREAM_TOO_LARGE.value,
             status_code=status_code,
         )
-    if line_bytes > upstream_services().core.SSE_MAX_LINE_BYTES:
-        raise upstream_services().infrastructure.UpstreamError(
+    if line_bytes > services.core.SSE_MAX_LINE_BYTES:
+        raise services.infrastructure.UpstreamError(
             "sse exceeded max line bytes",
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=services.infrastructure.EC.STREAM_TOO_LARGE.value,
             status_code=status_code,
         )
-    if byte_count > upstream_services().core.SSE_MAX_BYTES:
-        raise upstream_services().infrastructure.UpstreamError(
+    if byte_count > services.core.SSE_MAX_BYTES:
+        raise services.infrastructure.UpstreamError(
             "sse exceeded max bytes",
-            error_code=upstream_services().infrastructure.EC.STREAM_TOO_LARGE.value,
+            error_code=services.infrastructure.EC.STREAM_TOO_LARGE.value,
             status_code=status_code,
         )
     return line_count, byte_count
@@ -172,11 +180,12 @@ def _decode_sse_data_line(
     *,
     current_event: str | None,
     log_prefix: str,
+    services: UpstreamServices,
 ) -> dict[str, Any] | None:
     try:
         event = json.loads(data_raw)
     except json.JSONDecodeError:
-        upstream_services().infrastructure.logger.warning(
+        services.infrastructure.logger.warning(
             "%s invalid json line: %s",
             log_prefix,
             data_raw[:200],
@@ -197,6 +206,7 @@ async def _iter_httpx_sse_events(
     interruption_error_code: str,
     interruption_message: str,
     log_prefix: str,
+    services: UpstreamServices,
 ) -> AsyncIterator[dict[str, Any]]:
     current_event: str | None = None
     line_count = 0
@@ -208,6 +218,7 @@ async def _iter_httpx_sse_events(
                 line_count=line_count,
                 byte_count=byte_count,
                 status_code=response.status_code,
+                services=services,
             )
             if line == "":
                 current_event = None
@@ -226,16 +237,17 @@ async def _iter_httpx_sse_events(
                 data_raw,
                 current_event=current_event,
                 log_prefix=log_prefix,
+                services=services,
             )
             if event is not None:
-                upstream_services().transport.maybe_record_usage_from_event(event)
+                services.transport.maybe_record_usage_from_event(event)
                 yield event
-    except upstream_services().infrastructure.UpstreamError:
+    except services.infrastructure.UpstreamError:
         raise
     except asyncio.CancelledError:
         raise
     except httpx.HTTPError as exc:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             f"{interruption_message}: {exc}",
             status_code=response.status_code,
             error_code=interruption_error_code,
@@ -254,23 +266,25 @@ async def _raise_response_status_error(
     url: str,
     trace_id: str,
     log_prefix: str,
+    services: UpstreamServices,
 ) -> None:
     raw = await _bounded_body_or_upstream_error(
         response,
         max_bytes=min(
-            upstream_services().core.NON_SSE_JSON_MAX_BYTES,
+            services.core.NON_SSE_JSON_MAX_BYTES,
             _ERROR_RESPONSE_MAX_BYTES,
         ),
         label="upstream error payload",
         url=url,
         trace_id=trace_id,
+        services=services,
     )
     raw_text = raw.decode("utf-8", errors="replace")
     response_headers = getattr(response, "headers", None)
     request_id = (
         response_headers.get("x-request-id") if response_headers is not None else None
     )
-    upstream_services().infrastructure.logger.warning(
+    services.infrastructure.logger.warning(
         "%s non-2xx status=%s url=%s body=%.1000s trace_id=%s x_request_id=%s",
         log_prefix,
         response.status_code,
@@ -283,8 +297,8 @@ async def _raise_response_status_error(
         payload = json.loads(raw_text)
     except Exception:  # noqa: BLE001
         payload = {"raw": raw_text}
-    raise upstream_services().core.with_error_context(
-        upstream_services().core.parse_error(
+    raise services.core.with_error_context(
+        services.core.parse_error(
             payload if isinstance(payload, dict) else {},
             response.status_code,
         ),
@@ -312,15 +326,20 @@ class _ResponsesCallTerminal:
     last_event_type: str | None = None
     error: dict[str, Any] | None = None
 
-    def observe(self, event: dict[str, Any]) -> None:
+    def observe(
+        self,
+        event: dict[str, Any],
+        *,
+        services: UpstreamServices,
+    ) -> None:
         event_type = event.get("type")
         if isinstance(event_type, str):
             self.last_event_type = event_type
-        if upstream_services().core.is_responses_success_terminal(event_type):
+        if services.core.is_responses_success_terminal(event_type):
             response_object = event.get("response")
             if isinstance(response_object, dict):
                 self.completed = response_object
-        elif upstream_services().core.is_responses_error_terminal(event_type):
+        elif services.core.is_responses_error_terminal(event_type):
             self.error = _response_error_detail(event)
 
 
@@ -330,6 +349,7 @@ def _responses_terminal_result(
     status_code: int,
     url: str,
     trace_id: str,
+    services: UpstreamServices,
 ) -> dict[str, Any]:
     if terminal.completed is not None:
         return terminal.completed
@@ -341,16 +361,16 @@ def _responses_terminal_result(
         "last_event_type": terminal.last_event_type,
     }
     if terminal.error is None:
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "responses_call sse missing terminal frame",
             status_code=status_code,
-            error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
             payload=payload,
         )
     upstream_code = terminal.error.get("code") or terminal.error.get("type")
     upstream_message = terminal.error.get("message")
     payload["upstream_error"] = terminal.error
-    raise upstream_services().infrastructure.UpstreamError(
+    raise services.infrastructure.UpstreamError(
         (
             upstream_message
             if isinstance(upstream_message, str) and upstream_message
@@ -360,7 +380,7 @@ def _responses_terminal_result(
         error_code=(
             upstream_code
             if isinstance(upstream_code, str) and upstream_code
-            else upstream_services().infrastructure.EC.BAD_RESPONSE.value
+            else services.infrastructure.EC.BAD_RESPONSE.value
         ),
         payload=payload,
     )
@@ -371,22 +391,27 @@ async def _responses_call_sse_result(
     *,
     url: str,
     trace_id: str,
+    services: UpstreamServices,
 ) -> dict[str, Any]:
     terminal = _ResponsesCallTerminal()
     async for event in _iter_httpx_sse_events(
         response,
         url=url,
         trace_id=trace_id,
-        interruption_error_code=upstream_services().infrastructure.EC.TEXT_STREAM_INTERRUPTED.value,
+        interruption_error_code=(
+            services.infrastructure.EC.TEXT_STREAM_INTERRUPTED.value
+        ),
         interruption_message="responses_call sse interrupted",
         log_prefix="responses_call sse",
+        services=services,
     ):
-        terminal.observe(event)
+        terminal.observe(event, services=services)
     return _responses_terminal_result(
         terminal,
         status_code=response.status_code,
         url=url,
         trace_id=trace_id,
+        services=services,
     )
 
 
@@ -395,21 +420,23 @@ async def _responses_call_json_result(
     *,
     url: str,
     trace_id: str,
+    services: UpstreamServices,
 ) -> dict[str, Any]:
     raw = await _bounded_body_or_upstream_error(
         response,
-        max_bytes=upstream_services().core.NON_SSE_JSON_MAX_BYTES,
+        max_bytes=services.core.NON_SSE_JSON_MAX_BYTES,
         label="responses json payload",
         url=url,
         trace_id=trace_id,
+        services=services,
     )
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception as exc:  # noqa: BLE001
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "responses_call returned invalid JSON",
             status_code=response.status_code,
-            error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
             payload={
                 "path": "responses",
                 "method": "POST",
@@ -418,10 +445,10 @@ async def _responses_call_json_result(
             },
         ) from exc
     if not isinstance(payload, dict):
-        raise upstream_services().infrastructure.UpstreamError(
+        raise services.infrastructure.UpstreamError(
             "responses_call returned non-object payload",
             status_code=response.status_code,
-            error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
             payload={
                 "path": "responses",
                 "method": "POST",
@@ -430,7 +457,7 @@ async def _responses_call_json_result(
             },
         )
     if isinstance(payload.get("usage"), dict):
-        upstream_services().core.record_usage(payload["usage"])
+        services.core.record_usage(payload["usage"])
     return payload
 
 
@@ -445,19 +472,22 @@ async def _iter_sse_with_runtime(
     proxy_url: str | None = None,
     pinned_target: Any | None = None,
     allow_non_sse_payload: bool = False,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """POST ``/v1/responses`` with httpx and yield bounded SSE events."""
-    call_trace_id = trace_id or upstream_services().core.generate_trace_id()
-    timeout_config = await upstream_services().lifecycle.resolve_timeout_config()
+    services = resolve_image_upstream_services(runtime)
+    call_trace_id = trace_id or services.core.generate_trace_id()
+    timeout_config = await services.lifecycle.resolve_timeout_config()
     client, owned_client = await _select_response_client(
         timeout_config=timeout_config,
         proxy_url=proxy_url,
         pinned_target=pinned_target,
+        services=services,
     )
-    url = upstream_services().requests.responses_url(base)
+    url = services.requests.responses_url(base)
     stream_kwargs: dict[str, Any] = {
         "json": body,
-        "headers": upstream_services().core.auth_headers(
+        "headers": services.core.auth_headers(
             api_key, trace_id=call_trace_id
         ),
     }
@@ -477,6 +507,7 @@ async def _iter_sse_with_runtime(
                     url=url,
                     trace_id=call_trace_id,
                     log_prefix="httpx sse",
+                    services=services,
                 )
 
             if allow_non_sse_payload:
@@ -488,19 +519,20 @@ async def _iter_sse_with_runtime(
                 if "text/event-stream" not in content_type.lower():
                     raw = await _bounded_body_or_upstream_error(
                         response,
-                        max_bytes=upstream_services().core.NON_SSE_JSON_MAX_BYTES,
+                        max_bytes=services.core.NON_SSE_JSON_MAX_BYTES,
                         label="non-sse json payload",
                         url=url,
                         trace_id=call_trace_id,
+                        services=services,
                     )
                     raw_text = raw.decode("utf-8", errors="replace")
                     try:
                         json_payload = json.loads(raw_text)
                     except Exception as exc:  # noqa: BLE001
-                        raise upstream_services().infrastructure.UpstreamError(
+                        raise services.infrastructure.UpstreamError(
                             f"non-sse payload is not valid JSON: {exc}",
                             status_code=response.status_code,
-                            error_code=upstream_services().infrastructure.EC.BAD_RESPONSE.value,
+                            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
                             payload={
                                 "path": "responses",
                                 "method": "POST",
@@ -511,7 +543,7 @@ async def _iter_sse_with_runtime(
                             },
                         ) from exc
                     yield {
-                        "type": upstream_services().core.JSON_PAYLOAD_SENTINEL_TYPE,
+                        "type": services.core.JSON_PAYLOAD_SENTINEL_TYPE,
                         "payload": json_payload,
                         "content_type": content_type,
                     }
@@ -524,6 +556,7 @@ async def _iter_sse_with_runtime(
                 interruption_error_code=interruption_error_code,
                 interruption_message="responses stream interrupted",
                 log_prefix="sse:",
+                services=services,
             ):
                 yield event
     except asyncio.CancelledError:
@@ -531,7 +564,7 @@ async def _iter_sse_with_runtime(
     finally:
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
-            upstream_services().core.log_upstream_call(
+            services.core.log_upstream_call(
                 endpoint="responses",
                 status=final_status,
                 duration_ms=duration_ms,
@@ -539,28 +572,30 @@ async def _iter_sse_with_runtime(
                 response_headers=final_response_headers,
             )
         except Exception:  # noqa: BLE001
-            upstream_services().infrastructure.logger.debug(
+            services.infrastructure.logger.debug(
                 "failed to log upstream call meta",
                 exc_info=True,
             )
         if owned_client is not None:
-            await upstream_services().lifecycle.aclose_client_cancel_safe(owned_client)
+            await services.lifecycle.aclose_client_cancel_safe(owned_client)
 
 
 async def _iter_sse(
     body: dict[str, Any],
     *,
     runtime_override: Any | None = None,
+    runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Validate a Responses request, resolve its runtime, and yield SSE events."""
-    upstream_services().core.validate_responses_body(body)
+    services = resolve_image_upstream_services(runtime)
+    services.core.validate_responses_body(body)
     if isinstance(body.get("tools"), list):
-        body["tools"] = upstream_services().core.stable_sort_tools(body["tools"])
+        body["tools"] = services.core.stable_sort_tools(body["tools"])
     assert body.get("model"), "model must be set"
 
-    runtime = runtime_override or await upstream_services().core.resolve_runtime()
-    base, api_key, proxy = upstream_services().core.runtime_parts(runtime)
-    provider_name = upstream_services().core.runtime_provider_name(runtime)
+    provider_runtime = runtime_override or await services.core.resolve_runtime()
+    base, api_key, proxy = services.core.runtime_parts(provider_runtime)
+    provider_name = services.core.runtime_provider_name(provider_runtime)
     if provider_name:
         yield {
             "type": "provider_used",
@@ -569,24 +604,25 @@ async def _iter_sse(
             "endpoint": "responses",
             "source": "text",
         }
-    proxy_url = await upstream_services().infrastructure.resolve_provider_proxy_url(
-        proxy
-    )
+    proxy_url = await services.infrastructure.resolve_provider_proxy_url(proxy)
     runtime_kwargs: dict[str, Any] = {
         "base": base,
         "api_key": api_key,
         "body": body,
-        "interruption_error_code": upstream_services().core.TEXT_STREAM_INTERRUPTED_ERROR_CODE,
+        "interruption_error_code": services.core.TEXT_STREAM_INTERRUPTED_ERROR_CODE,
         "proxy_url": proxy_url,
     }
+    if runtime is not None:
+        runtime_kwargs["runtime"] = runtime
     pinned_target = _runtime_pinned_target(
-        runtime,
+        provider_runtime,
         base=base,
         proxy_url=proxy_url,
+        services=services,
     )
     if pinned_target is not None:
         runtime_kwargs["pinned_target"] = pinned_target
-    async for event in upstream_services().responses.iter_sse_with_runtime(
+    async for event in services.responses.iter_sse_with_runtime(
         **runtime_kwargs,
     ):
         yield event
@@ -596,10 +632,13 @@ async def stream_completion(
     body: dict[str, Any],
     *,
     runtime_override: Any | None = None,
+    runtime: ImageUpstreamRuntime,
 ) -> AsyncIterator[dict[str, Any]]:
-    async for event in upstream_services().responses.iter_sse(
+    services = resolve_image_upstream_services(runtime)
+    async for event in services.responses.iter_sse(
         body,
         runtime_override=runtime_override,
+        runtime=runtime,
     ):
         yield event
 
@@ -614,11 +653,13 @@ async def responses_call(
     timeout_s: float | None = None,
     endpoint_label: str = "responses",
     pinned_target_override: Any | None = None,
+    runtime: ImageUpstreamRuntime,
 ) -> dict[str, Any]:
     """Make one Responses request and accept either SSE or JSON success bodies."""
-    upstream_services().core.validate_responses_body(body)
+    services = resolve_image_upstream_services(runtime)
+    services.core.validate_responses_body(body)
     if isinstance(body.get("tools"), list):
-        body["tools"] = upstream_services().core.stable_sort_tools(body["tools"])
+        body["tools"] = services.core.stable_sort_tools(body["tools"])
     assert body.get("model"), "model must be set"
 
     proxy = proxy_override
@@ -626,26 +667,25 @@ async def responses_call(
         base, api_key = base_url_override, api_key_override
     else:
         _ = route
-        runtime = await upstream_services().core.resolve_runtime()
-        base, api_key, proxy = upstream_services().core.runtime_parts(runtime)
+        provider_runtime = await services.core.resolve_runtime()
+        base, api_key, proxy = services.core.runtime_parts(provider_runtime)
 
-    url = upstream_services().requests.responses_url(base)
-    call_trace_id = upstream_services().core.generate_trace_id()
-    headers = upstream_services().core.auth_headers(api_key, trace_id=call_trace_id)
+    url = services.requests.responses_url(base)
+    call_trace_id = services.core.generate_trace_id()
+    headers = services.core.auth_headers(api_key, trace_id=call_trace_id)
     stream_kwargs: dict[str, Any] = {"json": body, "headers": headers}
-    timeout_config = await upstream_services().lifecycle.resolve_timeout_config()
+    timeout_config = await services.lifecycle.resolve_timeout_config()
     effective_timeout = (
         float(timeout_s) if timeout_s is not None else timeout_config.read
     )
     stream_kwargs["timeout"] = timeout_config.to_httpx(read=effective_timeout)
 
-    proxy_url = await upstream_services().infrastructure.resolve_provider_proxy_url(
-        proxy
-    )
+    proxy_url = await services.infrastructure.resolve_provider_proxy_url(proxy)
     client, owned_client = await _select_response_client(
         timeout_config=timeout_config,
         proxy_url=proxy_url,
         pinned_target=(pinned_target_override if proxy_url is None else None),
+        services=services,
     )
     started = time.monotonic()
     final_status = 0
@@ -662,6 +702,7 @@ async def responses_call(
                         url=url,
                         trace_id=call_trace_id,
                         log_prefix="responses_call",
+                        services=services,
                     )
 
                 content_type = (
@@ -674,17 +715,19 @@ async def responses_call(
                         response,
                         url=url,
                         trace_id=call_trace_id,
+                        services=services,
                     )
                 return await _responses_call_json_result(
                     response,
                     url=url,
                     trace_id=call_trace_id,
+                    services=services,
                 )
         except httpx.TimeoutException as exc:
-            raise upstream_services().infrastructure.UpstreamError(
+            raise services.infrastructure.UpstreamError(
                 f"responses_call upstream timeout: {exc}",
                 status_code=None,
-                error_code=upstream_services().infrastructure.EC.UPSTREAM_TIMEOUT.value,
+                error_code=services.infrastructure.EC.UPSTREAM_TIMEOUT.value,
                 payload={
                     "path": "responses",
                     "method": "POST",
@@ -693,10 +736,10 @@ async def responses_call(
                 },
             ) from exc
         except httpx.HTTPError as exc:
-            raise upstream_services().infrastructure.UpstreamError(
+            raise services.infrastructure.UpstreamError(
                 f"responses_call upstream network error: {exc}",
                 status_code=None,
-                error_code=upstream_services().infrastructure.EC.UPSTREAM_ERROR.value,
+                error_code=services.infrastructure.EC.UPSTREAM_ERROR.value,
                 payload={
                     "path": "responses",
                     "method": "POST",
@@ -709,7 +752,7 @@ async def responses_call(
     finally:
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
-            upstream_services().core.log_upstream_call(
+            services.core.log_upstream_call(
                 endpoint=endpoint_label,
                 status=final_status,
                 duration_ms=duration_ms,
@@ -717,12 +760,12 @@ async def responses_call(
                 response_headers=final_response_headers,
             )
         except Exception:  # noqa: BLE001
-            upstream_services().infrastructure.logger.debug(
+            services.infrastructure.logger.debug(
                 "responses_call meta log failed",
                 exc_info=True,
             )
         if owned_client is not None:
-            await upstream_services().lifecycle.aclose_client_cancel_safe(owned_client)
+            await services.lifecycle.aclose_client_cancel_safe(owned_client)
 
 
 __all__ = [

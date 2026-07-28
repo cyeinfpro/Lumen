@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.workflow_domain import apparel_library_reference as reference
+from app.workflows.adapters import apparel_library_reference as reference
 
 
 class _Result:

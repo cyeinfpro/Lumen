@@ -35,8 +35,8 @@ def create_app(
             level="INFO",
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
-        await app_runtime.startup()
         try:
+            await app_runtime.startup()
             yield
         finally:
             await app_runtime.shutdown()

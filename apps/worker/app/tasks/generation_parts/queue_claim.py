@@ -2,24 +2,44 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import time
 from contextlib import suppress
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
 from redis.exceptions import WatchError
 
 from .queue import (
+    IMAGE_QUEUE_ACTIVE_KEY,
+    IMAGE_QUEUE_LANE_CURSOR_KEY,
+    IMAGE_QUEUE_LOCK_KEY,
+    IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
+    IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S,
     ImageQueueLockLost,
+    active_image_provider_names,
+    cleanup_image_queue_active,
     clear_stale_image_queue_reservation,
+    clear_avoided_providers as clear_task_avoided_providers,
+    dual_race_sentinel_name,
+    get_avoided_providers,
+    image_provider_active_key,
+    image_provider_lock_key,
+    image_queue_avoid_key,
+    image_queue_lock,
+    image_queue_not_before_key,
+    image_task_provider_key,
+    inflight_clear,
+    is_dual_race_sentinel,
+    kick_image_queue,
+    provider_active_count,
+    ready_queued_generation_ids,
+    redis_text,
+    resolve_image_queue_capacity,
 )
-from .runtime import (
-    generation_domain_ports,
-    generation_events_ports,
-    generation_lease_ports,
-    generation_queue_ports,
-)
+from .lease import LEASE_TTL_S, release_lease
+from .runtime_contracts import GENERATION_RUN_TIMEOUT_S
+from .services import RunGenerationDeps
 
 
 RESERVE_IMAGE_SLOT_LUA = """
@@ -138,10 +158,6 @@ return 1
 
 DUAL_RACE_SENTINEL_PREFIX = "__dr:"
 _IMAGE_QUEUE_RESERVATION_TOKEN_PREFIX = "generation:image_queue:reservation:"
-_IMAGE_QUEUE_RESERVATION_TOKENS: ContextVar[dict[str, str]] = ContextVar(
-    "image_queue_reservation_tokens",
-    default={},
-)
 _POOL_SELECT_COMPAT_ARGUMENTS = (
     "size_bucket",
     "cost_class",
@@ -151,55 +167,18 @@ _POOL_SELECT_COMPAT_ARGUMENTS = (
     "endpoint_kind",
     "task_id",
 )
-
-
-def dual_race_sentinel_name(task_id: str) -> str:
-    return f"{generation_queue_ports()._DUAL_RACE_SENTINEL_PREFIX}{task_id}"
-
-
-def is_dual_race_sentinel(name: str | None) -> bool:
-    return bool(
-        name and name.startswith(generation_queue_ports()._DUAL_RACE_SENTINEL_PREFIX)
-    )
+logger = logging.getLogger(__name__)
 
 
 def _image_queue_reservation_token_key(task_id: str) -> str:
     return f"{_IMAGE_QUEUE_RESERVATION_TOKEN_PREFIX}{task_id}"
 
 
-def _remember_image_queue_reservation_token(task_id: str, token: str) -> None:
-    tokens = dict(_IMAGE_QUEUE_RESERVATION_TOKENS.get())
-    tokens[task_id] = token
-    _IMAGE_QUEUE_RESERVATION_TOKENS.set(tokens)
-
-
-def _forget_image_queue_reservation_token(task_id: str, token: str) -> None:
-    tokens = _IMAGE_QUEUE_RESERVATION_TOKENS.get()
-    if tokens.get(task_id) != token:
-        return
-    remaining = dict(tokens)
-    remaining.pop(task_id, None)
-    _IMAGE_QUEUE_RESERVATION_TOKENS.set(remaining)
-
-
-def _current_image_queue_reservation_token(task_id: str) -> str | None:
-    return _IMAGE_QUEUE_RESERVATION_TOKENS.get().get(task_id)
-
-
-def _image_queue_reservation_token_ttl() -> int:
-    max_runtime = max(
-        0.0,
-        float(
-            getattr(
-                generation_domain_ports(),
-                "_RUN_GENERATION_TIMEOUT_S",
-                0.0,
-            )
-        ),
-    )
+def _image_queue_reservation_token_ttl(*, services: RunGenerationDeps) -> int:
+    max_runtime = max(0.0, GENERATION_RUN_TIMEOUT_S)
     return max(
-        int(generation_lease_ports()._LEASE_TTL_S * 4),
-        int(max_runtime + generation_lease_ports()._LEASE_TTL_S * 2),
+        int(LEASE_TTL_S * 4),
+        int(max_runtime + LEASE_TTL_S * 2),
     )
 
 
@@ -209,18 +188,22 @@ async def _ready_queue_rank(
     *,
     task_id: str,
     fair_window: int,
+    services: RunGenerationDeps,
 ) -> int | None:
     try:
-        queued_ids = await generation_queue_ports()._ready_queued_generation_ids(
+        queued_ids = await ready_queued_generation_ids(
             redis,
             fair_window,
             lock=lock,
+            services=services,
         )
     except TypeError as exc:
         if "lock" not in str(exc):
             raise
-        queued_ids = await generation_queue_ports()._ready_queued_generation_ids(
-            redis, fair_window
+        queued_ids = await ready_queued_generation_ids(
+            redis,
+            fair_window,
+            services=services,
         )
     return queued_ids.index(task_id) if task_id in queued_ids else None
 
@@ -275,21 +258,26 @@ async def _filter_avoided_queue_providers(
     *,
     task_id: str,
     providers: list[Any],
+    services: RunGenerationDeps,
 ) -> list[Any]:
     if not providers:
         return providers
-    avoided = await generation_queue_ports()._get_avoided_providers(redis, task_id)
+    avoided = await get_avoided_providers(
+        redis,
+        task_id,
+        services=services,
+    )
     if not avoided:
         return providers
     filtered = [
         provider
         for provider in providers
-        if generation_queue_ports()._redis_text(getattr(provider, "name", ""))
+        if redis_text(getattr(provider, "name", ""))
         not in avoided
     ]
     if filtered:
         return filtered
-    generation_events_ports().logger.info(
+    logger.info(
         "image queue avoid set fully overlaps providers, "
         "ignoring avoid for task=%s avoided=%s",
         task_id,
@@ -297,7 +285,7 @@ async def _filter_avoided_queue_providers(
     )
     with suppress(Exception):
         await lock.delete_if_owner(
-            generation_queue_ports()._image_queue_avoid_key(task_id)
+            image_queue_avoid_key(task_id)
         )
     return providers
 
@@ -308,13 +296,14 @@ async def _existing_reservation_blocks_admission(
     *,
     task_id: str,
     active_members: set[str],
+    services: RunGenerationDeps,
 ) -> bool:
-    provider_name = generation_queue_ports()._redis_text(
-        await redis.get(generation_queue_ports()._image_task_provider_key(task_id))
+    provider_name = redis_text(
+        await redis.get(image_task_provider_key(task_id))
     )
     if not provider_name:
         return False
-    if generation_queue_ports()._is_dual_race_sentinel(provider_name):
+    if is_dual_race_sentinel(provider_name):
         if provider_name in active_members:
             return True
         await _clear_stale_reservation(
@@ -322,13 +311,14 @@ async def _existing_reservation_blocks_admission(
             lock,
             task_id=task_id,
             provider_name=provider_name,
+            services=services,
         )
-        generation_events_ports().logger.info(
+        logger.info(
             "image queue cleared stale dual_race sentinel task=%s",
             task_id,
         )
         return False
-    provider_zset = generation_queue_ports()._image_provider_active_key(provider_name)
+    provider_zset = image_provider_active_key(provider_name)
     still_admitted = False
     with suppress(Exception):
         score = await redis.zscore(provider_zset, task_id)
@@ -340,8 +330,9 @@ async def _existing_reservation_blocks_admission(
         lock,
         task_id=task_id,
         provider_name=provider_name,
+        services=services,
     )
-    generation_events_ports().logger.info(
+    logger.info(
         "image queue cleared stale self-lock task=%s provider=%s",
         task_id,
         provider_name,
@@ -355,12 +346,14 @@ async def _clear_stale_reservation(
     *,
     task_id: str,
     provider_name: str,
+    services: RunGenerationDeps,
 ) -> None:
     cleared = await clear_stale_image_queue_reservation(
         redis,
         lock,
         task_id=task_id,
         provider_name=provider_name,
+        services=services,
     )
     if cleared:
         await lock.delete_if_owner(_image_queue_reservation_token_key(task_id))
@@ -374,31 +367,31 @@ async def _reserve_dual_race_slot(
     fair_rank: int,
     active_count: int,
     capacity: int,
+    services: RunGenerationDeps,
 ) -> Any | None:
     from ...provider_pool import ResolvedProvider
 
-    sentinel = generation_queue_ports()._dual_race_sentinel_name(task_id)
+    sentinel = dual_race_sentinel_name(task_id)
     ok = await lock.eval_fenced(
         RESERVE_DUAL_RACE_SLOT_LUA,
         6,
-        generation_queue_ports()._image_task_provider_key(task_id),
-        generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
-        generation_queue_ports()._image_queue_not_before_key(task_id),
-        generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY,
-        generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
+        image_task_provider_key(task_id),
+        IMAGE_QUEUE_ACTIVE_KEY,
+        image_queue_not_before_key(task_id),
+        IMAGE_QUEUE_LANE_CURSOR_KEY,
+        IMAGE_QUEUE_LOCK_KEY,
         _image_queue_reservation_token_key(task_id),
         lock.token,
         sentinel,
         str(expiry),
-        str(generation_lease_ports()._LEASE_TTL_S),
+        str(LEASE_TTL_S),
         str(fair_rank + 1),
-        str(_image_queue_reservation_token_ttl()),
+        str(_image_queue_reservation_token_ttl(services=services)),
         lost_result=-1,
     )
     if int(ok or 0) != 1:
         return None
-    _remember_image_queue_reservation_token(task_id, lock.token)
-    generation_events_ports().logger.info(
+    logger.info(
         "image queue admitted task=%s mode=dual_race active=%d/%d",
         task_id,
         active_count + 1,
@@ -418,10 +411,11 @@ async def _reserve_from_provider_candidates(
     fair_rank: int,
     active_count: int,
     capacity: int,
+    services: RunGenerationDeps,
 ) -> tuple[Any | None, bool]:
     active_count_failed = False
     for provider in providers:
-        provider_name = generation_queue_ports()._redis_text(
+        provider_name = redis_text(
             getattr(provider, "name", "")
         )
         if not provider_name:
@@ -430,10 +424,11 @@ async def _reserve_from_provider_candidates(
             1,
             int(getattr(provider, "image_concurrency", 1) or 1),
         )
-        current = await generation_queue_ports()._provider_active_count(
+        current = await provider_active_count(
             redis,
             provider_name,
             lock=lock,
+            services=services,
         )
         if current is None:
             active_count_failed = True
@@ -449,10 +444,11 @@ async def _reserve_from_provider_candidates(
             now=now,
             expiry=expiry,
             fair_rank=fair_rank,
+            services=services,
         )
         if not admitted:
             continue
-        generation_events_ports().logger.info(
+        logger.info(
             "image queue admitted task=%s provider=%s "
             "provider_active=%d/%d global_active=%d/%d",
             task_id,
@@ -476,17 +472,18 @@ async def _reserve_provider_slot(
     now: float,
     expiry: float,
     fair_rank: int,
+    services: RunGenerationDeps,
 ) -> bool:
     try:
         ok = await lock.eval_fenced(
-            generation_lease_ports()._RESERVE_IMAGE_SLOT_LUA,
+            RESERVE_IMAGE_SLOT_LUA,
             7,
-            generation_queue_ports()._image_provider_active_key(provider_name),
-            generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
-            generation_queue_ports()._image_task_provider_key(task_id),
-            generation_queue_ports()._image_queue_not_before_key(task_id),
-            generation_queue_ports()._IMAGE_QUEUE_LOCK_KEY,
-            generation_queue_ports()._IMAGE_QUEUE_LANE_CURSOR_KEY,
+            image_provider_active_key(provider_name),
+            IMAGE_QUEUE_ACTIVE_KEY,
+            image_task_provider_key(task_id),
+            image_queue_not_before_key(task_id),
+            IMAGE_QUEUE_LOCK_KEY,
+            IMAGE_QUEUE_LANE_CURSOR_KEY,
             _image_queue_reservation_token_key(task_id),
             str(now),
             str(expiry),
@@ -494,18 +491,17 @@ async def _reserve_provider_slot(
             provider_name,
             str(concurrency),
             str(capacity),
-            str(generation_lease_ports()._LEASE_TTL_S),
-            str(generation_lease_ports()._LEASE_TTL_S * 4),
+            str(LEASE_TTL_S),
+            str(LEASE_TTL_S * 4),
             lock.token,
             str(fair_rank + 1),
-            str(_image_queue_reservation_token_ttl()),
+            str(_image_queue_reservation_token_ttl(services=services)),
             lost_result=-1,
         )
     except ImageQueueLockLost:
         raise
     if int(ok or 0) != 1:
         return False
-    _remember_image_queue_reservation_token(task_id, lock.token)
     return True
 
 
@@ -513,21 +509,22 @@ async def _defer_after_active_count_failure(
     lock: Any,
     *,
     task_id: str,
+    services: RunGenerationDeps,
 ) -> None:
-    cooldown = generation_queue_ports()._IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S
+    cooldown = IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S
     redis_set_ok = False
     try:
         redis_set_ok = await lock.set_if_owner(
-            generation_queue_ports()._image_queue_not_before_key(task_id),
+            image_queue_not_before_key(task_id),
             str(time.time() + cooldown),
-            cooldown + generation_queue_ports()._IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
+            cooldown + IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
         )
     except Exception:  # noqa: BLE001
         pass
-    generation_queue_ports()._PROVIDER_COOLDOWN_LOCAL[task_id] = (
+    services.queue.provider_cooldowns[task_id] = (
         time.monotonic() + cooldown
     )
-    generation_events_ports().logger.warning(
+    logger.warning(
         "image queue deferred task=%s after provider active count failure "
         "cooldown=%.1fs redis_set=%s",
         task_id,
@@ -547,6 +544,7 @@ async def reserve_image_queue_slot(
     queue_lane: str | None = None,
     size_bucket: str | None = None,
     cost_class: str | None = None,
+    services: RunGenerationDeps,
 ) -> Any | None:
     """Reserve one global image slot for a task admitted by fair scheduling.
 
@@ -554,19 +552,21 @@ async def reserve_image_queue_slot(
     to ``_reserve_provider_slot``, which uses ``lock.eval_fenced(`` with
     ``lost_result=-1``.
     """
-    capacity = await generation_queue_ports()._resolve_image_queue_capacity()
-    async with generation_queue_ports()._image_queue_lock(redis) as lock:
+    capacity = await resolve_image_queue_capacity(services=services)
+    async with image_queue_lock(redis) as lock:
         lock.require_atomic_writes()
         await lock.assert_owner()
-        await generation_queue_ports()._cleanup_image_queue_active(redis, lock=lock)
-        active_members = await generation_queue_ports()._active_image_provider_names(
-            redis
+        await cleanup_image_queue_active(redis, lock=lock, services=services)
+        active_members = await active_image_provider_names(
+            redis,
+            services=services,
         )
         if await _existing_reservation_blocks_admission(
             redis,
             lock,
             task_id=task_id,
             active_members=active_members,
+            services=services,
         ):
             return None
         if len(active_members) >= capacity:
@@ -577,12 +577,13 @@ async def reserve_image_queue_slot(
             lock,
             task_id=task_id,
             fair_window=fair_window,
+            services=services,
         )
         if fair_rank is None:
             return None
 
         now = time.time()
-        expiry = now + generation_lease_ports()._LEASE_TTL_S
+        expiry = now + LEASE_TTL_S
         if dual_race:
             return await _reserve_dual_race_slot(
                 lock,
@@ -591,6 +592,7 @@ async def reserve_image_queue_slot(
                 fair_rank=fair_rank,
                 active_count=len(active_members),
                 capacity=capacity,
+                services=services,
             )
         providers = await _select_queue_provider_candidates(
             task_id=task_id,
@@ -606,6 +608,7 @@ async def reserve_image_queue_slot(
             lock,
             task_id=task_id,
             providers=providers,
+            services=services,
         )
         if not providers:
             return None
@@ -619,6 +622,7 @@ async def reserve_image_queue_slot(
             fair_rank=fair_rank,
             active_count=len(active_members),
             capacity=capacity,
+            services=services,
         )
         if provider is not None:
             return provider
@@ -626,6 +630,7 @@ async def reserve_image_queue_slot(
             await _defer_after_active_count_failure(
                 lock,
                 task_id=task_id,
+                services=services,
             )
     return None
 
@@ -637,13 +642,23 @@ async def release_image_queue_slot(
     provider_name: str | None,
     lease_token: str | None = None,
     reservation_token: str | None = None,
+    services: RunGenerationDeps,
 ) -> None:
     if not provider_name:
         return
 
-    reservation_token = reservation_token or (
-        _current_image_queue_reservation_token(task_id)
-    )
+    if reservation_token is None:
+        try:
+            reservation_token = redis_text(
+                await redis.get(_image_queue_reservation_token_key(task_id))
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "image queue reservation token read failed task=%s provider=%s",
+                task_id,
+                provider_name,
+                exc_info=True,
+            )
     if reservation_token or lease_token:
         released = False
         try:
@@ -653,34 +668,33 @@ async def release_image_queue_slot(
                 provider_name=provider_name,
                 reservation_token=reservation_token,
                 lease_token=lease_token,
+                services=services,
             )
         except Exception:  # noqa: BLE001
-            generation_events_ports().logger.warning(
+            logger.warning(
                 "fenced image queue release failed task=%s provider=%s",
                 task_id,
                 provider_name,
                 exc_info=True,
             )
         if not released:
-            generation_events_ports().logger.info(
+            logger.info(
                 "image queue release skipped after reservation owner changed "
                 "task=%s provider=%s",
                 task_id,
                 provider_name,
             )
-        elif reservation_token:
-            _forget_image_queue_reservation_token(task_id, reservation_token)
         with suppress(Exception):
-            await generation_queue_ports()._kick_image_queue(redis)
+            await kick_image_queue(redis, services=services)
         return
 
-    task_provider_key = generation_queue_ports()._image_task_provider_key(task_id)
+    task_provider_key = image_task_provider_key(task_id)
     try:
-        current_reservation_token = generation_queue_ports()._redis_text(
+        current_reservation_token = redis_text(
             await redis.get(_image_queue_reservation_token_key(task_id))
         )
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "legacy image queue release skipped after reservation token read "
             "failed task=%s provider=%s",
             task_id,
@@ -689,49 +703,49 @@ async def release_image_queue_slot(
         )
         return
     if current_reservation_token:
-        generation_events_ports().logger.info(
+        logger.info(
             "legacy image queue release skipped for tokenized reservation "
             "task=%s provider=%s",
             task_id,
             provider_name,
         )
         with suppress(Exception):
-            await generation_queue_ports()._kick_image_queue(redis)
+            await kick_image_queue(redis, services=services)
         return
 
-    if generation_queue_ports()._is_dual_race_sentinel(provider_name):
+    if is_dual_race_sentinel(provider_name):
         try:
             await redis.zrem(
-                generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY, provider_name
+                IMAGE_QUEUE_ACTIVE_KEY, provider_name
             )
             await redis.delete(task_provider_key)
         except Exception:  # noqa: BLE001
-            generation_events_ports().logger.warning(
+            logger.warning(
                 "dual_race release failed task=%s sentinel=%s",
                 task_id,
                 provider_name,
                 exc_info=True,
             )
-        await generation_queue_ports()._kick_image_queue(redis)
+        await kick_image_queue(redis, services=services)
         return
-    provider_zset = generation_queue_ports()._image_provider_active_key(provider_name)
+    provider_zset = image_provider_active_key(provider_name)
     try:
         await redis.zrem(provider_zset, task_id)
-        await redis.zrem(generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY, task_id)
+        await redis.zrem(IMAGE_QUEUE_ACTIVE_KEY, task_id)
         await redis.delete(task_provider_key)
         with suppress(Exception):
-            legacy = generation_queue_ports()._image_provider_lock_key(provider_name)
-            owner = generation_queue_ports()._redis_text(await redis.get(legacy))
+            legacy = image_provider_lock_key(provider_name)
+            owner = redis_text(await redis.get(legacy))
             if owner == task_id:
                 await redis.delete(legacy)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "image queue release failed task=%s provider=%s",
             task_id,
             provider_name,
             exc_info=True,
         )
-    await generation_queue_ports()._kick_image_queue(redis)
+    await kick_image_queue(redis, services=services)
 
 
 async def _release_image_queue_slot_fenced(
@@ -741,27 +755,26 @@ async def _release_image_queue_slot_fenced(
     provider_name: str,
     reservation_token: str | None,
     lease_token: str | None,
+    services: RunGenerationDeps,
 ) -> bool:
     """Release only while this task still owns its reservation or worker lease."""
-    provider_zset = generation_queue_ports()._image_provider_active_key(provider_name)
+    provider_zset = image_provider_active_key(provider_name)
     active_member = (
         provider_name
-        if generation_queue_ports()._is_dual_race_sentinel(provider_name)
+        if is_dual_race_sentinel(provider_name)
         else task_id
     )
-    task_provider_key = generation_queue_ports()._image_task_provider_key(task_id)
+    task_provider_key = image_task_provider_key(task_id)
     task_lease_key = f"task:{task_id}:lease"
     reservation_key = _image_queue_reservation_token_key(task_id)
-    legacy_provider_lock_key = generation_queue_ports()._image_provider_lock_key(
-        provider_name
-    )
+    legacy_provider_lock_key = image_provider_lock_key(provider_name)
     eval_fn = getattr(redis, "eval", None)
     if callable(eval_fn):
         result = await eval_fn(
             RELEASE_IMAGE_QUEUE_SLOT_LUA,
             6,
             provider_zset,
-            generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY,
+            IMAGE_QUEUE_ACTIVE_KEY,
             task_provider_key,
             task_lease_key,
             reservation_key,
@@ -776,7 +789,7 @@ async def _release_image_queue_slot_fenced(
 
     pipeline_factory = getattr(redis, "pipeline", None)
     if not callable(pipeline_factory):
-        generation_events_ports().logger.warning(
+        logger.warning(
             "fenced image queue release skipped without atomic CAS task=%s provider=%s",
             task_id,
             provider_name,
@@ -797,13 +810,13 @@ async def _release_image_queue_slot_fenced(
                 legacy_provider_lock_key,
             ):
                 await watch(key)
-            current_lease = generation_queue_ports()._redis_text(
+            current_lease = redis_text(
                 await pipe.get(task_lease_key)
             )
-            current_provider = generation_queue_ports()._redis_text(
+            current_provider = redis_text(
                 await pipe.get(task_provider_key)
             )
-            current_reservation = generation_queue_ports()._redis_text(
+            current_reservation = redis_text(
                 await pipe.get(reservation_key)
             )
             owns_reservation = bool(
@@ -814,12 +827,12 @@ async def _release_image_queue_slot_fenced(
                 not owns_reservation and not owns_lease
             ) or current_provider != provider_name:
                 return False
-            legacy_owner = generation_queue_ports()._redis_text(
+            legacy_owner = redis_text(
                 await pipe.get(legacy_provider_lock_key)
             )
             pipe.multi()
             pipe.zrem(provider_zset, task_id)
-            pipe.zrem(generation_queue_ports()._IMAGE_QUEUE_ACTIVE_KEY, active_member)
+            pipe.zrem(IMAGE_QUEUE_ACTIVE_KEY, active_member)
             pipe.delete(task_provider_key)
             pipe.delete(reservation_key)
             if legacy_owner == task_id:
@@ -830,7 +843,7 @@ async def _release_image_queue_slot_fenced(
             if attempt >= 2:
                 return False
         except Exception:
-            generation_events_ports().logger.warning(
+            logger.warning(
                 "fenced image queue WATCH release failed task=%s provider=%s",
                 task_id,
                 provider_name,
@@ -870,45 +883,51 @@ async def release_generation_runtime_resources(
     lease_token: str,
     provider_name: str | None,
     clear_avoided_providers: bool,
+    services: RunGenerationDeps,
 ) -> None:
     try:
-        release_fn = generation_lease_ports()._release_image_queue_slot
+        release_fn = release_image_queue_slot
         release_kwargs: dict[str, Any] = {
             "task_id": task_id,
             "provider_name": provider_name,
+            "services": services,
         }
         fencing_keyword = _release_slot_fencing_keyword(release_fn)
         if fencing_keyword:
             release_kwargs[fencing_keyword] = lease_token
         await release_fn(redis, **release_kwargs)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "generation image queue release failed task=%s provider=%s",
             task_id,
             provider_name,
             exc_info=True,
         )
     try:
-        await generation_queue_ports()._inflight_clear(redis, task_id)
+        await inflight_clear(redis, task_id, services=services)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "generation inflight cleanup failed task=%s",
             task_id,
             exc_info=True,
         )
     if clear_avoided_providers:
         try:
-            await generation_queue_ports()._clear_avoided_providers(redis, task_id)
+            await clear_task_avoided_providers(
+                redis,
+                task_id,
+                services=services,
+            )
         except Exception:  # noqa: BLE001
-            generation_events_ports().logger.warning(
+            logger.warning(
                 "generation avoid-set cleanup failed task=%s",
                 task_id,
                 exc_info=True,
             )
     try:
-        await generation_lease_ports()._release_lease(redis, task_id, lease_token)
+        await release_lease(redis, task_id, lease_token)
     except Exception:  # noqa: BLE001
-        generation_events_ports().logger.warning(
+        logger.warning(
             "generation lease release failed task=%s",
             task_id,
             exc_info=True,
@@ -917,6 +936,7 @@ async def release_generation_runtime_resources(
 
 @dataclass(slots=True)
 class GenerationResourceLease:
+    services: RunGenerationDeps
     redis: Any
     task_id: str
     lease_token: str
@@ -933,7 +953,7 @@ class GenerationResourceLease:
             self._closed = True
         release = (
             self.release_resources
-            or generation_lease_ports()._release_generation_runtime_resources
+            or release_generation_runtime_resources
         )
         await release(
             self.redis,

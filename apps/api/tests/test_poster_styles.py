@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 from app.routes import _poster_library as plib
 from app.routes import poster_styles
-from app.workflow_services import library_sync_operation
+from app.workflows.adapters import library_sync_operation
 from lumen_core.constants import (
     POSTER_STYLE_CATEGORIES,
     POSTER_STYLE_DEFAULT_ASPECTS,

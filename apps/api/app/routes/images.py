@@ -6,17 +6,46 @@ module remains a stable, low-complexity integration surface.
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Any
 
-from fastapi import Request, UploadFile
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import write_audit
 from ..deps import CurrentUser
 from ..images.application import http_routes as _endpoints
-from ..video_reference_images import ensure_video_reference_image_variant
+from ..images.application.storage_maintenance import sweep_orphan_image_files
 
+
+__all__ = [
+    "ALLOWED_MIME",
+    "ALLOWED_VARIANTS",
+    "DISPLAY_VARIANT",
+    "EXT_BY_MIME",
+    "MAX_BYTES",
+    "MAX_IMAGE_PIXELS",
+    "MAX_LONG_SIDE",
+    "NORMALIZABLE_UPLOAD_MIME",
+    "PILImage",
+    "UPLOADS_LIMITER",
+    "VARIANT_MEDIA_TYPE",
+    "VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE",
+    "delete_image",
+    "get_image_binary",
+    "get_image_by_key",
+    "get_image_meta",
+    "get_image_signed",
+    "get_image_variant",
+    "os",
+    "reference_image_binary",
+    "reference_image_binary_named",
+    "router",
+    "settings",
+    "shutil",
+    "sweep_orphan_image_files",
+    "upload_image",
+    "upload_image_impl",
+]
 
 router = _endpoints.router
 
@@ -37,12 +66,10 @@ os = _endpoints.os
 settings = _endpoints.settings
 shutil = _endpoints.shutil
 
-_acquire_variant_generation_lock = _endpoints._acquire_variant_generation_lock
 _check_public_image_lookup_rate_limit = _endpoints._check_public_image_lookup_rate_limit
 _check_signed_image_rate_limit = _endpoints._check_signed_image_rate_limit
 _check_upload_rate_limit = _endpoints._check_upload_rate_limit
 _enforce_pixel_limit = _endpoints._enforce_pixel_limit
-_ensure_display_variant = _endpoints._ensure_display_variant
 _ensure_image_visible_to_user = _endpoints._ensure_image_visible_to_user
 _ensure_storage_free_space = _endpoints._ensure_storage_free_space
 _etag_matches_if_none_match = _endpoints._etag_matches_if_none_match
@@ -52,57 +79,18 @@ _image_out = _endpoints._image_out
 _iter_open_file_and_close = _endpoints._iter_open_file_and_close
 _make_display_variant = _endpoints._make_display_variant
 _open_regular_file_no_symlink = _endpoints._open_regular_file_no_symlink
-_release_variant_generation_lock = _endpoints._release_variant_generation_lock
 _storage_streaming_response = _endpoints._storage_streaming_response
 _upload_allows_large_dimensions = _endpoints._upload_allows_large_dimensions
 _upload_metadata_finalizer = _endpoints._upload_metadata_finalizer
 _upload_requests_mask_preflight = _endpoints._upload_requests_mask_preflight
 _variant_key_for_image = _endpoints._variant_key_for_image
 _video_reference_token_is_valid = _endpoints._video_reference_token_is_valid
-_wait_for_variant = _endpoints._wait_for_variant
 _write_new_file_atomic = _endpoints._write_new_file_atomic
-sweep_orphan_image_files = _endpoints.sweep_orphan_image_files
-
-# Upload capacity leases are process-wide resources. Constructing the service in
-# every request gave each request an empty local guard and disabled the intended
-# per-process memory/concurrency ceiling. Keep one lazily-created service graph
-# for the lifetime of this API process; Redis still owns the cross-process cap.
-_build_upload_command_service = _endpoints._upload_command_service
-
-
-@lru_cache(maxsize=1)
-def _shared_upload_command_service() -> Any:
-    return _build_upload_command_service()
-
-
-_endpoints._upload_command_service = _shared_upload_command_service
-_upload_command_service = _shared_upload_command_service
-
 get_image_binary = _endpoints.get_image_binary
 get_image_meta = _endpoints.get_image_meta
 get_image_variant = _endpoints.get_image_variant
-
-
-async def upload_image(
-    user: CurrentUser,
-    db: AsyncSession,
-    file: UploadFile,
-    purpose: str | None = None,
-    reference_width: int | None = None,
-    reference_height: int | None = None,
-) -> Any:
-    return await _endpoints.upload_image_impl(
-        user,
-        db,
-        file=file,
-        purpose=purpose,
-        reference_width=reference_width,
-        reference_height=reference_height,
-        check_upload_rate_limit=_check_upload_rate_limit,
-        ensure_storage_free_space=_ensure_storage_free_space,
-        upload_command_service=_upload_command_service,
-        image_out=_image_out,
-    )
+upload_image = _endpoints.upload_image
+upload_image_impl = _endpoints.upload_image_impl
 
 
 async def get_image_signed(
@@ -130,14 +118,17 @@ async def reference_image_binary(
     db: AsyncSession,
     token: str,
     variant: str | None = None,
+    variant_service: Any | None = None,
 ) -> Any:
+    if variant_service is None and variant == _endpoints.VIDEO_REFERENCE_IMAGE_KIND:
+        variant_service = _endpoints.get_variant_service(request)
     return await _endpoints.reference_image_binary_impl(
         image_id,
         request,
         db,
         token=token,
         variant=variant,
-        ensure_reference_variant=ensure_video_reference_image_variant,
+        variant_service=variant_service,
     )
 
 
@@ -148,6 +139,7 @@ async def reference_image_binary_named(
     db: AsyncSession,
     token: str,
     variant: str | None = None,
+    variant_service: Any | None = None,
 ) -> Any:
     expected = _endpoints.volcano_asset_safe_filename(image_id, asset_type="Image")
     if filename != expected or variant != _endpoints.VOLCANO_ASSET_IMAGE_KIND:
@@ -158,6 +150,7 @@ async def reference_image_binary_named(
         db,
         token=token,
         variant=variant,
+        variant_service=variant_service,
     )
 
 

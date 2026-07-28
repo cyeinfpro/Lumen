@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from .completion_parts.default_runtime import DEFAULT_COMPLETION_RUNTIME
 from .completion_parts.runtime import CompletionRuntime
 
 
 async def run_completion(ctx: dict[str, Any], task_id: str) -> None:
-    runtime = ctx.get("completion_runtime", DEFAULT_COMPLETION_RUNTIME)
+    runtime = ctx.get("completion_runtime")
     if not isinstance(runtime, CompletionRuntime):
         raise TypeError("ctx['completion_runtime'] must be CompletionRuntime")
     await runtime.run(ctx, task_id)

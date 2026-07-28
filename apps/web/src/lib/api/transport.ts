@@ -14,7 +14,10 @@ import {
 } from "./requestBudget";
 import { createRequestSignal } from "./requestSignal";
 import { readResponseData, sessionCookieSecureSignal } from "./response";
-import { retryModeFor } from "./retryPolicy";
+import {
+  isReplayableBody,
+  retryModeFor,
+} from "./retryPolicy";
 
 export type TransportRequest = RequestInit & {
   requestClass: RequestClass;
@@ -40,6 +43,40 @@ function requestHeaders(init: RequestInit): Headers {
     headers.set("content-type", "application/json");
   }
   return headers;
+}
+
+function cloneRequestBody(
+  body: BodyInit | null | undefined,
+): BodyInit | null | undefined {
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    const clone = new FormData();
+    for (const [name, value] of body.entries()) {
+      if (typeof File !== "undefined" && value instanceof File) {
+        clone.append(name, value, value.name);
+      } else {
+        clone.append(name, value);
+      }
+    }
+    return clone;
+  }
+  if (typeof Blob !== "undefined" && body instanceof Blob) {
+    return body.slice(0, body.size, body.type);
+  }
+  if (
+    typeof URLSearchParams !== "undefined" &&
+    body instanceof URLSearchParams
+  ) {
+    return new URLSearchParams(body);
+  }
+  return body;
+}
+
+function requestFactory(init: RequestInit): () => RequestInit {
+  return () => ({
+    ...init,
+    headers: new Headers(init.headers),
+    body: cloneRequestBody(init.body),
+  });
 }
 
 function unauthorizedError(response: Response, data: unknown): ApiError {
@@ -137,8 +174,12 @@ export class ApiTransport {
 
   private fetch(path: string, init: RequestInit): Promise<Response> {
     const headers = new Headers(init.headers);
-    return executeFetch(apiUrl(path), init, {
-      retryMode: retryModeFor((init.method ?? "GET").toUpperCase(), headers),
+    return executeFetch(apiUrl(path), requestFactory(init), {
+      retryMode: retryModeFor(
+        (init.method ?? "GET").toUpperCase(),
+        headers,
+        init.body,
+      ),
     });
   }
 
@@ -186,6 +227,7 @@ export class ApiTransport {
     if (
       response.status !== 403 ||
       !applyCsrf ||
+      !isReplayableBody(init.body) ||
       parseApiError(response.status, data).code !== "csrf_failed"
     ) {
       return { response, data };

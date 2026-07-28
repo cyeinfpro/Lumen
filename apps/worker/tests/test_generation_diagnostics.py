@@ -1,47 +1,34 @@
-import pytest
-
-from app.tasks.generation_parts import default_runtime as generation
 from app.tasks.generation_parts import diagnostics
 
 
-def test_diagnostics_facade_keeps_pure_helper_aliases() -> None:
-    assert generation._compact_diag_value is diagnostics.compact_diag_value
-    assert (
-        generation._build_generation_diagnostics
-        is diagnostics.build_generation_diagnostics
-    )
+def _redis_text(value: object) -> str | None:
+    return str(value) if value is not None else None
 
 
-def test_stage_timer_facade_uses_current_monotonic(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(generation.time, "monotonic", lambda: 10.75)
-
-    timer = generation._StageTimer()
+def test_stage_timer_uses_injected_monotonic() -> None:
+    timer = diagnostics.StageTimer(monotonic=lambda: 10.75)
     timer.add_elapsed("upstream", 10.0)
     timer.set_ms("queue", -5)
 
     assert timer.snapshot() == {"upstream": 750, "queue": 0}
 
 
-def test_diagnostics_facade_injects_current_redis_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_diagnostics_accepts_explicit_redis_text() -> None:
     seen: list[object] = []
 
     def fake_redis_text(value: object) -> str | None:
         seen.append(value)
         return f"decoded:{value!r}" if value is not None else None
 
-    monkeypatch.setattr(generation, "_redis_text", fake_redis_text)
-
-    attempt = generation._provider_attempt_from_progress(
+    attempt = diagnostics.provider_attempt_from_progress(
         {"provider": b"provider", "reason": b"retry"},
         status="failover",
         attempt_epoch=3,
+        redis_text=fake_redis_text,
     )
-    selected = generation._request_event_provider_from_attempts(
-        [{"actual_provider": b"winner", "status": "used"}]
+    selected = diagnostics.request_event_provider_from_attempts(
+        [{"actual_provider": b"winner", "status": "used"}],
+        redis_text=fake_redis_text,
     )
 
     assert attempt["provider"] == "decoded:b'provider'"
@@ -51,7 +38,7 @@ def test_diagnostics_facade_injects_current_redis_text(
 
 
 def test_safe_generation_error_summary_compacts_message() -> None:
-    summary = generation._safe_generation_error_summary(
+    summary = diagnostics.safe_generation_error_summary(
         code="upstream_error",
         status_code=502,
         message="first line\n" + "x" * 500,
@@ -64,7 +51,7 @@ def test_safe_generation_error_summary_compacts_message() -> None:
 
 
 def test_image_requested_params_snapshot_whitelists_and_compacts() -> None:
-    snapshot = generation._image_requested_params_snapshot(
+    snapshot = diagnostics.image_requested_params_snapshot(
         {
             "fast": True,
             "billing_tier": list(range(30)),
@@ -83,7 +70,7 @@ def test_image_requested_params_snapshot_whitelists_and_compacts() -> None:
 
 
 def test_build_generation_diagnostics_redacts_provider_details_by_default() -> None:
-    diagnostics = generation._build_generation_diagnostics(
+    result = diagnostics.build_generation_diagnostics(
         requested_params={"size": "1024x1024"},
         provider="secret-provider",
         actual_endpoint="https://internal.example/v1/images",
@@ -100,13 +87,13 @@ def test_build_generation_diagnostics_redacts_provider_details_by_default() -> N
         ],
     )
 
-    assert "provider" not in diagnostics
-    assert "actual_provider" not in diagnostics
-    assert "actual_endpoint" not in diagnostics
-    assert "debug_id" not in diagnostics
-    assert diagnostics["failover"] is True
-    assert diagnostics["failover_count"] == 1
-    attempt = diagnostics["provider_attempts"][0]
+    assert "provider" not in result
+    assert "actual_provider" not in result
+    assert "actual_endpoint" not in result
+    assert "debug_id" not in result
+    assert result["failover"] is True
+    assert result["failover_count"] == 1
+    attempt = result["provider_attempts"][0]
     assert "provider" not in attempt
     assert "endpoint" not in attempt
     assert attempt["status"] == "failover"
@@ -115,7 +102,7 @@ def test_build_generation_diagnostics_redacts_provider_details_by_default() -> N
 
 
 def test_build_generation_diagnostics_can_expose_provider_details() -> None:
-    diagnostics = generation._build_generation_diagnostics(
+    result = diagnostics.build_generation_diagnostics(
         requested_params={"size": "1024x1024"},
         provider="internal-provider",
         actual_endpoint="https://internal.example/v1/images",
@@ -130,18 +117,18 @@ def test_build_generation_diagnostics_can_expose_provider_details() -> None:
         expose_provider_diagnostics=True,
     )
 
-    assert diagnostics["provider"] == "internal-provider"
-    assert diagnostics["actual_provider"] == "internal-provider"
-    assert diagnostics["actual_endpoint"] == "https://internal.example/v1/images"
-    assert diagnostics["debug_id"] == "task-123"
+    assert result["provider"] == "internal-provider"
+    assert result["actual_provider"] == "internal-provider"
+    assert result["actual_endpoint"] == "https://internal.example/v1/images"
+    assert result["debug_id"] == "task-123"
     assert (
-        diagnostics["provider_attempts"][0]["endpoint"]
+        result["provider_attempts"][0]["endpoint"]
         == "https://internal.example/v1/images"
     )
 
 
 def test_sanitize_upstream_request_preserves_request_event_provider() -> None:
-    upstream_request = generation._sanitize_generation_upstream_request(
+    upstream_request = diagnostics.sanitize_generation_upstream_request(
         {
             "provider": "secret-provider",
             "actual_provider": "secret-provider",
@@ -161,23 +148,26 @@ def test_sanitize_upstream_request_preserves_request_event_provider() -> None:
 
 def test_request_event_provider_from_attempts_prefers_used_attempt() -> None:
     assert (
-        generation._request_event_provider_from_attempts(
+        diagnostics.request_event_provider_from_attempts(
             [
                 {"provider": "failed-provider", "status": "failover"},
                 {"provider": "winner-provider", "status": "used"},
-            ]
+            ],
+            redis_text=_redis_text,
         )
         == "winner-provider"
     )
     assert (
-        generation._request_event_provider_from_attempts(
-            [{"provider": "last-known-provider", "status": "failover"}]
+        diagnostics.request_event_provider_from_attempts(
+            [{"provider": "last-known-provider", "status": "failover"}],
+            redis_text=_redis_text,
         )
         == "last-known-provider"
     )
     assert (
-        generation._request_event_provider_from_attempts(
-            [{"provider": "dual_race", "status": "used"}]
+        diagnostics.request_event_provider_from_attempts(
+            [{"provider": "dual_race", "status": "used"}],
+            redis_text=_redis_text,
         )
         is None
     )

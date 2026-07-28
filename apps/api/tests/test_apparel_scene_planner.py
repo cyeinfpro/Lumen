@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from app.workflow_domain import apparel_scene_planner as scene_planner
+from app.workflows.adapters import apparel_scene_planner as scene_planner
+from app.workflows.application.runtime_state import WorkflowRuntimeState
 from lumen_core.providers import ProviderDefinition
 
 
@@ -18,10 +19,54 @@ def fake_provider(name: str) -> ProviderDefinition:
     )
 
 
+@pytest.mark.asyncio
+async def test_provider_round_robin_state_is_injected_and_resettable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = WorkflowRuntimeState()
+    provider = fake_provider("primary")
+    seen_counters: list[dict[int, int]] = []
+
+    async def fake_get_setting(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    def fake_weighted_order(
+        providers: list[ProviderDefinition],
+        counters: dict[int, int],
+    ) -> list[ProviderDefinition]:
+        seen_counters.append(counters)
+        counters[0] = counters.get(0, 0) + 1
+        return providers
+
+    monkeypatch.setattr(scene_planner, "get_spec", lambda _name: object())
+    monkeypatch.setattr(scene_planner, "get_setting", fake_get_setting)
+    monkeypatch.setattr(
+        scene_planner,
+        "build_effective_provider_config",
+        lambda **_kwargs: ([provider], {}, []),
+    )
+    monkeypatch.setattr(scene_planner, "endpoint_kind_allowed", lambda *_args: True)
+    monkeypatch.setattr(scene_planner, "weighted_priority_order", fake_weighted_order)
+
+    result = await scene_planner.resolve_scene_provider_order(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        runtime.scene_provider_round_robin,
+    )
+
+    assert result == [provider]
+    assert seen_counters == [runtime.scene_provider_round_robin.counters]
+    assert runtime.scene_provider_round_robin.counters == {0: 1}
+    runtime.reset()
+    assert runtime.scene_provider_round_robin.counters == {}
+
+
 def test_gpt55_call_timeout_warns_on_unknown_purpose(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("WARNING", logger="app.workflow_domain.apparel_scene_planner")
+    caplog.set_level(
+        "WARNING",
+        logger="app.workflows.adapters.apparel_scene_planner",
+    )
 
     assert scene_planner._gpt55_call_timeout_seconds("new_unmapped_purpose") == 75.0
     assert "unknown GPT-5.5 call purpose" in caplog.text
@@ -47,7 +92,9 @@ async def test_call_gpt55_json_skips_attempts_on_401(
             instructions="return json",
             payload={},
             max_output_tokens=200,
-            provider_order=[fake_provider("p1"), fake_provider("p2")],
+            provider_selection=scene_planner.SceneProviderSelection(
+                order=(fake_provider("p1"), fake_provider("p2"))
+            ),
         )
 
     assert calls == ["gpt55-priority", "gpt55-priority"]
@@ -76,7 +123,9 @@ async def test_call_gpt55_json_retries_text_only_when_reference_image_rejected(
         instructions="return json",
         payload={},
         max_output_tokens=200,
-        provider_order=[fake_provider("p1")],
+        provider_selection=scene_planner.SceneProviderSelection(
+            order=(fake_provider("p1"),)
+        ),
         reference_images=reference_images,
     )
 
@@ -112,7 +161,9 @@ async def test_call_gpt55_json_continues_attempts_after_text_only_retry_fails(
         instructions="return json",
         payload={},
         max_output_tokens=200,
-        provider_order=[fake_provider("p1")],
+        provider_selection=scene_planner.SceneProviderSelection(
+            order=(fake_provider("p1"),)
+        ),
         reference_images=reference_images,
     )
 

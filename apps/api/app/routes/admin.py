@@ -43,6 +43,8 @@ from ..audit import hash_email
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ..db import affected_rows, get_db
 from ..deps import AdminUser, verify_csrf
+from ..images.application.create_variant import CreateVariantService, VariantError
+from ..images.composition import get_variant_service
 from ..redis_client import get_redis
 from ..security import hash_password
 from ..services.admin import request_events as _request_events
@@ -53,7 +55,6 @@ from .images import (
     VARIANT_MEDIA_TYPE,
 )
 from .media_delivery import (
-    ensure_display_variant,
     image_storage_path,
     image_storage_streaming_response,
 )
@@ -944,6 +945,7 @@ async def get_admin_image_variant(
     kind: str,
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    variant_service: Annotated[CreateVariantService, Depends(get_variant_service)],
 ) -> Response:
     if kind not in ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
@@ -954,19 +956,23 @@ async def get_admin_image_variant(
     ).scalar_one_or_none()
     if not img:
         raise _http("not_found", "image not found", 404)
-    variant = (
-        await db.execute(
-            select(ImageVariant).where(
-                ImageVariant.image_id == img.id,
-                ImageVariant.kind == kind,
+    if kind == DISPLAY_VARIANT:
+        await db.rollback()
+        try:
+            variant = await variant_service.ensure_display_variant(image_id)
+        except VariantError as exc:
+            raise _http(exc.code, exc.message, exc.status_code) from exc
+    else:
+        variant = (
+            await db.execute(
+                select(ImageVariant).where(
+                    ImageVariant.image_id == img.id,
+                    ImageVariant.kind == kind,
+                )
             )
-        )
-    ).scalar_one_or_none()
-    if variant is None:
-        if kind != DISPLAY_VARIANT:
+        ).scalar_one_or_none()
+        if variant is None:
             raise _http("not_found", "variant not found", 404)
-        variant = await ensure_display_variant(db, img)
-        await db.commit()
     return image_storage_streaming_response(
         image_storage_path(variant.storage_key),
         media_type=VARIANT_MEDIA_TYPE.get(kind, "application/octet-stream"),

@@ -7,41 +7,43 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.config import settings
-from app.routes import workflows
-from app.workflow_domain import (
-    apparel_library,
+from app.workflows.adapters import (
     apparel_scene_planner as scene_planner,
     apparel_scene_planner as scene_planner_impl,
-    showcase_model_policy,
-    showcase_shot_pool as shot_pool,
-    showcase_shot_pool_adult,
-    showcase_shot_pool_kids,
-    showcase_template_policy,
-)
-from app.workflow_domain.apparel_library_reference import ReferenceProfile
-from app.workflow_domain.workflow_contracts import PublishBundle
-from app.workflow_services import (
     library_github,
     library_items,
     library_materialization,
-    model_library_endpoints as model_library,
     output_sync,
-    poster_endpoints as poster,
-    project_endpoints as project,
     serialization,
     showcase_context,
     showcase_inputs,
     showcase_orchestration,
     showcase_preflight_steps,
-    showcase_prompts,
-    showcase_scene_policy,
-    showcase_shots,
     workflow_runtime,
 )
+from app.workflows.application import model_library_tagging, showcase_prompts
+from app.workflows.application.runtime_state import WorkflowRuntimeState
+from app.workflows.adapters.operations import (
+    model_library,
+    poster,
+    projects as project,
+)
+from app.workflows.application.errors import WorkflowRequestError
+from app.workflows.domain import (
+    apparel_library,
+    showcase_model_policy,
+    showcase_scene_policy,
+    showcase_shot_pool as shot_pool,
+    showcase_shot_pool_adult,
+    showcase_shot_pool_kids,
+    showcase_shots,
+    showcase_template_policy,
+)
+from app.workflows.adapters.apparel_library_reference import ReferenceProfile
+from app.workflows.domain.workflow_contracts import PublishBundle
 from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
@@ -913,7 +915,7 @@ async def test_delete_workflow_cleans_generated_outputs_and_backing_conversation
     )
     db = _Db([], responses=[[conv]])
 
-    out = await workflows.delete_workflow(  # noqa: SLF001
+    out = await project.delete_workflow(  # noqa: SLF001
         "run-1",
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -981,7 +983,7 @@ async def test_delete_apparel_model_library_job_cleans_generated_outputs(
     )
     db = _Db([])
 
-    out = await workflows.delete_apparel_model_library_job(  # noqa: SLF001
+    out = await model_library.delete_apparel_model_library_job(  # noqa: SLF001
         "run-1",
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -1030,7 +1032,7 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
     )
     db = _Db([], responses=[rows])
 
-    out = await workflows.clear_apparel_model_library_jobs(  # noqa: SLF001
+    out = await model_library.clear_apparel_model_library_jobs(  # noqa: SLF001
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
     )
@@ -1041,124 +1043,6 @@ async def test_clear_apparel_model_library_jobs_cleans_each_finished_job(
     assert [call.split(":")[0] for call in cleanup_calls] == ["run-1", "run-2"]
     assert all("model library job cleared" in call for call in cleanup_calls)
     assert db.committed is True
-
-
-def test_workflow_cursor_round_trip_and_filter_validation() -> None:
-    updated_at = datetime(2026, 7, 11, 8, 30, tzinfo=timezone.utc)
-    run = SimpleNamespace(id="run-2", updated_at=updated_at)
-
-    cursor = serialization._encode_workflow_cursor(  # noqa: SLF001
-        run,
-        workflow_type="poster_design",
-    )
-
-    assert serialization._decode_workflow_cursor(  # noqa: SLF001
-        cursor,
-        workflow_type="poster_design",
-    ) == (updated_at, "run-2")
-    with pytest.raises(HTTPException) as mismatch:
-        serialization._decode_workflow_cursor(  # noqa: SLF001
-            cursor,
-            workflow_type="apparel_model_showcase",
-        )
-    assert mismatch.value.status_code == 422
-    with pytest.raises(HTTPException) as malformed:
-        serialization._decode_workflow_cursor(  # noqa: SLF001
-            "not-a-valid-cursor",
-            workflow_type="poster_design",
-        )
-    assert malformed.value.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_list_workflows_uses_stable_cursor_lookahead_and_page_boundary() -> None:
-    from sqlalchemy.dialects import postgresql
-
-    updated_at = datetime(2026, 7, 11, 8, 30, tzinfo=timezone.utc)
-
-    def row(run_id: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            id=run_id,
-            conversation_id=None,
-            type="poster_design",
-            status="needs_review",
-            title=run_id,
-            user_prompt="海报",
-            product_image_ids=[],
-            current_step="multi_size_generation",
-            quality_mode="premium",
-            metadata_jsonb={},
-            created_at=updated_at,
-            updated_at=updated_at,
-        )
-
-    run_3, run_2, run_1 = row("run-3"), row("run-2"), row("run-1")
-    db = _Db(
-        [],
-        responses=[
-            [run_3, run_2, run_1],
-            [("run-3", ["img-3"]), ("run-2", ["img-2"])],
-        ],
-    )
-
-    first_page = await workflows.list_workflows(
-        SimpleNamespace(id="user-1"),
-        db,  # type: ignore[arg-type]
-        type="poster_design",
-        cursor=None,
-        limit=2,
-    )
-
-    assert [item.id for item in first_page.items] == ["run-3", "run-2"]
-    assert [item.output_count for item in first_page.items] == [1, 1]
-    assert first_page.next_cursor is not None
-    assert serialization._decode_workflow_cursor(  # noqa: SLF001
-        first_page.next_cursor,
-        workflow_type="poster_design",
-    ) == (updated_at, "run-2")
-    rendered = str(
-        db.statements[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "ORDER BY workflow_runs.updated_at DESC, workflow_runs.id DESC" in rendered
-    assert "LIMIT 3" in rendered
-
-    next_db = _Db([], responses=[[]])
-    next_page = await workflows.list_workflows(
-        SimpleNamespace(id="user-1"),
-        next_db,  # type: ignore[arg-type]
-        type="poster_design",
-        cursor=first_page.next_cursor,
-        limit=2,
-    )
-    assert next_page.items == []
-    assert next_page.next_cursor is None
-    next_rendered = str(
-        next_db.statements[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "workflow_runs.updated_at <" in next_rendered
-    assert "workflow_runs.id < 'run-2'" in next_rendered
-
-    boundary_db = _Db(
-        [],
-        responses=[
-            [run_3, run_2],
-            [("run-3", []), ("run-2", [])],
-        ],
-    )
-    boundary_page = await workflows.list_workflows(
-        SimpleNamespace(id="user-1"),
-        boundary_db,  # type: ignore[arg-type]
-        type="poster_design",
-        cursor=None,
-        limit=2,
-    )
-    assert boundary_page.next_cursor is None
 
 
 @pytest.mark.asyncio
@@ -1187,7 +1071,7 @@ async def test_get_workflow_is_read_only(
     monkeypatch.setattr(project, "_build_run_out", fake_build)
     db = _Db([])
 
-    out = await workflows.get_workflow(
+    out = await project.get_workflow(
         "run-1",
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -1227,7 +1111,7 @@ async def test_reconcile_workflow_is_explicit_mutation(
     monkeypatch.setattr(project, "_build_run_out", fake_build)
     db = _Db([])
 
-    out = await workflows.reconcile_workflow(
+    out = await project.reconcile_workflow(
         "run-1",
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -1310,7 +1194,7 @@ async def test_create_poster_masters_associates_brand_attachments(
         return current_run
 
     monkeypatch.setattr(poster, "_get_run", fake_get_run)
-    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync)
     monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
     monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
@@ -1318,7 +1202,7 @@ async def test_create_poster_masters_associates_brand_attachments(
     monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[]])
-    out = await workflows.create_poster_masters(
+    out = await poster.create_poster_masters(
         "run-poster",
         PosterMastersCreateIn(candidate_count=1),
         SimpleNamespace(id="user-1"),
@@ -1327,8 +1211,9 @@ async def test_create_poster_masters_associates_brand_attachments(
 
     assert out is run
     assert len(create_calls) == 1
-    assert create_calls[0]["intent"] == Intent.IMAGE_TO_IMAGE
-    assert create_calls[0]["attachment_ids"] == ["logo-1", "product-1"]
+    task_request = create_calls[0]["request"]
+    assert task_request.intent == Intent.IMAGE_TO_IMAGE
+    assert task_request.attachment_ids == ["logo-1", "product-1"]
     assert master_step.input_json["reference_image_ids"] == [
         "logo-1",
         "product-1",
@@ -1394,12 +1279,12 @@ async def test_approve_poster_master_persists_adjustments_for_next_step(
         return current_run
 
     monkeypatch.setattr(poster, "_get_run", fake_get_run)
-    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync)
     monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[master], []])
-    out = await workflows.approve_poster_master(
+    out = await poster.approve_poster_master(
         "run-poster",
         "master-1",
         PosterMasterApproveIn(adjustments="背景再暖一点"),
@@ -1499,7 +1384,7 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
         return current_run
 
     monkeypatch.setattr(poster, "_get_run", fake_get_run)
-    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync)
     monkeypatch.setattr(poster, "_poster_selected_master", fake_selected_master)
     monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
@@ -1508,7 +1393,7 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
     monkeypatch.setattr(poster, "_build_run_out", fake_build)
 
     db = _Db([], responses=[[]])
-    out = await workflows.create_poster_renders(
+    out = await poster.create_poster_renders(
         "run-poster",
         PosterRendersCreateIn(aspects=["9:16"]),
         SimpleNamespace(id="user-1"),
@@ -1517,13 +1402,14 @@ async def test_create_poster_renders_uses_brand_attachments_and_legacy_adjustmen
 
     assert out is run
     assert len(create_calls) == 1
-    assert create_calls[0]["intent"] == Intent.IMAGE_TO_IMAGE
-    assert create_calls[0]["attachment_ids"] == [
+    task_request = create_calls[0]["request"]
+    assert task_request.intent == Intent.IMAGE_TO_IMAGE
+    assert task_request.attachment_ids == [
         "master-image",
         "logo-1",
         "product-1",
     ]
-    assert "背景再暖一点" in create_calls[0]["text"]
+    assert "背景再暖一点" in task_request.text
     assert multi_step.input_json["adjustments"] == "背景再暖一点"
     assert multi_step.input_json["reference_image_ids"] == [
         "master-image",
@@ -1708,7 +1594,7 @@ async def test_apparel_model_library_jobs_respects_offset_and_has_more(
     expected_db_second = _Db([], responses=[library_runs, candidate_rows])
 
     async def run_page(db: _Db, offset: int) -> ApparelModelLibraryJobsOut:  # noqa: SLF001
-        return await workflows.list_apparel_model_library_jobs(  # noqa: SLF001
+        return await model_library.list_apparel_model_library_jobs(  # noqa: SLF001
             user=SimpleNamespace(id="user-1"),
             db=db,  # type: ignore[arg-type]
             limit=2,
@@ -2222,11 +2108,12 @@ async def test_create_showcase_images_persists_generation_outbox_before_publish(
     body = ShowcaseImagesCreateIn(output_count=2, template="urban_commute")
     db = _Db([])
 
-    out = await workflows.create_showcase_images(
+    out = await project.create_showcase_images(
         "run-1",
         body,
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
+        runtime=WorkflowRuntimeState(),
     )
 
     assert out is run
@@ -2315,7 +2202,7 @@ async def test_showcase_generation_context_requires_approved_model_approval(
         fail_selected_candidate,
     )
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(WorkflowRequestError) as exc:
         await showcase_context._showcase_generation_context(  # noqa: SLF001
             db=_Db([]),  # type: ignore[arg-type]
             user=SimpleNamespace(id="user-1"),
@@ -2393,7 +2280,7 @@ async def test_create_accessory_previews_reuses_matching_running_request(
 
     db = _Db([], responses=[[candidate]])
 
-    out = await workflows.create_accessory_previews(
+    out = await project.create_accessory_previews(
         "run-1",
         body,
         SimpleNamespace(id="user-1"),
@@ -2458,6 +2345,7 @@ async def test_dispatch_showcase_images_is_idempotent_when_tasks_exist(
         workflow_run_id="run-1",
         body=ShowcaseImagesCreateIn(),
         user=SimpleNamespace(id="user-1"),
+        runtime=WorkflowRuntimeState(),
     )
 
     assert out is run
@@ -3095,7 +2983,7 @@ async def test_reopen_model_selection_resets_downstream_and_clears_quality_repor
     monkeypatch.setattr(project, "_build_run_out", fake_build_run_out)
     db = _Db([], responses=[[selected, rejected], []])
 
-    out = await workflows.reopen_model_selection(
+    out = await project.reopen_model_selection(
         "run-1",
         SimpleNamespace(id="user-1"),
         db,  # type: ignore[arg-type]
@@ -3749,6 +3637,7 @@ async def test_showcase_preflight_impl_runs_gpt55_merged_director(
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
     )
 
     assert preflight["planning"]["planner"] == "gpt55_preflight"
@@ -3785,7 +3674,8 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
         raise RuntimeError("db temporarily unavailable")
 
     async def fake_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        seen_provider_orders.append(kwargs.get("provider_order"))
+        selection = kwargs["provider_selection"]
+        seen_provider_orders.append(selection.order)
         return scene_planner_impl.rules_fallback_planning(
             product_analysis={"category": "衬衫"},
             template="urban_commute",
@@ -3827,6 +3717,7 @@ async def test_showcase_preflight_impl_retries_provider_resolution_per_call(
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
     )
 
     assert seen_provider_orders == [None]
@@ -3915,6 +3806,7 @@ async def test_showcase_preflight_impl_reviews_director_brief_without_rewrite(
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
     )
 
     assert preflight["prompt_reviews"][0]["status"] == "ok"
@@ -4011,6 +3903,7 @@ async def test_showcase_preflight_impl_reports_composer_review_progress(
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
         progress_hook=progress_hook,
     )
 
@@ -4158,6 +4051,7 @@ async def test_showcase_preflight_impl_uses_director_brief_for_risky_scene(
         continuity_anchor="accessory",
         allow_pet=False,
         allow_background_people=True,
+        provider_runtime=WorkflowRuntimeState().scene_provider_round_robin,
     )
 
     assert preflight["prompt_reviews"][0]["guarded_composer"] is True
@@ -5172,17 +5066,21 @@ def test_job_item_out_marks_dual_race_bonus_as_free() -> None:
 
 
 def test_normalize_tagged_age_recognizes_aliases() -> None:
-    f = model_library._normalize_tagged_age  # noqa: SLF001
-    assert f("young_adult") == "young_adult"
-    assert f("YOUNG") == "young_adult"
-    assert f("kids") == "child"
-    assert f("middleaged") == "middle_aged"
-    assert f("garbage") is None
+    def normalize(value: object) -> str | None:
+        return model_library_tagging.normalize_tagged_age(
+            value,
+            age_segments=apparel_library.MODEL_LIBRARY_AGE_SEGMENTS,
+        )
+
+    assert normalize("young_adult") == "young_adult"
+    assert normalize("YOUNG") == "young_adult"
+    assert normalize("kids") == "child"
+    assert normalize("middleaged") == "middle_aged"
+    assert normalize("garbage") is None
 
 
 def test_normalize_tagged_gender_normalizes_aliases() -> None:
-    f = model_library._normalize_tagged_gender  # noqa: SLF001
-    assert f("female") == "female"
-    assert f("Woman") == "female"
-    assert f("M") == "male"
-    assert f("unknown") is None
+    assert model_library_tagging.normalize_tagged_gender("female") == "female"
+    assert model_library_tagging.normalize_tagged_gender("Woman") == "female"
+    assert model_library_tagging.normalize_tagged_gender("M") == "male"
+    assert model_library_tagging.normalize_tagged_gender("unknown") is None

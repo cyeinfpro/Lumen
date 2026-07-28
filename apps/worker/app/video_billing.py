@@ -26,6 +26,7 @@ from . import billing as worker_billing
 
 
 logger = logging.getLogger(__name__)
+_DEFAULTABLE_VIDEO_BILLING_ERRORS = frozenset({"video_pricing_missing"})
 
 
 @dataclass(frozen=True)
@@ -217,7 +218,9 @@ async def resolve_video_billing(
                 billing_model=billing_model,
             )
             decision = "actual_usage_settle" if succeeded else "failure_usage_settle"
-        except VideoBillingError:
+        except VideoBillingError as exc:
+            if exc.code not in _DEFAULTABLE_VIDEO_BILLING_ERRORS:
+                raise
             # 定价规则缺失 → 算不出真实成本，但上游仍可能已扣费，
             # 因此退回默认金额结算而不是 release。
             actual_micro = _default_video_charge_micro(generation, held)

@@ -28,10 +28,40 @@ health_check
 cleanup
 "
 
+LUMEN_UPDATE_RESUMABLE_PHASES="
+lock
+self_update_scripts
+check
+preflight
+backup_preflight
+fetch_release
+set_image_tag
+pull_images
+check_storage
+start_infra
+migrate_db
+switch
+restart_services
+health_check
+cleanup
+"
+
 lumen_update_phase_is_known() {
     local phase="$1"
     case "
 ${LUMEN_UPDATE_PHASES}
+" in
+        *"
+${phase}
+"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+lumen_update_phase_is_resumable() {
+    local phase="$1"
+    case "
+${LUMEN_UPDATE_RESUMABLE_PHASES}
 " in
         *"
 ${phase}

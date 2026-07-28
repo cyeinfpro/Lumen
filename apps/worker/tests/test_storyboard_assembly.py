@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,9 @@ from typing import Any
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.storage_writes import StorageWriteCoordinator
 from app.tasks import storyboard_assembly
+from lumen_core.storage_capacity import StorageCapacityExceeded
 
 
 def _claim(
@@ -167,9 +170,11 @@ async def test_concurrent_workers_only_one_claim_reaches_ffmpeg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     claim = _claim()
+    storage_writes_marker = object()
     lock = asyncio.Lock()
     claimed = False
     concat_calls = 0
+    published_events: list[str] = []
 
     async def claim_once(
         _run_id: str,
@@ -184,8 +189,8 @@ async def test_concurrent_workers_only_one_claim_reaches_ffmpeg(
             claimed = True
             return claim
 
-    async def publish(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    async def publish(*_args: Any, **kwargs: Any) -> None:
+        published_events.append(kwargs["event_name"])
 
     async def load_paths(
         _claim: storyboard_assembly._AssemblyClaim,  # noqa: SLF001
@@ -214,9 +219,11 @@ async def test_concurrent_workers_only_one_claim_reaches_ffmpeg(
         *,
         processed: dict[str, Any],
         diagnostics: dict[str, Any],
+        storage_writes: Any,
     ) -> Any:
         assert processed["video_bytes"] == b"video"
         assert diagnostics == {}
+        assert storage_writes is storage_writes_marker
         return SimpleNamespace(id="video-1")
 
     monkeypatch.setattr(storyboard_assembly, "_claim_assembly", claim_once)
@@ -226,12 +233,41 @@ async def test_concurrent_workers_only_one_claim_reaches_ffmpeg(
     monkeypatch.setattr(storyboard_assembly, "_postprocess_video_bytes", postprocess)
     monkeypatch.setattr(storyboard_assembly, "_store_assembly_result", store)
 
+    ctx = {
+        "redis": object(),
+        "storage_write_coordinator": storage_writes_marker,
+    }
     await asyncio.gather(
-        storyboard_assembly.run_storyboard_assembly({"redis": object()}, "run-1"),
-        storyboard_assembly.run_storyboard_assembly({"redis": object()}, "run-1"),
+        storyboard_assembly.run_storyboard_assembly(ctx, "run-1"),
+        storyboard_assembly.run_storyboard_assembly(ctx, "run-1"),
     )
 
     assert concat_calls == 1
+    assert published_events == [
+        "storyboard.assembling",
+        "storyboard.assembled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_requires_storage_write_coordinator_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim_called = False
+
+    async def claim(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal claim_called
+        claim_called = True
+
+    monkeypatch.setattr(storyboard_assembly, "_claim_assembly", claim)
+
+    with pytest.raises(KeyError, match="storage_write_coordinator"):
+        await storyboard_assembly.run_storyboard_assembly(
+            {"redis": object()},
+            "run-1",
+        )
+
+    assert claim_called is False
 
 
 @pytest.mark.asyncio
@@ -362,18 +398,64 @@ async def test_old_attempt_cannot_complete_or_overwrite_new_attempt(
     assert "done" in compiled.params.values()
 
 
-class _Storage:
+class _Lease:
     def __init__(self) -> None:
+        self.release_calls = 0
+
+    async def renew(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        self.release_calls += 1
+
+
+class _Capacity:
+    def __init__(self, *, error: BaseException | None = None) -> None:
+        self.error = error
+        self.requests: list[int] = []
+        self.lease = _Lease()
+
+    async def reserve(self, bytes_required: int) -> _Lease:
+        self.requests.append(bytes_required)
+        if self.error is not None:
+            raise self.error
+        return self.lease
+
+
+class _Storage:
+    def __init__(self, *, existing_keys: set[str] | None = None) -> None:
+        self.existing_keys = existing_keys or set()
         self.written: list[str] = []
         self.deleted: list[str] = []
 
-    def put_bytes_result(self, key: str, data: bytes) -> Any:
+    def put_bytes_result(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        max_bytes: int | None = None,
+    ) -> Any:
+        assert max_bytes == len(data)
         self.written.append(key)
-        return SimpleNamespace(size=len(data), created=True)
+        return SimpleNamespace(
+            size=len(data),
+            created=key not in self.existing_keys,
+        )
 
     def delete(self, key: str) -> bool:
         self.deleted.append(key)
         return True
+
+
+def _coordinator(
+    fake_storage: _Storage,
+    capacity: _Capacity | None = None,
+) -> StorageWriteCoordinator:
+    return StorageWriteCoordinator(
+        storage=fake_storage,  # type: ignore[arg-type]
+        capacity=capacity or _Capacity(),  # type: ignore[arg-type]
+        lease_ttl_seconds=30,
+    )
 
 
 def _processed() -> dict[str, Any]:
@@ -390,10 +472,192 @@ def _processed() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+async def test_store_assembly_reserves_and_writes_video_and_poster_as_one_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_storage = _Storage()
+    capacity = _Capacity()
+    storage_writes = _coordinator(fake_storage, capacity)
+    ids = iter(["version-1", "video-1"])
+    operation_order: list[str] = []
+    original_put = fake_storage.put_bytes_result
+
+    def record_put(
+        key: str,
+        data: bytes,
+        *,
+        max_bytes: int | None = None,
+    ) -> Any:
+        operation_order.append(f"write:{key}")
+        return original_put(key, data, max_bytes=max_bytes)
+
+    async def complete(
+        _claim: storyboard_assembly._AssemblyClaim,  # noqa: SLF001
+        _video: Any,
+    ) -> bool:
+        operation_order.append("complete")
+        return True
+
+    monkeypatch.setattr(fake_storage, "put_bytes_result", record_put)
+    monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: next(ids))
+    monkeypatch.setattr(storyboard_assembly, "_complete_assembly", complete)
+
+    video = await storyboard_assembly._store_assembly_result(  # noqa: SLF001
+        _claim(),
+        processed=_processed(),
+        diagnostics={},
+        storage_writes=storage_writes,
+    )
+
+    expected_keys = {
+        "u/user-1/storyboards/run-1/assembly/version-1/output.mp4",
+        "u/user-1/storyboards/run-1/assembly/version-1/poster.jpg",
+    }
+    assert capacity.requests == [2 * (len(b"video-bytes") + len(b"poster-bytes"))]
+    assert capacity.lease.release_calls == 1
+    assert set(fake_storage.written) == expected_keys
+    assert operation_order[-1] == "complete"
+    assert video.storage_key in expected_keys
+    assert video.poster_storage_key in expected_keys
+
+
+@pytest.mark.asyncio
+async def test_capacity_rejection_happens_before_storyboard_storage_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_storage = _Storage()
+    capacity = _Capacity(error=StorageCapacityExceeded("full"))
+    storage_writes = _coordinator(fake_storage, capacity)
+    complete_called = False
+
+    async def complete(
+        _claim: storyboard_assembly._AssemblyClaim,  # noqa: SLF001
+        _video: Any,
+    ) -> bool:
+        nonlocal complete_called
+        complete_called = True
+        return True
+
+    monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: "version-1")
+    monkeypatch.setattr(storyboard_assembly, "_complete_assembly", complete)
+
+    with pytest.raises(OSError):
+        await storyboard_assembly._store_assembly_result(  # noqa: SLF001
+            _claim(),
+            processed=_processed(),
+            diagnostics={},
+            storage_writes=storage_writes,
+        )
+
+    assert capacity.requests == [2 * (len(b"video-bytes") + len(b"poster-bytes"))]
+    assert capacity.lease.release_calls == 0
+    assert fake_storage.written == []
+    assert fake_storage.deleted == []
+    assert complete_called is False
+
+
+@pytest.mark.asyncio
+async def test_partial_storyboard_write_failure_cleans_created_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PartialFailureStorage(_Storage):
+        def put_bytes_result(
+            self,
+            key: str,
+            data: bytes,
+            *,
+            max_bytes: int | None = None,
+        ) -> Any:
+            assert max_bytes == len(data)
+            self.written.append(key)
+            if key.endswith("/poster.jpg"):
+                raise RuntimeError("poster write failed")
+            return SimpleNamespace(size=len(data), created=True)
+
+    fake_storage = PartialFailureStorage()
+    capacity = _Capacity()
+    storage_writes = _coordinator(fake_storage, capacity)
+    monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: "version-1")
+
+    with pytest.raises(RuntimeError, match="poster write failed"):
+        await storyboard_assembly._store_assembly_result(  # noqa: SLF001
+            _claim(),
+            processed=_processed(),
+            diagnostics={},
+            storage_writes=storage_writes,
+        )
+
+    video_key = "u/user-1/storyboards/run-1/assembly/version-1/output.mp4"
+    assert set(fake_storage.written) == {
+        video_key,
+        "u/user-1/storyboards/run-1/assembly/version-1/poster.jpg",
+    }
+    assert fake_storage.deleted == [video_key]
+    assert capacity.lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_storyboard_write_cleans_only_created_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_key = "u/user-1/storyboards/run-1/assembly/version-1/output.mp4"
+    poster_key = "u/user-1/storyboards/run-1/assembly/version-1/poster.jpg"
+
+    class BlockingStorage(_Storage):
+        def __init__(self) -> None:
+            super().__init__(existing_keys={video_key})
+            self.poster_started = threading.Event()
+            self.allow_poster = threading.Event()
+
+        def put_bytes_result(
+            self,
+            key: str,
+            data: bytes,
+            *,
+            max_bytes: int | None = None,
+        ) -> Any:
+            assert max_bytes == len(data)
+            self.written.append(key)
+            if key == poster_key:
+                self.poster_started.set()
+                if not self.allow_poster.wait(timeout=5):
+                    raise TimeoutError("poster write did not resume")
+            return SimpleNamespace(
+                size=len(data),
+                created=key not in self.existing_keys,
+            )
+
+    fake_storage = BlockingStorage()
+    capacity = _Capacity()
+    storage_writes = _coordinator(fake_storage, capacity)
+    monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: "version-1")
+
+    task = asyncio.create_task(
+        storyboard_assembly._store_assembly_result(  # noqa: SLF001
+            _claim(),
+            processed=_processed(),
+            diagnostics={},
+            storage_writes=storage_writes,
+        )
+    )
+    assert await asyncio.to_thread(fake_storage.poster_started.wait, 2)
+    task.cancel()
+    fake_storage.allow_poster.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert set(fake_storage.written) == {video_key, poster_key}
+    assert fake_storage.deleted == [poster_key]
+    assert capacity.lease.release_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_commit_failure_cleans_new_video_and_poster_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_storage = _Storage()
+    storage_writes = _coordinator(fake_storage)
     ids = iter(["version-1", "video-1"])
 
     async def fail_commit(
@@ -402,7 +666,6 @@ async def test_commit_failure_cleans_new_video_and_poster_keys(
     ) -> bool:
         raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(storyboard_assembly, "storage", fake_storage)
     monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: next(ids))
     monkeypatch.setattr(storyboard_assembly, "_complete_assembly", fail_commit)
 
@@ -411,6 +674,7 @@ async def test_commit_failure_cleans_new_video_and_poster_keys(
             _claim(),
             processed=_processed(),
             diagnostics={},
+            storage_writes=storage_writes,
         )
 
     assert len(fake_storage.written) == 2
@@ -422,6 +686,7 @@ async def test_superseded_completion_cleans_new_video_and_poster_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_storage = _Storage()
+    storage_writes = _coordinator(fake_storage)
     ids = iter(["version-1", "video-1"])
 
     async def lose_attempt(
@@ -430,7 +695,6 @@ async def test_superseded_completion_cleans_new_video_and_poster_keys(
     ) -> bool:
         return False
 
-    monkeypatch.setattr(storyboard_assembly, "storage", fake_storage)
     monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: next(ids))
     monkeypatch.setattr(storyboard_assembly, "_complete_assembly", lose_attempt)
 
@@ -442,6 +706,7 @@ async def test_superseded_completion_cleans_new_video_and_poster_keys(
             _claim(),
             processed=_processed(),
             diagnostics={},
+            storage_writes=storage_writes,
         )
 
     assert set(fake_storage.deleted) == set(fake_storage.written)
@@ -451,7 +716,10 @@ async def test_superseded_completion_cleans_new_video_and_poster_keys(
 async def test_cancellation_after_storage_write_cleans_new_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_storage = _Storage()
+    video_key = "u/user-1/storyboards/run-1/assembly/version-1/output.mp4"
+    poster_key = "u/user-1/storyboards/run-1/assembly/version-1/poster.jpg"
+    fake_storage = _Storage(existing_keys={video_key})
+    storage_writes = _coordinator(fake_storage)
     ids = iter(["version-1", "video-1"])
 
     async def cancel_commit(
@@ -460,7 +728,6 @@ async def test_cancellation_after_storage_write_cleans_new_keys(
     ) -> bool:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(storyboard_assembly, "storage", fake_storage)
     monkeypatch.setattr(storyboard_assembly, "new_uuid7", lambda: next(ids))
     monkeypatch.setattr(storyboard_assembly, "_complete_assembly", cancel_commit)
 
@@ -469,6 +736,8 @@ async def test_cancellation_after_storage_write_cleans_new_keys(
             _claim(),
             processed=_processed(),
             diagnostics={},
+            storage_writes=storage_writes,
         )
 
-    assert set(fake_storage.deleted) == set(fake_storage.written)
+    assert set(fake_storage.written) == {video_key, poster_key}
+    assert fake_storage.deleted == [poster_key]

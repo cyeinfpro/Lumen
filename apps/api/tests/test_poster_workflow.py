@@ -21,14 +21,12 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy.dialects import postgresql
 
 from app.services.poster_styles import workflow_lookup
-from app.workflow_services import (
-    poster_endpoints as poster,
-    project_endpoints as project,
-    workflow_runtime,
-)
+from app.workflows.adapters import workflow_runtime
+from app.workflows.adapters.operations import poster, projects as project
+from app.workflows.application import poster_design
+from app.workflows.application.errors import WorkflowRequestError
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
     PosterDesignWorkflowCreateIn,
@@ -158,7 +156,7 @@ def test_copy_analysis_approve_in_default_corrections() -> None:
 
 
 def test_poster_workflow_steps_match_design_doc() -> None:
-    assert poster.POSTER_WORKFLOW_STEPS == (
+    assert poster_design.POSTER_WORKFLOW_STEPS == (
         "copy_input",
         "style_selection",
         "copy_analysis",
@@ -180,7 +178,7 @@ def test_poster_seed_steps_initial_status() -> None:
     )
     seeded = poster._poster_seed_steps(run)  # noqa: SLF001
     by_key = {s.step_key: s for s in seeded}
-    assert set(by_key.keys()) == set(poster.POSTER_WORKFLOW_STEPS)
+    assert set(by_key.keys()) == set(poster_design.POSTER_WORKFLOW_STEPS)
     assert by_key["copy_input"].status == "approved"
     assert by_key["style_selection"].status == "approved"
     assert by_key["copy_analysis"].status == "running"
@@ -250,13 +248,13 @@ def test_poster_master_prompt_cache_prefix_stable() -> None:
         "price": None,
         "info_density": "high",
     }
-    p1 = poster._poster_master_prompt(  # noqa: SLF001
+    p1 = poster_design.poster_master_prompt(
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         brand_assets={},
         candidate_index=1,
     )
-    p2 = poster._poster_master_prompt(  # noqa: SLF001
+    p2 = poster_design.poster_master_prompt(
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         brand_assets={},
@@ -284,7 +282,7 @@ def test_poster_render_prompt_includes_target_aspect_and_text_fields() -> None:
         "cta": "立即抢购",
         "info_density": "medium",
     }
-    p = poster._poster_render_prompt(  # noqa: SLF001
+    p = poster_design.poster_render_prompt(
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         target_aspect="9:16",
@@ -293,7 +291,7 @@ def test_poster_render_prompt_includes_target_aspect_and_text_fields() -> None:
     assert "限时五折" in p
     assert "立即抢购" in p
     # adjustments 可选段
-    p2 = poster._poster_render_prompt(  # noqa: SLF001
+    p2 = poster_design.poster_render_prompt(
         style_summary=style_summary,
         copy_analysis=copy_analysis,
         target_aspect="9:16",
@@ -359,7 +357,7 @@ async def test_sync_promotes_copy_analysis_to_needs_review(
 
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[completion], [], []])
-    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster.sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]
 
     assert copy_step.status == "needs_review"
     assert copy_step.output_json["main_title"] == "hello"
@@ -419,7 +417,7 @@ async def test_sync_marks_master_step_needs_review_when_all_masters_ready(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     # responses 顺序：master 行 + (per master image lookup + per master gens) → 简化为空
     db = _Db(responses=[masters, [], [], []])
-    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster.sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]
 
     assert master_step.status == "needs_review"
     assert approval_step.status == "needs_review"
@@ -482,7 +480,7 @@ async def test_sync_master_generation_ignores_ready_masters_from_previous_batch(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[old_ready, new_pending], generations, [], []])
 
-    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster.sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]
 
     assert master_step.status == "running"
     assert master_step.image_ids == []
@@ -537,7 +535,7 @@ async def test_sync_render_generation_ignores_ready_renders_from_previous_batch(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [old_ready, new_pending], generations, images])
 
-    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster.sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]
 
     assert new_pending.status == "generating"
     assert multi_step.status == "running"
@@ -583,7 +581,7 @@ async def test_sync_render_revision_waits_for_active_revision_image(
     monkeypatch.setattr(poster, "_load_steps", fake_load_steps)
     db = _Db(responses=[[], [render], generations, images])
 
-    await poster._sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]  # noqa: SLF001
+    await poster.sync_poster_workflow_outputs(db, run)  # type: ignore[arg-type]
 
     assert render.image_id == "img-old"
     assert render.status == "revising"
@@ -656,7 +654,7 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
         return current_run
 
     monkeypatch.setattr(poster, "_get_run", fake_get_run)
-    monkeypatch.setattr(poster, "_sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync_poster)
     monkeypatch.setattr(poster, "_step", fake_step)
     monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
     monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
@@ -681,60 +679,6 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
     assert run.status == "running"
     assert conv.last_activity_at is not None
     assert db.committed is True
-
-
-@pytest.mark.asyncio
-async def test_list_workflows_hides_poster_style_generation_jobs_by_default() -> None:
-    db = _Db(responses=[[]])
-    user = SimpleNamespace(id="user-1")
-
-    out = await project.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
-
-    assert out.items == []
-    rendered = str(
-        db.statements[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-    assert "apparel_model_library_generate" in rendered
-    assert "poster_style_library_generate" in rendered
-
-
-@pytest.mark.asyncio
-async def test_list_workflows_counts_poster_multi_size_outputs() -> None:
-    now = datetime(2026, 5, 12, tzinfo=timezone.utc)
-    run = SimpleNamespace(
-        id="run-poster",
-        conversation_id=None,
-        type="poster_design",
-        status="needs_review",
-        title="海报",
-        user_prompt="限时五折",
-        product_image_ids=[],
-        current_step="multi_size_generation",
-        quality_mode="premium",
-        metadata_jsonb={},
-        created_at=now,
-        updated_at=now,
-    )
-    db = _Db(responses=[[run], [("run-poster", ["img-1", "img-2"])]])
-    user = SimpleNamespace(id="user-1")
-
-    out = await project.list_workflows(user, db, type=None, limit=50)  # type: ignore[arg-type]
-
-    assert len(out.items) == 1
-    assert out.items[0].output_count == 2
-
-
-def test_next_action_for_poster_project_steps() -> None:
-    run = SimpleNamespace(
-        type="poster_design",
-        status="needs_review",
-        current_step="multi_size_generation",
-    )
-
-    assert workflow_runtime._next_action_for(run) == "生成/确认多尺寸"  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -1011,7 +955,7 @@ async def test_create_poster_design_workflow_smoke(
     # workflow_run 已 add 到 db；至少 1 个 run + 7 个 step
     added_types = [type(row).__name__ for row in db.added]
     assert "WorkflowRun" in added_types
-    assert added_types.count("WorkflowStep") == len(poster.POSTER_WORKFLOW_STEPS)
+    assert added_types.count("WorkflowStep") == len(poster_design.POSTER_WORKFLOW_STEPS)
     assert db.committed is True
 
 
@@ -1019,8 +963,6 @@ async def test_create_poster_design_workflow_smoke(
 async def test_create_poster_design_workflow_rejects_unknown_style(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fastapi import HTTPException
-
     async def fake_load_style(db: Any, *, user_id: str, style_id: str) -> Any:
         raise poster._http("style_not_found", "poster style not found", 404)  # noqa: SLF001
 
@@ -1029,6 +971,6 @@ async def test_create_poster_design_workflow_rejects_unknown_style(
     body = PosterDesignWorkflowCreateIn(copy_text="测试文案", style_id="missing")
     db = _Db()
     user = SimpleNamespace(id="user-1")
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(WorkflowRequestError) as exc:
         await poster.create_poster_design_workflow(body, user, db)  # type: ignore[arg-type]
     assert exc.value.status_code == 404

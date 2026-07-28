@@ -1,26 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from typing import Any
 
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app import provider_pool
-from app.tasks.generation_parts import default_runtime as generation
-from .task_parts_runtime_testing import synchronize_module_ports
-
-
-@pytest.fixture(autouse=True)
-def _sync_generation_ports(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    with synchronize_module_ports(
-        monkeypatch,
-        generation,
-        generation.DEFAULT_GENERATION_RUNTIME.ports,
-    ):
-        yield
+from app.tasks.generation_parts import runner as generation_runner
+from app.tasks.generation_parts.default_runtime import build_generation_runtime
 
 
 class _Result:
@@ -47,12 +35,17 @@ class _Session:
         return None
 
 
-class _Pool:
-    def __init__(self) -> None:
-        self.attached: list[Any] = []
+class _SessionStore:
+    def __init__(self, session: _Session) -> None:
+        self._session = session
 
-    def attach_redis(self, redis: Any) -> None:
-        self.attached.append(redis)
+    def session(self) -> _Session:
+        return self._session
+
+
+class _UnexpectedProvider:
+    async def resolve_primary_route(self) -> str:
+        raise AssertionError("initial claim miss must not touch runtime resources")
 
 
 def _render(statement: Any) -> str:
@@ -78,7 +71,6 @@ def _render(statement: Any) -> str:
     ],
 )
 async def test_initial_claim_distinguishes_locked_row_from_missing_task(
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     existence_probe: str | None,
     expected_level: int,
@@ -86,45 +78,23 @@ async def test_initial_claim_distinguishes_locked_row_from_missing_task(
     unexpected_log: str,
 ) -> None:
     session = _Session([None, existence_probe])
-    pool = _Pool()
-
-    async def get_pool() -> _Pool:
-        return pool
-
-    async def unexpected_runtime_resource_call(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("initial claim miss must not touch runtime resources")
-
-    monkeypatch.setattr(generation, "SessionLocal", lambda: session)
-    monkeypatch.setattr(provider_pool, "get_pool", get_pool)
-    monkeypatch.setattr(
-        generation,
-        "_reserve_image_queue_slot",
-        unexpected_runtime_resource_call,
-    )
-    monkeypatch.setattr(
-        generation,
-        "_acquire_lease",
-        unexpected_runtime_resource_call,
-    )
-    monkeypatch.setattr(
-        generation,
-        "_release_image_queue_slot",
-        unexpected_runtime_resource_call,
-    )
-    monkeypatch.setattr(
-        generation,
-        "_release_lease",
-        unexpected_runtime_resource_call,
+    default_runtime = build_generation_runtime()
+    runtime = replace(
+        default_runtime,
+        deps=replace(
+            default_runtime.deps,
+            store=_SessionStore(session),
+            provider=_UnexpectedProvider(),
+        ),
     )
 
     redis = object()
-    with caplog.at_level(logging.INFO, logger=generation.logger.name):
-        await generation.run_generation(
+    with caplog.at_level(logging.INFO, logger=generation_runner.logger.name):
+        await runtime.run(
             {"redis": redis, "worker_id": "worker-test"},
             "gen-1",
         )
 
-    assert pool.attached == []
     assert len(session.statements) == 2
     assert "FOR UPDATE SKIP LOCKED" in _render(session.statements[0])
     assert "FOR UPDATE" not in _render(session.statements[1])

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 
-import asyncio
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -192,7 +191,6 @@ async def test_resolve_user_credential_runtime_builds_resolved_provider(
     assert provider.image_jobs_enabled is True
     assert provider.image_jobs_endpoint == "responses"
     assert provider._byok_http_target.url == provider.base_url
-    assert byok_runtime.current_byok_http_target() is None
 
 
 def test_validate_byok_http_target_requires_same_origin() -> None:
@@ -213,39 +211,6 @@ def test_validate_byok_http_target_requires_same_origin() -> None:
             target,
             "https://image-job.internal/v1/image-jobs",
         )
-
-
-@pytest.mark.asyncio
-async def test_byok_http_target_context_is_task_local_and_resets() -> None:
-    targets = (
-        PublicHttpTarget("https://a.example/v1", ("203.0.113.10",)),
-        PublicHttpTarget("https://b.example/v1", ("203.0.113.11",)),
-    )
-    ready = (asyncio.Event(), asyncio.Event())
-    release = asyncio.Event()
-
-    async def observe(
-        target: PublicHttpTarget,
-        started: asyncio.Event,
-    ) -> PublicHttpTarget | None:
-        token = byok_runtime.bind_byok_http_target(target)
-        try:
-            started.set()
-            await release.wait()
-            return byok_runtime.current_byok_http_target()
-        finally:
-            byok_runtime.reset_byok_http_target(token)
-
-    tasks = [
-        asyncio.create_task(observe(target, started))
-        for target, started in zip(targets, ready, strict=True)
-    ]
-    await asyncio.gather(*(started.wait() for started in ready))
-
-    assert byok_runtime.current_byok_http_target() is None
-    release.set()
-    assert await asyncio.gather(*tasks) == list(targets)
-    assert byok_runtime.current_byok_http_target() is None
 
 
 @pytest.mark.asyncio

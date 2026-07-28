@@ -21,6 +21,7 @@ from lumen_core.models import Video, WorkflowRun, WorkflowStep, new_uuid7
 from ..db import SessionLocal, affected_rows
 from ..sse_publish import publish_event
 from ..storage import storage
+from ..storage_writes import StorageWriteCoordinator
 from ..video_artifacts import postprocess_video_bytes as _postprocess_video_bytes
 
 
@@ -454,89 +455,12 @@ async def _complete_assembly(claim: _AssemblyClaim, video: Video) -> bool:
     return True
 
 
-async def _delete_storage_keys(keys: list[str]) -> None:
-    unique_keys = list(dict.fromkeys(keys))
-    if not unique_keys:
-        return
-    cleanup = asyncio.ensure_future(
-        asyncio.gather(
-            *(asyncio.to_thread(storage.delete, key) for key in unique_keys),
-            return_exceptions=True,
-        )
-    )
-    try:
-        results = await asyncio.shield(cleanup)
-    except asyncio.CancelledError:
-
-        def _log_late_cleanup(
-            task: asyncio.Future[list[bool | BaseException]],
-        ) -> None:
-            with suppress(Exception):
-                late_results = task.result()
-                for key, result in zip(unique_keys, late_results, strict=False):
-                    if isinstance(result, BaseException):
-                        logger.warning(
-                            "storyboard storage cleanup failed key=%s err=%s",
-                            key,
-                            result,
-                        )
-
-        cleanup.add_done_callback(_log_late_cleanup)
-        raise
-    for key, result in zip(unique_keys, results, strict=False):
-        if isinstance(result, BaseException):
-            logger.warning(
-                "storyboard storage cleanup failed key=%s err=%s",
-                key,
-                result,
-            )
-
-
-async def _put_storage_bytes(key: str, data: bytes) -> bool:
-    put_task = asyncio.create_task(
-        asyncio.to_thread(storage.put_bytes_result, key, data)
-    )
-    try:
-        result = await asyncio.shield(put_task)
-    except asyncio.CancelledError:
-
-        async def _cleanup_late_put() -> None:
-            try:
-                late_result = await put_task
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "storyboard storage write failed after cancellation key=%s err=%s",
-                    key,
-                    exc,
-                )
-                return
-            if late_result.created:
-                try:
-                    await asyncio.to_thread(storage.delete, key)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "storyboard storage cleanup failed after cancellation "
-                        "key=%s err=%s",
-                        key,
-                        exc,
-                    )
-
-        cleanup = asyncio.create_task(_cleanup_late_put())
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            cleanup.add_done_callback(
-                lambda task: task.exception() if not task.cancelled() else None
-            )
-        raise
-    return bool(result.created)
-
-
 async def _store_assembly_result(
     claim: _AssemblyClaim,
     *,
     processed: dict[str, Any],
     diagnostics: dict[str, Any],
+    storage_writes: StorageWriteCoordinator,
 ) -> Video:
     version = new_uuid7()
     video_key = (
@@ -545,16 +469,15 @@ async def _store_assembly_result(
     poster_key = (
         f"u/{claim.user_id}/storyboards/{claim.run_id}/assembly/{version}/poster.jpg"
     )
-    created_keys: list[str] = []
+    video_bytes = processed["video_bytes"]
+    poster_bytes = processed.get("poster_bytes")
+    files = [(video_key, video_bytes)]
+    if poster_bytes:
+        files.append((poster_key, poster_bytes))
+    created_keys = await storage_writes.write_files(files)
     try:
-        if await _put_storage_bytes(video_key, processed["video_bytes"]):
-            created_keys.append(video_key)
-        poster_storage_key = None
-        if processed.get("poster_bytes"):
-            if await _put_storage_bytes(poster_key, processed["poster_bytes"]):
-                created_keys.append(poster_key)
-            poster_storage_key = poster_key
-        sha = hashlib.sha256(processed["video_bytes"]).hexdigest()
+        poster_storage_key = poster_key if poster_bytes else None
+        sha = hashlib.sha256(video_bytes).hexdigest()
         video = Video(
             id=new_uuid7(),
             user_id=claim.user_id,
@@ -566,7 +489,7 @@ async def _store_assembly_result(
             height=int(processed.get("height") or 0),
             duration_ms=int(processed.get("duration_ms") or 0),
             fps=processed.get("fps"),
-            size_bytes=len(processed["video_bytes"]),
+            size_bytes=len(video_bytes),
             sha256=sha,
             etag=sha,
             has_audio=bool(processed.get("has_audio")),
@@ -586,7 +509,7 @@ async def _store_assembly_result(
         if not await _complete_assembly(claim, video):
             raise _AssemblyAttemptLost("assembly attempt superseded before commit")
     except BaseException:
-        await _delete_storage_keys(created_keys)
+        await storage_writes.delete_files(created_keys)
         raise
     return video
 
@@ -597,6 +520,7 @@ async def run_storyboard_assembly(
     expected_attempt_token: str | None = None,
 ) -> None:
     redis = ctx["redis"]
+    storage_writes: StorageWriteCoordinator = ctx["storage_write_coordinator"]
     claim: _AssemblyClaim | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     attempt_lost = asyncio.Event()
@@ -633,6 +557,7 @@ async def run_storyboard_assembly(
             claim,
             processed=processed,
             diagnostics=diagnostics,
+            storage_writes=storage_writes,
         )
         await _cancel_heartbeat_task(heartbeat_task)
         heartbeat_task = None

@@ -499,7 +499,7 @@ async def _store_image_event(
     (
         image_payload,
         image_budget_micro,
-    ) = await completion_tools_ports()._store_and_publish_completion_tool_image(
+    ) = await completion_tools_ports().tool_image_service.store_and_publish_tool_image(
         redis=state.redis,
         user_id=state.user_id,
         channel=state.channel,

@@ -12,6 +12,7 @@ UPDATE_SOURCE_RELATIVE = (
     "release/manifest.sh",
     "release/source_helpers.sh",
     "release/fetch.sh",
+    "release/digest.sh",
     "release/activate.sh",
 )
 
@@ -125,7 +126,8 @@ def test_release_source_binding_accepts_only_matching_40_byte_commit(
 def test_formal_release_collects_source_commit_from_allowed_proofs() -> None:
     source = _update_source()
 
-    assert 'git rev-parse --verify "${RELEASE_SOURCE_REF}^{commit}"' in source
+    assert 'RELEASE_SOURCE_GIT_REF="${RELEASE_SOURCE_REF:-HEAD}"' in source
+    assert '"${RELEASE_SOURCE_GIT_REF}^{commit}"' in source
     assert "org.opencontainers.image.revision" in source
     assert "prepare_official_release_source_manifest" in source
     assert 'RELEASE_SOURCE_API_IMAGE="${api_image}"' in source
@@ -171,3 +173,25 @@ def test_official_manifest_is_bound_after_fetch_without_changing_compat_paths() 
     assert "LUMEN_ALLOW_UNVERIFIED_CUSTOM_REGISTRY" in source
     assert 'TARGET_TAG="main"' in source
     assert 'RELEASE_MANIFEST_FILE=""' in source
+
+
+def test_pull_binds_single_inspect_image_ids_before_completion() -> None:
+    source = _update_source()
+    pull = _bash_function(source, "update_phase_pull_images")
+    references = _bash_function(source, "lumen_update_required_image_references")
+    capture = _bash_function(source, "lumen_update_capture_image_record")
+    binder = _bash_function(source, "lumen_update_bind_immutable_images")
+
+    assert "config --images" in references
+    assert "--profile tgbot config --images" in references
+    assert capture.count("lumen_docker image inspect") == 1
+    assert '"Id"' in capture
+    assert "RepoDigests" in capture
+    assert "org.opencontainers.image.revision" in capture
+    assert "compose_services" in source
+    assert "pull_policy: never" in source
+    assert "TARGET_IMAGE_SET_DIGEST" in binder
+    assert pull.count("lumen_update_bind_immutable_images") >= 3
+    assert pull.index("lumen_update_bind_immutable_images") < pull.index(
+        "emit_done pull_images 0"
+    )

@@ -24,7 +24,6 @@ from .runtime import (
     CompletionBillingPorts,
     CompletionEventsPorts,
     CompletionRetryPorts,
-    install_completion_ports,
 )
 from .artifact_codec import (
     compute_blurhash as _generation_compute_blurhash,
@@ -36,6 +35,14 @@ from .artifact_codec import (
 from .artifact_storage import (
     cleanup_completion_image_files_on_error as _cleanup_storage_on_error,
     write_completion_image_files as _write_generation_files,
+)
+from .image_storage_runtime import (
+    CompletionToolImageBudget,
+    CompletionToolImageCodec,
+    CompletionToolImageEvents,
+    CompletionToolImageRepository,
+    CompletionToolImageService,
+    CompletionToolImageStorage,
 )
 
 # This module assembles the explicit completion runtime and its adapters.
@@ -106,7 +113,9 @@ from ...observability import (
 from ...retry import RetryDecision, is_retriable
 from ...sse_publish import publish_event as _publish_sse_event
 from ...storage import storage
+from ...storage_writes import StorageWriteCoordinator
 from ...provider_runtime.errors import UpstreamError
+from ...provider_runtime.upstream_services import ImageUpstreamRuntime
 from ...upstream_parts.responses import (
     extract_response_image_b64 as _extract_response_image_b64,
     extract_response_revised_prompt as _extract_response_revised_prompt,
@@ -617,33 +626,34 @@ def _image_format_and_meta(
     )
 
 
-async def _store_completion_tool_image(
-    *,
-    session: Any,
-    task_id: str,
-    attempt_epoch: int,
-    user_id: str,
-    message_id: str,
-    raw_image: bytes,
-    revised_prompt: str | None,
-    billing_budget_micro: int,
-) -> dict[str, Any]:
-    return await _completion_tool_images._store_completion_tool_image(
-        session=session,
-        task_id=task_id,
-        attempt_epoch=attempt_epoch,
-        user_id=user_id,
-        message_id=message_id,
-        raw_image=raw_image,
-        revised_prompt=revised_prompt,
-        billing_budget_micro=billing_budget_micro,
-        hooks=_completion_tool_images.ToolImageStorageHooks(
-            image_format_and_meta=_image_format_and_meta,
-            new_uuid7=new_uuid7,
+def _build_completion_tool_image_service(
+    storage_writes: StorageWriteCoordinator | None = None,
+) -> CompletionToolImageService:
+    write_files = (
+        _write_generation_files
+        if storage_writes is None
+        else storage_writes.write_files
+    )
+    cleanup_on_error = (
+        _cleanup_storage_on_error
+        if storage_writes is None
+        else storage_writes.cleanup_on_error
+    )
+    return CompletionToolImageService(
+        budget=CompletionToolImageBudget(
+            reserve=_ensure_completion_tool_image_wallet_budget,
+        ),
+        codec=CompletionToolImageCodec(
+            decode=_decode_upstream_image_b64,
+            format_and_meta=_image_format_and_meta,
             sha256=_sha256,
-            write_generation_files=_write_generation_files,
-            cleanup_storage_on_error=_cleanup_storage_on_error,
-            record_image_usage=partial(
+            upstream_error_type=UpstreamError,
+            bad_response_error_code=EC.BAD_RESPONSE.value,
+        ),
+        repository=CompletionToolImageRepository(
+            session_factory=SessionLocal,
+            new_id=new_uuid7,
+            record_usage=partial(
                 _completion_tool_images._record_completion_tool_image_usage,
                 hooks=_completion_tool_images.ToolImageUsageHooks(
                     acquire_lock=_acquire_completion_xact_lock,
@@ -656,7 +666,15 @@ async def _store_completion_tool_image(
             image_model=Image,
             image_variant_model=ImageVariant,
             message_model=Message,
-            storage_public_url=storage.public_url,
+            public_url=storage.public_url,
+        ),
+        storage=CompletionToolImageStorage(
+            write_files=write_files,
+            cleanup_on_error=cleanup_on_error,
+        ),
+        events=CompletionToolImageEvents(
+            publish=publish_event,
+            image_event=EV_COMP_IMAGE,
         ),
     )
 
@@ -679,43 +697,6 @@ async def _ensure_completion_tool_image_wallet_budget(
             billing_core=billing_core,
             insufficient_balance_error_type=_CompletionToolInsufficientBalance,
             budget_setting=_CHAT_TOOL_IMAGE_BUDGET_SETTING,
-        ),
-    )
-
-
-async def _store_and_publish_completion_tool_image(
-    *,
-    redis: Any,
-    user_id: str,
-    channel: str,
-    task_id: str,
-    message_id: str,
-    attempt: int,
-    attempt_epoch: int,
-    b64_image: str,
-    revised_prompt: str | None,
-    reserved_tool_image_micro: int = 0,
-) -> tuple[dict[str, Any] | None, int]:
-    return await _completion_tool_images._store_and_publish_completion_tool_image(
-        redis=redis,
-        user_id=user_id,
-        channel=channel,
-        task_id=task_id,
-        message_id=message_id,
-        attempt=attempt,
-        attempt_epoch=attempt_epoch,
-        b64_image=b64_image,
-        revised_prompt=revised_prompt,
-        reserved_tool_image_micro=reserved_tool_image_micro,
-        hooks=_completion_tool_images.ToolImagePublishHooks(
-            ensure_wallet_budget=_ensure_completion_tool_image_wallet_budget,
-            decode_upstream_image_b64=_decode_upstream_image_b64,
-            session_factory=SessionLocal,
-            store_tool_image=_store_completion_tool_image,
-            publish_event=publish_event,
-            upstream_error_type=UpstreamError,
-            bad_response_error_code=EC.BAD_RESPONSE.value,
-            image_event=EV_COMP_IMAGE,
         ),
     )
 
@@ -1358,7 +1339,10 @@ def _build_completion_context_ports() -> CompletionContextPorts:
     )
 
 
-def _build_completion_tools_ports() -> CompletionToolsPorts:
+def _build_completion_tools_ports(
+    storage_writes: StorageWriteCoordinator | None = None,
+) -> CompletionToolsPorts:
+    tool_image_service = _build_completion_tool_image_service(storage_writes)
     return CompletionToolsPorts(
         _CompletionToolTracker=_CompletionToolTracker,
         _CompletionUsageAccumulator=_CompletionUsageAccumulator,
@@ -1372,7 +1356,7 @@ def _build_completion_tools_ports() -> CompletionToolsPorts:
         _extract_response_revised_prompt=_extract_response_revised_prompt,
         _publish_completion_tool_progress=_publish_completion_tool_progress,
         _publish_completion_tool_updates=_publish_completion_tool_updates,
-        _store_and_publish_completion_tool_image=_store_and_publish_completion_tool_image,
+        tool_image_service=tool_image_service,
         _summarize_tool_error=_summarize_tool_error,
         _tool_image_dedupe_key=_tool_image_dedupe_key,
         _tool_limited_completion_body=_tool_limited_completion_body,
@@ -1396,7 +1380,9 @@ def _build_completion_persistence_ports() -> CompletionPersistencePorts:
     )
 
 
-def _build_completion_upstream_ports() -> CompletionUpstreamPorts:
+def _build_completion_upstream_ports(
+    image_upstream_runtime: ImageUpstreamRuntime,
+) -> CompletionUpstreamPorts:
     return CompletionUpstreamPorts(
         UpstreamError=UpstreamError,
         _apply_url_citations=_apply_url_citations,
@@ -1410,7 +1396,10 @@ def _build_completion_upstream_ports() -> CompletionUpstreamPorts:
         _normalize_reasoning_effort_for_upstream=_normalize_reasoning_effort_for_upstream,
         _raise_for_terminal_response_event=_raise_for_terminal_response_event,
         _record_completion_upstream_metadata=_record_completion_upstream_metadata,
-        stream_completion=stream_completion,
+        stream_completion=partial(
+            stream_completion,
+            runtime=image_upstream_runtime,
+        ),
     )
 
 
@@ -1471,18 +1460,22 @@ def _build_completion_retry_ports() -> CompletionRetryPorts:
     )
 
 
-def build_completion_runtime() -> CompletionRuntime:
+def build_completion_runtime(
+    *,
+    image_upstream_runtime: ImageUpstreamRuntime,
+    storage_writes: StorageWriteCoordinator | None = None,
+) -> CompletionRuntime:
     ports = CompletionPorts(
         context=_build_completion_context_ports(),
-        tools=_build_completion_tools_ports(),
+        tools=_build_completion_tools_ports(storage_writes),
         persistence=_build_completion_persistence_ports(),
-        upstream=_build_completion_upstream_ports(),
+        upstream=_build_completion_upstream_ports(image_upstream_runtime),
         billing=_build_completion_billing_ports(),
         events=_build_completion_events_ports(),
         retry=_build_completion_retry_ports(),
     )
-    install_completion_ports(ports)
-    return CompletionRuntime(ports=ports, runner=_run_completion)
-
-
-DEFAULT_COMPLETION_RUNTIME = build_completion_runtime()
+    return CompletionRuntime(
+        ports=ports,
+        runner=_run_completion,
+        image_upstream_runtime=image_upstream_runtime,
+    )

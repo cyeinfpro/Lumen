@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Set
 from pathlib import Path
 from typing import Protocol
 
@@ -9,6 +9,8 @@ from ..domain.artifact import (
     ArtifactKey,
     PublishedArtifact,
     StagedArtifact,
+    StagedSweepBudget,
+    StagedSweepResult,
     UploadTicket,
 )
 
@@ -53,6 +55,14 @@ class ArtifactStorePort(Protocol):
         staged: StagedArtifact,
     ) -> bool: ...
 
-    async def list_staged(self) -> list[StagedArtifact]: ...
+    async def sweep_staged(
+        self,
+        *,
+        active_tickets: Set[str] | None,
+        stale_before: float,
+        budget: StagedSweepBudget,
+        load_active_tickets: Callable[[Set[str]], Awaitable[Set[str]]] | None = None,
+        before_delete: Callable[[], Awaitable[None]] | None = None,
+    ) -> StagedSweepResult: ...
 
     def processing_path(self, key: ArtifactKey) -> Path: ...

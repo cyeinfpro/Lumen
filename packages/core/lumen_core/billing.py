@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Any
 
@@ -48,6 +49,7 @@ CROCKFORD_REDEMPTION_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 # 由该列合法产生（只能来自迁移遗留 / 直连改库 / 反序列化脏数据），一律按
 # 非法输入处理。
 MAX_RATE_MULTIPLIER = Decimal("9999.9999")
+_IDEMPOTENCY_FINGERPRINT_KEY = "_billing_idempotency_fingerprint"
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +59,111 @@ class BillingError(RuntimeError):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class _IdempotencySemantics:
+    kind: str
+    ref_type: str | None
+    ref_id: str | None
+    amount_micro: int | None
+    request_meta: Mapping[str, Any]
+    legacy_transaction_amount_micro: int | None = None
+    legacy_amount_meta_key: str | None = None
+    created_by_admin: str | None = None
+
+
+def _idempotency_fingerprint(semantics: _IdempotencySemantics) -> str:
+    payload = {
+        "version": 1,
+        "kind": semantics.kind,
+        "ref_type": semantics.ref_type,
+        "ref_id": semantics.ref_id,
+        "amount_micro": semantics.amount_micro,
+        "meta": dict(semantics.request_meta),
+        "created_by_admin": semantics.created_by_admin,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"v1:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _idempotency_meta(
+    meta: Mapping[str, Any],
+    semantics: _IdempotencySemantics,
+) -> dict[str, Any]:
+    return {
+        **dict(meta),
+        _IDEMPOTENCY_FINGERPRINT_KEY: _idempotency_fingerprint(semantics),
+    }
+
+
+def _legacy_idempotency_matches(
+    existing: WalletTransaction,
+    semantics: _IdempotencySemantics,
+    existing_meta: Mapping[str, Any],
+) -> bool:
+    for attribute, expected in (
+        ("kind", semantics.kind),
+        ("ref_type", semantics.ref_type),
+        ("ref_id", semantics.ref_id),
+        ("created_by_admin", semantics.created_by_admin),
+    ):
+        if hasattr(existing, attribute) and getattr(existing, attribute) != expected:
+            return False
+    if (
+        semantics.legacy_transaction_amount_micro is not None
+        and hasattr(existing, "amount_micro")
+        and int(existing.amount_micro)
+        != semantics.legacy_transaction_amount_micro
+    ):
+        return False
+    if semantics.legacy_amount_meta_key is not None:
+        raw_amount = existing_meta.get(semantics.legacy_amount_meta_key)
+        try:
+            legacy_amount = int(raw_amount)
+        except (TypeError, ValueError):
+            return False
+        if legacy_amount != semantics.amount_micro:
+            return False
+    return all(
+        key in existing_meta and existing_meta[key] == value
+        for key, value in semantics.request_meta.items()
+    )
+
+
+def _idempotent_replay(
+    existing: WalletTransaction | None,
+    semantics: _IdempotencySemantics,
+) -> WalletTransaction | None:
+    if existing is None:
+        return None
+    raw_meta = getattr(existing, "meta", None)
+    existing_meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+    stored_fingerprint = existing_meta.get(_IDEMPOTENCY_FINGERPRINT_KEY)
+    expected_fingerprint = _idempotency_fingerprint(semantics)
+    matches = (
+        isinstance(stored_fingerprint, str)
+        and hmac.compare_digest(stored_fingerprint, expected_fingerprint)
+    )
+    if stored_fingerprint is None:
+        matches = _legacy_idempotency_matches(
+            existing,
+            semantics,
+            existing_meta,
+        )
+    if not matches:
+        raise BillingError(
+            "IDEMPOTENCY_CONFLICT",
+            "idempotency key was already used with different billing semantics",
+            409,
+        )
+    return existing
 
 
 def micro_to_rmb_str(amount_micro: int) -> str:
@@ -599,14 +706,28 @@ async def hold(
     allow_negative: bool = False,
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
-    existing = await _existing_tx(db, user_id, idempotency_key)
-    if existing is not None:
-        return existing
     amount = int(amount_micro)
     if amount <= 0:
         raise BillingError("INVALID_AMOUNT", "hold amount must be positive", 422)
+    semantics = _IdempotencySemantics(
+        kind="hold",
+        ref_type=ref_type,
+        ref_id=ref_id,
+        amount_micro=amount,
+        request_meta=meta or {},
+        legacy_transaction_amount_micro=-amount,
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
+    if existing is not None:
+        return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     if not allow_negative and wallet.balance_micro < amount:
@@ -623,7 +744,10 @@ async def hold(
         ref_type=ref_type,
         ref_id=ref_id,
         idempotency_key=idempotency_key,
-        meta={**(meta or {}), "hold_delta": amount},
+        meta=_idempotency_meta(
+            {**(meta or {}), "hold_delta": amount},
+            semantics,
+        ),
     )
 
 
@@ -711,11 +835,25 @@ async def settle(
         raise BillingError(
             "ZERO_SETTLEMENT", "settle actual amount must be positive", 422
         )
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    semantics = _IdempotencySemantics(
+        kind="settle",
+        ref_type=ref_type,
+        ref_id=ref_id,
+        amount_micro=raw_actual,
+        request_meta=meta or {},
+        legacy_amount_meta_key="reported_actual_micro",
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     # The per-user wallet row lock serializes settle/release for the same ref.
@@ -749,15 +887,18 @@ async def settle(
         ref_type=ref_type,
         ref_id=ref_id,
         idempotency_key=idempotency_key,
-        meta={
-            **(meta or {}),
-            "held_micro": held,
-            "actual_micro": actual,
-            "reported_actual_micro": raw_actual,
-            "unauthorized_micro": unauthorized_micro,
-            "hold_delta": -held,
-            "overdraw_micro": overdraw_micro,
-        },
+        meta=_idempotency_meta(
+            {
+                **(meta or {}),
+                "held_micro": held,
+                "actual_micro": actual,
+                "reported_actual_micro": raw_actual,
+                "unauthorized_micro": unauthorized_micro,
+                "hold_delta": -held,
+                "overdraw_micro": overdraw_micro,
+            },
+            semantics,
+        ),
     )
 
 
@@ -770,11 +911,24 @@ async def release(
     idempotency_key: str,
     meta: dict[str, Any] | None = None,
 ) -> WalletTransaction | None:
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    semantics = _IdempotencySemantics(
+        kind="release",
+        ref_type=ref_type,
+        ref_id=ref_id,
+        amount_micro=None,
+        request_meta=meta or {},
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     # Recompute after taking the wallet lock; a concurrent settle may have
@@ -797,7 +951,10 @@ async def release(
         ref_type=ref_type,
         ref_id=ref_id,
         idempotency_key=idempotency_key,
-        meta={**(meta or {}), "released_micro": held, "hold_delta": -held},
+        meta=_idempotency_meta(
+            {**(meta or {}), "released_micro": held, "hold_delta": -held},
+            semantics,
+        ),
     )
 
 
@@ -819,11 +976,25 @@ async def charge(
         raise BillingError("NEGATIVE_AMOUNT", "charge amount must not be negative", 422)
     if amount == 0 and not record_zero:
         return None
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    semantics = _IdempotencySemantics(
+        kind=kind,
+        ref_type=ref_type,
+        ref_id=ref_id,
+        amount_micro=amount,
+        request_meta=meta or {},
+        legacy_transaction_amount_micro=-amount,
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, idempotency_key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, idempotency_key),
+        semantics,
+    )
     if existing is not None:
         return existing
     before_balance = wallet.balance_micro
@@ -848,7 +1019,14 @@ async def charge(
         ref_type=ref_type,
         ref_id=ref_id,
         idempotency_key=idempotency_key,
-        meta={**(meta or {}), "cost_micro": amount, "overdraw_micro": overdraw_micro},
+        meta=_idempotency_meta(
+            {
+                **(meta or {}),
+                "cost_micro": amount,
+                "overdraw_micro": overdraw_micro,
+            },
+            semantics,
+        ),
     )
 
 
@@ -865,11 +1043,26 @@ async def adjust(
 ) -> WalletTransaction:
     amount = int(amount_micro_signed)
     key = idempotency_key or f"adjust:{new_uuid7()}"
-    existing = await _existing_tx(db, user_id, key)
+    semantics = _IdempotencySemantics(
+        kind="adjust_admin",
+        ref_type="admin_adjust",
+        ref_id=key,
+        amount_micro=amount,
+        request_meta={"reason": reason},
+        legacy_transaction_amount_micro=amount,
+        created_by_admin=admin_id,
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, key),
+        semantics,
+    )
     if existing is not None:
         return existing
     next_balance = wallet.balance_micro + amount
@@ -896,7 +1089,7 @@ async def adjust(
         ref_type="admin_adjust",
         ref_id=key,
         idempotency_key=key,
-        meta={"reason": reason},
+        meta=_idempotency_meta({"reason": reason}, semantics),
         created_by_admin=admin_id,
     )
 
@@ -915,11 +1108,26 @@ async def topup_redeem(
     if amount <= 0:
         raise BillingError("INVALID_AMOUNT", "redeem amount must be positive", 422)
     key = idempotency_key or f"redeem:{usage_id}"
-    existing = await _existing_tx(db, user_id, key)
+    request_meta = {**(meta or {}), "code_id": code_id}
+    semantics = _IdempotencySemantics(
+        kind="topup_redeem",
+        ref_type="redemption",
+        ref_id=usage_id,
+        amount_micro=amount,
+        request_meta=request_meta,
+        legacy_transaction_amount_micro=amount,
+    )
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = await _existing_tx(db, user_id, key)
+    existing = _idempotent_replay(
+        await _existing_tx(db, user_id, key),
+        semantics,
+    )
     if existing is not None:
         return existing
     wallet.balance_micro += amount
@@ -934,5 +1142,5 @@ async def topup_redeem(
         ref_type="redemption",
         ref_id=usage_id,
         idempotency_key=key,
-        meta={**(meta or {}), "code_id": code_id},
+        meta=_idempotency_meta(request_meta, semantics),
     )

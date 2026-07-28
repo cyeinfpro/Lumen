@@ -1491,7 +1491,7 @@ async def test_topup_redeem_locks_wallet_before_balance_mutation(
 
 
 @pytest.mark.asyncio
-async def test_topup_redeem_replay_preserves_existing_tx_meta(
+async def test_topup_redeem_replay_rejects_different_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original_meta = {
@@ -1517,19 +1517,21 @@ async def test_topup_redeem_replay_preserves_existing_tx_meta(
     monkeypatch.setattr(billing_core, "get_wallet", fail_get_wallet)
     monkeypatch.setattr(billing_core, "_insert_tx", fail_insert_tx)
 
-    tx = await billing_core.topup_redeem(
-        object(),  # type: ignore[arg-type]
-        "user-1",
-        25_000_000,
-        usage_id="usage-1",
-        code_id="code-new",
-        meta={
-            "code_id": "code-new",
-            "redemption_request_hash": "hash-new",
-        },
-    )
+    with pytest.raises(billing_core.BillingError) as exc:
+        await billing_core.topup_redeem(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            25_000_000,
+            usage_id="usage-1",
+            code_id="code-new",
+            meta={
+                "code_id": "code-new",
+                "redemption_request_hash": "hash-new",
+            },
+        )
 
-    assert tx is existing_tx
+    assert exc.value.code == "IDEMPOTENCY_CONFLICT"
+    assert exc.value.status_code == 409
     assert existing_tx.meta is original_meta
     assert existing_tx.meta == {
         "code_id": "code-original",

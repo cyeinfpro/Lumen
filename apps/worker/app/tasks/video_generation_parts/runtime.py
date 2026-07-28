@@ -117,6 +117,7 @@ class VideoGenerationPorts:
     resolve_video_billing: Any
     runtime_settings: Any
     storage: Any
+    storage_writes: Any
     time: Any
     worker_flush_balance_cache: Any
 

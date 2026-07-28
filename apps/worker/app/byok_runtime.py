@@ -20,12 +20,7 @@ from lumen_core.providers import parse_provider_bool, parse_proxy_json
 from lumen_core.url_security import PublicHttpTarget, resolve_public_http_target
 
 from .config import settings
-from .provider_runtime.byok_context import (
-    bind_byok_http_target,
-    current_byok_http_target,
-    reset_byok_http_target,
-    validate_byok_http_target,
-)
+from .provider_runtime.byok_context import validate_byok_http_target
 from .provider_runtime.contracts import ResolvedProvider
 from .provider_runtime.errors import UpstreamError
 
@@ -304,14 +299,11 @@ def byok_error_to_generation_code(error_code: str) -> str:
 
 
 __all__ = (
-    "bind_byok_http_target",
     "byok_error_message",
     "byok_error_to_generation_code",
     "classify_user_credential_error",
-    "current_byok_http_target",
     "is_byok_provider",
     "record_user_credential_runtime_error",
-    "reset_byok_http_target",
     "resolve_user_credential_runtime",
     "validate_byok_http_target",
 )

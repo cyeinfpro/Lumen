@@ -92,7 +92,15 @@ class LocalStorage:
             raise ValueError(f"invalid storage key: {key}") from exc
         return path
 
-    def put_bytes_result(self, key: str, data: bytes) -> StoragePutResult:
+    def put_bytes_result(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        max_bytes: int | None = None,
+    ) -> StoragePutResult:
+        if max_bytes is not None and len(data) > max(0, max_bytes):
+            raise StorageDiskFullError(key)
         p = self.path_for(key)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)

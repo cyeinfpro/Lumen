@@ -5,7 +5,6 @@
 update_phase_lock() {
 emit_start lock
 emit_info lock operation_id "${OPERATION_ID}"
-emit_done  lock 0
 
 # CURRENT_RELEASE 提前到 self_update_scripts 前解析（check phase 内仍会重赋值，幂等）；
 # 不放进 check phase 是为了 self_update_scripts 在 noop 判断之前就能拿到 release scripts 目录。
@@ -15,6 +14,7 @@ if [ -L "${ROOT}/current" ]; then
     CURRENT_RELEASE="$(lumen_release_current_path "${ROOT}" || true)"
     [ -n "${CURRENT_RELEASE}" ] && CURRENT_ID="$(basename "${CURRENT_RELEASE}")"
 fi
+emit_done  lock 0
 }
 
 # Phase: self_update_scripts
@@ -47,9 +47,11 @@ else
         backup.sh restore.sh update.sh \
         update/runner.sh update/phases.sh update/bootstrap.sh \
         update/common.sh update/phase_contract.sh update/journal.sh \
+        update/journal_store.py \
         update/release/manifest.sh update/release/runner_units.sh \
         update/release/source_helpers.sh update/release/self_update.sh \
         update/release/check.sh update/release/fetch.sh \
+        update/release/digest.sh update/release/image_proof_store.py \
         update/release/activate.sh \
         update/backup/restore_points.sh \
         update/backup/migration_helpers.sh update/backup/preflight.sh \
@@ -77,6 +79,7 @@ else
                             log_info "[self_update_scripts] update.sh 已变更，re-exec 新版（保留 OPERATION_ID）。"
                             emit_done self_update_scripts 0
                             export LUMEN_UPDATE_SELF_UPDATED=$((self_update_hops + 1))
+                            export LUMEN_UPDATE_RESUME=1
                             export OPERATION_ID
                             exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
                         fi

@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .contracts import EndpointStat, ProviderConfig, ProviderHealth
+from .contracts import (
+    EndpointStat,
+    ImageProbePort,
+    ImageProbeRequest,
+    ProviderConfig,
+    ProviderHealth,
+)
 from .errors import UpstreamError
-from .probe_runtime import provider_probe_runtime
+from .probe_runtime import ProviderProbeRuntime
 
 
 class ProviderProbeMixin:
+    _probe_runtime: ProviderProbeRuntime
+
     def _image_candidate_adaptive_score(
         self,
         *,
@@ -60,18 +68,18 @@ class ProviderProbeMixin:
         consecutive_failures = stat.consecutive_failures if stat is not None else 0
         score = (
             latency
-            + failure_ewma * provider_probe_runtime().image_routing_failure_penalty_ms
+            + failure_ewma * self._probe_runtime.image_routing_failure_penalty_ms
             + consecutive_failures
-            * provider_probe_runtime().image_routing_consecutive_failure_penalty_ms
+            * self._probe_runtime.image_routing_consecutive_failure_penalty_ms
         )
         if (
             stat is not None
             and stat.last_failure_at is not None
-            and provider_probe_runtime().monotonic() - stat.last_failure_at
-            < provider_probe_runtime().endpoint_recent_failure_window_s
+            and self._probe_runtime.monotonic() - stat.last_failure_at
+            < self._probe_runtime.endpoint_recent_failure_window_s
         ):
             score += (
-                provider_probe_runtime().image_routing_consecutive_failure_penalty_ms
+                self._probe_runtime.image_routing_consecutive_failure_penalty_ms
             )
         # Large/dual-race work occupies expensive slots longer, so amplify the
         # health signal when all hard routing keys tie.
@@ -86,10 +94,10 @@ class ProviderProbeMixin:
         with self._stats_lock:
             was_open = (
                 h.consecutive_failures
-                >= provider_probe_runtime().circuit_failure_threshold
+                >= self._probe_runtime.circuit_failure_threshold
             )
             h.consecutive_failures = 0
-            h.last_success_at = provider_probe_runtime().monotonic()
+            h.last_success_at = self._probe_runtime.monotonic()
             h.cooldown_until = None
             h.half_open_probe_inflight = False
             h.half_open_probe_token = None
@@ -97,7 +105,7 @@ class ProviderProbeMixin:
                 h.total_requests += 1
                 h.successful_requests += 1
         if was_open:
-            provider_probe_runtime().logger.info(
+            self._probe_runtime.logger.info(
                 "circuit_closed: provider=%s recovered", provider_name
             )
 
@@ -112,7 +120,7 @@ class ProviderProbeMixin:
         h = self._health.get(provider_name)
         if h is None:
             return
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         if is_probe:
             # probe 不毒化熔断（不动 consecutive_failures / cooldown_until），但仍
             # 上报一次 fail 让监控可见——_record_request_stats 只递 total/fail
@@ -130,7 +138,7 @@ class ProviderProbeMixin:
                 was_half_open_probe = h.half_open_probe_inflight
                 was_open_fallback = (
                     h.consecutive_failures
-                    >= provider_probe_runtime().circuit_failure_threshold
+                    >= self._probe_runtime.circuit_failure_threshold
                     and not was_half_open_probe
                 )
                 h.half_open_probe_inflight = False
@@ -146,7 +154,7 @@ class ProviderProbeMixin:
                 was_open_fallback = (
                     selected_circuit_state == "open"
                     and h.consecutive_failures
-                    >= provider_probe_runtime().circuit_failure_threshold
+                    >= self._probe_runtime.circuit_failure_threshold
                 )
                 if owns_half_open_probe:
                     h.half_open_probe_inflight = False
@@ -159,22 +167,22 @@ class ProviderProbeMixin:
                 failures = h.consecutive_failures
             if (
                 not was_open_fallback
-                and failures >= provider_probe_runtime().circuit_failure_threshold
+                and failures >= self._probe_runtime.circuit_failure_threshold
             ):
                 multiplier = min(
-                    failures - provider_probe_runtime().circuit_failure_threshold + 1,
+                    failures - self._probe_runtime.circuit_failure_threshold + 1,
                     10,
                 )
                 duration = min(
-                    provider_probe_runtime().circuit_cooldown_base_s * multiplier,
-                    provider_probe_runtime().circuit_cooldown_max_s,
+                    self._probe_runtime.circuit_cooldown_base_s * multiplier,
+                    self._probe_runtime.circuit_cooldown_max_s,
                 )
                 h.cooldown_until = now + duration
         if (
             not was_open_fallback
-            and failures >= provider_probe_runtime().circuit_failure_threshold
+            and failures >= self._probe_runtime.circuit_failure_threshold
         ):
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "circuit_open: provider=%s failures=%d cooldown=%.0fs",
                 provider_name,
                 failures,
@@ -192,7 +200,7 @@ class ProviderProbeMixin:
         endpoint 的路径会用到。caller 必须保证最终调一次 release_image_inflight。
         """
         k = endpoint_kind or ""
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         with self._stats_lock:
             h = self._health.setdefault(provider_name, ProviderHealth())
             h.image_inflight[k] = h.image_inflight.get(k, 0) + 1
@@ -233,12 +241,12 @@ class ProviderProbeMixin:
         retry-after 过去；此处只动 health 维度。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         ek_key = endpoint_kind or ""
         with self._stats_lock:
             was_image_open = (
                 h.image_consecutive_failures
-                >= provider_probe_runtime().image_circuit_failure_threshold
+                >= self._probe_runtime.image_circuit_failure_threshold
             )
             h.image_consecutive_failures = 0
             h.image_cooldown_until = None
@@ -260,7 +268,7 @@ class ProviderProbeMixin:
         except Exception:  # noqa: BLE001
             pass
         if was_image_open:
-            provider_probe_runtime().logger.info(
+            self._probe_runtime.logger.info(
                 "image_circuit_closed: provider=%s recovered", provider_name
             )
 
@@ -273,7 +281,7 @@ class ProviderProbeMixin:
         text route 不受影响（让"该号生图差但文本健康"的情况能继续跑文本）。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         ek_key = endpoint_kind or ""
         with self._stats_lock:
             h.image_consecutive_failures += 1
@@ -283,10 +291,10 @@ class ProviderProbeMixin:
             image_failures = h.image_consecutive_failures
             if (
                 image_failures
-                >= provider_probe_runtime().image_circuit_failure_threshold
+                >= self._probe_runtime.image_circuit_failure_threshold
             ):
                 h.image_cooldown_until = (
-                    now + provider_probe_runtime().image_circuit_cooldown_s
+                    now + self._probe_runtime.image_circuit_cooldown_s
                 )
         if endpoint_kind:
             self.record_endpoint_failure(provider_name, endpoint_kind)
@@ -299,12 +307,12 @@ class ProviderProbeMixin:
             ).inc()
         except Exception:  # noqa: BLE001
             pass
-        if image_failures >= provider_probe_runtime().image_circuit_failure_threshold:
-            provider_probe_runtime().logger.warning(
+        if image_failures >= self._probe_runtime.image_circuit_failure_threshold:
+            self._probe_runtime.logger.warning(
                 "image_circuit_open: provider=%s image_failures=%d cooldown=%.0fs",
                 provider_name,
                 image_failures,
-                provider_probe_runtime().image_circuit_cooldown_s,
+                self._probe_runtime.image_circuit_cooldown_s,
             )
 
     # ---- image-job per-endpoint stats ------------------------------------
@@ -321,13 +329,13 @@ class ProviderProbeMixin:
         self, provider_name: str, endpoint: str, *, latency_ms: float | None = None
     ) -> None:
         stat = self._endpoint_stat(provider_name, endpoint)
-        stat.last_success_at = provider_probe_runtime().monotonic()
+        stat.last_success_at = self._probe_runtime.monotonic()
         stat.consecutive_failures = 0
         stat.successes += 1
-        stat.failure_ewma = provider_probe_runtime().ewma(
+        stat.failure_ewma = self._probe_runtime.ewma(
             stat.failure_ewma,
             0.0,
-            provider_probe_runtime().endpoint_failure_alpha,
+            self._probe_runtime.endpoint_failure_alpha,
         )
         if latency_ms is not None and latency_ms > 0:
             stat.success_count += 1
@@ -335,21 +343,21 @@ class ProviderProbeMixin:
             stat.success_mean_ms += (
                 latency_ms - stat.success_mean_ms
             ) / stat.success_count
-            stat.latency_ewma_ms = provider_probe_runtime().ewma(
+            stat.latency_ewma_ms = self._probe_runtime.ewma(
                 stat.latency_ewma_ms,
                 latency_ms,
-                provider_probe_runtime().endpoint_ewma_alpha,
+                self._probe_runtime.endpoint_ewma_alpha,
             )
 
     def record_endpoint_failure(self, provider_name: str, endpoint: str) -> None:
         stat = self._endpoint_stat(provider_name, endpoint)
-        stat.last_failure_at = provider_probe_runtime().monotonic()
+        stat.last_failure_at = self._probe_runtime.monotonic()
         stat.consecutive_failures += 1
         stat.failures += 1
-        stat.failure_ewma = provider_probe_runtime().ewma(
+        stat.failure_ewma = self._probe_runtime.ewma(
             stat.failure_ewma,
             1.0,
-            provider_probe_runtime().endpoint_failure_alpha,
+            self._probe_runtime.endpoint_failure_alpha,
         )
 
     def endpoint_chain(
@@ -376,7 +384,7 @@ class ProviderProbeMixin:
         # auto: rank both, with sane defaults when we have no history yet.
         candidates = ["generations", "responses"]
         h = self._health.get(provider_name)
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
 
         def _score(endpoint: str) -> tuple[float, float, float, int]:
             # Lower is better. Tuple ordering: EWMA failure/recent-failure
@@ -387,18 +395,18 @@ class ProviderProbeMixin:
                 stat = h.endpoint_stats.get(endpoint, EndpointStat())
             penalty = (
                 stat.failure_ewma
-                * provider_probe_runtime().image_routing_failure_penalty_ms
+                * self._probe_runtime.image_routing_failure_penalty_ms
                 + stat.consecutive_failures
-                * provider_probe_runtime().image_routing_consecutive_failure_penalty_ms
+                * self._probe_runtime.image_routing_consecutive_failure_penalty_ms
             )
             # If this endpoint failed in the last 60s prefer the alternative
             # even if its mean latency is higher.
             if (
                 stat.last_failure_at is not None
                 and now - stat.last_failure_at
-                < provider_probe_runtime().endpoint_recent_failure_window_s
+                < self._probe_runtime.endpoint_recent_failure_window_s
             ):
-                penalty += provider_probe_runtime().image_routing_failure_penalty_ms
+                penalty += self._probe_runtime.image_routing_failure_penalty_ms
             latency = (
                 stat.latency_ewma_ms
                 if stat.latency_ewma_ms is not None
@@ -438,11 +446,11 @@ class ProviderProbeMixin:
         不计入 image_consecutive_failures——这不是"号坏了"，而是"号当前没额度"。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         wait = (
             float(retry_after_s)
             if retry_after_s is not None and retry_after_s > 0
-            else provider_probe_runtime().image_rate_limited_default_s
+            else self._probe_runtime.image_rate_limited_default_s
         )
         with self._stats_lock:
             h.image_rate_limited_until = now + wait
@@ -457,19 +465,17 @@ class ProviderProbeMixin:
             ).inc()
         except Exception:  # noqa: BLE001
             pass
-        provider_probe_runtime().logger.warning(
+        self._probe_runtime.logger.warning(
             "image_rate_limited: provider=%s wait=%.0fs", provider_name, wait
         )
 
     # ---- 探活 ------------------------------------------------------------
 
-    @staticmethod
-    def _extract_response_output_text(payload: Any) -> str:
-        return provider_probe_runtime().extract_response_text(payload)
+    def _extract_response_output_text(self, payload: Any) -> str:
+        return self._probe_runtime.extract_response_text(payload)
 
-    @staticmethod
-    def _extract_sse_output_text(raw: str) -> str:
-        return provider_probe_runtime().extract_sse_text(raw)
+    def _extract_sse_output_text(self, raw: str) -> str:
+        return self._probe_runtime.extract_sse_text(raw)
 
     async def _probe_one(self, provider: ProviderConfig) -> bool:
         """文本算术探活：让 gpt-5.4-mini 算 99*99，必须答出 9801 才算真活。
@@ -479,8 +485,8 @@ class ProviderProbeMixin:
         - 上游强制改写成空响应 / 错误响应但 status=200
         - sub2api 把请求 sticky 到一个坏号但仍返回 200
         """
-        if not provider_probe_runtime().endpoint_allowed(provider, "responses"):
-            provider_probe_runtime().logger.debug(
+        if not self._probe_runtime.endpoint_allowed(provider, "responses"):
+            self._probe_runtime.logger.debug(
                 "probe_result: provider=%s status=skipped reason=endpoint_locked_to_%s",
                 provider.name,
                 provider.image_jobs_endpoint,
@@ -494,12 +500,12 @@ class ProviderProbeMixin:
             "authorization": f"Bearer {provider.api_key}",
             "content-type": "application/json",
         }
-        body = provider_probe_runtime().build_probe_request()
+        body = self._probe_runtime.build_probe_request()
         try:
-            proxy_url = await provider_probe_runtime().resolve_proxy_url(provider.proxy)
-            async with provider_probe_runtime().async_client_factory(
-                timeout=provider_probe_runtime().timeout_factory(
-                    provider_probe_runtime().probe_timeout_s
+            proxy_url = await self._probe_runtime.resolve_proxy_url(provider.proxy)
+            async with self._probe_runtime.async_client_factory(
+                timeout=self._probe_runtime.timeout_factory(
+                    self._probe_runtime.probe_timeout_s
                 ),
                 proxy=proxy_url,
                 follow_redirects=False,
@@ -507,7 +513,7 @@ class ProviderProbeMixin:
             ) as client:
                 resp = await client.post(url, json=body, headers=headers)
             if resp.status_code >= 500:
-                provider_probe_runtime().logger.warning(
+                self._probe_runtime.logger.warning(
                     "probe_result: provider=%s status=fail http=%d",
                     provider.name,
                     resp.status_code,
@@ -515,7 +521,7 @@ class ProviderProbeMixin:
                 return False
             if resp.status_code >= 400:
                 # 4xx 通常是 auth / 配额问题——不是"上游网关挂了"，但也不是"真活"
-                provider_probe_runtime().logger.warning(
+                self._probe_runtime.logger.warning(
                     "probe_result: provider=%s status=fail http=%d (auth/quota)",
                     provider.name,
                     resp.status_code,
@@ -527,21 +533,21 @@ class ProviderProbeMixin:
             except Exception:  # noqa: BLE001
                 text = self._extract_sse_output_text(resp.text)
                 if not text:
-                    provider_probe_runtime().logger.warning(
+                    self._probe_runtime.logger.warning(
                         "probe_result: provider=%s status=fail bad_json",
                         provider.name,
                     )
                     return False
             if "9801" in text:
                 return True
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "probe_result: provider=%s status=fail wrong_answer text=%.200s",
                 provider.name,
                 text,
             )
             return False
         except Exception as exc:  # noqa: BLE001
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "probe_result: provider=%s status=fail err=%s",
                 provider.name,
                 type(exc).__name__,
@@ -558,13 +564,13 @@ class ProviderProbeMixin:
         providers = [
             p
             for p in self._providers
-            if p.enabled and provider_probe_runtime().endpoint_allowed(p, "responses")
+            if p.enabled and self._probe_runtime.endpoint_allowed(p, "responses")
         ]
         if not providers:
             return {}
 
         probe_sem = asyncio.Semaphore(
-            max(1, provider_probe_runtime().probe_max_concurrency)
+            max(1, self._probe_runtime.probe_max_concurrency)
         )
 
         async def run_probe(provider: ProviderConfig) -> bool:
@@ -583,11 +589,11 @@ class ProviderProbeMixin:
 
             h = self._health.get(provider.name)
             if h is not None:
-                h.last_probe_at = provider_probe_runtime().monotonic()
+                h.last_probe_at = self._probe_runtime.monotonic()
 
             if healthy:
                 self.report_success(provider.name, is_probe=True)
-                provider_probe_runtime().logger.debug(
+                self._probe_runtime.logger.debug(
                     "probe_result: provider=%s status=ok", provider.name
                 )
             else:
@@ -595,7 +601,11 @@ class ProviderProbeMixin:
 
         return outcome
 
-    async def _probe_image_one(self, provider: ProviderConfig) -> bool:
+    async def _probe_image_one(
+        self,
+        provider: ProviderConfig,
+        image_probe: ImageProbePort,
+    ) -> bool:
         """1024x1024 低质量生图探活：必须真拿回 base64 才算 healthy。
 
         和文本 probe 隔离：
@@ -605,10 +615,8 @@ class ProviderProbeMixin:
         - 不调 record_image_call（不入账 Redis quota，sub2api 那边的 OAuth 配额会消耗，
           但 Lumen 的滑动窗口不计 probe 次数）
         """
-        from .probe_hooks import get_image_probe
-
-        if not provider_probe_runtime().endpoint_allowed(provider, "responses"):
-            provider_probe_runtime().logger.debug(
+        if not self._probe_runtime.endpoint_allowed(provider, "responses"):
+            self._probe_runtime.logger.debug(
                 "image_probe_result: provider=%s status=skipped reason=endpoint_locked_to_%s",
                 provider.name,
                 provider.image_jobs_endpoint,
@@ -616,19 +624,16 @@ class ProviderProbeMixin:
             return True
 
         try:
-            kwargs: dict[str, Any] = {
-                "prompt": provider_probe_runtime().image_probe_prompt,
-                "size": provider_probe_runtime().image_probe_size,
-                "action": "generate",
-                "quality": provider_probe_runtime().image_probe_quality,
-                "base_url_override": provider.base_url,
-                "api_key_override": provider.api_key,
-            }
-            if provider.proxy is not None:
-                kwargs["proxy_override"] = provider.proxy
-            b64, _ = await get_image_probe()(**kwargs)
+            b64, _ = await image_probe(
+                ImageProbeRequest(
+                    prompt=self._probe_runtime.image_probe_prompt,
+                    size=self._probe_runtime.image_probe_size,
+                    quality=self._probe_runtime.image_probe_quality,
+                    provider=provider,
+                )
+            )
         except UpstreamError as exc:
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "image_probe_result: provider=%s status=fail err_code=%s msg=%.200s",
                 provider.name,
                 exc.error_code,
@@ -636,23 +641,26 @@ class ProviderProbeMixin:
             )
             return False
         except Exception as exc:  # noqa: BLE001
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "image_probe_result: provider=%s status=fail err=%s",
                 provider.name,
                 type(exc).__name__,
             )
             return False
-        if not b64 or len(b64) < provider_probe_runtime().image_probe_min_b64_len:
-            provider_probe_runtime().logger.warning(
+        if not b64 or len(b64) < self._probe_runtime.image_probe_min_b64_len:
+            self._probe_runtime.logger.warning(
                 "image_probe_result: provider=%s status=fail b64_len=%d (min=%d)",
                 provider.name,
                 len(b64) if b64 else 0,
-                provider_probe_runtime().image_probe_min_b64_len,
+                self._probe_runtime.image_probe_min_b64_len,
             )
             return False
         return True
 
-    async def probe_image_all(self) -> dict[str, bool]:
+    async def probe_image_all(
+        self,
+        image_probe: ImageProbePort,
+    ) -> dict[str, bool]:
         """对所有 enabled provider 跑 image probe。"""
         try:
             await self._maybe_reload()
@@ -663,17 +671,17 @@ class ProviderProbeMixin:
         providers = [
             p
             for p in self._providers
-            if p.enabled and provider_probe_runtime().endpoint_allowed(p, "responses")
+            if p.enabled and self._probe_runtime.endpoint_allowed(p, "responses")
         ]
         if not providers:
             return {}
         probe_sem = asyncio.Semaphore(
-            max(1, provider_probe_runtime().probe_max_concurrency)
+            max(1, self._probe_runtime.probe_max_concurrency)
         )
 
         async def run_probe(provider: ProviderConfig) -> bool:
             async with probe_sem:
-                return await self._probe_image_one(provider)
+                return await self._probe_image_one(provider, image_probe)
 
         results = await asyncio.gather(
             *(run_probe(p) for p in providers),
@@ -685,7 +693,7 @@ class ProviderProbeMixin:
             outcome[provider.name] = healthy
             if healthy:
                 self.report_image_probe_success(provider.name)
-                provider_probe_runtime().logger.debug(
+                self._probe_runtime.logger.debug(
                     "image_probe_result: provider=%s status=ok", provider.name
                 )
             else:
@@ -703,13 +711,13 @@ class ProviderProbeMixin:
         with self._stats_lock:
             was_image_open = (
                 h.image_consecutive_failures
-                >= provider_probe_runtime().image_circuit_failure_threshold
+                >= self._probe_runtime.image_circuit_failure_threshold
             )
             h.image_consecutive_failures = 0
             h.image_cooldown_until = None
-            h.last_probe_at = provider_probe_runtime().monotonic()
+            h.last_probe_at = self._probe_runtime.monotonic()
         if was_image_open:
-            provider_probe_runtime().logger.info(
+            self._probe_runtime.logger.info(
                 "image_circuit_closed: provider=%s recovered via probe",
                 provider_name,
             )
@@ -721,24 +729,24 @@ class ProviderProbeMixin:
         但累加 image_consecutive_failures 让坏号能从 image route 候选里被排除。
         """
         h = self._health.setdefault(provider_name, ProviderHealth())
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         with self._stats_lock:
             h.image_consecutive_failures += 1
             h.last_probe_at = now
             image_failures = h.image_consecutive_failures
             if (
                 image_failures
-                >= provider_probe_runtime().image_circuit_failure_threshold
+                >= self._probe_runtime.image_circuit_failure_threshold
             ):
                 h.image_cooldown_until = (
-                    now + provider_probe_runtime().image_circuit_cooldown_s
+                    now + self._probe_runtime.image_circuit_cooldown_s
                 )
-        if image_failures >= provider_probe_runtime().image_circuit_failure_threshold:
-            provider_probe_runtime().logger.warning(
+        if image_failures >= self._probe_runtime.image_circuit_failure_threshold:
+            self._probe_runtime.logger.warning(
                 "image_circuit_open: provider=%s probe_failures=%d cooldown=%.0fs",
                 provider_name,
                 image_failures,
-                provider_probe_runtime().image_circuit_cooldown_s,
+                self._probe_runtime.image_circuit_cooldown_s,
             )
 
     async def flush_image_metrics(self) -> None:
@@ -761,7 +769,7 @@ class ProviderProbeMixin:
         except Exception:  # noqa: BLE001
             return
 
-        wall_now = provider_probe_runtime().wall_time()
+        wall_now = self._probe_runtime.wall_time()
         redis = self.get_redis()
         statuses = self.get_status()
 
@@ -851,19 +859,19 @@ class ProviderProbeMixin:
                         h.total_requests += total
                         h.successful_requests += success
                         h.failed_requests += fail
-            provider_probe_runtime().logger.warning(
+            self._probe_runtime.logger.warning(
                 "flush_stats_to_redis failed", exc_info=True
             )
 
     def get_status(self) -> list[dict[str, Any]]:
         """返回所有 provider 的当前状态（调试 / admin API 用）。"""
-        now = provider_probe_runtime().monotonic()
+        now = self._probe_runtime.monotonic()
         result: list[dict[str, Any]] = []
         for p in self._providers:
             h = self._health.get(p.name, ProviderHealth())
             if (
                 h.consecutive_failures
-                >= provider_probe_runtime().circuit_failure_threshold
+                >= self._probe_runtime.circuit_failure_threshold
             ):
                 if h.cooldown_until and now >= h.cooldown_until:
                     state = "half_open"

@@ -5,6 +5,11 @@
 update_phase_set_image_tag() {
 emit_start set_image_tag
 
+if ! lumen_update_journal_assert_target_field effective_tag "${TARGET_TAG}"; then
+    log_error "[set_image_tag] TARGET_TAG 与 fetch_release 已绑定目标冲突。"
+    emit_fail set_image_tag 1
+    exit 1
+fi
 if ! lumen_set_image_tag_in_env "${SHARED_ENV}" "${TARGET_TAG}"; then
     log_error "[set_image_tag] 写入 shared/.env 失败。"
     emit_fail set_image_tag 1
@@ -36,8 +41,27 @@ if [ "${TAG_LINE_CNT}" != "1" ]; then
     exit 1
 fi
 
-# 把 target tag 落到 release 目录的 .image-tag（回滚定位）
-printf '%s\n' "${TARGET_TAG}" > "${NEW_RELEASE}/.image-tag" 2>/dev/null || true
+# 把 target tag 落到 release 目录的 .image-tag（回滚与 resume proof）
+RELEASE_IMAGE_TAG_FILE="${NEW_RELEASE}/.image-tag"
+RELEASE_IMAGE_TAG_TMP="$(
+    mktemp "${NEW_RELEASE}/.image-tag.XXXXXXXXXX" 2>/dev/null
+)" || {
+    log_error "[set_image_tag] 无法创建 .image-tag 临时文件。"
+    emit_fail set_image_tag 1
+    exit 1
+}
+if ! printf '%s\n' "${TARGET_TAG}" > "${RELEASE_IMAGE_TAG_TMP}" \
+        || ! lumen_update_copy_file_durable \
+            "${RELEASE_IMAGE_TAG_TMP}" "${RELEASE_IMAGE_TAG_FILE}"; then
+    rm -f "${RELEASE_IMAGE_TAG_TMP}" 2>/dev/null || true
+    log_error "[set_image_tag] 无法持久化 .image-tag proof。"
+    emit_fail set_image_tag 1
+    exit 1
+fi
+rm -f "${RELEASE_IMAGE_TAG_TMP}"
+RELEASE_IMAGE_TAG_SHA256="$(
+    lumen_update_file_sha256 "${RELEASE_IMAGE_TAG_FILE}"
+)"
 
 RELEASE_MANIFEST_FILE=""
 RELEASE_MANIFEST_TAG="${TARGET_RELEASE_TAG}"
@@ -65,9 +89,20 @@ if lumen_release_manifest_required "${TARGET_TAG}" \
         RELEASE_MANIFEST_FILE="${NEW_RELEASE}/release-manifest.json"
         if [ -n "${RELEASE_SOURCE_MANIFEST_CACHE}" ] \
                 && [ "${RELEASE_MANIFEST_TAG}" = "${TARGET_RELEASE_TAG}" ]; then
-            if ! mv -f \
-                    "${RELEASE_SOURCE_MANIFEST_CACHE}" "${RELEASE_MANIFEST_FILE}"; then
-                log_error "[set_image_tag] 无法提交已校验的 release manifest。"
+            if [ -f "${RELEASE_SOURCE_MANIFEST_CACHE}" ]; then
+                if ! mv -f \
+                        "${RELEASE_SOURCE_MANIFEST_CACHE}" "${RELEASE_MANIFEST_FILE}"; then
+                    log_error "[set_image_tag] 无法提交已校验的 release manifest。"
+                    emit_fail set_image_tag 1
+                    exit 1
+                fi
+            elif [ -f "${RELEASE_MANIFEST_FILE}" ] \
+                    && [ -n "${RELEASE_MANIFEST_SHA256:-}" ] \
+                    && [ "$(lumen_update_file_sha256 "${RELEASE_MANIFEST_FILE}")" \
+                        = "${RELEASE_MANIFEST_SHA256}" ]; then
+                emit_info set_image_tag resume "manifest_already_committed"
+            else
+                log_error "[set_image_tag] manifest cache 已消失且 release 内无匹配 proof。"
                 emit_fail set_image_tag 1
                 exit 1
             fi
@@ -107,6 +142,24 @@ if [ -n "${RELEASE_MANIFEST_TAG}" ] \
     emit_info set_image_tag version "${TARGET_VERSION_FROM_MANIFEST}"
 fi
 
+FINAL_MANIFEST_SHA256=""
+if [ -n "${RELEASE_MANIFEST_FILE}" ]; then
+    if [ ! -f "${RELEASE_MANIFEST_FILE}" ]; then
+        log_error "[set_image_tag] 已声明的 release manifest 不存在。"
+        emit_fail set_image_tag 1
+        exit 1
+    fi
+    FINAL_MANIFEST_SHA256="$(
+        lumen_update_file_sha256 "${RELEASE_MANIFEST_FILE}"
+    )"
+fi
+RELEASE_MANIFEST_SHA256="${FINAL_MANIFEST_SHA256}"
+if ! lumen_update_journal_bind_target; then
+    log_error "[set_image_tag] release proof 与已绑定 target 冲突。"
+    emit_fail set_image_tag 1
+    exit 1
+fi
+
 emit_info set_image_tag tag "${TARGET_TAG}"
 emit_done set_image_tag 0
 }
@@ -129,8 +182,14 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
         if lumen_compose_in "${NEW_RELEASE}" build tgbot 2>/dev/null; then
             TGBOT_IMAGE_READY=1
         else
-            log_warn "[build_images] tgbot build 失败，已忽略。"
+            log_error "[build_images] tgbot 已启用但 build 失败，拒绝启动未证明镜像。"
+            emit_fail pull_images 1
+            exit 1
         fi
+    fi
+    if ! lumen_update_bind_immutable_images; then
+        emit_fail pull_images 1
+        exit 1
     fi
     emit_done pull_images 0
 fi
@@ -146,6 +205,31 @@ if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ] \
     log_info "[pull_images] fast 模式：跳过显式 docker compose pull，稍后按服务 --pull missing。"
     emit_info pull_images action "skipped_by_fast_mode"
     emit_info pull_images pull_policy "up_pull_missing"
+    TGBOT_IMAGE_READY=0
+    if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
+        TGBOT_IMAGE_READY=1
+    fi
+    if ! lumen_update_bind_immutable_images; then
+        log_info "[pull_images] 本地目标镜像缺失或 proof 不匹配，执行一次显式拉取后重绑。"
+        if ! lumen_retry 3 5 "docker compose pull tag=${TARGET_TAG}" \
+                lumen_compose_pull_per_image "${NEW_RELEASE}"; then
+            log_error "[pull_images] 无法取得可绑定的目标镜像。"
+            emit_fail pull_images 1
+            exit 1
+        fi
+        if [ "${TGBOT_IMAGE_READY}" = "1" ] \
+                && ! lumen_retry 2 5 "docker compose pull tgbot" \
+                    lumen_compose_in "${NEW_RELEASE}" \
+                        --profile tgbot pull tgbot; then
+            log_error "[pull_images] tgbot 已启用但镜像拉取失败。"
+            emit_fail pull_images 1
+            exit 1
+        fi
+        if ! lumen_update_bind_immutable_images; then
+            emit_fail pull_images 1
+            exit 1
+        fi
+    fi
     emit_done pull_images 0
 elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # -----------------------------------------------------------------------
@@ -162,6 +246,11 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     if ! lumen_retry 3 5 "docker compose pull tag=${TARGET_TAG}" \
             lumen_compose_pull_per_image "${NEW_RELEASE}"; then
         if [ "${TARGET_TAG}" != "main" ] && [ "${LUMEN_UPDATE_FALLBACK_MAIN:-0}" = "1" ]; then
+            if ! lumen_update_journal_assert_target_field effective_tag main; then
+                log_error "[pull_images] target 已不可变绑定为 ${TARGET_TAG}，拒绝在续跑边界内改绑 main。"
+                emit_fail pull_images 1
+                exit 1
+            fi
             log_warn "[pull_images] docker compose pull tag=${TARGET_TAG} 失败，自动回退到 main 后重试。"
             emit_info pull_images target_tag_fallback "main"
             TARGET_TAG="main"
@@ -220,16 +309,13 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
     # 会跳过它。如果 .env 启用了 telegram，单独拉一次让 tgbot 镜像也跟到目标
     # tag 对应的 GHCR digest——否则 restart_services 阶段的
     # `--profile tgbot up -d tgbot` 会复用本地旧 image。启用 tgbot 时它属于
-    # 本次部署的服务集合；默认不让非核心 tgbot 镜像阻断 api/worker/web 更新。
+    # 本次部署的服务集合；启用后必须与核心服务进入同一 immutable proof。
     if env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
         if ! lumen_retry 2 5 "docker compose pull tgbot" \
                 lumen_compose_in "${NEW_RELEASE}" --profile tgbot pull tgbot; then
-            if [ "${LUMEN_UPDATE_REQUIRE_TGBOT:-0}" = "1" ]; then
-                log_error "[pull_images] tgbot pull 失败，已配置 REQUIRE_TGBOT，终止更新。"
-                emit_fail pull_images 1
-                exit 1
-            fi
-            log_warn "[pull_images] tgbot pull 失败，跳过 tgbot 更新（不影响 api/worker/web）。"
+            log_error "[pull_images] tgbot 已启用但 pull 失败，拒绝启动未证明镜像。"
+            emit_fail pull_images 1
+            exit 1
         else
             TGBOT_IMAGE_READY=1
             emit_info pull_images tgbot_pull "ok"
@@ -252,6 +338,10 @@ elif [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ]; then
             exit 1
         fi
         emit_info pull_images digest_manifest "verified"
+    fi
+    if ! lumen_update_bind_immutable_images; then
+        emit_fail pull_images 1
+        exit 1
     fi
     emit_info pull_images tag "${TARGET_TAG}"
     emit_done pull_images 0

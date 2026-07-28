@@ -38,6 +38,7 @@ from lumen_core.models import (
 )
 
 from ..db import SessionLocal
+from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..sse_publish import publish_event
 from .memory_extraction_parts.contracts import (
     CompletedMemoryExtraction as _CompletedMemoryExtraction,
@@ -390,6 +391,7 @@ async def _try_llm_extract(
     *,
     explicit_only: bool,
     scope_hint: str | None = None,
+    image_upstream_runtime: ImageUpstreamRuntime | None = None,
 ) -> list[ExtractedMemory]:
     try:
         from ..provider_pool import get_pool, text_provider_attempt
@@ -438,7 +440,11 @@ async def _try_llm_extract(
                 kwargs["proxy_override"] = provider.proxy
             with text_provider_attempt(pool, provider) as provider_attempt:
                 try:
-                    payload = await responses_call(body, **kwargs)
+                    payload = await responses_call(
+                        body,
+                        runtime=image_upstream_runtime,
+                        **kwargs,
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -961,11 +967,23 @@ async def _prepare_memory_extraction(
 ) -> tuple[list[_PreparedMemoryCandidate], bool]:
     candidates, rejected_pii = extract_memories(claim.text, explicit_only=False)
     if candidates and not rejected_pii:
-        llm_candidates = await _try_llm_extract(
-            claim.text,
-            explicit_only=False,
-            scope_hint=claim.scope_hint,
-        )
+        try:
+            image_upstream_runtime = ctx["image_upstream_runtime"]
+        except KeyError:
+            image_upstream_runtime = None
+        if isinstance(image_upstream_runtime, ImageUpstreamRuntime):
+            llm_candidates = await _try_llm_extract(
+                claim.text,
+                explicit_only=False,
+                scope_hint=claim.scope_hint,
+                image_upstream_runtime=image_upstream_runtime,
+            )
+        else:
+            _logger.warning(
+                "memory_extraction.image_upstream_runtime_unavailable "
+                "fallback=deterministic"
+            )
+            llm_candidates = []
         if llm_candidates:
             candidates = llm_candidates
     prepared: list[_PreparedMemoryCandidate] = []

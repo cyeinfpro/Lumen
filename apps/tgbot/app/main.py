@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from enum import StrEnum
 from collections.abc import Awaitable, Callable
@@ -71,6 +72,30 @@ class PollingTermination:
 
 class PollingSupervisorFailure(RuntimeError):
     pass
+
+
+async def _sleep_or_stop(
+    stop_event: asyncio.Event,
+    seconds: float,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    if stop_event.is_set():
+        return True
+    stop_task = asyncio.create_task(stop_event.wait(), name="lumen-backoff-stop")
+    sleep_task = asyncio.ensure_future(sleep(seconds))
+    done, _pending = await asyncio.wait(
+        (stop_task, sleep_task),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if stop_task in done:
+        sleep_task.cancel()
+        await asyncio.gather(sleep_task, return_exceptions=True)
+        return True
+    stop_task.cancel()
+    await asyncio.gather(stop_task, return_exceptions=True)
+    await sleep_task
+    return False
 
 
 def _record_polling_failure(classification: PollingTerminationClass) -> None:
@@ -179,7 +204,12 @@ async def _run_polling_supervisor(
                 termination.error,
                 network_backoff,
             )
-            await sleep(network_backoff)
+            if await _sleep_or_stop(
+                stop_event,
+                network_backoff,
+                sleep=sleep,
+            ):
+                return PollingTerminationClass.NORMAL_STOP
             network_backoff = min(
                 network_backoff * 2,
                 _POLLING_NETWORK_BACKOFF_MAX_SEC,
@@ -234,7 +264,11 @@ def _stop_metrics_server(server: object | None) -> None:
         server_close()
 
 
-async def _run_control_listener(stop_event: asyncio.Event) -> None:
+async def _run_control_listener(
+    stop_event: asyncio.Event,
+    *,
+    sleep_or_stop: Callable[[asyncio.Event, float], Awaitable[bool]] = _sleep_or_stop,
+) -> None:
     """订阅 admin 通道；收到 restart 命令则 clean-exit，systemd Restart=always 会拉起。
 
     任何错误（包括 Redis 抖动）都不应该让进程退出；记 warning 后继续重连。
@@ -287,7 +321,8 @@ async def _run_control_listener(stop_event: asyncio.Event) -> None:
                 backoff,
                 consecutive_failures,
             )
-            await asyncio.sleep(backoff)
+            if await sleep_or_stop(stop_event, backoff):
+                return
             backoff = min(backoff * 2, backoff_max)
         finally:
             try:
@@ -434,43 +469,41 @@ async def _amain() -> None:
             level=logging.ERROR,
         )
         return
-    api = LumenApi()
-    proxy_mgr = ProxyManager(api)
+    async with AsyncExitStack() as stack:
+        api = LumenApi()
+        stack.push_async_callback(api.aclose)
+        proxy_mgr = ProxyManager(api)
 
-    # 先去 API 拉 runtime-config（DB 优先，env 兜底）
-    bot_token = ""
-    initial_proxy_url = ""
-    bot_enabled = True
-    try:
-        cfg = await proxy_mgr.initial_load()
-        bot_token = (cfg.get("bot_token") or "").strip()
-        bot_enabled = bool(cfg.get("bot_enabled", True))
-        proxy_info = cfg.get("proxy") or {}
-        if isinstance(proxy_info, dict):
-            initial_proxy_url = str(proxy_info.get("url") or "")
-    except ApiError as exc:
-        logger.warning("runtime-config load failed (will use env fallbacks): %s", exc)
-
-    # bootstrap fallbacks
-    if not bot_token:
-        bot_token = settings.telegram_bot_token
-    if not initial_proxy_url:
-        initial_proxy_url = settings.telegram_proxy_url.strip()
-    initial_proxy_url = normalize_proxy_url(initial_proxy_url)
-
-    if not bot_enabled:
+        # 先去 API 拉 runtime-config（DB 优先，env 兜底）
+        bot_token = ""
+        initial_proxy_url = ""
+        bot_enabled = True
         try:
+            cfg = await proxy_mgr.initial_load()
+            bot_token = (cfg.get("bot_token") or "").strip()
+            bot_enabled = bool(cfg.get("bot_enabled", True))
+            proxy_info = cfg.get("proxy") or {}
+            if isinstance(proxy_info, dict):
+                initial_proxy_url = str(proxy_info.get("url") or "")
+        except ApiError as exc:
+            logger.warning("runtime-config load failed (will use env fallbacks): %s", exc)
+
+        # bootstrap fallbacks
+        if not bot_token:
+            bot_token = settings.telegram_bot_token
+        if not initial_proxy_url:
+            initial_proxy_url = settings.telegram_proxy_url.strip()
+        initial_proxy_url = normalize_proxy_url(initial_proxy_url)
+
+        if not bot_enabled:
             await _pause_until_restart_or_stop(
                 logger,
                 "telegram.bot_enabled=0 in runtime configuration",
                 level=logging.INFO,
                 recovery_check=lambda: _runtime_config_is_runnable(api),
             )
-        finally:
-            await api.aclose()
-        return
-    if not bot_token:
-        try:
+            return
+        if not bot_token:
             await _pause_until_restart_or_stop(
                 logger,
                 "configuration error: bot token is empty in runtime configuration and "
@@ -478,35 +511,33 @@ async def _amain() -> None:
                 level=logging.ERROR,
                 recovery_check=lambda: _runtime_config_is_runnable(api),
             )
-        finally:
-            await api.aclose()
-        return
+            return
 
-    if initial_proxy_url:
-        logger.info(
-            "outbound proxy: name=%s url=%s",
-            proxy_mgr.current_name or "(env fallback)",
-            _redact_proxy(initial_proxy_url),
-        )
-    else:
-        logger.warning(
-            "no outbound proxy configured; TG calls will go direct (likely fail in CN)"
-        )
+        if initial_proxy_url:
+            logger.info(
+                "outbound proxy: name=%s url=%s",
+                proxy_mgr.current_name or "(env fallback)",
+                _redact_proxy(initial_proxy_url),
+            )
+        else:
+            logger.warning(
+                "no outbound proxy configured; TG calls will go direct "
+                "(likely fail in CN)"
+            )
 
-    session = (
-        FailoverSession(proxy_mgr, proxy=initial_proxy_url)
-        if initial_proxy_url
-        else None
-    )
-    defaults = DefaultBotProperties(parse_mode=None)
-    try:
-        bot = (
-            Bot(token=bot_token, default=defaults, session=session)
-            if session is not None
-            else Bot(token=bot_token, default=defaults)
+        session = (
+            FailoverSession(proxy_mgr, proxy=initial_proxy_url)
+            if initial_proxy_url
+            else None
         )
-    except TokenValidationError as exc:
+        defaults = DefaultBotProperties(parse_mode=None)
         try:
+            bot = (
+                Bot(token=bot_token, default=defaults, session=session)
+                if session is not None
+                else Bot(token=bot_token, default=defaults)
+            )
+        except TokenValidationError as exc:
             _record_polling_failure(PollingTerminationClass.INVALID_CONFIGURATION)
             logger.error(
                 "polling initialization failed class=%s error=%s",
@@ -522,64 +553,74 @@ async def _amain() -> None:
                     bot_token,
                 ),
             )
-        finally:
-            await api.aclose()
-        return
+            return
+        stack.push_async_callback(bot.session.close)
 
-    # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
-    # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
-    # 比 bot 拒绝起完全失联好）。
-    fsm_redis: aioredis.Redis | None = None
-    storage: MemoryStorage | RedisStorage
-    try:
-        fsm_redis = aioredis.from_url(settings.redis_url, decode_responses=False)
-        await fsm_redis.ping()
-        storage = RedisStorage(
-            redis=fsm_redis,
-            key_builder=DefaultKeyBuilder(prefix="tg:bot:fsm", with_bot_id=True),
-            state_ttl=_FSM_STATE_TTL_SEC,
-            data_ttl=_FSM_STATE_TTL_SEC,
+        # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
+        # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
+        # 比 bot 拒绝起完全失联好）。
+        fsm_redis: aioredis.Redis | None = None
+        storage: MemoryStorage | RedisStorage
+        try:
+            fsm_redis = aioredis.from_url(
+                settings.redis_url,
+                decode_responses=False,
+            )
+            stack.push_async_callback(fsm_redis.aclose)
+            await fsm_redis.ping()
+            storage = RedisStorage(
+                redis=fsm_redis,
+                key_builder=DefaultKeyBuilder(prefix="tg:bot:fsm", with_bot_id=True),
+                state_ttl=_FSM_STATE_TTL_SEC,
+                data_ttl=_FSM_STATE_TTL_SEC,
+            )
+            logger.info("fsm: using RedisStorage (ttl=%ds)", _FSM_STATE_TTL_SEC)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "fsm: redis unavailable (%s); fallback to MemoryStorage",
+                exc,
+            )
+            if fsm_redis is not None:
+                try:
+                    await fsm_redis.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+                fsm_redis = None
+            storage = MemoryStorage()
+        dp = Dispatcher(storage=storage)
+
+        # DI：handler 用 `api: LumenApi` 注解就能拿到
+        dp["api"] = api
+        dp["generation_runtime"] = GenerationRuntime()
+
+        # 全局准入：拒非私聊 + 可选 TG user_id 白名单
+        gate = AccessGate(api)
+        dp.message.middleware(gate)
+        dp.callback_query.middleware(gate)
+
+        dp.include_router(build_root_router())
+
+        stop_event = asyncio.Event()
+        listener_task = asyncio.create_task(
+            run_listener(bot, api, stop_event),
+            name="lumen-listener",
         )
-        logger.info("fsm: using RedisStorage (ttl=%ds)", _FSM_STATE_TTL_SEC)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fsm: redis unavailable (%s); fallback to MemoryStorage", exc)
-        if fsm_redis is not None:
-            try:
-                await fsm_redis.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            fsm_redis = None
-        storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+        stack.push_async_callback(_cancel_task, listener_task)
+        control_task = asyncio.create_task(
+            _run_control_listener(stop_event),
+            name="lumen-control",
+        )
+        stack.push_async_callback(_cancel_task, control_task)
+        stack.callback(stop_event.set)
 
-    # DI：handler 用 `api: LumenApi` 注解就能拿到
-    dp["api"] = api
-    dp["generation_runtime"] = GenerationRuntime()
-
-    # 全局准入：拒非私聊 + 可选 TG user_id 白名单
-    gate = AccessGate(api)
-    dp.message.middleware(gate)
-    dp.callback_query.middleware(gate)
-
-    dp.include_router(build_root_router())
-
-    stop_event = asyncio.Event()
-    listener_task = asyncio.create_task(
-        run_listener(bot, api, stop_event), name="lumen-listener"
-    )
-    control_task = asyncio.create_task(
-        _run_control_listener(stop_event), name="lumen-control"
-    )
-
-    _install_stop_signal_handlers(stop_event)
-
-    try:
+        _install_stop_signal_handlers(stop_event)
         logger.info("starting polling; api=%s", settings.lumen_api_base)
 
         async def start_polling() -> None:
             await dp.start_polling(
                 bot,
                 allowed_updates=dp.resolve_used_update_types(),
+                close_bot_session=False,
             )
 
         async def pause_invalid_configuration(error: BaseException) -> None:
@@ -602,17 +643,6 @@ async def _amain() -> None:
             logger=logger,
             pause_invalid_configuration=pause_invalid_configuration,
         )
-    finally:
-        stop_event.set()
-        for t in (listener_task, control_task):
-            await _cancel_task(t)
-        await bot.session.close()
-        await api.aclose()
-        if fsm_redis is not None:
-            try:
-                await fsm_redis.aclose()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def main() -> None:

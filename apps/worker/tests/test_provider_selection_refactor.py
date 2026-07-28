@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 from typing import Any
 
 import pytest
@@ -14,6 +12,11 @@ from app.provider_pool import (
     ResolvedProvider,
 )
 from app.upstream_parts import responses
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 def _pool_with(*providers: ProviderConfig) -> ProviderPool:
@@ -114,12 +117,12 @@ async def test_pool_select_compat_downgrades_then_applies_live_filters(
         return provider.name != "file-blocked"
 
     monkeypatch.setattr(
-        upstream_services().providers,
+        TEST_UPSTREAM_SERVICES.providers,
         "provider_allows_image_endpoint",
         allows_endpoint,
     )
 
-    selected = await upstream_services().providers.pool_select_compat(
+    selected = await TEST_UPSTREAM_SERVICES.providers.pool_select_compat(
         LegacyPool(),
         route="image",
         endpoint_kind="responses",
@@ -150,7 +153,7 @@ async def test_pool_select_compat_does_not_swallow_internal_type_error() -> None
             raise TypeError("provider transformation failed")
 
     with pytest.raises(TypeError, match="provider transformation failed"):
-        await upstream_services().providers.pool_select_compat(
+        await TEST_UPSTREAM_SERVICES.providers.pool_select_compat(
             BrokenPool(), route="image"
         )
 

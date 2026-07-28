@@ -9,10 +9,15 @@ snapshot_update_state() {
         log_error "无法快照不存在的 shared env：${SHARED_ENV}"
         return 1
     fi
+    if { [ -e "${ROOT}/current" ] && [ ! -L "${ROOT}/current" ]; } \
+            || { [ -e "${ROOT}/previous" ] && [ ! -L "${ROOT}/previous" ]; }; then
+        log_error "current/previous 存在非符号链接对象，拒绝创建可恢复快照。"
+        return 1
+    fi
     UPDATE_ENV_SNAPSHOT="$(mktemp "${SHARED_DIR}/.env.update.XXXXXX")" \
         || return 1
-    if ! cp -p "${SHARED_ENV}" "${UPDATE_ENV_SNAPSHOT}" \
-            || ! chmod 0600 "${UPDATE_ENV_SNAPSHOT}"; then
+    if ! lumen_update_copy_file_durable \
+            "${SHARED_ENV}" "${UPDATE_ENV_SNAPSHOT}"; then
         rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
         UPDATE_ENV_SNAPSHOT=""
         return 1
@@ -40,7 +45,30 @@ snapshot_update_state() {
             return 1
         fi
     fi
+    if ! UPDATE_SNAPSHOT_ENV_SHA256="$(
+        lumen_update_file_sha256 "${UPDATE_ENV_SNAPSHOT}"
+    )"; then
+        log_error "无法计算 shared env 快照摘要，拒绝继续。"
+        lumen_discard_host_artifact_snapshot "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"
+        UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+        rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+        UPDATE_ENV_SNAPSHOT=""
+        UPDATE_SNAPSHOT_ENV_SHA256=""
+        return 1
+    fi
+    UPDATE_SNAPSHOT_LINKS_KNOWN=1
     UPDATE_STATE_SNAPSHOT_READY=1
+    if ! lumen_update_journal_snapshot_state; then
+        log_error "无法持久化 update journal 快照，拒绝继续。"
+        lumen_discard_host_artifact_snapshot "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"
+        UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+        rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
+        UPDATE_ENV_SNAPSHOT=""
+        UPDATE_SNAPSHOT_ENV_SHA256=""
+        UPDATE_SNAPSHOT_LINKS_KNOWN=0
+        UPDATE_STATE_SNAPSHOT_READY=0
+        return 1
+    fi
     return 0
 }
 
@@ -49,8 +77,10 @@ restore_update_env_snapshot() {
     [ -f "${UPDATE_ENV_SNAPSHOT}" ] || return 1
     local restore_tmp="${SHARED_DIR}/.env.restore.$$"
     rm -f "${restore_tmp}" 2>/dev/null || true
-    if ! cp -p "${UPDATE_ENV_SNAPSHOT}" "${restore_tmp}" \
-            || ! mv -f "${restore_tmp}" "${SHARED_ENV}"; then
+    if ! lumen_update_copy_file_durable \
+            "${UPDATE_ENV_SNAPSHOT}" "${restore_tmp}" \
+            || ! mv -f "${restore_tmp}" "${SHARED_ENV}" \
+            || ! lumen_update_fsync_directory "${SHARED_DIR}"; then
         rm -f "${restore_tmp}" 2>/dev/null || true
         return 1
     fi
@@ -59,17 +89,38 @@ restore_update_env_snapshot() {
 
 restore_update_symlink_snapshot() {
     local rc=0
+    if [ "${UPDATE_SNAPSHOT_LINKS_KNOWN:-0}" -ne 1 ]; then
+        log_error "rollback：原始 current/previous 快照未知，拒绝破坏性恢复。"
+        return 1
+    fi
     if [ "${UPDATE_ORIGINAL_CURRENT_PRESENT}" -eq 1 ]; then
+        if [ -z "${UPDATE_ORIGINAL_CURRENT_TARGET}" ]; then
+            log_error "rollback：原始 current target 缺失，拒绝恢复。"
+            return 1
+        fi
         lumen_atomic_replace_symlink \
             "${UPDATE_ORIGINAL_CURRENT_TARGET}" "${ROOT}/current" || rc=1
     elif [ -L "${ROOT}/current" ]; then
         rm -f "${ROOT}/current" || rc=1
+    elif [ -e "${ROOT}/current" ]; then
+        log_error "rollback：current 已被非符号链接对象占用，拒绝删除。"
+        rc=1
     fi
     if [ "${UPDATE_ORIGINAL_PREVIOUS_PRESENT}" -eq 1 ]; then
+        if [ -z "${UPDATE_ORIGINAL_PREVIOUS_TARGET}" ]; then
+            log_error "rollback：原始 previous target 缺失，拒绝恢复。"
+            return 1
+        fi
         lumen_atomic_replace_symlink \
             "${UPDATE_ORIGINAL_PREVIOUS_TARGET}" "${ROOT}/previous" || rc=1
     elif [ -L "${ROOT}/previous" ]; then
         rm -f "${ROOT}/previous" || rc=1
+    elif [ -e "${ROOT}/previous" ]; then
+        log_error "rollback：previous 已被非符号链接对象占用，拒绝删除。"
+        rc=1
+    fi
+    if [ "${rc}" -eq 0 ] && ! lumen_update_fsync_directory "${ROOT}"; then
+        rc=1
     fi
     return "${rc}"
 }
@@ -79,9 +130,49 @@ discard_update_state_snapshot() {
         rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
     fi
     UPDATE_ENV_SNAPSHOT=""
+    UPDATE_SNAPSHOT_ENV_SHA256=""
     lumen_discard_host_artifact_snapshot "${UPDATE_HOST_ARTIFACT_SNAPSHOT}"
     UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+    UPDATE_SNAPSHOT_LINKS_KNOWN=0
     UPDATE_STATE_SNAPSHOT_READY=0
+}
+
+mark_update_committed() {
+    if ! lumen_update_journal_mark_committed; then
+        UPDATE_STATE_COMMIT_UNKNOWN=1
+        export UPDATE_STATE_COMMIT_UNKNOWN
+        log_error "核心服务已切换，但 committed marker 持久化失败；拒绝执行 pre-commit rollback。"
+        return 1
+    fi
+    UPDATE_STATE_COMMIT_UNKNOWN=0
+    export UPDATE_STATE_COMMIT_UNKNOWN
+    return 0
+}
+
+validate_resumed_update_state() {
+    UPDATE_RUNTIME_MIGRATION_HEAD=""
+    if [ "${UPDATE_MIGRATION_VERIFIED:-0}" -eq 1 ] \
+            && [ -n "${UPDATE_MIGRATION_HEAD:-}" ]; then
+        if [ -z "${NEW_RELEASE:-}" ] || [ ! -d "${NEW_RELEASE}" ]; then
+            log_error "resume 校验失败：目标 release 不存在。"
+            return 1
+        fi
+        UPDATE_RUNTIME_MIGRATION_HEAD="$(
+            current_alembic_revision "${NEW_RELEASE}" 2>/dev/null || true
+        )"
+    fi
+    if ! lumen_update_journal_validate_resume; then
+        log_error "resume invariant 校验失败，拒绝自动续跑且不执行 rollback。"
+        return 1
+    fi
+
+    # Proxy credentials are intentionally excluded from the journal. Rebuild
+    # the ephemeral proxy environment from shared/.env after a safe resume.
+    LUMEN_PROXY_URL=""
+    if lumen_configure_proxy_env "${SHARED_ENV}" >/dev/null 2>&1; then
+        LUMEN_PROXY_URL="${LUMEN_UPDATE_PROXY_URL:-${LUMEN_HTTP_PROXY:-}}"
+    fi
+    return 0
 }
 
 restore_uncommitted_update_state() {
@@ -147,15 +238,21 @@ on_err() {
     if [ "${ROLLBACK_DONE}" -eq 0 ]; then
         ROLLBACK_DONE=1
         if [ "${UPDATE_STATE_COMMITTED}" -eq 0 ] \
-                && [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ]; then
+                && [ "${UPDATE_STATE_COMMIT_UNKNOWN:-0}" -eq 0 ] \
+                && [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ] \
+                && [ "${UPDATE_SNAPSHOT_LINKS_KNOWN:-0}" -eq 1 ]; then
             if restore_uncommitted_update_state; then
                 lumen_update_journal_status rolled_back || true
             else
                 lumen_update_journal_failed \
                     "${_UPDATE_LAST_PHASE:-update}" "${rc}" || true
             fi
-        else
+        elif [ "${UPDATE_STATE_COMMITTED}" -eq 1 ] \
+                || [ "${UPDATE_STATE_COMMIT_UNKNOWN:-0}" -eq 1 ]; then
             discard_update_state_snapshot
+            lumen_update_journal_status manual_required || true
+        else
+            log_error "rollback 快照不完整或未知，保留现场并拒绝破坏性恢复。"
             lumen_update_journal_failed \
                 "${_UPDATE_LAST_PHASE:-update}" "${rc}" || true
         fi

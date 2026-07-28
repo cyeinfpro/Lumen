@@ -21,9 +21,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
+
+from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +187,27 @@ def _extract_completed_payload(event: dict[str, Any]) -> dict[str, Any] | None:
     return flat or None
 
 
+def _require_image_upstream_runtime(
+    ctx: dict[str, Any] | None,
+) -> ImageUpstreamRuntime:
+    runtime = ctx.get("image_upstream_runtime") if isinstance(ctx, dict) else None
+    if not isinstance(runtime, ImageUpstreamRuntime):
+        raise TypeError("ctx['image_upstream_runtime'] must be ImageUpstreamRuntime")
+    return runtime
+
+
+async def _consume_probe_completion(
+    body: dict[str, Any],
+    runtime: ImageUpstreamRuntime,
+    stream_completion: Any,
+) -> dict[str, Any] | None:
+    async for event in stream_completion(body, runtime=runtime):
+        payload = _extract_completed_payload(event)
+        if payload is not None:
+            return payload
+    return None
+
+
 async def probe_upstream(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     """对上游执行一次最小 SSE 探针。
 
@@ -217,20 +241,16 @@ async def probe_upstream(ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     from ..upstream import UpstreamError, stream_completion
 
     try:
-        # 用 asyncio.wait_for 给一个硬上限，避免上游 hang 死拖垮 cron 槽位。
-        import asyncio
-
-        async def _consume() -> None:
-            nonlocal completed_payload, saw_completed
-            async for ev in stream_completion(body):
-                payload = _extract_completed_payload(ev)
-                if payload is not None:
-                    completed_payload = payload
-                    saw_completed = True
-                    # 拿到完成帧就够了；上游通常不再发别的事件，但保险起见 break。
-                    break
-
-        await asyncio.wait_for(_consume(), timeout=_PROBE_TIMEOUT_S)
+        image_upstream_runtime = _require_image_upstream_runtime(ctx)
+        completed_payload = await asyncio.wait_for(
+            _consume_probe_completion(
+                body,
+                image_upstream_runtime,
+                stream_completion,
+            ),
+            timeout=_PROBE_TIMEOUT_S,
+        )
+        saw_completed = completed_payload is not None
         status_code = 200 if saw_completed else 599  # 没看到完成帧 → 视作 5xx 类故障
     except asyncio.TimeoutError as exc:  # type: ignore[attr-defined]
         error_repr = f"timeout after {_PROBE_TIMEOUT_S}s"

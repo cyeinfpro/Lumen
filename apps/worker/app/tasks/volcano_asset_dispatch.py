@@ -220,6 +220,7 @@ async def _process_locked(
             operation,
             failure,
             persistence=persistence,
+            storage_writes=ctx.get("storage_write_coordinator"),
         )
     if failure is not None:
         return await runtime._record_operation_failure(

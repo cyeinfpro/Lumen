@@ -11,7 +11,10 @@ const { ReplayCoordinator } = loadTsModule(
   new URL("./replayCoordinator.ts", import.meta.url),
 ) as {
   ReplayCoordinator: new (adapter: SnapshotAdapter) => {
-    recover(reason: RecoveryReason): Promise<SnapshotResult>;
+    recover(
+      reason: RecoveryReason,
+      signal: AbortSignal,
+    ): Promise<SnapshotResult>;
     lastSuccessfulSyncAt(): number;
   };
 };
@@ -34,8 +37,9 @@ test("replay recovery is singleflight and commits only successful cursor", async
     return pending;
   });
   const reason = { kind: "replay_gap", reason: "gap" } as const;
-  const first = coordinator.recover(reason);
-  const second = coordinator.recover(reason);
+  const signal = new AbortController().signal;
+  const first = coordinator.recover(reason, signal);
+  const second = coordinator.recover(reason, signal);
   equal(calls, 1);
   release({ cursor: "20-0", syncedAt: 50 });
   deepStrictEqual(await first, { cursor: "20-0", syncedAt: 50 });
@@ -51,8 +55,9 @@ test("failed snapshot remains retryable", async () => {
     return { cursor: "21-0", syncedAt: 60 };
   });
   const reason = { kind: "replay_gap", reason: "gap" } as const;
-  await rejects(coordinator.recover(reason), /offline/);
-  deepStrictEqual(await coordinator.recover(reason), {
+  const signal = new AbortController().signal;
+  await rejects(coordinator.recover(reason, signal), /offline/);
+  deepStrictEqual(await coordinator.recover(reason, signal), {
     cursor: "21-0",
     syncedAt: 60,
   });

@@ -167,6 +167,11 @@ class Settings(BaseSettings):
     app_port: int = _DEFAULT_API_PORT
     storage_root: str = "/opt/lumendata/storage"
     backup_root: str = "/opt/lumendata/backup"
+    minimum_storage_free_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=0,
+        alias="LUMEN_MIN_STORAGE_FREE_BYTES",
+    )
     image_upload_global_concurrency: int = Field(
         default=2,
         ge=1,

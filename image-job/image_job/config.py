@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
+
+
+_PRIVATE_UPSTREAM_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    )
+)
 
 
 def _flag(env: Mapping[str, str], name: str, default: str = "0") -> bool:
@@ -22,6 +35,57 @@ def _float_env(
 ) -> float:
     """Parse a float env var with a floor."""
     return max(min_val, float(env.get(name, str(default))))
+
+
+def _allows_insecure_upstream_http(host: str) -> bool:
+    normalized = host.lower().rstrip(".")
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return bool(
+        address.is_loopback
+        or address.is_link_local
+        or any(address in network for network in _PRIVATE_UPSTREAM_NETWORKS)
+    )
+
+
+def _validate_upstream_base_url(raw_url: str) -> str:
+    value = raw_url.strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        parsed.port
+    except ValueError as exc:
+        raise RuntimeError(
+            "IMAGE_JOB_UPSTREAM_BASE_URL must be a valid http or https URL with a host"
+        ) from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not host
+        or any(char.isspace() for char in host)
+    ):
+        raise RuntimeError(
+            "IMAGE_JOB_UPSTREAM_BASE_URL must be a valid http or https URL with a host"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError(
+            "IMAGE_JOB_UPSTREAM_BASE_URL must not include username or password"
+        )
+    if "?" in value or "#" in value:
+        raise RuntimeError(
+            "IMAGE_JOB_UPSTREAM_BASE_URL must not include query or fragment"
+        )
+    if parsed.scheme.lower() == "http" and not _allows_insecure_upstream_http(host):
+        raise RuntimeError(
+            "IMAGE_JOB_UPSTREAM_BASE_URL must use HTTPS unless the host is "
+            "localhost or a private, loopback, or link-local IP literal"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -55,6 +119,8 @@ class ImageJobSettings:
     upstream_base_url: str
     public_base_url: str
     timeouts: ImageJobTimeouts
+    credential_active_key_id: str = ""
+    credential_master_secret: SecretText = field(default_factory=SecretText)
     sqlite_journal_mode: str = "WAL"
     max_request_bytes: int = 64 * 1024 * 1024
     max_ref_bytes: int = 50 * 1024 * 1024
@@ -135,9 +201,9 @@ class ImageJobSettings:
             concurrency=_int_env(env, "IMAGE_JOB_CONCURRENCY", 2),
             sidecar_token=SecretText(env.get("IMAGE_JOB_SIDECAR_TOKEN", "").strip()),
             allow_legacy_bearer=_flag(env, "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH"),
-            upstream_base_url=env.get(
-                "IMAGE_JOB_UPSTREAM_BASE_URL", "http://127.0.0.1:8081"
-            ).rstrip("/"),
+            upstream_base_url=_validate_upstream_base_url(
+                env.get("IMAGE_JOB_UPSTREAM_BASE_URL", "http://127.0.0.1:8081")
+            ),
             public_base_url=env.get(
                 "IMAGE_JOB_PUBLIC_BASE_URL", "https://example.com"
             ).rstrip("/"),
@@ -147,6 +213,12 @@ class ImageJobSettings:
                 graceful_shutdown_s=_float_env(
                     env, "IMAGE_JOB_GRACEFUL_SHUTDOWN_S", 60.0
                 ),
+            ),
+            credential_active_key_id=env.get(
+                "IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID", ""
+            ).strip(),
+            credential_master_secret=SecretText(
+                env.get("IMAGE_JOB_CREDENTIAL_MASTER_SECRET", "")
             ),
             sqlite_journal_mode=env.get("IMAGE_JOB_SQLITE_JOURNAL_MODE", "WAL")
             .strip()
@@ -228,6 +300,9 @@ class ImageJobSettings:
         )
 
     def validate(self) -> None:
+        from .credential_vault import CredentialVault
+
+        _validate_upstream_base_url(self.upstream_base_url)
         token = self.sidecar_token.get_secret_value()
         if token and (len(token) < 32 or any(char.isspace() for char in token)):
             raise RuntimeError(
@@ -239,3 +314,8 @@ class ImageJobSettings:
                 "IMAGE_JOB_SIDECAR_TOKEN is required unless "
                 "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1 is explicitly enabled"
             )
+        vault = CredentialVault(
+            active_key_id=self.credential_active_key_id,
+            master_secret=self.credential_master_secret.get_secret_value(),
+        )
+        vault.validate_runtime()

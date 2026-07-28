@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-from app.provider_runtime.upstream_services import upstream_services
-
 import time
 from typing import Any
 
@@ -20,7 +18,13 @@ import pytest
 
 from app import account_limiter, provider_pool, upstream
 from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
+from app.upstream_parts.image_execution import ImageExecutionRequest
+from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.providers import provider_supports_route
+
+
+TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()
+TEST_UPSTREAM_SERVICES = TEST_UPSTREAM_RUNTIME.services
 
 
 def _pool(*configs: ProviderConfig) -> ProviderPool:
@@ -29,6 +33,29 @@ def _pool(*configs: ProviderConfig) -> ProviderPool:
     pool._health = {p.name: ProviderHealth() for p in configs}
     pool._config_loaded_at = time.monotonic() + 60.0
     return pool
+
+
+def _image_request(**overrides: Any) -> ImageExecutionRequest:
+    values: dict[str, Any] = {
+        "action": "generate",
+        "prompt": "p",
+        "size": "1024x1024",
+        "images": None,
+        "mask": None,
+        "n": 1,
+        "quality": "low",
+        "output_format": None,
+        "output_compression": None,
+        "background": None,
+        "moderation": None,
+        "model": None,
+        "progress_callback": None,
+        "provider_override": None,
+        "user_id": None,
+        "upstream_runtime": TEST_UPSTREAM_RUNTIME,
+    }
+    values.update(overrides)
+    return ImageExecutionRequest(**values)
 
 
 def _cfg(
@@ -276,7 +303,10 @@ async def test_image_job_endpoint_chain_skips_capability_unsupported_endpoint(
     async def fake_resolve_image_job_base_url() -> str:
         return "http://image-job"
 
-    async def fake_run_once(**kwargs: Any) -> tuple[str, str | None]:
+    async def fake_run_once(
+        _request: ImageExecutionRequest,
+        **kwargs: Any,
+    ) -> tuple[str, str | None]:
         calls.append(kwargs["endpoint"])
         return "BBBB", None
 
@@ -284,27 +314,20 @@ async def test_image_job_endpoint_chain_skips_capability_unsupported_endpoint(
         return None
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
     )
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "resolve_image_job_base_url",
         fake_resolve_image_job_base_url,
     )
     monkeypatch.setattr(
-        upstream_services().image_jobs, "image_job_run_once", fake_run_once
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_run_once", fake_run_once
     )
     monkeypatch.setattr(account_limiter, "record_image_call", fake_record_image_call)
 
-    result = await upstream_services().image_jobs.image_job_with_failover(
-        action="generate",
-        prompt="p",
-        size="1024x1024",
-        images=None,
-        n=1,
-        quality="low",
-        progress_callback=None,
-        provider_override=provider,
+    result = await TEST_UPSTREAM_SERVICES.image_jobs.image_job_with_failover(
+        _image_request(provider_override=provider)
     )
 
     assert result == ("BBBB", None)
@@ -330,26 +353,24 @@ async def test_direct_generate_provider_override_blocks_unsupported_generations(
     async def fake_get_pool() -> FakePool:
         return FakePool()
 
-    async def fake_direct_once(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_direct_once(
+        _request: ImageExecutionRequest,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
         nonlocal calls
         calls += 1
         return "BBBB", None
 
     monkeypatch.setattr(
-        upstream_services().infrastructure.provider_pool, "get_pool", fake_get_pool
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
     )
     monkeypatch.setattr(
-        upstream_services().direct, "direct_generate_image_once", fake_direct_once
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_once", fake_direct_once
     )
 
     with pytest.raises(Exception) as exc:
-        await upstream_services().direct.direct_generate_image_with_failover(
-            prompt="p",
-            size="1024x1024",
-            n=1,
-            quality="low",
-            progress_callback=None,
-            provider_override=provider,
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_with_failover(
+            _image_request(provider_override=provider)
         )
 
     assert calls == 0
@@ -372,44 +393,39 @@ async def test_image2_dispatch_skips_responses_fallback_when_capability_false(
     )
     fallback_calls = 0
 
-    async def fake_direct_fail(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_direct_fail(
+        _request: ImageExecutionRequest,
+    ) -> tuple[str, str | None]:
         raise upstream.UpstreamError(
             "temporary direct failure",
             status_code=502,
             error_code="upstream_error",
         )
 
-    async def fake_responses_fallback(**_kwargs: Any) -> tuple[str, str | None]:
+    async def fake_responses_fallback(
+        _request: ImageExecutionRequest,
+        *,
+        lanes: int,
+    ) -> tuple[str, str | None]:
+        _ = lanes
         nonlocal fallback_calls
         fallback_calls += 1
         return "BBBB", None
 
     monkeypatch.setattr(
-        upstream_services().direct,
+        TEST_UPSTREAM_SERVICES.direct,
         "direct_generate_image_with_failover",
         fake_direct_fail,
     )
     monkeypatch.setattr(
-        upstream_services().race, "race_responses_image", fake_responses_fallback
+        TEST_UPSTREAM_SERVICES.race, "race_responses_image", fake_responses_fallback
     )
 
     with pytest.raises(Exception) as exc:
-        async for _ in upstream_services().dispatch.run_image_once_for_provider(
-            action="generate",
-            provider=provider,
+        async for _ in TEST_UPSTREAM_SERVICES.dispatch.run_image_once_for_provider(
+            _image_request(provider_override=provider),
             channel="stream",
             engine="image2",
-            prompt="p",
-            size="1024x1024",
-            images=None,
-            n=1,
-            quality="low",
-            output_format=None,
-            output_compression=None,
-            background=None,
-            moderation=None,
-            model=None,
-            progress_callback=None,
         ):
             pass
 

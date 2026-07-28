@@ -891,6 +891,172 @@ install_storage_units() {
     log_info "完成。下一步：在管理后台「存储后端」页面配置 local 或 smb。"
 }
 
+stage_image_job_package() {
+    local app_dir="$1"
+    local stage_dir="${app_dir}/.image_job.stage.$$"
+    as_sudo rm -rf "${stage_dir}"
+    as_sudo mkdir -p "${stage_dir}"
+    if ! as_sudo cp -R "${ROOT}/image-job/image_job/." "${stage_dir}/"; then
+        as_sudo rm -rf "${stage_dir}"
+        return 1
+    fi
+    if ! as_sudo find "${stage_dir}" -type d -name __pycache__ \
+            -prune -exec rm -rf {} + \
+            || ! as_sudo find "${stage_dir}" -type f -name '*.pyc' -delete \
+            || ! as_sudo find "${stage_dir}" -type d -exec chmod 0755 {} + \
+            || ! as_sudo find "${stage_dir}" -type f -name '*.py' \
+                -exec chmod 0644 {} +; then
+        as_sudo rm -rf "${stage_dir}"
+        return 1
+    fi
+    printf '%s\n' "${stage_dir}"
+}
+
+replace_image_job_package() {
+    local app_dir="$1"
+    local stage_dir="$2"
+    local old_dir="${app_dir}/.image_job.previous.$$"
+
+    as_sudo rm -rf "${old_dir}"
+    if as_sudo test -e "${app_dir}/image_job" \
+            || as_sudo test -L "${app_dir}/image_job"; then
+        if ! as_sudo mv "${app_dir}/image_job" "${old_dir}"; then
+            as_sudo rm -rf "${stage_dir}"
+            return 1
+        fi
+    fi
+    if ! as_sudo mv "${stage_dir}" "${app_dir}/image_job"; then
+        if as_sudo test -e "${old_dir}"; then
+            as_sudo mv "${old_dir}" "${app_dir}/image_job" || true
+        fi
+        as_sudo rm -rf "${stage_dir}"
+        return 1
+    fi
+    as_sudo rm -rf "${old_dir}"
+}
+
+image_job_env_value() {
+    local env_file="$1"
+    local key="$2"
+    awk -F= -v target="${key}" '
+        $1 == target {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "${env_file}"
+}
+
+image_job_upsert_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    local next_file value_file
+    next_file="$(mktemp "${env_file}.new.XXXXXX")" || return 1
+    value_file="$(mktemp "${env_file}.value.XXXXXX")" || {
+        rm -f "${next_file}"
+        return 1
+    }
+    chmod 0600 "${next_file}" "${value_file}"
+    if ! printf '%s' "${value}" > "${value_file}"; then
+        rm -f "${next_file}" "${value_file}"
+        return 1
+    fi
+    if ! awk -v target="${key}" -v value_file="${value_file}" '
+        BEGIN {
+            if ((getline replacement < value_file) < 0) exit 2
+            close(value_file)
+            replaced = 0
+        }
+        index($0, target "=") == 1 {
+            if (!replaced) {
+                print target "=" replacement
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (!replaced) print target "=" replacement
+        }
+    ' "${env_file}" > "${next_file}"; then
+        rm -f "${next_file}" "${value_file}"
+        return 1
+    fi
+    rm -f "${value_file}"
+    chmod 0600 "${next_file}"
+    mv "${next_file}" "${env_file}"
+}
+
+image_job_db_has_encrypted_credentials() {
+    local python_bin="$1"
+    local db_path="$2"
+    as_sudo "${python_bin}" -c '
+import pathlib
+import sqlite3
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.is_file() or path.stat().st_size == 0:
+    raise SystemExit(1)
+try:
+    conn = sqlite3.connect(path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "auth_ciphertext" not in columns:
+        raise SystemExit(1)
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE auth_ciphertext IS NOT NULL LIMIT 1"
+    ).fetchone()
+except sqlite3.DatabaseError:
+    raise SystemExit(2)
+finally:
+    try:
+        conn.close()
+    except NameError:
+        pass
+raise SystemExit(0 if row is not None else 1)
+' "${db_path}"
+}
+
+prepare_image_job_credential_env() {
+    local env_file="$1"
+    local db_path="$2"
+    local python_bin="$3"
+    local key_id master_secret encrypted_state=0
+
+    key_id="$(image_job_env_value "${env_file}" IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID)"
+    master_secret="$(
+        image_job_env_value "${env_file}" IMAGE_JOB_CREDENTIAL_MASTER_SECRET
+    )"
+
+    if [ "${#master_secret}" -lt 32 ] \
+            || [[ "${master_secret}" =~ [[:space:]] ]]; then
+        image_job_db_has_encrypted_credentials "${python_bin}" "${db_path}" \
+            || encrypted_state=$?
+        if [ "${encrypted_state}" -eq 0 ]; then
+            log_error "image-job 数据库已有加密凭据，但 master secret 缺失或无效。"
+            log_error "请从 /etc/image-job/image-job.env 的备份恢复原始密钥。"
+            return 1
+        fi
+        if [ "${encrypted_state}" -ne 1 ]; then
+            log_error "无法检查 image-job 数据库中的加密凭据，拒绝改写密钥。"
+            return 1
+        fi
+        master_secret="$(
+            "${python_bin}" -c 'import secrets; print(secrets.token_urlsafe(48))'
+        )"
+    fi
+
+    if [[ ! "${key_id}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+        key_id="v1"
+    fi
+
+    image_job_upsert_env_value \
+        "${env_file}" IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID "${key_id}"
+    image_job_upsert_env_value \
+        "${env_file}" IMAGE_JOB_CREDENTIAL_MASTER_SECRET "${master_secret}"
+}
+
 install_image_job() {
     ensure_linux_systemd
     require_sudo
@@ -898,7 +1064,8 @@ install_image_job() {
 
     local app_dir data_dir state_dir db_path upstream_base public_base listen_host listen_port
     local concurrency python_bin service_user service_group
-    local config_dir env_file sidecar_token tmp_env
+    local config_dir env_file sidecar_token tmp_env package_stage
+    local service_was_active=0
 
     log_step "安装 image-job sidecar"
     app_dir="$(read_or_default '应用目录' '/opt/image-job')"
@@ -923,6 +1090,9 @@ install_image_job() {
     validate_python_command "Python 命令" "${python_bin}" || exit 1
     validate_service_user_name "systemd 运行用户" "${service_user}" || exit 1
     ensure_python_min_version "${python_bin}" 3 11
+    if as_sudo systemctl is-active --quiet image-job; then
+        service_was_active=1
+    fi
     probe_sub2api_upstream "${upstream_base}"
 
     ensure_service_user "${service_user}" "${app_dir}"
@@ -935,23 +1105,54 @@ install_image_job() {
     as_sudo install -d -m 0755 "${app_dir}" "${data_dir}" "${data_dir}/images"
     as_sudo install -d -m 0755 "${data_dir}/images/temp" "${data_dir}/refs"
     as_sudo install -d -m 0700 "${state_dir}"
+    package_stage="$(stage_image_job_package "${app_dir}")" || {
+        log_error "image-job 包 staging 失败，保留现有安装。"
+        exit 1
+    }
+
+    log_step "预检 image-job 服务凭证"
+    tmp_env="$(mktemp)"
+    chmod 0600 "${tmp_env}"
+    if as_sudo test -f "${env_file}"; then
+        as_sudo cat "${env_file}" > "${tmp_env}"
+    fi
+    sidecar_token="$(
+        image_job_env_value "${tmp_env}" IMAGE_JOB_SIDECAR_TOKEN
+    )"
+    if [ "${#sidecar_token}" -lt 32 ] \
+            || [[ "${sidecar_token}" =~ [[:space:]] ]]; then
+        sidecar_token="$(
+            "${python_bin}" -c 'import secrets; print(secrets.token_urlsafe(48))'
+        )"
+    fi
+    if ! image_job_upsert_env_value \
+            "${tmp_env}" IMAGE_JOB_SIDECAR_TOKEN "${sidecar_token}" \
+            || ! prepare_image_job_credential_env \
+                "${tmp_env}" "${db_path}" "${python_bin}"; then
+        rm -f "${tmp_env}"
+        as_sudo rm -rf "${package_stage}"
+        exit 1
+    fi
+
+    if ! replace_image_job_package "${app_dir}" "${package_stage}"; then
+        rm -f "${tmp_env}"
+        log_error "image-job 包切换失败，保留现有安装。"
+        exit 1
+    fi
     as_sudo install -m 0644 "${ROOT}/image-job/app.py" "${app_dir}/app.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/image_artifacts.py" "${app_dir}/image_artifacts.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/image_candidates.py" "${app_dir}/image_candidates.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/image_url_security.py" "${app_dir}/image_url_security.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/job_persistence.py" "${app_dir}/job_persistence.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/payload_helpers.py" "${app_dir}/payload_helpers.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/request_bodies.py" "${app_dir}/request_bodies.py"
-    as_sudo install -m 0644 "${ROOT}/image-job/upstream_runtime.py" "${app_dir}/upstream_runtime.py"
+    # 旧版把这些实现装在 app.py 旁边；现在实现只存在于 image_job 包内。
+    # 只有新包成功接管后才删除旧副本，失败时保留完整的旧安装。
+    as_sudo rm -f \
+        "${app_dir}/image_artifacts.py" \
+        "${app_dir}/image_candidates.py" \
+        "${app_dir}/image_url_security.py" \
+        "${app_dir}/job_persistence.py" \
+        "${app_dir}/payload_helpers.py" \
+        "${app_dir}/request_bodies.py" \
+        "${app_dir}/upstream_runtime.py"
     # 旧版本装过 runtime_config.py，现已删除（死代码，配置由 image_job/config.py
     # 提供）。升级时清掉残件，免得留一份没人读的环境变量副本误导排障。
     as_sudo rm -f "${app_dir}/runtime_config.py"
-    as_sudo rm -rf "${app_dir}/image_job"
-    as_sudo cp -R "${ROOT}/image-job/image_job" "${app_dir}/image_job"
-    as_sudo find "${app_dir}/image_job" -type d -name __pycache__ -prune -exec rm -rf {} +
-    as_sudo find "${app_dir}/image_job" -type f -name '*.pyc' -delete
-    as_sudo find "${app_dir}/image_job" -type d -exec chmod 0755 {} +
-    as_sudo find "${app_dir}/image_job" -type f -name '*.py' -exec chmod 0644 {} +
     as_sudo install -m 0644 "${ROOT}/image-job/requirements.txt" "${app_dir}/requirements.txt"
     as_sudo install -m 0644 "${ROOT}/image-job/README.md" "${app_dir}/README.md"
     as_sudo install -m 0644 "${ROOT}/image-job/image-job.md" "${app_dir}/image-job.md"
@@ -960,42 +1161,7 @@ install_image_job() {
     as_sudo "${python_bin}" -m venv "${app_dir}/.venv"
     as_sudo "${app_dir}/.venv/bin/pip" install -r "${app_dir}/requirements.txt"
 
-    log_step "配置 image-job 服务凭证"
-    tmp_env="$(mktemp)"
-    chmod 0600 "${tmp_env}"
-    if as_sudo test -f "${env_file}"; then
-        as_sudo cat "${env_file}" > "${tmp_env}"
-    fi
-    sidecar_token="$(
-        awk -F= '
-            $1 == "IMAGE_JOB_SIDECAR_TOKEN" {
-                sub(/^[^=]*=/, "")
-                print
-                exit
-            }
-        ' "${tmp_env}"
-    )"
-    if [ "${#sidecar_token}" -lt 32 ] || [[ "${sidecar_token}" =~ [[:space:]] ]]; then
-        sidecar_token="$(
-            "${python_bin}" -c 'import secrets; print(secrets.token_urlsafe(48))'
-        )"
-    fi
-    awk -v token="${sidecar_token}" '
-        BEGIN { replaced = 0 }
-        /^IMAGE_JOB_SIDECAR_TOKEN=/ {
-            if (!replaced) {
-                print "IMAGE_JOB_SIDECAR_TOKEN=" token
-                replaced = 1
-            }
-            next
-        }
-        { print }
-        END {
-            if (!replaced) print "IMAGE_JOB_SIDECAR_TOKEN=" token
-        }
-    ' "${tmp_env}" > "${tmp_env}.new"
-    mv "${tmp_env}.new" "${tmp_env}"
-    chmod 0600 "${tmp_env}"
+    log_step "安装 image-job 服务凭证"
     as_sudo install -d -m 0755 "${config_dir}"
     as_sudo install -m 0600 "${tmp_env}" "${env_file}"
     rm -f "${tmp_env}"
@@ -1039,7 +1205,11 @@ EOF
     as_sudo chmod 0700 "${state_dir}"
 
     as_sudo systemctl daemon-reload
-    as_sudo systemctl enable --now image-job
+    if [ "${service_was_active}" -eq 1 ]; then
+        as_sudo systemctl restart image-job
+    else
+        as_sudo systemctl enable --now image-job
+    fi
 
     log_step "image-job 健康检查"
     if command -v curl >/dev/null 2>&1; then

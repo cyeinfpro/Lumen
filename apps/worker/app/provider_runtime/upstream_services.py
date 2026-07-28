@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any
 
 _INFRASTRUCTURE_NAMES = frozenset(
     {
@@ -117,6 +115,13 @@ class UpstreamServices:
     transport: SimpleNamespace
 
 
+@dataclass(frozen=True, slots=True)
+class ImageUpstreamRuntime:
+    """Explicit service graph carried by production image requests."""
+
+    services: UpstreamServices
+
+
 @dataclass
 class UpstreamLifecycleState:
     retired_client_close_tasks: set[Any]
@@ -128,16 +133,6 @@ class UpstreamLifecycleState:
             retired_client_close_tasks=set(),
             retired_clients=set(),
         )
-
-
-_PROCESS_SERVICES: ContextVar[UpstreamServices | None] = ContextVar(
-    "upstream_process_services",
-    default=None,
-)
-_SERVICES_OVERRIDE: ContextVar[UpstreamServices | None] = ContextVar(
-    "upstream_services_override",
-    default=None,
-)
 
 
 def service_group_for(name: str, value: Any) -> str:
@@ -161,6 +156,18 @@ def service_name(name: str) -> str:
 
 
 def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
+    missing = [
+        name
+        for name in ("settings", "lifecycle_state", "upstream_image_requests")
+        if name not in namespace
+    ]
+    missing.extend(
+        binding for binding, _group in _MODULE_BINDINGS if binding not in namespace
+    )
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise RuntimeError(f"upstream composition is missing required dependencies: {names}")
+
     groups: dict[str, SimpleNamespace] = {
         field: SimpleNamespace() for field in UpstreamServices.__dataclass_fields__
     }
@@ -187,47 +194,20 @@ def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
     return UpstreamServices(**groups)
 
 
-def install_upstream_services(services: UpstreamServices) -> None:
-    _PROCESS_SERVICES.set(services)
-
-
-def upstream_services() -> UpstreamServices:
-    services = _SERVICES_OVERRIDE.get() or _PROCESS_SERVICES.get()
-    if services is None:
-        raise RuntimeError("upstream services have not been composed")
-    return services
-
-
-def bind_upstream_services(
-    services: UpstreamServices,
-) -> Token[UpstreamServices | None]:
-    return _SERVICES_OVERRIDE.set(services)
-
-
-def reset_upstream_services(token: Token[UpstreamServices | None]) -> None:
-    _SERVICES_OVERRIDE.reset(token)
-
-
-@contextmanager
-def use_upstream_services(
-    services: UpstreamServices,
-) -> Iterator[UpstreamServices]:
-    token = bind_upstream_services(services)
-    try:
-        yield services
-    finally:
-        reset_upstream_services(token)
+def resolve_image_upstream_services(
+    runtime: ImageUpstreamRuntime | None,
+) -> UpstreamServices:
+    if runtime is None:
+        raise TypeError("ImageUpstreamRuntime is required")
+    return runtime.services
 
 
 __all__ = [
+    "ImageUpstreamRuntime",
     "UpstreamLifecycleState",
     "UpstreamServices",
-    "bind_upstream_services",
     "build_upstream_services",
-    "install_upstream_services",
-    "reset_upstream_services",
+    "resolve_image_upstream_services",
     "service_group_for",
     "service_name",
-    "upstream_services",
-    "use_upstream_services",
 ]

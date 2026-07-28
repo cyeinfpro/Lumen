@@ -7,14 +7,13 @@ V1 不实现：variations、share、shares/*（V1.1+）。
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import logging
 import os
 import secrets
 import shutil
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, BinaryIO, Iterator
 
@@ -53,10 +52,7 @@ from lumen_core.models import (
     User,
 )
 from lumen_core.model_image_metadata import (
-    build_model_image_metadata,
     model_image_filename,
-    parse_model_image_filename,
-    read_model_image_metadata,
 )
 from lumen_core.schemas import ImageOut
 from lumen_core.volcano_assets import volcano_asset_safe_filename
@@ -65,7 +61,7 @@ from ...audit import hash_email, request_ip_hash, write_audit
 from ...byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ...canvas_services import asset_ref_service
 from ...config import settings
-from ...db import SessionLocal, get_db
+from ...db import get_db
 from ...deps import CurrentUser, verify_csrf
 from ...ratelimit import (
     PUBLIC_IMAGE_LIMITER,
@@ -82,20 +78,15 @@ from ._file_delivery import (
     storage_streaming_response as _build_storage_streaming_response,
 )
 from ...services import storage_files
-from ...video_reference_images import (
-    VIDEO_REFERENCE_IMAGE_KIND,
-    VIDEO_REFERENCE_IMAGE_MIME,
-    VideoReferenceImageError,
-    ensure_video_reference_image_variant,
-)
 from ...volcano_asset_media import (
     VOLCANO_ASSET_IMAGE_KIND,
     VOLCANO_ASSET_IMAGE_MIME,
 )
-from ..adapters.filesystem_store import FileSystemArtifactStore
-from ..adapters.redis_capacity import build_capacity
-from ..adapters.sqlalchemy_repository import SQLAlchemyImageRepository
-from ..adapters.variant_locks import RedisVariantLocks, VariantLockLease
+from ..composition import (
+    create_image_route_lifespan,
+    get_upload_command_service,
+    get_variant_service,
+)
 from ..domain.artifact import ArtifactStatus
 from ..domain.variants import (
     ALLOWED_VARIANTS,
@@ -103,9 +94,10 @@ from ..domain.variants import (
     PREVIEW_VARIANT,
     THUMB_VARIANT,
     VARIANT_MEDIA_TYPE,
+    VIDEO_REFERENCE_VARIANT,
     deterministic_variant_key,
 )
-from ..processing.service import ImageProcessor
+from ..processing.model_metadata import MODEL_LIBRARY_METADATA_PROFILE
 from .create_variant import (
     CreateVariantService,
     VariantError,
@@ -119,7 +111,7 @@ from .upload import (
 )
 
 
-router = APIRouter()
+router = APIRouter(lifespan=create_image_route_lifespan())
 logger = logging.getLogger(__name__)
 
 _VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
@@ -147,8 +139,8 @@ EXT_BY_MIME = MappingProxyType(
 NORMALIZABLE_UPLOAD_MIME = frozenset({"image/mpo", "image/x-mpo"})
 MIN_STORAGE_FREE_BYTES = 512 * 1024 * 1024
 
-VARIANT_LOCK_TTL_SECONDS = 60
-VARIANT_LOCK_WAIT_SECONDS = 5.0
+VIDEO_REFERENCE_IMAGE_KIND = VIDEO_REFERENCE_VARIANT
+VIDEO_REFERENCE_IMAGE_MIME = "image/jpeg"
 
 
 def _http(code: str, msg: str, http: int = 400) -> HTTPException:
@@ -309,33 +301,6 @@ def _enforce_pixel_limit(
         )
 
 
-def _model_metadata_json_from_upload(
-    im: PILImage.Image,
-    filename: str | None,
-) -> dict[str, Any]:
-    parsed = read_model_image_metadata(im)
-    metadata_source = "embedded"
-    if parsed is None and filename:
-        parsed = parse_model_image_filename(filename)
-        metadata_source = "filename"
-    if parsed is None:
-        return {}
-    payload = build_model_image_metadata(
-        age_segment=parsed.age_segment,
-        gender=parsed.gender,
-        appearance_direction=parsed.appearance_direction,
-        style_tags=list(parsed.style_tags or []),
-        source=parsed.source or metadata_source,
-        prompt_hint=parsed.prompt_hint,
-    )
-    if not payload:
-        return {}
-    return {
-        "model_library": payload,
-        "model_library_metadata_source": metadata_source,
-    }
-
-
 def _upload_requests_mask_preflight(purpose: str | None, filename: str | None) -> bool:
     purpose_norm = (purpose or "").strip().lower()
     if purpose_norm in {"mask", "inpaint_mask", "inpaint-mask"}:
@@ -395,147 +360,6 @@ def _ensure_storage_free_space(incoming_bytes: int) -> None:
         )
 
 
-def _variant_lock_key(image_id: str, kind: str) -> str:
-    return RedisVariantLocks(get_redis()).key(image_id, kind)
-
-
-async def _acquire_variant_generation_lock(
-    image_id: str,
-    kind: str,
-    *,
-    ttl_seconds: int = VARIANT_LOCK_TTL_SECONDS,
-) -> str | None:
-    lease = await RedisVariantLocks(get_redis()).acquire(
-        image_id,
-        kind,
-        ttl_seconds=ttl_seconds,
-    )
-    if lease is None:
-        return None
-    prefix = "redis" if lease.coordinated else "local"
-    return f"{prefix}:{lease.token}"
-
-
-async def _release_variant_generation_lock(
-    image_id: str,
-    kind: str,
-    token: str,
-) -> None:
-    coordinated = token.startswith("redis:")
-    raw_token = token.split(":", 1)[1] if ":" in token else token
-    try:
-        await RedisVariantLocks(get_redis()).release(
-            VariantLockLease(
-                key=_variant_lock_key(image_id, kind),
-                token=raw_token,
-                coordinated=coordinated,
-            )
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("variant generation lock release failed", exc_info=True)
-
-
-async def _wait_for_variant(
-    db: AsyncSession,
-    image_id: str,
-    kind: str,
-    *,
-    timeout_seconds: float = VARIANT_LOCK_WAIT_SECONDS,
-) -> ImageVariant | None:
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.2)
-        variant = (
-            await db.execute(
-                select(ImageVariant).where(
-                    ImageVariant.image_id == image_id,
-                    ImageVariant.kind == kind,
-                )
-            )
-        ).scalar_one_or_none()
-        if variant is not None:
-            return variant
-    return None
-
-
-def _metadata_storage_keys(metadata: Any) -> Iterator[str]:
-    if not isinstance(metadata, dict):
-        return
-    normalized_ref = metadata.get("normalized_ref")
-    if isinstance(normalized_ref, dict):
-        storage_key = normalized_ref.get("storage_key")
-        if isinstance(storage_key, str) and storage_key:
-            yield storage_key
-
-
-def _is_image_file_storage_key(key: str) -> bool:
-    parts = PurePosixPath(key).parts
-    if len(parts) < 4 or parts[0] != "u" or not parts[1]:
-        return False
-    if parts[2] == "uploads":
-        return len(parts) == 4 and bool(parts[3])
-    if parts[2] == "g":
-        return len(parts) == 5 and bool(parts[3]) and bool(parts[4])
-    return False
-
-
-async def _known_storage_keys(db: AsyncSession) -> set[str]:
-    keys: set[str] = set()
-    image_rows = (
-        await db.execute(select(Image.storage_key, Image.metadata_jsonb))
-    ).all()
-    for row in image_rows:
-        storage_key = row[0]
-        metadata = row[1]
-        if isinstance(storage_key, str) and storage_key:
-            keys.add(storage_key)
-        keys.update(_metadata_storage_keys(metadata))
-    variant_keys = (await db.execute(select(ImageVariant.storage_key))).scalars().all()
-    keys.update(key for key in variant_keys if isinstance(key, str) and key)
-    return keys
-
-
-async def sweep_orphan_image_files(
-    db: AsyncSession,
-    *,
-    storage_root: str | None = None,
-    dry_run: bool = True,
-) -> dict[str, Any]:
-    root = Path(storage_root or settings.storage_root).resolve()
-    known_keys = await _known_storage_keys(db)
-    scanned = 0
-    deleted = 0
-    orphan_keys: list[str] = []
-    if not root.exists():
-        return {
-            "dry_run": dry_run,
-            "storage_root": str(root),
-            "scanned": 0,
-            "orphans": [],
-            "deleted": 0,
-        }
-    for path in root.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        scanned += 1
-        rel = path.relative_to(root).as_posix()
-        if not _is_image_file_storage_key(rel):
-            continue
-        if rel in known_keys:
-            continue
-        orphan_keys.append(rel)
-        if not dry_run:
-            await asyncio.to_thread(path.unlink)
-            deleted += 1
-    return {
-        "dry_run": dry_run,
-        "storage_root": str(root),
-        "scanned": scanned,
-        "orphans": orphan_keys,
-        "deleted": deleted,
-    }
-
-
 def _image_url(image_id: str) -> str:
     # 相对路径：前端同源请求，反代 /api/* → 后端 /*。
     # 不拼 public_base_url：避免把 dev/prod host 焊进 API 响应，导致
@@ -563,22 +387,6 @@ def _make_display_variant(
             path,
             max_pixels=MAX_IMAGE_PIXELS,
             max_side=max_side,
-        )
-    except VariantError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
-
-
-async def _ensure_display_variant(
-    db: AsyncSession,
-    img: Image,
-) -> ImageVariant:
-    try:
-        return await CreateVariantService(
-            artifacts=FileSystemArtifactStore(settings.storage_root),
-            max_pixels=MAX_IMAGE_PIXELS,
-        ).ensure_display_variant(
-            db,
-            img,
         )
     except VariantError as exc:
         raise _http(exc.code, exc.message, exc.status_code) from exc
@@ -632,15 +440,6 @@ def _upload_metadata_finalizer(
         gender=model_payload.get("gender"),
         appearance_direction=model_payload.get("appearance_direction"),
         style_tags=model_payload.get("style_tags") or [],
-    )
-
-
-def _upload_command_service() -> UploadCommandService:
-    return UploadCommandService(
-        artifacts=FileSystemArtifactStore(settings.storage_root),
-        capacity=build_capacity(get_redis()),
-        repository=SQLAlchemyImageRepository(SessionLocal),
-        processor=ImageProcessor(),
     )
 
 
@@ -759,6 +558,10 @@ def _storage_streaming_response(
 async def upload_image(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    upload_command_service: Annotated[
+        UploadCommandService,
+        Depends(get_upload_command_service),
+    ],
     file: UploadFile = File(...),
     purpose: str | None = Form(default=None),
     reference_width: int | None = Form(default=None),
@@ -773,7 +576,7 @@ async def upload_image(
         reference_height=reference_height,
         check_upload_rate_limit=_check_upload_rate_limit,
         ensure_storage_free_space=_ensure_storage_free_space,
-        upload_command_service=_upload_command_service,
+        upload_command_service=upload_command_service,
         image_out=_image_out,
     )
 
@@ -788,7 +591,7 @@ async def upload_image_impl(
     reference_height: int | None,
     check_upload_rate_limit: Any,
     ensure_storage_free_space: Any,
-    upload_command_service: Any,
+    upload_command_service: UploadCommandService,
     image_out: Any,
 ) -> ImageOut:
     await check_upload_rate_limit(user.id)
@@ -799,7 +602,7 @@ async def upload_image_impl(
             if isinstance(reference_width, int) and isinstance(reference_height, int)
             else None
         )
-        img = await upload_command_service().execute(
+        img = await upload_command_service.execute(
             user_id=user.id,
             upload_file=file,
             filename=file.filename,
@@ -820,7 +623,7 @@ async def upload_image_impl(
                 ),
                 reference_size=reference_size,
             ),
-            metadata_reader=_model_metadata_json_from_upload,
+            metadata_profile=MODEL_LIBRARY_METADATA_PROFILE,
             metadata_finalizer=_upload_metadata_finalizer,
             storage_guard=ensure_storage_free_space,
         )
@@ -891,6 +694,7 @@ async def get_image_variant(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    variant_service: Annotated[CreateVariantService, Depends(get_variant_service)],
 ) -> Response:
     if kind not in ALLOWED_VARIANTS:
         raise _http("invalid_variant", "unsupported image variant", 400)
@@ -907,29 +711,26 @@ async def get_image_variant(
     if not img:
         raise _http("not_found", "image not found", 404)
     await _ensure_image_visible_to_user(db, img, user)
-    variant = (
-        await db.execute(
-            select(ImageVariant).where(
-                ImageVariant.image_id == img.id,
-                ImageVariant.kind == kind,
-            )
-        )
-    ).scalar_one_or_none()
-    if not variant:
-        if kind != DISPLAY_VARIANT:
-            raise _http("not_found", "variant not found", 404)
-        lock_token = await _acquire_variant_generation_lock(img.id, kind)
-        if lock_token is None:
-            variant = await _wait_for_variant(db, img.id, kind)
+    if kind == DISPLAY_VARIANT:
+        await db.rollback()
         try:
-            if variant is None:
-                variant = await _ensure_display_variant(db, img)
-                await db.commit()
-        except PILImage.DecompressionBombError as exc:
-            raise _too_many_pixels() from exc
-        finally:
-            if lock_token is not None:
-                await _release_variant_generation_lock(img.id, kind, lock_token)
+            variant = await variant_service.ensure_display_variant(
+                image_id,
+                expected_user_id=user.id,
+            )
+        except VariantError as exc:
+            raise _http(exc.code, exc.message, exc.status_code) from exc
+    else:
+        variant = (
+            await db.execute(
+                select(ImageVariant).where(
+                    ImageVariant.image_id == img.id,
+                    ImageVariant.kind == kind,
+                )
+            )
+        ).scalar_one_or_none()
+        if variant is None:
+            raise _http("not_found", "variant not found", 404)
     path = _fs_path(variant.storage_key)
 
     media_type = VARIANT_MEDIA_TYPE[kind]
@@ -1107,6 +908,7 @@ async def reference_image_binary(
     image_id: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    variant_service: Annotated[CreateVariantService, Depends(get_variant_service)],
     token: str = Query(min_length=16, max_length=256),
     variant: str | None = Query(default=None, max_length=32),
 ) -> Response:
@@ -1116,7 +918,7 @@ async def reference_image_binary(
         db,
         token=token,
         variant=variant,
-        ensure_reference_variant=ensure_video_reference_image_variant,
+        variant_service=variant_service,
     )
 
 
@@ -1127,7 +929,7 @@ async def reference_image_binary_impl(
     *,
     token: str,
     variant: str | None,
-    ensure_reference_variant: Any,
+    variant_service: CreateVariantService,
 ) -> Response:
     img = (
         await db.execute(
@@ -1150,14 +952,12 @@ async def reference_image_binary_impl(
         raise _http("not_found", "image not found", 404)
     if variant:
         if variant == VIDEO_REFERENCE_IMAGE_KIND:
+            await db.rollback()
             try:
-                ref_variant = await ensure_reference_variant(
-                    db,
-                    img,
-                    storage_root=settings.storage_root,
+                ref_variant = await variant_service.ensure_video_reference_variant(
+                    image_id
                 )
-                await db.commit()
-            except VideoReferenceImageError as exc:
+            except VariantError as exc:
                 raise _http(exc.code, exc.message, exc.status_code) from exc
             return _storage_streaming_response(
                 _fs_path(ref_variant.storage_key),
@@ -1208,18 +1008,20 @@ async def reference_image_binary_named(
     filename: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
+    variant_service: Annotated[CreateVariantService, Depends(get_variant_service)],
     token: str = Query(min_length=16, max_length=256),
     variant: str | None = Query(default=None, max_length=32),
 ) -> Response:
     expected = volcano_asset_safe_filename(image_id, asset_type="Image")
     if filename != expected or variant != VOLCANO_ASSET_IMAGE_KIND:
         raise _http("not_found", "image not found", 404)
-    return await reference_image_binary(
+    return await reference_image_binary_impl(
         image_id,
         request,
         db,
         token=token,
         variant=variant,
+        variant_service=variant_service,
     )
 
 

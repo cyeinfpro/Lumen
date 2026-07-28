@@ -49,6 +49,31 @@ test("control and domain events are parsed separately", () => {
   }
 });
 
+test("recovery_required is a typed control event", () => {
+  deepStrictEqual(
+    parseRealtimeEvent({
+      name: "recovery_required",
+      data: JSON.stringify({
+        reason: "replay_unavailable",
+        message: "fetch a fresh snapshot",
+      }),
+      cursor: "14-0",
+      allowedDomainEvents: new Set(),
+    }),
+    {
+      kind: "event",
+      event: {
+        kind: "control",
+        type: "recovery_required",
+        version: 1,
+        reason: "replay_unavailable",
+        message: "fetch a fresh snapshot",
+        cursor: "14-0",
+      },
+    },
+  );
+});
+
 test("invalid json, shape, version, and unknown event are observable", () => {
   equal(
     parseRealtimeEvent({

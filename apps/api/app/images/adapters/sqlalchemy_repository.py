@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from lumen_core.models import Image
+from lumen_core.model_entities.media_workflows import ImageReconcileEpoch
 
 from ..domain.artifact import ArtifactStatus, ensure_artifact_transition
 
@@ -19,6 +22,35 @@ class ArtifactTransitionConflict(RuntimeError):
     pass
 
 
+def _normalized_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _commit_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, datetime) and isinstance(expected, datetime):
+        return _normalized_datetime(actual) == _normalized_datetime(expected)
+    return actual == expected
+
+
+def _row_matches_commit(
+    row: Image,
+    *,
+    target_status: ArtifactStatus,
+    expected_values: Mapping[str, Any],
+    expected_reconcile_fence: int,
+) -> bool:
+    if row.artifact_status != target_status.value:
+        return False
+    if int(getattr(row, "reconcile_fence", 0) or 0) != expected_reconcile_fence:
+        return False
+    return all(
+        _commit_value_matches(getattr(row, key, None), expected)
+        for key, expected in expected_values.items()
+    )
+
+
 def _reconcile_candidate_condition(
     status_column: Any,
     reconcile_after_column: Any,
@@ -26,6 +58,7 @@ def _reconcile_candidate_condition(
     *,
     due_before: datetime,
     stale_before: datetime,
+    quarantined_at_column: Any | None = None,
 ) -> Any:
     """Select only resumable/due rows; healthy old READY rows are not work.
 
@@ -60,7 +93,10 @@ def _reconcile_candidate_condition(
         reconcile_after_column.is_not(None),
         reconcile_after_column <= due_before,
     )
-    return or_(scheduled, stale_early_phase, stale_unscheduled_publish)
+    condition = or_(scheduled, stale_early_phase, stale_unscheduled_publish)
+    if quarantined_at_column is not None:
+        condition = and_(quarantined_at_column.is_(None), condition)
+    return condition
 
 
 def _reconcile_priority(status_column: Any) -> Any:
@@ -84,19 +120,60 @@ class SQLAlchemyImageRepository:
         async with self.session_factory() as session:
             return await session.get(Image, image_id)
 
+    async def next_reconcile_fence(self) -> int:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(ImageReconcileEpoch)
+                .where(ImageReconcileEpoch.id == 1)
+                .values(value=ImageReconcileEpoch.value + 1)
+                .returning(ImageReconcileEpoch.value)
+            )
+            value = result.scalar_one_or_none()
+            if value is not None:
+                await session.commit()
+                return int(value)
+            session.add(ImageReconcileEpoch(id=1, value=1))
+            try:
+                await session.commit()
+                return 1
+            except IntegrityError:
+                await session.rollback()
+            result = await session.execute(
+                update(ImageReconcileEpoch)
+                .where(ImageReconcileEpoch.id == 1)
+                .values(value=ImageReconcileEpoch.value + 1)
+                .returning(ImageReconcileEpoch.value)
+            )
+            value = result.scalar_one_or_none()
+            if value is None:
+                await session.rollback()
+                raise ArtifactCommitError("reconcile fence row is missing")
+            await session.commit()
+            return int(value)
+
     async def _resolve_commit(
         self,
         session: AsyncSession,
         *,
         image_id: str,
         target_status: ArtifactStatus,
+        expected_values: Mapping[str, Any] | None = None,
+        expected_reconcile_fence: int = 0,
     ) -> Image:
+        expected = dict(expected_values or {})
         try:
             await session.commit()
             row = await session.get(Image, image_id)
-            if row is None:
-                raise ArtifactCommitError("image row disappeared after commit")
-            return row
+            if row is not None and _row_matches_commit(
+                row,
+                target_status=target_status,
+                expected_values=expected,
+                expected_reconcile_fence=expected_reconcile_fence,
+            ):
+                return row
+            raise ArtifactCommitError(
+                "image row did not match committed artifact state"
+            )
         except Exception as exc:
             try:
                 await session.rollback()
@@ -104,7 +181,12 @@ class SQLAlchemyImageRepository:
                 pass
             async with self.session_factory() as recovery:
                 row = await recovery.get(Image, image_id)
-                if row is not None and row.artifact_status == target_status.value:
+                if row is not None and _row_matches_commit(
+                    row,
+                    target_status=target_status,
+                    expected_values=expected,
+                    expected_reconcile_fence=expected_reconcile_fence,
+                ):
                     return row
             raise ArtifactCommitError(
                 f"image artifact commit not observed for {target_status.value}"
@@ -120,6 +202,14 @@ class SQLAlchemyImageRepository:
                 session,
                 image_id=image.id,
                 target_status=ArtifactStatus.STAGING,
+                expected_values={
+                    "user_id": image.user_id,
+                    "storage_key": image.storage_key,
+                    "sha256": image.sha256,
+                    "artifact_manifest_jsonb": image.artifact_manifest_jsonb,
+                    "deleted_at": image.deleted_at,
+                },
+                expected_reconcile_fence=int(image.reconcile_fence or 0),
             )
 
     async def transition(
@@ -129,6 +219,7 @@ class SQLAlchemyImageRepository:
         expected: Iterable[ArtifactStatus],
         target: ArtifactStatus,
         values: dict[str, Any] | None = None,
+        reconcile_fence: int | None = None,
     ) -> Image:
         expected_set = frozenset(expected)
         if not expected_set:
@@ -139,21 +230,38 @@ class SQLAlchemyImageRepository:
         payload = dict(values or {})
         payload["artifact_status"] = target.value
         payload["updated_at"] = datetime.now(timezone.utc)
+        payload["reconcile_fence"] = 0
+        conditions = [
+            Image.id == image_id,
+            Image.deleted_at.is_(None),
+            Image.artifact_status.in_([status.value for status in expected_set]),
+        ]
+        if reconcile_fence is not None:
+            if reconcile_fence <= 0:
+                raise ValueError("reconcile fence must be positive")
+            conditions.append(Image.reconcile_fence == reconcile_fence)
+        else:
+            conditions.append(Image.reconcile_fence == 0)
         async with self.session_factory() as session:
             result = await session.execute(
-                update(Image)
-                .where(
-                    Image.id == image_id,
-                    Image.artifact_status.in_(
-                        [status.value for status in expected_set]
-                    ),
-                )
-                .values(**payload)
+                update(Image).where(*conditions).values(**payload)
             )
             if not isinstance(result.rowcount, int) or result.rowcount != 1:
                 await session.rollback()
                 row = await session.get(Image, image_id)
-                if row is not None and row.artifact_status == target.value:
+                if (
+                    reconcile_fence is None
+                    and row is not None
+                    and _row_matches_commit(
+                        row,
+                        target_status=target,
+                        expected_values={
+                            **dict(values or {}),
+                            "deleted_at": None,
+                        },
+                        expected_reconcile_fence=0,
+                    )
+                ):
                     return row
                 raise ArtifactTransitionConflict(
                     f"image artifact transition conflict image_id={image_id}"
@@ -162,6 +270,11 @@ class SQLAlchemyImageRepository:
                 session,
                 image_id=image_id,
                 target_status=target,
+                expected_values={
+                    **payload,
+                    "deleted_at": None,
+                },
+                expected_reconcile_fence=0,
             )
 
     async def update_publishing(
@@ -170,14 +283,19 @@ class SQLAlchemyImageRepository:
         *,
         values: dict[str, Any],
     ) -> Image:
+        payload = dict(values)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        payload["reconcile_fence"] = 0
         async with self.session_factory() as session:
             result = await session.execute(
                 update(Image)
                 .where(
                     Image.id == image_id,
+                    Image.deleted_at.is_(None),
                     Image.artifact_status == ArtifactStatus.PUBLISHING.value,
+                    Image.reconcile_fence == 0,
                 )
-                .values(**values, updated_at=datetime.now(timezone.utc))
+                .values(**payload)
             )
             if not isinstance(result.rowcount, int) or result.rowcount != 1:
                 await session.rollback()
@@ -188,6 +306,11 @@ class SQLAlchemyImageRepository:
                 session,
                 image_id=image_id,
                 target_status=ArtifactStatus.PUBLISHING,
+                expected_values={
+                    **payload,
+                    "deleted_at": None,
+                },
+                expected_reconcile_fence=0,
             )
 
     async def update_ready(
@@ -195,15 +318,25 @@ class SQLAlchemyImageRepository:
         image_id: str,
         *,
         values: dict[str, Any],
+        reconcile_fence: int | None = None,
     ) -> Image:
+        payload = dict(values)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        payload["reconcile_fence"] = 0
+        conditions = [
+            Image.id == image_id,
+            Image.deleted_at.is_(None),
+            Image.artifact_status == ArtifactStatus.READY.value,
+        ]
+        if reconcile_fence is not None:
+            if reconcile_fence <= 0:
+                raise ValueError("reconcile fence must be positive")
+            conditions.append(Image.reconcile_fence == reconcile_fence)
+        else:
+            conditions.append(Image.reconcile_fence == 0)
         async with self.session_factory() as session:
             result = await session.execute(
-                update(Image)
-                .where(
-                    Image.id == image_id,
-                    Image.artifact_status == ArtifactStatus.READY.value,
-                )
-                .values(**values, updated_at=datetime.now(timezone.utc))
+                update(Image).where(*conditions).values(**payload)
             )
             if not isinstance(result.rowcount, int) or result.rowcount != 1:
                 await session.rollback()
@@ -214,7 +347,44 @@ class SQLAlchemyImageRepository:
                 session,
                 image_id=image_id,
                 target_status=ArtifactStatus.READY,
+                expected_values={
+                    **payload,
+                    "deleted_at": None,
+                },
+                expected_reconcile_fence=0,
             )
+
+    async def claim_reconcile(
+        self,
+        image_id: str,
+        *,
+        expected_status: ArtifactStatus,
+        expected_updated_at: datetime,
+        fence: int,
+    ) -> bool:
+        if fence <= 0:
+            raise ValueError("reconcile fence must be positive")
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(Image)
+                .where(
+                    Image.id == image_id,
+                    Image.deleted_at.is_(None),
+                    Image.quarantined_at.is_(None),
+                    Image.artifact_status == expected_status.value,
+                    Image.updated_at == expected_updated_at,
+                    Image.reconcile_fence < fence,
+                )
+                .values(
+                    reconcile_fence=fence,
+                    updated_at=Image.updated_at,
+                )
+            )
+            if not isinstance(result.rowcount, int) or result.rowcount != 1:
+                await session.rollback()
+                return False
+            await session.commit()
+            return True
 
     async def list_reconcile_candidates(
         self,
@@ -229,12 +399,16 @@ class SQLAlchemyImageRepository:
             Image.updated_at,
             due_before=due_before,
             stale_before=stale_before,
+            quarantined_at_column=Image.quarantined_at,
         )
         async with self.session_factory() as session:
             rows = (
                 await session.execute(
                     select(Image)
-                    .where(condition)
+                    .where(
+                        Image.deleted_at.is_(None),
+                        condition,
+                    )
                     .order_by(
                         _reconcile_priority(Image.artifact_status),
                         case((Image.reconcile_after.is_(None), 1), else_=0),
@@ -247,19 +421,80 @@ class SQLAlchemyImageRepository:
             ).scalars()
             return list(rows)
 
-    async def active_upload_tickets(self) -> set[str]:
+    async def record_reconcile_failure(
+        self,
+        image_id: str,
+        *,
+        expected_status: ArtifactStatus,
+        attempts: int,
+        error_code: str,
+        error_message: str,
+        error_at: datetime,
+        reconcile_after: datetime | None,
+        quarantined_at: datetime | None,
+        reconcile_fence: int | None = None,
+    ) -> None:
+        if attempts < 1:
+            raise ValueError("reconcile attempts must be positive")
+        conditions = [
+            Image.id == image_id,
+            Image.deleted_at.is_(None),
+            Image.artifact_status == expected_status.value,
+        ]
+        if reconcile_fence is not None:
+            if reconcile_fence <= 0:
+                raise ValueError("reconcile fence must be positive")
+            conditions.append(Image.reconcile_fence == reconcile_fence)
+        else:
+            conditions.append(Image.reconcile_fence == 0)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(Image)
+                .where(*conditions)
+                .values(
+                    reconcile_attempts=attempts,
+                    reconcile_fence=0,
+                    reconcile_after=reconcile_after,
+                    last_artifact_error=error_message[:2000],
+                    last_reconcile_error_code=error_code[:64],
+                    last_reconcile_error_at=error_at,
+                    quarantined_at=quarantined_at,
+                    updated_at=error_at,
+                )
+            )
+            if not isinstance(result.rowcount, int) or result.rowcount != 1:
+                await session.rollback()
+                raise ArtifactTransitionConflict(
+                    f"image reconcile update conflict image_id={image_id}"
+                )
+            await session.commit()
+
+    async def active_upload_tickets(
+        self,
+        candidate_tickets: set[str] | None = None,
+    ) -> set[str]:
+        if candidate_tickets is not None and not candidate_tickets:
+            return set()
+        conditions = [
+            Image.deleted_at.is_(None),
+            Image.artifact_status.in_(
+                [
+                    ArtifactStatus.STAGING.value,
+                    ArtifactStatus.PROCESSING.value,
+                    ArtifactStatus.PUBLISHING.value,
+                ]
+            ),
+        ]
+        if candidate_tickets is not None:
+            conditions.append(
+                Image.artifact_manifest_jsonb["ticket"]
+                .as_string()
+                .in_(sorted(candidate_tickets))
+            )
         async with self.session_factory() as session:
             manifests = (
                 await session.execute(
-                    select(Image.artifact_manifest_jsonb).where(
-                        Image.artifact_status.in_(
-                            [
-                                ArtifactStatus.STAGING.value,
-                                ArtifactStatus.PROCESSING.value,
-                                ArtifactStatus.PUBLISHING.value,
-                            ]
-                        )
-                    )
+                    select(Image.artifact_manifest_jsonb).where(*conditions)
                 )
             ).scalars()
             tickets: set[str] = set()
@@ -267,6 +502,10 @@ class SQLAlchemyImageRepository:
                 if not isinstance(manifest, dict):
                     continue
                 ticket = manifest.get("ticket")
-                if isinstance(ticket, str) and ticket:
+                if (
+                    isinstance(ticket, str)
+                    and ticket
+                    and (candidate_tickets is None or ticket in candidate_tickets)
+                ):
                     tickets.add(ticket)
             return tickets

@@ -12,6 +12,7 @@ export type SnapshotResult = {
 export type SnapshotAdapter = (
   scopes: readonly SnapshotScope[],
   reason: RecoveryReason,
+  signal: AbortSignal,
 ) => Promise<SnapshotResult>;
 
 export class ReplayCoordinator {
@@ -23,10 +24,14 @@ export class ReplayCoordinator {
     this.snapshot = snapshot;
   }
 
-  recover(reason: RecoveryReason): Promise<SnapshotResult> {
+  recover(
+    reason: RecoveryReason,
+    signal: AbortSignal,
+  ): Promise<SnapshotResult> {
     if (this.flight) return this.flight;
-    const flight = this.snapshot(scopesForRecovery(reason), reason)
+    const flight = this.snapshot(scopesForRecovery(reason), reason, signal)
       .then((result) => {
+        signal.throwIfAborted();
         this.lastSuccessfulSync = result.syncedAt ?? Date.now();
         return result;
       })
