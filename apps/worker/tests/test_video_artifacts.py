@@ -306,7 +306,7 @@ async def test_download_video_url_cleans_partial_file_when_lease_check_fails(
 
 
 def test_download_video_url_has_no_in_memory_chunk_accumulator() -> None:
-    source = inspect.getsource(_download_video_url)
+    source = inspect.getsource(video_upstream._stream_video_response)  # noqa: SLF001
 
     assert "async for chunk in response.aiter_bytes" in source
     assert "file_obj.write(chunk)" in source

@@ -28,8 +28,6 @@ from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
     GenerationAction,
-    GenerationStage,
-    GenerationStatus,
     IMAGE_MULTI_GEN_STAGGER_CAP_S,
     IMAGE_MULTI_GEN_STAGGER_S,
     MAX_PROMPT_CHARS,
@@ -43,13 +41,11 @@ from lumen_core.models import (
     ApiSupplierTemplate,
     Completion,
     Conversation,
-    Generation,
     Message,
     OutboxEvent,
     SystemSetting,
     SystemPrompt,
     UserApiCredential,
-    new_uuid7,
 )
 from lumen_core.queue_metadata import generation_queue_metadata
 from lumen_core.runtime_settings import get_spec
@@ -72,6 +68,16 @@ from ..task_billing import (
     requested_image_billing_tier,
     resolve_image_render_quality,
     user_rate_multiplier_x10000,
+)
+from .message_generation_tasks import (
+    GenerationBatch,
+    GenerationTaskCommand,
+    GenerationTaskServices,
+    generation_outbox_payload,
+    generation_upstream_request,
+    hold_generation_billing,
+    new_generation,
+    prepare_generation_billing,
 )
 
 
@@ -990,206 +996,99 @@ async def _create_completion_task(
 
 
 async def _create_generation_tasks(
-    *,
-    db: AsyncSession,
-    user_id: str,
-    account_mode: str,
-    assistant_msg: Message,
-    intent: Intent,
-    stored_key: str,
-    attachment_ids: list[str],
-    image_params: ImageParamsIn,
-    text: str,
-    resolved_size: ResolvedSize,
-    prompt_suffix: str,
-    default_image_output_format: str,
-    mask_image_id: str | None,
-    credential_pin: TaskCredentialPin | None,
-    request_metadata: dict[str, Any] | None,
-    billing_enabled_fn: AsyncCallable,
-    billing_allow_negative_fn: AsyncCallable,
-    billing_image_thresholds_fn: AsyncCallable,
-    user_rate_multiplier_fn: AsyncCallable,
-    apply_rate_multiplier_fn: Callable[[int, int], int],
-    requested_image_billing_tier_fn: Callable[[ImageParamsIn], str | None],
-    write_audit_fn: AsyncCallable,
+    command: GenerationTaskCommand,
+    services: GenerationTaskServices,
 ) -> tuple[list[str], list[dict[str, Any]]]:
+    db = command.db
+    image_params = command.image_params
+    resolved_size = command.resolved_size
     requested_count = max(1, min(10, image_params.count))
     action = (
         GenerationAction.EDIT.value
-        if intent == Intent.IMAGE_TO_IMAGE
+        if command.intent == Intent.IMAGE_TO_IMAGE
         else GenerationAction.GENERATE.value
     )
-    primary = attachment_ids[0] if attachment_ids else None
-    prompt_full = (text or "") + prompt_suffix
+    primary = command.attachment_ids[0] if command.attachment_ids else None
+    prompt_full = (command.text or "") + command.prompt_suffix
     upstream_request = image_upstream_request(
         image_params,
         resolved_size,
         prompt=prompt_full,
-        default_output_format=default_image_output_format,
-    )
-    billing_is_enabled = account_mode == "wallet" and await billing_enabled_fn(db)
-    billing_thresholds = (
-        await billing_image_thresholds_fn(db) if billing_is_enabled else {}
+        default_output_format=command.default_image_output_format,
     )
     size_px = (
         (resolved_size.width or 0) * (resolved_size.height or 0)
         if resolved_size.width and resolved_size.height
         else billing_core.DEFAULT_IMAGE_SIZE_THRESHOLDS["1k"]
     )
-    billing_tier = requested_image_billing_tier_fn(image_params)
+    billing_tier = services.requested_image_billing_tier(image_params)
     base_upstream_request = _merge_request_metadata(
         upstream_request,
-        request_metadata,
+        command.request_metadata,
     )
     base_upstream_request.update(
         _image_queue_metadata(
             image_params,
             resolved_size,
             action=action,
-            mask_image_id=mask_image_id,
+            mask_image_id=command.mask_image_id,
             size_px=size_px,
             billing_tier=billing_tier,
         )
     )
-    if not billing_is_enabled:
-        estimated_micro, estimated_tier = (0, "free")
-        base_estimated_micro = 0
-    elif billing_tier is not None:
-        (
-            base_estimated_micro,
-            estimated_tier,
-        ) = await billing_core.estimate_image_cost_for_tier(
-            db,
-            tier=billing_tier,
-            n=1,
-        )
-    else:
-        base_estimated_micro, estimated_tier = await billing_core.estimate_image_cost(
-            db,
-            size_px=size_px,
-            n=1,
-            thresholds=billing_thresholds or None,
-        )
-    if billing_is_enabled:
-        rate_multiplier_x10000 = int(await user_rate_multiplier_fn(db, user_id))
-        estimated_micro = apply_rate_multiplier_fn(
-            base_estimated_micro,
-            rate_multiplier_x10000,
-        )
-        base_upstream_request["billing_pricing_snapshot"] = {
-            "kind": "image",
-            "tier": estimated_tier,
-            "unit_price_micro": int(base_estimated_micro),
-            "captured_size_px": int(size_px),
-        }
-        base_upstream_request["billing_rate_multiplier_x10000"] = rate_multiplier_x10000
-    if credential_pin:
+    billing = await prepare_generation_billing(
+        command,
+        services,
+        base_upstream_request=base_upstream_request,
+        size_px=size_px,
+        billing_tier=billing_tier,
+    )
+    if command.credential_pin:
         base_upstream_request["responses_model"] = (
-            credential_pin.default_image_model or credential_pin.default_chat_model
+            command.credential_pin.default_image_model
+            or command.credential_pin.default_chat_model
         )
     if base_upstream_request.get("background") == "transparent":
         prompt_full += _transparent_background_prompt_suffix()
 
-    request_trace_id = base_upstream_request.get("trace_id")
-    allow_negative_billing = (
-        await billing_allow_negative_fn(db)
-        if billing_is_enabled and estimated_micro > 0
-        else False
+    batch = GenerationBatch(
+        requested_count=requested_count,
+        action=action,
+        primary_image_id=primary,
+        prompt=prompt_full,
+        base_upstream_request=base_upstream_request,
+        request_trace_id=base_upstream_request.get("trace_id"),
     )
     generation_ids: list[str] = []
     outbox_payloads: list[dict[str, Any]] = []
     for image_index in range(1, requested_count + 1):
-        gen_upstream_request = dict(base_upstream_request)
-        gen_upstream_request["n"] = 1
-        if requested_count > 1:
-            gen_upstream_request["batch_task_index"] = image_index
-            gen_upstream_request["batch_task_count"] = requested_count
-            gen_upstream_request["requested_image_count"] = requested_count
-            if isinstance(request_trace_id, str) and request_trace_id:
-                gen_upstream_request["request_trace_id"] = request_trace_id
-            gen_upstream_request["trace_id"] = f"gen_{new_uuid7()}"
-        else:
-            gen_upstream_request.setdefault("trace_id", f"gen_{new_uuid7()}")
-        gen = Generation(
-            message_id=assistant_msg.id,
-            user_id=user_id,
-            action=action,
-            prompt=prompt_full,
-            size_requested=resolved_size.size,
-            aspect_ratio=image_params.aspect_ratio,
-            input_image_ids=attachment_ids,
-            primary_input_image_id=primary,
-            mask_image_id=(mask_image_id if intent == Intent.IMAGE_TO_IMAGE else None),
-            status=GenerationStatus.QUEUED.value,
-            progress_stage=GenerationStage.QUEUED.value,
-            attempt=0,
-            idempotency_key=generation_child_idempotency_key(
-                stored_key,
-                image_index,
-            ),
-            upstream_request=gen_upstream_request,
-            user_api_credential_id=(
-                credential_pin.credential_id if credential_pin else None
-            ),
-            upstream_supplier_id=(
-                credential_pin.supplier_id if credential_pin else None
-            ),
+        upstream_request = generation_upstream_request(batch, image_index)
+        generation = new_generation(
+            command,
+            services,
+            batch,
+            image_index=image_index,
+            upstream_request=upstream_request,
         )
-        db.add(gen)
+        db.add(generation)
         await db.flush()
-        if billing_is_enabled and estimated_micro > 0:
-            try:
-                tx = await billing_core.hold(
-                    db,
-                    user_id,
-                    estimated_micro,
-                    ref_type="generation",
-                    ref_id=gen.id,
-                    idempotency_key=f"hold:{gen.id}",
-                    allow_negative=allow_negative_billing,
-                    meta={
-                        "tier": estimated_tier,
-                        "size_requested": resolved_size.size,
-                        "pixels_estimated": size_px,
-                        "image_count": 1,
-                        "batch_task_index": image_index,
-                        "batch_task_count": requested_count,
-                        "pricing_snapshot": gen_upstream_request.get(
-                            "billing_pricing_snapshot"
-                        ),
-                    },
-                )
-            except billing_core.BillingError as exc:
-                raise _billing_http_error(exc) from exc
-            if tx is not None:
-                await write_audit_fn(
-                    db,
-                    event_type="wallet.hold.image",
-                    user_id=user_id,
-                    details={
-                        "generation_id": gen.id,
-                        "amount_micro": estimated_micro,
-                        "tier": estimated_tier,
-                        "image_count": 1,
-                        "batch_task_index": image_index,
-                        "batch_task_count": requested_count,
-                        "balance_after": tx.balance_after,
-                        "hold_after": tx.hold_after,
-                    },
-                    autocommit=False,
-                )
-        generation_ids.append(gen.id)
-        generation_payload: dict[str, Any] = {
-            "task_id": gen.id,
-            "user_id": user_id,
-            "kind": "generation",
-        }
-        defer_s = image_multi_generation_defer_s(image_index)
-        if defer_s > 0:
-            generation_payload["defer_s"] = defer_s
-        generation_payload.update(_task_payload_context(gen_upstream_request))
-        outbox_payloads.append(generation_payload)
+        await hold_generation_billing(
+            command,
+            services,
+            batch,
+            billing,
+            generation,
+            image_index=image_index,
+        )
+        generation_ids.append(generation.id)
+        outbox_payloads.append(
+            generation_outbox_payload(
+                command,
+                services,
+                generation,
+                image_index=image_index,
+            )
+        )
     return generation_ids, outbox_payloads
 
 
@@ -1319,28 +1218,36 @@ async def create_assistant_task(
     else:
         assert resolved_size is not None
         generation_ids, outbox_payloads = await _create_generation_tasks(
-            db=db,
-            user_id=user_id,
-            account_mode=account_mode,
-            assistant_msg=assistant_msg,
-            intent=intent,
-            stored_key=stored_key,
-            attachment_ids=attachment_ids,
-            image_params=image_params,
-            text=text,
-            resolved_size=resolved_size,
-            prompt_suffix=prompt_suffix,
-            default_image_output_format=default_image_output_format,
-            mask_image_id=mask_image_id,
-            credential_pin=credential_pin,
-            request_metadata=request_metadata,
-            billing_enabled_fn=billing_enabled_fn,
-            billing_allow_negative_fn=billing_allow_negative_fn,
-            billing_image_thresholds_fn=billing_image_thresholds_fn,
-            user_rate_multiplier_fn=user_rate_multiplier_fn,
-            apply_rate_multiplier_fn=apply_rate_multiplier_fn,
-            requested_image_billing_tier_fn=requested_image_billing_tier_fn,
-            write_audit_fn=write_audit_fn,
+            GenerationTaskCommand(
+                db=db,
+                user_id=user_id,
+                account_mode=account_mode,
+                assistant_msg=assistant_msg,
+                intent=intent,
+                stored_key=stored_key,
+                attachment_ids=attachment_ids,
+                image_params=image_params,
+                text=text,
+                resolved_size=resolved_size,
+                prompt_suffix=prompt_suffix,
+                default_image_output_format=default_image_output_format,
+                mask_image_id=mask_image_id,
+                credential_pin=credential_pin,
+                request_metadata=request_metadata,
+            ),
+            GenerationTaskServices(
+                billing_enabled=billing_enabled_fn,
+                billing_allow_negative=billing_allow_negative_fn,
+                billing_image_thresholds=billing_image_thresholds_fn,
+                user_rate_multiplier=user_rate_multiplier_fn,
+                apply_rate_multiplier=apply_rate_multiplier_fn,
+                requested_image_billing_tier=requested_image_billing_tier_fn,
+                write_audit=write_audit_fn,
+                child_idempotency_key=generation_child_idempotency_key,
+                defer_seconds=image_multi_generation_defer_s,
+                payload_context=_task_payload_context,
+                billing_http_error=_billing_http_error,
+            ),
         )
     outbox_rows = await _create_outbox_rows(db, outbox_payloads)
     return AssistantTaskResult(

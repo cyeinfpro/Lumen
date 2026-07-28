@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from lumen_core.constants import MAX_PROMPT_CHARS
@@ -36,7 +37,9 @@ from ..domain.showcase_template_policy import (
 )  # noqa: F401
 from .values import dict_or_empty as _dict_or_empty
 from ..domain.showcase_scene_policy import compact_lock_text as _compact_lock_text  # noqa: F401
-from ..domain.showcase_scene_policy import compact_product_identity as _compact_product_identity  # noqa: F401
+from ..domain.showcase_scene_policy import (
+    compact_product_identity as _compact_product_identity,
+)  # noqa: F401
 from ..domain.showcase_scene_policy import join_lock_items as _join_lock_items  # noqa: F401
 from ..domain.showcase_scene_policy import (
     showcase_scene_card_action_direction as _showcase_scene_card_action_direction,
@@ -61,7 +64,9 @@ from ..domain.showcase_scene_policy import (
     showcase_visibility_policy as _showcase_visibility_policy,
 )  # noqa: F401
 from ..domain.showcase_scene_policy import truncate_prompt_text as _truncate_prompt_text  # noqa: F401
-from ..domain.showcase_shots import showcase_default_variant as _showcase_default_variant  # noqa: F401
+from ..domain.showcase_shots import (
+    showcase_default_variant as _showcase_default_variant,
+)  # noqa: F401
 
 
 class _ModelCandidateLike(Protocol):
@@ -70,28 +75,32 @@ class _ModelCandidateLike(Protocol):
     model_brief_json: object
 
 
+@dataclass(frozen=True, slots=True)
+class _ShowcasePromptBrief:
+    user_direction: str
+    template_direction: str
+    product_preserve: str
+    accessory_direction: str
+    model_consistency: str
+    shot_direction: str
+    pose_direction: str
+    framing_direction: str
+    quality_direction: str
+    render_direction: str
+    style_region: str
+    scene_card_mode: bool = False
+    allow_pet: bool = True
+    allow_background_people: bool = True
+    include_product_lock: bool = True
+
+
 def _showcase_prompt_brief(
-    *,
-    user_direction: str,
-    template_direction: str,
-    product_preserve: str,
-    accessory_direction: str,
-    model_consistency: str,
-    shot_direction: str,
-    pose_direction: str,
-    framing_direction: str,
-    quality_direction: str,
-    render_direction: str,
-    style_region: str,
-    scene_card_mode: bool = False,
-    allow_pet: bool = True,
-    allow_background_people: bool = True,
-    include_product_lock: bool = True,
+    brief: _ShowcasePromptBrief,
 ) -> str:
-    direction = template_direction.strip() or "背景与衣服图片搭配"
+    direction = brief.template_direction.strip() or "背景与衣服图片搭配"
     extra_direction = _compact_showcase_user_direction(
-        user_direction,
-        style_region,
+        brief.user_direction,
+        brief.style_region,
     )
     if extra_direction:
         direction = f"{direction}；{extra_direction}"
@@ -101,18 +110,18 @@ def _showcase_prompt_brief(
         "必须保持头身比例自然、透视可信，动作像真实抓拍；不得退回普通棚拍站姿，"
         "不得和其它图片重复同一地点、同一站姿、同一手部动作；"
         "避免跳跃、转圈、跪趴、后仰、大幅甩头。"
-        if scene_card_mode
+        if brief.scene_card_mode
         else "1. 摄影执行：真实模特目录摄影，约 50mm 标准焦段（不要广角拉头身比、不要长焦压扁），平视或胸口高度机位；身体重心可信，动作幅度小，避免跳跃、转圈、跪趴、后仰、大幅甩头。"
     )
-    if scene_card_mode:
+    if brief.scene_card_mode:
         extras: list[str] = []
-        scene_text = template_direction
-        if allow_pet and any(
+        scene_text = brief.template_direction
+        if brief.allow_pet and any(
             token in scene_text
             for token in ("宠物", "狗", "猫", "牵引绳", "小狗", "小猫")
         ):
             extras.append("低存在感宠物")
-        if allow_background_people and any(
+        if brief.allow_background_people and any(
             token in scene_text for token in ("路人", "人群", "行人")
         ):
             extras.append("远处路人")
@@ -127,8 +136,8 @@ def _showcase_prompt_brief(
         "请根据这张白底产品图和模特图，生成真实自然的真人模特穿搭图。",
         "",
     ]
-    if include_product_lock:
-        compact_product_preserve = _compact_lock_text(product_preserve)
+    if brief.include_product_lock:
+        compact_product_preserve = _compact_lock_text(brief.product_preserve)
         lines.extend(
             [
                 "【商品 1:1 锁定】以商品图为准，保持同款同色同廓形；"
@@ -142,12 +151,12 @@ def _showcase_prompt_brief(
             "要求：",
             photography_direction,
             "2. 模特按产品图自然穿着这件衣服，版型贴合，褶皱合理；不要人偶感、不要时装秀台步。",
-            f"3. 模特参考模特图，{model_consistency}身材和表情自然。",
-            f"4. 配饰：{accessory_direction}（不得遮挡商品）。",
+            f"3. 模特参考模特图，{brief.model_consistency}身材和表情自然。",
+            f"4. 配饰：{brief.accessory_direction}（不得遮挡商品）。",
             f"5. 场景：背景与衣服风格搭配，{direction}；画面里不要出现镜子或镜面反射。",
-            f"6. 画质：{quality_direction}，{render_direction}。",
-            f"7. 构图：{style_region}风格，{pose_direction}，{shot_direction}。",
-            f"8. 画面：{framing_direction}；服装主体清晰可见。",
+            f"6. 画质：{brief.quality_direction}，{brief.render_direction}。",
+            f"7. 构图：{brief.style_region}风格，{brief.pose_direction}，{brief.shot_direction}。",
+            f"8. 画面：{brief.framing_direction}；服装主体清晰可见。",
             subject_rule,
         ]
     )
@@ -399,21 +408,23 @@ def _showcase_prompt(
             or "只执行本张拍摄方案的动作和动态，不混入其它模板动作或旧 shot 文案"
         )
     body = _showcase_prompt_brief(
-        user_direction=user_prompt,
-        template_direction=template_direction,
-        product_preserve=visible_preserve,
-        accessory_direction=accessory_direction,
-        model_consistency=model_consistency,
-        shot_direction=shot_direction,
-        pose_direction=pose_direction,
-        framing_direction=framing_direction,
-        quality_direction=quality_direction,
-        render_direction=render_direction,
-        style_region=style_region,
-        scene_card_mode=bool(scene_direction),
-        allow_pet=allow_pet,
-        allow_background_people=allow_background_people,
-        include_product_lock=not bool(lock_prefix),
+        _ShowcasePromptBrief(
+            user_direction=user_prompt,
+            template_direction=template_direction,
+            product_preserve=visible_preserve,
+            accessory_direction=accessory_direction,
+            model_consistency=model_consistency,
+            shot_direction=shot_direction,
+            pose_direction=pose_direction,
+            framing_direction=framing_direction,
+            quality_direction=quality_direction,
+            render_direction=render_direction,
+            style_region=style_region,
+            scene_card_mode=bool(scene_direction),
+            allow_pet=allow_pet,
+            allow_background_people=allow_background_people,
+            include_product_lock=not bool(lock_prefix),
+        )
     )
     if not lock_prefix:
         return body
