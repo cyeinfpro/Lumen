@@ -102,7 +102,7 @@ Deliverables:
 
 Ownership:
 
-- `apps/worker/app/tasks/volcano_assets.py`
+- `apps/worker/app/tasks/volcano_asset_orchestrator.py`
 - `volcano_asset_actions.py`
 - `volcano_asset_create.py`
 - `volcano_asset_dispatch.py`

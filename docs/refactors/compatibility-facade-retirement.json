@@ -11,18 +11,6 @@
       "path": "packages/core/lumen_core/schemas.py",
       "retirement_condition": "All external and internal callers import schema_models directly.",
       "status": "active"
-    },
-    {
-      "owner": "worker",
-      "path": "apps/worker/app/video_upstream.py",
-      "retirement_condition": "All callers use video_upstream_parts directly and no compatibility signatures remain.",
-      "status": "active"
-    },
-    {
-      "owner": "worker",
-      "path": "apps/worker/app/tasks/volcano_assets.py",
-      "retirement_condition": "All task callers use the runtime context and leaf action modules directly.",
-      "status": "active"
     }
   ],
   "version": 1

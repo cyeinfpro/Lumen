@@ -80,7 +80,7 @@ def _install_runtime(
 async def test_http_429_clears_uncertain_state_and_allows_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -167,7 +167,7 @@ async def test_http_429_clears_uncertain_state_and_allows_retry(
 async def test_same_intent_operations_do_not_share_reconcile_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation_one = _operation()
@@ -273,7 +273,7 @@ async def test_same_intent_operations_do_not_share_reconcile_candidate(
 async def test_different_create_asset_intents_can_submit_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation_one = {**_operation(), "name": "Alpha Upload"}

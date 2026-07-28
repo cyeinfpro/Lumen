@@ -15,7 +15,7 @@ from lumen_core.constants import (
 )
 from lumen_core.models import VideoGeneration
 
-from ...video_upstream import PollResult
+from ...video_upstream_service import PollResult
 
 
 async def finalize_submit_unknown(

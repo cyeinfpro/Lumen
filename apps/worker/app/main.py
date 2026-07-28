@@ -50,7 +50,7 @@ from .tasks import generation as generation_tasks
 from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
-from .tasks import volcano_assets as volcano_asset_tasks
+from .tasks import volcano_asset_orchestrator as volcano_asset_tasks
 from .tasks.completion_parts import entrypoints as completion_tasks
 from .tasks.completion_parts.default_runtime import build_completion_runtime
 from .tasks.generation_parts.default_runtime import build_generation_runtime

@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Any
 
-from .video_upstream import SubmitResult
+from .video_upstream_service import SubmitResult
 
 
 logger = logging.getLogger(__name__)

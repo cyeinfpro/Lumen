@@ -30,7 +30,7 @@ from apps.worker.tests.volcano_asset_test_support import (
 
 @pytest.fixture(autouse=True)
 def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     async def read(
         _operation: dict[str, Any],
@@ -53,7 +53,7 @@ def _stub_success_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_worker_update_group_recovers_success_receipt_after_redis_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
@@ -142,7 +142,7 @@ async def test_worker_update_group_recovers_success_receipt_after_redis_loss(
 async def test_worker_update_group_retry_reads_target_before_resubmitting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
@@ -193,7 +193,7 @@ async def test_worker_update_group_retry_reads_target_before_resubmitting(
 async def test_worker_update_asset_reconciles_timeout_by_reading_target_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _management_operation(
@@ -268,7 +268,7 @@ async def test_worker_update_asset_reconciles_timeout_by_reading_target_state(
 async def test_worker_delete_group_succeeds_when_target_is_already_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(
@@ -320,7 +320,7 @@ async def test_worker_delete_group_succeeds_when_target_is_already_missing(
 async def test_worker_delete_group_records_cascaded_asset_ids_before_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_management_operation("delete_group"))
@@ -392,7 +392,7 @@ async def test_worker_delete_group_records_cascaded_asset_ids_before_delete(
 async def test_worker_delete_asset_treats_delete_not_found_as_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_management_operation("delete_asset"))
@@ -455,7 +455,7 @@ async def test_worker_delete_asset_treats_delete_not_found_as_success(
 async def test_worker_management_action_does_not_mutate_after_lease_loss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(
@@ -578,7 +578,7 @@ def test_success_receipts_are_action_scoped_and_redacted(
     operation: dict[str, Any],
     result: dict[str, Any],
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     malicious_result = {
         **result,
@@ -602,7 +602,7 @@ def test_success_receipts_are_action_scoped_and_redacted(
 
 
 def test_success_receipt_rejects_result_for_another_action_target() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     operation = _management_operation(
         "update_asset",
@@ -624,7 +624,7 @@ def test_success_receipt_rejects_result_for_another_action_target() -> None:
 
 
 def test_success_receipt_redacts_source_url_and_token() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     receipt = volcano_assets._receipt_asset(
         {
@@ -643,7 +643,7 @@ def test_success_receipt_redacts_source_url_and_token() -> None:
 
 
 def test_success_receipt_is_bound_to_exact_provider_route() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     operation = _operation()
     result = {
@@ -691,7 +691,7 @@ def test_success_receipt_is_bound_to_exact_provider_route() -> None:
 async def test_legacy_receipt_cannot_satisfy_new_provider_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     monkeypatch.undo()
     operation = _operation()
@@ -751,7 +751,7 @@ async def test_legacy_receipt_cannot_satisfy_new_provider_binding(
 
 
 def test_reference_token_reuses_unexpired_value() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     metadata = {
         "token": "existing-token",
@@ -790,7 +790,7 @@ async def test_concurrent_source_urls_share_one_locked_token(
     token_key: str,
     ensure_name: str,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
     from app.tasks import volcano_asset_source_media
 
     source = SimpleNamespace(id="source-1", metadata_jsonb={})

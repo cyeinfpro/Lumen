@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import video_artifacts, video_upstream
+from app import video_artifacts
+from app import video_upstream_service as video_upstream
 from app.video_artifacts import (
     InvalidVideoArtifactError,
     UnsupportedVideoMediaError,
@@ -17,7 +18,7 @@ from app.video_artifacts import (
     downloaded_video_from_bytes,
     hash_video_file,
 )
-from app.video_upstream import _download_video_url
+from app.video_upstream_service import _download_video_url
 
 
 def _mp4_bytes(*, brand: bytes = b"mp42") -> bytes:

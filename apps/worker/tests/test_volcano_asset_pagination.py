@@ -68,7 +68,7 @@ def _install_create_asset_runtime(
 async def test_later_page_existing_asset_is_in_submit_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     redis = _Redis(_operation())
@@ -148,7 +148,7 @@ async def test_later_page_existing_asset_is_in_submit_baseline(
 async def test_later_page_second_new_candidate_keeps_reconcile_ambiguous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     old_assets = [_asset(f"asset-old-{index}") for index in range(100)]
@@ -208,7 +208,7 @@ async def test_later_page_second_new_candidate_keeps_reconcile_ambiguous(
 
 @pytest.mark.asyncio
 async def test_operation_asset_scan_stops_at_safe_item_limit() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _operation()
@@ -240,7 +240,7 @@ async def test_operation_asset_scan_stops_at_safe_item_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_operation_asset_scan_stops_when_page_makes_no_progress() -> None:
-    from app.tasks import volcano_assets
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
     operation = _operation()

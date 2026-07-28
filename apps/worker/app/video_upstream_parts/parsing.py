@@ -505,7 +505,7 @@ def _is_upstream_model_unavailable_message(message: str) -> bool:
 
 
 # Public parser contract. Private spellings remain implementation details for
-# same-module helpers and compatibility aliases in ``video_upstream``.
+# same-module helpers exposed by ``video_upstream_service``.
 absolute_url = _absolute_url
 billable = _billable
 collapse_url_path_slashes = _collapse_url_path_slashes

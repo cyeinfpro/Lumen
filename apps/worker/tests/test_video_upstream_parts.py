@@ -3,12 +3,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from app import video_upstream
+from app import video_upstream_service as video_upstream
 from app.video_upstream_parts import adapters, parsing
 
 
 _VIDEO_CLUSTER_PATHS = (
-    Path(__file__).parents[1] / "app" / "video_upstream.py",
+    Path(__file__).parents[1] / "app" / "video_upstream_service.py",
     Path(__file__).parents[1] / "app" / "video_artifacts.py",
     Path(__file__).parents[1] / "app" / "video_upstream_parts",
     Path(__file__).parents[1]
@@ -20,7 +20,7 @@ _VIDEO_CLUSTER_PATHS = (
 )
 
 
-def test_video_upstream_facade_reexports_adapter_contracts() -> None:
+def test_video_upstream_service_exposes_adapter_contracts() -> None:
     assert video_upstream.VolcanoSeedanceAdapter is adapters.VolcanoSeedanceAdapter
     assert video_upstream.VideoSubmitRequest.__module__.endswith(".contracts")
     assert video_upstream.VideoUpstreamError.__module__.endswith(".contracts")
@@ -87,7 +87,7 @@ def test_duration_tokens_round_up_so_platform_never_eats_the_remainder() -> None
 def test_video_upstream_production_modules_stay_below_file_size_budget() -> None:
     root = Path(__file__).parents[1] / "app"
     paths = [
-        root / "video_upstream.py",
+        root / "video_upstream_service.py",
         *sorted((root / "video_upstream_parts").glob("*.py")),
     ]
 

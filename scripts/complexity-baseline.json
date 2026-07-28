@@ -8,23 +8,15 @@
     "nesting_depth": 6
   },
   "metrics": {
-    "function_lines": {
-      "apps/api/app/canvas_services/execution_service.py::execute_node": 305,
-      "apps/api/app/services/message_submission.py::_create_generation_tasks": 202
-    },
+    "function_lines": {},
     "function_parameters": {
-      "apps/api/app/services/message_submission.py::_create_generation_tasks": 22,
       "apps/api/app/services/message_submission.py::create_assistant_task": 29,
       "apps/api/app/workflows/adapters/apparel_scene_planner.py::compose_image_prompt_with_gpt55": 13,
       "apps/api/app/workflows/adapters/apparel_scene_planner.py::plan_scene_cards_with_gpt55": 18,
       "apps/api/app/workflows/adapters/showcase_orchestration.py::_prepare_showcase_preflight_impl": 20,
-      "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt": 16,
-      "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt_brief": 15
+      "apps/api/app/workflows/application/showcase_prompts.py::_showcase_prompt": 16
     },
-    "nesting_depth": {
-      "apps/api/app/workflows/application/model_library_generation.py::model_library_generate_prompt": 7,
-      "apps/worker/app/video_upstream.py::_download_video_url": 7
-    }
+    "nesting_depth": {}
   },
   "oversized_files": {},
   "version": 6,

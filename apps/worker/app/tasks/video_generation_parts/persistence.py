@@ -26,7 +26,7 @@ from ...video_artifacts import (
     DownloadedVideo,
     ProcessedVideoFile,
 )
-from ...video_upstream import PollResult, VideoProviderAdapter
+from ...video_upstream_service import PollResult, VideoProviderAdapter
 from .contracts import StoredVideo
 
 

@@ -47,7 +47,7 @@ from ...video_submit_cache import (
     load_submit_result as _load_submit_result,
     store_submit_result as _store_submit_result,
 )
-from ...video_upstream import (
+from ...video_upstream_service import (
     adapter_for_provider,
 )
 from .contracts import (

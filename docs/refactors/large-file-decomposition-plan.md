@@ -86,7 +86,7 @@ passes its owning complexity gate, and is below the repository exit threshold.
 | 22 | `apps/web/src/app/admin/_panels/ProvidersPanel.tsx` | 2,227 | provider catalog, editor, health, credentials | Medium |
 | 23 | `apps/api/app/routes/admin.py` | 2,157 | `routes/admin_routes/` and admin services | High |
 | 24 | `apps/worker/app/tasks/context_summary.py` | 2,127 | `tasks/context_summary_parts/` | Medium-high |
-| 25 | `apps/worker/app/video_upstream.py` | 2,106 | `app/video_upstream_parts/` | Medium-high |
+| 25 | `apps/worker/app/video_upstream_service.py` | 2,106 | `app/video_upstream_parts/` | Medium-high |
 
 Line counts include the reliability fixes in this worktree. Test files are
 excluded from the placement priority even when they are larger than production

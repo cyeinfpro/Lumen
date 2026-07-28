@@ -9,7 +9,7 @@ from app.tasks import (
     volcano_asset_actions,
     volcano_asset_create,
     volcano_asset_dispatch,
-    volcano_assets,
+    volcano_asset_orchestrator as volcano_assets,
 )
 from app.tasks.volcano_asset_runtime import (
     VolcanoAssetRuntimeContext,
@@ -31,12 +31,16 @@ def test_volcano_parts_do_not_import_task_facade(module: object) -> None:
     back_imports: list[int] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            if any(alias.name == "app.tasks.volcano_assets" for alias in node.names):
+            if any(
+                alias.name == "app.tasks.volcano_asset_orchestrator"
+                for alias in node.names
+            ):
                 back_imports.append(node.lineno)
         elif isinstance(node, ast.ImportFrom):
             source = node.module or ""
-            imports_facade_module = source == "app.tasks.volcano_assets" or (
-                node.level > 0 and source == "volcano_assets"
+            imports_facade_module = (
+                source == "app.tasks.volcano_asset_orchestrator"
+                or (node.level > 0 and source == "volcano_assets")
             )
             imports_facade_name = any(
                 alias.name == "volcano_assets" for alias in node.names
@@ -92,7 +96,7 @@ def test_runtime_slot_is_late_bound_and_restricted() -> None:
         _ = runtime.undeclared
 
 
-def test_facade_monkeypatch_is_visible_to_installed_runtime(
+def test_orchestrator_monkeypatch_is_visible_to_installed_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     replacement = object()

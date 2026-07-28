@@ -26,25 +26,6 @@
     }
   ],
   "public_api": {
-    "apps/worker/app/tasks/volcano_assets.py": [
-      "process_volcano_asset_operation"
-    ],
-    "apps/worker/app/video_upstream.py": [
-      "CancelResult",
-      "DashScopeHappyHorseAdapter",
-      "FakeVideoAdapter",
-      "PollResult",
-      "SubmitResult",
-      "UnifiedVideoCreateAdapter",
-      "VideoProviderAdapter",
-      "VideoReferenceMedia",
-      "VideoSubmitRequest",
-      "VideoUpstreamError",
-      "VolcanoNewApiVideoAdapter",
-      "VolcanoSeedanceAdapter",
-      "VolcanoThirdPartySeedanceAdapter",
-      "adapter_for_provider"
-    ],
     "packages/core/lumen_core/models.py": [
       "AllowedEmail",
       "ApiSupplierTemplate",

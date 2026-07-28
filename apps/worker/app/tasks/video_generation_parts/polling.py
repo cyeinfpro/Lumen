@@ -17,7 +17,7 @@ from lumen_core.constants import (
 from lumen_core.models import VideoGeneration
 
 from ...video_artifacts import InvalidVideoArtifactError
-from ...video_upstream import (
+from ...video_upstream_service import (
     PollResult,
     VideoProviderAdapter,
     VideoUpstreamError,

@@ -8,9 +8,10 @@ from typing import Any
 import httpx
 import pytest
 
-from app import video_billing, video_provider_slots, video_upstream
+from app import video_billing, video_provider_slots
+from app import video_upstream_service as video_upstream
 from app.video_submit_cache import load_submit_result
-from app.video_upstream import (
+from app.video_upstream_service import (
     DashScopeHappyHorseAdapter,
     UnifiedVideoCreateAdapter,
     VideoReferenceMedia,

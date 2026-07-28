@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.tasks import context_summary, volcano_assets
+from app.tasks import context_summary
+from app.tasks import volcano_asset_orchestrator as volcano_assets
 from app.tasks.completion_parts import entrypoints as completion
 from app.tasks.completion_parts import request_metadata
 from app.tasks.context_summary_parts import results as context_summary_results
@@ -34,7 +35,7 @@ def test_worker_task_entrypoints_do_not_reexport_private_part_helpers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_volcano_receipt_facade_injects_current_session_factory(
+async def test_volcano_receipt_orchestrator_injects_current_session_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_factory = object()

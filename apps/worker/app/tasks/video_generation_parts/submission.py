@@ -21,7 +21,7 @@ from lumen_core.constants import (
 from lumen_core.models import VideoGeneration
 
 from ...video_submit_cache import CachedSubmitResult
-from ...video_upstream import PollResult, SubmitResult, VideoSubmitRequest
+from ...video_upstream_service import PollResult, SubmitResult, VideoSubmitRequest
 
 
 @dataclass(slots=True)
