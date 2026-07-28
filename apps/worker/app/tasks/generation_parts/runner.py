@@ -36,7 +36,6 @@ from ...observability import (
     upstream_calls_total,
 )
 from ...provider_runtime.errors import UpstreamError
-from ...upstream_parts.image_dispatch import image_endpoint_kind_for_engine
 from ..state import is_generation_terminal
 from . import failure, success
 from .diagnostics import (
@@ -635,9 +634,7 @@ def _apply_route_constraints(state: GenerationRunState) -> None:
         if state.requires_mask_provider
         else None
         if state.is_dual_race
-        else image_endpoint_kind_for_engine(
-            state.image_route
-        )
+        else state.services.provider.endpoint_kind_for_engine(state.image_route)
     )
 
 

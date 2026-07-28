@@ -205,18 +205,20 @@ async def test_completion_arq_entry_requires_explicit_runtime() -> None:
 async def test_generation_resource_lease_close_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[str] = []
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    async def release(*_args: Any, **_kwargs: Any) -> None:
-        calls.append("release")
+    async def release(*args: Any, **kwargs: Any) -> None:
+        calls.append((args, kwargs))
 
     monkeypatch.setattr(
         "app.tasks.generation_parts.queue_claim.release_generation_runtime_resources",
         release,
     )
+    services = _fake_generation_deps()
+    redis = object()
     resource = GenerationResourceLease(
-        services=_fake_generation_deps(),
-        redis=object(),
+        services=services,
+        redis=redis,
         task_id="gen-3",
         lease_token="owner:token",
         provider_name="provider-a",
@@ -226,7 +228,18 @@ async def test_generation_resource_lease_close_is_idempotent(
 
     assert await resource.close()
     assert not await resource.close()
-    assert calls == ["release"]
+    assert calls == [
+        (
+            (redis,),
+            {
+                "task_id": "gen-3",
+                "lease_token": "owner:token",
+                "provider_name": "provider-a",
+                "clear_avoided_providers": True,
+                "services": services,
+            },
+        )
+    ]
 
 
 def test_completion_frame_reducer_stops_after_terminal_frame() -> None:

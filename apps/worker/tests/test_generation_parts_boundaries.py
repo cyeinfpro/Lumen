@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from lumen_core.constants import GenerationErrorCode, MessageStatus
+from lumen_core.constants import GenerationAction, GenerationErrorCode, MessageStatus
 from lumen_core.models import Generation, Message
 
 from app.tasks.generation_parts import (
@@ -48,6 +48,8 @@ def test_generation_runtime_composes_typed_semantic_services() -> None:
     assert isinstance(deps, RunGenerationDeps)
     assert generation_runtime.runner is runner.run_generation
     assert not hasattr(generation_runtime, "ports")
+    assert deps.provider.endpoint_kind_for_engine("image2") == "generations"
+    assert deps.provider.endpoint_kind_for_engine("responses") == "responses"
     assert tuple(field.name for field in fields(deps)) == (
         "store",
         "artifacts",
@@ -68,6 +70,29 @@ def test_generation_runtime_composes_typed_semantic_services() -> None:
     assert isinstance(deps.lease, composition_ports.DefaultGenerationLease)
     assert isinstance(deps.credentials, composition_ports.DefaultGenerationCredentials)
     assert isinstance(deps.workflows, composition_ports.DefaultGenerationWorkflows)
+
+
+def test_route_constraints_use_the_injected_provider_runtime() -> None:
+    calls: list[str] = []
+
+    class Provider:
+        def endpoint_kind_for_engine(self, engine: str) -> str:
+            calls.append(engine)
+            return "responses"
+
+    state = SimpleNamespace(
+        action=GenerationAction.GENERATE,
+        mask_image_id=None,
+        raw_image_route="responses",
+        image_route="responses",
+        route_diagnostics=[],
+        services=SimpleNamespace(provider=Provider()),
+    )
+
+    runner._apply_route_constraints(state)
+
+    assert calls == ["responses"]
+    assert state.endpoint_kind == "responses"
 
 
 def test_runner_builds_explicit_generation_provider_context() -> None:
