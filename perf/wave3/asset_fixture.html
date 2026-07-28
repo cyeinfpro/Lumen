@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Lumen Wave 3 Asset Fixture</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #f4f4f5;
+        color: #18181b;
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid #d4d4d8;
+        background: #fff;
+      }
+
+      input {
+        width: min(420px, 100%);
+        padding: 7px 9px;
+      }
+
+      #viewport {
+        position: relative;
+        width: 100%;
+      }
+
+      .asset-tile {
+        overflow: hidden;
+        border: 1px solid #d4d4d8;
+        border-radius: 6px;
+        background: #fff;
+      }
+
+      .asset-tile img,
+      .asset-placeholder {
+        display: block;
+        width: 100%;
+        min-height: 96px;
+        background: #e4e4e7;
+        object-fit: cover;
+      }
+
+      .asset-tile span {
+        display: block;
+        padding: 6px 8px;
+      }
+
+      dialog {
+        width: min(900px, 90vw);
+        border: 0;
+        padding: 12px;
+      }
+
+      dialog img {
+        display: block;
+        width: 100%;
+        max-height: 75vh;
+        object-fit: contain;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <input
+        id="search"
+        aria-label="Search assets"
+        placeholder="Search server-side"
+      />
+    </header>
+    <main id="viewport"></main>
+    <dialog id="lightbox">
+      <button id="close-lightbox" type="button">Close</button>
+      <img id="lightbox-image" alt="Selected asset" />
+    </dialog>
+    <script type="module">
+      const params = new URLSearchParams(location.search);
+      const count = Number(params.get("count") || 1000);
+      const mode = params.get("mode") || "legacy";
+      const mobile = params.get("mobile") === "1";
+      const pageSize = 50;
+      const columns = mobile ? 2 : 5;
+      const rowHeight = mobile ? 190 : 220;
+      const overscanRows = mobile ? 8 : 12;
+      const queueLimit = mode === "target" ? 32 : Number.POSITIVE_INFINITY;
+      const activeLimit = 3;
+      const viewport = document.querySelector("#viewport");
+      const searchInput = document.querySelector("#search");
+      const lightbox = document.querySelector("#lightbox");
+      const lightboxImage = document.querySelector("#lightbox-image");
+      const closeLightbox = document.querySelector("#close-lightbox");
+      let assets = [];
+      let displayedAssets = [];
+      let renderScheduled = false;
+      let searchTimer = null;
+      let selectedAsset = null;
+      let activePrewarms = 0;
+      const prewarmQueue = [];
+      const prewarmByKey = new Map();
+      const failedThumbs = new Set();
+
+      const diagnostics = {
+        cancelledPrewarms: 0,
+        displayRequestsByReason: {
+          hover: 0,
+          open: 0,
+          neighbor: 0,
+        },
+        failedThumbStillInSrcSet: 0,
+        imageTimeouts: 0,
+        lowNetworkSkips: 0,
+        prewarmDrops: 0,
+        prewarmMaxActive: 0,
+        prewarmMaxQueueDepth: 0,
+        repeatedFailedThumbRequests: 0,
+        scenarioCounts: null,
+      };
+      const metrics = {
+        diagnostics,
+        firstInteractiveMs: null,
+        loadedPages: 1,
+        maxMountedTiles: 0,
+        mode,
+        search: {
+          loadedPagesBeforeSearch: null,
+          normalizedQuery: null,
+          requestCount: 0,
+          resultIds: [],
+        },
+      };
+      window.__wave3Metrics = metrics;
+
+      if ("PerformanceObserver" in window) {
+        try {
+          metrics.longTasks = [];
+          new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              metrics.longTasks.push(entry.duration);
+            }
+          }).observe({ entryTypes: ["longtask"] });
+        } catch {
+          metrics.longTasks = null;
+        }
+      }
+
+      function connectionIsWeak() {
+        const connection = navigator.connection;
+        return Boolean(
+          connection?.saveData ||
+            ["slow-2g", "2g", "3g"].includes(connection?.effectiveType),
+        );
+      }
+
+      function sourceFor(asset, kind, extra = "") {
+        return `/img/${asset.id}/${kind}${extra}`;
+      }
+
+      function candidateState(asset) {
+        const candidates = [];
+        if (asset.thumbReady && !failedThumbs.has(asset.id)) {
+          candidates.push({
+            kind: "thumb256",
+            src: sourceFor(
+              asset,
+              "thumb",
+              asset.scenario === "thumb_404" ? "?fail=1" : "",
+            ),
+            width: 256,
+          });
+        }
+        if (asset.previewReady) {
+          candidates.push({
+            kind: "preview1024",
+            src: sourceFor(asset, "preview"),
+            width: 1024,
+          });
+        }
+        return candidates;
+      }
+
+      function updateImageCandidates(image, asset) {
+        const candidates = candidateState(asset);
+        const originalCandidates =
+          mode === "legacy" && asset.scenario === "thumb_404"
+            ? [
+                {
+                  kind: "thumb256",
+                  src: sourceFor(asset, "thumb", "?fail=1"),
+                  width: 256,
+                },
+                ...candidates.filter((candidate) => candidate.kind !== "thumb256"),
+              ]
+            : candidates;
+        image.src = candidates[0]?.src || "";
+        image.srcset = originalCandidates
+          .map((candidate) => `${candidate.src} ${candidate.width}w`)
+          .join(", ");
+        image.sizes = "128px";
+        image.dataset.candidates = candidates
+          .map((candidate) => candidate.kind)
+          .join(",");
+      }
+
+      function createTile(asset) {
+        const tile = document.createElement("article");
+        tile.className = "asset-tile";
+        tile.dataset.assetId = asset.id;
+        tile.dataset.generationId = asset.id;
+        const candidates = candidateState(asset);
+        let image = null;
+        if (candidates.length > 0 || mode === "legacy") {
+          image = document.createElement("img");
+          image.alt = asset.prompt;
+          image.loading = "lazy";
+          image.decoding = "async";
+          if (candidates.length > 0) {
+            updateImageCandidates(image, asset);
+          } else {
+            image.loading = "eager";
+            image.src = `/api/images/${asset.id}/binary`;
+            image.srcset = image.src;
+          }
+          image.addEventListener("error", () => {
+            if (!image.currentSrc.includes("/thumb")) return;
+            failedThumbs.add(asset.id);
+            if (mode === "legacy") {
+              image.src = sourceFor(asset, "preview");
+              if (image.srcset.includes("/thumb")) {
+                diagnostics.failedThumbStillInSrcSet += 1;
+              }
+              window.setTimeout(() => {
+                image.srcset = "";
+                image.src = sourceFor(asset, "preview");
+              }, 0);
+            } else {
+              updateImageCandidates(image, asset);
+              if (image.srcset.includes("/thumb")) {
+                diagnostics.failedThumbStillInSrcSet += 1;
+              }
+            }
+          }, { once: true });
+          tile.append(image);
+        } else {
+          const placeholder = document.createElement("div");
+          placeholder.className = "asset-placeholder";
+          placeholder.dataset.pending = "true";
+          tile.append(placeholder);
+        }
+        const label = document.createElement("span");
+        label.textContent = asset.prompt;
+        tile.append(label);
+        tile.addEventListener("pointerenter", () => {
+          if (mode === "legacy") {
+            diagnostics.displayRequestsByReason.hover += 1;
+            enqueuePrewarm(asset, "display", "hover", "idle");
+            return;
+          }
+          if (connectionIsWeak()) {
+            diagnostics.lowNetworkSkips += 1;
+            return;
+          }
+          if (asset.previewReady) {
+            enqueuePrewarm(asset, "preview", "hover", "idle");
+          }
+        });
+        tile.addEventListener("pointerleave", () => {
+          cancelPrewarm(`${asset.id}:preview:hover`);
+          cancelPrewarm(`${asset.id}:display:hover`);
+        });
+        tile.addEventListener("click", () => openAsset(asset));
+        return tile;
+      }
+
+      function cancelPrewarm(key) {
+        const job = prewarmByKey.get(key);
+        if (!job || job.started) return false;
+        job.cancelled = true;
+        prewarmByKey.delete(key);
+        diagnostics.cancelledPrewarms += 1;
+        return true;
+      }
+
+      function enqueuePrewarm(asset, kind, reason, priority) {
+        const key = `${asset.id}:${kind}:${reason}`;
+        if (prewarmByKey.has(key)) return key;
+        const job = {
+          asset,
+          cancelled: false,
+          key,
+          kind,
+          priority,
+          reason,
+          started: false,
+        };
+        if (prewarmQueue.length >= queueLimit) {
+          const droppedIndex = prewarmQueue.findIndex(
+            (candidate) =>
+              !candidate.started &&
+              !candidate.cancelled &&
+              candidate.priority === "idle",
+          );
+          if (droppedIndex >= 0) {
+            const [dropped] = prewarmQueue.splice(droppedIndex, 1);
+            dropped.cancelled = true;
+            prewarmByKey.delete(dropped.key);
+            diagnostics.prewarmDrops += 1;
+          } else {
+            diagnostics.prewarmDrops += 1;
+            return null;
+          }
+        }
+        prewarmQueue.push(job);
+        prewarmByKey.set(key, job);
+        diagnostics.prewarmMaxQueueDepth = Math.max(
+          diagnostics.prewarmMaxQueueDepth,
+          prewarmQueue.filter((candidate) => !candidate.cancelled).length,
+        );
+        drainPrewarmQueue();
+        return key;
+      }
+
+      function drainPrewarmQueue() {
+        while (activePrewarms < activeLimit) {
+          const job = prewarmQueue.shift();
+          if (!job) return;
+          if (job.cancelled) continue;
+          job.started = true;
+          activePrewarms += 1;
+          diagnostics.prewarmMaxActive = Math.max(
+            diagnostics.prewarmMaxActive,
+            activePrewarms,
+          );
+          const image = new Image();
+          let settled = false;
+          const timeout = window.setTimeout(() => {
+            diagnostics.imageTimeouts += 1;
+            finish();
+          }, 180);
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeout);
+            image.onload = null;
+            image.onerror = null;
+            image.src = "";
+            activePrewarms -= 1;
+            prewarmByKey.delete(job.key);
+            drainPrewarmQueue();
+          };
+          image.onload = finish;
+          image.onerror = finish;
+          const delay = job.asset.index % 97 === 0 ? "?delay=400" : "";
+          image.src = sourceFor(job.asset, job.kind, delay);
+        }
+      }
+
+      function tilePosition(index) {
+        const row = Math.floor(index / columns);
+        const column = index % columns;
+        return {
+          left: `calc(${(column * 100) / columns}% + 6px)`,
+          top: `${row * rowHeight + 8}px`,
+          width: `calc(${100 / columns}% - 12px)`,
+        };
+      }
+
+      function renderLegacy() {
+        const fragment = document.createDocumentFragment();
+        viewport.replaceChildren();
+        viewport.style.display = "grid";
+        viewport.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+        viewport.style.gap = "8px";
+        viewport.style.padding = "8px";
+        for (const asset of displayedAssets) fragment.append(createTile(asset));
+        viewport.append(fragment);
+        metrics.maxMountedTiles = Math.max(
+          metrics.maxMountedTiles,
+          displayedAssets.length,
+        );
+      }
+
+      function renderVirtual() {
+        renderScheduled = false;
+        const viewportTop = window.scrollY;
+        const viewportBottom = viewportTop + window.innerHeight;
+        const firstVisibleRow = Math.max(
+          0,
+          Math.floor(viewportTop / rowHeight) - overscanRows,
+        );
+        const lastVisibleRow = Math.min(
+          Math.ceil(displayedAssets.length / columns),
+          Math.ceil(viewportBottom / rowHeight) + overscanRows,
+        );
+        const start = firstVisibleRow * columns;
+        const end = Math.min(displayedAssets.length, lastVisibleRow * columns);
+        viewport.style.display = "block";
+        viewport.style.height = `${Math.ceil(displayedAssets.length / columns) * rowHeight}px`;
+        const fragment = document.createDocumentFragment();
+        for (let index = start; index < end; index += 1) {
+          const tile = createTile(displayedAssets[index]);
+          Object.assign(tile.style, {
+            position: "absolute",
+            ...tilePosition(index),
+          });
+          fragment.append(tile);
+        }
+        viewport.replaceChildren(fragment);
+        metrics.maxMountedTiles = Math.max(
+          metrics.maxMountedTiles,
+          end - start,
+        );
+      }
+
+      function scheduleRender() {
+        if (mode === "legacy") {
+          renderLegacy();
+          return;
+        }
+        if (renderScheduled) return;
+        renderScheduled = true;
+        requestAnimationFrame(renderVirtual);
+      }
+
+      async function runSearch(rawQuery) {
+        const query = String(rawQuery || "").trim().toLowerCase();
+        metrics.search.loadedPagesBeforeSearch = metrics.loadedPages;
+        metrics.search.normalizedQuery = query || null;
+        metrics.search.requestCount += 1;
+        if (mode === "legacy") {
+          displayedAssets = assets.filter((asset) =>
+            asset.prompt.toLowerCase().includes(query),
+          );
+          metrics.search.resultIds = displayedAssets.map((item) => item.id);
+          window.scrollTo(0, 0);
+          scheduleRender();
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          return metrics.search.resultIds;
+        }
+        const response = await fetch(
+          `/api/generations/feed?q=${encodeURIComponent(query)}&page_size=${pageSize}`,
+        );
+        const payload = await response.json();
+        displayedAssets = payload.items;
+        metrics.search.resultIds = payload.items.map((item) => item.id);
+        window.scrollTo(0, 0);
+        scheduleRender();
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        return metrics.search.resultIds;
+      }
+
+      function openAsset(asset) {
+        selectedAsset = asset;
+        diagnostics.displayRequestsByReason.open += 1;
+        lightboxImage.src = asset.displayReady
+          ? sourceFor(asset, "display")
+          : sourceFor(asset, "preview");
+        lightbox.showModal();
+        enqueuePrewarm(asset, "display", "open", "open");
+      }
+
+      closeLightbox.addEventListener("click", () => {
+        selectedAsset = null;
+        lightbox.close();
+        lightboxImage.src = "";
+      });
+
+      searchInput.addEventListener("input", () => {
+        window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => runSearch(searchInput.value), 300);
+      });
+
+      window.addEventListener("scroll", scheduleRender, { passive: true });
+
+      window.__wave3Actions = {
+        async closeLightbox() {
+          if (lightbox.open) closeLightbox.click();
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        },
+        async openVisibleTile() {
+          const tile = document.querySelector(".asset-tile");
+          tile?.click();
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        },
+        async search(query) {
+          searchInput.value = query;
+          return runSearch(query);
+        },
+        async stressPrewarm(limit = 500) {
+          const candidates = assets.slice(0, limit);
+          for (const asset of candidates) {
+            if (mode === "target" && connectionIsWeak()) {
+              diagnostics.lowNetworkSkips += 1;
+              continue;
+            }
+            if (mode === "legacy") {
+              diagnostics.displayRequestsByReason.hover += 1;
+            }
+            enqueuePrewarm(
+              asset,
+              mode === "legacy" ? "display" : "preview",
+              "hover",
+              "idle",
+            );
+          }
+          for (const asset of candidates) {
+            cancelPrewarm(`${asset.id}:preview:hover`);
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 260));
+        },
+      };
+
+      const initial = await fetch(`/fixture/assets?count=${count}`);
+      const payload = await initial.json();
+      assets = payload.items;
+      displayedAssets = assets;
+      metrics.loadedPages = mode === "legacy" ? Math.ceil(count / pageSize) : 1;
+      diagnostics.scenarioCounts = payload.scenario_counts;
+      scheduleRender();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      metrics.firstInteractiveMs = performance.now();
+      performance.mark("wave3:first-interactive");
+      document.documentElement.dataset.ready = "true";
+    </script>
+  </body>
+</html>
