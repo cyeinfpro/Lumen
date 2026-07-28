@@ -40,7 +40,7 @@ import type {
   UserMessage,
 } from "@/lib/types";
 import { cancelTask, imageVariantUrl } from "@/lib/apiClient";
-import { prewarmImage } from "@/lib/imagePreload";
+import { prewarmImage } from "@/features/assets";
 import { aspectRatioToCss } from "@/lib/sizing";
 import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import type { LightboxItem } from "@/components/ui/lightbox/types";

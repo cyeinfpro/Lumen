@@ -12,7 +12,7 @@ function source(path) {
 }
 
 await import("../src/store/chat/types.test.ts");
-await import("../src/store/chat/generationSlice.test.ts");
+await import("../src/features/generation/model/generationState.test.ts");
 await import("../src/store/chat/history.test.ts");
 await import("../src/store/chat/composerSlice.test.ts");
 await import("../src/store/chat/taskRecovery.test.ts");
@@ -125,20 +125,24 @@ test("upgrade and inpaint lazy UI keep visible recovery states", () => {
   match(lazyInpaint, /z-\[var\(--z-dialog\)\] bg-black\/60/);
 });
 
-test("image prewarm cache is bounded and concurrency-limited", () => {
-  const preload = source("src/lib/imagePreload.ts");
+test("asset prewarm scheduler is bounded and concurrency-limited", () => {
+  const preload = source(
+    "src/features/assets/model/prewarmScheduler.ts",
+  );
 
-  match(preload, /IMAGE_CACHE_LIMIT = 384/);
-  match(preload, /VIDEO_CACHE_LIMIT = 96/);
-  match(preload, /IMAGE_PREWARM_CONCURRENCY = 3/);
-  match(preload, /VIDEO_PREWARM_CONCURRENCY = 1/);
-  match(preload, /entry\.status === "fulfilled"/);
-  match(preload, /map\.delete\(victim\)/);
+  match(preload, /DEFAULT_MAX_QUEUE = 32/);
+  match(preload, /DEFAULT_IMAGE_CONCURRENCY = 3/);
+  match(preload, /DEFAULT_VIDEO_CONCURRENCY = 1/);
+  match(preload, /DEFAULT_CACHE_LIMIT = 384/);
+  match(preload, /private readonly fulfilled = new Map/);
+  match(preload, /while \(this\.fulfilled\.size > this\.cacheLimit\)/);
 });
 
 test("SSE replay recovery is leader-owned and singleflight", () => {
-  const runtime = source("src/lib/sse/runtime.ts");
-  const coordinator = source("src/lib/sse/replayCoordinator.ts");
+  const runtime = source("src/features/realtime/model/runtime.ts");
+  const coordinator = source(
+    "src/features/realtime/model/replayCoordinator.ts",
+  );
 
   match(runtime, /if \(this\.leader\) void this\.recover\(effect\.reason\)/);
   match(runtime, /type: "recovery_complete"/);
@@ -187,7 +191,9 @@ test("chat reconciliation preserves terminal states and retry drafts", () => {
   const runtime = source("src/store/chat/runtime.ts");
   const generationActions = source("src/store/chat/generationActions.ts");
   const composer = source("src/store/chat/composerSlice.ts");
-  const generationSlice = source("src/store/chat/generationSlice.ts");
+  const generationSlice = source(
+    "src/features/generation/model/generationState.ts",
+  );
   const history = source("src/store/chat/history.ts");
   const taskRecovery = source("src/store/chat/taskRecovery.ts");
 
@@ -236,7 +242,9 @@ test("chat store delegates composer, task recovery, and pure reducer boundaries"
     "src/store/chat/completionStreamPatches.ts",
   );
   const eviction = source("src/store/chat/base64Eviction.ts");
-  const generationSlice = source("src/store/chat/generationSlice.ts");
+  const generationSlice = source(
+    "src/features/generation/model/generationState.ts",
+  );
   const history = source("src/store/chat/history.ts");
   const taskRecovery = source("src/store/chat/taskRecovery.ts");
   const types = source("src/store/chat/types.ts");
@@ -250,7 +258,7 @@ test("chat store delegates composer, task recovery, and pure reducer boundaries"
   match(store, /from "\.\/chat\/messageReconciliation"/);
   match(runtime, /from "\.\/completionStreamPatches"/);
   match(runtime, /from "\.\/base64Eviction"/);
-  match(store, /from "\.\/chat\/generationSlice"/);
+  match(store, /from "@\/features\/generation"/);
   match(store, /from "\.\/chat\/history"/);
   match(store, /from "\.\/chat\/taskRecovery"/);
   match(store, /from "\.\/chat\/types"/);
@@ -341,7 +349,9 @@ test("core async actions, runtime registries, SSE handler, and singleton remain 
   const generationActions = source("src/store/chat/generationActions.ts");
   const runtime = source("src/store/chat/runtime.ts");
   const composer = source("src/store/chat/composerSlice.ts");
-  const generationSlice = source("src/store/chat/generationSlice.ts");
+  const generationSlice = source(
+    "src/features/generation/model/generationState.ts",
+  );
   const history = source("src/store/chat/history.ts");
   const taskRecovery = source("src/store/chat/taskRecovery.ts");
 

@@ -10,13 +10,13 @@ import dynamic from "next/dynamic";
 
 const MobileStream = dynamic(
   () =>
-    import("@/components/ui/shell/MobileStream").then((mod) => mod.MobileStream),
+    import("@/features/assets").then((mod) => mod.MobileStream),
   { ssr: false, loading: () => <ShellSkeleton /> },
 );
 
 const DesktopStream = dynamic(
   () =>
-    import("@/components/ui/shell/DesktopStream").then((mod) => mod.DesktopStream),
+    import("@/features/assets").then((mod) => mod.DesktopStream),
   { ssr: false, loading: () => <ShellSkeleton /> },
 );
 

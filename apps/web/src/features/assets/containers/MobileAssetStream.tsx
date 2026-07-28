@@ -1,0 +1,489 @@
+"use client";
+
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { useReducedMotion } from "framer-motion";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { ArrowUp, Loader2 } from "lucide-react";
+import { MobileTabBar } from "@/components/ui/shell";
+import { PullToRefresh, pushMobileToast } from "@/components/ui/primitives/mobile";
+import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
+import {
+  flattenFeed,
+  feedTotal,
+  useDebouncedStreamSearch,
+  useStreamFeedQuery,
+  type StreamFeedFilters,
+} from "../api/queries";
+import { useCreateMultiShareMutation } from "@/lib/queries";
+import {
+  FilterBar,
+} from "../ui/FilterBar";
+import {
+  StreamErrorState,
+  StreamLoadingState,
+  StreamNeverState,
+  StreamNoResultsState,
+} from "../ui/StreamFeedback";
+import { StreamOverview } from "../ui/StreamOverview";
+import { StreamSearchBar } from "../ui/StreamSearchBar";
+import { StreamTopBar } from "../ui/StreamTopBar";
+import { GenerationMasonry } from "../ui/VirtualMasonry";
+import { cn } from "@/lib/utils";
+import { copy } from "@/lib/copy";
+import { shareOrCopyLink } from "@/lib/shareLink";
+
+function parseFilters(sp: URLSearchParams): StreamFeedFilters {
+  const ratio = sp.get("ratio") ?? undefined;
+  const has_ref = sp.get("has_ref") === "1";
+  const fast = sp.get("fast") === "1";
+  return { ratio, has_ref, fast };
+}
+
+function filtersToQueryString(f: StreamFeedFilters): string {
+  const p = new URLSearchParams();
+  if (f.ratio) p.set("ratio", f.ratio);
+  if (f.has_ref) p.set("has_ref", "1");
+  if (f.fast) p.set("fast", "1");
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+function hasAnyFilter(f: StreamFeedFilters): boolean {
+  return Boolean(f.ratio || f.has_ref || f.fast);
+}
+
+function reportShareResult(
+  result: Awaited<ReturnType<typeof shareOrCopyLink>>,
+  onShared: () => void,
+) {
+  if (result === "failed") {
+    pushMobileToast("链接复制失败", "danger");
+  } else if (result !== "cancelled") {
+    pushMobileToast(
+      result === "shared" ? "已打开分享菜单" : "链接已复制",
+      "success",
+    );
+    onShared();
+  }
+}
+
+function hasActiveSelection(selectionMode: boolean, selectedCount: number): boolean {
+  return selectionMode || selectedCount > 0;
+}
+
+function shouldShowOverview(
+  isLoading: boolean,
+  hasError: boolean,
+  itemCount: number,
+  hasFilters: boolean,
+  query: string,
+): boolean {
+  return !isLoading && !hasError && (itemCount > 0 || hasFilters || Boolean(query.trim()));
+}
+
+function MobileStreamFeedState({
+  hasError,
+  errorMessage,
+  onRetry,
+  isLoading,
+  isEmptyAll,
+  hasFilters,
+  isEmptyFiltered,
+  searchValue,
+  onClear,
+  children,
+}: {
+  hasError: boolean;
+  errorMessage?: string;
+  onRetry: () => void;
+  isLoading: boolean;
+  isEmptyAll: boolean;
+  hasFilters: boolean;
+  isEmptyFiltered: boolean;
+  searchValue: string;
+  onClear: () => void;
+  children: ReactNode;
+}) {
+  if (hasError) {
+    return (
+      <div role="alert" aria-live="assertive">
+        <StreamErrorState message={errorMessage} onRetry={onRetry} />
+      </div>
+    );
+  }
+  if (isLoading) return <StreamLoadingState />;
+  if (isEmptyAll) {
+    return hasFilters ? (
+      <StreamNoResultsState onClear={onClear} />
+    ) : (
+      <StreamNeverState />
+    );
+  }
+  if (isEmptyFiltered) {
+    return <StreamNoResultsState searchValue={searchValue} onClear={onClear} />;
+  }
+  return children;
+}
+
+export function MobileStream() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const reduceMotion = useReducedMotion();
+
+  const queryString = searchParams.toString();
+  const queryFilters = useMemo(
+    () => parseFilters(new URLSearchParams(queryString)),
+    [queryString],
+  );
+  const highlightId = useMemo(
+    () => new URLSearchParams(queryString).get("highlight")?.trim() ?? "",
+    [queryString],
+  );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const deferredQ = useDeferredValue(q);
+  const debouncedQ = useDebouncedStreamSearch(q);
+  const filters = useMemo(
+    () => ({ ...queryFilters, q: debouncedQ }),
+    [debouncedQ, queryFilters],
+  );
+  const [filterOpen, setFilterOpen] = useState(() => hasAnyFilter(queryFilters));
+
+  const applyFilters = useCallback(
+    (next: StreamFeedFilters) => {
+      const qs = filtersToQueryString(next);
+      router.replace(`${pathname || "/stream"}${qs}`, { scroll: false });
+    },
+    [pathname, router],
+  );
+
+  const clearFilters = useCallback(() => {
+    applyFilters({});
+  }, [applyFilters]);
+
+  const query = useStreamFeedQuery(filters);
+  const hasNextPage = query.hasNextPage;
+  const isFetchingNextPage = query.isFetchingNextPage;
+  const fetchNextPage = query.fetchNextPage;
+  const items = useMemo(() => flattenFeed(query.data), [query.data]);
+  const total = feedTotal(query.data);
+
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const createMultiShareMutation = useCreateMultiShareMutation();
+
+  const clearAllControls = useCallback(() => {
+    setQ("");
+    setSearchOpen(false);
+    setFilterOpen(false);
+    applyFilters({});
+  }, [applyFilters]);
+
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
+  const [showScrollTop, setShowScrollTop] = useState(false);
+  const compactRef = useRef(false);
+  const showScrollTopRef = useRef(false);
+  const scrollRafRef = useRef<number | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const fetchingNextRef = useRef(false);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (scrollRafRef.current !== null) return;
+      scrollRafRef.current = window.requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        const top = el.scrollTop;
+        const nextCompact = top > 60;
+        const nextShowScrollTop = top > 400;
+        if (nextCompact !== compactRef.current) {
+          compactRef.current = nextCompact;
+          setCompact(nextCompact);
+        }
+        if (nextShowScrollTop !== showScrollTopRef.current) {
+          showScrollTopRef.current = nextShowScrollTop;
+          setShowScrollTop(nextShowScrollTop);
+        }
+      });
+    };
+    onScroll();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const sent = sentinelRef.current;
+    const root = scrollRef.current;
+    if (!sent || !root) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (
+            e.isIntersecting &&
+            hasNextPage &&
+            !isFetchingNextPage &&
+            !fetchingNextRef.current
+          ) {
+            fetchingNextRef.current = true;
+            void fetchNextPage().finally(() => {
+              fetchingNextRef.current = false;
+            });
+          }
+        }
+      },
+      { root, rootMargin: "0px 0px 800px 0px", threshold: 0 },
+    );
+    io.observe(sent);
+    return () => io.disconnect();
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+
+  const filteredItems = useMemo(() => {
+    const query = deferredQ.trim().toLowerCase();
+    if (!query) return items;
+    return items.filter((it) => it.prompt.toLowerCase().includes(query));
+  }, [items, deferredQ]);
+
+  const selectedImageIds = useMemo(() => {
+    if (selectedIds.size === 0) return [];
+    return filteredItems
+      .map((it) => it.image.id)
+      .filter((imageId) => selectedIds.has(imageId));
+  }, [filteredItems, selectedIds]);
+
+  const selectionActive = hasActiveSelection(
+    selectionMode,
+    selectedImageIds.length,
+  );
+  const toggleSelectedImage = useCallback((imageId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(imageId)) next.delete(imageId);
+      else next.add(imageId);
+      return next;
+    });
+  }, []);
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setSelectionMode(false);
+  }, []);
+  const toggleSelectionMode = useCallback(() => {
+    setSelectionMode((value) => !value);
+  }, []);
+  const shareSelectedImages = useCallback(async () => {
+    if (selectedImageIds.length === 0 || createMultiShareMutation.isPending) return;
+    try {
+      const share = await createMultiShareMutation.mutateAsync({
+        imageIds: selectedImageIds,
+      });
+      const result = await shareOrCopyLink(share.url, "Lumen 图片分享");
+      reportShareResult(result, clearSelection);
+    } catch {
+      pushMobileToast("分享链接生成失败", "danger");
+    }
+  }, [clearSelection, createMultiShareMutation, selectedImageIds]);
+
+  const promptCount = useMemo(() => {
+    const s = new Set<string>();
+    for (const it of items) s.add(it.prompt);
+    return s.size;
+  }, [items]);
+
+  const isLoading = query.isPending;
+  const isEmptyAll = !isLoading && items.length === 0;
+  const isEmptyFiltered =
+    !isLoading && items.length > 0 && filteredItems.length === 0;
+  const hasStructuredFilters = hasAnyFilter(filters);
+  const hasActiveControls = hasStructuredFilters || Boolean(q.trim());
+  const showOverview = shouldShowOverview(
+    isLoading,
+    query.isError,
+    items.length,
+    hasActiveControls,
+    q,
+  );
+
+  const onToggleSearch = useCallback(() => {
+    setSearchOpen((v) => {
+      const next = !v;
+      if (!next) setQ("");
+      return next;
+    });
+  }, []);
+  const onToggleFilter = useCallback(() => setFilterOpen((v) => !v), []);
+  const onToggleReferenceFilter = useCallback(() => {
+    applyFilters({ ...filters, has_ref: !filters.has_ref });
+  }, [applyFilters, filters]);
+  const onToggleFastFilter = useCallback(() => {
+    applyFilters({ ...filters, fast: !filters.fast });
+  }, [applyFilters, filters]);
+
+  const scrollToTop = useCallback(() => {
+    scrollRef.current?.scrollTo({
+      top: 0,
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, [reduceMotion]);
+
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.dataset.appScroll = "";
+    return () => {
+      delete scroller.dataset.appScroll;
+    };
+  }, []);
+
+  return (
+    <div
+      data-app-viewport
+      className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
+    >
+      <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
+      <StreamTopBar
+        compact={compact}
+        total={total}
+        promptCount={promptCount}
+        searchActive={searchOpen}
+        filterActive={filterOpen || hasStructuredFilters}
+        onToggleSearch={onToggleSearch}
+        onToggleFilter={onToggleFilter}
+      />
+
+      <div
+        className="min-h-0 flex-1 overflow-hidden"
+        style={{
+          paddingBottom: "var(--mobile-tabbar-height)",
+        }}
+      >
+        <PullToRefresh
+          containerRef={scrollRef}
+          onRefresh={async () => {
+            await query.refetch();
+          }}
+          className="h-full"
+        >
+          <div className="mx-auto max-w-[640px] px-1">
+            <StreamSearchBar
+              open={searchOpen}
+              value={q}
+              onChange={setQ}
+              resultCount={filteredItems.length}
+              loadedCount={items.length}
+              onClose={() => {
+                setSearchOpen(false);
+                setQ("");
+              }}
+            />
+            <FilterBar
+              open={filterOpen || hasStructuredFilters}
+              filters={filters}
+              onChange={(next) => applyFilters(next)}
+              onClear={clearFilters}
+            />
+
+            {showOverview && (
+              <StreamOverview
+                total={total}
+                loaded={items.length}
+                visible={filteredItems.length}
+                promptCount={promptCount}
+                filters={filters}
+                searchValue={deferredQ}
+                refreshing={query.isRefetching}
+                onRefresh={() => {
+                  void query.refetch();
+                }}
+                onClearFilters={clearAllControls}
+                onToggleReferenceFilter={onToggleReferenceFilter}
+                onToggleFastFilter={onToggleFastFilter}
+                selectionMode={selectionActive}
+                selectedCount={selectedImageIds.length}
+                sharingSelected={createMultiShareMutation.isPending}
+                onToggleSelectionMode={toggleSelectionMode}
+                onClearSelection={clearSelection}
+                onShareSelected={shareSelectedImages}
+              />
+            )}
+
+            <MobileStreamFeedState
+              hasError={query.isError}
+              errorMessage={query.error?.message}
+              onRetry={() => {
+                void query.refetch();
+              }}
+              isLoading={isLoading}
+              isEmptyAll={isEmptyAll}
+              hasFilters={hasActiveControls}
+              isEmptyFiltered={isEmptyFiltered}
+              searchValue={q}
+              onClear={clearAllControls}
+            >
+              <GenerationMasonry
+                items={filteredItems}
+                feed={filteredItems}
+                selectionMode={selectionActive}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelectedImage}
+                highlightId={highlightId}
+              />
+            </MobileStreamFeedState>
+
+            <div ref={sentinelRef} aria-hidden className="h-8" />
+            {isFetchingNextPage && (
+              <div className="flex items-center justify-center gap-2.5 py-5 text-[var(--fg-2)]">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="type-body-sm">{copy.state.loading}</span>
+              </div>
+            )}
+          </div>
+        </PullToRefresh>
+      </div>
+
+      <div
+        className={cn(
+          "fixed right-4 z-30 h-11 w-11 transition-[opacity,transform] duration-200",
+          showScrollTop
+            ? "pointer-events-auto translate-y-0 opacity-100"
+            : "pointer-events-none translate-y-3 opacity-0",
+        )}
+        style={{ bottom: "calc(var(--mobile-tabbar-height) + var(--space-4))" }}
+      >
+        <Pressable
+          size="default"
+          minHit={true}
+          pressScale="tight"
+          haptic="light"
+          aria-label="回到顶部"
+          onPress={scrollToTop}
+          className={cn(
+            "h-11 w-11 rounded-full",
+            "border border-[var(--border-subtle)] bg-[var(--bg-1)]/85 text-[var(--fg-1)] shadow-[var(--shadow-2)] backdrop-blur-xl",
+            "hover:text-[var(--fg-0)]",
+          )}
+        >
+          <ArrowUp className="h-[18px] w-[18px]" />
+        </Pressable>
+      </div>
+
+      <MobileTabBar />
+    </div>
+  );
+}

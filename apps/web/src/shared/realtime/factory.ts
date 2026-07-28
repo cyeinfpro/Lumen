@@ -1,11 +1,11 @@
 import {
   BrowserEventSourceTransport,
   type EventStreamTransport,
-} from "@/lib/sse/eventSourceTransport";
+} from "@/features/realtime/api/eventSourceTransport";
 import {
   RealtimeRuntime,
   type RealtimeRuntimeOptions,
-} from "@/lib/sse/runtime";
+} from "@/features/realtime/model/runtime";
 
 export type CreateRealtimeRuntimeOptions = Omit<
   RealtimeRuntimeOptions,

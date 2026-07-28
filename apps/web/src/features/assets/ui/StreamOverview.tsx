@@ -1,0 +1,250 @@
+"use client";
+
+import {
+  Eraser,
+  Gauge,
+  CheckSquare,
+  Image as ImageIcon,
+  Layers3,
+  RefreshCw,
+  Search,
+  Share2,
+  WandSparkles,
+  X,
+} from "lucide-react";
+import { useRouter } from "next/navigation";
+
+import type { StreamFeedFilters } from "../model/contracts";
+import { cn } from "@/lib/utils";
+
+export interface StreamOverviewProps {
+  total: number;
+  loaded: number;
+  visible: number;
+  promptCount: number;
+  filters: StreamFeedFilters;
+  searchValue: string;
+  refreshing?: boolean;
+  selectionMode?: boolean;
+  selectedCount?: number;
+  sharingSelected?: boolean;
+  onRefresh: () => void;
+  onClearFilters: () => void;
+  onToggleReferenceFilter: () => void;
+  onToggleFastFilter: () => void;
+  onToggleSelectionMode?: () => void;
+  onClearSelection?: () => void;
+  onShareSelected?: () => void;
+}
+
+function hasStreamOverviewFilters(filters: StreamFeedFilters): boolean {
+  return Boolean(filters.ratio || filters.has_ref || filters.fast);
+}
+
+function SelectionControls({
+  selectionMode,
+  selectedCount,
+  sharingSelected,
+  onToggleSelectionMode,
+  onClearSelection,
+  onShareSelected,
+}: Pick<
+  StreamOverviewProps,
+  | "selectionMode"
+  | "selectedCount"
+  | "sharingSelected"
+  | "onToggleSelectionMode"
+  | "onClearSelection"
+  | "onShareSelected"
+>) {
+  if (selectedCount && selectedCount > 0) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={onShareSelected}
+          disabled={sharingSelected}
+          className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-3 text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] disabled:opacity-60 focus-visible:outline-none md:h-9 md:min-h-0"
+        >
+          <Share2 className="h-3 w-3" />
+          {sharingSelected ? "分享中" : `分享 ${selectedCount} 张`}
+        </button>
+        <button
+          type="button"
+          onClick={onClearSelection}
+          aria-label="取消选择"
+          className="inline-flex min-h-11 min-w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </>
+    );
+  }
+  if (!onToggleSelectionMode) return null;
+  return (
+    <button
+      type="button"
+      onClick={onToggleSelectionMode}
+      aria-pressed={selectionMode}
+      className={cn(
+        "type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 transition-colors focus-visible:outline-none md:h-9 md:min-h-0",
+        selectionMode
+          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+          : "border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
+      )}
+    >
+      <CheckSquare className="h-3 w-3" />
+      多选
+    </button>
+  );
+}
+
+function FilterChips({
+  filters,
+  searchValue,
+  onToggleReferenceFilter,
+  onToggleFastFilter,
+}: Pick<
+  StreamOverviewProps,
+  | "filters"
+  | "searchValue"
+  | "onToggleReferenceFilter"
+  | "onToggleFastFilter"
+>) {
+  const hasSearch = searchValue.trim().length > 0;
+  return (
+    <>
+      {filters.ratio && (
+        <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+          {filters.ratio}
+        </span>
+      )}
+      {filters.has_ref && (
+        <button
+          type="button"
+          onClick={onToggleReferenceFilter}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
+        >
+          <ImageIcon className="h-3 w-3" />
+          参考图
+        </button>
+      )}
+      {filters.fast && (
+        <button
+          type="button"
+          onClick={onToggleFastFilter}
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
+        >
+          <Gauge className="h-3 w-3" />
+          快速
+        </button>
+      )}
+      {hasSearch && (
+        <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+          <Search className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate">{searchValue.trim()}</span>
+        </span>
+      )}
+    </>
+  );
+}
+
+export function StreamOverview({
+  total,
+  loaded,
+  visible,
+  promptCount,
+  filters,
+  searchValue,
+  refreshing = false,
+  selectionMode = false,
+  selectedCount = 0,
+  sharingSelected = false,
+  onRefresh,
+  onClearFilters,
+  onToggleReferenceFilter,
+  onToggleFastFilter,
+  onToggleSelectionMode,
+  onClearSelection,
+  onShareSelected,
+}: StreamOverviewProps) {
+  const router = useRouter();
+  const hasFilter = hasStreamOverviewFilters(filters);
+  const hasSearch = searchValue.trim().length > 0;
+  const hasControls = hasFilter || hasSearch;
+  const visibleLabel = hasControls ? `${visible}/${loaded}` : `${loaded}`;
+
+  return (
+    <section
+      aria-label="图库概览"
+      className="toolbar-shell adaptive-material sticky top-0 z-20 bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
+    >
+      <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
+        <div className="type-caption flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="inline-flex items-center gap-1.5 text-[var(--fg-1)]">
+            <ImageIcon className="h-3.5 w-3.5 text-[var(--amber-300)]" />
+            <span className="tabular-nums">{visibleLabel} 张</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
+            <Layers3 className="h-3.5 w-3.5" />
+            <span className="tabular-nums">{promptCount} 提示词</span>
+          </span>
+          {total > loaded && (
+            <span className="text-[11px] tabular-nums text-[var(--fg-2)]">
+              共 {total}，继续下滑加载
+            </span>
+          )}
+        </div>
+
+        <div className="flex min-w-0 items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar min-[400px]:shrink-0 min-[400px]:pb-0">
+          <SelectionControls
+            selectionMode={selectionMode}
+            selectedCount={selectedCount}
+            sharingSelected={sharingSelected}
+            onToggleSelectionMode={onToggleSelectionMode}
+            onClearSelection={onClearSelection}
+            onShareSelected={onShareSelected}
+          />
+          {hasControls && (
+            <button
+              type="button"
+              onClick={onClearFilters}
+              className="type-control inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-2.5 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-9 md:min-h-0"
+            >
+              <Eraser className="h-3 w-3" />
+              清除
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            aria-label="刷新"
+            className="inline-flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] disabled:opacity-50 focus-visible:outline-none md:h-9 md:w-9 md:min-h-0 md:min-w-0"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+          </button>
+          <button
+            type="button"
+            onClick={() => router.push("/")}
+            className="type-control inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)] focus-visible:outline-none md:h-9 md:min-h-0"
+          >
+            <WandSparkles className="h-3.5 w-3.5" />
+            创作
+          </button>
+        </div>
+      </div>
+
+      {hasControls && (
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          <FilterChips
+            filters={filters}
+            searchValue={searchValue}
+            onToggleReferenceFilter={onToggleReferenceFilter}
+            onToggleFastFilter={onToggleFastFilter}
+          />
+        </div>
+      )}
+    </section>
+  );
+}

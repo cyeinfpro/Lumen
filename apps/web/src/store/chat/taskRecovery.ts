@@ -10,14 +10,12 @@ import type { AssistantMessage, Generation } from "../../lib/types";
 import {
   coerceGenerationStage,
   coerceGenerationStatus,
-} from "../chatGenerationEvents";
-import {
   generationExplainabilityFromBackend,
   generationTaskMetaFromBackend,
   isInflightGeneration,
   mergeUnknownActiveGenerations,
   type GenerationExplainabilityMeta,
-} from "./generationSlice";
+} from "@/features/generation";
 import {
   applyCompletionSnapshot,
   isTerminalTaskStatus,

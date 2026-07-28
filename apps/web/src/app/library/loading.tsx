@@ -1,4 +1,4 @@
-import { StreamLoadingState } from "@/components/ui/stream";
+import { StreamLoadingState } from "@/features/assets";
 
 export default function Loading() {
   return (

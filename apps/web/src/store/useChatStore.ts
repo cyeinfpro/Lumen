@@ -16,8 +16,8 @@ import {
 } from "./chat/composerSlice";
 import { applyCompletionEventToMessage } from "./chat/completionEvents";
 import { createConversationActions } from "./chat/conversationActions";
+import { assistantHasGeneration } from "@/features/generation";
 import { createGenerationActions } from "./chat/generationActions";
-import { assistantHasGeneration } from "./chat/generationSlice";
 import { buildMessageListState } from "./chat/history";
 import { normalizeImageParams } from "./chat/imageParams";
 import { adaptBackendAssistantMessage } from "./chat/messageAdapters";
@@ -60,7 +60,7 @@ import type {
 // payload decoding from "./chat/payload", adapters from "./chat/messageAdapters",
 // completion reducers from "./chat/completionEvents", reconciliation from
 // "./chat/messageReconciliation", generation reducers from
-// "./chat/generationSlice", and history materialization from "./chat/history".
+// generation model, and history materialization from "./chat/history".
 // The send reconciliation contract still calls:
 // rememberCompletionMessage(completionId, realAssistant.id);
 

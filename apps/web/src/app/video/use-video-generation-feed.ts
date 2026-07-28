@@ -14,7 +14,7 @@ import {
 } from "@tanstack/react-query";
 
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { useSSE } from "@/lib/useSSE";
+import { useSSE } from "@/features/realtime";
 import {
   isTerminalVideoEvent,
   mergeVideoGenerationEvent,
