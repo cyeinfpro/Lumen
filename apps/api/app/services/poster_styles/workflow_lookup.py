@@ -23,7 +23,6 @@ from . import storage
 from .sync import sync_lease_owner
 
 _INDEX_MAX_BYTES = 32 * 1024 * 1024
-_LOCAL_BOOTSTRAP_LOCK = asyncio.Lock()
 
 
 def _index_path() -> Path:
@@ -149,8 +148,7 @@ async def bootstrap_local_presets_if_empty() -> None:
     items = await asyncio.to_thread(_local_preset_entries)
     if not items:
         return
-    async with _LOCAL_BOOTSTRAP_LOCK:
-        await asyncio.to_thread(_publish_local_presets_if_empty, items)
+    await asyncio.to_thread(_publish_local_presets_if_empty, items)
 
 
 async def find_preset_item(

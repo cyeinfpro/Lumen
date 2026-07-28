@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
-from fastapi import Request
+from fastapi import FastAPI, Request
 
 from app.routes import admin_backups, admin_release, admin_update
 from app.services import update_check
@@ -739,30 +739,26 @@ async def test_marker_cleanup_task_registry_discards_finished_tasks(
     monkeypatch: pytest.MonkeyPatch,
     module: Any,
 ) -> None:
-    def retained_tasks() -> set[asyncio.Task[None]]:
-        state = getattr(module, "_marker_cleanup_state", None)
-        return state.tasks if state is not None else module._marker_cleanup_tasks
-
     release_cleanup = asyncio.Event()
+    runtime = module._MarkerCleanupRuntime()
 
     async def fake_cleanup(_proc: Any) -> None:
         await release_cleanup.wait()
 
-    await module._shutdown_marker_cleanup_tasks()
     monkeypatch.setattr(module, "_cleanup_marker_when_done", fake_cleanup)
 
-    task = module._schedule_marker_cleanup_when_done(Mock())
+    task = module._schedule_marker_cleanup_when_done(runtime, Mock())
     try:
-        assert task in retained_tasks()
+        assert task in runtime.tasks
 
         release_cleanup.set()
         await asyncio.wait_for(task, timeout=1.0)
         await asyncio.sleep(0)
 
-        assert task not in retained_tasks()
+        assert task not in runtime.tasks
     finally:
         release_cleanup.set()
-        await module._shutdown_marker_cleanup_tasks()
+        await runtime.shutdown()
 
 
 @pytest.mark.parametrize("module", [admin_update, admin_release])
@@ -771,24 +767,35 @@ async def test_marker_cleanup_shutdown_cancels_retained_tasks(
     monkeypatch: pytest.MonkeyPatch,
     module: Any,
 ) -> None:
-    def retained_tasks() -> set[asyncio.Task[None]]:
-        state = getattr(module, "_marker_cleanup_state", None)
-        return state.tasks if state is not None else module._marker_cleanup_tasks
+    runtime = module._MarkerCleanupRuntime()
 
     async def fake_cleanup(_proc: Any) -> None:
         await asyncio.Event().wait()
 
-    await module._shutdown_marker_cleanup_tasks()
     monkeypatch.setattr(module, "_cleanup_marker_when_done", fake_cleanup)
 
-    task = module._schedule_marker_cleanup_when_done(Mock())
+    task = module._schedule_marker_cleanup_when_done(runtime, Mock())
 
-    assert task in retained_tasks()
+    assert task in runtime.tasks
 
-    await module._shutdown_marker_cleanup_tasks()
+    await runtime.shutdown()
 
     assert task.cancelled()
-    assert task not in retained_tasks()
+    assert task not in runtime.tasks
+
+
+@pytest.mark.parametrize("module", [admin_update, admin_release])
+@pytest.mark.asyncio
+async def test_marker_cleanup_runtime_is_owned_by_router_lifespan(module: Any) -> None:
+    app = FastAPI()
+    app.include_router(module.router)
+    state_key = module._MARKER_CLEANUP_RUNTIME_STATE_KEY
+
+    async with app.router.lifespan_context(app):
+        runtime = getattr(app.state, state_key)
+        assert isinstance(runtime, module._MarkerCleanupRuntime)
+
+    assert not hasattr(app.state, state_key)
 
 
 @pytest.mark.asyncio

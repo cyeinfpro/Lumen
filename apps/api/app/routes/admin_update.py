@@ -11,15 +11,14 @@ import re
 import shlex
 import shutil
 import subprocess
-import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, AsyncIterator, TextIO
+from typing import Annotated, AsyncIterator, Awaitable, Callable, TextIO
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,32 +56,49 @@ from .admin_backups import (
 )
 
 
-@dataclass
-class _MarkerCleanupState:
-    tasks: set[asyncio.Task[None]]
-    lock: threading.Lock
+_MARKER_CLEANUP_RUNTIME_STATE_KEY = "_admin_update_marker_cleanup_runtime"
 
 
-_marker_cleanup_state = _MarkerCleanupState(tasks=set(), lock=threading.Lock())
+@dataclass(slots=True)
+class _MarkerCleanupRuntime:
+    tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+    def schedule(
+        self,
+        proc: subprocess.Popen[bytes],
+        cleanup: Callable[[subprocess.Popen[bytes]], Awaitable[None]],
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(cleanup(proc))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        return task
+
+    async def shutdown(self) -> None:
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.difference_update(tasks)
 
 
-async def _shutdown_marker_cleanup_tasks() -> None:
-    with _marker_cleanup_state.lock:
-        tasks = list(_marker_cleanup_state.tasks)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    with _marker_cleanup_state.lock:
-        _marker_cleanup_state.tasks.difference_update(tasks)
+def _marker_cleanup_runtime(request: Request) -> _MarkerCleanupRuntime:
+    runtime = getattr(request.app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, None)
+    if not isinstance(runtime, _MarkerCleanupRuntime):
+        raise RuntimeError("admin update marker cleanup runtime is unavailable")
+    return runtime
 
 
 @asynccontextmanager
-async def _marker_cleanup_lifespan(_app: object) -> AsyncIterator[None]:
+async def _marker_cleanup_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    runtime = _MarkerCleanupRuntime()
+    setattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, runtime)
     try:
         yield
     finally:
-        await _shutdown_marker_cleanup_tasks()
+        await runtime.shutdown()
+        if getattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, None) is runtime:
+            delattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY)
 
 
 router = APIRouter(
@@ -1254,7 +1270,10 @@ async def trigger_update(
         systemd_run_available=_systemd_run_available,
         start_update_systemd_unit=_start_update_systemd_unit,
         write_audit=write_admin_audit_isolated,
-        schedule_cleanup=_schedule_marker_cleanup_when_done,
+        schedule_cleanup=lambda proc: _schedule_marker_cleanup_when_done(
+            _marker_cleanup_runtime(request),
+            proc,
+        ),
     )
     return await _update_trigger.trigger_update(
         request,
@@ -1266,18 +1285,10 @@ async def trigger_update(
 
 
 def _schedule_marker_cleanup_when_done(
+    runtime: _MarkerCleanupRuntime,
     proc: subprocess.Popen[bytes],
 ) -> asyncio.Task[None]:
-    task = asyncio.create_task(_cleanup_marker_when_done(proc))
-    with _marker_cleanup_state.lock:
-        _marker_cleanup_state.tasks.add(task)
-    task.add_done_callback(_discard_marker_cleanup_task)
-    return task
-
-
-def _discard_marker_cleanup_task(task: asyncio.Task[None]) -> None:
-    with _marker_cleanup_state.lock:
-        _marker_cleanup_state.tasks.discard(task)
+    return runtime.schedule(proc, _cleanup_marker_when_done)
 
 
 async def _cleanup_marker_when_done(proc: subprocess.Popen[bytes]) -> None:

@@ -851,6 +851,7 @@ async def test_sync_releases_process_lock_before_external_io(
     ) -> Any:
         assert proxy_url is None
         assert lease_token
+        assert type(plib._SYNC_LOCK).__name__ == "_FileLockCompatibilityContext"
         assert plib._SYNC_LOCK.locked() is False
         return poster_styles.PosterStyleSyncOut(status="ok")
 
@@ -1336,8 +1337,7 @@ async def test_create_item_schedules_one_compatibility_background_task() -> None
 
 
 @pytest.mark.asyncio
-async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
-) -> None:
+async def test_auto_tag_skips_persistence_when_provider_returns_nothing() -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
 
@@ -1358,8 +1358,7 @@ async def test_auto_tag_skips_persistence_when_provider_returns_nothing(
 
 
 @pytest.mark.asyncio
-async def test_auto_tag_persists_when_provider_returns_signal(
-) -> None:
+async def test_auto_tag_persists_when_provider_returns_signal() -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
 
@@ -1398,8 +1397,7 @@ def test_poster_style_auto_tag_concurrency_env_is_clamped(
 
 
 @pytest.mark.asyncio
-async def test_auto_tag_runs_provider_call_inside_distributed_capacity(
-) -> None:
+async def test_auto_tag_runs_provider_call_inside_distributed_capacity() -> None:
     row = _user_item()
     db = _StubDb(response_batches=[[row]])
 

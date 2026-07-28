@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 
 
 class _StubStreamResponse:
@@ -63,6 +64,30 @@ def test_prompt_enhance_normalizes_responses_url() -> None:
     assert prompts._responses_url("https://upstream.example/v1") == (
         "https://upstream.example/v1/responses"
     )
+
+
+@pytest.mark.asyncio
+async def test_prompt_runtime_is_owned_and_drained_by_router_lifespan() -> None:
+    from app.routes import prompts
+
+    app = FastAPI()
+    app.include_router(prompts.router)
+    release = asyncio.Event()
+
+    async def pending_release() -> None:
+        await release.wait()
+
+    async with app.router.lifespan_context(app):
+        runtime = getattr(app.state, prompts._PROMPT_RUNTIME_STATE_KEY)
+        assert isinstance(runtime, prompts._PromptRuntime)
+        task = asyncio.create_task(pending_release())
+        runtime.track_release_task(task)
+        assert task in runtime.release_tasks
+        release.set()
+
+    assert task.done()
+    assert not hasattr(app.state, prompts._PROMPT_RUNTIME_STATE_KEY)
+    assert not hasattr(prompts, "_prompt_runtime_state")
 
 
 def test_video_prompt_enhance_body_uses_media_content() -> None:
@@ -344,9 +369,12 @@ async def test_prompt_enhance_resolves_provider_pool_without_legacy_merge(
         return values.get(getattr(spec, "key", ""))
 
     monkeypatch.setattr(prompts, "get_setting", fake_get_setting)
-    prompts._PROVIDER_RR_COUNTERS.clear()
+    runtime = prompts._PromptRuntime()
 
-    providers = await prompts._resolve_provider_order(object())  # type: ignore[arg-type]
+    providers = await prompts._resolve_provider_order(  # type: ignore[arg-type]
+        object(),
+        runtime,
+    )
 
     assert [(p.name, p.base_url, p.api_key, p.priority) for p in providers] == [
         ("primary", "https://primary.example", "sk-primary", 10),
@@ -384,9 +412,12 @@ async def test_prompt_enhance_skips_providers_locked_to_generations(
         return values.get(getattr(spec, "key", ""))
 
     monkeypatch.setattr(prompts, "get_setting", fake_get_setting)
-    prompts._PROVIDER_RR_COUNTERS.clear()
+    runtime = prompts._PromptRuntime()
 
-    providers = await prompts._resolve_provider_order(object())  # type: ignore[arg-type]
+    providers = await prompts._resolve_provider_order(  # type: ignore[arg-type]
+        object(),
+        runtime,
+    )
 
     assert [p.name for p in providers] == ["responses"]
 
@@ -422,9 +453,12 @@ async def test_prompt_enhance_skips_image_only_providers(
         return values.get(getattr(spec, "key", ""))
 
     monkeypatch.setattr(prompts, "get_setting", fake_get_setting)
-    prompts._PROVIDER_RR_COUNTERS.clear()
+    runtime = prompts._PromptRuntime()
 
-    providers = await prompts._resolve_provider_order(object())  # type: ignore[arg-type]
+    providers = await prompts._resolve_provider_order(  # type: ignore[arg-type]
+        object(),
+        runtime,
+    )
 
     assert [p.name for p in providers] == ["chat"]
 
@@ -443,7 +477,10 @@ async def test_prompt_enhance_checks_per_user_rate_limit(
     async def fake_check(redis: object, key: str) -> None:
         calls.append((redis, key))
 
-    async def fake_resolve_provider_order(_db: object) -> list[ProviderDefinition]:
+    async def fake_resolve_provider_order(
+        _db: object,
+        _runtime: prompts._PromptRuntime,
+    ) -> list[ProviderDefinition]:
         return [
             ProviderDefinition(
                 name="primary",
@@ -461,6 +498,7 @@ async def test_prompt_enhance_checks_per_user_rate_limit(
         prompts.EnhanceIn(text="cat"),
         SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
+        prompts._PromptRuntime(),
     )
 
     assert calls == [(redis, "rl:prompt_enhance:user-1")]
@@ -480,7 +518,10 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
     async def fake_check(_redis: object, _key: str) -> None:
         return None
 
-    async def fake_resolve_provider_order(_db: object) -> list[ProviderDefinition]:
+    async def fake_resolve_provider_order(
+        _db: object,
+        _runtime: prompts._PromptRuntime,
+    ) -> list[ProviderDefinition]:
         return [
             ProviderDefinition(
                 name="primary",
@@ -514,6 +555,7 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
         object(),  # type: ignore[arg-type]
         SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
+        prompts._PromptRuntime(),
     )
     chunks = [chunk async for chunk in response.body_iterator]
 
@@ -536,9 +578,12 @@ async def test_prompt_enhance_uses_legacy_env_when_providers_absent(
     monkeypatch.setattr(prompts, "get_setting", fake_get_setting)
     monkeypatch.setenv("UPSTREAM_BASE_URL", "https://legacy.example")
     monkeypatch.setenv("UPSTREAM_API_KEY", "sk-legacy")
-    prompts._PROVIDER_RR_COUNTERS.clear()
+    runtime = prompts._PromptRuntime()
 
-    providers = await prompts._resolve_provider_order(object())  # type: ignore[arg-type]
+    providers = await prompts._resolve_provider_order(  # type: ignore[arg-type]
+        object(),
+        runtime,
+    )
 
     assert [(p.name, p.base_url, p.api_key, p.priority) for p in providers] == [
         ("default", "https://legacy.example", "sk-legacy", 0),
@@ -1076,7 +1121,9 @@ async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
         billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
+        runtime: prompts._PromptRuntime,
     ) -> None:
+        assert isinstance(runtime, prompts._PromptRuntime)
         calls["release_user"] = billing.user_id if billing is not None else None
         calls["release_reason"] = reason
 

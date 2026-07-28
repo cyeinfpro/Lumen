@@ -11,14 +11,14 @@ import logging
 import mimetypes
 import os
 import secrets
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -30,6 +30,7 @@ from lumen_core.pricing import UsageTokens, parse_usage
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
+    RoundRobinState,
     build_effective_provider_config,
     endpoint_kind_allowed,
     provider_supports_route,
@@ -68,12 +69,6 @@ httpx = _prompt_upstream.httpx
 
 _VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
 
-router = APIRouter(
-    prefix="/prompts",
-    tags=["prompts"],
-    dependencies=[Depends(verify_csrf)],
-)
-
 _RETRYABLE_HTTP_STATUS = _prompt_upstream.RETRYABLE_HTTP_STATUS
 _FALLBACK_400_MARKERS = _prompt_upstream.FALLBACK_400_MARKERS
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
@@ -86,17 +81,63 @@ _PROMPT_ENHANCE_READ_TIMEOUT_SECONDS = 25.0
 _PROMPT_ENHANCE_WRITE_TIMEOUT_SECONDS = 10.0
 _PROMPT_ENHANCE_POOL_TIMEOUT_SECONDS = 10.0
 
+_PROMPT_RUNTIME_STATE_KEY = "_prompt_enhancement_runtime"
 
-@dataclass
-class _PromptRuntimeState:
-    provider_rr_counters: dict[int, int] = field(default_factory=dict)
-    provider_rr_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+@dataclass(slots=True)
+class _PromptRuntime:
+    provider_round_robin: RoundRobinState = field(default_factory=RoundRobinState)
     release_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
+    def track_release_task(self, task: asyncio.Task[None]) -> None:
+        self.release_tasks.add(task)
 
-_prompt_runtime_state = _PromptRuntimeState()
-# Compatibility view for tests that reset the historical round-robin counter.
-_PROVIDER_RR_COUNTERS = _prompt_runtime_state.provider_rr_counters
+        def _done(completed: asyncio.Task[None]) -> None:
+            self.release_tasks.discard(completed)
+            with suppress(asyncio.CancelledError):
+                exc = completed.exception()
+                if exc is not None:
+                    logger.error(
+                        "prompt enhance detached hold release failed",
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+        task.add_done_callback(_done)
+
+    async def shutdown(self) -> None:
+        tasks = list(self.release_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.release_tasks.difference_update(tasks)
+
+
+def _prompt_runtime(request: Request) -> _PromptRuntime:
+    runtime = getattr(request.app.state, _PROMPT_RUNTIME_STATE_KEY, None)
+    if not isinstance(runtime, _PromptRuntime):
+        raise RuntimeError("prompt enhancement runtime is unavailable")
+    return runtime
+
+
+@asynccontextmanager
+async def _prompt_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    runtime = _PromptRuntime()
+    setattr(app.state, _PROMPT_RUNTIME_STATE_KEY, runtime)
+    try:
+        yield
+    finally:
+        await runtime.shutdown()
+        if getattr(app.state, _PROMPT_RUNTIME_STATE_KEY, None) is runtime:
+            delattr(app.state, _PROMPT_RUNTIME_STATE_KEY)
+
+
+router = APIRouter(
+    prefix="/prompts",
+    tags=["prompts"],
+    dependencies=[Depends(verify_csrf)],
+    lifespan=_prompt_lifespan,
+)
+
+_PromptRuntimeDep = Annotated[_PromptRuntime, Depends(_prompt_runtime)]
 
 _EnhanceAttempt = _prompt_upstream.EnhanceAttempt
 _EnhanceProviderError = _prompt_upstream.EnhanceProviderError
@@ -141,8 +182,17 @@ def _provider_allows_prompt_enhance(provider: ProviderDefinition) -> bool:
     )
 
 
-async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
+async def _resolve_provider_order(
+    db: AsyncSession,
+    runtime: _PromptRuntime | None = None,
+) -> list[ProviderDefinition]:
     """Read Provider Pool, with legacy UPSTREAM_* env fallback only if absent."""
+    if runtime is None:
+        from ..main import app
+
+        runtime = getattr(app.state, _PROMPT_RUNTIME_STATE_KEY, None)
+        if not isinstance(runtime, _PromptRuntime):
+            raise RuntimeError("prompt enhancement runtime is unavailable")
     spec_providers = get_spec("providers")
     raw_providers = await get_setting(db, spec_providers) if spec_providers else None
     providers, _proxies, errors = build_effective_provider_config(
@@ -155,10 +205,7 @@ async def _resolve_provider_order(db: AsyncSession) -> list[ProviderDefinition]:
     for err in errors:
         logger.warning("%s", err)
     providers = [p for p in providers if _provider_allows_prompt_enhance(p)]
-    async with _prompt_runtime_state.provider_rr_lock:
-        return weighted_priority_order(
-            providers, _prompt_runtime_state.provider_rr_counters
-        )
+    return weighted_priority_order(providers, runtime.provider_round_robin)
 
 
 def _build_enhance_body(
@@ -870,22 +917,6 @@ async def _release_prompt_enhance_hold(
         logger.exception("prompt enhance billing hold release failed")
 
 
-def _track_prompt_enhance_release_task(task: asyncio.Task[None]) -> None:
-    _prompt_runtime_state.release_tasks.add(task)
-
-    def _done(completed: asyncio.Task[None]) -> None:
-        _prompt_runtime_state.release_tasks.discard(completed)
-        with suppress(asyncio.CancelledError):
-            exc = completed.exception()
-            if exc is not None:
-                logger.error(
-                    "prompt enhance detached hold release failed",
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                )
-
-    task.add_done_callback(_done)
-
-
 async def _release_prompt_enhance_hold_detached(
     billing: _EnhanceBillingContext | None,
     *,
@@ -902,13 +933,14 @@ def _schedule_prompt_enhance_hold_release(
     billing: _EnhanceBillingContext | None,
     *,
     reason: str,
+    runtime: _PromptRuntime,
 ) -> asyncio.Task[None] | None:
     if billing is None or billing.hold_amount_micro <= 0:
         return None
     task = asyncio.create_task(
         _release_prompt_enhance_hold_detached(billing, reason=reason)
     )
-    _track_prompt_enhance_release_task(task)
+    runtime.track_release_task(task)
     return task
 
 
@@ -916,8 +948,13 @@ async def _release_prompt_enhance_hold_after_cancel(
     billing: _EnhanceBillingContext | None,
     *,
     reason: str,
+    runtime: _PromptRuntime,
 ) -> None:
-    task = _schedule_prompt_enhance_hold_release(billing, reason=reason)
+    task = _schedule_prompt_enhance_hold_release(
+        billing,
+        reason=reason,
+        runtime=runtime,
+    )
     if task is None:
         return
     try:
@@ -982,22 +1019,36 @@ async def _stream_enhance(
     providers: list[ProviderDefinition],
     billing: _EnhanceBillingContext | None = None,
     *,
+    runtime: _PromptRuntime | None = None,
     system_prompt: str = ENHANCE_SYSTEM_PROMPT,
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
-    runtime = _prompt_failover.StreamRuntime(
+    active_runtime = runtime or _PromptRuntime()
+
+    async def release_after_cancel(
+        context: _EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        await _release_prompt_enhance_hold_after_cancel(
+            context,
+            reason=reason,
+            runtime=active_runtime,
+        )
+
+    stream_runtime = _prompt_failover.StreamRuntime(
         stream_one=_stream_enhance_one,
         charge=_charge_prompt_enhance,
         release=_release_prompt_enhance_hold,
-        release_after_cancel=_release_prompt_enhance_hold_after_cancel,
+        release_after_cancel=release_after_cancel,
     )
     stream = _prompt_failover.stream_enhance(
         text,
         providers,
         billing,
         attempts=_ENHANCE_ATTEMPTS,
-        runtime=runtime,
+        runtime=stream_runtime,
         default_system_prompt=ENHANCE_SYSTEM_PROMPT,
         system_prompt=system_prompt,
         content=content,
@@ -1028,9 +1079,12 @@ async def enhance_prompt(
     body: EnhanceIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    runtime: _PromptRuntimeDep,
 ) -> StreamingResponse:
     await PROMPTS_ENHANCE_LIMITER.check(get_redis(), f"rl:prompt_enhance:{user.id}")
-    providers = [p for p in await _resolve_provider_order(db) if p.api_key.strip()]
+    providers = [
+        p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
+    ]
     if not providers:
         raise HTTPException(
             status_code=503,
@@ -1044,7 +1098,14 @@ async def enhance_prompt(
     billing = await _prepare_prompt_enhance_billing(db, user)
 
     return StreamingResponse(
-        _stream_with_keepalive(_stream_enhance(body.text, providers, billing)),
+        _stream_with_keepalive(
+            _stream_enhance(
+                body.text,
+                providers,
+                billing,
+                runtime=runtime,
+            )
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1063,9 +1124,12 @@ async def enhance_video_prompt(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    runtime: _PromptRuntimeDep,
 ) -> StreamingResponse:
     await PROMPTS_ENHANCE_LIMITER.check(get_redis(), f"rl:prompt_enhance:{user.id}")
-    providers = [p for p in await _resolve_provider_order(db) if p.api_key.strip()]
+    providers = [
+        p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
+    ]
     if not providers:
         raise HTTPException(
             status_code=503,
@@ -1093,6 +1157,7 @@ async def enhance_video_prompt(
                 body.text,
                 providers,
                 billing,
+                runtime=runtime,
                 system_prompt=_video_enhance_system_prompt(body.variant_count),
                 content=content,
             )
