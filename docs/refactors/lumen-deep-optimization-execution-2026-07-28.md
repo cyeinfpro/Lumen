@@ -997,3 +997,115 @@ All findings were rechecked against the baseline SHA before implementation.
 - Build warning: existing Sentry/Prisma OpenTelemetry dynamic dependency
   warning; build completed successfully
 - No second full invocation was run after the failed-node fixes
+
+## Current-Main V2 Wave 4: Semantic Modules And Governance
+
+- Date closed: `2026-07-29`
+- `WORK_BASE_SHA`: `d2b8c259d52edc0a839b695fecc7b7ab2029bbe3`
+- Wave 4 parent: `c27ab843a1850747a6125fd3cace02a56693e329`
+- Integration branch: `codex/a0-wave4-runtime-state-20260728`
+- Integrated commits:
+  - `5ce8ebc` runtime ownership and module-state retirement
+  - `1ba5d1d` complexity reduction
+  - `a8c4e65` Worker compatibility-facade retirement
+  - `69b326d` generation scheduler and runner phase split
+  - `02550f6` Web realtime/generation/assets feature roots
+  - `f376622` API realtime channel/replay/hub split
+  - `6b0ce6d` Wave 4 feature-domain impact mapping
+
+### Delivered Structure
+
+- API realtime:
+  - `routes/events.py` is a transport/composition shell.
+  - channel policy, replay/dedupe, and connection hub live under
+    `apps/api/app/realtime/**` and export through its public index.
+- Worker generation:
+  - queue candidate, fairness, provider, and permit controls are separate.
+  - claim and dispatch phases use narrow service views.
+  - `queue_claim.py` is 672 lines and `runner.py` is 716 lines.
+- Web:
+  - real `features/realtime`, `features/generation`, and `features/assets`
+    roots exist.
+  - cross-feature consumers use public indexes; legacy shims are deleted.
+- Runtime ownership:
+  - admin model cache is `ApiRuntime` owned.
+  - metrics listener is `WorkerRuntime` owned.
+  - upstream client locks are upstream-runtime owned.
+  - artifact verification lock is artifact-store owned.
+  - SSE timestamps use an immutable monotonic wall-clock mapping.
+- Facades:
+  - Worker implementation roots moved to
+    `video_upstream_service.py` and `volcano_asset_orchestrator.py`.
+  - old Worker compatibility paths are absent.
+
+### Preserved Invariants
+
+- Redis stream IDs remain realtime replay/order authority; at-least-once
+  delivery and bounded `sse_id`/`event_id` dedupe remain intact.
+- Stable dispatch identity, weighted admission, provider reservations, lease
+  renewal, fenced release, billing, artifact saga, and terminal events retain
+  their Wave 1-3 behavior.
+- Video download still validates every redirect target, forbids HTTPS
+  downgrade, streams to disk with a size ceiling, checks the lease, and removes
+  failed files.
+- Volcano operation attempt/fencing, durable receipts, quota release, and
+  ambiguous-submit reconciliation remain unchanged.
+- Asset search, candidate fallback, mounted-DOM bounds, lightbox window, and
+  prewarm queue contracts remain unchanged.
+- No new process-wide mutable global was introduced.
+
+### Metrics
+
+- Web feature roots: `0 -> 3`
+- `events.py`: `1145 -> 260` lines
+- `queue_claim.py`: `995 -> 672` lines
+- `runner.py`: `1367 -> 716` lines
+- complexity findings: `11 -> 5`
+- module runtime state: `15 -> 8`
+- compatibility facades: `4 -> 2`
+- manifest stale paths: `19 -> 0`
+- manifest unmatched paths: `1 -> 0`
+- critical-domain fallback-only files: `16 -> 0`
+- Web architecture: 559 files, 2139 internal edges, 3 features,
+  0 cross-feature edges, 0 findings
+
+### Wave 4 Domain Batch
+
+- API realtime, Canvas, message, prompt/model, runtime, and admin contracts:
+  `220 passed`.
+- Worker generation scheduler/admission/lease contracts: `139 passed`.
+- Worker video contracts: `196 passed`.
+- Worker Volcano asset contracts: `56 passed`.
+- Web realtime/generation/assets and hardening contracts: `134 passed`.
+- Runtime-owner focused contracts:
+  - API: `33 passed`
+  - Worker: `35 passed`
+  - image-job: `4 passed`
+- Impact planner/linter contracts: `16 passed`.
+- The first Web invocation failed only because the isolated worktree had no
+  `node_modules`; linking the existing main-checkout dependency tree and
+  rerunning the failed Web batch produced `134 passed`.
+- The UI governance gate then detected seven unchanged media-overlay utilities
+  at their new `AssetTile.tsx` path. Three narrow
+  `@ui-governance-allow media` annotations replaced path-based grandfathering;
+  focused rerun: `8 passed`.
+
+### Static Gates
+
+- Changed Python Ruff: passed.
+- Backend architecture: 0 cycles, 0 boundary violations,
+  3 existing runtime-coupling findings.
+- Backend complexity: 5 multi-dimensional findings, no violations or
+  oversized files.
+- Module runtime state: 8 instances across 8 modules.
+- Test manifest: stale 0, unmatched 0, fallback-only 0.
+- Web architecture, complexity, TypeScript, ESLint, layout contract, and UI
+  governance: passed.
+- `git diff --check`: passed.
+
+### Rollback
+
+- Revert the Wave 4 close commit, then `f376622`, `02550f6`, `69b326d`,
+  `a8c4e65`, `1ba5d1d`, and `5ce8ebc` in reverse integration order.
+- No full `bash scripts/test.sh -q`, version bump, push, tag, release, or
+  GitHub Actions run occurred in Wave 4; those remain exclusively in Wave 5.
