@@ -30,7 +30,7 @@ import {
   aggregateGenerationStatus,
   assistantHasGeneration,
   generationIdsOfMessage,
-} from "./generationSlice";
+} from "@/features/generation";
 import { DEFAULT_PARAMS } from "./imageParams";
 import type { ChatState, ChatStateGetter, ChatStateSetter } from "./types";
 import {

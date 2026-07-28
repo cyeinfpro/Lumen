@@ -16,7 +16,13 @@ import { qualityToFixedSize } from "@/lib/sizing";
 import { ApiError } from "@/lib/api/http";
 import { imageBinaryUrl } from "@/lib/api/images";
 import { errorCodeToFullText, recommendedActionsForError } from "@/lib/errors";
-import { reduceGenerationLifecycleEvent } from "../chatGenerationEvents";
+import {
+  assistantHasGeneration,
+  generationExplainabilityFromPayload,
+  reduceGenerationLifecycleEvent,
+  terminalGenerationEventStatus,
+  updateGenerationAssistantStatuses,
+} from "@/features/generation";
 import { createRequestFence } from "./requestGuards";
 import {
   applyCompletionStreamPatches,
@@ -28,12 +34,6 @@ import {
 import { buildBase64EvictionPatch } from "./base64Eviction";
 import { DEFAULT_PARAMS } from "./imageParams";
 import { optionalRecord as parseOptionalRecord, optionalString, recommendedActionsFromUnknown, ssePayloadRecord as parseSsePayloadRecord } from "./payload";
-import {
-  assistantHasGeneration,
-  generationExplainabilityFromPayload,
-  terminalGenerationEventStatus,
-  updateGenerationAssistantStatuses,
-} from "./generationSlice";
 import { cloneConversationHistoryCacheEntry, isEvictableDataUrl, type ConversationHistoryCacheEntry, type MessageListMaterialization } from "./history";
 import type { SseIdGetter } from "./completionEvents";
 import type { ChatState, ChatStateGetter, ChatStateSetter } from "./types";

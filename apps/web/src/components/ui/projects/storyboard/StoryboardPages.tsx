@@ -33,7 +33,7 @@ import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { useSSE } from "@/lib/useSSE";
+import { useSSE } from "@/features/realtime";
 import {
   qk,
   useApproveStoryboardAssetMutation,

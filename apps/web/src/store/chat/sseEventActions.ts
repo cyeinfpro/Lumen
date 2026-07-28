@@ -21,7 +21,7 @@ import {
   completionToolGenerationId,
   generationExplainabilityFromPayload,
   generationIdsOfMessage,
-} from "./generationSlice";
+} from "@/features/generation";
 import { buildMessageListState } from "./history";
 import {
   coerceMemoryWrites,

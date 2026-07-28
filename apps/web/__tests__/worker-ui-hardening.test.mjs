@@ -218,7 +218,7 @@ function baseChatMocks(harness, extra = {}) {
       cancelTask: async () => {},
       imageVariantUrl: (id) => `/images/${id}`,
     },
-    "@/lib/imagePreload": { prewarmImage() {} },
+    "@/features/assets": { prewarmImage() {} },
     "@/lib/imageResultLightbox": {
       imageResultToLightboxItem: () => ({ id: "image" }),
     },

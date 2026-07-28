@@ -2,8 +2,7 @@
 
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { ShellSkeleton } from "@/components/ui/shell/ShellSkeleton";
-import { MobileStream } from "@/components/ui/shell/MobileStream";
-import { DesktopStream } from "@/components/ui/shell/DesktopStream";
+import { DesktopStream, MobileStream } from "@/features/assets";
 
 export default function AssetsPage() {
   const isMobile = useIsMobile();

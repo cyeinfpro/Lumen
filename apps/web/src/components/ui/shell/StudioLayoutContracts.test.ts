@@ -22,14 +22,20 @@ const conversationListSource = source("../me/ConversationList.tsx");
 const mobileTopBarSource = source("./MobileStudioTopBar.tsx");
 const mobileTabBarSource = source("./MobileTabBar.tsx");
 const mobileMeSource = source("./MobileMe.tsx");
-const mobileStreamSource = source("./MobileStream.tsx");
+const mobileStreamSource = source(
+  "../../../features/assets/containers/MobileAssetStream.tsx",
+);
 const settingsShellSource = source("./SettingsShell.tsx");
 const mobileDrawerSource = source("./MobileConversationDrawer.tsx");
 const sidebarSource = source("../Sidebar.tsx");
 const mobileCanvasSource = source("../chat/mobile/MobileConversationCanvas.tsx");
-const generationTileSource = source("../stream/GenerationTile.tsx");
+const generationTileSource = source(
+  "../../../features/assets/ui/AssetTile.tsx",
+);
 const mobileComposerSource = source("../composer/mobile/MobileComposerPill.tsx");
-const streamSearchSource = source("../stream/StreamSearchBar.tsx");
+const streamSearchSource = source(
+  "../../../features/assets/ui/StreamSearchBar.tsx",
+);
 const viewportSource = source("../../../hooks/useKeyboardInset.ts");
 const mediaQuerySource = source("../../../hooks/useMediaQuery.ts");
 const inputSource = source("../primitives/Input.tsx");

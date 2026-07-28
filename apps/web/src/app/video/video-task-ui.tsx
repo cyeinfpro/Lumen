@@ -22,7 +22,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 
 import { Button, IconButton } from "@/components/ui/primitives";
 import { videoBinaryUrl, videoDownloadUrl } from "@/lib/apiClient";
-import { prewarmImage, prewarmVideoMetadata } from "@/lib/imagePreload";
+import { prewarmImage, prewarmVideoMetadata } from "@/features/assets";
 import { DURATION, EASE } from "@/lib/motion";
 import type { VideoGenerationOut } from "@/lib/types";
 import { cn } from "@/lib/utils";

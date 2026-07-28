@@ -13,18 +13,16 @@ import type {
   Message,
 } from "../../lib/types";
 import {
+  aggregateGenerationStatus,
   coerceGenerationStage,
   coerceGenerationStatus,
-} from "../chatGenerationEvents";
-import {
-  aggregateGenerationStatus,
   completionToolGenerationId,
   generationExplainabilityFromBackend,
   generationIdsOfMessage,
   mergeExplainabilityIntoImage,
   preferredGenerationSnapshot,
   type GenerationExplainabilityMeta,
-} from "./generationSlice";
+} from "@/features/generation";
 import { DEFAULT_PARAMS } from "./imageParams";
 import {
   adaptBackendAssistantMessage,

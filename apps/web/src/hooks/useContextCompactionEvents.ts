@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCompactConversationStatus } from "@/lib/apiClient";
-import { useSSE } from "@/lib/useSSE";
+import { useSSE } from "@/features/realtime";
 
 export type CompactionPhase = "started" | "progress" | "completed";
 export type CompactionTrigger = "auto" | "manual";

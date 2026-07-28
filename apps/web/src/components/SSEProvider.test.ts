@@ -11,7 +11,11 @@ const provider = readFileSync(
   "utf8",
 );
 const hook = readFileSync(
-  new URL("../lib/useSSE.ts", import.meta.url),
+  new URL("../features/realtime/model/useSSE.ts", import.meta.url),
+  "utf8",
+);
+const registry = readFileSync(
+  new URL("../shared/realtime/runtimeRegistry.ts", import.meta.url),
   "utf8",
 );
 
@@ -21,10 +25,13 @@ test("provider is a thin runtime boundary without business routing", () => {
   doesNotMatch(provider, /switch\s*\(|invalidateQueries|BroadcastChannel|EventSource/);
 });
 
-test("compatibility hook delegates to the realtime runtime and exposes control recovery", () => {
+test("feature hook delegates runtime ownership and exposes control recovery", () => {
   ok(hook.trimEnd().split("\n").length < 200);
-  match(hook, /createRealtimeRuntime/);
+  match(hook, /acquireRealtimeRuntime/);
+  match(hook, /releaseRealtimeRuntime/);
   match(hook, /recoverSnapshot/);
   match(hook, /onControl/);
+  doesNotMatch(hook, /new Map/);
+  match(registry, /const runtimes = new Map<string, RealtimeRuntime>\(\)/);
   doesNotMatch(hook, /class SharedSSEConnection/);
 });
