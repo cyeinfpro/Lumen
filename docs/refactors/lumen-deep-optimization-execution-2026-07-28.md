@@ -122,6 +122,82 @@ reinterpret the source plan.
 - Rollback the three Wave 0 commits in reverse order. Removing the independent
   harness requires no data migration or feature flag.
 
+### V2 Wave 1 Completion
+
+#### Commits
+
+- Connection-level replay/live/live dedupe:
+  `3f95c6f` (`fix(realtime): dedupe connection events`).
+- Shared durable append and typed fanout outcomes:
+  `7404e97` (`fix(realtime): unify durable fanout semantics`).
+- Web progress coalescing:
+  `89cf2ae` (`perf(web): coalesce realtime progress`).
+
+#### Behavior And Invariants
+
+- Replay, live task/compat, live user, and compaction events share one bounded
+  per-connection deduper keyed by recoverable `sse_id` and stable `event_id`.
+- The deduper stores at most 4096 keys, evicts oldest keys, and is owned by the
+  connection state; no process-wide mutable global was added.
+- Progress and terminal events with distinct identities are never merged.
+- API and Worker runtime append paths now use
+  `lumen_core.sse_durable` for owner-token reservation, bounded wait, stream
+  recovery, stale compare-delete, and transactional `XADD + EXPIRE`.
+- Lua remains the normal fast path. The non-Lua path requires a transactional
+  Redis pipeline and no longer deletes an in-flight reservation immediately.
+- Durable append success defines publication success. User and compat live
+  fanout run independently, user first; a live failure is logged/measured and
+  does not reverse durable success.
+- Web coalesces only `generation.progress` and `completion.progress`, latest
+  per task, at a 100 ms interval. Delta/thinking-delta events remain
+  uncoalesced. Terminal/state barriers discard pending progress for the same
+  task and dispatch immediately.
+
+#### Metrics
+
+- Same `sse_id` on task+user live channels:
+  `2 frames -> 1 frame`.
+- Concurrent non-Lua append for the same stable `event_id`:
+  `2 Stream entries -> 1 Stream entry`.
+- Accepted `EXEC` with lost response:
+  retry recovers the existing Stream ID and keeps one entry.
+- Live fanout order:
+  `compat,user -> user,compat`.
+- Live outcome, bytes, and duration are exposed as:
+  `lumen_sse_live_publish_total`,
+  `lumen_sse_live_publish_bytes_total`, and
+  `lumen_sse_live_publish_duration_seconds`.
+- Web progress application is bounded to at most 10 scheduled flushes per
+  second per runtime, with one latest event per active task in each flush.
+
+#### Verification
+
+- Backend realtime/domain batch, including shared durable and API publisher
+  contracts: 133 passed, 1 unrelated node deselected.
+- Focused durable/fanout/route contract set after failure fixes:
+  36 passed.
+- Web realtime batch, including the new progress coalescer:
+  24 passed.
+- Web type-check, architecture, and complexity gates passed.
+- Changed-file Ruff and Ruff format passed.
+- Backend architecture, complexity, and runtime-state gates passed at
+  `3 / 11 / 15`; no baseline was raised.
+- Manifest linter passed with stale/unmatched/critical-fallback/shadowed all
+  zero.
+- No full repository invocation was run. The shared Core change remains
+  full-mandatory for the single final Wave 5 gate.
+
+#### Risks And Rollback
+
+- The fallback requires WATCH/MULTI support when Lua cannot execute XADD. A
+  deployment lacking both capabilities must fail durable publication and
+  retry the source event rather than emit an unrecoverable live event.
+- A connection may see a duplicate again after the bounded dedupe window is
+  evicted; the downstream store still retains stable event identity.
+- Rollback Web coalescing independently with `89cf2ae`.
+- Rollback backend fanout/durable behavior with `7404e97`, then connection
+  dedupe with `3f95c6f`. Do not roll back the Redis Stream itself.
+
 ## Baseline
 
 - Date: 2026-07-28
