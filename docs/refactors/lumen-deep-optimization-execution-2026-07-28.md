@@ -96,11 +96,11 @@ All findings were rechecked against the baseline SHA before implementation.
 
 ### Wave 4
 
-- [ ] Compatibility facades retired
-- [ ] Complexity baseline lowered
-- [ ] Runtime state baseline lowered
-- [ ] Public port type audit passed
-- [ ] Final impact plan passed
+- [x] Compatibility facades retired
+- [x] Complexity baseline lowered
+- [x] Runtime state baseline lowered
+- [x] Public port type audit passed
+- [x] Final impact plan passed
 - [ ] Final `bash scripts/test.sh -q` passed
 - [ ] GitHub Actions passed
 
@@ -467,3 +467,114 @@ All findings were rechecked against the baseline SHA before implementation.
   baselined findings; backend complexity remained 31 and runtime-state 20,
   both scheduled for Wave 4 reductions
 - Final Wave result: every selected gate and failed node passed
+
+### Wave 4 API Complexity Handoff
+
+- Baseline SHA: `9b0899eee05b80c786bc6b3316d23212cc7babd3`
+- Agent commit: `b4bbcf7e37c82de901c857d441f74c2b8964851d`
+  (integrated as `5c734a4`)
+- Changed files: Auth, user export, task listing, video capability/submission,
+  and direct tests
+- Invariants: signup transaction and invite semantics, export archive/security,
+  task query behavior, video pricing/idempotency/billing/outbox order
+- Implementation: typed request/catalog/submission contexts and focused helper
+  extraction
+- Targeted tests: 173 passed
+- Static gate: changed-file Ruff and format passed
+- Not run: full API/repository suites
+- Metrics: six owned findings to zero; signup `205 -> 36` lines; export nesting
+  `7 -> 1`; four parameter findings removed
+- Lead correction: removed the Agent's new video `**legacy` resolver in
+  `4b19ed0` after migrating callers to typed context/services
+- Rollback: revert `4b19ed0`, then `5c734a4`
+- Remaining risk: direct non-HTTP task callers now construct typed query values
+
+### Wave 4 Worker Complexity Handoff
+
+- Baseline SHA: `9b0899eee05b80c786bc6b3316d23212cc7babd3`
+- Agent commit: `09e19f91e3b3ead9794ba41835d0af2e16a4996a`
+  (integrated as `fa7e86d`)
+- Changed files: retry/provider selection, completion context/tool/stream,
+  context summary, generation diagnostics, memory finalization, image request,
+  video parsing, and direct tests
+- Invariants: memory lock/commit/rollback and PII ordering, retry defaults,
+  billing floors, provider order, summary coverage, request bodies, and video
+  error precedence
+- Implementation: typed `Unpack` argument contracts, focused contexts/helpers,
+  and flattened parsers
+- Targeted tests: 340 passed
+- Static gate: changed-file Ruff and format passed
+- Not run: full Worker/repository suites
+- Metrics: 12 owned findings to zero; memory finalization `304 -> 121`;
+  reasoning nesting `7 -> 0`; video error nesting `7 -> 1`; nine parameter
+  findings removed
+- Rollback: revert `fa7e86d`
+- Remaining risk: typed `Unpack` entrypoints intentionally expose compact
+  runtime signatures while preserving named call contracts
+
+### Wave 4 Worker Facade Handoff
+
+- Baseline SHA: `9b0899eee05b80c786bc6b3316d23212cc7babd3`
+- Agent commit: `518ac2da2d2df331ba4dd7dcf74f9a6d6a2909d7`
+  (integrated as `c1d3670`)
+- Deleted files: Worker completion, video-generation, and upstream facades
+- Replacement files: typed leaf entrypoints under existing parts packages
+- Invariants: ARQ registration, video cron seconds `15/45`, runtime validation,
+  upstream identities, startup validation, and shutdown cleanup
+- Targeted tests: 491 passed after dependency setup
+- Static gate: Ruff passed; format remediation applied
+- Not run: full Worker/repository suites
+- Metrics: 34 facade bindings across 24 files to zero
+- Rollback: revert `c1d3670`
+- Remaining risk: consumers outside this repository must migrate deleted paths
+
+### Wave 4 API Runtime-State Handoff
+
+- Baseline SHA: `9b0899eee05b80c786bc6b3316d23212cc7babd3`
+- Agent commit: `11c1fa2460a00e4565086363958a88da24642091`
+  (integrated as `24d703a`)
+- Changed files: Poster library/workflow locks, admin update/release cleanup,
+  prompt runtime, and direct tests
+- Invariants: file locking remains authoritative, publication rechecks state,
+  cleanup tasks are application-owned and drained, prompt holds are released
+- Targeted tests: 143 passed
+- Static gate: Ruff passed; format remediation applied
+- Not run: full API/repository suites
+- Metrics: five runtime-state findings to zero; route mutable lock/client count
+  remains zero
+- Lead corrections: removed the stateless Poster compatibility lock in
+  `4df6c9e`; replaced the prompt-to-main service locator with explicit Telegram
+  runtime injection in `1cb2c86`
+- Rollback: revert `1cb2c86`, `4df6c9e`, then `24d703a`
+- Remaining risk: independently mounting the Telegram router without the prompt
+  router lifespan is unsupported
+
+### Wave 4 Lead Evidence
+
+- Plan: `/tmp/lumen-wave4-plan.json`
+- Initial results: `/tmp/lumen-wave4-results.json`
+- Base: `9b0899eee05b80c786bc6b3316d23212cc7babd3`
+- Changed files: 109 before stale-reference fixes
+- Matched rules: 10; commands: 14; full mandatory false
+- Initial gates: architecture, complexity, runtime state, and changed-file Ruff
+  all passed
+- Initial passing suites: Image artifacts 43; Canvas/Auth 85; Upload 50;
+  Message/Video 160; Poster 68; Completion 78
+- API collection failures: 12 files referenced removed Image/Volcano facades;
+  only those files were rerun after import migration and passed 115 tests
+- Worker full result: 1555 passed with 6 existing skips, then two stale
+  old-file path assertions failed; only those two node IDs were rerun and
+  passed
+- Workflow/runtime target collection failures shared the same removed Image
+  facade import and were covered by the failed-file run; the public Workflow
+  port contract was then run directly and passed 2 tests
+- No failed full command was rerun
+- Governance: complexity `31 -> 11`, with stage-one dimensions `2 / 7 / 2`;
+  runtime state `20 -> 15`; facade inventory `8 -> 4`; public Workflow and
+  Completion forbidden types remain zero; no baseline was expanded
+- Facade deletions: API Volcano media/assets, API Images route, Worker
+  completion/video/upstream, plus the Completion legacy adapter filename/type
+- Remaining facade inventory: Core models/schemas and the two large Worker
+  implementation surfaces retain explicit owners and deletion conditions; no
+  new callers were added
+- Final Wave result: every selected gate and every failed file/node passed
