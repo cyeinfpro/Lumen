@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 
 from lumen_core.arq_jobs import arq_job_id
 
+from ..generation_dispatch import enqueue_generation_dispatch
 from .contracts import (
     OUTBOX_ENQUEUE_DEDUPE_PREFIX,
     OUTBOX_ENQUEUE_DEDUPE_TTL_S,
@@ -100,6 +101,17 @@ async def deliver_outbox_event(
     defer_s = payload.get("defer_s")
     if isinstance(defer_s, (int, float)) and defer_s > 0:
         enqueue_kwargs["_defer_by"] = float(defer_s)
+    if kind == "generation":
+        result = await enqueue_generation_dispatch(
+            redis,
+            task_id=str(task_id),
+            attempt=1,
+            defer_by=enqueue_kwargs.get("_defer_by"),
+            job_try=1,
+        )
+        if not result.accepted:
+            raise RuntimeError("generation dispatch was not accepted")
+        return dedupe_key, str(task_id), True
     enqueue_kwargs["_job_id"] = arq_job_id(
         kind,
         str(task_id),
