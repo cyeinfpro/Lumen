@@ -99,10 +99,6 @@ class ProjectWorkflowOperations(Protocol):
 
 
 class ApparelWorkflowOperations(Protocol):
-    async def create_apparel_model_showcase(
-        self, *, body: object, user: object, db: object
-    ) -> object: ...
-
     async def list_apparel_model_library(
         self,
         *,
@@ -229,10 +225,6 @@ class ModelLibraryWorkflowOperations(Protocol):
 
 
 class PosterWorkflowOperations(Protocol):
-    async def create_poster_design_workflow(
-        self, *, body: object, user: object, db: object
-    ) -> object: ...
-
     async def approve_copy_analysis(
         self,
         *,
