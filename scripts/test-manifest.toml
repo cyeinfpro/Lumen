@@ -1,0 +1,384 @@
+[planner]
+max_reverse_depth = 2
+exclusive_resources = ["postgres", "redis", "filesystem", "web-build"]
+full_mandatory_paths = [
+  ".github/workflows/**",
+  "apps/api/alembic/**",
+  "apps/api/alembic.ini",
+  "apps/web/package-lock.json",
+  "apps/web/scripts/run-tests.mjs",
+  "apps/*/pyproject.toml",
+  "image-job/pyproject.toml",
+  "image-job/requirements.txt",
+  "packages/core/**",
+  "packages/*/pyproject.toml",
+  "pyproject.toml",
+  "scripts/run_test_plan.py",
+  "scripts/test-manifest.toml",
+  "scripts/test.sh",
+  "scripts/test_impact.py",
+  "uv.lock",
+  "**/conftest.py",
+]
+
+[gates.python-ruff]
+command = "uv run ruff check {changed_python}"
+
+[gates.backend-architecture]
+command = "uv run python scripts/check_architecture.py"
+
+[gates.backend-complexity]
+command = "uv run python scripts/check_complexity.py"
+
+[gates.backend-runtime-state]
+command = "uv run python scripts/module_runtime_state_audit.py"
+
+[gates.migration-static]
+command = "uv run python scripts/lint_alembic_breaking.py {changed_migrations}"
+
+[gates.web-architecture]
+command = "cd apps/web && npm run check:architecture"
+
+[gates.web-complexity]
+command = "cd apps/web && npm run check:complexity"
+
+[gates.web-typecheck]
+command = "cd apps/web && npm run type-check"
+resources = ["web-build"]
+
+[gates.web-runner-syntax]
+command = "node --check apps/web/scripts/run-tests.mjs"
+
+[[rules]]
+name = "test-infrastructure"
+paths = [
+  "scripts/test-manifest.toml",
+  "scripts/test_impact.py",
+  "scripts/run_test_plan.py",
+  "scripts/test.sh",
+  "tests/test_test_impact.py",
+  "tests/test_run_test_plan.py",
+  "apps/web/scripts/run-tests.mjs",
+  "apps/web/__tests__/run-tests-script.test.mjs",
+  "**/conftest.py",
+]
+commands = [
+  "uv run pytest -q tests/test_test_impact.py tests/test_run_test_plan.py",
+  "cd apps/web && node --test __tests__/run-tests-script.test.mjs",
+]
+gates = ["python-ruff", "web-runner-syntax"]
+risk = ["test-infrastructure"]
+resources = []
+
+[[rules]]
+name = "api-images"
+paths = ["apps/api/app/images/**"]
+commands = [
+  "uv run pytest -q apps/api/tests/images/test_artifact_saga.py apps/api/tests/images/test_staged_sweep_budget.py apps/api/tests/images/test_artifact_runtime_regressions.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["filesystem"]
+resources = ["filesystem"]
+
+[[rules]]
+name = "api-canvas-auth"
+paths = [
+  "apps/api/app/canvas_services/**",
+  "apps/api/app/routes/auth.py",
+  "apps/api/app/idempotency/**",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_canvas_execution_guards.py apps/api/tests/test_canvas_projection_guards.py apps/api/tests/test_canvas_retry_isolation.py apps/api/tests/test_auth_security.py apps/api/tests/test_idempotency_serialization.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["postgres"]
+resources = ["postgres"]
+
+[[rules]]
+name = "api-poster"
+paths = [
+  "apps/api/app/services/poster_styles/**",
+  "apps/api/app/routes/poster_styles.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_poster_styles.py apps/api/tests/test_poster_style_storage.py apps/api/tests/test_poster_operation_modularity.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["filesystem", "postgres"]
+resources = ["filesystem", "postgres"]
+
+[[rules]]
+name = "web-realtime"
+paths = [
+  "apps/web/src/lib/useSSE.ts",
+  "apps/web/src/lib/sse/**",
+  "apps/web/src/components/SSEProvider.tsx",
+]
+commands = [
+  "cd apps/web && npm test -- src/lib/useSSE.test.ts src/components/SSEProvider.test.ts src/lib/sse/connectionMachine.test.ts src/lib/sse/eventSourceTransport.test.ts src/lib/sse/leaderElection.test.ts src/lib/sse/replayCoordinator.test.ts src/lib/sse/runtime.test.ts src/lib/sse/validation.test.ts",
+]
+gates = ["web-architecture", "web-complexity", "web-typecheck"]
+risk = ["sse-replay"]
+resources = []
+
+[[rules]]
+name = "worker-outbox"
+paths = [
+  "apps/worker/app/outbox/**",
+  "apps/worker/app/tasks/outbox.py",
+]
+commands = [
+  "uv run pytest -q apps/worker/tests/test_outbox.py apps/worker/tests/test_outbox_reconciliation_contracts.py apps/worker/tests/test_outbox_postgres_integration.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["postgres", "redis", "at-least-once-delivery"]
+resources = ["postgres", "redis"]
+
+[[rules]]
+name = "message-video-submission"
+paths = [
+  "apps/api/app/services/message_submission.py",
+  "apps/api/app/services/message_request.py",
+  "apps/api/app/services/video/**",
+  "apps/api/app/routes/videos.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_messages_route.py apps/api/tests/test_video_reference_videos.py apps/api/tests/test_videos_media.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["postgres", "filesystem"]
+resources = ["postgres", "filesystem"]
+
+[[rules]]
+name = "api-upload"
+paths = [
+  "apps/api/app/images/application/upload.py",
+  "apps/api/app/routes/images.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_images_upload.py apps/api/tests/test_upload_pipeline.py apps/api/tests/images/test_storage_capacity.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["filesystem"]
+resources = ["filesystem"]
+
+[[rules]]
+name = "api-workflows"
+paths = [
+  "apps/api/app/workflows/**",
+  "apps/api/app/routes/workflow_routes/**",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_workflow_application_composition.py apps/api/tests/test_workflow_http_cutover_parity.py apps/api/tests/test_workflow_policy_registry.py apps/api/tests/test_workflow_route_modules.py apps/api/tests/test_workflow_serialization.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["postgres"]
+resources = ["postgres"]
+
+[[rules]]
+name = "worker-completion"
+paths = [
+  "apps/worker/app/tasks/completion.py",
+  "apps/worker/app/tasks/completion_parts/**",
+  "apps/worker/app/services/completion/**",
+]
+commands = [
+  "uv run pytest -q apps/worker/tests/test_completion_parts.py apps/worker/tests/test_completion_context_window.py apps/worker/tests/test_completion_lease.py apps/worker/tests/test_completion_tool_image.py apps/worker/tests/test_completion_web_search.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["redis"]
+resources = ["redis"]
+
+[[rules]]
+name = "runtime-container"
+paths = [
+  "apps/api/app/main.py",
+  "apps/api/app/runtime/**",
+  "apps/worker/app/main.py",
+  "apps/worker/app/runtime/**",
+  "apps/worker/app/task_runtime/**",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_lifespan_cleanup.py apps/worker/tests/test_worker_startup.py apps/worker/tests/test_task_parts_runtime.py apps/worker/tests/test_state.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["runtime-state"]
+resources = []
+
+[[rules]]
+name = "web-features"
+paths = [
+  "apps/web/src/app/**",
+  "apps/web/src/components/**",
+  "apps/web/src/features/**",
+  "apps/web/src/store/**",
+]
+commands = ["cd apps/web && npm test"]
+gates = ["web-architecture", "web-complexity", "web-typecheck"]
+risk = ["web-feature-boundary"]
+resources = []
+fallback = true
+
+[[rules]]
+name = "shared-core"
+paths = ["packages/core/**"]
+commands = [
+  "uv run pytest -q packages/core/tests",
+  "uv run pytest -q apps/api/tests/test_core_security_infra.py apps/api/tests/test_alembic_env.py",
+  "uv run pytest -q apps/worker/tests/test_billing_idempotency.py apps/worker/tests/test_worker_startup.py",
+]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["shared-core", "multi-application"]
+resources = []
+
+[[rules]]
+name = "database-migrations"
+paths = [
+  "apps/api/alembic/**",
+  "apps/api/alembic.ini",
+  "packages/core/lumen_core/model_base.py",
+]
+commands = [
+  "uv run pytest -q apps/api/tests/test_alembic_env.py apps/api/tests/test_memory_extraction_migration.py apps/api/tests/test_billing_consistency_migration.py tests/test_migration_lock_safety.py",
+]
+gates = [
+  "python-ruff",
+  "migration-static",
+  "backend-architecture",
+  "backend-runtime-state",
+]
+risk = ["migration", "postgres"]
+resources = ["postgres"]
+
+[[rules]]
+name = "api-general"
+paths = ["apps/api/app/**"]
+commands = ["uv run pytest -q apps/api/tests"]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = []
+resources = []
+fallback = true
+
+[[rules]]
+name = "worker-general"
+paths = ["apps/worker/app/**"]
+commands = ["uv run pytest -q apps/worker/tests"]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = []
+resources = []
+fallback = true
+
+[[rules]]
+name = "web-general"
+paths = [
+  "apps/web/src/**",
+  "apps/web/__tests__/**",
+  "apps/web/*.ts",
+  "apps/web/*.mjs",
+]
+commands = ["cd apps/web && npm test"]
+gates = ["web-architecture", "web-complexity", "web-typecheck"]
+risk = []
+resources = []
+fallback = true
+
+[[rules]]
+name = "tgbot"
+paths = ["apps/tgbot/**"]
+commands = ["cd apps/tgbot && PYTHONPATH=\"$PWD\" uv run pytest -q tests"]
+gates = [
+  "python-ruff",
+  "backend-architecture",
+  "backend-complexity",
+  "backend-runtime-state",
+]
+risk = ["telegram"]
+resources = []
+
+[[rules]]
+name = "image-job"
+paths = ["image-job/**"]
+commands = ["uv run pytest -q image-job/tests"]
+gates = ["python-ruff", "backend-architecture", "backend-complexity"]
+risk = ["filesystem"]
+resources = ["filesystem"]
+
+[[rules]]
+name = "operations"
+paths = [
+  "scripts/lib/**",
+  "scripts/update/**",
+  "scripts/*.sh",
+  "scripts/restore_runner.py",
+  "scripts/update_runner.py",
+  "scripts/build_release_manifest.py",
+  "scripts/promote_release_images.py",
+  "scripts/release_manifest_guard.py",
+  "scripts/version.py",
+  "deploy/**",
+  "tools/mock-image-upstream/**",
+]
+commands = ["uv run pytest -q tests tools/mock-image-upstream/tests"]
+gates = ["python-ruff"]
+risk = ["operations"]
+resources = []
