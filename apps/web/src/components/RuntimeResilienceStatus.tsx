@@ -9,14 +9,6 @@ import {
 } from "@/lib/runtimeResilience";
 import { replaceWithLogin } from "@/lib/auth/navigation";
 
-function sessionIsHealthy(status: RuntimeResilienceSnapshot): boolean {
-  return status.session === "authenticated" || status.session === "public";
-}
-
-function realtimeIsHealthy(status: RuntimeResilienceSnapshot): boolean {
-  return status.realtime === "open" || status.realtime === "idle";
-}
-
 function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   if (status.session === "unauthorized") {
     return "会话已失效";
@@ -27,19 +19,17 @@ function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
   if (status.realtime === "error" || status.realtime === "closed") {
     return "实时连接中断，正在恢复";
   }
-  return status.session === "revalidating"
-    ? "正在确认会话"
-    : "正在连接";
+  return "";
 }
 
 export function RuntimeResilienceStatus() {
   const status = useRuntimeResilience();
-  if (sessionIsHealthy(status) && realtimeIsHealthy(status)) return null;
-
   const unauthorized = status.session === "unauthorized";
   const sessionDegraded = status.session === "degraded";
   const realtimeDegraded =
     status.realtime === "error" || status.realtime === "closed";
+  if (!unauthorized && !sessionDegraded && !realtimeDegraded) return null;
+
   const urgent = unauthorized || sessionDegraded;
   const message = runtimeStatusMessage(status);
   const Icon = unauthorized
@@ -75,7 +65,7 @@ export function RuntimeResilienceStatus() {
         }
       >
         <Icon
-          className={"h-4 w-4 shrink-0 " + (!urgent ? "animate-spin" : "")}
+          className="h-4 w-4 shrink-0"
           aria-hidden
         />
         <span className="min-w-0 flex-1 truncate">{message}</span>
