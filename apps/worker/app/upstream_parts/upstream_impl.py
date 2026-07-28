@@ -27,7 +27,7 @@ Completion（聊天）路径仍走 POST /v1/responses 的 SSE 流式协议，事
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 - composed infrastructure dependency
 import base64  # noqa: F401 - late-bound image-job facade
 import hashlib  # noqa: F401 - late-bound image-job facade
 import logging
@@ -311,9 +311,6 @@ _proxied_clients: OrderedDict[tuple[Any, str], httpx.AsyncClient] = OrderedDict(
 _images_client: httpx.AsyncClient | None = None
 _images_client_timeout_config: Any | None = None
 _proxied_images_clients: OrderedDict[tuple[Any, str], httpx.AsyncClient] = OrderedDict()
-_client_lock = asyncio.Lock()
-_images_client_lock = asyncio.Lock()
-lifecycle_state = UpstreamLifecycleState.create()
 
 _TEXT_STREAM_INTERRUPTED_ERROR_CODE = EC.TEXT_STREAM_INTERRUPTED.value
 
@@ -1312,7 +1309,9 @@ async def responses_call(
 
 
 def build_image_upstream_runtime() -> ImageUpstreamRuntime:
-    runtime = ImageUpstreamRuntime(build_upstream_services(globals()))
+    namespace = dict(globals())
+    namespace["lifecycle_state"] = UpstreamLifecycleState.create()
+    runtime = ImageUpstreamRuntime(build_upstream_services(namespace))
     services = runtime.services
     _configure_pil_max_image_pixels(services)
     services.core.configure_pil_max_image_pixels = partial(

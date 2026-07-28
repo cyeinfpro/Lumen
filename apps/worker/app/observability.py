@@ -483,9 +483,6 @@ class MetricsServerRuntime:
     thread: threading.Thread | None = None
 
 
-_METRICS_SERVER = MetricsServerRuntime()
-
-
 class _ThreadingMetricsWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
@@ -516,17 +513,19 @@ def _start_metrics_wsgi_server(host: str, port: int) -> tuple[Any, threading.Thr
 def start_metrics_server(
     port: int,
     host: str = "0.0.0.0",  # nosec B104
+    *,
+    runtime: MetricsServerRuntime,
 ) -> None:
     """在指定端口起一个独立的 prometheus_client HTTP server。幂等。"""
-    if _METRICS_SERVER.started:
+    if runtime.started:
         return
     # Empty configuration retains the container-network listener.
     bind_host = host.strip() or "0.0.0.0"  # nosec B104
     try:
         httpd, thread = _start_metrics_wsgi_server(bind_host, port)
-        _METRICS_SERVER.httpd = httpd
-        _METRICS_SERVER.thread = thread
-        _METRICS_SERVER.started = True
+        runtime.httpd = httpd
+        runtime.thread = thread
+        runtime.started = True
         logger.info("worker metrics server started on %s:%d", bind_host, port)
     except OSError as exc:
         if getattr(exc, "errno", None) == EADDRINUSE:
@@ -554,12 +553,12 @@ def start_metrics_server(
         ) from exc
 
 
-def stop_metrics_server() -> None:
+def stop_metrics_server(runtime: MetricsServerRuntime) -> None:
     """Stop the prometheus HTTP server if startup later fails."""
-    httpd = _METRICS_SERVER.httpd
-    _METRICS_SERVER.httpd = None
-    _METRICS_SERVER.thread = None
-    _METRICS_SERVER.started = False
+    httpd = runtime.httpd
+    runtime.httpd = None
+    runtime.thread = None
+    runtime.started = False
     if httpd is None:
         return
     try:
@@ -594,6 +593,7 @@ def get_tracer(name: str = "lumen.worker"):
 
 
 __all__ = [
+    "MetricsServerRuntime",
     "init_sentry",
     "init_otel",
     "start_metrics_server",

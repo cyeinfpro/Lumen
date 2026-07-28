@@ -1903,9 +1903,15 @@ def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None
     assert "state.services.billing.flush_after_commit(" in branch
 
 
-def test_sse_timestamp_lock_is_eagerly_initialized() -> None:
-    assert sse_publish._TS_LOCK is not None
-    assert hasattr(sse_publish._TS_LOCK, "acquire")
+@pytest.mark.asyncio
+async def test_sse_timestamp_uses_monotonic_wall_clock_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sse_publish.time, "monotonic_ns", lambda: 12_345_000_000)
+
+    assert await sse_publish._monotonic_ts_ms() == (
+        sse_publish._MONOTONIC_EPOCH_OFFSET_MS + 12_345
+    )
 
 
 def test_sse_xadd_dedupe_uses_per_event_set_nx_ex() -> None:

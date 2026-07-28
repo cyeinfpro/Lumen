@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers import (
@@ -31,10 +31,7 @@ from lumen_core.schemas import (
 
 from ..db import get_db
 from ..deps import AdminUser
-from ..services.admin_model_cache import (
-    get_cached_admin_models,
-    invalidate_admin_models_cache,
-)
+from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import read_providers as _read_providers
 
 router = APIRouter(prefix="/admin", tags=["admin-models"])
@@ -132,10 +129,12 @@ async def _build_models_response(db: AsyncSession) -> AdminModelsOut:
 
 @router.get("/models", response_model=AdminModelsOut)
 async def list_admin_models(
+    request: Request,
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminModelsOut:
-    return await get_cached_admin_models(db, _build_models_response)
+    cache = admin_model_cache_from_request(request)
+    return await cache.get(db, _build_models_response)
 
 
-__all__ = ["router", "invalidate_admin_models_cache"]
+__all__ = ["router"]

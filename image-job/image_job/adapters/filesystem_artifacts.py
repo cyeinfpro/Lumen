@@ -18,12 +18,6 @@ from PIL import Image, UnidentifiedImageError
 from ..config import ImageJobSettings
 
 
-# `Image.MAX_IMAGE_PIXELS` 与 `warnings.catch_warnings()` 都是进程级全局状态，
-# 而 _inspect 跑在 asyncio.to_thread 的线程池里，可能并发进入。用锁把
-# 「改全局 → 解码 → 还原」串起来，语义与 artifacts.ImageArtifactFacade 一致。
-_IMAGE_VERIFY_LOCK = threading.RLock()
-
-
 _MIME_EXT: Mapping[str, str] = MappingProxyType(
     {
         "image/png": "png",
@@ -52,6 +46,9 @@ class FilesystemArtifactStore:
     ) -> None:
         self.settings = settings
         self.repository = repository
+        # Pillow verification temporarily mutates process-wide decoder state.
+        # The owning sidecar runtime serializes that critical section.
+        self._image_verify_lock = threading.RLock()
 
     def _file_path(self, token: str, ext: str) -> Path:
         return self.settings.refs_dir / f"{token}.{ext}"
@@ -64,7 +61,7 @@ class FilesystemArtifactStore:
         # 配置的 max_image_pixels，配置调大调小都不生效。
         max_pixels = self.settings.max_image_pixels
         try:
-            with _IMAGE_VERIFY_LOCK:
+            with self._image_verify_lock:
                 previous_max_pixels = Image.MAX_IMAGE_PIXELS
                 Image.MAX_IMAGE_PIXELS = max_pixels
                 try:

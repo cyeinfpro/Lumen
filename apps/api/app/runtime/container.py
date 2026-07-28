@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 import httpx
@@ -9,6 +9,7 @@ from arq.connections import ArqRedis
 
 from ..redis_client import ReconnectingRedis
 from ..services.billing_cache import BillingCacheService
+from ..services.admin_model_cache import AdminModelCache
 from ..services.poster_styles.tagging_runtime import PosterTaggingRuntime
 from .lifecycle import LifecycleDiagnostics, RuntimeLifecycle
 
@@ -40,6 +41,7 @@ class ApiRuntime:
     _arq: ArqRedis
     _billing_cache: BillingCacheService
     _lifecycle: RuntimeLifecycle
+    _admin_models: AdminModelCache = field(default_factory=AdminModelCache)
     _poster_tagging: PosterTaggingRuntime | None = None
     _http: httpx.AsyncClient | None = None
     _image_reconciler_enabled: bool = False
@@ -56,6 +58,9 @@ class ApiRuntime:
 
     def billing_cache(self) -> BillingCacheService:
         return self._billing_cache
+
+    def admin_models(self) -> AdminModelCache:
+        return self._admin_models
 
     def poster_tagging(self) -> PosterTaggingRuntime:
         if self._poster_tagging is None:
@@ -80,6 +85,7 @@ class ApiRuntime:
             RuntimeCapability("sse", CapabilityStatus.ENABLED, "redis-backed"),
             RuntimeCapability("arq", CapabilityStatus.ENABLED),
             RuntimeCapability("billing_cache", CapabilityStatus.ENABLED),
+            RuntimeCapability("admin_model_cache", CapabilityStatus.ENABLED),
             RuntimeCapability(
                 "image_reconciler",
                 CapabilityStatus.ENABLED

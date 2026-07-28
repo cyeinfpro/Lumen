@@ -28,6 +28,7 @@ from .config import settings
 from .db import engine
 from .jobs.upstream_probe import probe_upstream
 from .observability import (
+    MetricsServerRuntime,
     bind_db_pool_metrics,
     init_otel,
     init_sentry,
@@ -150,7 +151,12 @@ async def _cleanup_resources(ctx: dict[str, Any]) -> None:
             "upstream_client",
             lambda: close_client(runtime=image_upstream_runtime),
         )
-    await _cleanup_resource("metrics_server", stop_metrics_server)
+    metrics_server_runtime = ctx.pop("metrics_server_runtime", None)
+    if isinstance(metrics_server_runtime, MetricsServerRuntime):
+        await _cleanup_resource(
+            "metrics_server",
+            lambda: stop_metrics_server(metrics_server_runtime),
+        )
     # 引擎最后释放：上面的清理动作（billing_cache flush、generation_runtime
     # 收尾）都可能还要用连接。不 dispose 会在 PG 侧留下 IDLE 连接，
     # 反复重启后耗尽 max_connections。
@@ -221,8 +227,17 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
         init_otel(settings.otel_service_name, settings.otel_exporter_endpoint)
         # 必须在 metrics server 起来之前挂好采样函数，否则第一轮 scrape 拿到的是空值。
         bind_db_pool_metrics(engine)
-        start_metrics_server(settings.worker_metrics_port, settings.worker_metrics_host)
-        lifecycle.own("metrics_server", stop_metrics_server)
+        metrics_server_runtime = MetricsServerRuntime()
+        ctx["metrics_server_runtime"] = metrics_server_runtime
+        start_metrics_server(
+            settings.worker_metrics_port,
+            settings.worker_metrics_host,
+            runtime=metrics_server_runtime,
+        )
+        lifecycle.own(
+            "metrics_server",
+            lambda: stop_metrics_server(metrics_server_runtime),
+        )
         # P1-4: 预热 tiktoken o200k_base encoding，避免首条请求承担 ~100-200 ms 加载耗时。
         # 失败不阻塞启动——count_tokens 内部会回落到 estimate_text_tokens。
         loaded = warm_tiktoken()
@@ -237,6 +252,7 @@ async def _on_startup(ctx: dict) -> None:  # type: ignore[type-arg]
             _generation=generation_runtime,
             _completion=completion_runtime,
             _video=video_generation_runtime,
+            _metrics_server=metrics_server_runtime,
             _lifecycle=lifecycle,
         )
         ctx["worker_runtime"] = worker_runtime

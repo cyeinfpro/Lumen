@@ -65,7 +65,7 @@ async def test_startup_failure_closes_partial_resources(
     monkeypatch.setattr(main, "init_otel", lambda *_a, **_kw: None)
     monkeypatch.setattr(main, "start_metrics_server", lambda *_a, **_kw: None)
     monkeypatch.setattr(
-        main, "stop_metrics_server", lambda: calls.append("metrics_stop")
+        main, "stop_metrics_server", lambda *_args: calls.append("metrics_stop")
     )
     monkeypatch.setattr(main, "warm_tiktoken", fail_warm_tiktoken)
     monkeypatch.setattr(main.billing_cache, "shutdown", fake_billing_shutdown)
@@ -129,7 +129,7 @@ async def test_startup_rejects_invalid_effective_image_job_channel(
     )
     monkeypatch.setattr(main.billing_cache, "shutdown", lambda: None)
     monkeypatch.setattr(main, "close_client", lambda *, runtime: None)
-    monkeypatch.setattr(main, "stop_metrics_server", lambda: None)
+    monkeypatch.setattr(main, "stop_metrics_server", lambda *_args: None)
 
     with pytest.raises(RuntimeError, match="effective image_jobs_only"):
         await main._on_startup({"redis": object()})
@@ -153,7 +153,7 @@ async def test_shutdown_attempts_each_cleanup_after_one_fails(
         assert runtime is image_upstream_runtime
         calls.append("upstream")
 
-    def fake_stop_metrics() -> None:
+    def fake_stop_metrics(*_args: object) -> None:
         calls.append("metrics")
 
     async def fake_dispose() -> None:
@@ -164,7 +164,12 @@ async def test_shutdown_attempts_each_cleanup_after_one_fails(
     monkeypatch.setattr(main, "stop_metrics_server", fake_stop_metrics)
     monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=fake_dispose))
 
-    await main._on_shutdown({"image_upstream_runtime": image_upstream_runtime})
+    await main._on_shutdown(
+        {
+            "image_upstream_runtime": image_upstream_runtime,
+            "metrics_server_runtime": main.MetricsServerRuntime(),
+        }
+    )
 
     # 引擎必须最后 dispose：前面的清理仍可能借用连接。
     assert calls == ["billing", "upstream", "metrics", "engine"]
@@ -183,7 +188,7 @@ async def test_shutdown_disposes_engine_even_when_earlier_cleanup_raises(
         assert runtime is image_upstream_runtime
         raise RuntimeError("upstream client close failed")
 
-    def failing_stop_metrics() -> None:
+    def failing_stop_metrics(*_args: object) -> None:
         raise RuntimeError("metrics server stop failed")
 
     async def fake_dispose() -> None:
@@ -354,6 +359,7 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
         _generation=generation,
         _completion=completion,
         _video=video,
+        _metrics_server=main.MetricsServerRuntime(),
         _lifecycle=lifecycle,
     )
 
@@ -369,6 +375,7 @@ async def test_worker_runtime_exposes_typed_context_and_idempotent_shutdown() ->
         "generation_runtime": generation,
         "completion_runtime": completion,
         "video_generation_runtime": video,
+        "metrics_server_runtime": runtime.metrics_server(),
     }
     assert calls == ["generation", "upstream", "engine"]
     diagnostics = runtime.diagnostics()
