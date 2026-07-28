@@ -1,5 +1,5 @@
 {
-  "max_total": 20,
+  "max_total": 15,
   "modules": [
     {
       "max_instances": 1,
@@ -46,44 +46,9 @@
     {
       "max_instances": 1,
       "owner": "api",
-      "path": "apps/api/app/services/poster_styles/library.py",
-      "retirement_condition": "Poster style library synchronization is owned by an application-scoped service.",
-      "symbols": ["_SYNC_LOCK"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/services/poster_styles/workflow_lookup.py",
-      "retirement_condition": "Poster workflow bootstrap synchronization is owned by an application-scoped service.",
-      "symbols": ["_LOCAL_BOOTSTRAP_LOCK"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
       "path": "apps/api/app/sse_publish.py",
       "retirement_condition": "SSE timestamp state is owned by an application event publisher instance.",
       "symbols": ["_sse_publish_state"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/routes/admin_update.py",
-      "retirement_condition": "Update marker cleanup is owned by the admin update application service.",
-      "symbols": ["_marker_cleanup_state"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/routes/admin_release.py",
-      "retirement_condition": "Release marker cleanup is owned by the admin release application service.",
-      "symbols": ["_marker_cleanup_runtime"]
-    },
-    {
-      "max_instances": 1,
-      "owner": "api",
-      "path": "apps/api/app/routes/prompts.py",
-      "retirement_condition": "Prompt enhancement runtime is constructed by application composition.",
-      "symbols": ["_prompt_runtime_state"]
     },
     {
       "max_instances": 1,
