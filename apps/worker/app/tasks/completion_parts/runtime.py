@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ...task_runtime import RuntimeSlot
 from ...provider_runtime.upstream_services import ImageUpstreamRuntime
 from .image_storage_runtime import CompletionToolImageService
 
@@ -24,6 +22,7 @@ class CompletionRunner(Protocol):
         self,
         ctx: dict[str, Any],
         task_id: str,
+        ports: "CompletionPorts",
     ) -> None: ...
 
 
@@ -155,62 +154,6 @@ class CompletionPorts:
     retry: CompletionRetryPorts
 
 
-_COMPLETION_PORTS: RuntimeSlot[CompletionPorts] = RuntimeSlot("completion-ports")
-_COMPLETION_CONTEXT_PORTS: RuntimeSlot[CompletionContextPorts] = RuntimeSlot(
-    "completion-context-ports"
-)
-_COMPLETION_TOOLS_PORTS: RuntimeSlot[CompletionToolsPorts] = RuntimeSlot(
-    "completion-tools-ports"
-)
-_COMPLETION_PERSISTENCE_PORTS: RuntimeSlot[CompletionPersistencePorts] = RuntimeSlot(
-    "completion-persistence-ports"
-)
-_COMPLETION_UPSTREAM_PORTS: RuntimeSlot[CompletionUpstreamPorts] = RuntimeSlot(
-    "completion-upstream-ports"
-)
-_COMPLETION_BILLING_PORTS: RuntimeSlot[CompletionBillingPorts] = RuntimeSlot(
-    "completion-billing-ports"
-)
-_COMPLETION_EVENTS_PORTS: RuntimeSlot[CompletionEventsPorts] = RuntimeSlot(
-    "completion-events-ports"
-)
-_COMPLETION_RETRY_PORTS: RuntimeSlot[CompletionRetryPorts] = RuntimeSlot(
-    "completion-retry-ports"
-)
-
-
-def completion_ports() -> CompletionPorts:
-    return _COMPLETION_PORTS.current()
-
-
-def completion_context_ports() -> CompletionContextPorts:
-    return _COMPLETION_CONTEXT_PORTS.current()
-
-
-def completion_tools_ports() -> CompletionToolsPorts:
-    return _COMPLETION_TOOLS_PORTS.current()
-
-
-def completion_persistence_ports() -> CompletionPersistencePorts:
-    return _COMPLETION_PERSISTENCE_PORTS.current()
-
-
-def completion_upstream_ports() -> CompletionUpstreamPorts:
-    return _COMPLETION_UPSTREAM_PORTS.current()
-
-
-def completion_billing_ports() -> CompletionBillingPorts:
-    return _COMPLETION_BILLING_PORTS.current()
-
-
-def completion_events_ports() -> CompletionEventsPorts:
-    return _COMPLETION_EVENTS_PORTS.current()
-
-
-def completion_retry_ports() -> CompletionRetryPorts:
-    return _COMPLETION_RETRY_PORTS.current()
-
-
 @dataclass(frozen=True, slots=True)
 class CompletionRuntime:
     ports: CompletionPorts
@@ -218,15 +161,4 @@ class CompletionRuntime:
     image_upstream_runtime: ImageUpstreamRuntime
 
     async def run(self, ctx: dict[str, Any], task_id: str) -> None:
-        with ExitStack() as stack:
-            stack.enter_context(_COMPLETION_PORTS.use(self.ports))
-            stack.enter_context(_COMPLETION_CONTEXT_PORTS.use(self.ports.context))
-            stack.enter_context(_COMPLETION_TOOLS_PORTS.use(self.ports.tools))
-            stack.enter_context(
-                _COMPLETION_PERSISTENCE_PORTS.use(self.ports.persistence)
-            )
-            stack.enter_context(_COMPLETION_UPSTREAM_PORTS.use(self.ports.upstream))
-            stack.enter_context(_COMPLETION_BILLING_PORTS.use(self.ports.billing))
-            stack.enter_context(_COMPLETION_EVENTS_PORTS.use(self.ports.events))
-            stack.enter_context(_COMPLETION_RETRY_PORTS.use(self.ports.retry))
-            await self.runner(ctx, task_id)
+        await self.runner(ctx, task_id, self.ports)
