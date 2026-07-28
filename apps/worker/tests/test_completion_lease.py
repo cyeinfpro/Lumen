@@ -6,7 +6,7 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from app import sse_publish
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
 from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts.contracts import CompletionCommand, CompletionServices
+from app.tasks.completion_parts.services import CompletionRepositoryService
 from lumen_core.constants import (
     EV_COMP_DELTA,
     EV_COMP_FAILED,
@@ -28,14 +29,15 @@ def _synchronize_completion_services(
     monkeypatch: pytest.MonkeyPatch,
     services: CompletionServices,
 ) -> Iterator[None]:
+    adapter = cast(CompletionRepositoryService, services.repository).adapter
     adapters = (
-        services.repository,
-        services.context_builder,
-        services.tool_executor,
-        services.upstream_client,
-        services.billing,
-        services.events,
-        services.lease_retry,
+        adapter.persistence,
+        adapter.context,
+        adapter.tools,
+        adapter.upstream,
+        adapter.billing,
+        adapter.events,
+        adapter.retry,
     )
     bindings: dict[str, tuple[Any, Any]] = {}
     for adapter in adapters:
