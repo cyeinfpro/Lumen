@@ -33,13 +33,6 @@ class WorkflowHttpUseCases:
             workflow_run_id=workflow_run_id, user=user, db=db
         )
 
-    async def delete_workflow(
-        self, *, workflow_run_id: str, user: object, db: object
-    ) -> object:
-        return await self.projects.delete_workflow(
-            workflow_run_id=workflow_run_id, user=user, db=db
-        )
-
     async def add_workflow_assets(
         self,
         *,

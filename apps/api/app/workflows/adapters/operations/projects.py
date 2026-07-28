@@ -249,7 +249,7 @@ class _SQLAlchemyProjectLifecycleAdapter:
         await self.db.commit()
 
 
-def _project_lifecycle(db: AsyncSession) -> ProjectLifecycle:
+def build_project_lifecycle(db: AsyncSession) -> ProjectLifecycle:
     adapter = _SQLAlchemyProjectLifecycleAdapter(db)
     return ProjectLifecycle(
         repository=adapter,
@@ -271,7 +271,7 @@ async def get_workflow(
 ) -> WorkflowRunOut:
     return cast(
         WorkflowRunOut,
-        await _project_lifecycle(db).get(
+        await build_project_lifecycle(db).get(
             user_id=user.id,
             run_id=workflow_run_id,
         ),
@@ -285,22 +285,10 @@ async def reconcile_workflow(
 ) -> WorkflowRunOut:
     return cast(
         WorkflowRunOut,
-        await _project_lifecycle(db).reconcile(
+        await build_project_lifecycle(db).reconcile(
             user_id=user.id,
             run_id=workflow_run_id,
         ),
-    )
-
-
-async def delete_workflow(
-    workflow_run_id: str,
-    user: CurrentUser,
-    db: AsyncSession,
-) -> dict[str, bool]:
-    return await _project_lifecycle(db).delete(
-        user_id=user.id,
-        run_id=workflow_run_id,
-        account_mode=getattr(user, "account_mode", "wallet"),
     )
 
 
@@ -312,7 +300,7 @@ async def add_workflow_assets(
 ) -> WorkflowRunOut:
     return cast(
         WorkflowRunOut,
-        await _project_lifecycle(db).add_assets(
+        await build_project_lifecycle(db).add_assets(
             user_id=user.id,
             run_id=workflow_run_id,
             image_ids=body.image_ids,
