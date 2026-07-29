@@ -1,23 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
 
 import { toast } from "@/components/ui/primitives";
-import {
-  cancelVideoGeneration,
-  createVideoGeneration,
-  deleteVideo,
-  enhanceVideoPrompt,
-  retryVideoGeneration,
-} from "@/lib/apiClient";
 import type {
   VideoAction,
   VideoGenerationOut,
 } from "@/lib/types";
 import {
-  isVideoRequestFenceCurrent,
-  mergeVideoGenerationLists as mergeById,
   nextVideoRequestFence,
 } from "@/lib/videoEventSnapshot";
 import type { VideoRequestFence } from "@/lib/videoEventSnapshot";
@@ -26,13 +16,9 @@ import {
   displayPromptReferenceMentions,
   referenceDisplayToken,
   referenceLimitsForModelOption,
-  referencePayloadForVideoAction,
-  referencesForVideoAction,
-  promptForVideoAction,
 } from "./video-reference-domain";
 import {
   canApplyPromptEnhanceCandidate,
-  cleanPromptEnhanceText,
   focusVideoWorkbenchElement,
 } from "./video-workbench-ui";
 import type {
@@ -45,27 +31,19 @@ import {
   estimateHoldMicro,
   parseSeed,
   resolutionOptionsForModel,
-  toVideoResolution,
 } from "./video-options-model";
 import {
   motionSafeScrollBehavior,
 } from "./video-page-utils";
 import { hasPromptEnhancementPanel } from "./video-page-derived-state";
 import {
-  applyPromptEnhanceCandidateState,
-  buildPromptEnhanceCandidates,
-  canEnhanceVideoPrompt,
   effectiveVideoDuration,
   effectiveVideoResolution,
-  inputImageForVideoAction,
-  interruptedPromptEnhanceDescription,
-  notifyCompletedPromptEnhancement,
   referenceDraftFromHistory,
   selectedVideoModel,
   videoServiceSummary,
   videoSourceReady,
   videoSubmitDisabledReason,
-  VIDEO_PROMPT_VARIANT_COUNT,
 } from "./video-page-domain";
 import {
   useVideoGenerationFeed,
@@ -82,6 +60,12 @@ import {
 import {
   useVideoReferenceSummary,
 } from "./use-video-reference-summary";
+import {
+  useVideoPromptEnhancement,
+} from "./use-video-prompt-enhancement";
+import {
+  useVideoTaskMutations,
+} from "./use-video-task-mutations";
 import {
   VideoPageView,
 } from "./video-page-view";
@@ -368,124 +352,35 @@ export default function VideoPage() {
     [insertPromptText],
   );
 
-  const createMut = useMutation({
-    mutationFn: () =>
-      createVideoGeneration({
-        action,
-        model: selectedModel,
-        prompt: promptForVideoAction(action, prompt, referenceMedia),
-        input_image_id: inputImageForVideoAction(action, inputImageId),
-        reference_media: referencePayloadForVideoAction(action, referenceMedia),
-        duration_s: effectiveDurationS,
-        resolution: toVideoResolution(effectiveResolution),
-        aspect_ratio: aspectRatio,
-        generate_audio: generateAudio,
-        seed: parseSeed(seed),
-        watermark: false,
-      }),
-    onSuccess: (generation) => {
-      terminalHistorySyncedRef.current.delete(generation.id);
-      enableVideoSettling(generation.id);
-      syncVideoSettling(generation);
-      setItems((previous) => mergeById(previous, [generation]));
-      setIsTaskPanelOpen(true);
-      toast.success("任务已提交");
-      scheduleGenerationRefresh(generation.id, { delayMs: 800 });
-      void invalidateHistory();
-    },
-    onError: (error) =>
-      toast.error("提交失败", {
-        description: error instanceof Error ? error.message : undefined,
-      }),
-  });
-
-  const cancelMut = useMutation({
-    mutationFn: cancelVideoGeneration,
-    onSuccess: (generation, requestedId) => {
-      if (generation.id !== requestedId) return;
-      setItems((previous) => mergeById(previous, [generation]));
-      const providerCannotCancel =
-        generation.provider_kind === "dashscope" ||
-        generation.provider_kind === "omni_flash" ||
-        generation.provider_kind === "volcano_newapi";
-      toast.success("已请求取消", {
-        description: providerCannotCancel
-          ? "该供应商可能无法中止已提交任务，若上游最终成功仍会按结果计费。"
-          : undefined,
-      });
-      scheduleGenerationRefresh(generation.id, { forceHistorySync: true });
-    },
-    onError: (error) =>
-      toast.error("取消失败", {
-        description: error instanceof Error ? error.message : undefined,
-      }),
-  });
-
-  const retryMut = useMutation({
-    mutationFn: (request: VideoRequestFence) =>
-      retryVideoGeneration(request.taskId),
-    onSuccess: (generation, request) => {
-      if (!isVideoRequestFenceCurrent(retryRequestFenceRef.current, request)) {
-        return;
-      }
-      terminalHistorySyncedRef.current.delete(generation.id);
-      enableVideoSettling(generation.id);
-      syncVideoSettling(generation);
-      setItems((previous) => mergeById(previous, [generation]));
-      setIsTaskPanelOpen(true);
-      const createdNewTask = generation.id !== request.taskId;
-      toast.success(createdNewTask ? "已创建新的重试任务" : "已重新生成", {
-        description: createdNewTask
-          ? `正在跟踪新任务 ${generation.id.slice(0, 8)}`
-          : undefined,
-      });
-      scheduleGenerationRefresh(generation.id, { delayMs: 800 });
-      void invalidateHistory();
-    },
-    onError: (error, request) => {
-      if (!isVideoRequestFenceCurrent(retryRequestFenceRef.current, request)) {
-        return;
-      }
-      toast.error("重试失败", {
-        description: error instanceof Error ? error.message : undefined,
-      });
-    },
-  });
-
-  const requestVideoRetry = useCallback(
-    (generationId: string) => {
-      const request = nextVideoRequestFence(
-        retryRequestFenceRef.current,
-        generationId,
-      );
-      retryRequestFenceRef.current = request;
-      retryMut.mutate(request);
-    },
-    [retryMut],
-  );
-
-  const deleteMut = useMutation({
-    mutationFn: deleteVideo,
-    onSuccess: async (_data, videoId) => {
-      for (const item of effectiveItems) {
-        if (item.video?.id === videoId) {
-          disableVideoSettling(item.id);
-          abortGenerationRefresh(item.id);
-        }
-      }
-      setItems((previous) =>
-        previous.map((item) =>
-          item.video?.id === videoId ? { ...item, video: null } : item,
-        ),
-      );
-      setSelectedVideoId((current) => (current === videoId ? "" : current));
-      toast.success("视频已删除");
-      await invalidateHistory();
-    },
-    onError: (error) =>
-      toast.error("删除失败", {
-        description: error instanceof Error ? error.message : undefined,
-      }),
+  const {
+    cancelMut,
+    createMut,
+    deleteMut,
+    requestVideoRetry,
+    retryMut,
+  } = useVideoTaskMutations({
+    abortGenerationRefresh,
+    action,
+    aspectRatio,
+    disableVideoSettling,
+    durationS: effectiveDurationS,
+    effectiveItems,
+    enableVideoSettling,
+    generateAudio,
+    inputImageId,
+    invalidateHistory,
+    model: selectedModel,
+    prompt,
+    referenceMedia,
+    resolution: effectiveResolution,
+    retryRequestFenceRef,
+    scheduleGenerationRefresh,
+    seed,
+    setIsTaskPanelOpen,
+    setItems,
+    setSelectedVideoId,
+    syncVideoSettling,
+    terminalHistorySyncedRef,
   });
 
   const loadAsDraft = useCallback(
@@ -518,150 +413,33 @@ export default function VideoPage() {
     [focusPromptTarget, loadDraftMedia, switchDraftContext],
   );
 
-  const canEnhancePrompt = canEnhanceVideoPrompt({
-    uploadPending: firstFrameUploadPending,
-    referenceUploadPending,
-    prompt,
-    action,
-    inputImageId,
-    referenceCount: referenceMedia.length,
-  });
-
-  const enhancePromptAction = useCallback(async () => {
-    if (
-      isEnhancingPrompt ||
-      !canEnhancePrompt ||
-      hasActiveUpload()
-    ) {
-      return;
-    }
-    const original = prompt;
-    const activeReferenceMedia = referencesForVideoAction(
-      action,
-      referenceMedia,
-    );
-    const current = promptForVideoAction(action, prompt, activeReferenceMedia);
-    const controller = new AbortController();
-    promptEnhanceAbortRef.current?.abort();
-    const requestEpoch = promptEnhanceEpochRef.current + 1;
-    const requestDraftFence = { ...draftFenceRef.current };
-    promptEnhanceEpochRef.current = requestEpoch;
-    promptEnhanceAbortRef.current = controller;
-    clearPromptEnhanceChoices();
-    setIsEnhancingPrompt(true);
-    let accumulated = "";
-    const isCurrentRequest = () =>
-      !controller.signal.aborted &&
-      promptEnhanceAbortRef.current === controller &&
-      promptEnhanceEpochRef.current === requestEpoch &&
-      isVideoRequestFenceCurrent(draftFenceRef.current, requestDraftFence);
-    try {
-      await enhanceVideoPrompt(
-        {
-          text: current,
-          action,
-          model: selectedModel,
-          duration_s: effectiveDurationS,
-          resolution: effectiveResolution,
-          aspect_ratio: aspectRatio,
-          generate_audio: generateAudio,
-          input_image_id: inputImageForVideoAction(action, inputImageId),
-          variant_count: VIDEO_PROMPT_VARIANT_COUNT,
-          reference_media: referencePayloadForVideoAction(
-            action,
-            referenceMedia,
-          ),
-        },
-        (delta) => {
-          if (!isCurrentRequest()) return;
-          accumulated += delta;
-          setPromptEnhancePreview(
-            displayPromptReferenceMentions(accumulated, activeReferenceMedia),
-          );
-        },
-        controller.signal,
-      );
-      if (!isCurrentRequest()) return;
-      const candidates = buildPromptEnhanceCandidates(
-        accumulated,
-        current,
-        activeReferenceMedia,
-      );
-      const applied = applyPromptEnhanceCandidateState(
-        candidates,
-        setPrompt,
-        setPromptEnhanceCandidates,
-        setSelectedPromptEnhanceCandidateId,
-      );
-      if (applied) {
-        setPromptEnhancePreview("");
-        notifyCompletedPromptEnhancement(
-          applied.recommended,
-          applied.autoApply,
-          candidates.length,
-        );
-      } else {
-        setPromptEnhancePreview("");
-        toast.error("优化失败", { description: "没有收到有效提示词" });
-        setPrompt(original);
-      }
-    } catch (error) {
-      if (isCurrentRequest()) {
-        const description =
-          error instanceof Error ? error.message : undefined;
-        if (accumulated.trim()) {
-          const candidates = buildPromptEnhanceCandidates(
-            accumulated,
-            current,
-            activeReferenceMedia,
-          );
-          const applied = applyPromptEnhanceCandidateState(
-            candidates,
-            setPrompt,
-            setPromptEnhanceCandidates,
-            setSelectedPromptEnhanceCandidateId,
-          );
-          if (!applied) {
-            setPrompt(
-              displayPromptReferenceMentions(
-                cleanPromptEnhanceText(accumulated),
-                activeReferenceMedia,
-              ),
-            );
-          }
-          setPromptEnhancePreview("");
-          toast.error("优化中断", {
-            description: interruptedPromptEnhanceDescription(description),
-          });
-        } else {
-          toast.error("优化失败", { description });
-          setPrompt(original);
-        }
-      }
-    } finally {
-      if (
-        promptEnhanceAbortRef.current === controller &&
-        promptEnhanceEpochRef.current === requestEpoch
-      ) {
-        promptEnhanceAbortRef.current = null;
-        setIsEnhancingPrompt(false);
-      }
-    }
-  }, [
+  const {
+    canEnhancePrompt,
+    enhancePromptAction,
+  } = useVideoPromptEnhancement({
     action,
     aspectRatio,
-    canEnhancePrompt,
     clearPromptEnhanceChoices,
-    effectiveDurationS,
-    effectiveResolution,
+    draftFenceRef,
+    durationS: effectiveDurationS,
     generateAudio,
     hasActiveUpload,
     inputImageId,
     isEnhancingPrompt,
+    model: selectedModel,
     prompt,
+    promptEnhanceAbortRef,
+    promptEnhanceEpochRef,
     referenceMedia,
-    selectedModel,
-  ]);
+    referenceUploadPending,
+    resolution: effectiveResolution,
+    setIsEnhancingPrompt,
+    setPrompt,
+    setPromptEnhanceCandidates,
+    setPromptEnhancePreview,
+    setSelectedPromptEnhanceCandidateId,
+    uploadPending: firstFrameUploadPending,
+  });
 
   const scrollPromptEditorIntoView = useCallback(() => {
     const target = promptRef.current;
