@@ -448,11 +448,15 @@ test("mobile image composer exposes complete quick settings and advanced access"
   const mobile = source(
     "src/components/ui/composer/mobile/MobileComposerPill.tsx",
   );
+  const expanded = source(
+    "src/components/ui/composer/mobile/MobileComposerExpanded.tsx",
+  );
   const quickSettings = source(
     "src/components/ui/composer/mobile/MobileComposerExecutionControls.tsx",
   );
 
-  match(mobile, /<MobileComposerExecutionControls/);
+  match(mobile, /<MobileComposerExpanded/);
+  match(expanded, /<MobileComposerExecutionControls/);
   match(quickSettings, /function MobileImageQuickSettingsBar/);
   match(quickSettings, /ariaLabel="生成数量"/);
   match(quickSettings, /COUNT_OPTIONS = \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\]/);
