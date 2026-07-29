@@ -18,6 +18,7 @@ from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
 )
+from app.upstream_parts.generated_payload import InlineImageBytes
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.url_security import PublicHttpTarget
 
@@ -551,7 +552,7 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
         api_key_override="sk-test",
     )
 
-    assert result == [("ZmFrZQ==", "ok")]
+    assert result == [(InlineImageBytes(b"fake"), "ok")]
     headers = seen["headers"]
     expected_key = TEST_UPSTREAM_SERVICES.core.image_idempotency_key(
         trace_id="gen-fixed",

@@ -398,8 +398,10 @@ def test_repository_ledger_matches_current_total_ceiling() -> None:
     ledger = load_ledger()
     findings = collect_module_runtime_findings()
 
-    assert ledger["max_total"] == 15
-    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 15
-    assert len(findings) == 15
-    assert any(finding.path.startswith("image-job/") for finding in findings.values())
+    assert ledger["max_total"] == 8
+    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 8
+    assert len(findings) == 8
+    assert not any(
+        finding.path.startswith("image-job/") for finding in findings.values()
+    )
     assert audit_runtime_state(findings, ledger) == []
