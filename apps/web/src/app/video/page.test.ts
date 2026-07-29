@@ -65,6 +65,14 @@ const referenceSummarySource = readFileSync(
   new URL("./use-video-reference-summary.ts", import.meta.url),
   "utf8",
 );
+const promptEnhancementSource = readFileSync(
+  new URL("./use-video-prompt-enhancement.ts", import.meta.url),
+  "utf8",
+);
+const taskMutationsSource = readFileSync(
+  new URL("./use-video-task-mutations.ts", import.meta.url),
+  "utf8",
+);
 const requestLifecycleSource = readFileSync(
   new URL("./video-request-lifecycle.ts", import.meta.url),
   "utf8",
@@ -90,6 +98,8 @@ const source = [
   parameterHandlersSource,
   pageViewActionsSource,
   referenceSummarySource,
+  promptEnhancementSource,
+  taskMutationsSource,
   referenceDomainSource,
   optionsModelSource,
   readFileSync(new URL("./video-page-utils.ts", import.meta.url), "utf8"),
@@ -1078,10 +1088,10 @@ test("video feed scopes private state and runtime ownership by user id", () => {
 });
 
 test("video retry fences the original request while accepting a new task id", () => {
-  const retryStart = pageSource.indexOf("const retryMut = useMutation");
-  const retryEnd = pageSource.indexOf("const deleteMut = useMutation");
+  const retryStart = taskMutationsSource.indexOf("const retryMut = useMutation");
+  const retryEnd = taskMutationsSource.indexOf("const deleteMut = useMutation");
   ok(retryStart >= 0 && retryEnd > retryStart);
-  const retrySource = pageSource.slice(retryStart, retryEnd);
+  const retrySource = taskMutationsSource.slice(retryStart, retryEnd);
 
   match(
     retrySource,
