@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.adapters import workflow_runtime
 from app.workflows.adapters.operations import projects
 
@@ -29,7 +29,10 @@ def test_workflow_compatibility_facades_are_retired() -> None:
 
 
 def test_workflow_public_router_has_no_legacy_reexports() -> None:
-    route_path = Path(__file__).parents[1] / "app" / "routes" / "workflows.py"
+    routes_root = Path(__file__).parents[1] / "app" / "routes"
+    assert not (routes_root / "workflows.py").exists()
+
+    route_path = routes_root / "workflow_routes" / "__init__.py"
     tree = ast.parse(route_path.read_text("utf-8"))
     names = [
         target.id
@@ -83,7 +86,6 @@ def test_workflow_http_contract_characterization() -> None:
 def test_workflow_layers_have_no_dynamic_module_lookup_or_route_imports() -> None:
     app_root = Path(__file__).parents[1] / "app"
     roots = (
-        app_root / "routes" / "workflows.py",
         app_root / "workflows",
         app_root / "routes" / "workflow_routes",
         app_root / "routes" / "poster_styles.py",
@@ -96,12 +98,6 @@ def test_workflow_layers_have_no_dynamic_module_lookup_or_route_imports() -> Non
         for path in paths:
             source = path.read_text("utf-8")
             tree = ast.parse(source)
-            if path == app_root / "routes" / "workflows.py":
-                line_count = len(source.splitlines())
-                if line_count > 1500:
-                    violations.append(
-                        f"{path}: route module exceeds 1500 lines ({line_count})"
-                    )
             for forbidden in (
                 "sys.modules",
                 "importlib",

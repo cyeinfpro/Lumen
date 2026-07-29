@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image as PILImage
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.adapters import serialization
 from app.workflows.application.errors import WorkflowRequestError
 

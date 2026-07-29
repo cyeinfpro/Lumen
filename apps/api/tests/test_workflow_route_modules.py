@@ -15,7 +15,7 @@ from lumen_core.schemas import (
     PosterMastersCreateIn,
 )
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.adapters.operations import apparel, model_library, poster
 from app.workflows.transport.http import (
     apparel as apparel_routes,

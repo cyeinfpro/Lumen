@@ -93,6 +93,7 @@ DIMENSION_CHECKS = {
     "debt_documentation": (
         "dead_code_zero",
         "facade_gate",
+        "facade_inventory",
         "documentation_freshness",
     ),
 }
@@ -120,7 +121,14 @@ STATIC_COMMANDS = {
         "scripts/baseline_monotonic.py",
     ),
     "complexity_gate": ("uv", "run", "python", "scripts/check_complexity.py"),
+    "dead_code_zero": ("uv", "run", "python", "scripts/dead_code_audit.py"),
     "facade_gate": ("uv", "run", "python", "scripts/architecture_audit.py"),
+    "facade_inventory": (
+        "uv",
+        "run",
+        "python",
+        "scripts/facade_inventory.py",
+    ),
     "manifest_gate": ("uv", "run", "python", "scripts/test_manifest_lint.py"),
     "migration_gate": (
         "uv",

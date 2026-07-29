@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any
 
 from arq import Retry
@@ -83,7 +84,81 @@ from .volcano_assets_parts.receipts import (
 
 logger = logging.getLogger(__name__)
 
-_RUNTIME_CONTEXT = VolcanoAssetRuntimeContext(globals().__getitem__)
+_RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType({
+    "VOLCANO_ASSET_MAX_ASSETS": lambda: VOLCANO_ASSET_MAX_ASSETS,
+    "VOLCANO_ASSET_OPERATION_TTL_SECONDS": (
+        lambda: VOLCANO_ASSET_OPERATION_TTL_SECONDS
+    ),
+    "VolcanoAssetClient": lambda: VolcanoAssetClient,
+    "VolcanoAssetCreateRateLimited": lambda: VolcanoAssetCreateRateLimited,
+    "VolcanoAssetMediaError": lambda: VolcanoAssetMediaError,
+    "VolcanoAssetQuotaExceeded": lambda: VolcanoAssetQuotaExceeded,
+    "VolcanoAssetRedisUnavailable": lambda: VolcanoAssetRedisUnavailable,
+    "VolcanoAssetServiceError": lambda: VolcanoAssetServiceError,
+    "_LeaseLostError": lambda: _LeaseLostError,
+    "_OperationFailure": lambda: _OperationFailure,
+    "_RELEASE_OPERATION_LOCK_SCRIPT": lambda: _RELEASE_OPERATION_LOCK_SCRIPT,
+    "_RENEW_OPERATION_LOCK_SCRIPT": lambda: _RENEW_OPERATION_LOCK_SCRIPT,
+    "_SUPPORTED_ACTIONS": lambda: _SUPPORTED_ACTIONS,
+    "_SuccessPersistenceError": lambda: _SuccessPersistenceError,
+    "_ambiguous_create_asset_failure": lambda: _ambiguous_create_asset_failure,
+    "_ambiguous_create_group_failure": lambda: _ambiguous_create_group_failure,
+    "_asset_target_reached": lambda: _asset_target_reached,
+    "_complete_operation": lambda: _complete_operation,
+    "_confirm_operation_lock": lambda: _confirm_operation_lock,
+    "_defer_for_rate_limit": lambda: _defer_for_rate_limit,
+    "_delete_asset_result": lambda: _delete_asset_result,
+    "_delete_group_result": lambda: _delete_group_result,
+    "_get_operation": lambda: _get_operation,
+    "_get_scoped_asset": lambda: _get_scoped_asset,
+    "_get_scoped_group": lambda: _get_scoped_group,
+    "_group_target_reached": lambda: _group_target_reached,
+    "_is_not_found": lambda: _is_not_found,
+    "_list_group_asset_ids_best_effort": lambda: _list_group_asset_ids_best_effort,
+    "_media_failure": lambda: _media_failure,
+    "_operation_contract_failure": lambda: _operation_contract_failure,
+    "_operation_deleted_asset_ids": lambda: _operation_deleted_asset_ids,
+    "_operation_has_value": lambda: _operation_has_value,
+    "_persist_terminal_operation": lambda: _persist_terminal_operation,
+    "_process_create_asset": lambda: _process_create_asset,
+    "_process_create_group": lambda: _process_create_group,
+    "_process_delete_asset": lambda: _process_delete_asset,
+    "_process_delete_group": lambda: _process_delete_group,
+    "_process_management_action": lambda: _process_management_action,
+    "_process_update_asset": lambda: _process_update_asset,
+    "_process_update_group": lambda: _process_update_group,
+    "_provider_for_operation": lambda: _provider_for_operation,
+    "_read_success_receipt": lambda: _read_success_receipt,
+    "_reconcile_ambiguous_submit": lambda: _reconcile_ambiguous_submit,
+    "_reconcile_update_asset": lambda: _reconcile_update_asset,
+    "_reconcile_update_group": lambda: _reconcile_update_group,
+    "_record_operation_failure": lambda: _record_operation_failure,
+    "_recover_unconfirmed_delivery": lambda: _recover_unconfirmed_delivery,
+    "_release_quota_best_effort": lambda: _release_quota_best_effort,
+    "_require_asset_scope": lambda: _require_asset_scope,
+    "_require_group_scope": lambda: _require_group_scope,
+    "_resource_is_deleted": lambda: _resource_is_deleted,
+    "_retry_redis_call": lambda: _retry_redis_call,
+    "_service_failure": lambda: _service_failure,
+    "_snapshot_group_asset_ids": lambda: _snapshot_group_asset_ids,
+    "_source_url_for_submit": lambda: _source_url_for_submit,
+    "_utc_iso": lambda: _utc_iso,
+    "_write_audit": lambda: _write_audit,
+    "acquire_volcano_create_rate_limit": lambda: acquire_volcano_create_rate_limit,
+    "normalize_asset": lambda: normalize_asset,
+    "normalize_asset_list": lambda: normalize_asset_list,
+    "normalize_volcano_asset_name": lambda: normalize_volcano_asset_name,
+    "reserve_volcano_asset_quota": lambda: reserve_volcano_asset_quota,
+    "video_provider_binding_fingerprint": lambda: video_provider_binding_fingerprint,
+    "volcano_asset_quota_key": lambda: volcano_asset_quota_key,
+})
+
+
+def _resolve_runtime_dependency(name: str) -> Any:
+    return _RUNTIME_DEPENDENCY_FACTORIES[name]()
+
+
+_RUNTIME_CONTEXT = VolcanoAssetRuntimeContext(_resolve_runtime_dependency)
 _action_parts.install_runtime(_RUNTIME_CONTEXT)
 _create_parts.install_runtime(_RUNTIME_CONTEXT)
 _dispatch_parts.install_runtime(_RUNTIME_CONTEXT)

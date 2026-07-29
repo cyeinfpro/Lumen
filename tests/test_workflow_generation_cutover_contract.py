@@ -232,7 +232,10 @@ def test_workflow_http_transport_files_are_bounded() -> None:
 
 
 def test_workflow_public_router_has_no_compatibility_reexports() -> None:
-    path = API_APP / "routes" / "workflows.py"
+    legacy_path = API_APP / "routes" / "workflows.py"
+    assert not legacy_path.exists()
+
+    path = API_APP / "routes" / "workflow_routes" / "__init__.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     exported: list[str] | None = None
     for statement in tree.body:

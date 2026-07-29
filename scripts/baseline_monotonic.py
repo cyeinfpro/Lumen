@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 JSON_PATHS = (
     "scripts/architecture-baseline.json",
     "scripts/complexity-baseline.json",
+    "docs/refactors/compatibility-facade-retirement.json",
     "docs/refactors/runtime-coupling-inventory.json",
     "docs/refactors/module-runtime-state-ledger.json",
 )
@@ -157,6 +158,10 @@ def compare_complexity(current: dict[str, Any], base: dict[str, Any]) -> list[st
 def compare_runtime_inventory(
     current: dict[str, Any],
     base: dict[str, Any],
+    *,
+    merge_base: str | None = None,
+    root: Path = ROOT,
+    runner: GitRunner = _run_git,
 ) -> list[str]:
     current_findings = {
         _finding_key(item)
@@ -175,11 +180,95 @@ def compare_runtime_inventory(
     base_api = base.get("public_api", {})
     for path, exports in current.get("public_api", {}).items():
         if path not in base_api:
+            source = (
+                read_base_text(
+                    path,
+                    merge_base=merge_base,
+                    root=root,
+                    runner=runner,
+                    missing_ok=True,
+                )
+                if merge_base is not None
+                else None
+            )
+            if source is not None and set(exports).issubset(
+                _static_all_symbols(source)
+            ):
+                continue
             errors.append(f"facade baseline added path: {path}")
             continue
         added = set(exports) - set(base_api[path])
         for name in sorted(added):
             errors.append(f"facade public API grew: {path}:{name}")
+    return errors
+
+
+def _static_all_symbols(source: str) -> set[str]:
+    tree = ast.parse(source)
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = (
+            statement.targets
+            if isinstance(statement, ast.Assign)
+            else [statement.target]
+        )
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in targets
+        ):
+            continue
+        if not isinstance(statement.value, (ast.List, ast.Tuple)):
+            return set()
+        return {
+            str(element.value)
+            for element in statement.value.elts
+            if isinstance(element, ast.Constant)
+            and isinstance(element.value, str)
+        }
+    return set()
+
+
+def compare_facade_ledger(
+    current: dict[str, Any],
+    base: dict[str, Any],
+    *,
+    merge_base: str,
+    root: Path = ROOT,
+    runner: GitRunner = _run_git,
+) -> list[str]:
+    errors: list[str] = []
+    base_entries = {
+        str(item["path"]): item
+        for item in base.get("facades", [])
+        if isinstance(item, dict) and item.get("path")
+    }
+    for entry in current.get("facades", []):
+        if not isinstance(entry, dict):
+            errors.append("facade ledger contains invalid entry")
+            continue
+        path = str(entry.get("path") or "")
+        allowed = base_entries.get(path)
+        if allowed is not None:
+            if (
+                "caller_count" in allowed
+                and int(entry.get("caller_count", 0))
+                > int(allowed.get("caller_count", 0))
+            ):
+                errors.append(
+                    f"facade caller budget grew: {path} "
+                    f"{allowed.get('caller_count')} -> {entry.get('caller_count')}"
+                )
+            continue
+        source = read_base_text(
+            path,
+            merge_base=merge_base,
+            root=root,
+            runner=runner,
+            missing_ok=True,
+        )
+        if source is None:
+            errors.append(f"facade ledger added new source: {path}")
     return errors
 
 
@@ -291,6 +380,18 @@ def audit_baselines(
         compare_runtime_inventory(
             current["docs/refactors/runtime-coupling-inventory.json"],
             base["docs/refactors/runtime-coupling-inventory.json"],
+            merge_base=merge_base,
+            root=root,
+            runner=runner,
+        )
+    )
+    errors.extend(
+        compare_facade_ledger(
+            current["docs/refactors/compatibility-facade-retirement.json"],
+            base["docs/refactors/compatibility-facade-retirement.json"],
+            merge_base=merge_base,
+            root=root,
+            runner=runner,
         )
     )
     errors.extend(

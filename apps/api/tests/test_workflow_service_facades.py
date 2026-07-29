@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from lumen_core.schemas import ApparelModelLibrarySyncOut
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.adapters import (
     library_github,
     library_items,

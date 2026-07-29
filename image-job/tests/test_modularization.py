@@ -35,6 +35,23 @@ def test_app_stays_below_modularization_limit() -> None:
     assert line_count < 200
 
 
+def test_persistence_stays_below_modularization_limit() -> None:
+    line_count = len((PACKAGE_DIR / "persistence.py").read_text().splitlines())
+
+    assert line_count < 1_000
+
+
+def test_persistence_facade_reexports_split_implementations() -> None:
+    from image_job import persistence
+    from image_job.persistence_parts.references import (
+        ReferencePersistenceFacade,
+    )
+    from image_job.persistence_parts.retention import RetentionFacade
+
+    assert persistence.ReferencePersistenceFacade is ReferencePersistenceFacade
+    assert persistence.RetentionFacade is RetentionFacade
+
+
 def test_moved_modules_live_only_in_package() -> None:
     for old_name, package_name in MOVED_MODULES.items():
         assert not (IMAGE_JOB_DIR / old_name).exists()

@@ -820,7 +820,7 @@ def _include_app_routers(target: FastAPI) -> None:
     from .routes import admin_storage as admin_storage_router  # noqa: E402
     from .routes import admin_telegram as admin_telegram_router  # noqa: E402
     from .routes import admin_update as admin_update_router  # noqa: E402
-    from .routes import auth, storyboards, workflows  # noqa: E402
+    from .routes import auth, storyboards, workflow_routes  # noqa: E402
     from .routes import canvases as canvases_router  # noqa: E402
     from .routes import billing as billing_router  # noqa: E402
     from .routes import byok as byok_router  # noqa: E402
@@ -836,7 +836,7 @@ def _include_app_routers(target: FastAPI) -> None:
     target.include_router(auth.router, prefix="/auth", tags=["auth"])
     _include_core_routers(target)
     target.include_router(canvases_router.router)
-    target.include_router(workflows.router)
+    target.include_router(workflow_routes.router)
     target.include_router(storyboards.router)
     target.include_router(poster_styles_router.router)
     target.include_router(admin_router.router)

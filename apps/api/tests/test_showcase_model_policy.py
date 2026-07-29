@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.domain import showcase_model_policy as policy
 
 
