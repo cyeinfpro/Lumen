@@ -88,7 +88,7 @@
     {
       "max_instances": 1,
       "owner": "core",
-      "path": "packages/core/lumen_core/providers.py",
+      "path": "packages/core/lumen_core/providers_parts/proxy_runtime.py",
       "retirement_condition": "Provider proxy tunnel runtime is constructed and closed by each application composition root.",
       "symbols": ["_SSH_TUNNEL_RUNTIME"]
     },

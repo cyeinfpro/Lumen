@@ -22,14 +22,21 @@
       "status": "active"
     },
     {
-      "caller_count": 178,
+      "caller_count": 179,
       "owner": "core",
       "path": "packages/core/lumen_core/models.py",
       "retirement_condition": "All external and internal callers import model_entities or model_base directly.",
       "status": "active"
     },
     {
-      "caller_count": 76,
+      "caller_count": 44,
+      "owner": "core",
+      "path": "packages/core/lumen_core/providers.py",
+      "retirement_condition": "All external and internal callers import providers_parts contracts directly or receive a typed provider runtime through composition.",
+      "status": "active"
+    },
+    {
+      "caller_count": 80,
       "owner": "core",
       "path": "packages/core/lumen_core/schemas.py",
       "retirement_condition": "All external and internal callers import schema_models directly.",
