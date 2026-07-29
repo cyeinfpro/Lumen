@@ -71,9 +71,10 @@ test("lightbox and composer gestures avoid stale direction and layout animation"
   const desktopComposer = source(
     "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
   );
-  const mobileComposer = source(
-    "src/components/ui/composer/mobile/MobileComposerPill.tsx",
-  );
+  const mobileComposer = [
+    source("src/components/ui/composer/mobile/MobileComposerPill.tsx"),
+    source("src/components/ui/composer/mobile/MobileComposerButtons.tsx"),
+  ].join("\n");
 
   match(lightbox, /dx \+ projectMomentum\(vxRef\.current\)/);
   match(lightbox, /dy \+ projectMomentum\(vyRef\.current\)/);
