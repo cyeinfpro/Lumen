@@ -21,9 +21,14 @@ from lumen_core.models import Generation, Message
 from lumen_core.queue_metadata import generation_queue_metadata
 
 from ...observability import safe_outcome, task_duration_seconds
+from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from ..state import is_generation_terminal
 from .diagnostics import generation_trace_id, queue_wait_ms
 from .errors import TaskCancelled
+from .execution_boundary import (
+    SIDECAR_EXECUTION_KEY,
+    release_or_settle_generation,
+)
 from .lifecycle import settle_existing_generated_image
 from .persistence import (
     ensure_generation_conversation_alive,
@@ -170,6 +175,12 @@ def load_generation_fields(
         if isinstance(generation.upstream_request, dict)
         else None
     )
+    raw_execution = (
+        state.gen_upstream_request_snapshot.get(SIDECAR_EXECUTION_KEY)
+        if isinstance(state.gen_upstream_request_snapshot, dict)
+        else None
+    )
+    state.sidecar_execution = ImageJobExecutionHandle.from_mapping(raw_execution)
     state.trace_id = generation_trace_id(
         state.task_id,
         state.gen_upstream_request_snapshot,
@@ -232,7 +243,8 @@ async def cancel_queued_generation(
         MessageStatus.CANCELED,
     ):
         row.status = MessageStatus.FAILED
-    await services.billing.release(
+    await release_or_settle_generation(
+        services.billing,
         session,
         state.generation,
         reason=EC.CANCELLED.value,
@@ -322,13 +334,15 @@ async def fail_queued_generation(
     generation = await session.get(Generation, state.task_id)
     if generation is not None:
         if services is None:
-            await state.services.billing.release(
+            await release_or_settle_generation(
+                state.services.billing,
                 session,
                 generation,
                 reason=code,
             )
         else:
-            await phase_services.billing.release(
+            await release_or_settle_generation(
+                phase_services.billing,
                 session,
                 generation,
                 reason=code,

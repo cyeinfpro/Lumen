@@ -23,6 +23,8 @@ import { LeaderElection, type LeaderClock } from "./leaderElection";
 import {
   ReplayCoordinator,
   type SnapshotAdapter,
+  type SnapshotExecutionContext,
+  type SnapshotResult,
 } from "./replayCoordinator";
 import { parseRealtimeEvent } from "./validation";
 
@@ -34,9 +36,10 @@ export type RealtimeStatus =
 
 export type RuntimeSubscriber = {
   handlers: Record<string, (data: unknown, id: string) => void>;
-  onOpen?: (event: Event) => void;
+  onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
   onError?: (event: Event) => void;
   onControl?: (event: RealtimeControlEvent) => void;
+  onAuthInvalidated?: () => void;
   recoverSnapshot?: SnapshotAdapter;
   hiddenCloseDelayMs?: number;
   maxRetryCount?: number;
@@ -121,9 +124,20 @@ export class RealtimeRuntime {
   private readonly bus: CrossTabBus;
   private readonly election: LeaderElection;
   private readonly options: RealtimeRuntimeOptions;
+  private readonly id: string;
+  private connectionGeneration = 0;
+  private activeSourceGeneration: number | null = null;
   private recoveryFlight: Promise<void> | null = null;
   private recoveryAbort: AbortController | null = null;
   private recoveryGeneration = 0;
+  private recoverySequence = 0;
+  private recoveryId: string | null = null;
+  private pendingRecoveryId: string | null = null;
+  private localRecoveryResult: SnapshotResult | null = null;
+  private leaderRecoveryComplete: Extract<
+    CrossTabMessage,
+    { type: "recovery_complete" }
+  > | null = null;
   private unsubscribeBus: (() => void) | null = null;
   private unsubscribeLeader: (() => void) | null = null;
 
@@ -132,6 +146,7 @@ export class RealtimeRuntime {
     this.now = options.now ?? Date.now;
     this.channelKey = [...options.channels].sort().join(",");
     const id = options.tabId ?? tabId();
+    this.id = id;
     this.transport = options.transport;
     this.bus = new CrossTabBus(
       this.channelKey,
@@ -201,7 +216,20 @@ export class RealtimeRuntime {
     );
     this.unsubscribeLeader = this.election.subscribe((leader) => {
       this.leader = leader;
-      if (!leader) this.cancelRecovery();
+      if (!leader) {
+        this.cancelRecovery();
+        this.dispatch({ type: "stop" });
+        return;
+      }
+      if (this.state.kind === "recovering" && this.recoveryId) {
+        if (this.localRecoveryResult) {
+          this.completeLeaderRecovery(
+            this.recoveryId,
+            this.localRecoveryResult,
+          );
+        }
+        return;
+      }
       this.dispatch({ type: leader ? "start" : "stop" });
     });
     this.election.start();
@@ -218,6 +246,7 @@ export class RealtimeRuntime {
     this.election.stop();
     this.bus.close();
     this.sourceEventNames.clear();
+    this.activeSourceGeneration = null;
     this.seen.clear();
     this.seenQueue = [];
   }
@@ -234,7 +263,7 @@ export class RealtimeRuntime {
     // 修复恢复期重复连接：快照恢复在途时丢弃重连类事件。它们会把状态机推出
     // recovering，随后到达的 snapshot_success 因状态不匹配被丢弃 —— 既白开一条用
     // 旧 cursor 的连接，又丢掉恢复得到的新 cursor。恢复完成后自己会重新开流。
-    if (this.recoveryFlight && this.state.kind === "recovering") {
+    if (this.recoveryId && this.state.kind === "recovering") {
       if (
         event.type === "manual_reconnect" ||
         event.type === "online" ||
@@ -263,6 +292,7 @@ export class RealtimeRuntime {
     if (effect.kind === "closeSource") {
       this.source?.close();
       this.source = null;
+      this.activeSourceGeneration = null;
       this.sourceEventNames.clear();
       return;
     }
@@ -284,7 +314,9 @@ export class RealtimeRuntime {
       return;
     }
     if (effect.kind === "recoverSnapshot") {
-      if (this.leader) void this.recover(effect.reason);
+      const recoveryId =
+        this.pendingRecoveryId ?? this.createRecoveryId();
+      void this.recover(effect.reason, recoveryId);
       return;
     }
     this.publishStatus();
@@ -292,6 +324,9 @@ export class RealtimeRuntime {
 
   private openSource(cursor?: string): void {
     this.source?.close();
+    const generation = this.connectionGeneration + 1;
+    this.connectionGeneration = generation;
+    this.activeSourceGeneration = generation;
     const names = new Set<string>(CONTROL_EVENT_NAMES);
     for (const subscriber of this.subscribers) {
       for (const name of Object.keys(subscriber.handlers)) names.add(name);
@@ -304,17 +339,45 @@ export class RealtimeRuntime {
       },
       {
         onOpen: (event) => {
+          if (!this.sourceIsCurrent(generation)) return;
           this.dispatch({ type: "open", at: this.now() });
-          for (const subscriber of this.subscribers) subscriber.onOpen?.(event);
+          const context = this.connectionContext(generation);
+          for (const subscriber of this.subscribers) {
+            subscriber.onOpen?.(event, context);
+          }
         },
         onError: (event) => {
+          if (!this.sourceIsCurrent(generation)) return;
           for (const subscriber of this.subscribers) subscriber.onError?.(event);
           this.dispatch({ type: "error", at: this.now() });
         },
-        onEvent: (name, data, eventCursor) =>
-          this.onStreamEvent(name, data, eventCursor),
+        onEvent: (name, data, eventCursor) => {
+          if (!this.sourceIsCurrent(generation)) return;
+          this.onStreamEvent(name, data, eventCursor);
+        },
       },
     );
+  }
+
+  private sourceIsCurrent(generation: number): boolean {
+    return (
+      this.started &&
+      this.leader &&
+      this.subscribers.size > 0 &&
+      this.activeSourceGeneration === generation &&
+      this.connectionGeneration === generation
+    );
+  }
+
+  private connectionContext(
+    generation: number,
+    isCurrent = () => this.sourceIsCurrent(generation),
+  ): SnapshotExecutionContext {
+    return {
+      connectionGeneration: generation,
+      userScope: this.channelKey,
+      isCurrent,
+    };
   }
 
   private sourceNeedsEventNames(subscriber: RuntimeSubscriber): boolean {
@@ -343,16 +406,28 @@ export class RealtimeRuntime {
     });
     if (parsed.kind !== "event") return;
     if (parsed.event.kind === "control") {
-      this.handleControl(parsed.event);
-      this.bus.post({ type: "control_event", event: parsed.event }, this.now());
+      const recoveryId = recoveryReason(parsed.event)
+        ? this.createRecoveryId()
+        : undefined;
+      this.handleControl(parsed.event, recoveryId);
+      this.bus.post(
+        { type: "control_event", event: parsed.event, recoveryId },
+        this.now(),
+      );
       return;
     }
     this.deliverDomain(parsed.event, true);
   }
 
-  private handleControl(event: RealtimeControlEvent): void {
+  private handleControl(
+    event: RealtimeControlEvent,
+    recoveryId?: string,
+  ): void {
     for (const subscriber of this.subscribers) subscriber.onControl?.(event);
     if (event.type === "auth_invalidated") {
+      for (const subscriber of this.subscribers) {
+        subscriber.onAuthInvalidated?.();
+      }
       this.dispatch({ type: "unauthorized" });
       return;
     }
@@ -361,33 +436,57 @@ export class RealtimeRuntime {
       if (event.cursor) this.dispatch({ type: "cursor", cursor: event.cursor });
       return;
     }
-    if (reason.kind === "server_epoch_changed") {
+    this.pendingRecoveryId = recoveryId ?? this.createRecoveryId();
+    try {
+      if (reason.kind === "server_epoch_changed") {
+        this.dispatch({
+          type: "epoch_change",
+          epoch: reason.epoch,
+          cursor: reason.cursor,
+        });
+        return;
+      }
       this.dispatch({
-        type: "epoch_change",
-        epoch: reason.epoch,
+        type:
+          reason.kind === "recovery_required"
+            ? "recovery_required"
+            : "replay_gap",
+        reason: reason.reason,
         cursor: reason.cursor,
       });
-      return;
+    } finally {
+      this.pendingRecoveryId = null;
     }
-    this.dispatch({
-      type:
-        reason.kind === "recovery_required"
-          ? "recovery_required"
-          : "replay_gap",
-      reason: reason.reason,
-      cursor: reason.cursor,
-    });
   }
 
-  private recover(reason: RecoveryReason): Promise<void> {
-    if (this.recoveryFlight) return this.recoveryFlight;
+  private createRecoveryId(): string {
+    this.recoverySequence += 1;
+    return `${this.id}:${this.recoverySequence}`;
+  }
+
+  private recover(
+    reason: RecoveryReason,
+    recoveryId: string,
+  ): Promise<void> {
+    if (this.recoveryFlight && this.recoveryId === recoveryId) {
+      return this.recoveryFlight;
+    }
+    if (this.recoveryId && this.recoveryId !== recoveryId) {
+      this.cancelRecovery();
+    }
     const generation = this.recoveryGeneration + 1;
     this.recoveryGeneration = generation;
+    this.recoveryId = recoveryId;
+    this.localRecoveryResult = null;
+    this.leaderRecoveryComplete = null;
+    const connectionGeneration = this.connectionGeneration;
     const controller = new AbortController();
     this.recoveryAbort = controller;
     const flight = this.performRecovery(
       reason,
+      recoveryId,
       generation,
+      connectionGeneration,
       controller.signal,
     ).finally(() => {
       if (this.recoveryFlight === flight) this.recoveryFlight = null;
@@ -403,29 +502,38 @@ export class RealtimeRuntime {
   }
 
   private cancelRecovery(): void {
-    if (!this.recoveryFlight && !this.recoveryAbort) return;
+    if (!this.recoveryFlight && !this.recoveryAbort && !this.recoveryId) return;
     this.recoveryGeneration += 1;
     this.recoveryAbort?.abort();
     this.recoveryAbort = null;
     this.recoveryFlight = null;
+    this.recoveryId = null;
+    this.localRecoveryResult = null;
+    this.leaderRecoveryComplete = null;
   }
 
   private recoveryIsCurrent(
+    recoveryId: string,
     generation: number,
+    connectionGeneration: number,
     signal: AbortSignal,
   ): boolean {
     return (
       !signal.aborted &&
       this.started &&
-      this.leader &&
       this.subscribers.size > 0 &&
-      this.recoveryGeneration === generation
+      this.state.kind === "recovering" &&
+      this.recoveryId === recoveryId &&
+      this.recoveryGeneration === generation &&
+      this.connectionGeneration === connectionGeneration
     );
   }
 
   private async performRecovery(
     reason: RecoveryReason,
+    recoveryId: string,
     generation: number,
+    connectionGeneration: number,
     signal: AbortSignal,
   ): Promise<void> {
     const adapters = [
@@ -436,17 +544,39 @@ export class RealtimeRuntime {
       ),
     ];
     if (adapters.length === 0) {
-      if (this.recoveryIsCurrent(generation, signal)) {
+      if (
+        this.recoveryIsCurrent(
+          recoveryId,
+          generation,
+          connectionGeneration,
+          signal,
+        )
+      ) {
         this.dispatch({ type: "snapshot_failure" });
       }
       return;
     }
+    const context = this.connectionContext(
+      connectionGeneration,
+      () =>
+        this.recoveryIsCurrent(
+          recoveryId,
+          generation,
+          connectionGeneration,
+          signal,
+        ),
+    );
     const coordinator = new ReplayCoordinator(
-      async (scopes, currentReason, currentSignal) => {
+      async (scopes, currentReason, currentSignal, currentContext) => {
         currentSignal.throwIfAborted();
         const results = await Promise.all(
           adapters.map((adapter) =>
-            adapter(scopes, currentReason, currentSignal),
+            adapter(
+              scopes,
+              currentReason,
+              currentSignal,
+              currentContext,
+            ),
           ),
         );
         currentSignal.throwIfAborted();
@@ -459,28 +589,71 @@ export class RealtimeRuntime {
       },
     );
     try {
-      const result = await coordinator.recover(reason, signal);
-      if (!this.recoveryIsCurrent(generation, signal)) return;
-      this.bus.post(
-        {
-          type: "recovery_complete",
-          cursor: result.cursor,
-          syncedAt: result.syncedAt ?? this.now(),
-        },
-        this.now(),
-      );
-      this.dispatch({ type: "snapshot_success", cursor: result.cursor });
+      const result = await coordinator.recover(reason, signal, context);
+      if (!context.isCurrent()) return;
+      this.localRecoveryResult = result;
+      if (this.leader) {
+        this.completeLeaderRecovery(recoveryId, result);
+      } else {
+        this.completeFollowerRecoveryIfReady();
+      }
     } catch (error) {
-      if (!this.recoveryIsCurrent(generation, signal)) return;
-      this.bus.post(
-        {
-          type: "recovery_failed",
-          reason: error instanceof Error ? error.message : "snapshot_failed",
-        },
-        this.now(),
-      );
+      if (!context.isCurrent()) return;
+      if (this.leader) {
+        this.bus.post(
+          {
+            type: "recovery_failed",
+            recoveryId,
+            reason: error instanceof Error ? error.message : "snapshot_failed",
+          },
+          this.now(),
+        );
+      }
       this.dispatch({ type: "snapshot_failure" });
+      this.recoveryId = null;
+      this.localRecoveryResult = null;
+      this.leaderRecoveryComplete = null;
     }
+  }
+
+  private completeLeaderRecovery(
+    recoveryId: string,
+    result: SnapshotResult,
+  ): void {
+    this.bus.post(
+      {
+        type: "recovery_complete",
+        recoveryId,
+        cursor: result.cursor,
+        syncedAt: result.syncedAt ?? this.now(),
+      },
+      this.now(),
+    );
+    this.dispatch({ type: "snapshot_success", cursor: result.cursor });
+    this.recoveryId = null;
+    this.localRecoveryResult = null;
+    this.leaderRecoveryComplete = null;
+  }
+
+  private completeFollowerRecoveryIfReady(): void {
+    const complete = this.leaderRecoveryComplete;
+    if (
+      this.leader ||
+      !complete ||
+      complete.recoveryId !== this.recoveryId ||
+      !this.localRecoveryResult
+    ) {
+      return;
+    }
+    this.state = {
+      kind: "open",
+      cursor: complete.cursor ?? this.localRecoveryResult.cursor,
+      openedAt: complete.syncedAt,
+    };
+    this.notifyStatus("open");
+    this.recoveryId = null;
+    this.localRecoveryResult = null;
+    this.leaderRecoveryComplete = null;
   }
 
   private deliverDomain(event: RealtimeDomainEvent, broadcast: boolean): void {
@@ -514,9 +687,10 @@ export class RealtimeRuntime {
       return;
     }
     if (message.type === "control_event") {
-      for (const subscriber of this.subscribers) {
-        subscriber.onControl?.(message.event);
-      }
+      this.handleControl(
+        message.event,
+        message.recoveryId ?? `${message.sender}:${message.sentAt}`,
+      );
       return;
     }
     this.handleBusStateMessage(message);
@@ -524,30 +698,49 @@ export class RealtimeRuntime {
 
   private handleBusStateMessage(message: CrossTabMessage): void {
     if (message.type === "recovery_complete") {
-      if (!this.leader) {
-        this.state = {
-          kind: "open",
-          cursor: message.cursor,
-          openedAt: message.syncedAt,
-        };
-        this.notifyStatus("open");
-      }
+      this.handleFollowerRecoveryComplete(message);
       return;
     }
     if (message.type === "recovery_failed") {
-      if (!this.leader) this.notifyStatus("error");
+      this.handleFollowerRecoveryFailed(message);
       return;
     }
     if (message.type === "status" && !this.leader) {
-      const status = message.status;
-      if (
-        status === "open" ||
-        status === "closed" ||
-        status === "connecting" ||
-        status === "error"
-      ) {
-        this.notifyStatus(status);
-      }
+      this.followLeaderStatus(message.status);
+    }
+  }
+
+  private handleFollowerRecoveryComplete(
+    message: Extract<CrossTabMessage, { type: "recovery_complete" }>,
+  ): void {
+    if (this.leader || message.recoveryId !== this.recoveryId) return;
+    this.leaderRecoveryComplete = message;
+    this.completeFollowerRecoveryIfReady();
+  }
+
+  private handleFollowerRecoveryFailed(
+    message: Extract<CrossTabMessage, { type: "recovery_failed" }>,
+  ): void {
+    if (this.leader || message.recoveryId !== this.recoveryId) return;
+    this.cancelRecovery();
+    this.notifyStatus("error");
+  }
+
+  private followLeaderStatus(status: string): void {
+    if (
+      this.state.kind === "recovering" &&
+      this.recoveryId &&
+      status !== "error"
+    ) {
+      return;
+    }
+    if (
+      status === "open" ||
+      status === "closed" ||
+      status === "connecting" ||
+      status === "error"
+    ) {
+      this.notifyStatus(status);
     }
   }
 

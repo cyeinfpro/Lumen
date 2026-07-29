@@ -1,0 +1,107 @@
+version = 1
+
+[[packages]]
+name = "core"
+package = "lumen_core"
+root = "packages/core/lumen_core"
+
+[[packages]]
+name = "api"
+package = "app"
+root = "apps/api/app"
+
+[[packages]]
+name = "worker"
+package = "app"
+root = "apps/worker/app"
+
+[[packages]]
+name = "tgbot"
+package = "app"
+root = "apps/tgbot/app"
+
+[[packages]]
+name = "image-job"
+package = "image_job"
+root = "image-job/image_job"
+
+[[rules]]
+name = "api-lower-to-routes"
+package = "api"
+sources = [
+  "app.services",
+  "app.canvas_services",
+  "app.workflow_services",
+  "app.workflow_domain",
+  "app.workflows",
+  "app.images",
+]
+targets = ["app.routes"]
+
+[[rules]]
+name = "worker-lower-to-tasks"
+package = "worker"
+sources = [
+  "app.services",
+  "app.background_removal",
+  "app.upstream_parts",
+  "app.video_upstream_parts",
+  "app.upstream_clients",
+  "app.provider_runtime",
+  "app.reconciliation",
+  "app.outbox",
+  "app.locks",
+  "app.jobs",
+  "app.task_runtime",
+]
+targets = ["app.tasks"]
+
+[[rules]]
+name = "image-job-lower-to-http"
+package = "image-job"
+sources = [
+  "image_job.domain",
+  "image_job.application",
+  "image_job.ports",
+  "image_job.adapters",
+]
+targets = [
+  "image_job.api",
+  "image_job.route_handlers",
+  "image_job.app_factory",
+]
+
+[[forbidden]]
+name = "workflow-v2-to-legacy"
+package = "api"
+sources = [
+  "app.main",
+  "app.routes",
+  "app.services",
+  "app.workflows",
+]
+targets = [
+  "app.workflow_services",
+  "app.workflow_domain",
+]
+
+[[forbidden]]
+name = "workflow-domain-layering"
+package = "api"
+sources = ["app.workflows.domain"]
+targets = [
+  "app.routes",
+  "app.workflows.adapters",
+  "app.workflows.application",
+  "app.workflows.composition",
+  "app.workflows.transport",
+]
+
+[[forbidden]]
+name = "workflow-http-to-adapters"
+package = "api"
+sources = [
+  "app.routes.workflow_routes",
+  "app.workflows.transport",
+]
+targets = ["app.workflows.adapters"]

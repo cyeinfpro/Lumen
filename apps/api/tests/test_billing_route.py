@@ -17,6 +17,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.routes import billing
+from app.routes.billing_parts import composition as billing_composition
+from app.routes.billing_parts import overview as billing_overview_routes
+from app.routes.billing_parts import pricing as billing_pricing_routes
+from app.routes.billing_parts import redemptions as billing_redemption_routes
+from app.routes.billing_parts import services as billing_services
+from app.routes.billing_parts import wallets as billing_wallet_routes
 from app.services import pricing_cache
 from lumen_core import billing as billing_core
 from lumen_core.models import Base, UserWallet, WalletTransaction
@@ -67,6 +73,56 @@ async def _wallet_session() -> AsyncIterator[AsyncSession]:
 
 def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
     assert billing._openai_price_micro("0.0005", 1.0) == 1  # noqa: SLF001
+
+
+def test_billing_route_composition_is_typed_and_static() -> None:
+    services = billing.build_billing_services()
+
+    assert isinstance(services, billing.BillingServices)
+    assert isinstance(services.queries, billing.BillingQueries)
+    assert isinstance(services.commands, billing.BillingCommands)
+
+    source = "\n".join(
+        [
+            inspect.getsource(billing),
+            inspect.getsource(billing_composition),
+            inspect.getsource(billing_overview_routes),
+            inspect.getsource(billing_pricing_routes),
+            inspect.getsource(billing_redemption_routes),
+            inspect.getsource(billing_wallet_routes),
+        ]
+    )
+    assert "globals()" not in source
+    assert "ContextVar" not in source
+    assert "__getattr__" not in source
+    assert "current_runtime" not in source
+
+
+@pytest.mark.asyncio
+async def test_wallet_route_accepts_typed_query_fake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = WalletOut(mode="byok", balance=None, hold=None, frozen=False)
+
+    async def wallet_out(_db: Any, _user: Any) -> WalletOut:
+        return expected
+
+    services = billing.replace_billing_queries(
+        billing.build_billing_services(),
+        wallet_out=wallet_out,
+    )
+    monkeypatch.setattr(
+        billing_wallet_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    out = await billing.get_my_wallet(
+        SimpleNamespace(id="typed-fake-user", account_mode="byok"),
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert out is expected
 
 
 def test_redemption_expiry_boundary_is_consistently_expired() -> None:
@@ -254,8 +310,10 @@ async def test_wallet_api_24h_activity_aggregates_all_rows_and_window_boundaries
     async def low_balance_threshold(_db: Any) -> int:
         return 2_000_000
 
-    monkeypatch.setattr(billing, "_low_balance_threshold", low_balance_threshold)
-    monkeypatch.setattr(billing, "_wallet_activity_window_end", lambda: now)
+    monkeypatch.setattr(
+        billing_services, "_low_balance_threshold", low_balance_threshold
+    )
+    monkeypatch.setattr(billing_services, "_wallet_activity_window_end", lambda: now)
 
     rows = [
         WalletTransaction(
@@ -550,7 +608,7 @@ async def test_credential_windows_use_persisted_credential_ledger(
                 resets_at=now + timedelta(hours=1),
             )
 
-    monkeypatch.setattr(billing, "BillingCacheService", Service)
+    monkeypatch.setattr(billing_services, "BillingCacheService", Service)
 
     windows = await billing._credential_windows(  # noqa: SLF001
         object(),  # type: ignore[arg-type]
@@ -591,8 +649,8 @@ async def test_billing_balance_respects_disabled_redis_cache(
             return "0"
         return None
 
-    monkeypatch.setattr(billing, "_billing_cache", lambda: Cache())
-    monkeypatch.setattr(billing, "_setting_raw", setting_raw)
+    monkeypatch.setattr(billing_services, "_billing_cache", lambda: Cache())
+    monkeypatch.setattr(billing_services, "_setting_raw", setting_raw)
 
     assert await billing._billing_balance_micro(Db(), "user-1") == 321  # noqa: SLF001
 
@@ -604,7 +662,7 @@ async def test_redemption_secret_missing_returns_actionable_412(
     async def missing_setting(_db: Any, _key: str) -> str | None:
         return None
 
-    monkeypatch.setattr(billing, "_setting_raw", missing_setting)
+    monkeypatch.setattr(billing_services, "_setting_raw", missing_setting)
 
     with pytest.raises(Exception) as excinfo:
         await billing._redemption_secret(object())  # noqa: SLF001
@@ -624,7 +682,7 @@ async def test_redemption_operational_gate_requires_enabled(
             return "1"
         return None
 
-    monkeypatch.setattr(billing, "_setting_raw", disabled_setting)
+    monkeypatch.setattr(billing_services, "_setting_raw", disabled_setting)
 
     with pytest.raises(Exception) as excinfo:
         await billing._require_redemption_operational(object())  # noqa: SLF001
@@ -644,7 +702,7 @@ async def test_redemption_operational_gate_requires_bootstrap(
             return "0"
         return None
 
-    monkeypatch.setattr(billing, "_setting_raw", unbootstrapped_setting)
+    monkeypatch.setattr(billing_services, "_setting_raw", unbootstrapped_setting)
 
     with pytest.raises(Exception) as excinfo:
         await billing._require_redemption_operational(object())  # noqa: SLF001
@@ -744,11 +802,15 @@ async def test_create_redemption_codes_rolls_back_when_download_cache_fails(
     async def fake_write_audit(*_args: Any, **_kwargs: Any) -> bool:
         return True
 
-    monkeypatch.setattr(billing, "_redemption_secret", fake_secret)
-    monkeypatch.setattr(billing, "_require_bootstrap_completed", fake_bootstrap)
-    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
-    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
-    monkeypatch.setattr(billing, "get_redis", lambda: _FailingRedis())
+    monkeypatch.setattr(billing_services, "_redemption_secret", fake_secret)
+    monkeypatch.setattr(
+        billing_services, "_require_bootstrap_completed", fake_bootstrap
+    )
+    monkeypatch.setattr(billing_composition, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        billing_composition, "request_ip_hash", lambda _request: "ip-hash"
+    )
+    monkeypatch.setattr(billing_services, "get_redis", lambda: _FailingRedis())
 
     db = _Db()
     admin = SimpleNamespace(id="admin-1", email="admin@example.test")
@@ -782,11 +844,15 @@ async def test_create_redemption_codes_returns_plaintext_and_no_store(
         return True
 
     redis = _MemoryRedis()
-    monkeypatch.setattr(billing, "_redemption_secret", fake_secret)
-    monkeypatch.setattr(billing, "_require_bootstrap_completed", fake_bootstrap)
-    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
-    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
-    monkeypatch.setattr(billing, "get_redis", lambda: redis)
+    monkeypatch.setattr(billing_services, "_redemption_secret", fake_secret)
+    monkeypatch.setattr(
+        billing_services, "_require_bootstrap_completed", fake_bootstrap
+    )
+    monkeypatch.setattr(billing_composition, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        billing_composition, "request_ip_hash", lambda _request: "ip-hash"
+    )
+    monkeypatch.setattr(billing_services, "get_redis", lambda: redis)
 
     db = _Db()
     admin = SimpleNamespace(id="admin-1", email="admin@example.test")
@@ -859,16 +925,18 @@ async def test_create_redemption_codes_replays_persisted_batch(
         return expected
 
     monkeypatch.setattr(
-        billing,
+        billing_services,
         "_require_bootstrap_completed",
         fail_new_batch_checks,
     )
-    monkeypatch.setattr(billing, "_redemption_secret", fail_new_batch_checks)
-    monkeypatch.setattr(billing, "_lock_redemption_batch_idempotency_key", fake_lock)
-    monkeypatch.setattr(billing, "_redemption_batch_for_idempotency", existing)
-    monkeypatch.setattr(billing, "_replay_redemption_batch", replay)
+    monkeypatch.setattr(billing_services, "_redemption_secret", fail_new_batch_checks)
     monkeypatch.setattr(
-        billing,
+        billing_services, "_lock_redemption_batch_idempotency_key", fake_lock
+    )
+    monkeypatch.setattr(billing_services, "_redemption_batch_for_idempotency", existing)
+    monkeypatch.setattr(billing_services, "_replay_redemption_batch", replay)
+    monkeypatch.setattr(
+        billing_services,
         "_redemption_batch_request_hash",
         lambda *_args, **_kwargs: "persisted-request-hash",
     )
@@ -958,8 +1026,8 @@ async def test_redemption_batch_replay_returns_persisted_plaintext(
         }
         return "tok_replay"
 
-    monkeypatch.setattr(billing, "_load_redemption_plaintext_batch", load)
-    monkeypatch.setattr(billing, "_store_redemption_plaintext_batch", store)
+    monkeypatch.setattr(billing_services, "_load_redemption_plaintext_batch", load)
+    monkeypatch.setattr(billing_services, "_store_redemption_plaintext_batch", store)
     response = Response()
 
     out = await billing._replay_redemption_batch(  # noqa: SLF001
@@ -994,11 +1062,24 @@ async def test_create_redemption_codes_logs_cache_cleanup_failure(
         async def commit(self) -> None:
             raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(billing, "_redemption_secret", fake_secret)
-    monkeypatch.setattr(billing, "_require_bootstrap_completed", fake_bootstrap)
-    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
-    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
-    monkeypatch.setattr(billing, "get_redis", lambda: _FailingDeleteRedis())
+    monkeypatch.setattr(billing_services, "_redemption_secret", fake_secret)
+    monkeypatch.setattr(
+        billing_services, "_require_bootstrap_completed", fake_bootstrap
+    )
+    monkeypatch.setattr(billing_composition, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        billing_composition, "request_ip_hash", lambda _request: "ip-hash"
+    )
+    monkeypatch.setattr(
+        billing_services,
+        "get_redis",
+        lambda: _FailingDeleteRedis(),
+    )
+    monkeypatch.setattr(
+        billing_composition,
+        "get_redis",
+        lambda: _FailingDeleteRedis(),
+    )
 
     with caplog.at_level("WARNING"):
         with pytest.raises(RuntimeError, match="commit failed"):
@@ -1018,7 +1099,7 @@ async def test_store_redemption_plaintext_batch_cleans_partial_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = _FailingSecondSetRedis()
-    monkeypatch.setattr(billing, "get_redis", lambda: redis)
+    monkeypatch.setattr(billing_services, "get_redis", lambda: redis)
 
     with pytest.raises(RuntimeError, match="second write failed"):
         await billing._store_redemption_plaintext_batch(  # noqa: SLF001
@@ -1194,11 +1275,13 @@ async def test_redeem_code_cache_miss_replays_existing_usage_from_db(
     async def fail_operational(_db: Any) -> None:
         raise AssertionError("DB idempotency fallback must avoid a second redeem")
 
-    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
-    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", lock_key)
-    monkeypatch.setattr(billing, "_redemption_out_for_usage", existing_usage)
-    monkeypatch.setattr(billing, "_cache_redemption_out", cache_response)
-    monkeypatch.setattr(billing, "_require_redemption_operational", fail_operational)
+    monkeypatch.setattr(billing_services, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing_services, "_lock_redemption_idempotency_key", lock_key)
+    monkeypatch.setattr(billing_services, "_redemption_out_for_usage", existing_usage)
+    monkeypatch.setattr(billing_services, "_cache_redemption_out", cache_response)
+    monkeypatch.setattr(
+        billing_services, "_require_redemption_operational", fail_operational
+    )
 
     out = await billing.redeem_code(
         RedemptionIn(code="LMN-AAAA-BBBB-CCCC"),
@@ -1277,14 +1360,14 @@ async def test_redeem_code_integrity_error_replays_wallet_tx_race(
     ) -> None:
         cached.append(response)
 
-    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
-    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", noop)
-    monkeypatch.setattr(billing, "_redemption_out_for_usage", existing_usage)
-    monkeypatch.setattr(billing, "_cache_redemption_out", cache_response)
-    monkeypatch.setattr(billing, "_require_redemption_operational", noop)
-    monkeypatch.setattr(billing, "REDEMPTION_LIMITER", Limiter())
-    monkeypatch.setattr(billing, "get_redis", lambda: object())
-    monkeypatch.setattr(billing, "_redemption_secrets", secrets)
+    monkeypatch.setattr(billing_services, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing_services, "_lock_redemption_idempotency_key", noop)
+    monkeypatch.setattr(billing_services, "_redemption_out_for_usage", existing_usage)
+    monkeypatch.setattr(billing_services, "_cache_redemption_out", cache_response)
+    monkeypatch.setattr(billing_services, "_require_redemption_operational", noop)
+    monkeypatch.setattr(billing_services, "REDEMPTION_LIMITER", Limiter())
+    monkeypatch.setattr(billing_composition, "get_redis", lambda: object())
+    monkeypatch.setattr(billing_services, "_redemption_secrets", secrets)
     monkeypatch.setattr(billing.billing_core, "topup_redeem", fail_topup)
 
     db = Db()
@@ -1353,14 +1436,14 @@ async def test_redeem_code_samples_clock_after_row_lock(
         raise AssertionError("expired code must not be redeemed")
 
     monkeypatch.setattr(redemptions_route, "datetime", _Clock)
-    monkeypatch.setattr(billing, "_cached_redemption_out", no_cached)
-    monkeypatch.setattr(billing, "_lock_redemption_idempotency_key", noop)
-    monkeypatch.setattr(billing, "_redemption_out_for_usage", no_cached)
-    monkeypatch.setattr(billing, "_cache_redemption_out", noop)
-    monkeypatch.setattr(billing, "_require_redemption_operational", noop)
-    monkeypatch.setattr(billing, "REDEMPTION_LIMITER", Limiter())
-    monkeypatch.setattr(billing, "get_redis", lambda: object())
-    monkeypatch.setattr(billing, "_redemption_secrets", secrets)
+    monkeypatch.setattr(billing_services, "_cached_redemption_out", no_cached)
+    monkeypatch.setattr(billing_services, "_lock_redemption_idempotency_key", noop)
+    monkeypatch.setattr(billing_services, "_redemption_out_for_usage", no_cached)
+    monkeypatch.setattr(billing_services, "_cache_redemption_out", noop)
+    monkeypatch.setattr(billing_services, "_require_redemption_operational", noop)
+    monkeypatch.setattr(billing_services, "REDEMPTION_LIMITER", Limiter())
+    monkeypatch.setattr(billing_composition, "get_redis", lambda: object())
+    monkeypatch.setattr(billing_services, "_redemption_secrets", secrets)
     monkeypatch.setattr(billing.billing_core, "topup_redeem", fail_topup)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -1410,13 +1493,21 @@ async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
     async def fake_overview(_admin: Any, _db: Any) -> Any:
         return "overview"
 
-    monkeypatch.setattr(billing, "get_setting", fake_get_setting)
-    monkeypatch.setattr(billing, "update_settings", fake_update_settings)
-    monkeypatch.setattr(billing, "_generate_redemption_secret", lambda: "new-secret")
-    monkeypatch.setattr(billing, "remember_previous_redemption_secret", fake_remember)
-    monkeypatch.setattr(billing, "write_audit", fake_write_audit)
-    monkeypatch.setattr(billing, "request_ip_hash", lambda _request: "ip-hash")
-    monkeypatch.setattr(billing, "admin_billing_overview", fake_overview)
+    monkeypatch.setattr(billing_composition, "get_setting", fake_get_setting)
+    monkeypatch.setattr(billing_composition, "update_settings", fake_update_settings)
+    monkeypatch.setattr(
+        billing_services, "_generate_redemption_secret", lambda: "new-secret"
+    )
+    monkeypatch.setattr(
+        billing_composition, "remember_previous_redemption_secret", fake_remember
+    )
+    monkeypatch.setattr(billing_composition, "write_audit", fake_write_audit)
+    monkeypatch.setattr(
+        billing_composition, "request_ip_hash", lambda _request: "ip-hash"
+    )
+    monkeypatch.setattr(
+        billing_overview_routes, "admin_billing_overview", fake_overview
+    )
 
     db = Db()
     out = await billing.admin_rotate_redemption_secret(
@@ -1617,7 +1708,7 @@ async def test_admin_adjust_wallet_rejects_negative_balance_cap(
             422,
         )
 
-    monkeypatch.setattr(billing, "_allow_negative_balance", allow_negative)
+    monkeypatch.setattr(billing_services, "_allow_negative_balance", allow_negative)
     monkeypatch.setattr(billing.billing_core, "adjust", fail_adjust)
 
     with pytest.raises(Exception) as excinfo:
@@ -1727,9 +1818,9 @@ async def test_set_account_mode_to_byok_allows_switch_without_holds(
 
     monkeypatch.setattr(billing.billing_core, "get_wallet", get_wallet)
     monkeypatch.setattr(billing.billing_core, "adjust", adjust)
-    monkeypatch.setattr(billing, "_wallet_out", wallet_out)
-    monkeypatch.setattr(billing, "write_audit", write_audit)
-    monkeypatch.setattr(billing, "_invalidate_balance_cache", invalidate)
+    monkeypatch.setattr(billing_services, "_wallet_out", wallet_out)
+    monkeypatch.setattr(billing_composition, "write_audit", write_audit)
+    monkeypatch.setattr(billing_services, "_invalidate_balance_cache", invalidate)
 
     out = await billing.admin_set_account_mode(
         "user-1",

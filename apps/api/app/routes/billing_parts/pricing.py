@@ -23,38 +23,31 @@ from lumen_core.schemas import (
 from ...audit import hash_email
 from ...db import get_db
 from ...deps import AdminUser, CurrentUser, verify_csrf
-from .compat import current_runtime
+from .composition import build_billing_services
+from .contracts import BillingServices
 
 
 router = APIRouter()
 
 
-def _pricing_out(b: Any, rows: list[PricingRule], db: AsyncSession) -> PricingRulesOut:
-    return PricingRulesOut(
-        items=[b._pricing_rule_out(row) for row in rows],
-        image_size_thresholds=b._image_thresholds(db),
-        billing_enabled=False,
-        show_estimate_in_composer=True,
-    )
-
-
 async def _pricing_response(
-    b: Any,
+    services: BillingServices,
     db: AsyncSession,
     *,
     order: tuple[Any, ...],
 ) -> PricingRulesOut:
+    queries = services.queries
     rows = list(
         (await db.execute(select(PricingRule).order_by(*order))).scalars().all()
     )
     return PricingRulesOut(
-        items=[b._pricing_rule_out(row) for row in rows],
-        image_size_thresholds=await b._image_thresholds(db),
-        billing_enabled=b.billing_core.parse_bool_setting(
-            await b._setting_raw(db, "billing.enabled"), False
+        items=[queries.pricing_rule_out(row) for row in rows],
+        image_size_thresholds=await queries.image_thresholds(db),
+        billing_enabled=billing_core.parse_bool_setting(
+            await queries.setting_raw(db, "billing.enabled"), False
         ),
-        show_estimate_in_composer=b.billing_core.parse_bool_setting(
-            await b._setting_raw(db, "billing.show_estimate_in_composer"), True
+        show_estimate_in_composer=billing_core.parse_bool_setting(
+            await queries.setting_raw(db, "billing.show_estimate_in_composer"), True
         ),
     )
 
@@ -64,7 +57,8 @@ async def get_my_pricing(
     _user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     rows = list(
         (
             await db.execute(
@@ -77,13 +71,13 @@ async def get_my_pricing(
         .all()
     )
     return PricingRulesOut(
-        items=[b._pricing_rule_out(row) for row in rows],
-        image_size_thresholds=await b._image_thresholds(db),
-        billing_enabled=b.billing_core.parse_bool_setting(
-            await b._setting_raw(db, "billing.enabled"), False
+        items=[queries.pricing_rule_out(row) for row in rows],
+        image_size_thresholds=await queries.image_thresholds(db),
+        billing_enabled=billing_core.parse_bool_setting(
+            await queries.setting_raw(db, "billing.enabled"), False
         ),
-        show_estimate_in_composer=b.billing_core.parse_bool_setting(
-            await b._setting_raw(db, "billing.show_estimate_in_composer"), True
+        show_estimate_in_composer=billing_core.parse_bool_setting(
+            await queries.setting_raw(db, "billing.show_estimate_in_composer"), True
         ),
     )
 
@@ -93,9 +87,9 @@ async def admin_list_pricing(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
+    services = build_billing_services()
     return await _pricing_response(
-        b,
+        services,
         db,
         order=(
             PricingRule.scope,
@@ -112,8 +106,7 @@ async def admin_list_billing_pricing(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
-    return await b.admin_list_pricing(admin, db)
+    return await admin_list_pricing(admin, db)
 
 
 @router.put(
@@ -127,14 +120,16 @@ async def admin_update_pricing(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     now = datetime.now(timezone.utc)
     values: list[dict[str, Any]] = []
     for item in body.items:
-        price = b._rmb_to_micro_or_422(item.price_rmb, field="price_rmb")
+        price = queries.rmb_to_micro_or_422(item.price_rmb, field="price_rmb")
         if price < 0:
-            raise b._http("invalid_amount", "price must be non-negative", 422)
-        b._validate_enabled_pricing_value(
+            raise queries.http("invalid_amount", "price must be non-negative", 422)
+        queries.validate_enabled_pricing_value(
             unit=item.unit,
             price_micro=price,
             enabled=item.enabled,
@@ -155,17 +150,17 @@ async def admin_update_pricing(
             }
         )
     thresholds_to_write = body.image_size_thresholds
-    thresholds_for_check = thresholds_to_write or await b._image_thresholds(db)
-    await b._validate_thresholds_have_prices(
+    thresholds_for_check = thresholds_to_write or await queries.image_thresholds(db)
+    await queries.validate_thresholds_have_prices(
         db,
         thresholds_for_check,
         values,
         force=body.force,
     )
     await _upsert_pricing_values(db, values, now=now)
-    await b._align_pricing_group_priorities(db, values, now=now)
+    await commands.align_pricing_group_priorities(db, values, now=now)
     if thresholds_to_write is not None:
-        await b.update_settings(
+        await commands.update_settings(
             db,
             [
                 (
@@ -174,12 +169,12 @@ async def admin_update_pricing(
                 )
             ],
         )
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="pricing.update",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={
             "count": len(values),
             "thresholds_updated": thresholds_to_write is not None,
@@ -190,8 +185,10 @@ async def admin_update_pricing(
     await db.commit()
     for value in values:
         if value["scope"] == "chat_model":
-            await b._invalidate_pricing_cache(str(value["key"]), str(value["variant"]))
-    return await b.admin_list_pricing(admin, db)
+            await commands.invalidate_pricing_cache(
+                str(value["key"]), str(value["variant"])
+            )
+    return await admin_list_pricing(admin, db)
 
 
 @router.post(
@@ -205,14 +202,16 @@ async def admin_bulk_pricing(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     now = datetime.now(timezone.utc)
     model = body.model.strip()
     variant = (body.channel or "default").strip() or "default"
     rates = body.rates.model_dump()
     values: list[dict[str, Any]] = []
-    for field, unit in b._BULK_RATE_UNITS.items():
-        micro = b._bulk_numeric_micro(rates.get(field), field=f"rates.{field}")
+    for field, unit in services.bulk_rate_units.items():
+        micro = queries.bulk_numeric_micro(rates.get(field), field=f"rates.{field}")
         if micro is not None:
             values.append(
                 _pricing_value(
@@ -227,7 +226,7 @@ async def admin_bulk_pricing(
     if body.rates.long_context_threshold is not None:
         threshold = int(body.rates.long_context_threshold)
         if threshold < 0:
-            raise b._http(
+            raise queries.http(
                 "invalid_amount",
                 "rates.long_context_threshold: threshold must be non-negative",
                 422,
@@ -241,26 +240,30 @@ async def admin_bulk_pricing(
         "long_context_input_multiplier",
         "long_context_output_multiplier",
     ):
-        multiplier = b._bulk_multiplier_x10000(rates.get(field), field=f"rates.{field}")
+        multiplier = queries.bulk_multiplier_x10000(
+            rates.get(field), field=f"rates.{field}"
+        )
         if multiplier is not None:
             values.append(_pricing_value(model, variant, field, multiplier, body, now))
     if not values:
-        raise b._http("invalid_request", "at least one pricing rate is required", 422)
+        raise queries.http(
+            "invalid_request", "at least one pricing rate is required", 422
+        )
     for value in values:
-        b._validate_enabled_pricing_value(
+        queries.validate_enabled_pricing_value(
             unit=str(value["unit"]),
             price_micro=int(value["price_micro"]),
             enabled=bool(value["enabled"]),
             field=f"rates.{value['unit']}",
         )
     await _upsert_pricing_values(db, values, now=now)
-    await b._align_pricing_group_priorities(db, values, now=now)
-    await b.write_audit(
+    await commands.align_pricing_group_priorities(db, values, now=now)
+    await commands.write_audit(
         db,
         event_type="pricing.bulk_update",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={
             "model": model,
             "channel": None if variant == "default" else variant,
@@ -271,8 +274,8 @@ async def admin_bulk_pricing(
         autocommit=False,
     )
     await db.commit()
-    await b._invalidate_pricing_cache(model, variant)
-    return await b.admin_list_pricing(admin, db)
+    await commands.invalidate_pricing_cache(model, variant)
+    return await admin_list_pricing(admin, db)
 
 
 @router.post(
@@ -286,8 +289,9 @@ async def admin_import_openai_pricing(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> PricingRulesOut:
-    b = current_runtime()
-    rows = b._parse_price_rows(body.content)
+    services = build_billing_services()
+    queries = services.queries
+    rows = queries.parse_price_rows(body.content)
     items = []
     for row in rows:
         model = str(row.get("model") or "").strip()
@@ -301,7 +305,7 @@ async def admin_import_openai_pricing(
                     "variant": "default",
                     "unit": "per_1k_tokens_in",
                     "price_rmb": billing_core.micro_to_rmb_str(
-                        b._openai_price_micro(row["input_usd_per_1m"], body.rate)
+                        queries.openai_price_micro(row["input_usd_per_1m"], body.rate)
                     ),
                     "enabled": True,
                     "note": f"OpenAI input USD/1M={row['input_usd_per_1m']} rate={body.rate}",
@@ -315,16 +319,16 @@ async def admin_import_openai_pricing(
                     "variant": "default",
                     "unit": "per_1k_tokens_out",
                     "price_rmb": billing_core.micro_to_rmb_str(
-                        b._openai_price_micro(row["output_usd_per_1m"], body.rate)
+                        queries.openai_price_micro(row["output_usd_per_1m"], body.rate)
                     ),
                     "enabled": True,
                     "note": f"OpenAI output USD/1M={row['output_usd_per_1m']} rate={body.rate}",
                 }
             )
     if not items:
-        raise b._http("invalid_price_file", "no model prices found", 422)
+        raise queries.http("invalid_price_file", "no model prices found", 422)
     update_body = PricingRulesUpdateIn.model_validate({"items": items})
-    return await b.admin_update_pricing(update_body, request, admin, db)
+    return await admin_update_pricing(update_body, request, admin, db)
 
 
 def _pricing_value(

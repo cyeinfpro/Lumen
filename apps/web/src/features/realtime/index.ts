@@ -5,6 +5,7 @@ export {
 } from "./model/contracts";
 export {
   type SnapshotAdapter,
+  type SnapshotExecutionContext,
   type SnapshotResult,
 } from "./model/replayCoordinator";
 export {

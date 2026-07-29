@@ -12,11 +12,14 @@ CHARGE_KINDS = ("charge", "charge_completion")
 _CHARGE_KINDS = CHARGE_KINDS
 
 
-def _meta_int(mapping: dict[str, Any], key: str) -> int:
+def meta_int(mapping: dict[str, Any], key: str) -> int:
     try:
         return max(0, int(mapping.get(key) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+_meta_int = meta_int
 
 
 def _scaled_meta_cost(mapping: dict[str, Any], key: str) -> int:
@@ -88,6 +91,7 @@ usage_total = _usage_total
 
 __all__ = [
     "CHARGE_KINDS",
+    "meta_int",
     "meta_int",
     "scaled_meta_cost",
     "usage_by_kind",

@@ -11,9 +11,10 @@ import shlex
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
+from urllib.parse import quote
 
 
 SERVICES = ("api", "worker", "tgbot", "web")
@@ -32,6 +33,8 @@ MISSING_MANIFEST_MARKERS = (
     "no such manifest",
     "not found",
 )
+ISOLATED_ALIAS_SOURCE_ANNOTATION = "io.lumen.promotion.source-digest"
+ISOLATED_ALIAS_NAME_ANNOTATION = "io.lumen.promotion.mutable-alias"
 
 
 class PromotionError(RuntimeError):
@@ -242,8 +245,20 @@ def parse_release_manifest_digests(text: str, *, tag: str) -> dict[str, str]:
 
 
 class DockerRegistry:
-    def __init__(self, command: Command) -> None:
+    def __init__(
+        self,
+        command: Command,
+        *,
+        delete_tag: Callable[[str, str], None] | None = None,
+    ) -> None:
         self._command = command
+        self._delete_tag = delete_tag or self._deletion_unavailable
+
+    @staticmethod
+    def _deletion_unavailable(reference: str, _digest: str) -> None:
+        raise PromotionError(
+            f"registry tag deletion is unavailable for rollback of {reference}"
+        )
 
     def inspect_digest(self, reference: str, *, missing_ok: bool = False) -> str | None:
         result = self._command.run(
@@ -293,6 +308,174 @@ class DockerRegistry:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or result.returncode
             raise PromotionError(f"failed to publish {target}: {detail}")
+
+    def create_isolated_alias(self, image: str, alias: str, digest: str) -> str:
+        target = f"{image}:{alias}"
+        source = f"{image}@{digest}"
+        result = self._command.run(
+            [
+                "buildx",
+                "imagetools",
+                "create",
+                "--annotation",
+                f"index:{ISOLATED_ALIAS_SOURCE_ANNOTATION}={digest}",
+                "--annotation",
+                f"index:{ISOLATED_ALIAS_NAME_ANNOTATION}={alias}",
+                "--tag",
+                target,
+                source,
+            ]
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or result.returncode
+            raise PromotionError(f"failed to publish isolated alias {target}: {detail}")
+        actual = self.inspect_digest(target)
+        if actual == digest:
+            raise PromotionError(
+                f"isolated alias {target} reused immutable digest {digest}"
+            )
+        return actual
+
+    def inspect_release_digest(self, reference: str, digest: str) -> str:
+        result = self._command.run(
+            ["buildx", "imagetools", "inspect", reference, "--raw"]
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or result.returncode
+            raise PromotionError(
+                f"failed to inspect alias metadata for {reference}: {detail}"
+            )
+        try:
+            manifest = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise PromotionError(
+                f"invalid raw manifest inspection output for {reference}"
+            ) from exc
+        annotations = (
+            manifest.get("annotations") if isinstance(manifest, dict) else None
+        )
+        source_digest = (
+            annotations.get(ISOLATED_ALIAS_SOURCE_ANNOTATION)
+            if isinstance(annotations, dict)
+            else None
+        )
+        if source_digest is None:
+            return digest
+        if (
+            not isinstance(source_digest, str)
+            or DIGEST_RE.fullmatch(source_digest) is None
+        ):
+            raise PromotionError(
+                f"alias metadata for {reference} has invalid source digest"
+            )
+        return source_digest
+
+    def delete_alias(self, image: str, alias: str, digest: str) -> None:
+        if SEMVER_RE.fullmatch(alias) is not None:
+            raise PromotionError(
+                f"refusing to delete immutable exact tag {image}:{alias}"
+            )
+        self._delete_tag(f"{image}:{alias}", digest)
+
+
+class GitHubPackageTagDeleter:
+    def __init__(self, command: Command, owner: str) -> None:
+        if not owner:
+            raise PromotionError("GitHub package owner cannot be empty")
+        self._command = command
+        self._owner = owner
+
+    def _package_versions(self, package: str) -> tuple[str, list[dict[str, object]]]:
+        encoded_package = quote(package, safe="")
+        failures: list[str] = []
+        for owner_kind in ("users", "orgs"):
+            endpoint = (
+                f"{owner_kind}/{self._owner}/packages/container/"
+                f"{encoded_package}/versions?per_page=100"
+            )
+            result = self._command.run(
+                ["api", "--paginate", endpoint, "--jq", ".[] | @json"]
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                failures.append(f"{owner_kind}: {detail or result.returncode}")
+                continue
+            versions: list[dict[str, object]] = []
+            for line in result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    version = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise PromotionError(
+                        f"invalid GitHub package version response for {package}"
+                    ) from exc
+                if not isinstance(version, dict):
+                    raise PromotionError(
+                        f"invalid GitHub package version entry for {package}"
+                    )
+                versions.append(version)
+            return owner_kind, versions
+        raise PromotionError(
+            f"failed to list GitHub package versions for {package}: "
+            + "; ".join(failures)
+        )
+
+    def delete(self, reference: str, digest: str) -> None:
+        image, separator, alias = reference.rpartition(":")
+        if not separator or not image or not alias:
+            raise PromotionError(f"invalid package alias reference: {reference!r}")
+        registry, path_separator, package_path = image.partition("/")
+        if registry != "ghcr.io" or not path_separator:
+            raise PromotionError(
+                f"GitHub package deletion requires a ghcr.io image: {image}"
+            )
+        owner, owner_separator, package = package_path.partition("/")
+        if not owner_separator or owner != self._owner or not package:
+            raise PromotionError(
+                f"image {image} is outside GitHub package owner {self._owner}"
+            )
+
+        owner_kind, versions = self._package_versions(package)
+        matches: list[tuple[object, list[object]]] = []
+        for version in versions:
+            metadata = version.get("metadata")
+            container = (
+                metadata.get("container") if isinstance(metadata, dict) else None
+            )
+            tags = container.get("tags") if isinstance(container, dict) else None
+            if (
+                version.get("name") == digest
+                and isinstance(tags, list)
+                and alias in tags
+            ):
+                matches.append((version.get("id"), tags))
+        if len(matches) != 1:
+            raise PromotionError(
+                f"expected one GitHub package version for {reference}@{digest}, "
+                f"found {len(matches)}"
+            )
+        version_id, tags = matches[0]
+        if not isinstance(version_id, int):
+            raise PromotionError(
+                f"GitHub package version for {reference} has invalid id"
+            )
+        if tags != [alias]:
+            raise PromotionError(
+                f"refusing to delete shared package version for {reference}; "
+                f"tags={tags}"
+            )
+
+        endpoint = (
+            f"{owner_kind}/{self._owner}/packages/container/"
+            f"{quote(package, safe='')}/versions/{version_id}"
+        )
+        result = self._command.run(["api", "--method", "DELETE", endpoint])
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or result.returncode
+            raise PromotionError(
+                f"failed to delete GitHub package version for {reference}: {detail}"
+            )
 
 
 class GitHubReleaseSource:
@@ -345,7 +528,9 @@ class AliasSnapshot:
     alias: str
     expected_digest: str
     old_digest: str | None
+    old_release_digest: str | None
     rollback_digest: str | None
+    published_digest: str | None = None
 
 
 class PromotionPublisher:
@@ -416,12 +601,19 @@ class PromotionPublisher:
                 old_digest = self._registry.inspect_digest(
                     f"{image}:{alias}", missing_ok=True
                 )
+                old_release_digest = old_digest
+                if old_digest is not None and old_digest != digests[service]:
+                    old_release_digest = self._registry.inspect_release_digest(
+                        f"{image}:{alias}",
+                        old_digest,
+                    )
                 snapshots.append(
                     AliasSnapshot(
                         service=service,
                         alias=alias,
                         expected_digest=digests[service],
                         old_digest=old_digest,
+                        old_release_digest=old_release_digest,
                         rollback_digest=old_digest,
                     )
                 )
@@ -435,7 +627,7 @@ class PromotionPublisher:
             for snapshot in snapshots
             if snapshot.old_digest is None
         ]
-        if missing:
+        if missing and plan.mode == "main":
             raise PromotionError(
                 "mutable aliases have no complete rollback baseline and registry "
                 "deletion is unavailable; refusing first/partial publication "
@@ -482,12 +674,15 @@ class PromotionPublisher:
                 for snapshot in alias_snapshots
                 if snapshot.old_digest is not None
             ]
-            if existing and all(
-                snapshot.old_digest == snapshot.expected_digest for snapshot in existing
+            if not existing:
+                rollback_manifest = {}
+                rollback_tag = "absent"
+            elif all(
+                snapshot.old_release_digest == snapshot.expected_digest
+                for snapshot in existing
             ):
                 rollback_manifest = {
-                    snapshot.service: snapshot.expected_digest
-                    for snapshot in alias_snapshots
+                    snapshot.service: snapshot.expected_digest for snapshot in existing
                 }
                 rollback_tag = plan.release_tag or "target"
             for _, candidate_tag in candidates:
@@ -498,8 +693,8 @@ class PromotionPublisher:
                     manifest = self._release_manifest(candidate_tag)
                     manifest_cache[candidate_tag] = manifest
                 if all(
-                    snapshot.old_digest == manifest[snapshot.service]
-                    for snapshot in alias_snapshots
+                    snapshot.old_release_digest == manifest[snapshot.service]
+                    for snapshot in existing
                 ):
                     rollback_manifest = manifest
                     rollback_tag = candidate_tag
@@ -517,10 +712,10 @@ class PromotionPublisher:
         for snapshot in snapshots:
             reference = f"{self._image(snapshot.service)}:{snapshot.alias}"
             actual = self._registry.inspect_digest(reference)
-            if actual != snapshot.expected_digest:
+            expected = snapshot.published_digest or snapshot.expected_digest
+            if actual != expected:
                 raise PromotionError(
-                    f"{reference} resolved to {actual}, "
-                    f"expected {snapshot.expected_digest}"
+                    f"{reference} resolved to {actual}, expected {expected}"
                 )
 
     def _publish_exact(
@@ -573,19 +768,40 @@ class PromotionPublisher:
             restored.add(key)
             reference = f"{self._image(snapshot.service)}:{snapshot.alias}"
             rollback_digest = snapshot.rollback_digest
-            if rollback_digest is None:
-                failures.append(f"{reference}: no rollback digest")
-                continue
             try:
                 last_error: BaseException | None = None
                 for _attempt in range(3):
                     try:
-                        self._registry.create_alias(
-                            self._image(snapshot.service),
-                            snapshot.alias,
-                            rollback_digest,
+                        current = self._registry.inspect_digest(
+                            reference,
+                            missing_ok=True,
                         )
-                        actual = self._registry.inspect_digest(reference)
+                        if current == rollback_digest:
+                            last_error = None
+                            break
+                        if rollback_digest is not None and (
+                            current != snapshot.expected_digest
+                        ):
+                            raise PromotionError(
+                                f"rollback found unexpected current digest {current}; "
+                                f"expected promoted digest {snapshot.expected_digest}"
+                            )
+                        if rollback_digest is None:
+                            self._registry.delete_alias(
+                                self._image(snapshot.service),
+                                snapshot.alias,
+                                current,
+                            )
+                        else:
+                            self._registry.create_alias(
+                                self._image(snapshot.service),
+                                snapshot.alias,
+                                rollback_digest,
+                            )
+                        actual = self._registry.inspect_digest(
+                            reference,
+                            missing_ok=rollback_digest is None,
+                        )
                         if actual != rollback_digest:
                             raise PromotionError(
                                 f"rollback verification returned {actual}, "
@@ -597,7 +813,10 @@ class PromotionPublisher:
                         last_error = exc
                 if last_error is not None:
                     raise last_error
-                self._log(f"rollback restored {reference} to {rollback_digest}")
+                if rollback_digest is None:
+                    self._log(f"rollback deleted newly created alias {reference}")
+                else:
+                    self._log(f"rollback restored {reference} to {rollback_digest}")
             except BaseException as exc:
                 failures.append(f"{reference}: {exc}")
 
@@ -613,6 +832,7 @@ class PromotionPublisher:
         snapshots = self._prepare_mutable_rollback(
             plan, self._snapshots(aliases, digests)
         )
+        published: list[AliasSnapshot] = []
         self._ensure_stable_not_downgrade(plan)
         old_handlers: dict[int, signal.Handlers] = {}
         handlers_restored = False
@@ -628,6 +848,10 @@ class PromotionPublisher:
         def interrupt(signum: int, _frame: object) -> None:
             raise PromotionInterrupted(signum)
 
+        def suppress_interrupts() -> None:
+            for signum in old_handlers:
+                signal.signal(signum, signal.SIG_IGN)
+
         for signum in (signal.SIGINT, signal.SIGTERM):
             old_handlers[signum] = signal.getsignal(signum)
             signal.signal(signum, interrupt)
@@ -635,16 +859,37 @@ class PromotionPublisher:
         try:
             for snapshot in snapshots:
                 if snapshot.old_digest == snapshot.expected_digest:
+                    published.append(
+                        replace(
+                            snapshot,
+                            published_digest=snapshot.expected_digest,
+                        )
+                    )
                     continue
-                self._registry.create_alias(
-                    self._image(snapshot.service),
-                    snapshot.alias,
-                    snapshot.expected_digest,
+                if snapshot.old_digest is None:
+                    # GHCR deletes package versions rather than individual tags.
+                    # A wrapper keeps this new alias independently removable.
+                    published_digest = self._registry.create_isolated_alias(
+                        self._image(snapshot.service),
+                        snapshot.alias,
+                        snapshot.expected_digest,
+                    )
+                else:
+                    self._registry.create_alias(
+                        self._image(snapshot.service),
+                        snapshot.alias,
+                        snapshot.expected_digest,
+                    )
+                    published_digest = snapshot.expected_digest
+                published_snapshot = replace(
+                    snapshot,
+                    published_digest=published_digest,
                 )
-                self._verify((snapshot,))
-            self._verify(snapshots)
+                published.append(published_snapshot)
+                self._verify((published_snapshot,))
+            self._verify(published)
         except BaseException:
-            restore_handlers()
+            suppress_interrupts()
             self._log(
                 "mutable alias publication failed; OCI registries do not provide "
                 "a multi-tag transaction, starting best-effort rollback"
@@ -653,7 +898,7 @@ class PromotionPublisher:
             raise
         finally:
             restore_handlers()
-        return snapshots
+        return published
 
     def publish(
         self, plan: AliasPlan, digests: dict[str, str], *, phase: str = "all"
@@ -737,17 +982,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         plan = build_alias_plan(args.mode, args.release_tag)
         digests = parse_image_digests(args.image_digest)
-        docker = DockerRegistry(SubprocessCommand(_command_prefix(args.docker_command)))
         release_source: GitHubReleaseSource | None = None
+        package_deleter: GitHubPackageTagDeleter | None = None
         if (
             plan.version is not None
             and not plan.is_prerelease
             and args.phase in {"all", "mutable"}
         ):
+            repository = args.github_repository or ""
+            github_command = SubprocessCommand(_command_prefix(args.github_command))
             release_source = GitHubReleaseSource(
-                SubprocessCommand(_command_prefix(args.github_command)),
-                args.github_repository or "",
+                github_command,
+                repository,
             )
+            owner, _, _ = repository.partition("/")
+            package_deleter = GitHubPackageTagDeleter(github_command, owner)
+        docker = DockerRegistry(
+            SubprocessCommand(_command_prefix(args.docker_command)),
+            delete_tag=(
+                package_deleter.delete if package_deleter is not None else None
+            ),
+        )
         publisher = PromotionPublisher(
             registry=docker,
             registry_namespace=args.registry,

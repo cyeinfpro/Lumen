@@ -25,6 +25,7 @@ AliasPlan = promotion.AliasPlan
 CommandResult = promotion.CommandResult
 DockerRegistry = promotion.DockerRegistry
 GitHubReleaseSource = promotion.GitHubReleaseSource
+GitHubPackageTagDeleter = promotion.GitHubPackageTagDeleter
 PromotionError = promotion.PromotionError
 PromotionInterrupted = promotion.PromotionInterrupted
 PromotionPublisher = promotion.PromotionPublisher
@@ -55,6 +56,7 @@ class FakeDockerCommand:
         self.interrupt_target = interrupt_target
         self.failure_consumed = False
         self.commands: list[tuple[str, ...]] = []
+        self.release_digests: dict[str, str] = {}
 
     def run(self, args: Sequence[str]) -> CommandResult:
         command = tuple(args)
@@ -64,14 +66,30 @@ class FakeDockerCommand:
             digest = self.state.get(reference)
             if digest is None:
                 return CommandResult(1, "", "manifest unknown: not found")
+            if "--raw" in command:
+                source_digest = self.release_digests.get(reference)
+                annotations = (
+                    {
+                        promotion.ISOLATED_ALIAS_SOURCE_ANNOTATION: source_digest,
+                    }
+                    if source_digest is not None
+                    else {}
+                )
+                return CommandResult(0, json.dumps({"annotations": annotations}), "")
             return CommandResult(0, json.dumps({"digest": digest}), "")
 
         if command[:3] == ("buildx", "imagetools", "create"):
-            assert command[3] == "--tag"
-            target = command[4]
-            source = command[5]
+            target_index = command.index("--tag")
+            target = command[target_index + 1]
+            source = command[target_index + 2]
             digest = source.rsplit("@", maxsplit=1)[1]
-            self.state[target] = digest
+            if "--annotation" in command:
+                published_digest = _digest(10_000 + len(self.commands))
+                self.state[target] = published_digest
+                self.release_digests[target] = digest
+            else:
+                self.state[target] = digest
+                self.release_digests.pop(target, None)
             if target == self.interrupt_target and not self.failure_consumed:
                 self.failure_consumed = True
                 raise PromotionInterrupted(signal.SIGTERM)
@@ -81,6 +99,12 @@ class FakeDockerCommand:
             return CommandResult(0, "", "")
 
         raise AssertionError(f"unexpected fake docker command: {command}")
+
+    def delete_tag(self, reference: str, digest: str) -> None:
+        self.commands.append(("registry", "delete-tag", reference, digest))
+        assert self.state.get(reference) == digest
+        self.state.pop(reference, None)
+        self.release_digests.pop(reference, None)
 
 
 class FakeGitHubCommand:
@@ -105,6 +129,29 @@ class FakeGitHubCommand:
                 return CommandResult(1, "", "manifest missing")
             return CommandResult(0, manifest, "")
         raise AssertionError(f"unexpected fake GitHub command: {command}")
+
+
+class FakePackageCommand:
+    def __init__(self, versions: Sequence[dict[str, object]]) -> None:
+        self.versions = list(versions)
+        self.commands: list[tuple[str, ...]] = []
+
+    def run(self, args: Sequence[str]) -> CommandResult:
+        command = tuple(args)
+        self.commands.append(command)
+        if command[:2] == ("api", "--paginate"):
+            return CommandResult(
+                0,
+                "\n".join(json.dumps(version) for version in self.versions),
+                "",
+            )
+        if command[:3] == ("api", "--method", "DELETE"):
+            version_id = int(command[3].rsplit("/", maxsplit=1)[1])
+            self.versions = [
+                version for version in self.versions if version.get("id") != version_id
+            ]
+            return CommandResult(0, "", "")
+        raise AssertionError(f"unexpected fake package command: {command}")
 
 
 def _immutable_state(digests: dict[str, str]) -> dict[str, str]:
@@ -147,7 +194,7 @@ def _publisher(
     )
     source = GitHubReleaseSource(github, "cyeinfpro/Lumen")
     return PromotionPublisher(
-        registry=DockerRegistry(docker),
+        registry=DockerRegistry(docker, delete_tag=docker.delete_tag),
         registry_namespace=REGISTRY,
         release_tags=source.published_tags,
         release_manifest=source.release_manifest_digests,
@@ -313,7 +360,7 @@ def test_shared_phase_rechecks_downgrade_guard_immediately_before_writes() -> No
         ]
     )
     publisher = PromotionPublisher(
-        registry=DockerRegistry(docker),
+        registry=DockerRegistry(docker, delete_tag=docker.delete_tag),
         registry_namespace=REGISTRY,
         release_tags=lambda: next(release_tag_snapshots),
         release_manifest=lambda tag: (
@@ -439,7 +486,7 @@ def test_first_main_alias_is_rejected_before_any_registry_write() -> None:
     )
 
 
-def test_first_new_major_refuses_absent_mutable_aliases_before_writes() -> None:
+def test_first_new_major_partial_failure_restores_absent_mutable_aliases() -> None:
     new_digests = _digests()
     old_digests = _digests(500)
     state = _immutable_state(new_digests)
@@ -458,16 +505,48 @@ def test_first_new_major_refuses_absent_mutable_aliases_before_writes() -> None:
         release_manifests={"v1.9.9": old_digests},
     )
 
-    with pytest.raises(PromotionError, match="registry deletion is unavailable"):
+    with pytest.raises(PromotionError, match="simulated registry write failure"):
         publisher.publish(
             build_alias_plan("release", "v2.0.0"),
             new_digests,
             phase="mutable",
         )
 
-    assert not any(
-        command[:3] == ("buildx", "imagetools", "create") for command in docker.commands
+    for service in SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        assert state[f"{image}:v2.0.0"] == new_digests[service]
+        assert f"{image}:v2.0" not in state
+        assert f"{image}:v2" not in state
+        assert state[f"{image}:latest"] == old_digests[service]
+    assert any(command[:2] == ("registry", "delete-tag") for command in docker.commands)
+
+
+def test_first_new_major_interrupt_restores_absent_mutable_aliases() -> None:
+    new_digests = _digests()
+    old_digests = _digests(550)
+    state = _immutable_state(new_digests)
+    for service in SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        state[f"{image}:v2.0.0"] = new_digests[service]
+        state[f"{image}:latest"] = old_digests[service]
+
+    docker = FakeDockerCommand(
+        state,
+        interrupt_target=f"{REGISTRY}/lumen-worker:v2",
     )
+    publisher = _publisher(
+        docker,
+        release_tags=("v1.9.9", "v2.0.0"),
+        release_manifests={"v1.9.9": old_digests},
+    )
+
+    with pytest.raises(PromotionInterrupted):
+        publisher.publish(
+            build_alias_plan("release", "v2.0.0"),
+            new_digests,
+            phase="mutable",
+        )
+
     for service in SERVICES:
         image = f"{REGISTRY}/lumen-{service}"
         assert state[f"{image}:v2.0.0"] == new_digests[service]
@@ -476,7 +555,7 @@ def test_first_new_major_refuses_absent_mutable_aliases_before_writes() -> None:
         assert state[f"{image}:latest"] == old_digests[service]
 
 
-def test_partial_mutable_alias_baseline_is_rejected_before_any_write() -> None:
+def test_partial_mutable_alias_baseline_is_restored_after_failure() -> None:
     new_digests = _digests()
     old_digests = _digests(600)
     state = _immutable_state(new_digests)
@@ -490,7 +569,7 @@ def test_partial_mutable_alias_baseline_is_rejected_before_any_write() -> None:
 
     docker = FakeDockerCommand(
         state,
-        fail_target=f"{REGISTRY}/lumen-api:v1.2",
+        fail_target=f"{REGISTRY}/lumen-worker:v1",
     )
     publisher = _publisher(
         docker,
@@ -498,7 +577,7 @@ def test_partial_mutable_alias_baseline_is_rejected_before_any_write() -> None:
         release_manifests={"v1.2.64": old_digests},
     )
 
-    with pytest.raises(PromotionError, match="worker:v1"):
+    with pytest.raises(PromotionError, match="simulated registry write failure"):
         publisher.publish(
             build_alias_plan("release", "v1.2.65"),
             new_digests,
@@ -506,6 +585,109 @@ def test_partial_mutable_alias_baseline_is_rejected_before_any_write() -> None:
         )
 
     assert state == before
+    assert any(
+        command[:3]
+        == (
+            "registry",
+            "delete-tag",
+            f"{REGISTRY}/lumen-worker:v1",
+        )
+        for command in docker.commands
+    )
+
+
+def test_next_stable_release_accepts_isolated_first_major_aliases() -> None:
+    old_digests = _digests(700)
+    new_digests = _digests(800)
+    state = _immutable_state(new_digests)
+    state.update(_immutable_state(old_digests))
+    docker = FakeDockerCommand(state)
+    for service in SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        state[f"{image}:v2.0.1"] = new_digests[service]
+        for alias in ("v2.0", "v2"):
+            reference = f"{image}:{alias}"
+            state[reference] = _digest(20_000 + len(docker.release_digests))
+            docker.release_digests[reference] = old_digests[service]
+        state[f"{image}:latest"] = old_digests[service]
+
+    publisher = _publisher(
+        docker,
+        release_tags=("v2.0.0", "v2.0.1"),
+        release_manifests={"v2.0.0": old_digests},
+    )
+
+    publisher.publish(
+        build_alias_plan("release", "v2.0.1"),
+        new_digests,
+        phase="mutable",
+    )
+
+    for service in SERVICES:
+        image = f"{REGISTRY}/lumen-{service}"
+        for alias in ("v2.0", "v2", "latest"):
+            assert state[f"{image}:{alias}"] == new_digests[service]
+
+
+def test_registry_refuses_to_delete_exact_release_tag() -> None:
+    digests = _digests()
+    state = _immutable_state(digests)
+    docker = FakeDockerCommand(state)
+    registry = DockerRegistry(docker, delete_tag=docker.delete_tag)
+
+    with pytest.raises(PromotionError, match="immutable exact tag"):
+        registry.delete_alias(
+            f"{REGISTRY}/lumen-api",
+            "v2.0.0",
+            digests["api"],
+        )
+
     assert not any(
-        command[:3] == ("buildx", "imagetools", "create") for command in docker.commands
+        command[:2] == ("registry", "delete-tag") for command in docker.commands
+    )
+
+
+def test_github_package_deleter_removes_only_a_single_tag_version() -> None:
+    digest = _digest(900)
+    command = FakePackageCommand(
+        [
+            {
+                "id": 123,
+                "name": digest,
+                "metadata": {"container": {"tags": ["v2"]}},
+            }
+        ]
+    )
+    deleter = GitHubPackageTagDeleter(command, "cyeinfpro")
+
+    deleter.delete(f"{REGISTRY}/lumen-api:v2", digest)
+
+    assert command.versions == []
+    assert command.commands[-1] == (
+        "api",
+        "--method",
+        "DELETE",
+        "users/cyeinfpro/packages/container/lumen-api/versions/123",
+    )
+
+
+def test_github_package_deleter_refuses_a_version_shared_with_exact_tag() -> None:
+    digest = _digest(901)
+    command = FakePackageCommand(
+        [
+            {
+                "id": 124,
+                "name": digest,
+                "metadata": {"container": {"tags": ["v2.0.0", "v2"]}},
+            }
+        ]
+    )
+    deleter = GitHubPackageTagDeleter(command, "cyeinfpro")
+
+    with pytest.raises(PromotionError, match="shared package version"):
+        deleter.delete(f"{REGISTRY}/lumen-api:v2", digest)
+
+    assert not any(
+        command_args[:3] == ("api", "--method", "DELETE")
+        for command_args in command.commands
     )

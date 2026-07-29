@@ -36,6 +36,7 @@ from .diagnostics import (
     StageTimer,
 )
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
+from .execution_boundary import release_or_settle_generation
 from .lease import (
     acquire_lease,
     cancel_renewer_task,
@@ -255,7 +256,8 @@ async def _persist_user_runtime_failure(
         message.status = MessageStatus.FAILED
     generation = await session.get(Generation, state.task_id)
     if generation is not None:
-        await state.services.billing.release(
+        await release_or_settle_generation(
+            state.services.billing,
             session,
             generation,
             reason=error_code,

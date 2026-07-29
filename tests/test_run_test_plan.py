@@ -5,6 +5,8 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = spec_from_file_location(
@@ -110,3 +112,71 @@ def test_rerun_failed_selects_only_previous_failures() -> None:
     )
 
     assert [command["id"] for command in selected] == ["failed"]
+
+
+def test_plan_identity_binds_base_head_and_command_set() -> None:
+    commands = [
+        {"id": "one", "command": "true", "resource_tags": ["postgres"]},
+    ]
+    identity = run_test_plan.build_plan_identity(
+        {
+            "schema_version": 1,
+            "base": "base-sha",
+            "head": "head-sha",
+        },
+        commands,
+    )
+
+    assert identity["base"] == "base-sha"
+    assert identity["head"] == "head-sha"
+    assert identity["commands"] == [
+        {
+            "command": "true",
+            "id": "one",
+            "resource_tags": ["postgres"],
+        }
+    ]
+    assert len(identity["digest"]) == 64
+
+
+def test_rerun_failed_rejects_stale_plan_identity() -> None:
+    commands = [{"id": "one", "command": "true", "resource_tags": []}]
+    current_identity = run_test_plan.build_plan_identity(
+        {"schema_version": 1, "base": "base", "head": "new-head"},
+        commands,
+    )
+    previous_identity = run_test_plan.build_plan_identity(
+        {"schema_version": 1, "base": "base", "head": "old-head"},
+        commands,
+    )
+
+    with pytest.raises(ValueError, match="do not match the current plan"):
+        run_test_plan._validate_previous_results(
+            {
+                "plan_identity": previous_identity,
+                "results": [{"id": "one", "exit_code": 0}],
+            },
+            plan_identity=current_identity,
+            commands=commands,
+        )
+
+
+def test_rerun_failed_rejects_commands_that_were_never_executed() -> None:
+    commands = [
+        {"id": "old", "command": "true", "resource_tags": []},
+        {"id": "new", "command": "echo new", "resource_tags": []},
+    ]
+    identity = run_test_plan.build_plan_identity(
+        {"schema_version": 1, "base": "base", "head": "head"},
+        commands,
+    )
+
+    with pytest.raises(ValueError, match="never executed: new"):
+        run_test_plan._validate_previous_results(
+            {
+                "plan_identity": identity,
+                "results": [{"id": "old", "exit_code": 0}],
+            },
+            plan_identity=identity,
+            commands=commands,
+        )

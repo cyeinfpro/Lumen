@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
+import tomllib
 from typing import Any, Iterable
 
 
@@ -26,6 +27,7 @@ from architecture_audit import (  # noqa: E402
 
 
 DEFAULT_BASELINE = ROOT / "scripts" / "architecture-baseline.json"
+DEFAULT_LAYER_CONFIG = ROOT / "scripts" / "architecture-layers.toml"
 
 
 @dataclass(frozen=True)
@@ -53,13 +55,119 @@ class PackageGraph:
     edges: dict[str, set[str]]
 
 
-DEFAULT_PACKAGES = (
-    PackageSpec("core", ROOT / "packages/core/lumen_core", "lumen_core"),
-    PackageSpec("api", ROOT / "apps/api/app", "app"),
-    PackageSpec("worker", ROOT / "apps/worker/app", "app"),
-    PackageSpec("tgbot", ROOT / "apps/tgbot/app", "app"),
-    PackageSpec("image-job", ROOT / "image-job/image_job", "image_job"),
-)
+@dataclass(frozen=True)
+class ArchitectureLayerConfig:
+    packages: tuple[PackageSpec, ...]
+    layer_rules: tuple[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        ...,
+    ]
+    forbidden_rules: tuple[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        ...,
+    ]
+
+
+def _string_list(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ValueError(f"{field} must be a non-empty string list")
+    return tuple(value)
+
+
+def _load_rules(
+    values: object,
+    *,
+    field: str,
+) -> tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...]:
+    if values is None:
+        return ()
+    if not isinstance(values, list):
+        raise ValueError(f"{field} must be a list")
+    rules: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError(f"{field}[{index}] must be a table")
+        name = value.get("name")
+        package = value.get("package")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"{field}[{index}].name is invalid")
+        if name in seen:
+            raise ValueError(f"duplicate architecture rule: {name}")
+        seen.add(name)
+        if not isinstance(package, str) or not package:
+            raise ValueError(f"{field}[{index}].package is invalid")
+        rules.append(
+            (
+                package,
+                name,
+                _string_list(
+                    value.get("sources"),
+                    field=f"{field}[{index}].sources",
+                ),
+                _string_list(
+                    value.get("targets"),
+                    field=f"{field}[{index}].targets",
+                ),
+            )
+        )
+    return tuple(rules)
+
+
+def load_layer_config(
+    path: Path = DEFAULT_LAYER_CONFIG,
+    *,
+    root: Path = ROOT,
+) -> ArchitectureLayerConfig:
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    packages_raw = raw.get("packages")
+    if raw.get("version") != 1 or not isinstance(packages_raw, list):
+        raise ValueError("unsupported architecture layer configuration")
+    packages: list[PackageSpec] = []
+    seen_packages: set[str] = set()
+    for index, value in enumerate(packages_raw):
+        if not isinstance(value, dict):
+            raise ValueError(f"packages[{index}] must be a table")
+        name = value.get("name")
+        package = value.get("package")
+        relative_root = value.get("root")
+        if not all(
+            isinstance(item, str) and item
+            for item in (name, package, relative_root)
+        ):
+            raise ValueError(f"packages[{index}] is invalid")
+        assert isinstance(name, str)
+        assert isinstance(package, str)
+        assert isinstance(relative_root, str)
+        if name in seen_packages:
+            raise ValueError(f"duplicate architecture package: {name}")
+        seen_packages.add(name)
+        packages.append(PackageSpec(name, root / relative_root, package))
+    layer_rules = _load_rules(raw.get("rules"), field="rules")
+    forbidden_rules = _load_rules(raw.get("forbidden"), field="forbidden")
+    referenced_packages = {
+        package
+        for package, _name, _sources, _targets in (
+            *layer_rules,
+            *forbidden_rules,
+        )
+    }
+    unknown = sorted(referenced_packages - seen_packages)
+    if unknown:
+        raise ValueError(f"architecture rules reference unknown packages: {unknown}")
+    return ArchitectureLayerConfig(
+        packages=tuple(packages),
+        layer_rules=layer_rules,
+        forbidden_rules=forbidden_rules,
+    )
+
+
+DEFAULT_LAYER_CONFIGURATION = load_layer_config()
+DEFAULT_PACKAGES = DEFAULT_LAYER_CONFIGURATION.packages
+LAYER_RULES = DEFAULT_LAYER_CONFIGURATION.layer_rules
+FORBIDDEN_DEPENDENCY_RULES = DEFAULT_LAYER_CONFIGURATION.forbidden_rules
 
 
 def module_name(spec: PackageSpec, path: Path) -> str:
@@ -179,102 +287,6 @@ def strongly_connected_components(
         if node not in indices:
             visit(node)
     return sorted(components)
-
-
-# 分层规则：(package, rule 名, 下层包前缀, 上层包前缀)。
-#
-# 口径必须覆盖**每一个**下层目录，漏一个就等于给它开了后门 —— 本文件之前只列了
-# api 的 services/canvas_services/workflow_services，于是 `app.images.application`
-# 反向 import `app.routes._image_delivery` 这类违规完全不在检测视野里（审计新-2/新-18）。
-# 新增下层目录时同步加进来；每条规则当前均为 0 违规，任何新增都会直接失败。
-LAYER_RULES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        "api",
-        "api-lower-to-routes",
-        (
-            "app.services",
-            "app.canvas_services",
-            "app.workflow_services",
-            "app.workflow_domain",
-            "app.workflows",
-            "app.images",
-        ),
-        ("app.routes",),
-    ),
-    (
-        "worker",
-        "worker-lower-to-tasks",
-        (
-            "app.services",
-            "app.background_removal",
-            "app.upstream_parts",
-            "app.video_upstream_parts",
-            "app.upstream_clients",
-            "app.provider_runtime",
-            "app.reconciliation",
-            "app.outbox",
-            "app.locks",
-            "app.jobs",
-            "app.task_runtime",
-        ),
-        ("app.tasks",),
-    ),
-    (
-        "image-job",
-        "image-job-lower-to-http",
-        (
-            "image_job.domain",
-            "image_job.application",
-            "image_job.ports",
-            "image_job.adapters",
-        ),
-        (
-            "image_job.api",
-            "image_job.route_handlers",
-            "image_job.app_factory",
-        ),
-    ),
-)
-
-FORBIDDEN_DEPENDENCY_RULES: tuple[
-    tuple[str, str, tuple[str, ...], tuple[str, ...]], ...
-] = (
-    (
-        "api",
-        "workflow-v2-to-legacy",
-        (
-            "app.main",
-            "app.routes",
-            "app.services",
-            "app.workflows",
-        ),
-        (
-            "app.workflow_services",
-            "app.workflow_domain",
-        ),
-    ),
-    (
-        "api",
-        "workflow-domain-layering",
-        ("app.workflows.domain",),
-        (
-            "app.routes",
-            "app.workflows.adapters",
-            "app.workflows.application",
-            "app.workflows.composition",
-            "app.workflows.transport",
-        ),
-    ),
-    (
-        "api",
-        "workflow-http-to-adapters",
-        (
-            "app.routes.workflow_routes",
-            "app.workflows.transport",
-        ),
-        ("app.workflows.adapters",),
-    ),
-)
 
 
 def _matches_module_prefix(module: str, prefixes: tuple[str, ...]) -> bool:

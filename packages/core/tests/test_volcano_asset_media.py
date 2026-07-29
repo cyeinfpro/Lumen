@@ -323,6 +323,21 @@ def test_video_transcode_semaphore_is_scoped_to_running_loop() -> None:
     assert first is not second
 
 
+def test_video_transcode_runtime_reset_clears_loop_semaphores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = volcano_asset_media._VideoTranscodeRuntime()
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
+    try:
+        runtime.semaphore_for_running_loop()
+        assert len(runtime.semaphores) == 1
+        runtime.reset()
+        assert len(runtime.semaphores) == 0
+    finally:
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_image_capacity_is_reserved_before_first_for_update(
     tmp_path: Path,

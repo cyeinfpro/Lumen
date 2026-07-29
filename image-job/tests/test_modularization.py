@@ -99,7 +99,7 @@ def test_persistence_facade_reads_monkeypatched_db_exec(monkeypatch) -> None:
 
     monkeypatch.setattr(app, "db_exec", fake_db_exec)
 
-    assert asyncio.run(app.mark_running("job-late-bound")) is True
+    assert asyncio.run(app.mark_running("job-late-bound"))
     assert calls
     assert "status = 'running'" in calls[0][0]
     assert calls[0][1][-1] == "job-late-bound"

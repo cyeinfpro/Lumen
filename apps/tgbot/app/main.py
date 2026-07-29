@@ -37,6 +37,7 @@ from .handlers import GenerationRuntime, build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
 from .proxy_manager import FailoverSession, ProxyManager, normalize_proxy_url
+from .tracker import tracker
 
 
 # FSM 状态过期时间。/new 走完一个生成或丢弃后状态被 clear()，正常路径不会留垃圾。
@@ -472,6 +473,7 @@ async def _amain() -> None:
     async with AsyncExitStack() as stack:
         api = LumenApi()
         stack.push_async_callback(api.aclose)
+        stack.push_async_callback(tracker.aclose)
         proxy_mgr = ProxyManager(api)
 
         # 先去 API 拉 runtime-config（DB 优先，env 兜底）

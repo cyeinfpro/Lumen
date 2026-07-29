@@ -574,6 +574,7 @@ class DefaultGenerationProvider:
             retry_attempt=request.context.retry_attempt,
             quota_task_id=request.context.quota_task_id,
             quota_attempt_epoch=request.context.quota_attempt_epoch,
+            sidecar_execution=request.context.sidecar_execution,
             upstream_runtime=self._upstream_runtime,
         )
         return generate_image(
@@ -608,6 +609,7 @@ class DefaultGenerationProvider:
             retry_attempt=common.context.retry_attempt,
             quota_task_id=common.context.quota_task_id,
             quota_attempt_epoch=common.context.quota_attempt_epoch,
+            sidecar_execution=common.context.sidecar_execution,
             upstream_runtime=self._upstream_runtime,
         )
         return edit_image(

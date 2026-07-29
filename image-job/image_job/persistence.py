@@ -41,6 +41,15 @@ ALLOWED_SQLITE_JOURNAL_MODES = frozenset(
         "OFF",
     }
 )
+TERMINAL_JOB_STATUSES = frozenset(
+    {
+        "succeeded",
+        "failed",
+        "cancelled",
+        "cancel_requested",
+        "uncertain",
+    }
+)
 _SQLITE_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -344,6 +353,7 @@ def init_storage(
         )
         _ensure_refs_auth_schema(conn)
         _ensure_column(conn, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "jobs", "execution_token", "TEXT")
         _ensure_column(conn, "jobs", "error_class", "TEXT")
         _ensure_column(conn, "jobs", "endpoint_used", "TEXT")
         _ensure_column(conn, "jobs", "upstream_auth_hash", "TEXT")
@@ -371,6 +381,13 @@ def init_storage(
             CREATE INDEX IF NOT EXISTS jobs_retention_expiry_idx
                 ON jobs(retention_expires_at, job_id)
                 WHERE retention_expires_at IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS jobs_active_updated_idx
+                ON jobs(status, updated_at, job_id)
+                WHERE status IN ('queued', 'running')
             """
         )
         # H-19：提交请求的 request_id 必须落库，否则异步 worker 真正执行时
@@ -526,42 +543,54 @@ class JobPersistenceFacade:
                 (self.now_iso(), row["job_id"]),
             )
 
-    async def mark_running(self, job_id: str) -> bool:
+    async def mark_running(self, job_id: str) -> str | None:
         now = self.now_iso()
+        execution_token = secrets.token_urlsafe(24)
         changed = await self.db_exec(
             "UPDATE jobs SET status = 'running', "
             "started_at = COALESCE(started_at, ?), "
-            "updated_at = ?, attempts = attempts + 1 "
+            "updated_at = ?, attempts = attempts + 1, execution_token = ? "
             "WHERE job_id = ? AND status = 'queued' "
+            "AND execution_token IS NULL "
             "AND auth_ciphertext IS NOT NULL "
             "AND auth_nonce IS NOT NULL "
             "AND auth_key_id IS NOT NULL",
-            (now, now, job_id),
+            (now, now, execution_token, job_id),
+        )
+        if changed != 1:
+            return None
+        return execution_token
+
+    async def touch_running(self, job_id: str, execution_token: str) -> bool:
+        changed = await self.db_exec(
+            """
+            UPDATE jobs
+            SET updated_at = ?
+            WHERE job_id = ?
+              AND status = 'running'
+              AND execution_token = ?
+            """,
+            (self.now_iso(), job_id, execution_token),
         )
         return changed == 1
-
-    async def touch_running(self, job_id: str) -> None:
-        await self.db_exec(
-            "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'",
-            (self.now_iso(), job_id),
-        )
 
     async def mark_succeeded(
         self,
         job_id: str,
         *,
+        execution_token: str,
         upstream_status: int,
         elapsed_ms: int,
         images: list[dict[str, Any]],
         endpoint_used: str | None = None,
-    ) -> None:
+    ) -> bool:
         now = self.now_iso()
         retention_expires_at = _terminal_retention_expiry(
             now,
             job_ttl_days=self.job_ttl_days(),
             images=images,
         )
-        await self.db_exec(
+        changed = await self.db_exec(
             """
             UPDATE jobs
             SET status = 'succeeded',
@@ -569,6 +598,7 @@ class JobPersistenceFacade:
                 auth_ciphertext = NULL,
                 auth_nonce = NULL,
                 auth_key_id = NULL,
+                execution_token = NULL,
                 finished_at = ?, updated_at = ?, elapsed_ms = ?,
                 upstream_status = ?, image_count = ?, images_json = ?,
                 error = NULL, upstream_body = NULL, error_class = NULL,
@@ -581,6 +611,8 @@ class JobPersistenceFacade:
                 END,
                 endpoint_used = COALESCE(?, endpoint_used)
             WHERE job_id = ?
+              AND status = 'running'
+              AND execution_token = ?
             """,
             (
                 now,
@@ -593,13 +625,16 @@ class JobPersistenceFacade:
                 retention_expires_at,
                 endpoint_used,
                 job_id,
+                execution_token,
             ),
         )
+        return changed == 1
 
     async def mark_failed(
         self,
         job_id: str,
         *,
+        execution_token: str,
         error: str,
         upstream_status: int | None = None,
         upstream_body: Any | None = None,
@@ -609,14 +644,14 @@ class JobPersistenceFacade:
         retryable: bool = False,
         retry_suppressed: bool = False,
         outcome_uncertain: bool = False,
-    ) -> None:
+    ) -> bool:
         now = self.now_iso()
         terminal_status = "uncertain" if outcome_uncertain else "failed"
         retention_expires_at = _terminal_retention_expiry(
             now,
             job_ttl_days=self.job_ttl_days(),
         )
-        await self.db_exec(
+        changed = await self.db_exec(
             """
             UPDATE jobs
             SET status = ?,
@@ -624,6 +659,7 @@ class JobPersistenceFacade:
                 auth_ciphertext = NULL,
                 auth_nonce = NULL,
                 auth_key_id = NULL,
+                execution_token = NULL,
                 finished_at = ?, updated_at = ?,
                 elapsed_ms = ?, upstream_status = ?, error = ?,
                 upstream_body = ?, error_class = ?, retryable = ?,
@@ -636,6 +672,8 @@ class JobPersistenceFacade:
                 END,
                 endpoint_used = COALESCE(?, endpoint_used)
             WHERE job_id = ?
+              AND status = 'running'
+              AND execution_token = ?
             """,
             (
                 terminal_status,
@@ -653,45 +691,67 @@ class JobPersistenceFacade:
                 retention_expires_at,
                 endpoint_used,
                 job_id,
+                execution_token,
             ),
         )
+        return changed == 1
 
-    async def mark_cancelled(self, job_id: str, *, error: str = "cancelled") -> bool:
+    async def mark_cancelled(
+        self,
+        job_id: str,
+        *,
+        execution_token: str | None = None,
+        error: str = "cancelled",
+    ) -> bool:
         now = self.now_iso()
+        after_dispatch = execution_token is not None
+        terminal_status = "cancel_requested" if after_dispatch else "cancelled"
         retention_expires_at = _terminal_retention_expiry(
             now,
             job_ttl_days=self.job_ttl_days(),
         )
+        state_predicate = (
+            "status = 'running' AND execution_token = ?"
+            if after_dispatch
+            else "status = 'queued' AND execution_token IS NULL"
+        )
+        params: tuple[Any, ...] = (
+            terminal_status,
+            now,
+            now,
+            error,
+            int(after_dispatch),
+            int(after_dispatch),
+            retention_expires_at,
+            retention_expires_at,
+            job_id,
+        )
+        if execution_token is not None:
+            params = (*params, execution_token)
         changed = await self.db_exec(
-            """
+            f"""
             UPDATE jobs
-            SET status = 'cancelled',
+            SET status = ?,
                 auth_header = NULL,
                 auth_ciphertext = NULL,
                 auth_nonce = NULL,
                 auth_key_id = NULL,
+                execution_token = NULL,
                 finished_at = ?,
                 updated_at = ?,
                 error = ?,
                 retryable = 0,
-                retry_suppressed = 0,
-                outcome_uncertain = 0,
+                retry_suppressed = ?,
+                outcome_uncertain = ?,
                 retention_expires_at = CASE
                     WHEN retention_expires_at IS NULL
                          OR retention_expires_at > ?
                     THEN ?
                     ELSE retention_expires_at
                 END
-            WHERE job_id = ? AND status = 'queued'
-            """,
-            (
-                now,
-                now,
-                error,
-                retention_expires_at,
-                retention_expires_at,
-                job_id,
-            ),
+            WHERE job_id = ? AND {state_predicate}
+            """,  # nosec B608 - predicate is selected from fixed literals.
+            params,
         )
         return changed == 1
 
@@ -708,7 +768,7 @@ class JobPersistenceFacade:
                 SET status = 'queued',
                     started_at = NULL,
                     updated_at = ?,
-                    attempts = COALESCE(attempts, 0) + 1,
+                    execution_token = NULL,
                     retryable = 0,
                     retry_suppressed = 0,
                     outcome_uncertain = 0
@@ -733,6 +793,7 @@ class JobPersistenceFacade:
                     auth_ciphertext = NULL,
                     auth_nonce = NULL,
                     auth_key_id = NULL,
+                    execution_token = NULL,
                     finished_at = ?,
                     updated_at = ?,
                     error = 'image job worker restarted while the upstream result was unresolved',
@@ -774,6 +835,7 @@ class JobPersistenceFacade:
                 auth_ciphertext = NULL,
                 auth_nonce = NULL,
                 auth_key_id = NULL,
+                execution_token = NULL,
                 finished_at = ?, updated_at = ?,
                 error = 'image job worker restarted; no auth header to retry',
                 error_class = ?, retryable = 0, retry_suppressed = 0,
@@ -832,7 +894,7 @@ class JobPersistenceFacade:
                     "images": images,
                 }
             )
-        elif row["status"] in {"failed", "uncertain"}:
+        elif row["status"] in {"failed", "uncertain", "cancel_requested"}:
             upstream_body: Any = None
             if row["upstream_body"]:
                 try:
@@ -1297,10 +1359,18 @@ class RetentionFacade:
             now = now.astimezone(timezone.utc)
         missing_expiry_rows = await self.db_all(
             """
-            SELECT job_id, created_at, finished_at, retention_days, images_json
+            SELECT job_id, status, created_at, finished_at,
+                   retention_days, images_json
             FROM jobs
             WHERE finished_at IS NOT NULL
               AND retention_expires_at IS NULL
+              AND status IN (
+                  'succeeded',
+                  'failed',
+                  'cancelled',
+                  'cancel_requested',
+                  'uncertain'
+              )
             ORDER BY finished_at ASC, job_id ASC
             LIMIT ?
             """,
@@ -1317,6 +1387,13 @@ class RetentionFacade:
                 WHERE job_id = ?
                   AND finished_at IS NOT NULL
                   AND retention_expires_at IS NULL
+                  AND status IN (
+                      'succeeded',
+                      'failed',
+                      'cancelled',
+                      'cancel_requested',
+                      'uncertain'
+                  )
                 """,
                 (
                     expires_at.isoformat(),
@@ -1326,10 +1403,19 @@ class RetentionFacade:
 
         rows = await self.db_all(
             """
-            SELECT job_id, created_at, finished_at, retention_days, images_json
+            SELECT job_id, status, created_at, finished_at,
+                   retention_days, images_json, retention_expires_at
             FROM jobs
             WHERE retention_expires_at IS NOT NULL
               AND retention_expires_at <= ?
+              AND finished_at IS NOT NULL
+              AND status IN (
+                  'succeeded',
+                  'failed',
+                  'cancelled',
+                  'cancel_requested',
+                  'uncertain'
+              )
             ORDER BY retention_expires_at ASC, job_id ASC
             LIMIT ?
             """,
@@ -1345,7 +1431,13 @@ class RetentionFacade:
             expires_at = self.job_effective_expiry(row)
             if expires_at is None or expires_at > now:
                 continue
-            await self.db_exec(
+            job_id = self._row_value(row, "job_id")
+            status = self._row_value(row, "status")
+            retention_expires_at = self._row_value(
+                row,
+                "retention_expires_at",
+            )
+            cleared = await self.db_exec(
                 """
                 UPDATE jobs
                 SET auth_header = NULL,
@@ -1353,9 +1445,14 @@ class RetentionFacade:
                     auth_nonce = NULL,
                     auth_key_id = NULL
                 WHERE job_id = ?
+                  AND status = ?
+                  AND finished_at IS NOT NULL
+                  AND retention_expires_at = ?
                 """,
-                (self._row_value(row, "job_id"),),
+                (job_id, status, retention_expires_at),
             )
+            if cleared != 1:
+                continue
             files, freed, cleaned = await asyncio.to_thread(
                 self.remove_job_artifacts,
                 row,
@@ -1366,8 +1463,14 @@ class RetentionFacade:
             if not cleaned:
                 continue
             removed_jobs += await self.db_exec(
-                "DELETE FROM jobs WHERE job_id = ? AND finished_at IS NOT NULL",
-                (self._row_value(row, "job_id"),),
+                """
+                DELETE FROM jobs
+                WHERE job_id = ?
+                  AND status = ?
+                  AND finished_at IS NOT NULL
+                  AND retention_expires_at = ?
+                """,
+                (job_id, status, retention_expires_at),
             )
 
         cutoff = now - timedelta(days=self.max_retention_days())

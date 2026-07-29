@@ -312,6 +312,7 @@ def build_image_iterator(state: GenerationRunState) -> Any:
             retry_attempt=state.attempt,
             quota_task_id=state.task_id,
             quota_attempt_epoch=state.attempt,
+            sidecar_execution=getattr(state, "sidecar_execution", None),
         ),
     )
     if state.action != GenerationAction.EDIT:

@@ -1,5 +1,5 @@
 {
-  "max_total": 8,
+  "max_total": 14,
   "modules": [
     {
       "max_instances": 1,
@@ -38,6 +38,27 @@
     },
     {
       "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/services/conversations/compaction.py",
+      "retirement_condition": "The context summary adapter registry moves to an application-owned conversation composition object.",
+      "symbols": ["_CONTEXT_SUMMARY_ADAPTERS"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "api",
+      "path": "apps/api/app/services/upload_pipeline.py",
+      "retirement_condition": "The process upload budget is constructed by the image upload composition root and injected into upload commands.",
+      "symbols": ["_PROCESS_UPLOAD_BUDGET"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "tgbot",
+      "path": "apps/tgbot/app/tracker.py",
+      "retirement_condition": "The tracker is constructed by TgBot startup and injected into handlers and listeners.",
+      "symbols": ["tracker"]
+    },
+    {
+      "max_instances": 1,
       "owner": "worker",
       "path": "apps/worker/app/provider_pool.py",
       "retirement_condition": "Worker startup constructs and closes the provider pool runtime explicitly.",
@@ -56,6 +77,27 @@
       "path": "apps/worker/app/tasks/auto_title.py",
       "retirement_condition": "Auto-title cache is owned by a task application runtime.",
       "symbols": ["_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "core",
+      "path": "packages/core/lumen_core/context_window.py",
+      "retirement_condition": "Token counting runtime is constructed by an explicit process composition owner instead of package import.",
+      "symbols": ["_TOKEN_COUNTER_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "core",
+      "path": "packages/core/lumen_core/providers.py",
+      "retirement_condition": "Provider proxy tunnel runtime is constructed and closed by each application composition root.",
+      "symbols": ["_SSH_TUNNEL_RUNTIME"]
+    },
+    {
+      "max_instances": 1,
+      "owner": "core",
+      "path": "packages/core/lumen_core/volcano_asset_media.py",
+      "retirement_condition": "Video transcode loop capacity is injected by the application media composition root.",
+      "symbols": ["_VIDEO_TRANSCODE_RUNTIME"]
     }
   ],
   "version": 1

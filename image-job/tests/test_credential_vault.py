@@ -369,17 +369,24 @@ async def test_terminal_cancel_and_expire_clear_envelopes(tmp_path: Path) -> Non
         _payload(),
         "Bearer sk-failed",
     )
-    assert await runtime.jobs.persistence.mark_running("job-failed")
-    await runtime.jobs.persistence.mark_failed("job-failed", error="failed")
+    failed_token = await runtime.jobs.persistence.mark_running("job-failed")
+    assert failed_token
+    await runtime.jobs.persistence.mark_failed(
+        "job-failed",
+        execution_token=failed_token,
+        error="failed",
+    )
 
     await runtime.jobs.persistence.insert_job(
         "job-succeeded",
         _payload(),
         "Bearer sk-succeeded",
     )
-    assert await runtime.jobs.persistence.mark_running("job-succeeded")
+    succeeded_token = await runtime.jobs.persistence.mark_running("job-succeeded")
+    assert succeeded_token
     await runtime.jobs.persistence.mark_succeeded(
         "job-succeeded",
+        execution_token=succeeded_token,
         upstream_status=200,
         elapsed_ms=1,
         images=[],

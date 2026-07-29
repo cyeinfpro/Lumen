@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from . import http_bodies
 from .application.auth import AuthFailure, authenticate, upstream_credential
@@ -114,6 +114,32 @@ async def get_image_job_handler(
         )
     except ResultFailure as exc:
         raise _http_failure(exc) from exc
+
+
+async def delete_image_job_handler(
+    job_id: str,
+    request: Request,
+    runtime: ImageJobRuntime,
+    identity,
+) -> JSONResponse:
+    upstream = None
+    if request.headers.get("x-lumen-upstream-authorization"):
+        try:
+            upstream = upstream_credential(request.headers, identity)
+        except AuthFailure as exc:
+            raise _http_failure(exc) from exc
+    try:
+        result = await runtime.jobs.cancel(
+            job_id,
+            caller=identity,
+            upstream=upstream,
+        )
+    except JobServiceFailure as exc:
+        raise _http_failure(exc) from exc
+    return JSONResponse(
+        content=result.response(),
+        status_code=result.status_code,
+    )
 
 
 async def upload_reference_handler(

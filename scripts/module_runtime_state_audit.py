@@ -28,7 +28,9 @@ DEFAULT_SOURCE_ROOTS = (
     ROOT / "apps" / "api" / "app",
     ROOT / "apps" / "worker" / "app",
     ROOT / "apps" / "web" / "src",
+    ROOT / "apps" / "tgbot" / "app",
     ROOT / "image-job" / "image_job",
+    ROOT / "packages" / "core" / "lumen_core",
 )
 _CACHE_DECORATORS = frozenset({"functools.cache", "functools.lru_cache"})
 _LIFECYCLE_METHODS = frozenset(
@@ -37,9 +39,21 @@ _LIFECYCLE_METHODS = frozenset(
         "close",
         "connect",
         "disconnect",
+        "clear",
+        "reset",
         "shutdown",
         "start",
         "stop",
+    }
+)
+_PYTHON_MUTABLE_FACTORY_NAMES = frozenset(
+    {
+        "defaultdict",
+        "dict",
+        "list",
+        "set",
+        "WeakKeyDictionary",
+        "WeakSet",
     }
 )
 _PYTHON_RUNTIME_TYPE_NAMES = frozenset(
@@ -52,6 +66,9 @@ _PYTHON_RUNTIME_TYPE_NAMES = frozenset(
         "RLock",
         "RedisClient",
         "Semaphore",
+        "Thread",
+        "WeakKeyDictionary",
+        "WeakSet",
     }
 )
 _TYPESCRIPT_RUNTIME_TYPE_NAMES = (
@@ -166,6 +183,88 @@ def _local_lifecycle_classes(tree: ast.Module) -> set[str]:
             for member in statement.body
         ):
             names.add(statement.name)
+    return names
+
+
+def _self_attribute_targets(node: ast.AST) -> list[str]:
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ):
+        return [node.attr]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [
+            name
+            for element in node.elts
+            for name in _self_attribute_targets(element)
+        ]
+    return []
+
+
+def _owns_python_runtime_state(
+    value: ast.AST,
+    *,
+    aliases: dict[str, str],
+) -> bool:
+    if isinstance(
+        value,
+        (
+            ast.Dict,
+            ast.DictComp,
+            ast.List,
+            ast.ListComp,
+            ast.Set,
+            ast.SetComp,
+        ),
+    ):
+        return True
+    if not isinstance(value, ast.Call):
+        return False
+    canonical_name = _resolve_imported_name(_call_name(value.func), aliases)
+    final_name = _runtime_type_name(canonical_name)
+    return (
+        final_name in _PYTHON_MUTABLE_FACTORY_NAMES
+        or _is_python_runtime_type(canonical_name)
+    )
+
+
+def _local_stateful_classes(
+    tree: ast.Module,
+    *,
+    aliases: dict[str, str],
+) -> set[str]:
+    names: set[str] = set()
+    for statement in tree.body:
+        if not isinstance(statement, ast.ClassDef):
+            continue
+        initializer = next(
+            (
+                member
+                for member in statement.body
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and member.name == "__init__"
+            ),
+            None,
+        )
+        if initializer is None:
+            continue
+        for member in ast.walk(initializer):
+            value: ast.AST | None = None
+            targets: list[ast.AST] = []
+            if isinstance(member, ast.Assign):
+                value = member.value
+                targets = list(member.targets)
+            elif isinstance(member, ast.AnnAssign):
+                value = member.value
+                targets = [member.target]
+            if value is None or not any(
+                _self_attribute_targets(target) for target in targets
+            ):
+                continue
+            if _owns_python_runtime_state(value, aliases=aliases):
+                names.add(statement.name)
+                break
     return names
 
 
@@ -286,6 +385,7 @@ def _collect_python_findings(
     dataclass_names = _mutable_local_dataclasses(tree)
     lifecycle_names = _local_lifecycle_classes(tree)
     aliases = _import_aliases(tree)
+    stateful_names = _local_stateful_classes(tree, aliases=aliases)
     relative = _relative_path(path, root)
     findings: dict[str, ModuleRuntimeFinding] = {}
 
@@ -318,7 +418,11 @@ def _collect_python_findings(
             continue
         raw_name = _call_name(value.func)
         canonical_name = _resolve_imported_name(raw_name, aliases)
-        if raw_name in dataclass_names or raw_name in lifecycle_names:
+        if (
+            raw_name in dataclass_names
+            or raw_name in lifecycle_names
+            or raw_name in stateful_names
+        ):
             class_name = raw_name
         elif _is_python_runtime_type(canonical_name):
             class_name = canonical_name

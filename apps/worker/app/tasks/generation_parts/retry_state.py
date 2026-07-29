@@ -32,6 +32,7 @@ from ...retry import RetryDecision, is_moderation_block, is_retriable
 from ...storage import StorageDiskFullError
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .event_delivery import stage_generation_event
+from .execution_boundary import release_or_settle_generation
 from .lease import is_cancelled
 from .queue import (
     IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
@@ -172,7 +173,8 @@ async def mark_generation_attempt_failed(
             if not retriable:
                 generation = await session.get(Generation, task_id)
                 if generation is not None:
-                    await services.billing.release(
+                    await release_or_settle_generation(
+                        services.billing,
                         session,
                         generation,
                         reason=error_code,

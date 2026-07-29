@@ -5,6 +5,10 @@ import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
 
 const source = readFileSync(new URL("./useSSE.ts", import.meta.url), "utf8");
+const lumenSource = readFileSync(
+  new URL("./useLumenRealtime.ts", import.meta.url),
+  "utf8",
+);
 
 function loadBackoffBaseDelay(): (attempt: number) => number {
   const start = source.indexOf("export function getSSEBackoffBaseDelay");
@@ -58,4 +62,12 @@ test("SSE registers recovery only when the caller provides the capability", () =
     source,
     /\[\s*channelKey,\s*eventKey,\s*hasRecoveryAdapter,/,
   );
+});
+
+test("initial snapshots are abortable and fenced by connection generation and user scope", () => {
+  match(lumenSource, /initialSnapshotFlight\.current\?\.controller\.abort\(\)/);
+  match(lumenSource, /connectionGeneration:/);
+  match(lumenSource, /userScope:/);
+  match(lumenSource, /assertSnapshotCurrent\(signal, context, userScope\)/);
+  match(lumenSource, /connectionContext\.isCurrent\(\)/);
 });

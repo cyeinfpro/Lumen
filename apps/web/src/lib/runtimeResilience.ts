@@ -23,6 +23,10 @@ export type RuntimeResilienceSnapshot = {
 
 type RecoveryKind = "realtime" | "session";
 type RecoveryHandler = () => void;
+export type SessionInvalidationReason = "realtime_auth_invalidated";
+export type SessionInvalidationHandler = (
+  reason: SessionInvalidationReason,
+) => void;
 
 const SERVER_SNAPSHOT: RuntimeResilienceSnapshot = {
   realtime: "idle",
@@ -34,6 +38,7 @@ const recoveryHandlers: Record<RecoveryKind, Set<RecoveryHandler>> = {
   realtime: new Set(),
   session: new Set(),
 };
+const sessionInvalidationHandlers = new Set<SessionInvalidationHandler>();
 
 function emitSnapshot(next: RuntimeResilienceSnapshot): void {
   if (
@@ -88,6 +93,26 @@ export function requestRuntimeRecovery(kind?: RecoveryKind): void {
       } catch {
         // Each subsystem owns its recovery error reporting.
       }
+    }
+  }
+}
+
+export function registerSessionInvalidation(
+  handler: SessionInvalidationHandler,
+): () => void {
+  sessionInvalidationHandlers.add(handler);
+  return () => sessionInvalidationHandlers.delete(handler);
+}
+
+export function requestSessionInvalidation(
+  reason: SessionInvalidationReason,
+): void {
+  setSessionRuntimeStatus("unauthorized");
+  for (const handler of sessionInvalidationHandlers) {
+    try {
+      handler(reason);
+    } catch {
+      // Identity owns cleanup reporting; one callback must not block another.
     }
   }
 }

@@ -10,6 +10,13 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 
+def _row_value(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 @dataclass(frozen=True)
 class UpstreamFacade:
     http_client: Callable[[], Any | None]
@@ -201,6 +208,7 @@ class UpstreamFacade:
                     response,
                     client,
                     job_id=row["job_id"],
+                    execution_token=_row_value(row, "execution_token"),
                 )
             return await self.extract_non_stream_response_images(response, client)
         except self.job_failure_type as exc:

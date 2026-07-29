@@ -3,7 +3,7 @@ import type {
   RealtimeDomainEvent,
 } from "./contracts";
 
-export const CROSS_TAB_PROTOCOL_VERSION = 1 as const;
+export const CROSS_TAB_PROTOCOL_VERSION = 2 as const;
 
 type BaseMessage = {
   version: typeof CROSS_TAB_PROTOCOL_VERSION;
@@ -19,13 +19,22 @@ export type CrossTabMessage =
   | (BaseMessage & { type: "status"; status: string })
   | (BaseMessage & { type: "manual_reconnect" })
   | (BaseMessage & { type: "domain_event"; event: RealtimeDomainEvent })
-  | (BaseMessage & { type: "control_event"; event: RealtimeControlEvent })
+  | (BaseMessage & {
+      type: "control_event";
+      event: RealtimeControlEvent;
+      recoveryId?: string;
+    })
   | (BaseMessage & {
       type: "recovery_complete";
+      recoveryId: string;
       cursor?: string;
       syncedAt: number;
     })
-  | (BaseMessage & { type: "recovery_failed"; reason: string });
+  | (BaseMessage & {
+      type: "recovery_failed";
+      recoveryId: string;
+      reason: string;
+    });
 
 export type CrossTabOutgoingMessage =
   CrossTabMessage extends infer TMessage

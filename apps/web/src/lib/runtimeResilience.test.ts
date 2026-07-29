@@ -1,4 +1,5 @@
 import {
+  deepEqual,
   doesNotMatch,
   equal,
   match,
@@ -9,6 +10,9 @@ import { loadTsModule } from "../../test-support/load-ts-module.mjs";
 
 const {
   isHighRiskIdentityWrite,
+  getRuntimeResilienceSnapshot,
+  registerSessionInvalidation,
+  requestSessionInvalidation,
   setSessionRuntimeStatus,
 } = loadTsModule(new URL("./runtimeResilience.ts", import.meta.url), {
   react: {
@@ -18,6 +22,11 @@ const {
   },
 }) as {
   isHighRiskIdentityWrite(method: string, path: string): boolean;
+  getRuntimeResilienceSnapshot(): { session: string };
+  registerSessionInvalidation(
+    handler: (reason: string) => void,
+  ): () => void;
+  requestSessionInvalidation(reason: string): void;
   setSessionRuntimeStatus(status: string): void;
 };
 
@@ -29,6 +38,20 @@ test("high-risk identity writes are narrowly classified", () => {
   equal(isHighRiskIdentityWrite("PATCH", "/api/admin/settings"), true);
   equal(isHighRiskIdentityWrite("POST", "/api/conversations"), false);
   equal(isHighRiskIdentityWrite("GET", "/api/admin/settings"), false);
+  setSessionRuntimeStatus("unknown");
+});
+
+test("auth invalidation marks the session unauthorized and invokes cleanup callback", () => {
+  const reasons: string[] = [];
+  const unregister = registerSessionInvalidation((reason) => {
+    reasons.push(reason);
+  });
+
+  requestSessionInvalidation("realtime_auth_invalidated");
+
+  equal(getRuntimeResilienceSnapshot().session, "unauthorized");
+  deepEqual(reasons, ["realtime_auth_invalidated"]);
+  unregister();
   setSessionRuntimeStatus("unknown");
 });
 

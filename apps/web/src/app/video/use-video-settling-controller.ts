@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MutableRefObject } from "react";
 
 import type { VideoGenerationOut } from "@/lib/types";
@@ -63,6 +70,7 @@ export function useVideoSettlingController({
   generationRefreshRequestsRef,
   scheduledRefreshTimersRef,
   pendingHistoryRefreshRef,
+  scopeKey,
 }: {
   effectiveItems: VideoGenerationOut[];
   generationRefreshRequestsRef: MutableRefObject<
@@ -70,6 +78,7 @@ export function useVideoSettlingController({
   >;
   scheduledRefreshTimersRef: MutableRefObject<Map<string, number>>;
   pendingHistoryRefreshRef: MutableRefObject<Set<string>>;
+  scopeKey: string;
 }): VideoSettlingController {
   const checkpointsRef = useRef<Map<string, VideoSettlingCheckpoint>>(
     new Map(),
@@ -154,6 +163,16 @@ export function useVideoSettlingController({
     },
     [clear, ensure],
   );
+
+  useLayoutEffect(() => {
+    for (const timer of expiryTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    expiryTimersRef.current.clear();
+    checkpointsRef.current.clear();
+    disabledRef.current.clear();
+    setVersion((value) => value + 1);
+  }, [scopeKey]);
 
   useEffect(() => {
     for (const item of effectiveItems) sync(item);

@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { uploadImage } from "@/lib/apiClient";
+import { cleanupStaleCanvasUpload } from "@/lib/canvas/staleUploadCleanup";
 import type { CanvasNodeDefinition } from "@/lib/canvas/types";
 import {
   MAX_UPLOAD_SOURCE_BYTES,
@@ -19,6 +20,7 @@ import {
 } from "@/lib/uploadLimits";
 import { cn } from "@/lib/utils";
 import { Button, IconButton, toast } from "@/components/ui/primitives";
+import { useCanvasStoreApi } from "../CanvasStoreProvider";
 
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp";
 const ALLOWED_IMAGE_MIME = new Set([
@@ -44,6 +46,7 @@ export function CanvasImageAssetDropZone({
   ) => void;
   children?: ReactNode;
 }) {
+  const store = useCanvasStoreApi();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const requestRef = useRef<CanvasImageUploadRequest | null>(null);
@@ -87,24 +90,42 @@ export function CanvasImageAssetDropZone({
         signal: request.controller.signal,
       });
       const current = latestRef.current;
+      const graph = store.getState().graph;
+      const currentNode = graph.nodes.find(
+        (node) => node.id === request.nodeId,
+      );
       if (
         requestRef.current !== request ||
-        current.nodeId !== request.nodeId
+        current.nodeId !== request.nodeId ||
+        !current.onUpdateConfig ||
+        !currentNode
       ) {
+        await cleanupStaleCanvasUpload({
+          graph,
+          kind: "image",
+          uploadedAsset: { id: image.id, created: true },
+          initialAssetId: request.initialImageId,
+        });
         return;
       }
       if (
-        !Object.is(current.config.image_id, request.initialImageId) ||
+        !Object.is(currentNode.config.image_id, request.initialImageId) ||
         !Object.is(
-          current.config.display_name,
+          currentNode.config.display_name,
           request.initialDisplayName,
         )
       ) {
+        await cleanupStaleCanvasUpload({
+          graph,
+          kind: "image",
+          uploadedAsset: { id: image.id, created: true },
+          initialAssetId: request.initialImageId,
+        });
         toast.info("上传已完成，但节点内容已被修改，未自动覆盖。");
         return;
       }
       current.onUpdateConfig?.(request.nodeId, {
-        ...current.config,
+        ...currentNode.config,
         image_id: image.id,
         display_name: file.name,
       });
@@ -119,7 +140,7 @@ export function CanvasImageAssetDropZone({
         setUploading(false);
       }
     }
-  }, []);
+  }, [store]);
 
   const ingestTransfer = useCallback(
     (transfer: DataTransfer | null) => {

@@ -2049,6 +2049,9 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
     check = CHECK_PHASE.read_text(encoding="utf-8")
     switch = SWITCH_PHASE.read_text(encoding="utf-8")
     restart = RESTART_PHASE.read_text(encoding="utf-8")
+    health = (ROOT / "scripts/update/services/health.sh").read_text(
+        encoding="utf-8"
+    )
     self_update = (ROOT / "scripts/update/release/self_update.sh").read_text(
         encoding="utf-8"
     )
@@ -2058,8 +2061,12 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
     assert switch.index("refresh_update_runner_units") < switch.index(
         "emit_done switch 0"
     )
-    assert restart.index("mark_update_committed") < restart.rindex(
-        "emit_done restart_services 0"
+    assert "mark_update_committed" not in restart
+    assert health.index('if [ "${HEALTH_FAIL}" -eq 1 ]') < health.index(
+        "mark_update_committed"
+    )
+    assert health.index("mark_update_committed") < health.index(
+        "emit_done health_check 0"
     )
     assert self_update.index('CURRENT_RELEASE=""') < self_update.index(
         "emit_done  lock 0"

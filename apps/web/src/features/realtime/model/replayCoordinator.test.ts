@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { loadTsModule } from "../../../../test-support/load-ts-module.mjs";
 import type {
   SnapshotAdapter,
+  SnapshotExecutionContext,
   SnapshotResult,
 } from "./replayCoordinator";
 import type { RecoveryReason } from "./contracts";
@@ -14,10 +15,21 @@ const { ReplayCoordinator } = loadTsModule(
     recover(
       reason: RecoveryReason,
       signal: AbortSignal,
+      context: SnapshotExecutionContext,
     ): Promise<SnapshotResult>;
     lastSuccessfulSyncAt(): number;
   };
 };
+
+function snapshotContext(
+  isCurrent: () => boolean = () => true,
+): SnapshotExecutionContext {
+  return {
+    connectionGeneration: 1,
+    userScope: "user:u1",
+    isCurrent,
+  };
+}
 
 test("replay recovery is singleflight and commits only successful cursor", async () => {
   let calls = 0;
@@ -38,8 +50,9 @@ test("replay recovery is singleflight and commits only successful cursor", async
   });
   const reason = { kind: "replay_gap", reason: "gap" } as const;
   const signal = new AbortController().signal;
-  const first = coordinator.recover(reason, signal);
-  const second = coordinator.recover(reason, signal);
+  const context = snapshotContext();
+  const first = coordinator.recover(reason, signal, context);
+  const second = coordinator.recover(reason, signal, context);
   equal(calls, 1);
   release({ cursor: "20-0", syncedAt: 50 });
   deepStrictEqual(await first, { cursor: "20-0", syncedAt: 50 });
@@ -56,10 +69,36 @@ test("failed snapshot remains retryable", async () => {
   });
   const reason = { kind: "replay_gap", reason: "gap" } as const;
   const signal = new AbortController().signal;
-  await rejects(coordinator.recover(reason, signal), /offline/);
-  deepStrictEqual(await coordinator.recover(reason, signal), {
+  const context = snapshotContext();
+  await rejects(coordinator.recover(reason, signal, context), /offline/);
+  deepStrictEqual(await coordinator.recover(reason, signal, context), {
     cursor: "21-0",
     syncedAt: 60,
   });
   equal(calls, 2);
+});
+
+test("stale connection generation cannot commit a snapshot result", async () => {
+  let release!: () => void;
+  let current = true;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const coordinator = new ReplayCoordinator(async () => {
+    await pending;
+    return { cursor: "stale-22-0", syncedAt: 70 };
+  });
+  const recovery = coordinator.recover(
+    { kind: "replay_gap", reason: "gap" },
+    new AbortController().signal,
+    snapshotContext(() => current),
+  );
+
+  current = false;
+  release();
+
+  await rejects(recovery, (error: unknown) => {
+    return error instanceof Error && error.name === "AbortError";
+  });
+  equal(coordinator.lastSuccessfulSyncAt(), 0);
 });

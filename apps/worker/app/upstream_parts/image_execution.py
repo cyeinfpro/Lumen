@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
+from ..upstream_clients.image_job_models import ImageJobExecutionHandle
 from .generated_payload import GeneratedImageResult
 from .transport import ImageProgressCallback
 
@@ -32,6 +33,7 @@ class ImageRequestContext:
     trace_id: str
     retry_attempt: int = 1
     quota_scope: ImageQuotaMemberScope | None = None
+    sidecar_execution: ImageJobExecutionHandle | None = None
     upstream_runtime: ImageUpstreamRuntime | None = None
 
     @classmethod
@@ -42,6 +44,7 @@ class ImageRequestContext:
         retry_attempt: int = 1,
         quota_task_id: str | None = None,
         quota_attempt_epoch: int | None = None,
+        sidecar_execution: ImageJobExecutionHandle | None = None,
         upstream_runtime: ImageUpstreamRuntime | None = None,
     ) -> ImageRequestContext:
         normalized_trace_id = (
@@ -61,6 +64,7 @@ class ImageRequestContext:
             trace_id=normalized_trace_id,
             retry_attempt=normalized_retry_attempt,
             quota_scope=quota_scope,
+            sidecar_execution=sidecar_execution,
             upstream_runtime=upstream_runtime,
         )
 
@@ -118,6 +122,9 @@ class ImageExecutionRequest:
 
     def with_provider(self, provider: Any) -> ImageExecutionRequest:
         return replace(self, provider_override=provider)
+
+    def with_n(self, n: int) -> ImageExecutionRequest:
+        return replace(self, n=max(1, int(n)))
 
 @dataclass(frozen=True)
 class ImageProviderRoute:

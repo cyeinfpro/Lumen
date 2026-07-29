@@ -85,6 +85,19 @@ def create_app(
             job_id, request, app_runtime, identity
         )
 
+    @app.delete("/v1/image-jobs/{job_id}")
+    async def delete_image_job(
+        job_id: str,
+        request: Request,
+        identity=Depends(caller),
+    ):
+        return await route_handlers.delete_image_job_handler(
+            job_id,
+            request,
+            app_runtime,
+            identity,
+        )
+
     @app.post("/v1/refs")
     async def upload_reference(request: Request, identity=Depends(caller)):
         return await route_handlers.upload_reference_handler(

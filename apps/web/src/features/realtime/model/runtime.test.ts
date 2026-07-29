@@ -200,11 +200,14 @@ test("recovery_required triggers one snapshot and reconnects from its cursor", a
   let calls = 0;
   const instance = runtime("tab-a", transport, hub, clock);
   const unsubscribe = instance.subscribe(
-    subscriber(statuses, async (_scopes, reason, signal) => {
+    subscriber(statuses, async (_scopes, reason, signal, context) => {
       calls += 1;
       equal(reason.kind, "recovery_required");
       equal(reason.reason, "replay_unavailable");
       equal(signal.aborted, false);
+      equal(context.connectionGeneration, 1);
+      equal(context.userScope, "user:u1");
+      equal(context.isCurrent(), true);
       return { cursor: "20-0", syncedAt: 100 };
     }),
   );
@@ -441,7 +444,7 @@ test("last subscriber aborts recovery and stale completion has no effects", asyn
   );
 });
 
-test("two tabs run snapshot recovery only on the elected leader", async () => {
+test("two tabs both finish local replay snapshots before follower reports open", async () => {
   const clock = new FakeClock();
   const hub = new FakeBroadcastHub();
   const leaderTransport = new FakeTransport();
@@ -450,6 +453,10 @@ test("two tabs run snapshot recovery only on the elected leader", async () => {
   const followerStatuses: RealtimeStatus[] = [];
   let leaderCalls = 0;
   let followerCalls = 0;
+  let releaseFollower!: () => void;
+  const followerPending = new Promise<void>((resolve) => {
+    releaseFollower = resolve;
+  });
   const leaderRuntime = runtime("tab-a", leaderTransport, hub, clock);
   const followerRuntime = runtime("tab-b", followerTransport, hub, clock);
   const unsubscribeLeader = leaderRuntime.subscribe(
@@ -461,7 +468,8 @@ test("two tabs run snapshot recovery only on the elected leader", async () => {
   const unsubscribeFollower = followerRuntime.subscribe(
     subscriber(followerStatuses, async () => {
       followerCalls += 1;
-      return { cursor: "unexpected", syncedAt: 200 };
+      await followerPending;
+      return { cursor: "30-0", syncedAt: 200 };
     }),
   );
   clock.tick(50);
@@ -476,15 +484,55 @@ test("two tabs run snapshot recovery only on the elected leader", async () => {
   await flushPromises();
 
   equal(leaderCalls, 1);
-  equal(followerCalls, 0);
-  ok(followerStatuses.includes("open"));
-  leaderTransport.opens[1].sink.onOpen({} as Event);
-  equal(followerStatuses.at(-1), "open");
+  equal(followerCalls, 1);
+  equal(followerStatuses.includes("open"), false);
   ok(
     hub.messages.some(
       (message) => (message as { type?: string }).type === "recovery_complete",
     ),
   );
+  leaderTransport.opens[1].sink.onOpen({} as Event);
+  equal(followerStatuses.includes("open"), false);
+
+  releaseFollower();
+  await flushPromises();
+  equal(followerStatuses.at(-1), "open");
+  unsubscribeLeader();
+  unsubscribeFollower();
+});
+
+test("auth invalidation invokes explicit callbacks in every tab", () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const leaderTransport = new FakeTransport();
+  const followerTransport = new FakeTransport();
+  const leaderStatuses: RealtimeStatus[] = [];
+  const followerStatuses: RealtimeStatus[] = [];
+  let leaderInvalidations = 0;
+  let followerInvalidations = 0;
+  const leaderRuntime = runtime("tab-a", leaderTransport, hub, clock);
+  const followerRuntime = runtime("tab-b", followerTransport, hub, clock);
+  const unsubscribeLeader = leaderRuntime.subscribe({
+    ...subscriber(leaderStatuses, async () => ({})),
+    onAuthInvalidated() {
+      leaderInvalidations += 1;
+    },
+  });
+  const unsubscribeFollower = followerRuntime.subscribe({
+    ...subscriber(followerStatuses, async () => ({})),
+    onAuthInvalidated() {
+      followerInvalidations += 1;
+    },
+  });
+  clock.tick(50);
+
+  leaderTransport.emit(0, "auth_invalidated", JSON.stringify({}));
+
+  equal(leaderInvalidations, 1);
+  equal(followerInvalidations, 1);
+  equal(leaderStatuses.at(-1), "error");
+  equal(followerStatuses.at(-1), "error");
+  equal(leaderTransport.opens[0]?.closed, true);
   unsubscribeLeader();
   unsubscribeFollower();
 });

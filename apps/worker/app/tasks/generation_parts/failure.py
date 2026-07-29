@@ -26,6 +26,10 @@ from .diagnostics import (
 )
 from .errors import StaleGenerationAttempt
 from .event_delivery import stage_generation_failure_event
+from .execution_boundary import (
+    SIDECAR_EXECUTION_KEY,
+    release_or_settle_generation,
+)
 from .lease import cancel_renewer_task, release_lease
 from .lifecycle import finalize_running_generation_cancel
 from .queue import (
@@ -175,6 +179,18 @@ async def _build_failure(
     g: RunGenerationDeps,
 ) -> GenerationFailure:
     decision = classify_exception(exc, state.has_partial)
+    payload = getattr(exc, "payload", None)
+    recovery_only = bool(
+        isinstance(payload, dict) and payload.get("recovery_only") is True
+    )
+    accepted_execution = bool(
+        getattr(state, "sidecar_execution", None)
+        or (isinstance(payload, dict) and payload.get(SIDECAR_EXECUTION_KEY))
+    )
+    if recovery_only:
+        decision = RetryDecision(True, "sidecar recovery only")
+    elif accepted_execution:
+        decision = RetryDecision(False, "sidecar execution already accepted")
     _byok_terminal, runtime_byok_error = g.credentials.classify_error(exc)
     if state.user_api_credential_id and runtime_byok_error:
         await g.credentials.record_runtime_error(
@@ -303,6 +319,9 @@ def _error_upstream_request(
         request["provider_attempts"] = state.provider_attempt_log[:12]
     if state.upstream_duration_ms is not None:
         request["upstream_duration_ms"] = state.upstream_duration_ms
+    state_execution = getattr(state, "sidecar_execution", None)
+    if isinstance(state_execution, dict):
+        request[SIDECAR_EXECUTION_KEY] = dict(state_execution)
     provider = (
         None
         if is_dual_race_sentinel(state.reserved_provider_name)
@@ -425,6 +444,8 @@ async def _retry_generation(
 async def _avoid_failed_provider(
     state: GenerationRunState, g: RunGenerationDeps
 ) -> None:
+    if isinstance(getattr(state, "sidecar_execution", None), dict):
+        return
     provider = state.reserved_provider_name
     if provider and not is_dual_race_sentinel(provider):
         await avoid_provider_for_task(
@@ -637,9 +658,20 @@ async def _mark_message_and_release_billing(
     generation = await session.get(Generation, state.task_id)
     if generation is None:
         return
+    state_execution = getattr(state, "sidecar_execution", None)
+    if isinstance(state_execution, dict):
+        generation.upstream_request = {
+            **(
+                dict(generation.upstream_request)
+                if isinstance(generation.upstream_request, dict)
+                else {}
+            ),
+            SIDECAR_EXECUTION_KEY: dict(state_execution),
+        }
     decision = decide_image_failure_billing(error_code)
     if decision.released:
-        await g.billing.release(
+        await release_or_settle_generation(
+            g.billing,
             session,
             generation,
             reason=error_code,

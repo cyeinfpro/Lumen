@@ -12,6 +12,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import billing as billing_core
 from lumen_core.models import (
     AuditLog,
     PricingRule,
@@ -43,7 +44,7 @@ from ...observability import (
     wallet_orphan_holds,
 )
 from ...services.redemption_secret import PreviousRedemptionSecretLocked
-from .compat import current_runtime
+from .composition import build_billing_services
 
 
 router = APIRouter()
@@ -56,8 +57,9 @@ async def admin_billing_audit(
     event_type: str | None = Query(default=None, max_length=64),
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
 ) -> list[AdminBillingAuditEventOut]:
-    b = current_runtime()
-    stmt = select(AuditLog).where(b._billing_audit_predicate())
+    services = build_billing_services()
+    queries = services.queries
+    stmt = select(AuditLog).where(queries.billing_audit_predicate())
     if event_type:
         stmt = stmt.where(AuditLog.event_type == event_type)
     rows = (
@@ -71,7 +73,7 @@ async def admin_billing_audit(
         .scalars()
         .all()
     )
-    return [b._audit_out(row) for row in rows]
+    return [queries.audit_out(row) for row in rows]
 
 
 @router.get("/admin/billing/overview", response_model=AdminBillingOverviewOut)
@@ -79,13 +81,14 @@ async def admin_billing_overview(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminBillingOverviewOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=24)
-    billing_enabled = await b._billing_enabled_setting(db)
-    bootstrap_completed = await b._bootstrap_completed_setting(db)
+    billing_enabled = await queries.billing_enabled_setting(db)
+    bootstrap_completed = await queries.bootstrap_completed_setting(db)
     secret_configured = bool(
-        (await b._setting_raw(db, "billing.redemption_code_secret") or "").strip()
+        (await queries.setting_raw(db, "billing.redemption_code_secret") or "").strip()
     )
     wallet_balance = int(
         (
@@ -134,7 +137,7 @@ async def admin_billing_overview(
                 select(
                     func.coalesce(func.sum(WalletTransaction.amount_micro), 0)
                 ).where(
-                    WalletTransaction.kind.in_((*b._CHARGE_KINDS, "settle")),
+                    WalletTransaction.kind.in_((*services.charge_kinds, "settle")),
                     WalletTransaction.created_at >= since,
                     WalletTransaction.amount_micro < 0,
                 )
@@ -142,12 +145,12 @@ async def admin_billing_overview(
         ).scalar_one()
         or 0
     )
-    aligned, missing = await b._threshold_price_alignment(db)
+    aligned, missing = await queries.threshold_price_alignment(db)
     audit_rows = (
         (
             await db.execute(
                 select(AuditLog)
-                .where(b._billing_audit_predicate())
+                .where(queries.billing_audit_predicate())
                 .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
                 .limit(10)
             )
@@ -162,16 +165,16 @@ async def admin_billing_overview(
         billing_enabled=billing_enabled,
         redemption_secret_configured=secret_configured,
         bootstrap_completed=bootstrap_completed,
-        wallet_total_balance=b._money(wallet_balance),
+        wallet_total_balance=queries.money(wallet_balance),
         active_holds_count=int(hold_row[0] or 0),
-        active_holds=b._money(int(hold_row[1] or 0)),
+        active_holds=queries.money(int(hold_row[1] or 0)),
         codes_active=active_codes,
         codes_redeemed_24h=int(redeemed_row[0] or 0),
-        codes_redeemed_24h_amount=b._money(int(redeemed_row[1] or 0)),
-        charges_24h=b._money(abs(charges_24h)),
+        codes_redeemed_24h_amount=queries.money(int(redeemed_row[1] or 0)),
+        charges_24h=queries.money(abs(charges_24h)),
         thresholds_pricing_aligned=aligned,
         thresholds_missing_prices=missing,
-        recent_audit_events=[b._audit_out(row) for row in audit_rows],
+        recent_audit_events=[queries.audit_out(row) for row in audit_rows],
     )
 
 
@@ -181,14 +184,15 @@ async def admin_billing_usage(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminBillingUsageOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     exists = (
         await db.execute(
             select(User.id).where(User.id == user_id, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
     if exists is None:
-        raise b._http("not_found", "user not found", 404)
+        raise queries.http("not_found", "user not found", 404)
     (
         balance,
         multiplier,
@@ -198,7 +202,7 @@ async def admin_billing_usage(
         windows,
         by_kind,
         count,
-    ) = await b._billing_snapshot_parts(db, user_id)
+    ) = await queries.billing_snapshot_parts(db, user_id)
     return AdminBillingUsageOut(
         user_id=user_id,
         balance_micro=balance,
@@ -208,7 +212,7 @@ async def admin_billing_usage(
         range_end=range_end,
         windows=windows,
         by_kind_30d=by_kind,
-        total_micro=b._usage_total(by_kind),
+        total_micro=queries.usage_total(by_kind),
         transaction_count=count,
     )
 
@@ -220,8 +224,9 @@ async def admin_wallet_audit(
     user_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> AdminWalletAuditOut:
-    b = current_runtime()
-    ledger = b._wallet_audit_ledger(user_id)
+    services = build_billing_services()
+    queries = services.queries
+    ledger = queries.wallet_audit_ledger(user_id)
     mismatch = ledger.c.running_balance != ledger.c.balance_after
     stats = (
         await db.execute(
@@ -272,7 +277,8 @@ async def admin_list_orphan_holds(
     min_age_minutes: Annotated[int, Query(ge=0, le=60 * 24 * 30)] = 60,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[AdminOrphanHoldOut]:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=min_age_minutes)
     holds = (
@@ -315,7 +321,7 @@ async def admin_list_orphan_holds(
             created = created.replace(tzinfo=timezone.utc)
         out.append(
             AdminOrphanHoldOut(
-                tx=b._tx_out(hold),
+                tx=queries.tx_out(hold),
                 user_id=hold.user_id,
                 age_seconds=max(0, int((now - created).total_seconds())),
             )
@@ -337,12 +343,14 @@ async def admin_release_orphan_hold(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WalletTransactionOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     hold = await db.get(WalletTransaction, tx_id)
     if hold is None or hold.kind != "hold":
-        raise b._http("not_found", "hold transaction not found", 404)
+        raise queries.http("not_found", "hold transaction not found", 404)
     if not hold.ref_type or not hold.ref_id:
-        raise b._http("invalid_hold", "hold transaction has no reference", 422)
+        raise queries.http("invalid_hold", "hold transaction has no reference", 422)
     consumed = (
         await db.execute(
             select(WalletTransaction.id)
@@ -356,10 +364,10 @@ async def admin_release_orphan_hold(
         )
     ).scalar_one_or_none()
     if consumed is not None:
-        raise b._http(
+        raise queries.http(
             "HOLD_ALREADY_CONSUMED", "hold was already settled or released", 409
         )
-    tx = await b.billing_core.release(
+    tx = await billing_core.release(
         db,
         hold.user_id,
         ref_type=hold.ref_type,
@@ -368,20 +376,20 @@ async def admin_release_orphan_hold(
         meta={"reason": "admin orphan hold release", "hold_tx_id": tx_id},
     )
     if tx is None:
-        raise b._http("HOLD_NOT_ACTIVE", "hold is no longer active", 409)
-    await b.write_audit(
+        raise queries.http("HOLD_NOT_ACTIVE", "hold is no longer active", 409)
+    await commands.write_audit(
         db,
         event_type="wallet.hold.force_release",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         target_user_id=hold.user_id,
         details={"hold_tx_id": tx_id, "release_tx_id": tx.id},
         autocommit=False,
     )
     await db.commit()
-    await b._invalidate_balance_cache(hold.user_id)
-    return b._tx_out(tx)
+    await commands.invalidate_balance_cache(hold.user_id)
+    return queries.tx_out(tx)
 
 
 @router.post(
@@ -395,15 +403,17 @@ async def admin_billing_bootstrap(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminBillingOverviewOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     provided_secret = (body.redemption_code_secret or "").strip()
     secret_generated = not provided_secret
-    redemption_secret = provided_secret or b._generate_redemption_secret()
-    low_balance_micro = b._rmb_to_micro_or_422(
+    redemption_secret = provided_secret or queries.generate_redemption_secret()
+    low_balance_micro = queries.rmb_to_micro_or_422(
         body.low_balance_warn_rmb, field="low_balance_warn_rmb"
     )
     if low_balance_micro < 0:
-        raise b._http(
+        raise queries.http(
             "invalid_amount",
             "low_balance_warn_rmb: amount must be non-negative",
             422,
@@ -411,18 +421,20 @@ async def admin_billing_bootstrap(
     pricing_items: list[dict[str, Any]] = []
     for tier, threshold in body.image_size_thresholds.items():
         if threshold < 0:
-            raise b._http("invalid_request", "thresholds must be non-negative", 422)
+            raise queries.http(
+                "invalid_request", "thresholds must be non-negative", 422
+            )
         price_rmb = body.image_prices_rmb.get(tier)
         if price_rmb is None:
-            raise b._http(
+            raise queries.http(
                 "invalid_request",
                 f"image_prices_rmb.{tier}: enabled tier price is required",
                 422,
             )
-        price_micro = b._rmb_to_micro_or_422(
+        price_micro = queries.rmb_to_micro_or_422(
             price_rmb, field=f"image_prices_rmb.{tier}"
         )
-        b._validate_enabled_pricing_value(
+        queries.validate_enabled_pricing_value(
             unit="per_image",
             price_micro=price_micro,
             enabled=True,
@@ -474,7 +486,7 @@ async def admin_billing_bootstrap(
                 existing.enabled = True
                 existing.note = item["note"]
                 existing.updated_at = datetime.now(timezone.utc)
-    await b.update_settings(
+    await commands.update_settings(
         db,
         [
             ("billing.redemption_code_secret", redemption_secret),
@@ -489,12 +501,12 @@ async def admin_billing_bootstrap(
             ("billing.show_estimate_in_composer", "1"),
         ],
     )
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="billing.bootstrap",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={
             "tiers": sorted(body.image_size_thresholds),
             "enabled": body.enabled,
@@ -503,7 +515,7 @@ async def admin_billing_bootstrap(
         autocommit=False,
     )
     await db.commit()
-    return await b.admin_billing_overview(admin, db)
+    return await admin_billing_overview(admin, db)
 
 
 @router.post(
@@ -516,36 +528,38 @@ async def admin_rotate_redemption_secret(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminBillingOverviewOut:
-    b = current_runtime()
-    secret_spec = b.get_spec("billing.redemption_code_secret")
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    secret_spec = queries.get_spec("billing.redemption_code_secret")
     if secret_spec is None:
-        raise b._http(
+        raise queries.http(
             "invalid_request", "redemption secret setting is unsupported", 500
         )
-    old_secret = await b.get_setting(db, secret_spec)
-    new_secret = b._generate_redemption_secret()
-    await b.update_settings(db, [("billing.redemption_code_secret", new_secret)])
+    old_secret = await queries.get_setting(db, secret_spec)
+    new_secret = queries.generate_redemption_secret()
+    await commands.update_settings(db, [("billing.redemption_code_secret", new_secret)])
     transition_expires_at = None
     if old_secret:
         try:
-            transition_expires_at = await b.remember_previous_redemption_secret(
+            transition_expires_at = await commands.remember_previous_redemption_secret(
                 db, old_secret
             )
         except PreviousRedemptionSecretLocked as exc:
-            raise b._http(
+            raise queries.http(
                 "previous_secret_locked",
                 "another rotation is still inside the 24h transition window",
                 409,
             ) from exc
     secret_hash8 = hashlib.sha256(new_secret.encode("utf-8")).hexdigest()[:8]
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="billing.secret.rotate"
         if old_secret
         else "billing.secret.configure",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={
             "secret_hash8": secret_hash8,
             "previous_secret_valid_until": transition_expires_at,
@@ -555,4 +569,4 @@ async def admin_rotate_redemption_secret(
         autocommit=False,
     )
     await db.commit()
-    return await b.admin_billing_overview(admin, db)
+    return await admin_billing_overview(admin, db)

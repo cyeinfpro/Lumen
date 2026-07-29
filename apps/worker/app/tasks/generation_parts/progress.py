@@ -3,19 +3,25 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sqlalchemy import select
+
 from lumen_core.constants import (
     EV_GEN_PARTIAL_IMAGE,
     EV_GEN_PROGRESS,
     GenerationStage,
 )
+from lumen_core.models import Generation
 
+from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from .diagnostics import (
     provider_attempt_from_progress,
     sanitize_provider_progress_payload,
 )
-from .errors import LeaseLost, TaskCancelled
+from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
+from .execution_boundary import SIDECAR_EXECUTION_KEY
 from .lease import is_cancelled
 from .queue import classify_inflight_lane, inflight_set_fields, redis_text
+from .retry_state import RUNNING_GENERATION_STATUSES
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
 
@@ -33,8 +39,12 @@ class ImageProgressPublisher:
         return {}
 
     async def __call__(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("type") or "")
+        handler = self._handlers().get(event_type)
+        if event_type == "image_job_execution" and handler is not None:
+            await handler(event)
+            return
         await self._raise_if_interrupted()
-        handler = self._handlers().get(str(event.get("type") or ""))
         if handler is not None:
             await handler(event)
 
@@ -42,6 +52,7 @@ class ImageProgressPublisher:
         self,
     ) -> dict[str, Callable[[dict[str, Any]], Awaitable[None]]]:
         return {
+            "image_job_execution": self._persist_image_job_execution,
             "image_job_image": self._record_image_job,
             "route_diagnostic": self._publish_route_diagnostic,
             "endpoint_failover": self._publish_endpoint_failover,
@@ -52,6 +63,41 @@ class ImageProgressPublisher:
             "completed": self._publish_lifecycle_progress,
             "provider_failover": self._publish_provider_failover,
         }
+
+    async def _persist_image_job_execution(self, event: dict[str, Any]) -> None:
+        execution = ImageJobExecutionHandle.from_mapping(event.get("execution"))
+        if execution is None:
+            return
+        payload = execution.to_dict()
+        self.state.sidecar_execution = execution
+        async with self.deps.store.session() as session:
+            current = (
+                await session.execute(
+                    select(Generation)
+                    .where(
+                        Generation.id == self.state.task_id,
+                        Generation.attempt == self.state.attempt,
+                        Generation.status.in_(RUNNING_GENERATION_STATUSES),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if current is None:
+                raise StaleGenerationAttempt(
+                    "sidecar execution persistence lost generation ownership "
+                    f"task={self.state.task_id} attempt={self.state.attempt}"
+                )
+            current_request = (
+                dict(current.upstream_request)
+                if isinstance(current.upstream_request, dict)
+                else {}
+            )
+            current_request[SIDECAR_EXECUTION_KEY] = payload
+            current.upstream_request = current_request
+            await session.commit()
+        request = dict(self.state.gen_upstream_request_snapshot or {})
+        request[SIDECAR_EXECUTION_KEY] = payload
+        self.state.gen_upstream_request_snapshot = request
 
     async def _raise_if_interrupted(self) -> None:
         state = self.state

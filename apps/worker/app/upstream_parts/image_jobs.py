@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -19,12 +20,24 @@ from ..upstream_clients.image_job_auth import (
     image_job_headers,
 )
 from ..upstream_clients.image_job_client import ImageJobClient, ImageJobClientError
-from ..upstream_clients.image_job_models import ImageJobHandle
+from ..upstream_clients.image_job_models import (
+    ImageJobCostKnowledge,
+    ImageJobExecutionHandle,
+    ImageJobHandle,
+    ImageJobResultState,
+)
 from .image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
     ensure_image_request_context,
 )
+from .image_job_recovery import (
+    emit_image_job_execution as _emit_image_job_execution,
+    execution_after_cancel as _execution_after_cancel,
+    image_job_recovery_error as _image_job_recovery_error,
+    resume_image_job as _resume_image_job,
+)
+from .image_job_submission import image_job_submit_headers as _image_job_submit_headers
 from .transport import ImageProgressCallback
 
 _UPSTREAM_AUTH_HEADER = UPSTREAM_AUTH_HEADER
@@ -106,7 +119,7 @@ def _image_job_body_base(
     return services.requests.image_job_body_base(
         prompt=prompt,
         size=size,
-        n=n,
+        n=1,
         quality=quality,
         output_format=output_format,
         output_compression=output_compression,
@@ -253,37 +266,6 @@ async def _download_image_job_result(
     )
 
 
-def _image_job_submit_headers(
-    payload: dict[str, Any],
-    *,
-    api_key: str,
-    trace_id: str,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> dict[str, str]:
-    services = _runtime_services(runtime)
-    headers = _image_job_headers(
-        api_key=api_key,
-        trace_id=trace_id,
-        runtime=runtime,
-    )
-    payload_idempotency_key = str(payload.get("idempotency_key") or "").strip()
-    if payload_idempotency_key:
-        digest = (
-            services
-            .infrastructure.hashlib.sha256(payload_idempotency_key.encode("utf-8"))
-            .hexdigest()
-        )
-        headers.setdefault("Idempotency-Key", f"lumen-image-job-{digest[:32]}")
-    else:
-        services.core.attach_image_idempotency_key(
-            headers,
-            trace_id=trace_id,
-            endpoint="image-jobs",
-            body=payload,
-        )
-    return headers
-
-
 def _build_image_job_client(
     base_url: str,
     *,
@@ -358,11 +340,13 @@ async def _submit_image_job(
     payload: dict[str, Any],
     base_url: str,
     api_key: str,
+    provider_id: str,
+    endpoint: str,
     proxy: ProviderProxyDefinition | None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
     request_context: ImageRequestContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
-) -> tuple[ImageJobClient, None, str]:
+) -> tuple[ImageJobClient, None, ImageJobExecutionHandle]:
     _ = proxy
     context = ensure_image_request_context(request_context)
     runtime = runtime or context.upstream_runtime
@@ -372,7 +356,11 @@ async def _submit_image_job(
     trace_id = context.trace_id
     headers = _image_job_submit_headers(
         payload,
-        api_key=api_key,
+        headers=_image_job_headers(
+            api_key=api_key,
+            trace_id=trace_id,
+            runtime=runtime,
+        ),
         trace_id=trace_id,
         runtime=runtime,
     )
@@ -414,7 +402,17 @@ async def _submit_image_job(
         trace_id=trace_id,
         response_headers=None,
     )
-    return client, None, handle.job_id
+    return (
+        client,
+        None,
+        ImageJobExecutionHandle(
+            job_id=handle.job_id,
+            provider_id=provider_id,
+            endpoint=endpoint,
+            base_url=base_url,
+            idempotency_key=str(headers.get("Idempotency-Key") or ""),
+        ),
+    )
 
 
 async def _poll_image_job_once(
@@ -488,51 +486,119 @@ async def _finish_image_job(
     payload: dict[str, Any],
     base_url: str,
     proxy_url: str | None,
-    job_id: str,
     progress_callback: ImageProgressCallback | None,
+    execution: ImageJobExecutionHandle | None = None,
+    job_id: str | None = None,
     request_context: ImageRequestContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> tuple[str, str | None]:
     context = ensure_image_request_context(request_context)
     runtime = runtime or context.upstream_runtime
     services = _runtime_services(runtime)
+    if execution is None:
+        resolved_job_id = str(job_id or job.get("job_id") or "unknown")
+        execution = ImageJobExecutionHandle(
+            job_id=resolved_job_id,
+            provider_id="unknown",
+            endpoint=str(payload.get("endpoint") or "unknown"),
+            base_url=base_url,
+            idempotency_key=f"legacy:{resolved_job_id}",
+        )
     status = job.get("status")
     if status == "failed":
-        raise services.image_jobs.image_job_error(
+        failed_execution = replace(
+            execution,
+            result_state=ImageJobResultState.FAILED,
+            cost_knowledge=ImageJobCostKnowledge.NONE,
+            sidecar_status="failed",
+        )
+        await _emit_image_job_execution(
+            progress_callback,
+            failed_execution,
+            runtime=runtime,
+        )
+        error = services.image_jobs.image_job_error(
             job,
             status_code=status_code,
         )
+        if isinstance(error, services.infrastructure.UpstreamError):
+            error.payload = {
+                **error.payload,
+                "sidecar_execution_accepted": True,
+                "sidecar_execution": failed_execution.to_dict(),
+            }
+        raise error
     if status == "uncertain":
-        # sidecar 只有在上游已回 2xx（可能已计费）却交付不出图片时才写 uncertain。
-        # 这里必须与 failed 分开：failed 代表「确定未扣费」可以退款，uncertain
-        # 代表「上游成本可能已发生」，既不能自动重试（会二次扣费），也不能退款
-        # （平台会吸收上游成本）。计费侧凭 error_code 走 upstream_billing 决策表。
-        raise services.infrastructure.UpstreamError(
+        uncertain_execution = replace(
+            execution,
+            result_state=ImageJobResultState.UNCERTAIN,
+            cost_knowledge=ImageJobCostKnowledge.UNKNOWN,
+            sidecar_status="uncertain",
+        )
+        await _emit_image_job_execution(
+            progress_callback,
+            uncertain_execution,
+            runtime=runtime,
+        )
+        raise _image_job_recovery_error(
             "image job finished with an unresolved upstream result; "
             "the upstream request may already have been billed",
+            uncertain_execution,
+            phase="terminal",
             status_code=status_code,
-            error_code=(
-                services.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
-            ),
-            payload={**job, "upstream_result_unknown": True},
+            runtime=runtime,
         )
     if status != "succeeded":
         raise services.infrastructure.UpstreamError(
             f"image job returned unknown status: {status!r}",
             status_code=status_code,
             error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-            payload=job,
+            payload={
+                **job,
+                "sidecar_execution_accepted": True,
+                "sidecar_execution": execution.to_dict(),
+            },
         )
     images = job.get("images")
     first = images[0] if isinstance(images, list) and images else None
     image_url = first.get("url") if isinstance(first, dict) else None
     if not isinstance(first, dict) or not isinstance(image_url, str) or not image_url:
-        raise services.infrastructure.UpstreamError(
-            "image job succeeded without images[0].url",
-            status_code=status_code,
-            error_code=services.infrastructure.EC.NO_IMAGE_RETURNED.value,
-            payload=job,
+        succeeded_execution = replace(
+            execution,
+            result_state=ImageJobResultState.SUCCEEDED,
+            cost_knowledge=ImageJobCostKnowledge.INCURRED,
+            sidecar_status="succeeded",
         )
+        await _emit_image_job_execution(
+            progress_callback,
+            succeeded_execution,
+            runtime=runtime,
+        )
+        raise _image_job_recovery_error(
+            "image job succeeded without images[0].url",
+            succeeded_execution,
+            phase="delivery",
+            status_code=status_code,
+            runtime=runtime,
+        )
+    artifact = {
+        key: value
+        for key, value in first.items()
+        if key in {"url", "expires_at", "bytes", "width", "height", "format"}
+        and value is not None
+    }
+    succeeded_execution = replace(
+        execution,
+        result_state=ImageJobResultState.SUCCEEDED,
+        cost_knowledge=ImageJobCostKnowledge.INCURRED,
+        sidecar_status="succeeded",
+        result_artifact=artifact,
+    )
+    await _emit_image_job_execution(
+        progress_callback,
+        succeeded_execution,
+        runtime=runtime,
+    )
     await services.transport.emit_image_progress(
         progress_callback,
         "image_job_image",
@@ -540,20 +606,30 @@ async def _finish_image_job(
             job=job,
             first=first,
             payload=payload,
-            job_id=job_id,
+            job_id=execution.job_id,
             image_url=image_url,
         ),
     )
-    raw = await services.image_jobs.download_image_job_result(
-        client=client,
-        image_url=image_url,
-        proxy_url=proxy_url,
-        allowed_base_url=base_url,
-        request_context=request_context,
-    )
-    return services.infrastructure.base64.b64encode(raw).decode(
-        "ascii"
-    ), None
+    try:
+        raw = await services.image_jobs.download_image_job_result(
+            client=client,
+            image_url=image_url,
+            proxy_url=proxy_url,
+            allowed_base_url=base_url,
+            request_context=request_context,
+        )
+        if not raw:
+            raise ValueError("image job delivery returned an empty body")
+    except Exception as exc:  # noqa: BLE001
+        raise _image_job_recovery_error(
+            f"image job delivery failed: {exc}",
+            succeeded_execution,
+            phase="delivery",
+            status_code=getattr(exc, "status_code", None),
+            cause=exc,
+            runtime=runtime,
+        ) from exc
+    return services.infrastructure.base64.b64encode(raw).decode("ascii"), None
 
 
 async def _wait_image_job(
@@ -563,7 +639,7 @@ async def _wait_image_job(
     base_url: str,
     api_key: str,
     proxy_url: str | None,
-    job_id: str,
+    execution: ImageJobExecutionHandle,
     progress_callback: ImageProgressCallback | None,
     request_context: ImageRequestContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
@@ -575,19 +651,29 @@ async def _wait_image_job(
         services.infrastructure.time.monotonic()
         + services.core.IMAGE_JOB_TIMEOUT_S
     )
-    status_url = services.requests.image_job_status_url(base_url, job_id)
+    status_url = services.requests.image_job_status_url(base_url, execution.job_id)
     while services.infrastructure.time.monotonic() < deadline:
         await services.infrastructure.asyncio.sleep(
             services.core.IMAGE_JOB_POLL_INTERVAL_S
         )
-        polled = await _poll_image_job_once(
-            client=client,
-            status_url=status_url,
-            api_key=api_key,
-            job_id=job_id,
-            request_context=context,
-            runtime=runtime,
-        )
+        try:
+            polled = await _poll_image_job_once(
+                client=client,
+                status_url=status_url,
+                api_key=api_key,
+                job_id=execution.job_id,
+                request_context=context,
+                runtime=runtime,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _image_job_recovery_error(
+                f"image job poll failed: {exc}",
+                execution,
+                phase="poll",
+                status_code=getattr(exc, "status_code", None),
+                cause=exc,
+                runtime=runtime,
+            ) from exc
         if polled is None:
             continue
         job, status_code = polled
@@ -600,16 +686,17 @@ async def _wait_image_job(
             payload=payload,
             base_url=base_url,
             proxy_url=proxy_url,
-            job_id=job_id,
+            execution=execution,
             progress_callback=progress_callback,
             request_context=context,
             runtime=runtime,
         )
-    raise services.infrastructure.UpstreamError(
+    raise _image_job_recovery_error(
         "image job timeout",
+        execution,
+        phase="poll",
         status_code=None,
-        error_code=services.infrastructure.EC.UPSTREAM_TIMEOUT.value,
-        payload={"path": "image-jobs", "method": "GET", "job_id": job_id},
+        runtime=runtime,
     )
 
 
@@ -618,6 +705,8 @@ async def _submit_and_wait_image_job(
     payload: dict[str, Any],
     base_url: str,
     api_key: str,
+    provider_id: str = "unknown",
+    endpoint: str | None = None,
     proxy: ProviderProxyDefinition | None,
     progress_callback: ImageProgressCallback | None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
@@ -627,22 +716,42 @@ async def _submit_and_wait_image_job(
     context = ensure_image_request_context(request_context)
     runtime = runtime or context.upstream_runtime
     services = _runtime_services(runtime)
-    client, proxy_url, job_id = await _submit_image_job(
+    endpoint = str(endpoint or payload.get("endpoint") or "unknown")
+    client, proxy_url, execution = await _submit_image_job(
         payload=payload,
         base_url=base_url,
         api_key=api_key,
+        provider_id=provider_id,
+        endpoint=endpoint,
         proxy=proxy,
         before_attempt=before_attempt,
         request_context=context,
         runtime=runtime,
     )
-    handle = ImageJobHandle(job_id=job_id, upstream_api_key=api_key)
+    handle = ImageJobHandle(
+        job_id=execution.job_id,
+        upstream_api_key=api_key,
+    )
     try:
+        try:
+            await _emit_image_job_execution(
+                progress_callback,
+                execution,
+                runtime=runtime,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _image_job_recovery_error(
+                f"image job accepted but execution persistence failed: {exc}",
+                execution,
+                phase="accept",
+                cause=exc,
+                runtime=runtime,
+            ) from exc
         await services.transport.emit_image_progress(
             progress_callback,
             "fallback_started",
             source="image_jobs",
-            job_id=job_id,
+            job_id=execution.job_id,
         )
         return await _wait_image_job(
             client=client,
@@ -650,7 +759,7 @@ async def _submit_and_wait_image_job(
             base_url=base_url,
             api_key=api_key,
             proxy_url=proxy_url,
-            job_id=job_id,
+            execution=execution,
             progress_callback=progress_callback,
             request_context=context,
             runtime=runtime,
@@ -659,9 +768,15 @@ async def _submit_and_wait_image_job(
         asyncio.CancelledError,
         services.infrastructure.UpstreamCancelled,
     ):
-        await client.cancel(
+        cancel_result = await client.cancel(
             handle,
             trace_id=context.trace_id,
+        )
+        cancelled_execution = _execution_after_cancel(execution, cancel_result)
+        await _emit_image_job_execution(
+            progress_callback,
+            cancelled_execution,
+            runtime=runtime,
         )
         raise
     finally:
@@ -672,6 +787,8 @@ async def _image_job_generate_once(
     request: ImageExecutionRequest,
     *,
     api_key_override: str,
+    provider_id: str,
+    endpoint: str,
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
@@ -697,6 +814,8 @@ async def _image_job_generate_once(
         base_url=base_url_override
         or await services.direct.resolve_image_job_base_url(),
         api_key=api_key_override,
+        provider_id=provider_id,
+        endpoint=endpoint,
         proxy=proxy_override,
         progress_callback=request.progress_callback,
         before_attempt=before_attempt,
@@ -730,6 +849,8 @@ async def _image_job_edit_once(
     request: ImageExecutionRequest,
     *,
     api_key_override: str,
+    provider_id: str,
+    endpoint: str,
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     image_edit_input_transport: str = "url",
@@ -795,6 +916,8 @@ async def _image_job_edit_once(
         ),
         base_url=submit_base_url,
         api_key=api_key_override,
+        provider_id=provider_id,
+        endpoint=endpoint,
         proxy=proxy_override,
         progress_callback=request.progress_callback,
         before_attempt=before_attempt,
@@ -806,6 +929,8 @@ async def _image_job_responses_once(
     request: ImageExecutionRequest,
     *,
     api_key_override: str,
+    provider_id: str,
+    endpoint: str,
     base_url_override: str | None = None,
     proxy_override: ProviderProxyDefinition | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
@@ -833,7 +958,7 @@ async def _image_job_responses_once(
         request_context=context,
     )
     body = services.image_jobs.build_responses_image_body(
-        request,
+        request.with_n(1),
         image_urls=image_urls or None,
     )
     return await services.image_jobs.submit_and_wait_image_job(
@@ -844,6 +969,8 @@ async def _image_job_responses_once(
         ),
         base_url=sidecar_base_url,
         api_key=api_key_override,
+        provider_id=provider_id,
+        endpoint=endpoint,
         proxy=proxy_override,
         progress_callback=request.progress_callback,
         before_attempt=before_attempt,
@@ -859,7 +986,10 @@ __all__ = [
     "_download_image_job_result",
     "_image_job_error",
     "_image_job_sidecar_token",
+    "_finish_image_job",
+    "_resume_image_job",
     "_submit_and_wait_image_job",
+    "_wait_image_job",
     "_image_job_generate_once",
     "_image_job_reference_image_entries",
     "_image_job_edit_once",

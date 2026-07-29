@@ -452,6 +452,9 @@ def build_plan(
             + _matching_paths(reverse_files, rule.paths)
         )
     }
+    matched_direct_or_reverse.update(
+        reason["file"] for reason in full_reasons
+    )
     return {
         "schema_version": 1,
         "base": base,

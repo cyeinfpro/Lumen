@@ -38,7 +38,7 @@ PRODUCTION_PATTERNS = (
     "apps/api/app/**/*.py",
     "apps/worker/app/**/*.py",
     "apps/tgbot/app/**/*.py",
-    "image-job/app/**/*.py",
+    "image-job/image_job/**/*.py",
     "packages/core/lumen_core/**/*.py",
     "apps/web/src/**/*.js",
     "apps/web/src/**/*.mjs",

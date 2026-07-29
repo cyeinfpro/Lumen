@@ -14,7 +14,13 @@ from .image_job_auth import (
     image_job_service_headers,
     image_job_submit_headers,
 )
-from .image_job_models import ImageJobHandle, ImageJobStatus, UploadedReference
+from .image_job_models import (
+    ImageJobCancelOutcome,
+    ImageJobCancelResult,
+    ImageJobHandle,
+    ImageJobStatus,
+    UploadedReference,
+)
 from .url_validation import validate_image_job_control_url
 
 PostWithRetry = Callable[..., Awaitable[httpx.Response]]
@@ -198,10 +204,15 @@ class ImageJobClient:
         url = data.get("url") if isinstance(data, dict) else None
         return UploadedReference(url) if isinstance(url, str) and url else None
 
-    async def cancel(self, handle: ImageJobHandle, *, trace_id: str) -> None:
+    async def cancel(
+        self,
+        handle: ImageJobHandle,
+        *,
+        trace_id: str,
+    ) -> ImageJobCancelResult:
         self._ensure_open()
         try:
-            await self._client.delete(
+            response = await self._client.delete(
                 f"{self.base_url}/v1/image-jobs/{quote(handle.job_id, safe='')}",
                 headers=image_job_headers(
                     service_token=self._endpoint.service_token,
@@ -210,7 +221,42 @@ class ImageJobClient:
                 ),
             )
         except (httpx.HTTPError, OSError):
-            return
+            return ImageJobCancelResult(
+                job_id=handle.job_id,
+                outcome=ImageJobCancelOutcome.UNCERTAIN,
+                status="unknown",
+                status_code=None,
+                outcome_uncertain=True,
+            )
+        try:
+            data = self._json_object(response, operation="cancel")
+        except ImageJobClientError:
+            return ImageJobCancelResult(
+                job_id=handle.job_id,
+                outcome=ImageJobCancelOutcome.UNCERTAIN,
+                status="unknown",
+                status_code=response.status_code,
+                outcome_uncertain=True,
+            )
+        raw_outcome = data.get("outcome")
+        try:
+            outcome = ImageJobCancelOutcome(str(raw_outcome))
+        except ValueError:
+            outcome = ImageJobCancelOutcome.UNCERTAIN
+        if response.status_code >= 400:
+            outcome = ImageJobCancelOutcome.UNCERTAIN
+        return ImageJobCancelResult(
+            job_id=handle.job_id,
+            outcome=outcome,
+            status=str(data.get("status") or "unknown"),
+            status_code=response.status_code,
+            outcome_uncertain=bool(data.get("outcome_uncertain"))
+            or outcome
+            in {
+                ImageJobCancelOutcome.CANCEL_REQUESTED,
+                ImageJobCancelOutcome.UNCERTAIN,
+            },
+        )
 
     async def close(self) -> None:
         if self._closed:

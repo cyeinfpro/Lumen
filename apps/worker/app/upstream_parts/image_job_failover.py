@@ -41,6 +41,17 @@ def _image_job_error_class(exc: BaseException) -> str | None:
     return None
 
 
+def _sidecar_execution_accepted(exc: BaseException) -> bool:
+    payload = getattr(exc, "payload", None)
+    return bool(
+        isinstance(payload, dict)
+        and (
+            payload.get("sidecar_execution_accepted") is True
+            or isinstance(payload.get("sidecar_execution"), dict)
+        )
+    )
+
+
 def _upstream_cost_already_incurred(
     exc: BaseException,
     *,
@@ -68,6 +79,8 @@ def _should_continue_image_job_failover(
     """Return whether endpoint or provider failover can recover the job."""
     services = _runtime_services(runtime)
     if services.providers.is_quota_accounting_unavailable(exc):
+        return False
+    if _sidecar_execution_accepted(exc):
         return False
     # 必须在 `retriable` 之前：成本已经发生这件事不该被「可重试」翻盘。
     if _upstream_cost_already_incurred(exc, runtime=runtime):
@@ -106,6 +119,8 @@ async def _image_job_run_once(
     services = _runtime_services(request.upstream_runtime)
     common: dict[str, Any] = {
         "api_key_override": api_key,
+        "provider_id": str(getattr(request.provider_override, "name", "") or ""),
+        "endpoint": endpoint,
         "base_url_override": base_url or None,
         "before_attempt": before_attempt,
     }
@@ -337,7 +352,7 @@ async def _run_image_job_endpoint(
     started = time.monotonic()
     try:
         result = await services.image_jobs.image_job_run_once(
-            request,
+            request.with_provider(provider),
             endpoint=endpoint,
             api_key=provider.api_key,
             base_url=plan.base_url,
@@ -630,6 +645,7 @@ async def _image_job_with_failover(
 
 __all__ = [
     "_image_job_error_class",
+    "_sidecar_execution_accepted",
     "_image_job_run_once",
     "_image_job_with_failover",
     "_image_jobs_endpoint_fallback_chain",

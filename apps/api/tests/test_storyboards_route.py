@@ -10,6 +10,10 @@ from fastapi import HTTPException
 
 from app import main
 from app.routes import storyboards
+from app.routes.storyboard_parts import assembly as storyboard_assembly_commands
+from app.routes.storyboard_parts import queries as storyboard_queries
+from app.routes.storyboard_parts import submission as storyboard_submission
+from app.services.storyboard import tasks as storyboard_tasks
 
 
 def test_decode_cursor_requires_timezone_aware_timestamp() -> None:
@@ -587,18 +591,18 @@ async def test_stale_assembly_claim_requeues_after_worker_sigkill(
 
 
 def test_storyboard_next_cursor_uses_last_returned_row() -> None:
-    source = inspect.getsource(storyboards.list_storyboards)
+    source = inspect.getsource(storyboard_queries.list_storyboards)
 
-    assert "_encode_cursor(page[-1])" in source
-    assert "_encode_cursor(rows[limit])" not in source
+    assert "encode_cursor(page[-1])" in source
+    assert "encode_cursor(rows[limit])" not in source
 
 
 def test_generate_all_keyframes_validates_batch_before_creating_tasks() -> None:
-    source = inspect.getsource(storyboards.generate_all_keyframes)
+    source = inspect.getsource(storyboard_submission.generate_all_keyframes)
 
     assert "shots_not_approved" in source
     assert source.index("shots_not_approved") < source.index(
-        "_create_storyboard_image_task"
+        "create_storyboard_image_task"
     )
 
 
@@ -665,19 +669,40 @@ async def test_storyboard_video_recovery_requires_current_submission_fingerprint
 
 
 def test_storyboard_image_task_helper_does_not_commit_before_step_link() -> None:
-    source = inspect.getsource(storyboards._create_storyboard_image_task)  # noqa: SLF001
+    source = inspect.getsource(storyboard_submission.create_storyboard_image_task)
 
     assert "await db.commit()" not in source
     assert "StoryboardImageTask(" in source
 
 
 def test_generate_all_keyframes_does_not_call_single_route_handler() -> None:
-    source = inspect.getsource(storyboards.generate_all_keyframes)
-    publish_source = inspect.getsource(storyboards._publish_storyboard_image_tasks)  # noqa: SLF001
+    source = inspect.getsource(storyboard_submission.generate_all_keyframes)
+    publish_source = inspect.getsource(storyboard_tasks.publish_storyboard_image_tasks)
 
     assert "generate_shot_keyframe(" not in source
-    assert "_publish_storyboard_image_tasks" in source
+    assert "runtime.publish_image_tasks" in source
     assert "Semaphore(STORYBOARD_KEYFRAME_PARALLELISM)" in publish_source
+
+
+def test_storyboards_transport_stays_below_route_ceiling() -> None:
+    source = inspect.getsource(storyboards)
+
+    assert len(source.splitlines()) < 800
+    assert "await db.commit()" not in source
+    assert "OutboxEvent(" not in source
+    assert "return await commands." in source
+    assert "return await submission." in source
+    assert "return await assembly." in source
+
+
+def test_storyboard_assembly_commits_outbox_before_enqueue() -> None:
+    source = inspect.getsource(storyboard_assembly_commands.assemble_storyboard)
+    scheduling = source[source.index("db.add(outbox)") :]
+
+    assert scheduling.index("db.add(outbox)") < scheduling.index("await db.commit()")
+    assert scheduling.index("await db.commit()") < scheduling.index(
+        "runtime.arq_pool()"
+    )
 
 
 def test_storyboards_router_is_mounted() -> None:

@@ -19,6 +19,8 @@ from .message_submission import (
     publish_assistant_task as _publish_assistant_task,
 )
 from .video.submission import (
+    VideoSubmissionContext,
+    VideoSubmissionServices,
     create_video_generation_record as _create_video_generation_record,
     invalidate_video_balance_cache as invalidate_balance_cache,
 )
@@ -215,10 +217,13 @@ async def create_canvas_video_task(
             db,
             body,
             user,
-            request=request,
-            workflow_metadata=metadata,
-            defer_commit=True,
-            deferred_publish_payload=publish_payload,
+            context=VideoSubmissionContext(
+                request=request,
+                workflow_metadata=metadata,
+                defer_commit=True,
+                deferred_publish_payload=publish_payload,
+            ),
+            services=VideoSubmissionServices(),
         )
     return CanvasVideoSubmission(
         generation=generation,

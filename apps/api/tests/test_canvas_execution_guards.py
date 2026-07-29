@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from types import SimpleNamespace
 from typing import AsyncIterator
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 from fastapi import HTTPException
@@ -25,8 +26,9 @@ from lumen_core.canvas_models import (
     CanvasTaskTerminalReceipt,
     CanvasVersion,
 )
-from lumen_core.models import Base, Image, VideoGeneration
-from lumen_core.schemas import VideoModelOptionOut, VideoOptionsOut
+from lumen_core.models import Base, Image, OutboxEvent, VideoGeneration
+from lumen_core.schemas import VideoCreateIn, VideoModelOptionOut, VideoOptionsOut
+from lumen_core.video_billing import VideoCostEstimate
 
 from app.canvas_services import execution_service
 from app.canvas_services.api_schemas import CanvasCreateIn, CanvasExecuteIn
@@ -42,6 +44,7 @@ from app.canvas_services.graph_resolution import ResolvedNode
 from app.services import task_submission
 from app.services.task_submission import CanvasImageSubmission
 from app.services.task_submission import _canvas_message_attachments
+from app.services.video import submission as video_submission
 
 
 def _graph() -> dict:
@@ -109,6 +112,7 @@ async def _session() -> AsyncIterator[AsyncSession]:
         CanvasTaskTerminalReceipt.__table__,
         Image.__table__,
         VideoGeneration.__table__,
+        OutboxEvent.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(
@@ -1040,8 +1044,35 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
         def begin_nested(self):
             return _NestedTransaction()
 
-    async def create_record(*_args, **kwargs):
-        kwargs["deferred_publish_payload"].update(
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="A product video",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="canvas-video-contract",
+    )
+    user = SimpleNamespace(id="user-1")
+    request = _request()
+    metadata = {"workflow_type": "infinite_canvas"}
+    create_record = create_autospec(video_submission.create_video_generation_record)
+
+    async def create_record_side_effect(
+        db,
+        submitted_body,
+        submitted_user,
+        *,
+        context=None,
+        services=None,
+    ):
+        assert isinstance(context, video_submission.VideoSubmissionContext)
+        assert isinstance(services, video_submission.VideoSubmissionServices)
+        assert context.request is request
+        assert context.workflow_metadata == metadata
+        assert context.defer_commit is True
+        assert context.deferred_publish_payload is not None
+        context.deferred_publish_payload.update(
             {
                 "task_id": "video-1",
                 "user_id": "user-1",
@@ -1051,6 +1082,7 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
         )
         return SimpleNamespace(id="video-1")
 
+    create_record.side_effect = create_record_side_effect
     invalidated: list[str] = []
     published: list[dict] = []
 
@@ -1070,15 +1102,238 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
 
     submission = await task_submission.create_canvas_video_task(
         Db(),  # type: ignore[arg-type]
-        body=SimpleNamespace(),
-        user=SimpleNamespace(),
-        request=_request(),
-        metadata={},
+        body=body,
+        user=user,  # type: ignore[arg-type]
+        request=request,
+        metadata=metadata,
     )
     await task_submission.publish_canvas_video_task(submission=submission)
 
+    create_record.assert_awaited_once()
     assert submission.generation.id == "video-1"
     assert submission.publish_payload["outbox_id"] == "outbox-1"
+    assert invalidated == ["user-1"]
+    assert published == [submission.publish_payload]
+
+
+@pytest.mark.asyncio
+async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SimpleNamespace(
+        name="canvas-provider",
+        kind="test",
+        upstream_model_for=lambda _model, _action: "upstream-video-model",
+    )
+
+    async def require_ready(_db, _body):
+        return provider, {}
+
+    async def public_base_loader(
+        request,
+        _db,
+        _body,
+        _fallback_snapshots,
+        *,
+        requires_public_media,
+        prefers_public_media_url,
+    ):
+        assert request is not None
+        assert requires_public_media is False
+        assert prefers_public_media_url is False
+        return None
+
+    async def input_snapshot_loader(
+        _db,
+        *,
+        user_id,
+        image_id,
+        fallback_snapshot,
+        reference_public_base_url,
+        required_public_media,
+    ):
+        assert user_id == "user-1"
+        assert image_id is None
+        assert fallback_snapshot is None
+        assert reference_public_base_url is None
+        assert required_public_media is False
+        return None, None, None
+
+    async def reference_snapshot_loader(
+        _db,
+        *,
+        user_id,
+        items,
+        fallback_snapshots,
+        reference_public_base_url,
+        required_public_media,
+    ):
+        assert user_id == "user-1"
+        assert items == []
+        assert fallback_snapshots is None
+        assert reference_public_base_url is None
+        assert required_public_media is False
+        return []
+
+    def reference_validator(provider_kind, reference_snapshots):
+        assert provider_kind == "test"
+        assert reference_snapshots == []
+
+    async def allow_negative_loader(_db):
+        return False
+
+    async def generation_renderer(_db, generation):
+        return SimpleNamespace(id=generation.id)
+
+    async def unexpected_publish(_value):
+        raise AssertionError("video publish side effects must wait for commit")
+
+    services = video_submission.VideoSubmissionServices(
+        require_ready=require_ready,
+        public_base_loader=public_base_loader,
+        input_snapshot_loader=input_snapshot_loader,
+        reference_snapshot_loader=reference_snapshot_loader,
+        reference_validator=reference_validator,
+        allow_negative_loader=allow_negative_loader,
+        generation_renderer=generation_renderer,
+        balance_invalidator=unexpected_publish,
+        queued_publisher=unexpected_publish,
+    )
+
+    def canvas_video_services():
+        return services
+
+    async def estimate_video_cost(
+        _db,
+        *,
+        model,
+        action,
+        resolution,
+        duration_s,
+        fps=None,
+        generate_audio=False,
+        estimates,
+        pricing_variant=None,
+        reference_media=None,
+    ):
+        assert model == "seedance-2.0-fast"
+        assert action == "t2v"
+        assert resolution == "720p"
+        assert duration_s == 5
+        assert fps is None
+        assert generate_audio is True
+        assert estimates == {}
+        assert pricing_variant == "t2v_720p"
+        assert reference_media is None
+        return VideoCostEstimate(
+            estimated_tokens=100,
+            hold_micro=25,
+            unit_price_micro=250_000,
+            source="test",
+        )
+
+    async def hold(
+        _db,
+        user_id,
+        amount_micro,
+        *,
+        ref_type,
+        ref_id,
+        idempotency_key,
+        allow_negative=False,
+        meta=None,
+    ):
+        assert user_id == "user-1"
+        assert amount_micro == 25
+        assert ref_type == "video_generation"
+        assert ref_id
+        assert idempotency_key == f"video_generation:hold:{ref_id}"
+        assert allow_negative is False
+        assert meta is not None
+        return None
+
+    invalidated: list[str] = []
+    published: list[dict] = []
+    transaction_events: list[str] = []
+
+    async def invalidate(user_id: str) -> None:
+        transaction_events.append("invalidate")
+        invalidated.append(user_id)
+
+    async def publish(payload: dict) -> None:
+        transaction_events.append("publish")
+        published.append(dict(payload))
+
+    monkeypatch.setattr(
+        task_submission,
+        "VideoSubmissionServices",
+        canvas_video_services,
+    )
+    monkeypatch.setattr(
+        video_submission,
+        "estimate_video_cost",
+        estimate_video_cost,
+    )
+    monkeypatch.setattr(video_submission.billing_core, "hold", hold)
+    monkeypatch.setattr(task_submission, "invalidate_balance_cache", invalidate)
+    monkeypatch.setattr(task_submission, "publish_video_queued", publish)
+
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="A committed Canvas video",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="canvas-video-transaction",
+    )
+    async with _session() as db:
+        commit = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit)
+
+        submission = await task_submission.create_canvas_video_task(
+            db,
+            body=body,
+            user=SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+            request=_request(),
+            metadata={
+                "workflow_type": "infinite_canvas",
+                "canvas_node_type": "video_generate",
+            },
+        )
+
+        commit.assert_not_awaited()
+        assert invalidated == []
+        assert published == []
+        generation = (
+            await db.execute(
+                select(VideoGeneration).where(
+                    VideoGeneration.id == submission.generation.id
+                )
+            )
+        ).scalar_one()
+        outbox = (
+            await db.execute(
+                select(OutboxEvent).where(
+                    OutboxEvent.id == submission.publish_payload["outbox_id"]
+                )
+            )
+        ).scalar_one()
+        assert generation.upstream_request["workflow_type"] == "infinite_canvas"
+        assert generation.upstream_request["canvas_node_type"] == "video_generate"
+        assert str(outbox.id) == submission.publish_payload["outbox_id"]
+        assert outbox.payload == {
+            "task_id": submission.publish_payload["task_id"],
+            "user_id": "user-1",
+            "kind": "video_generation",
+        }
+
+        await db.commit()
+        transaction_events.append("commit")
+        await task_submission.publish_canvas_video_task(submission=submission)
+
+    commit.assert_awaited_once()
+    assert transaction_events == ["commit", "invalidate", "publish"]
     assert invalidated == ["user-1"]
     assert published == [submission.publish_payload]
 

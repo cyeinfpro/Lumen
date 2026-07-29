@@ -997,12 +997,32 @@ test("terminal video refresh failures preserve force sync and retry", () => {
   );
   match(
     generationFeedSource,
-    /await invalidateHistory\(\);\s*if \(terminal\) terminalHistorySyncedRef\.current\.add\(id\)/,
+    /await invalidateHistory\(\);[\s\S]*?isVideoFeedScopeTokenCurrent\(runtime, request\.scope\)[\s\S]*?if \(terminal\) terminalHistorySyncedRef\.current\.add\(id\)/,
   );
   match(
     generationFeedSource,
-    /qc\.invalidateQueries\(\{ queryKey: \["video", "generations"\] \}\)/,
+    /qc\.invalidateQueries\(\{ queryKey: historyQueryKey \}\)/,
   );
+});
+
+test("video feed scopes private state and runtime ownership by user id", () => {
+  match(generationFeedSource, /const userScope = useUserQueryScope\(\)/);
+  match(
+    generationFeedSource,
+    /userScopedQueryKey\(userId, \["video", "options"\] as const\)/,
+  );
+  match(
+    generationFeedSource,
+    /userScopedQueryKey\(userId, \["video", "generations"\] as const\)/,
+  );
+  match(generationFeedSource, /resetVideoFeedRuntime\(/);
+  match(generationFeedSource, /setScopedItems\(\{ userId, value: \[\] \}\)/);
+  match(
+    generationFeedSource,
+    /setScopedSelection\(\{ userId, value: "" \}\)/,
+  );
+  match(generationFeedSource, /videoFeedChannels\(runtime, userId, activeItems\)/);
+  match(generationFeedSource, /isVideoFeedScopeTokenCurrent\(/);
 });
 
 test("video retry fences the original request while accepting a new task id", () => {

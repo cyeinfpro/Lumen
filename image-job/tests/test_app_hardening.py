@@ -1074,10 +1074,10 @@ def test_fail_interrupted_running_jobs_requeues_when_auth_present(
     rows = asyncio.run(_setup_and_run())
     by_id = {r["job_id"]: r for r in rows}
 
-    # 有 auth 的被重排为 queued；started_at 清空；attempts +1
+    # 有 auth 的被重排为 queued；started_at 清空；下一次 claim 才递增 attempt。
     assert by_id["job-with-auth"]["status"] == "queued"
     assert by_id["job-with-auth"]["started_at"] is None
-    assert by_id["job-with-auth"]["attempts"] == 1
+    assert by_id["job-with-auth"]["attempts"] == 0
 
     # 无 auth 的被标 failed（保持原行为）
     assert by_id["job-no-auth"]["status"] == "failed"

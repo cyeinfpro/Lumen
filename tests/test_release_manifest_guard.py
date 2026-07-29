@@ -86,3 +86,36 @@ def test_release_manifest_guard_resolves_alias_to_latest_stable_release() -> Non
 
     with pytest.raises(guard.ManifestError, match="no concrete release"):
         guard.select_matching_release_tag(payload, alias="v3")
+
+
+def test_release_manifest_guard_paginates_alias_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = _load_guard()
+    first_page = [
+        {
+            "tag_name": f"v1.0.{index}",
+            "draft": False,
+            "prerelease": False,
+        }
+        for index in range(100)
+    ]
+    second_page = [
+        {"tag_name": "v2.0.0", "draft": False, "prerelease": False},
+    ]
+    urls: list[str] = []
+
+    def fake_download(url: str, *, label: str) -> object:
+        urls.append(url)
+        assert label.startswith("release list response page ")
+        return first_page if url.endswith("page=1") else second_page
+
+    monkeypatch.setattr(guard, "_download_json", fake_download)
+
+    assert guard.resolve_alias_tag("v2") == "v2.0.0"
+    assert urls == [
+        "https://api.github.com/repos/cyeinfpro/Lumen/releases"
+        "?per_page=100&page=1",
+        "https://api.github.com/repos/cyeinfpro/Lumen/releases"
+        "?per_page=100&page=2",
+    ]
