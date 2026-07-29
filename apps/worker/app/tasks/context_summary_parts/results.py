@@ -47,6 +47,12 @@ class SummaryGenerationResult:
     fallback_reason: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class SegmentSummaryExecution:
+    coverage: SummaryCoverage | None = None
+    image_upstream_runtime: Any = None
+
+
 def summary_event_payload(
     request: SummaryRequest,
     timing: SummaryTiming,
