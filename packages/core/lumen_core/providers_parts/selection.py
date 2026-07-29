@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from typing import Any, Callable, Protocol, TypeVar
 
-from .config import _parse_optional_bool
+from .config import parse_optional_bool
 from .definitions import ProviderDefinition, RoundRobinState
 
 
@@ -29,11 +29,11 @@ def endpoint_kind_allowed(provider: Any, endpoint_kind: str | None) -> bool:
     if endpoint_kind not in {"generations", "responses", "models"}:
         return True
     if isinstance(provider, dict):
-        locked = _parse_optional_bool(provider.get("image_jobs_endpoint_lock")) is True
+        locked = parse_optional_bool(provider.get("image_jobs_endpoint_lock")) is True
         configured = provider.get("image_jobs_endpoint", "auto")
     else:
         locked = (
-            _parse_optional_bool(getattr(provider, "image_jobs_endpoint_lock", False))
+            parse_optional_bool(getattr(provider, "image_jobs_endpoint_lock", False))
             is True
         )
         configured = getattr(provider, "image_jobs_endpoint", "auto")

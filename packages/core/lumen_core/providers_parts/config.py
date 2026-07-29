@@ -85,7 +85,7 @@ def _parse_optional_str(raw: Any) -> str | None:
     return value or None
 
 
-def _parse_optional_bool(raw: Any) -> bool | None:
+def parse_optional_bool(raw: Any) -> bool | None:
     if raw is None:
         return None
     if isinstance(raw, bool):
@@ -102,7 +102,7 @@ def _parse_optional_bool(raw: Any) -> bool | None:
 def _parse_bool(raw: Any, *, default: bool, field: str) -> bool:
     if raw is None or raw == "":
         return default
-    parsed = _parse_optional_bool(raw)
+    parsed = parse_optional_bool(raw)
     if parsed is None:
         raise ValueError(f"{field} must be a boolean")
     return parsed
@@ -197,7 +197,7 @@ def _image_jobs_endpoint(item: dict[str, Any]) -> tuple[str, bool]:
     if endpoint not in IMAGE_JOBS_ENDPOINT_VALUES:
         endpoint = "auto"
     raw_lock = item.get("image_jobs_endpoint_lock", False)
-    parsed_lock = _parse_optional_bool(raw_lock)
+    parsed_lock = parse_optional_bool(raw_lock)
     if raw_lock not in (None, "") and parsed_lock is None:
         raise ValueError("image_jobs_endpoint_lock must be a boolean")
     if parsed_lock and endpoint == "auto":
@@ -266,11 +266,11 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
         image_jobs_base_url=image_jobs_base_url,
         image_edit_input_transport=image_edit_input_transport,
         image_concurrency=image_concurrency,
-        responses_supported=_parse_optional_bool(item.get("responses_supported")),
-        image_generations_supported=_parse_optional_bool(
+        responses_supported=parse_optional_bool(item.get("responses_supported")),
+        image_generations_supported=parse_optional_bool(
             item.get("image_generations_supported")
         ),
-        image_responses_supported=_parse_optional_bool(
+        image_responses_supported=parse_optional_bool(
             item.get("image_responses_supported")
         ),
     )
