@@ -52,8 +52,11 @@ const conversationMemorySource = readFileSync(
   new URL("../chat/ConversationMemoryButton.tsx", import.meta.url),
   "utf8",
 );
-const memoryPageSource = readFileSync(
-  new URL("../../../app/settings/memory/page.tsx", import.meta.url),
+const memoryQueriesSource = readFileSync(
+  new URL(
+    "../../../app/settings/memory/queries/useMemoryQueries.ts",
+    import.meta.url,
+  ),
   "utf8",
 );
 const mobileTopBarSource = readFileSync(
@@ -794,12 +797,12 @@ test("identity recovery retains confirmed sessions, retries, and terminates on 4
 });
 
 test("memory and conversation-private queries use scoped keys and identity gates", () => {
-  match(memoryPageSource, /userMemoryQueryKeys\.settings\(userScope\.userId\)/);
-  match(memoryPageSource, /userMemoryQueryKeys\.scopes\(userScope\.userId\)/);
-  match(memoryPageSource, /userMemoryQueryKeys\.items\(userScope\.userId/);
-  match(memoryPageSource, /userMemoryQueryKeys\.staging\(userScope\.userId\)/);
-  match(memoryPageSource, /userMemoryQueryKeys\.timeline\(userScope\.userId\)/);
-  match(memoryPageSource, /enabled: userScope\.enabled/);
+  match(memoryQueriesSource, /userMemoryQueryKeys\.settings\(userScope\.userId\)/);
+  match(memoryQueriesSource, /userMemoryQueryKeys\.scopes\(userScope\.userId\)/);
+  match(memoryQueriesSource, /userMemoryQueryKeys\.items\(userScope\.userId/);
+  match(memoryQueriesSource, /userMemoryQueryKeys\.staging\(userScope\.userId\)/);
+  match(memoryQueriesSource, /userMemoryQueryKeys\.timeline\(userScope\.userId\)/);
+  match(memoryQueriesSource, /enabled: userScope\.enabled/);
   match(accountCenterSource, /userMemoryQueryKeys\.staging\(userScope\.userId\)/);
   match(accountCenterSource, /enabled: identityReady/);
   match(conversationMemorySource, /userConversationQueryKeys\.detail\(/);
@@ -812,7 +815,7 @@ test("memory and conversation-private queries use scoped keys and identity gates
   );
 
   for (const componentSource of [
-    memoryPageSource,
+    memoryQueriesSource,
     accountCenterSource,
     globalTaskTraySource,
     conversationMemorySource,
