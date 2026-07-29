@@ -1109,3 +1109,44 @@ All findings were rechecked against the baseline SHA before implementation.
   `a8c4e65`, `1ba5d1d`, and `5ce8ebc` in reverse integration order.
 - No full `bash scripts/test.sh -q`, version bump, push, tag, release, or
   GitHub Actions run occurred in Wave 4; those remain exclusively in Wave 5.
+
+## Current-Main V2 Wave 5: Final Local Gate
+
+- Date: `2026-07-29`
+- Pre-release source HEAD: `7ea54ec7de9fba43f36852b8b7d1209f581f2864`
+- Full invocation count: exactly one `bash scripts/test.sh -q`.
+- Governance before suites:
+  - uninstall shell contracts passed
+  - Ruff passed
+  - architecture passed with 0 cycles and 0 boundary violations
+  - complexity passed with 5 findings
+  - runtime-state passed with 8 instances
+- Worker:
+  - full process reached `1598 passed, 6 skipped`
+  - one stale assertion expected a base64 string instead of the staged
+    `InlineImageBytes` contract
+  - only
+    `test_direct_generate_image_once_sends_bound_trace_idempotency_key`
+    was updated and rerun: `1 passed`
+  - the Worker suite and full command were not rerun
+- API: `1550 passed, 2 skipped`
+- Core: `565 passed`
+- TGBot: `87 passed`
+- image-job: `188 passed`
+- mock image upstream: `8 passed`
+- Operations:
+  - full process reached `410 passed, 4 skipped`
+  - one stale repository assertion still expected runtime-state ceiling `15`
+  - only
+    `test_repository_ledger_matches_current_total_ceiling`
+    was updated to the measured ceiling `8` and rerun: `1 passed`
+  - the Operations suite and full command were not rerun
+- Web:
+  - full suite: `510 passed`
+  - layout contract, UI governance, architecture, complexity, ESLint, and
+    TypeScript passed
+  - production build passed and generated all 35 static pages
+- Build warning: existing Sentry/Prisma OpenTelemetry dynamic dependency
+  warning; compilation and page generation completed successfully.
+- Final changed-test Ruff, format, and `git diff --check` passed.
+- No second full invocation was run after either failed-node correction.
