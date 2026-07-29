@@ -18,7 +18,7 @@ from ...domain.apparel_scene_fallbacks import (
     compact_product_context_for_gpt55,
     dict_or_empty as _dict_or_empty,
 )
-from .contracts import SceneProviderSelection
+from .contracts import PromptCompositionRequest, SceneProviderSelection
 from .parsing_validation import (
     coerce_candidate_briefs,
     coerce_selection_scores,
@@ -40,20 +40,21 @@ class PromptCompositionDependencies:
 async def compose_image_prompt_with_gpt55(
     db: AsyncSession,
     *,
-    base_prompt: str,
-    product_analysis: dict[str, Any],
-    garment_lock: dict[str, Any],
-    model_summary: str,
-    scene_card: dict[str, Any],
-    shot_class: str,
-    template: str,
-    aspect_ratio: str,
-    final_quality: str,
-    rewrite_instruction: str | None,
+    request: PromptCompositionRequest,
     provider_selection: SceneProviderSelection | None,
     reference_images: list[dict[str, str]] | None,
     dependencies: PromptCompositionDependencies,
 ) -> dict[str, Any]:
+    base_prompt = request.base_prompt
+    product_analysis = request.product_analysis
+    garment_lock = request.garment_lock
+    model_summary = request.model_summary
+    scene_card = request.scene_card
+    shot_class = request.shot_class
+    template = request.template
+    aspect_ratio = request.aspect_ratio
+    final_quality = request.final_quality
+    rewrite_instruction = request.rewrite_instruction
     camera = _dict_or_empty(scene_card.get("camera"))
     product_context = compact_product_context_for_gpt55(product_analysis, garment_lock)
     payload = {

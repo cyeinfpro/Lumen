@@ -9,6 +9,7 @@ from ...domain.apparel_scene_fallbacks import (
     clean_text,
     coerce_string_list,
 )
+from .contracts import FallbackPlanningRequest
 
 SceneCardsBuilder = Callable[..., list[dict[str, Any]]]
 PlanningResultBuilder = Callable[..., dict[str, Any]]
@@ -16,32 +17,22 @@ PlanningResultBuilder = Callable[..., dict[str, Any]]
 
 def rules_fallback_planning(
     *,
-    product_analysis: dict[str, Any],
-    template: str,
-    scene_environment: str,
-    shot_picks: list[tuple[str, dict[str, Any]]],
-    aspect_ratio: str,
-    user_prompt: str,
-    accessory_plan: dict[str, Any],
-    allow_pet: bool,
-    continuity_anchor: str,
-    scene_strategy: str,
-    scene_variety: str,
+    request: FallbackPlanningRequest,
     fallback_scene_cards: SceneCardsBuilder,
     fallback_result: PlanningResultBuilder,
 ) -> dict[str, Any]:
     cards = fallback_scene_cards(
-        product_analysis=product_analysis,
-        template=template,
-        scene_environment=scene_environment,
-        shot_picks=shot_picks,
-        aspect_ratio=aspect_ratio,
-        user_prompt=user_prompt,
-        accessory_plan=accessory_plan,
-        allow_pet=allow_pet,
-        continuity_anchor=continuity_anchor,
-        scene_strategy=scene_strategy,
-        scene_variety=scene_variety,
+        product_analysis=request.product_analysis,
+        template=request.template,
+        scene_environment=request.scene_environment,
+        shot_picks=request.shot_picks,
+        aspect_ratio=request.aspect_ratio,
+        user_prompt=request.user_prompt,
+        accessory_plan=request.accessory_plan,
+        allow_pet=request.allow_pet,
+        continuity_anchor=request.continuity_anchor,
+        scene_strategy=request.scene_strategy,
+        scene_variety=request.scene_variety,
     )
     return fallback_result(cards, reason="rules_fallback_requested")
 
