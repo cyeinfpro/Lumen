@@ -18,12 +18,14 @@ DOC = ROOT / "docs" / "docker-full-stack-cutover-plan.md"
 COMMIT = "b" * 40
 SELF_UPDATE_UNIT = (
     "lib.sh",
+    "lib/system.sh",
     "lib/environment.sh",
     "lib/step_protocol.sh",
     "lib/runtime.sh",
     "lib/locking.sh",
     "lib/container_release.sh",
     "lib/release_layout.sh",
+    "lib/self_update.sh",
     "release_manifest_guard.py",
     "update_runner.py",
     "restore_runner.py",

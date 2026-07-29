@@ -170,16 +170,18 @@ def test_operations_scripts_parse_with_zsh_n() -> None:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_lib_facade_loads_structured_modules_and_stays_below_1500_lines() -> None:
+def test_lib_facade_loads_structured_modules_and_stays_below_600_lines() -> None:
     facade = LIB.read_text(encoding="utf-8")
 
-    assert len(facade.splitlines()) < 1500
+    assert len(facade.splitlines()) <= 600
     assert {
         "container_release.sh",
         "environment.sh",
         "locking.sh",
         "runtime.sh",
+        "self_update.sh",
         "step_protocol.sh",
+        "system.sh",
     } <= {
         path.name for path in LIB_MODULES
     }
@@ -188,6 +190,8 @@ def test_lib_facade_loads_structured_modules_and_stays_below_1500_lines() -> Non
     assert "lib/runtime.sh" in facade
     assert "lib/locking.sh" in facade
     assert "lib/container_release.sh" in facade
+    assert "lib/self_update.sh" in facade
+    assert "lib/system.sh" in facade
     assert '. "${_LUMEN_LIB_SCRIPTS_DIR}/${_LUMEN_LIB_MODULE}"' in facade
 
 
@@ -232,6 +236,7 @@ def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
     fakebin.mkdir()
     files = {
         "lib.sh": "#!/usr/bin/env bash\nREMOTE_FACADE=1\n",
+        "lib/system.sh": "#!/usr/bin/env bash\nREMOTE_SYSTEM=1\n",
         "lib/environment.sh": "#!/usr/bin/env bash\nREMOTE_ENVIRONMENT=1\n",
         "lib/step_protocol.sh": "#!/usr/bin/env bash\nREMOTE_STEP_PROTOCOL=1\n",
         "lib/runtime.sh": "#!/usr/bin/env bash\nREMOTE_RUNTIME=1\n",
@@ -240,6 +245,11 @@ def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
             "#!/usr/bin/env bash\nREMOTE_CONTAINER_RELEASE=1\n"
         ),
         "lib/release_layout.sh": ("#!/usr/bin/env bash\nREMOTE_RELEASE_LAYOUT=1\n"),
+        "lib/self_update.sh": (
+            (ROOT / "scripts" / "lib" / "self_update.sh").read_text(
+                encoding="utf-8"
+            )
+        ),
         "release_manifest_guard.py": (
             "#!/usr/bin/env python3\nREMOTE_RELEASE_GUARD = 1\n"
         ),
@@ -303,8 +313,10 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         assert relative in result.stdout
     coverage = (target / ".lumen-self-update.files").read_text(encoding="utf-8")
     for helper in (
+        "lib/system.sh",
         "lib/environment.sh",
         "lib/step_protocol.sh",
+        "lib/self_update.sh",
         "release_manifest_guard.py",
         "update_runner.py",
         "restore_runner.py",
