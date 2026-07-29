@@ -2,23 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import math
-import random
-import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Annotated, Any
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Image, Video, new_uuid7
+from lumen_core.models import new_uuid7
 from lumen_core.schemas import (
     VideoAssetCapabilitiesOut,
     VideoAssetCreateAcceptedOut,
@@ -33,28 +24,16 @@ from lumen_core.schemas import (
     VideoAssetQuotaUsageOut,
     VideoAssetUpdateIn,
 )
-from lumen_core.url_security import is_private_host
-from lumen_core.video_providers import (
-    VideoProviderDefinition,
-    select_video_provider,
-    video_provider_binding_fingerprint,
-)
+from lumen_core.video_providers import VideoProviderDefinition
 from lumen_core.volcano_assets import (
-    VOLCANO_ASSET_CREATE_QPM,
-    VOLCANO_ASSET_CREATE_WINDOW_SECONDS,
-    VOLCANO_ASSET_OPERATION_TTL_SECONDS,
     VolcanoAssetCreateRateLimited,
     VolcanoAssetQuotaKey,
-    VolcanoAssetRedisUnavailable,
     acquire_volcano_create_rate_limit,
     compare_and_set_volcano_asset_operation,
-    normalize_asset,
-    normalize_asset_group,
     normalize_asset_group_list,
     normalize_asset_list,
     normalize_volcano_asset_name,
     release_volcano_create_rate_limit,
-    volcano_asset_operation_key,
     volcano_asset_quota_key,
 )
 
@@ -88,26 +67,46 @@ from ._volcano_asset_retry import (
     retry_failed_operation,
 )
 from .videos import video_provider_state
+from .volcano_assets_parts import operations as _operations
+from .volcano_assets_parts import routes as _route_queries
+from .volcano_assets_parts import serialization as _serialization
+from .volcano_assets_parts import services as _services
+from .volcano_assets_parts import validation as _validation
 
 
 router = APIRouter(prefix="/video-assets", tags=["video-assets"])
 logger = logging.getLogger(__name__)
 
-_AIGC_GROUP_TYPE = "AIGC"
-_OPERATION_JOB_NAME = "process_volcano_asset_operation"
-_OPERATION_ACTIONS = frozenset(
-    {
-        "create_group",
-        "update_group",
-        "delete_group",
-        "create_asset",
-        "update_asset",
-        "delete_asset",
-    }
-)
-_REDIS_RETRY_ATTEMPTS = 3
-_REDIS_RETRY_BASE_DELAY_SECONDS = 0.02
+_AIGC_GROUP_TYPE = _validation.AIGC_GROUP_TYPE
+_OPERATION_JOB_NAME = _operations.OPERATION_JOB_NAME
+_OPERATION_ACTIONS = _serialization.OPERATION_ACTIONS
+_REDIS_RETRY_ATTEMPTS = _operations.REDIS_RETRY_ATTEMPTS
+_REDIS_RETRY_BASE_DELAY_SECONDS = _operations.REDIS_RETRY_BASE_DELAY_SECONDS
 _MEMBER_LIST_PAGE_SIZE = 100
+VOLCANO_ASSET_CREATE_QPM = _operations.VOLCANO_ASSET_CREATE_QPM
+VOLCANO_ASSET_CREATE_WINDOW_SECONDS = _operations.VOLCANO_ASSET_CREATE_WINDOW_SECONDS
+
+
+def _query_route_dependencies() -> _route_queries.QueryRouteDependencies:
+    return _route_queries.QueryRouteDependencies(
+        provider_state=_provider_state,
+        public_base_url=_public_base_url,
+        require_provider=_require_provider,
+        project_quota_usage=_project_quota_usage,
+        client_factory=VolcanoAssetClient,
+        normalize_assets=normalize_asset_list,
+        normalize_groups=normalize_asset_group_list,
+        is_admin=_is_admin,
+        owned_resource_receipts=_owned_resource_receipts,
+        member_group_ids=_member_group_ids,
+        group_list_payload=_group_list_payload,
+        member_visible_page=_member_visible_page,
+        require_group_shape=_require_group_shape,
+        member_asset_listing=_member_asset_listing,
+        admin_asset_listing=_admin_asset_listing,
+        require_asset_shape=_require_asset_shape,
+        member_list_page_size=_MEMBER_LIST_PAGE_SIZE,
+    )
 
 
 def _http(
@@ -118,13 +117,12 @@ def _http(
     headers: dict[str, str] | None = None,
     **details: Any,
 ) -> HTTPException:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if details:
-        error["details"] = details
-    return HTTPException(
-        status_code=status_code,
-        detail={"error": error},
+    return _validation.http_error(
+        code,
+        message,
+        status_code,
         headers=headers,
+        **details,
     )
 
 
@@ -134,20 +132,11 @@ def _capability(
     model: str,
     errors: list[str] | None = None,
 ) -> tuple[VideoProviderDefinition | None, str | None]:
-    if errors:
-        return None, "video_provider_config_invalid"
-    provider = select_video_provider(
+    return _validation.capability(
         providers,
         model=model,
-        action="reference",
+        errors=errors,
     )
-    if provider is None:
-        return None, "reference_provider_missing"
-    if provider.kind != "volcano":
-        return provider, "reference_provider_not_official_volcano"
-    if not provider.asset_management_ready:
-        return provider, "volcano_asset_credentials_missing"
-    return provider, None
 
 
 async def _provider_state(
@@ -155,8 +144,12 @@ async def _provider_state(
     *,
     model: str,
 ) -> tuple[VideoProviderDefinition | None, str | None]:
-    providers, errors = await video_provider_state(db)
-    return _capability(providers, model=model, errors=errors)
+    return await _services.provider_state(
+        db,
+        model=model,
+        load_provider_state=video_provider_state,
+        capability=_capability,
+    )
 
 
 async def _require_provider(
@@ -164,38 +157,12 @@ async def _require_provider(
     *,
     model: str,
 ) -> VideoProviderDefinition:
-    provider, reason = await _provider_state(db, model=model)
-    if reason == "video_provider_config_invalid":
-        raise _http(
-            "video_provider_config_invalid",
-            "video provider configuration is invalid",
-            503,
-        )
-    if reason == "reference_provider_missing":
-        raise _http(
-            "video_asset_provider_missing",
-            "no enabled video provider supports reference assets for this model",
-            503,
-        )
-    if reason == "reference_provider_not_official_volcano":
-        raise _http(
-            "video_asset_provider_unsupported",
-            "the selected reference provider does not support Volcano assets",
-            409,
-        )
-    if reason == "volcano_asset_credentials_missing":
-        raise _http(
-            "volcano_asset_credentials_missing",
-            "the selected Volcano provider is missing asset credentials",
-            503,
-        )
-    if provider is None:
-        raise _http(
-            "video_asset_provider_missing",
-            "no enabled video provider supports reference assets for this model",
-            503,
-        )
-    return provider
+    return await _services.require_provider(
+        db,
+        model=model,
+        get_provider_state=_provider_state,
+        http_error=_http,
+    )
 
 
 async def _resource_owner_user_id(
@@ -214,7 +181,7 @@ async def _resource_owner_user_id(
 
 
 def _is_admin(user: Any) -> bool:
-    return getattr(user, "role", "") == "admin"
+    return _validation.is_admin(user)
 
 
 async def _owned_resource_receipts(
@@ -240,64 +207,30 @@ async def _require_resource_owner(
     resource_type: str,
     resource_id: str,
 ) -> None:
-    if _is_admin(user):
-        return
-    owner_user_id = await _resource_owner_user_id(
+    await _services.require_resource_owner(
         db,
+        user=user,
         provider=provider,
         resource_type=resource_type,
         resource_id=resource_id,
+        is_admin=_is_admin,
+        resource_owner_user_id=_resource_owner_user_id,
+        http_error=_http,
     )
-    if owner_user_id != str(user.id):
-        raise _http(
-            "video_asset_forbidden",
-            "only the resource owner or an administrator may access this resource",
-            403,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
 
 
 def _require_group_shape(
     group: dict[str, Any],
     provider: VideoProviderDefinition,
 ) -> None:
-    if not group.get("id"):
-        raise _http(
-            "volcano_asset_invalid_response",
-            "Volcano asset service returned a group without an id",
-            502,
-        )
-    if str(group.get("group_type") or "").upper() != _AIGC_GROUP_TYPE:
-        raise _http(
-            "volcano_asset_scope_mismatch",
-            "the asset group is outside the AIGC scope",
-            403,
-        )
-    if group.get("project_name") != provider.project_name:
-        raise _http(
-            "volcano_asset_scope_mismatch",
-            "the asset group is outside the configured project",
-            403,
-        )
+    _validation.require_group_shape(group, provider, http_error=_http)
 
 
 def _require_asset_shape(
     asset: dict[str, Any],
     provider: VideoProviderDefinition,
 ) -> None:
-    if not asset.get("id") or not asset.get("group_id"):
-        raise _http(
-            "volcano_asset_invalid_response",
-            "Volcano asset service returned an incomplete asset",
-            502,
-        )
-    if asset.get("project_name") != provider.project_name:
-        raise _http(
-            "volcano_asset_scope_mismatch",
-            "the asset is outside the configured project",
-            403,
-        )
+    _validation.require_asset_shape(asset, provider, http_error=_http)
 
 
 async def _get_group(
@@ -305,23 +238,12 @@ async def _get_group(
     provider: VideoProviderDefinition,
     group_id: str,
 ) -> dict[str, Any]:
-    raw = await client.request(
-        "GetAssetGroup",
-        {
-            "Id": group_id,
-            "ProjectName": provider.project_name,
-        },
+    return await _services.get_group(
+        client,
+        provider,
+        group_id,
+        require_group_shape=_require_group_shape,
     )
-    group = normalize_asset_group(
-        raw,
-        project_name=provider.project_name,
-        fallback={
-            "id": group_id,
-            "project_name": provider.project_name,
-        },
-    )
-    _require_group_shape(group, provider)
-    return group
 
 
 async def _get_asset(
@@ -329,59 +251,30 @@ async def _get_asset(
     provider: VideoProviderDefinition,
     asset_id: str,
 ) -> dict[str, Any]:
-    raw = await client.request(
-        "GetAsset",
-        {
-            "Id": asset_id,
-            "ProjectName": provider.project_name,
-        },
+    return await _services.get_asset(
+        client,
+        provider,
+        asset_id,
+        require_asset_shape=_require_asset_shape,
+        get_group=_get_group,
     )
-    asset = normalize_asset(
-        raw,
-        project_name=provider.project_name,
-        fallback={
-            "id": asset_id,
-            "project_name": provider.project_name,
-        },
-    )
-    _require_asset_shape(asset, provider)
-    await _get_group(client, provider, str(asset["group_id"]))
-    return asset
 
 
 def _validate_public_reference_url(url: str) -> str:
-    parts = urlsplit(url)
-    if (
-        parts.scheme.lower() != "https"
-        or not parts.hostname
-        or parts.username
-        or parts.password
-        or is_private_host(parts.hostname)
-    ):
-        raise _http(
-            "video_asset_public_url_invalid",
-            "a public HTTPS URL is required for Volcano asset ingestion",
-            503,
-        )
-    return url
+    return _validation.validate_public_reference_url(url, http_error=_http)
 
 
 async def _public_base_url(request: Request, db: AsyncSession) -> str:
-    try:
-        public_base_url = await resolve_public_base_url(request, db)
-    except Exception as exc:  # noqa: BLE001
-        raise _http(
-            "video_asset_public_url_missing",
-            "PUBLIC_BASE_URL or site.public_base_url is required for asset ingestion",
-            503,
-        ) from exc
-    return _validate_public_reference_url(public_base_url)
+    return await _services.public_base_url(
+        request,
+        db,
+        resolve_public_base_url=resolve_public_base_url,
+        validate_public_reference_url=_validate_public_reference_url,
+        http_error=_http,
+    )
 
 
-@dataclass(frozen=True)
-class _LocalAssetSource:
-    asset_type: str
-    local_id: str
+_LocalAssetSource = _services.LocalAssetSource
 
 
 async def _resolve_local_asset_source(
@@ -391,45 +284,12 @@ async def _resolve_local_asset_source(
     user_id: str,
     db: AsyncSession,
 ) -> _LocalAssetSource:
-    if body.image_id is not None:
-        image = (
-            await db.execute(
-                select(Image).where(
-                    Image.id == body.image_id,
-                    Image.user_id == user_id,
-                    Image.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        if image is None:
-            raise _http(
-                "video_asset_image_not_found",
-                "asset image was not found",
-                404,
-            )
-        return _LocalAssetSource(
-            asset_type="Image",
-            local_id=image.id,
-        )
-
-    video = (
-        await db.execute(
-            select(Video).where(
-                Video.id == body.video_id,
-                Video.user_id == user_id,
-                Video.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if video is None:
-        raise _http(
-            "video_asset_video_not_found",
-            "asset video was not found",
-            404,
-        )
-    return _LocalAssetSource(
-        asset_type="Video",
-        local_id=video.id,
+    del request
+    return await _services.resolve_local_asset_source(
+        body=body,
+        user_id=user_id,
+        db=db,
+        http_error=_http,
     )
 
 
@@ -441,16 +301,16 @@ async def _audit_write(
     event_type: str,
     details: dict[str, Any],
 ) -> None:
-    await write_audit(
-        db,
+    await _services.audit_write(
+        db=db,
+        request=request,
+        user=user,
         event_type=event_type,
-        user_id=user.id,
-        actor_email_hash=hash_email(user.email),
-        actor_ip_hash=request_ip_hash(request),
         details=details,
-        autocommit=False,
+        write_audit=write_audit,
+        hash_email=hash_email,
+        request_ip_hash=request_ip_hash,
     )
-    await db.commit()
 
 
 async def _audit_write_best_effort(
@@ -461,144 +321,61 @@ async def _audit_write_best_effort(
     event_type: str,
     details: dict[str, Any],
 ) -> None:
-    try:
-        await _audit_write(
-            db=db,
-            request=request,
-            user=user,
-            event_type=event_type,
-            details=details,
-        )
-    except Exception:  # noqa: BLE001
-        logger.error(
-            "video_asset.audit_write_failed event_type=%s",
-            event_type,
-            exc_info=True,
-        )
+    await _services.audit_write_best_effort(
+        db=db,
+        request=request,
+        user=user,
+        event_type=event_type,
+        details=details,
+        audit_write=_audit_write,
+        logger=logger,
+    )
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _serialization.utc_iso()
 
 
 async def _retry_redis_call(call: Callable[[], Awaitable[Any]]) -> Any:
-    last_error: Exception | None = None
-    for attempt in range(_REDIS_RETRY_ATTEMPTS):
-        try:
-            return await call()
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if attempt + 1 >= _REDIS_RETRY_ATTEMPTS:
-                break
-            delay = _REDIS_RETRY_BASE_DELAY_SECONDS * (2**attempt)
-            await asyncio.sleep(delay + random.uniform(0, delay))
-    if last_error is None:  # pragma: no cover - defensive invariant
-        raise RuntimeError("Redis operation failed")
-    raise VolcanoAssetRedisUnavailable(
-        f"Volcano asset Redis operation failed ({type(last_error).__name__})"
-    ) from None
+    return await _operations.retry_redis_call(call)
 
 
 async def _redis_get_operation(
     redis: Any,
     operation_id: str,
 ) -> dict[str, Any] | None:
-    raw = await _retry_redis_call(
-        lambda: redis.get(volcano_asset_operation_key(operation_id))
+    return await _operations.redis_get_operation(
+        redis,
+        operation_id,
+        retry_call=_retry_redis_call,
+        logger=logger,
     )
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        logger.error(
-            "video_asset.operation_invalid",
-        )
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 async def _redis_set_operation(redis: Any, operation: dict[str, Any]) -> None:
-    await _retry_redis_call(
-        lambda: redis.set(
-            volcano_asset_operation_key(str(operation["id"])),
-            json.dumps(
-                operation,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            ex=VOLCANO_ASSET_OPERATION_TTL_SECONDS,
-        )
+    await _operations.redis_set_operation(
+        redis,
+        operation,
+        retry_call=_retry_redis_call,
     )
 
 
 def _operation_quota_key(operation: dict[str, Any]) -> VolcanoAssetQuotaKey:
-    return VolcanoAssetQuotaKey(
-        provider_name=str(operation.get("provider_name") or ""),
-        project_name=str(operation.get("project_name") or ""),
-        region=str(operation.get("region") or ""),
-    )
+    return _serialization.operation_quota_key(operation)
 
 
 def _operation_out(operation: dict[str, Any]) -> VideoAssetOperationOut:
-    action = str(operation.get("action") or "")
-    if action not in _OPERATION_ACTIONS:
-        raise _http(
-            "video_asset_operation_state_invalid",
-            "video asset operation state is invalid",
-            503,
-        )
-    return VideoAssetOperationOut(
-        id=str(operation["id"]),
-        action=action,
-        status=str(operation.get("status") or "queued"),
-        progress_stage=str(operation.get("progress_stage") or "queued"),
-        attempt=max(1, int(operation.get("attempt") or 1)),
-        delivery_generation=max(
-            0,
-            int(operation.get("delivery_generation") or 0),
-        ),
-        retryable=bool(operation.get("retryable")),
-        retry_after_seconds=operation.get("retry_after_seconds"),
-        result=operation.get("result"),
-        error=operation.get("error"),
-        created_at=str(operation.get("created_at") or _utc_iso()),
-        updated_at=str(operation.get("updated_at") or _utc_iso()),
-        completed_at=operation.get("completed_at"),
+    return _serialization.operation_out(
+        operation,
+        http_error=_http,
+        now_iso=_utc_iso,
     )
 
 
 def _operation_asset_response(
     operation: dict[str, Any],
 ) -> VideoAssetCreateAcceptedOut:
-    result = operation.get("result")
-    if isinstance(result, dict):
-        asset = VideoAssetOut(**result)
-    else:
-        failed = str(operation.get("status") or "") == "failed"
-        error = operation.get("error")
-        error = error if isinstance(error, dict) else {}
-        asset = VideoAssetOut(
-            id=str(operation["id"]),
-            group_id=str(operation.get("group_id") or ""),
-            name=str(operation.get("name") or ""),
-            asset_type=str(operation.get("asset_type") or ""),
-            status="Failed" if failed else "Processing",
-            url=None,
-            project_name=str(operation.get("project_name") or ""),
-            error_code=str(error.get("code") or "") or None,
-            error_message=str(error.get("message") or "") or None,
-        )
-    return VideoAssetCreateAcceptedOut(
-        **asset.model_dump(),
-        operation_id=str(operation["id"]),
-        operation_status=str(operation.get("status") or "queued"),
-        progress_stage=str(operation.get("progress_stage") or "queued"),
-        retryable=bool(operation.get("retryable")),
-        retry_after_seconds=operation.get("retry_after_seconds"),
-    )
+    return _serialization.operation_asset_response(operation)
 
 
 async def _owned_operation(
@@ -607,43 +384,21 @@ async def _owned_operation(
     user_id: str,
     redis: Any,
 ) -> dict[str, Any]:
-    try:
-        operation = await _redis_get_operation(redis, operation_id)
-    except Exception as exc:  # noqa: BLE001
-        raise _http(
-            "video_asset_queue_unavailable",
-            "video asset operation queue is unavailable",
-            503,
-        ) from exc
-    if operation is None or str(operation.get("user_id") or "") != str(user_id):
-        raise _http(
-            "video_asset_operation_not_found",
-            "video asset operation was not found",
-            404,
-        )
-    return operation
+    return await _operations.owned_operation(
+        operation_id=operation_id,
+        user_id=user_id,
+        redis=redis,
+        redis_get_operation=_redis_get_operation,
+        http_error=_http,
+    )
 
 
 async def _enqueue_operation(operation: dict[str, Any]) -> None:
-    attempt = max(1, int(operation.get("attempt") or 1))
-    delivery_generation = max(
-        0,
-        int(operation.get("delivery_generation") or 0),
+    await _operations.enqueue_operation(
+        operation,
+        get_arq_pool=get_arq_pool,
+        retry_call=_retry_redis_call,
     )
-
-    async def enqueue() -> Any:
-        pool = await get_arq_pool()
-        return await pool.enqueue_job(
-            _OPERATION_JOB_NAME,
-            str(operation["id"]),
-            attempt,
-            delivery_generation,
-            _job_id=(
-                f"volcano-asset:{operation['id']}:{attempt}:{delivery_generation}"
-            ),
-        )
-
-    await _retry_redis_call(enqueue)
 
 
 async def _release_admission_slot(
@@ -651,81 +406,42 @@ async def _release_admission_slot(
     quota_key: VolcanoAssetQuotaKey,
     member: str,
 ) -> None:
-    try:
-        await release_volcano_create_rate_limit(
-            redis,
-            quota_key,
-            bucket="admission",
-            operation_id=member,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "video_asset.admission_release_failed",
-            exc_info=True,
-        )
+    await _operations.release_admission_slot(
+        redis,
+        quota_key,
+        member,
+        release_rate_limit=release_volcano_create_rate_limit,
+        logger=logger,
+    )
 
 
 async def _mark_enqueue_failed(
     redis: Any,
     operation: dict[str, Any],
 ) -> dict[str, Any]:
-    failed = {
-        **operation,
-        "status": "failed",
-        "progress_stage": "enqueue_failed",
-        "retryable": True,
-        "retry_after_seconds": 1,
-        "updated_at": _utc_iso(),
-        "completed_at": _utc_iso(),
-        "result": None,
-        "error": {
-            "code": "video_asset_queue_unavailable",
-            "message": "video asset operation queue is unavailable",
-            "retryable": True,
-            "retry_after_seconds": 1,
-        },
-    }
-    swapped, current = await compare_and_set_volcano_asset_operation(
+    return await _operations.mark_enqueue_failed(
         redis,
-        str(operation["id"]),
-        owner_user_id=str(operation.get("user_id") or ""),
-        expected_status=str(operation.get("status") or ""),
-        expected_attempt=max(1, int(operation.get("attempt") or 1)),
-        replacement=failed,
-        expected_progress_stage=str(operation.get("progress_stage") or ""),
+        operation,
+        compare_and_set=compare_and_set_volcano_asset_operation,
+        now_iso=_utc_iso,
     )
-    return failed if swapped else current or operation
 
 
 def _same_operation_scope(
     left: dict[str, Any],
     right: dict[str, Any],
 ) -> bool:
-    return all(
-        str(left.get(key) or "") == str(right.get(key) or "")
-        for key in (
-            "id",
-            "action",
-            "user_id",
-            "model",
-            "provider_name",
-            "provider_binding",
-            "project_name",
-            "region",
-        )
-    )
+    return _serialization.same_operation_scope(left, right)
 
 
 def _same_operation_intent(
     left: dict[str, Any],
     right: dict[str, Any],
 ) -> bool:
-    return (
-        _same_operation_scope(left, right)
-        and left.get("target_id") == right.get("target_id")
-        and left.get("fields") == right.get("fields")
-        and str(left.get("public_base_url") or "")
-        == str(right.get("public_base_url") or "")
+    return _serialization.same_operation_intent(
+        left,
+        right,
+        same_scope=_same_operation_scope,
     )
 
 
@@ -741,157 +457,45 @@ async def _queue_operation(
     audit_details: dict[str, Any],
     operation_id: str | None = None,
 ) -> VideoAssetOperationOut:
-    operation_id = operation_id or new_uuid7()
-    now = _utc_iso()
-    operation: dict[str, Any] = {
-        "id": operation_id,
-        "action": action,
-        "status": "queued",
-        "progress_stage": "queued",
-        "attempt": 1,
-        "delivery_generation": 0,
-        "retryable": False,
-        "retry_after_seconds": None,
-        "user_id": str(user.id),
-        "actor_email_hash": hash_email(user.email),
-        "actor_ip_hash": request_ip_hash(request),
-        "model": model,
-        "provider_name": provider.name,
-        "provider_binding": video_provider_binding_fingerprint(provider),
-        "project_name": provider.project_name,
-        "region": provider.region,
-        **operation_fields,
-        "created_at": now,
-        "updated_at": now,
-        "completed_at": None,
-        "result": None,
-        "error": None,
-    }
-    redis = get_redis()
-    quota_key: VolcanoAssetQuotaKey | None = None
-    admission_member: str | None = None
-    if action == "create_asset":
-        quota_key = volcano_asset_quota_key(provider)
-        admission_member = operation_id
-        try:
-            await acquire_volcano_create_rate_limit(
-                redis,
-                quota_key,
-                bucket="admission",
-                operation_id=admission_member,
-                now_ms=int(time.time() * 1000),
-            )
-        except VolcanoAssetCreateRateLimited as exc:
-            raise _rate_limit_http(exc) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise _http(
-                "video_asset_queue_unavailable",
-                "video asset operation queue is unavailable",
-                503,
-            ) from exc
-
-    try:
-        await _redis_set_operation(redis, operation)
-    except Exception as exc:  # noqa: BLE001
-        try:
-            stored = await _redis_get_operation(redis, operation_id)
-        except Exception:  # noqa: BLE001
-            stored = None
-        if (
-            stored is None
-            or not _same_operation_intent(stored, operation)
-            or stored.get("status") != "queued"
-            or max(1, int(stored.get("attempt") or 1)) != 1
-        ):
-            if quota_key is not None and admission_member is not None:
-                await _release_admission_slot(
-                    redis,
-                    quota_key,
-                    admission_member,
-                )
-            raise _http(
-                "video_asset_queue_unavailable",
-                "video asset operation queue is unavailable",
-                503,
-            ) from exc
-        operation = stored
-
-    try:
-        await _enqueue_operation(operation)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "video_asset.enqueue_failed operation_id=%s action=%s",
-            operation_id,
-            action,
-            exc_info=True,
-        )
-        try:
-            operation = await _mark_enqueue_failed(redis, operation)
-        except Exception:  # noqa: BLE001
-            logger.error(
-                "video_asset.enqueue_state_failed operation_id=%s action=%s",
-                operation_id,
-                action,
-                exc_info=True,
-            )
-        if quota_key is not None and admission_member is not None:
-            await _release_admission_slot(
-                redis,
-                quota_key,
-                admission_member,
-            )
-
-    await _audit_write_best_effort(
-        db=db,
+    return await _operations.queue_operation(
+        action=action,
         request=request,
         user=user,
-        event_type=(
-            f"video_asset_operation.{action}.queued"
-            if operation.get("status") != "failed"
-            else f"video_asset_operation.{action}.enqueue_failed"
+        db=db,
+        model=model,
+        provider=provider,
+        operation_fields=operation_fields,
+        audit_details=audit_details,
+        operation_id=operation_id,
+        deps=_operations.QueueOperationDependencies(
+            new_id=new_uuid7,
+            now_iso=_utc_iso,
+            get_redis=get_redis,
+            hash_email=hash_email,
+            request_ip_hash=request_ip_hash,
+            acquire_rate_limit=acquire_volcano_create_rate_limit,
+            quota_key=volcano_asset_quota_key,
+            redis_set_operation=_redis_set_operation,
+            redis_get_operation=_redis_get_operation,
+            same_operation_intent=_same_operation_intent,
+            release_admission_slot=_release_admission_slot,
+            enqueue_operation=_enqueue_operation,
+            mark_enqueue_failed=_mark_enqueue_failed,
+            audit_write_best_effort=_audit_write_best_effort,
+            operation_out=_operation_out,
+            rate_limit_http=_rate_limit_http,
+            http_error=_http,
+            logger=logger,
         ),
-        details={
-            "operation_id": operation_id,
-            "action": action,
-            "target_id": operation.get("target_id"),
-            "field_names": sorted(
-                str(key)
-                for key in (
-                    operation.get("fields")
-                    if isinstance(operation.get("fields"), dict)
-                    else {}
-                )
-            ),
-            "model": model,
-            "provider_name": provider.name,
-            "project_name": provider.project_name,
-            **audit_details,
-        },
     )
-    return _operation_out(operation)
 
 
 def _rate_limit_http(exc: VolcanoAssetCreateRateLimited) -> HTTPException:
-    retry_after_seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
-    return _http(
-        "volcano_asset_create_rate_limited",
-        "CreateAsset is limited to 3 requests per 60 seconds",
-        429,
-        headers={"Retry-After": str(retry_after_seconds)},
-        retry_after_ms=exc.retry_after_ms,
-        retry_after_seconds=retry_after_seconds,
-        limit=VOLCANO_ASSET_CREATE_QPM,
-        window_seconds=VOLCANO_ASSET_CREATE_WINDOW_SECONDS,
-    )
+    return _operations.rate_limit_http(exc, http_error=_http)
 
 
 def _http_error_code(exc: HTTPException) -> str | None:
-    detail = exc.detail if isinstance(exc.detail, dict) else {}
-    error = detail.get("error") if isinstance(detail, dict) else None
-    if not isinstance(error, dict):
-        return None
-    code = error.get("code")
-    return str(code) if code else None
+    return _validation.http_error_code(exc)
 
 
 @router.get("/capabilities", response_model=VideoAssetCapabilitiesOut)
@@ -901,34 +505,11 @@ async def get_capabilities(
     _user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoAssetCapabilitiesOut:
-    provider, reason = await _provider_state(db, model=model)
-    public_base_url: str | None = None
-    if reason is None:
-        try:
-            public_base_url = await _public_base_url(request, db)
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, dict) else {}
-            error = detail.get("error") if isinstance(detail, dict) else None
-            reason = (
-                str(error.get("code"))
-                if isinstance(error, dict) and error.get("code")
-                else "video_asset_public_url_missing"
-            )
-    return VideoAssetCapabilitiesOut(
-        enabled=reason is None,
-        reason=reason,
-        provider_name=provider.name if provider is not None else None,
-        project_name=(
-            provider.project_name
-            if provider is not None and provider.kind == "volcano"
-            else None
-        ),
-        region=(
-            provider.region
-            if provider is not None and provider.kind == "volcano"
-            else None
-        ),
-        public_base_url=public_base_url,
+    return await _route_queries.get_capabilities(
+        model=model,
+        request=request,
+        db=db,
+        deps=_query_route_dependencies(),
     )
 
 
@@ -938,12 +519,10 @@ async def get_usage(
     _user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoAssetQuotaUsageOut:
-    provider = await _require_provider(db, model=model)
-    return await _project_quota_usage(
-        request_page=VolcanoAssetClient(provider).request,
-        normalize_assets=normalize_asset_list,
-        normalize_groups=normalize_asset_group_list,
-        provider=provider,
+    return await _route_queries.get_usage(
+        model=model,
+        db=db,
+        deps=_query_route_dependencies(),
     )
 
 
@@ -959,56 +538,18 @@ async def list_groups(
     sort_by: Annotated[str | None, Query(max_length=64)] = None,
     sort_order: Annotated[str | None, Query(max_length=4)] = None,
 ) -> VideoAssetGroupListOut:
-    provider = await _require_provider(db, model=model)
-    member_receipts: OwnedResourceReceipts | None = None
-    upstream_group_ids = group_ids
-    upstream_page_number = page_number
-    upstream_page_size = page_size
-    if not _is_admin(user):
-        member_receipts = await _owned_resource_receipts(
-            db,
-            user=user,
-            provider=provider,
-            resource_type="group",
-        )
-        upstream_group_ids = _member_group_ids(member_receipts, group_ids)
-        if not upstream_group_ids:
-            return VideoAssetGroupListOut(
-                page_number=page_number,
-                page_size=page_size,
-            )
-        upstream_page_number = 1
-        upstream_page_size = _MEMBER_LIST_PAGE_SIZE
-    raw = await VolcanoAssetClient(provider).request(
-        "ListAssetGroups",
-        _group_list_payload(
-            provider,
-            name=name,
-            group_ids=upstream_group_ids,
-            page_number=upstream_page_number,
-            page_size=upstream_page_size,
-            sort_by=sort_by,
-            sort_order=sort_order,
-        ),
-    )
-    normalized = normalize_asset_group_list(
-        raw,
-        project_name=provider.project_name,
+    return await _route_queries.list_groups(
+        model=model,
+        user=user,
+        db=db,
+        name=name,
+        group_ids=group_ids,
         page_number=page_number,
         page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        deps=_query_route_dependencies(),
     )
-    visible = normalized["items"]
-    if member_receipts is not None:
-        normalized = _member_visible_page(
-            visible,
-            owned_ids=member_receipts.resource_ids,
-            page_number=page_number,
-            page_size=page_size,
-        )
-        visible = normalized["items"]
-    for group in visible:
-        _require_group_shape(group, provider)
-    return VideoAssetGroupListOut(**normalized)
 
 
 @router.post(
@@ -1149,54 +690,20 @@ async def list_assets(
     sort_order: Annotated[str | None, Query(max_length=4)] = None,
     asset_types: Annotated[list[AssetTypeFilter] | None, Query()] = None,
 ) -> VideoAssetListOut:
-    provider = await _require_provider(db, model=model)
-    if not _is_admin(user):
-        member_receipts = await _owned_resource_receipts(
-            db,
-            user=user,
-            provider=provider,
-            resource_type="asset",
-        )
-        if not member_receipts.resource_ids:
-            return VideoAssetListOut(
-                page_number=page_number,
-                page_size=page_size,
-            )
-        normalized = await _member_asset_listing(
-            request_page=VolcanoAssetClient(provider).request,
-            normalize_page=normalize_asset_list,
-            provider=provider,
-            receipts=member_receipts,
-            name=name,
-            requested_group_ids=group_ids,
-            statuses=statuses,
-            asset_types=asset_types,
-            page_number=page_number,
-            page_size=page_size,
-            sort_by=sort_by,
-            sort_order=sort_order,
-        )
-        visible = normalized["items"]
-        for asset in visible:
-            _require_asset_shape(asset, provider)
-        return VideoAssetListOut(**normalized)
-
-    normalized = await _admin_asset_listing(
-        request_page=VolcanoAssetClient(provider).request,
-        normalize_page=normalize_asset_list,
-        provider=provider,
+    return await _route_queries.list_assets(
+        model=model,
+        user=user,
+        db=db,
         name=name,
         group_ids=group_ids,
         statuses=statuses,
-        asset_types=asset_types,
         page_number=page_number,
         page_size=page_size,
         sort_by=sort_by,
         sort_order=sort_order,
+        asset_types=asset_types,
+        deps=_query_route_dependencies(),
     )
-    for asset in normalized["items"]:
-        _require_asset_shape(asset, provider)
-    return VideoAssetListOut(**normalized)
 
 
 @router.get("/assets/{asset_id}", response_model=VideoAssetOut)
