@@ -408,7 +408,16 @@ def test_completion_leaf_modules_do_not_reverse_import_facade() -> None:
                 assert all(name.name != "app.tasks.completion" for name in node.names)
 
 
-def test_completion_facade_stays_strictly_below_3000_lines() -> None:
+def test_completion_default_runtime_parts_have_no_dynamic_parent_coupling() -> None:
+    parts_root = Path(completion.__file__).with_name("default_runtime_parts")
+    for path in parts_root.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert len(source.splitlines()) < 400
+        for forbidden in ("sys.modules", "globals()", "_facade", "_g."):
+            assert forbidden not in source
+
+
+def test_completion_facade_stays_strictly_below_600_lines() -> None:
     source = Path(completion.__file__).read_text(encoding="utf-8")
 
-    assert len(source.splitlines()) < 3000
+    assert len(source.splitlines()) < 600

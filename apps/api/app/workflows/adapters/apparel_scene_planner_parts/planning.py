@@ -15,7 +15,7 @@ from ...domain.apparel_scene_fallbacks import (
     coerce_string_list,
     compact_product_context_for_gpt55,
 )
-from .contracts import SceneProviderSelection
+from .contracts import ScenePlanningRequest, SceneProviderSelection
 
 GPTJsonCall = Callable[..., Awaitable[dict[str, Any]]]
 NormalizeSceneCards = Callable[
@@ -44,25 +44,26 @@ class PlanningDependencies:
 async def plan_scene_cards_with_gpt55(
     db: AsyncSession,
     *,
-    product_analysis: dict[str, Any],
-    garment_lock: dict[str, Any],
-    model_summary: str,
-    template: str,
-    scene_environment: str,
-    shot_picks: list[tuple[str, dict[str, Any]]],
-    aspect_ratio: str,
-    output_count: int,
-    user_prompt: str,
-    accessory_plan: dict[str, Any],
-    scene_strategy: str,
-    scene_variety: str,
-    continuity_anchor: str,
-    allow_pet: bool,
-    allow_background_people: bool,
+    request: ScenePlanningRequest,
     provider_selection: SceneProviderSelection | None,
     reference_images: list[dict[str, str]] | None,
     dependencies: PlanningDependencies,
 ) -> dict[str, Any]:
+    product_analysis = request.product_analysis
+    garment_lock = request.garment_lock
+    model_summary = request.model_summary
+    template = request.template
+    scene_environment = request.scene_environment
+    shot_picks = request.shot_picks
+    aspect_ratio = request.aspect_ratio
+    output_count = request.output_count
+    user_prompt = request.user_prompt
+    accessory_plan = request.accessory_plan
+    scene_strategy = request.scene_strategy
+    scene_variety = request.scene_variety
+    continuity_anchor = request.continuity_anchor
+    allow_pet = request.allow_pet
+    allow_background_people = request.allow_background_people
     payload = {
         "product": compact_product_context_for_gpt55(product_analysis, garment_lock),
         "model": {"summary": model_summary},
