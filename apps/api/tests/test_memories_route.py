@@ -69,6 +69,34 @@ class _ScalarResult:
         return self.values
 
 
+def test_memory_dependency_bundles_resolve_facade_monkeypatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_owned_memory(*_args: Any, **_kwargs: Any) -> Any:
+        return None
+
+    async def fake_owned_scope(*_args: Any, **_kwargs: Any) -> Any:
+        return None
+
+    async def fake_undo_consumed(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    fake_redis = object()
+
+    def fake_get_redis() -> object:
+        return fake_redis
+
+    monkeypatch.setattr(memories, "_owned_memory", fake_owned_memory)
+    monkeypatch.setattr(memories, "_owned_scope", fake_owned_scope)
+    monkeypatch.setattr(memories, "_undo_token_consumed", fake_undo_consumed)
+    monkeypatch.setattr(memories, "get_redis", fake_get_redis)
+
+    assert memories._account_deps().owned_memory is fake_owned_memory  # noqa: SLF001
+    assert memories._scope_deps().owned_scope is fake_owned_scope  # noqa: SLF001
+    assert memories._conversation_deps().get_redis is fake_get_redis  # noqa: SLF001
+    assert memories._undo_deps().undo_token_consumed is fake_undo_consumed  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_undo_memory_write_keeps_token_when_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
