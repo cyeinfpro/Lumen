@@ -1,7 +1,7 @@
 {
   "defects": [
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P0-01",
       "owner": "track-a-worker",
       "paths": [
@@ -13,11 +13,11 @@
         "apps/worker/tests/test_image_job_execution_boundary.py::test_progress_persists_accepted_execution_before_polling"
       ],
       "severity": "P0",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Accepted sidecar jobs can be regenerated and released after poll timeout."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P0-02",
       "owner": "track-a-worker",
       "paths": [
@@ -29,11 +29,11 @@
         "apps/worker/tests/test_image_job_execution_boundary.py::test_billing_never_releases_unknown_or_incurred_sidecar_cost"
       ],
       "severity": "P0",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Succeeded sidecar jobs can be regenerated and released after delivery failure."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-01",
       "owner": "track-a-image-job",
       "paths": [
@@ -46,11 +46,11 @@
         "image-job/tests/test_cancellation_fencing.py::test_delete_terminal_job_is_idempotent"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Image-job cancellation endpoint and typed outcome contract are missing."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-02",
       "owner": "track-a-image-job",
       "paths": [
@@ -61,11 +61,11 @@
         "image-job/tests/test_cancellation_fencing.py::test_active_stale_recovery_uses_token_cas"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Retention can clear queued or running jobs."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-03",
       "owner": "track-a-worker",
       "paths": [
@@ -75,11 +75,11 @@
         "apps/worker/tests/test_image_job_execution_boundary.py::test_sidecar_payload_is_clamped_to_one_upstream_image"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Sidecar requests can generate multiple images while only one is delivered."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-04",
       "owner": "track-b-canvas",
       "paths": [
@@ -90,11 +90,11 @@
         "apps/api/tests/test_canvas_execution_guards.py::test_canvas_video_submission_defers_commit_and_publishes_after_commit"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Canvas video submission used a stale service signature."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-05",
       "owner": "track-c-realtime",
       "paths": [
@@ -104,11 +104,11 @@
         "apps/web/src/features/realtime/model/runtime.test.ts::two tabs both finish local replay snapshots before follower reports open"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Follower tabs can report recovery complete without a local snapshot."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-06",
       "owner": "track-c-realtime",
       "paths": [
@@ -120,11 +120,11 @@
         "apps/web/src/lib/runtimeResilience.test.ts::auth invalidation marks the session unauthorized and invokes cleanup callback"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "auth_invalidated does not revoke the client session and private state."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-07",
       "owner": "track-d-video",
       "paths": [
@@ -135,11 +135,11 @@
         "apps/web/src/app/video/video-feed-scope.test.ts::video feed channels are empty until active items match the current user scope"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Video local state and channels are not scoped by user identity."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-08",
       "owner": "lead-ci",
       "paths": [
@@ -150,11 +150,11 @@
         "tests/test_test_impact.py::test_production_build_and_governance_inputs_require_full_mandatory"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Production build inputs could select an empty PR test plan."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-09",
       "owner": "lead-release",
       "paths": [
@@ -165,11 +165,11 @@
         "tests/test_release_manifest.py::test_alembic_breaking_lint_covers_pr_main_and_release"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Migration lint and release tag main ancestry were bypassable."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-10",
       "owner": "track-e-updater",
       "paths": [
@@ -181,11 +181,11 @@
         "tests/test_update_state_machine.py::test_phase_done_is_after_required_state_and_side_effects"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "Updater committed before final HTTP and compose health proof."
     },
     {
-      "fixed_commit": null,
+      "fixed_commit": "1eb29da2e9b36ccb275171df77b1594b0a92d006",
       "id": "P1-11",
       "owner": "track-e-release",
       "paths": [
@@ -196,7 +196,7 @@
         "tests/test_promote_release_images.py::test_signal_interruption_restores_absent_aliases"
       ],
       "severity": "P1",
-      "status": "fixed_local",
+      "status": "closed",
       "summary": "First stable release of a new major cannot promote absent mutable aliases."
     }
   ],

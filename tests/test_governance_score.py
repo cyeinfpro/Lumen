@@ -38,8 +38,8 @@ def test_current_report_fails_closed_without_dynamic_evidence() -> None:
     assert report["status"] == "not_achieved"
     assert report["hard_gates_passed"] is False
     assert report["checks"]["full_tests"]["passed"] is False
-    assert report["checks"]["known_p0_zero"]["passed"] is False
-    assert report["checks"]["known_p1_zero"]["passed"] is False
+    assert report["checks"]["known_p0_zero"]["passed"] is True
+    assert report["checks"]["known_p1_zero"]["passed"] is True
     assert report["weighted_score"] < 9.0
 
 
@@ -107,4 +107,5 @@ def test_markdown_lists_failed_hard_gates() -> None:
 
     assert "# Lumen Governance Score" in markdown
     assert "Failed Hard Gates" in markdown
-    assert "`known_p0_zero`" in markdown
+    assert "`full_tests`" in markdown
+    assert "`release_proof`" in markdown
