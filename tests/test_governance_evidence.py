@@ -81,3 +81,8 @@ def test_failed_command_is_persisted_as_failed(
     assert passed is False
     assert check["exit_code"] == 17
     assert check["status"] == "failed"
+
+
+def test_release_proof_is_explicitly_post_release_only() -> None:
+    assert "release_proof" in governance_evidence.CHECK_COMMANDS
+    assert "release_proof" not in governance_evidence.DEFAULT_CHECKS

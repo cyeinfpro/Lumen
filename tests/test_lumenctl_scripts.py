@@ -3091,6 +3091,7 @@ def test_lumenctl_facade_loads_versioned_semantic_modules() -> None:
         "compose.sh",
         "nginx.sh",
         "systemd_image_job.sh",
+        "validation.sh",
     }
     for relative in (
         "lumenctl/compose.sh",

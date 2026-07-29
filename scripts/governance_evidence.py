@@ -48,6 +48,10 @@ CHECK_COMMANDS = {
         "uv run pytest -q tests/test_promote_release_images.py "
         "tests/test_release_manifest.py tests/test_update_state_machine.py",
     ),
+    "release_proof": (
+        "uv run python scripts/release_proof.py "
+        "--tag \"v$(cat VERSION)\" --commit \"$(git rev-parse HEAD)\"",
+    ),
     "sidecar_delivery_faults": (
         "uv run pytest -q apps/worker/tests/test_image_job_execution_boundary.py "
         "-k 'succeeded_retry_is_delivery_only or billing_never_releases'",
@@ -83,6 +87,10 @@ CHECK_COMMANDS = {
         "__tests__/chat-hardening.test.mjs",
     ),
 }
+
+DEFAULT_CHECKS = tuple(
+    sorted(name for name in CHECK_COMMANDS if name != "release_proof")
+)
 
 
 def _head_commit(root: Path) -> str:
@@ -170,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in sorted(CHECK_COMMANDS):
             print(f"{name}: {shlex.join(['bash', '-lc', ' && '.join(CHECK_COMMANDS[name])])}")
         return 0
-    names = args.check or sorted(CHECK_COMMANDS)
+    names = args.checks or DEFAULT_CHECKS
     payload, passed = run_checks(names, output=args.output)
     for name in names:
         check = payload["checks"][name]

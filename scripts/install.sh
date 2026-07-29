@@ -1,31 +1,13 @@
 #!/usr/bin/env bash
 # Lumen 一键安装脚本（Docker Compose 全栈版）
-# 用法：  bash scripts/install.sh                  # 打开运维菜单
-#        bash scripts/install.sh --install         # 直接安装（docker compose 全栈）
-#        bash scripts/install.sh --install --build # 用本地 Dockerfile 构建而不是 pull 远程镜像
-#        bash scripts/install.sh --install --image-tag=vX.Y.Z   # 钉死镜像 tag
-#        bash scripts/install.sh --install --data-root=/data    # 自定义 LUMEN_DATA_ROOT
-#        bash scripts/install.sh --install --db-root=/var/lib/lumen-data # 自定义 PG/Redis 根
-#
-# 行为概述：
-#   A. 检查 docker / docker compose v2 / openssl / curl
-#   B. 准备数据目录（PG/Redis 可通过 LUMEN_DB_ROOT 与 storage/backup 分离）
-#   C. 准备 release 布局（${LUMEN_DEPLOY_ROOT:-/opt/lumen}/{releases,shared,current}）
-#   D. 生成或合并 shared/.env（强随机替换 placeholder；symlink release/.env -> shared/.env）
-#   E. 探测 GHCR 镜像可用性，默认 stable/latest 失败不回退 main
-#   F. docker compose pull && 起 PG/Redis -> migrate -> 可选 bootstrap -> api/worker/web (+tgbot)
-#   G. 切 current symlink
-#   H. HTTP + compose 健康检查
-#   I. 安装/刷新一键更新 systemd runner（Linux systemd）
-#   J. systemd 旧服务残留提示（不自动 disable）
-#   K. 打印汇总
-#
-# 重复执行安全（幂等）。失败时清理已起容器（不删数据卷），打印恢复命令。
-# 兼容 LUMEN_NONINTERACTIVE=1：所有 read 跳过，从 LUMEN_ADMIN_EMAIL/LUMEN_ADMIN_PASSWORD env 读。
-
+# 用法：bash scripts/install.sh [--install] [--build] [--image-tag=vX.Y.Z]
+#      [--data-root=/data] [--db-root=/var/lib/lumen-data]
+# 入口负责 bootstrap、参数解析和流程编排；安装职责位于 scripts/install/*.sh。
+# 重复执行安全。失败时清理已启动容器但不删除数据卷。
+# LUMEN_NONINTERACTIVE=1 时从 LUMEN_ADMIN_EMAIL/LUMEN_ADMIN_PASSWORD 读取凭据。
 set -euo pipefail
 
-# `curl | bash` 远程模式下 BASH_SOURCE 是空数组，set -u 会让访问 [0] 报
+# `curl | bash` 下 BASH_SOURCE 可为空，set -u 会让访问 [0] 报
 # unbound variable 噪音；用 :- 兜底，dirname "" 返回 "." 落到 cwd。
 RAW_INSTALL_FROM_STDIN=0
 if [ -z "${BASH_SOURCE[0]:-}" ]; then

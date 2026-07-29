@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import lumen_core.providers as provider_mod
+from lumen_core.providers_parts import proxy_runtime
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     DEFAULT_PROVIDER_PURPOSES,
@@ -418,7 +419,7 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     source_known_hosts = _write_known_hosts(tmp_path)
 
@@ -447,12 +448,18 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
         captured["port"] = port
         return True
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
     monkeypatch.setattr(
-        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+        proxy_runtime.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
     )
-    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41555)
-    monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41555)
+    monkeypatch.setattr(
+        proxy_runtime,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
 
     url = await provider_mod.resolve_provider_proxy_url(
         ProviderProxyDefinition(
@@ -504,7 +511,7 @@ async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     source = Path(_write_known_hosts(tmp_path))
     link = tmp_path / "known_hosts-link"
     try:
@@ -522,12 +529,12 @@ async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
         return _FakeSshProcess()
 
     monkeypatch.setattr(
-        provider_mod.shutil,
+        proxy_runtime.shutil,
         "which",
         lambda name: "/usr/bin/ssh" if name == "ssh" else None,
     )
     monkeypatch.setattr(
-        provider_mod.asyncio,
+        proxy_runtime.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
@@ -550,7 +557,7 @@ async def test_resolve_ssh_proxy_rejects_symlink_known_hosts(
 async def test_resolve_ssh_proxy_rejects_missing_host_key_trust(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     launched = False
 
     def fake_which(name: str) -> str | None:
@@ -564,9 +571,9 @@ async def test_resolve_ssh_proxy_rejects_missing_host_key_trust(
         launched = True
         return _FakeSshProcess()
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
     monkeypatch.setattr(
-        provider_mod.asyncio,
+        proxy_runtime.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
@@ -590,11 +597,11 @@ async def test_resolve_ssh_proxy_rejects_writable_known_hosts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     known_hosts_path = _write_known_hosts(tmp_path)
     os.chmod(known_hosts_path, 0o666)
     monkeypatch.setattr(
-        provider_mod.shutil,
+        proxy_runtime.shutil,
         "which",
         lambda name: "/usr/bin/ssh" if name == "ssh" else None,
     )
@@ -615,7 +622,7 @@ async def test_resolve_ssh_proxy_rejects_writable_known_hosts(
 async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     key_blob = b"synthetic-ed25519-host-key"
     encoded_key = base64.b64encode(key_blob).decode("ascii")
@@ -656,19 +663,19 @@ async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
     async def fake_local_port_accepts(_port: int) -> bool:
         return True
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        provider_mod.asyncio,
+        proxy_runtime.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
     monkeypatch.setattr(
-        provider_mod,
+        proxy_runtime,
         "_local_port_accepts",
         fake_local_port_accepts,
     )
-    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41558)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41558)
 
     url = await provider_mod.resolve_provider_proxy_url(
         ProviderProxyDefinition(
@@ -703,7 +710,7 @@ async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
 async def test_resolve_ssh_proxy_rejects_host_key_fingerprint_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     launched = False
     expected_blob = b"expected-host-key"
     presented_blob = b"attacker-host-key"
@@ -735,10 +742,10 @@ async def test_resolve_ssh_proxy_rejects_host_key_fingerprint_mismatch(
         launched = True
         return _FakeSshProcess()
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        provider_mod.asyncio,
+        proxy_runtime.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
@@ -763,7 +770,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     proc = _FakeSshProcess()
 
@@ -786,15 +793,21 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
     async def fake_sleep(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
     monkeypatch.setattr(
-        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+        proxy_runtime.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
     )
-    monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41556)
-    monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
-    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_READY_CHECKS", 1)
-    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_START_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_runtime.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41556)
+    monkeypatch.setattr(
+        proxy_runtime,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
+    monkeypatch.setattr(proxy_runtime, "_SSH_TUNNEL_READY_CHECKS", 1)
+    monkeypatch.setattr(proxy_runtime, "_SSH_TUNNEL_START_ATTEMPTS", 1)
 
     with pytest.raises(RuntimeError, match="failed to start"):
         await provider_mod.resolve_provider_proxy_url(
@@ -823,11 +836,11 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    provider_mod._SSH_TUNNEL_RUNTIME.clear()
+    proxy_runtime._SSH_TUNNEL_RUNTIME.clear()
     captured: dict[str, object] = {}
     proc = _FakeSshProcess()
     unlink_events: list[tuple[str, int | None, bool]] = []
-    original_unlink = provider_mod._unlink_quietly
+    original_unlink = proxy_runtime._unlink_quietly
 
     def fake_which(name: str) -> str | None:
         if name == "ssh":
@@ -863,15 +876,21 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
             unlink_events.append((label, proc.returncode, os.path.exists(path)))
         original_unlink(path)
 
-    monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
     monkeypatch.setattr(
-        provider_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+        proxy_runtime.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
     )
-    monkeypatch.setattr(provider_mod.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(provider_mod, "_free_local_port", lambda: 41557)
-    monkeypatch.setattr(provider_mod, "_local_port_accepts", fake_local_port_accepts)
-    monkeypatch.setattr(provider_mod, "_unlink_quietly", tracking_unlink)
-    monkeypatch.setattr(provider_mod, "_SSH_TUNNEL_START_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_runtime.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41557)
+    monkeypatch.setattr(
+        proxy_runtime,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
+    monkeypatch.setattr(proxy_runtime, "_unlink_quietly", tracking_unlink)
+    monkeypatch.setattr(proxy_runtime, "_SSH_TUNNEL_START_ATTEMPTS", 1)
 
     with pytest.raises(asyncio.CancelledError):
         await provider_mod.resolve_provider_proxy_url(
