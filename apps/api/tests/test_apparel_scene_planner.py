@@ -8,6 +8,9 @@ import pytest
 
 from app.workflows.adapters import apparel_scene_planner as scene_planner
 from app.workflows.application.runtime_state import WorkflowRuntimeState
+from app.workflows.domain.apparel_scene_planner_exports import (
+    APPAREL_SCENE_PLANNER_EXPORTS,
+)
 from lumen_core.providers import ProviderDefinition
 
 
@@ -17,6 +20,11 @@ def fake_provider(name: str) -> ProviderDefinition:
         base_url="https://upstream.example/v1",
         api_key="sk-test",
     )
+
+
+def test_legacy_export_contract_remains_available() -> None:
+    assert scene_planner.__all__ == APPAREL_SCENE_PLANNER_EXPORTS
+    assert all(hasattr(scene_planner, name) for name in APPAREL_SCENE_PLANNER_EXPORTS)
 
 
 @pytest.mark.asyncio
