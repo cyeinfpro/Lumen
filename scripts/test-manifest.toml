@@ -34,6 +34,7 @@ full_mandatory_paths = [
   "scripts/dead_code_audit.py",
   "scripts/facade_inventory.py",
   "scripts/governance_evidence.py",
+  "scripts/release_proof.py",
   "scripts/governance_score.py",
   "scripts/module_runtime_state_audit.py",
   "scripts/run_test_plan.py",
@@ -44,6 +45,7 @@ full_mandatory_paths = [
   "tests/test_dead_code_audit.py",
   "tests/test_facade_inventory.py",
   "tests/test_governance_evidence.py",
+  "tests/test_release_proof.py",
   "scripts/test_impact.py",
   "uv.lock",
   "**/conftest.py",
@@ -89,6 +91,7 @@ paths = [
   "scripts/dead_code_audit.py",
   "scripts/facade_inventory.py",
   "scripts/governance_evidence.py",
+  "scripts/release_proof.py",
   "tests/test_test_manifest_lint.py",
   "tests/test_test_impact.py",
   "tests/test_run_test_plan.py",
@@ -97,6 +100,7 @@ paths = [
   "tests/test_dead_code_audit.py",
   "tests/test_facade_inventory.py",
   "tests/test_governance_evidence.py",
+  "tests/test_release_proof.py",
   "apps/web/scripts/run-tests.mjs",
   "apps/web/__tests__/run-tests-script.test.mjs",
   "**/conftest.py",
@@ -107,7 +111,7 @@ paths = [
   "scripts/governance_score.py",
 ]
 commands = [
-  "uv run pytest -q tests/test_test_manifest_lint.py tests/test_test_impact.py tests/test_run_test_plan.py tests/test_governance_score.py tests/test_governance_evidence.py tests/test_baseline_monotonic.py tests/test_dead_code_audit.py tests/test_facade_inventory.py",
+  "uv run pytest -q tests/test_test_manifest_lint.py tests/test_test_impact.py tests/test_run_test_plan.py tests/test_governance_score.py tests/test_governance_evidence.py tests/test_release_proof.py tests/test_baseline_monotonic.py tests/test_dead_code_audit.py tests/test_facade_inventory.py",
   "cd apps/web && node --test __tests__/run-tests-script.test.mjs",
 ]
 gates = ["python-ruff", "web-runner-syntax"]
