@@ -8,10 +8,10 @@ from typing import Any
 import httpx
 import pytest
 
+from app.provider_runtime import errors
 from app.upstream_parts import (
     client_lifecycle,
     entrypoints as upstream,
-    errors,
     transport,
 )
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime

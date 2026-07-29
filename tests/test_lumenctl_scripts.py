@@ -17,11 +17,26 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 LUMENCTL = ROOT / "scripts" / "lumenctl.sh"
+LUMENCTL_MODULE_DIR = ROOT / "scripts" / "lumenctl"
+LUMENCTL_MODULES = sorted(LUMENCTL_MODULE_DIR.glob("*.sh"))
 LIB = ROOT / "scripts" / "lib.sh"
 LIB_MODULE_DIR = ROOT / "scripts" / "lib"
 LIB_MODULES = sorted(LIB_MODULE_DIR.glob("*.sh"))
 UPDATE_MODULE_DIR = ROOT / "scripts" / "update"
 UPDATE_MODULES = sorted(UPDATE_MODULE_DIR.rglob("*.sh"))
+INSTALL_MODULE_DIR = ROOT / "scripts" / "install"
+INSTALL_SOURCE_RELATIVE = (
+    "state.sh",
+    "environment.sh",
+    "runtime.sh",
+    "prerequisites.sh",
+    "layout.sh",
+    "services.sh",
+    "operations.sh",
+)
+INSTALL_MODULES = [
+    INSTALL_MODULE_DIR / relative for relative in INSTALL_SOURCE_RELATIVE
+]
 UPDATE_SOURCE_RELATIVE = (
     "bootstrap.sh",
     "common.sh",
@@ -51,7 +66,9 @@ SCRIPT_FILES = [
     LIB,
     *LIB_MODULES,
     LUMENCTL,
+    *LUMENCTL_MODULES,
     ROOT / "scripts" / "install.sh",
+    *INSTALL_MODULES,
     ROOT / "scripts" / "update.sh",
     ROOT / "scripts" / "uninstall.sh",
     ROOT / "scripts" / "backup.sh",
@@ -75,8 +92,25 @@ def update_source_text() -> str:
     )
 
 
+def install_source_text() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (INSTALL, *INSTALL_MODULES)
+    )
+
+
+def lumenctl_source_text() -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (LUMENCTL, *LUMENCTL_MODULES)
+    )
+
+
 def bash_function_source(path: Path, name: str) -> str:
-    text = path.read_text(encoding="utf-8")
+    if path == INSTALL:
+        text = install_source_text()
+    elif path == LUMENCTL:
+        text = lumenctl_source_text()
+    else:
+        text = path.read_text(encoding="utf-8")
     match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
     assert match is not None, f"{name} not found in {path}"
     return match.group(0)
@@ -136,13 +170,21 @@ def test_operations_scripts_parse_with_zsh_n() -> None:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_lib_facade_loads_structured_modules_and_stays_below_2000_lines() -> None:
+def test_lib_facade_loads_structured_modules_and_stays_below_1500_lines() -> None:
     facade = LIB.read_text(encoding="utf-8")
 
-    assert len(facade.splitlines()) < 2000
-    assert {"container_release.sh", "locking.sh", "runtime.sh"} <= {
+    assert len(facade.splitlines()) < 1500
+    assert {
+        "container_release.sh",
+        "environment.sh",
+        "locking.sh",
+        "runtime.sh",
+        "step_protocol.sh",
+    } <= {
         path.name for path in LIB_MODULES
     }
+    assert "lib/environment.sh" in facade
+    assert "lib/step_protocol.sh" in facade
     assert "lib/runtime.sh" in facade
     assert "lib/locking.sh" in facade
     assert "lib/container_release.sh" in facade
@@ -190,6 +232,8 @@ def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
     fakebin.mkdir()
     files = {
         "lib.sh": "#!/usr/bin/env bash\nREMOTE_FACADE=1\n",
+        "lib/environment.sh": "#!/usr/bin/env bash\nREMOTE_ENVIRONMENT=1\n",
+        "lib/step_protocol.sh": "#!/usr/bin/env bash\nREMOTE_STEP_PROTOCOL=1\n",
         "lib/runtime.sh": "#!/usr/bin/env bash\nREMOTE_RUNTIME=1\n",
         "lib/locking.sh": "#!/usr/bin/env bash\nREMOTE_LOCKING=1\n",
         "lib/container_release.sh": (
@@ -259,6 +303,8 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         assert relative in result.stdout
     coverage = (target / ".lumen-self-update.files").read_text(encoding="utf-8")
     for helper in (
+        "lib/environment.sh",
+        "lib/step_protocol.sh",
         "release_manifest_guard.py",
         "update_runner.py",
         "restore_runner.py",
@@ -418,7 +464,7 @@ def test_operations_host_artifact_snapshot_restores_units_and_sbin(
 
 
 def test_install_and_update_transactions_include_host_artifact_snapshots() -> None:
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     runtime = (ROOT / "scripts" / "lib" / "runtime.sh").read_text(encoding="utf-8")
 
@@ -432,7 +478,7 @@ def test_install_and_update_transactions_include_host_artifact_snapshots() -> No
 
 
 def test_image_job_install_copies_package_and_removes_legacy_modules() -> None:
-    text = LUMENCTL.read_text(encoding="utf-8")
+    text = lumenctl_source_text()
 
     assert '"${ROOT}/image-job/app.py" "${app_dir}/app.py"' in text
 
@@ -782,7 +828,7 @@ def test_install_script_uses_docker_compose_full_stack() -> None:
     docker cutover: install.sh 不再启动宿主机 uv/npm 运行时，而是 docker compose 全栈。
     断言 docker compose 流程关键字 + 反断言旧的 systemctl restart / uv sync / npm ci。
     """
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     # Docker compose 全栈关键字
     assert "Docker Compose 全栈版" in text
     assert "docker compose pull" in text
@@ -799,21 +845,33 @@ def test_install_script_uses_docker_compose_full_stack() -> None:
     assert "systemctl restart lumen-web" not in text
 
 
+def test_install_split_keeps_raw_bootstrap_self_contained() -> None:
+    main = INSTALL.read_text(encoding="utf-8")
+
+    bootstrap_guard = main.index('if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then')
+    module_loader = main.index('INSTALL_MODULE_DIR="${SCRIPT_DIR}/install"')
+    assert bootstrap_guard < module_loader
+    assert len(main.splitlines()) < 1000
+    for relative in INSTALL_SOURCE_RELATIVE:
+        assert relative in main
+        assert (INSTALL_MODULE_DIR / relative).is_file()
+
+
 def test_install_bootstrap_defaults_to_menu_not_auto_update() -> None:
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     assert 'args=("menu")' in text
     assert "避免脚本一运行就跳过菜单" in text
     assert 'exec bash "${script_path}" "${args[@]}" </dev/tty' in text
 
 
 def test_install_failure_cleanup_array_length_is_bash_safe() -> None:
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     assert "${#INSTALL_STARTED_SERVICES[@]:-0}" not in text
     assert "${#INSTALL_STARTED_SERVICES[@]}" in text
 
 
 def test_install_pull_failure_fallback_to_main_requires_opt_in() -> None:
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     assert "LUMEN_INSTALL_FALLBACK_MAIN:-0" in text
     assert "回退到 main 后重试一次" in text
     assert 'env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"' in text
@@ -1221,7 +1279,7 @@ esac
 
 
 def test_install_generates_all_required_compose_secrets() -> None:
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     for key in (
         "DB_PASSWORD",
         "REDIS_PASSWORD",
@@ -1269,7 +1327,7 @@ def test_web_port_defaults_to_loopback_and_public_bind_is_explicit_opt_in() -> N
         encoding="utf-8"
     )
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     assert '"${WEB_BIND_HOST:-127.0.0.1}:3000:3000"' in compose
     assert "WEB_BIND_HOST=127.0.0.1" in env_example
     assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' not in compose
@@ -1446,7 +1504,7 @@ def test_backup_rejects_unsafe_max_keep_before_docker_or_deletion(
 def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots() -> (
     None
 ):
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
 
@@ -1469,7 +1527,7 @@ def test_systemd_unit_rendering_uses_ordered_placeholders_for_overlapping_roots(
 
 def test_install_refreshes_update_runner_units_for_admin_button() -> None:
     """Fresh Docker installs must enable the host watcher used by the panel button."""
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
 
@@ -1510,10 +1568,10 @@ def test_install_refreshes_update_runner_units_for_admin_button() -> None:
 
 
 def test_fresh_install_provisions_storage_control_plane_for_container_gid() -> None:
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     migrate = (ROOT / "scripts" / "migrate_to_releases.sh").read_text(encoding="utf-8")
-    lumenctl = LUMENCTL.read_text(encoding="utf-8")
+    lumenctl = lumenctl_source_text()
 
     assert "install_storage_control_plane" in install
     assert "LUMEN_LOCAL_SBIN_DIR%/}/lumen-storage-mount" in install
@@ -1592,7 +1650,7 @@ def test_tgbot_service_points_at_api_via_docker_network() -> None:
 
 def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
@@ -1919,7 +1977,7 @@ exit 0
 
 def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() -> None:
     update = update_source_text()
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
 
     assert update.count("sync_main_fallback_release") >= 3
     assert "fallback 镜像一致" in update
@@ -1930,7 +1988,7 @@ def test_main_fallback_resyncs_release_source_and_skips_failed_tgbot_manifest() 
 
 def test_release_manifest_python_prerequisite_is_consistent() -> None:
     lib = LIB.read_text(encoding="utf-8")
-    install = INSTALL.read_text(encoding="utf-8")
+    install = install_source_text()
     update = update_source_text()
     guard = (ROOT / "scripts" / "release_manifest_guard.py").read_text(encoding="utf-8")
 
@@ -2200,7 +2258,7 @@ def test_container_url_migration_rejects_unclassified_localhost_keys(
 
 
 def test_install_existing_env_container_url_check_defaults_to_dry_run() -> None:
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     assert "LUMEN_ENV_MIGRATE_CONTAINER_URLS:-dry-run" in text
     assert "apply|--apply)" in text
     assert "migrate-env-apply" in text
@@ -3023,6 +3081,60 @@ def test_lumenctl_help_lists_every_documented_command() -> None:
         "restore",
     ):
         assert f"  {command}" in output, f"lumenctl.sh help 缺少子命令：{command}"
+
+
+def test_lumenctl_facade_loads_versioned_semantic_modules() -> None:
+    facade = LUMENCTL.read_text(encoding="utf-8")
+
+    assert len(facade.splitlines()) < 1000
+    assert {path.name for path in LUMENCTL_MODULES} == {
+        "compose.sh",
+        "nginx.sh",
+        "systemd_image_job.sh",
+    }
+    for relative in (
+        "lumenctl/compose.sh",
+        "lumenctl/nginx.sh",
+        "lumenctl/systemd_image_job.sh",
+    ):
+        assert relative in facade
+
+    sync_source = bash_function_source(LUMENCTL, "lumenctl_sync_script_unit")
+    for relative in (
+        "lumenctl.sh",
+        '"${_LUMENCTL_MODULE_FILES[@]}"',
+        "lib.sh",
+        "update.sh",
+    ):
+        assert relative in sync_source
+
+
+def test_lumenctl_lifecycle_fallback_works_without_split_modules(
+    tmp_path: Path,
+) -> None:
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copy2(LUMENCTL, scripts_dir / "lumenctl.sh")
+    shutil.copy2(LIB, scripts_dir / "lib.sh")
+    shutil.copytree(LIB_MODULE_DIR, scripts_dir / "lib")
+    update = scripts_dir / "update.sh"
+    update.write_text(
+        "#!/usr/bin/env bash\nprintf 'legacy-update:%s\\n' \"$*\"\n",
+        encoding="utf-8",
+    )
+    update.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(scripts_dir / "lumenctl.sh"), "update-lumen", "--probe"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=script_env(),
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "legacy-update:--probe" in result.stdout
 
 
 def test_install_image_job_persists_required_sidecar_token() -> None:
@@ -3956,7 +4068,7 @@ def test_install_script_uses_lumen_compose_helpers_from_lib() -> None:
     docker cutover §6.2 / §10.2: install.sh 走 lib.sh 提供的 lumen_compose helper
     （或本地 _install_compose 包装），不再 systemctl restart lumen-*。
     """
-    text = INSTALL.read_text(encoding="utf-8")
+    text = install_source_text()
     # 显式引用 lib.sh 的 compose helper（lumen_compose 或 lumen_compose_in）
     assert "lumen_compose" in text
     # 流程描述里出现 docker compose pull / migrate / api/worker/web

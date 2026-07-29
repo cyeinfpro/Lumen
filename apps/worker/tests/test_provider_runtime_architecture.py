@@ -16,7 +16,6 @@ from app.upstream_parts import (
     direct_failover,
     direct_requests,
     entrypoints as upstream,
-    errors as upstream_errors,
     image_dispatch,
     image_job_failover,
     image_jobs,
@@ -50,7 +49,6 @@ def test_provider_runtime_contracts_keep_entrypoint_identity() -> None:
     assert provider_pool.ProviderHealth is contracts.ProviderHealth
     assert provider_pool.ResolvedProvider is contracts.ResolvedProvider
     assert upstream.UpstreamError is errors.UpstreamError
-    assert upstream_errors.UpstreamError is errors.UpstreamError
     assert byok_runtime.UpstreamError is errors.UpstreamError
     assert (
         byok_runtime.validate_byok_http_target is byok_context.validate_byok_http_target

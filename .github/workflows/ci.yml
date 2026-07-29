@@ -180,6 +180,10 @@ jobs:
       # scripts/test.sh 本地默认仍运行同样门禁，CI 则通过环境变量避免重复。
       - name: Architecture budget gate
         run: uv run python scripts/check_architecture.py
+      - name: Compatibility facade inventory gate
+        run: uv run python scripts/facade_inventory.py
+      - name: Dead-code retirement gate
+        run: uv run python scripts/dead_code_audit.py
       - name: Complexity budget gate
         run: uv run python scripts/check_complexity.py
       - name: Module runtime state gate

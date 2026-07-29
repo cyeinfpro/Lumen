@@ -18,6 +18,8 @@ DOC = ROOT / "docs" / "docker-full-stack-cutover-plan.md"
 COMMIT = "b" * 40
 SELF_UPDATE_UNIT = (
     "lib.sh",
+    "lib/environment.sh",
+    "lib/step_protocol.sh",
     "lib/runtime.sh",
     "lib/locking.sh",
     "lib/container_release.sh",
@@ -529,6 +531,9 @@ printf 'git_pull=<%s> arg=<%s>\\n' "${LUMEN_UPDATE_GIT_PULL-__unset__}" "${1:-}"
 
 def test_lumenctl_branch_calls_use_bootstrap_wrapper() -> None:
     text = LUMENCTL.read_text(encoding="utf-8")
+    sync_start = text.index("lumenctl_sync_script_unit()")
+    sync_end = text.index("\nlumenctl_repair_missing_modules()", sync_start)
+    sync_section = text[sync_start:sync_end]
     default_start = text.index("lumenctl_maybe_self_update()")
     default_end = text.index("\nmain()", default_start)
     default_section = text[default_start:default_end]
@@ -536,8 +541,9 @@ def test_lumenctl_branch_calls_use_bootstrap_wrapper() -> None:
     bootstrap_end = text.index("        # Docker compose runtime", bootstrap_start)
     bootstrap_section = text[bootstrap_start:bootstrap_end]
 
-    assert "lumen_self_update_scripts_from_github_branch" in default_section
-    assert "lumen_self_update_scripts_from_github_branch" in bootstrap_section
+    assert "lumen_self_update_scripts_from_github_branch" in sync_section
+    assert "lumenctl_sync_script_unit" in default_section
+    assert "lumenctl_sync_script_unit" in bootstrap_section
     assert 'lumen_self_update_scripts "${SCRIPT_DIR}"' not in default_section
     assert 'lumen_self_update_scripts "${SCRIPT_DIR}"' not in bootstrap_section
 

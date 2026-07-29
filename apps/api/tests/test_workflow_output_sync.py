@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.routes import workflows
+from app.routes import workflow_routes as workflows
 from app.workflows.adapters import output_sync
 from app.workflows.application import output_values
 

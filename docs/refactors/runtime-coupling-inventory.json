@@ -19,6 +19,22 @@
     }
   ],
   "public_api": {
+    "apps/api/app/services/billing_cache.py": [
+      "BillingCacheService",
+      "WindowUsage"
+    ],
+    "apps/worker/app/tasks/generation_parts/default_runtime.py": [
+      "build_generation_runtime"
+    ],
+    "apps/worker/app/upstream_parts/entrypoints.py": [
+      "UpstreamError",
+      "close_client",
+      "edit_image",
+      "generate_image",
+      "responses_call",
+      "stream_completion",
+      "validate_effective_image_job_configuration"
+    ],
     "packages/core/lumen_core/models.py": [
       "AllowedEmail",
       "ApiSupplierTemplate",

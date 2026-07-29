@@ -116,14 +116,9 @@ export function useVideoGenerationFeed() {
   const qc = useQueryClient();
   const userScope = useUserQueryScope();
   const userId = normalizeVideoFeedUserId(userScope.userId);
-  const runtimeRef = useRef<
-    VideoFeedRuntime<ScopedGenerationRefreshRequest> | null
-  >(null);
-  if (!runtimeRef.current) {
-    runtimeRef.current =
-      createVideoFeedRuntime<ScopedGenerationRefreshRequest>(userId);
-  }
-  const runtime = runtimeRef.current;
+  const [runtime] = useState<
+    VideoFeedRuntime<ScopedGenerationRefreshRequest>
+  >(() => createVideoFeedRuntime<ScopedGenerationRefreshRequest>(userId));
   const terminalHistorySyncedRef = useRef(runtime.terminalHistorySynced);
   const generationRefreshRequestsRef = useRef(
     runtime.generationRefreshRequests,
@@ -153,8 +148,11 @@ export function useVideoGenerationFeed() {
   const [historyFilter, setHistoryFilter] = useState<VideoHistoryFilter>("all");
   const [isTaskPanelOpen, setIsTaskPanelOpen] = useState(false);
   const scopeReady = isVideoFeedRuntimeCurrent(runtime, userId);
-  const items =
-    scopeReady && scopedItems.userId === userId ? scopedItems.value : [];
+  const items = useMemo(
+    () =>
+      scopeReady && scopedItems.userId === userId ? scopedItems.value : [],
+    [scopeReady, scopedItems, userId],
+  );
   const selectedVideoId =
     scopeReady && scopedSelection.userId === userId
       ? scopedSelection.value
@@ -173,7 +171,7 @@ export function useVideoGenerationFeed() {
         return { userId, value };
       });
     },
-    [runtime, userId],
+    [runtime, setScopedItems, userId],
   );
   const setSelectedVideoId = useCallback<Dispatch<SetStateAction<string>>>(
     (action) => {
@@ -189,7 +187,7 @@ export function useVideoGenerationFeed() {
         return { userId, value };
       });
     },
-    [runtime, userId],
+    [runtime, setScopedSelection, userId],
   );
 
   useBodyScrollLock(isTaskPanelOpen, {
@@ -574,9 +572,16 @@ export function useVideoGenerationFeed() {
         ),
       });
     }
-    setScopedItems({ userId, value: [] });
-    setScopedSelection({ userId, value: "" });
-    setIsTaskPanelOpen(false);
+    let active = true;
+    queueMicrotask(() => {
+      if (!active || !isVideoFeedRuntimeCurrent(runtime, userId)) return;
+      setScopedItems({ userId, value: [] });
+      setScopedSelection({ userId, value: "" });
+      setIsTaskPanelOpen(false);
+    });
+    return () => {
+      active = false;
+    };
   }, [qc, runtime, userId]);
 
   return {

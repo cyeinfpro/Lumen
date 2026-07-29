@@ -1,12 +1,35 @@
 {
   "facades": [
     {
+      "caller_count": 5,
+      "owner": "api-runtime",
+      "path": "apps/api/app/services/billing_cache.py",
+      "retirement_condition": "API callers import lumen_core.billing_cache directly or receive BillingCacheService through runtime composition.",
+      "status": "active"
+    },
+    {
+      "caller_count": 1,
+      "owner": "worker-generation",
+      "path": "apps/worker/app/tasks/generation_parts/default_runtime.py",
+      "retirement_condition": "Worker startup imports the generation composition root directly.",
+      "status": "active"
+    },
+    {
+      "caller_count": 1,
+      "owner": "worker-upstream",
+      "path": "apps/worker/app/upstream_parts/entrypoints.py",
+      "retirement_condition": "Production callers depend on typed provider runtime ports instead of the stable upstream compatibility surface.",
+      "status": "active"
+    },
+    {
+      "caller_count": 178,
       "owner": "core",
       "path": "packages/core/lumen_core/models.py",
       "retirement_condition": "All external and internal callers import model_entities or model_base directly.",
       "status": "active"
     },
     {
+      "caller_count": 76,
       "owner": "core",
       "path": "packages/core/lumen_core/schemas.py",
       "retirement_condition": "All external and internal callers import schema_models directly.",

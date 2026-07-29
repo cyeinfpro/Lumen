@@ -35,6 +35,14 @@ if [ "${LUMEN_TEST_SKIP_GOVERNANCE:-0}" != "1" ]; then
     uv run python scripts/check_architecture.py
 
     echo
+    echo "==> compatibility facade inventory"
+    uv run python scripts/facade_inventory.py
+
+    echo
+    echo "==> dead-code retirement audit"
+    uv run python scripts/dead_code_audit.py
+
+    echo
     echo "==> python module runtime state budget"
     uv run python scripts/module_runtime_state_audit.py
 

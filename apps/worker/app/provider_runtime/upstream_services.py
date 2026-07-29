@@ -4,39 +4,75 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from types import SimpleNamespace
+from functools import partial
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-_INFRASTRUCTURE_NAMES = frozenset(
-    {
-        "EC",
-        "PILImage",
-        "PublicHttpBodyTooLarge",
-        "UPSTREAM_MODEL",
-        "UnidentifiedImageError",
-        "UpstreamCancelled",
-        "UpstreamError",
-        "asyncio",
-        "base64",
-        "close_provider_proxy_tunnels",
-        "download_public_http_url",
-        "download_public_http_url_to_file",
-        "endpoint_kind_allowed",
-        "hashlib",
-        "httpx",
-        "logger",
-        "parse_provider_bool",
-        "pinned_async_http_transport",
-        "provider_pool",
-        "provider_supports_route",
-        "resolve",
-        "resolve_provider_proxy_url",
-        "resolve_public_http_target",
-        "settings",
-        "time",
-        "upstream_image_requests",
-        "validate_image_job_sidecar_token",
-    }
+_INFRASTRUCTURE_BINDING_NAMES = tuple(
+    """
+    EC PILImage PublicHttpBodyTooLarge UPSTREAM_MODEL
+    UnidentifiedImageError UpstreamCancelled UpstreamError asyncio
+    base64 close_provider_proxy_tunnels download_public_http_url
+    download_public_http_url_to_file endpoint_kind_allowed hashlib httpx logger
+    parse_provider_bool pinned_async_http_transport provider_pool
+    provider_supports_route resolve resolve_provider_proxy_url
+    resolve_public_http_target settings time upstream_image_requests
+    validate_image_job_sidecar_token
+    """.split()
+)
+_INFRASTRUCTURE_NAMES = frozenset(_INFRASTRUCTURE_BINDING_NAMES)
+
+_CORE_BINDING_NAMES = tuple(
+    """
+    DEFAULT_RESOLVE_RUNTIME CURL_BIN DEFAULT_IMAGE_BACKGROUND
+    DEFAULT_IMAGE_INSTRUCTIONS DEFAULT_IMAGE_JOB_BASE_URL
+    DEFAULT_IMAGE_MODERATION DEFAULT_IMAGE_OUTPUT_COMPRESSION
+    DEFAULT_IMAGE_OUTPUT_FORMAT DEFAULT_IMAGE_RESPONSES_MODEL
+    DUAL_RACE_BONUS_GRACE_4K_S DUAL_RACE_BONUS_GRACE_S
+    DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S
+    DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S FALLBACK_429_DEFAULT_WAIT_S
+    FALLBACK_429_MAX_WAIT_S FALLBACK_MAX_ATTEMPTS FALLBACK_MAX_ATTEMPTS_429
+    FALLBACK_MAX_ATTEMPTS_4XX FALLBACK_MAX_ATTEMPTS_5XX
+    FALLBACK_RETRY_BACKOFF_BASE_S FALLBACK_RETRY_BACKOFF_MAX_S
+    FALLBACK_RETRY_ERROR_CODES IMAGE_4K_PIXELS IMAGE_BACKGROUNDS
+    IMAGE_CHANNEL_AUTO IMAGE_CHANNEL_IMAGE_JOBS_ONLY IMAGE_CHANNEL_STREAM_ONLY
+    IMAGE_JOB_DOWNLOAD_MAX_BYTES IMAGE_JOB_FAILOVER_CLASSES
+    IMAGE_JOB_POLL_INTERVAL_S IMAGE_JOB_RETENTION_DAYS IMAGE_JOB_TIMEOUT_S
+    IMAGE_MODERATIONS IMAGE_OUTPUT_FORMATS IMAGE_PROVIDER_FAILOVER_ERROR_CODES
+    IMAGE_QUALITIES IMAGE_READ_TIMEOUT_4K_S IMAGE_READ_TIMEOUT_MIN_S
+    IMAGE_ROUTE_DUAL_RACE IMAGE_ROUTE_IMAGE2 IMAGE_ROUTE_RESPONSES
+    JSON_PAYLOAD_SENTINEL_TYPE KNOWN_OUTPUT_ITEM_TYPES
+    MAX_REFERENCE_IMAGE_PIXELS MAX_NORMALIZED_IMAGE_BYTES
+    MAX_REFERENCE_IMAGE_BYTES NON_SSE_JSON_MAX_BYTES PARTIAL_IMAGES_MAX_PIXELS
+    PROXIED_CLIENT_CACHE_MAX PROXIED_CLIENT_CLOSE_DELAY_SECONDS
+    PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS RACE_CANCEL_WAIT_S
+    RACE_SINGLE_LANE_PIXELS REFERENCE_CACHE_HEAD_TIMEOUT_S
+    REFERENCE_CACHE_KEY_PREFIX REFERENCE_CACHE_LRU_SUFFIX
+    REFERENCE_CACHE_MAX_ENTRIES REFERENCE_CACHE_TTL_S REFERENCE_PUSH_TIMEOUT_S
+    RETRY_HTTPX_EXC RETRY_STATUS SAFETY_POLICY_ERROR_MARKERS SSE_MAX_BYTES
+    SSE_MAX_LINES SSE_MAX_LINE_BYTES TEXT_STREAM_INTERRUPTED_ERROR_CODE
+    TRANSPARENT_MATTE_PROMPT_NOTE add_image_output_options
+    append_transparent_matte_prompt apply_retry_cache_busters
+    attach_image_idempotency_key auth_headers b64_value_if_str client
+    client_timeout_config configure_pil_max_image_pixels
+    extract_image_b64_from_payload extract_image_billable_count
+    extract_image_result extract_image_results extract_response_image_b64
+    extract_response_revised_prompt has_explicit_image_dispatch_setting
+    image_file_fingerprints image_idempotency_key image_request_policy
+    images_client images_client_timeout_config generate_trace_id
+    is_transparent_image_request is_responses_error_terminal
+    is_responses_success_terminal json_dumps_stable log_upstream_call
+    normalize_image_background normalize_image_moderation
+    normalize_image_output_compression normalize_image_output_format
+    normalize_image_quality parse_error parse_retry_after_seconds
+    post_with_retry provider_proxy proxied_clients proxied_images_clients
+    record_usage resolve_image_channel resolve_image_engine
+    resolve_legacy_image_primary_route resolve_runtime runtime_parts
+    runtime_provider_name stable_sort_tools summarize_upstream_error_detail
+    transparent_matte_upstream_options validate_responses_body
+    with_error_context resolve_db resolve_image_primary_route responses_call
+    tempfile
+    """.split()
 )
 
 _MODULE_GROUPS = (
@@ -76,6 +112,99 @@ _MODULE_BINDINGS = (
     ("upstream_retry_policy", "retry"),
     ("upstream_transport", "transport"),
 )
+
+_RUNTIME_BINDINGS = MappingProxyType({
+    "core": tuple(
+        """
+        add_image_output_options append_transparent_matte_prompt
+        apply_retry_cache_busters attach_image_idempotency_key auth_headers
+        b64_value_if_str extract_image_b64_from_payload
+        extract_image_billable_count extract_image_result extract_image_results
+        extract_response_image_b64 extract_response_revised_prompt
+        has_explicit_image_dispatch_setting image_file_fingerprints
+        image_idempotency_key image_request_policy is_transparent_image_request
+        json_dumps_stable normalize_image_background normalize_image_moderation
+        normalize_image_output_compression normalize_image_output_format
+        normalize_image_quality resolve_image_channel resolve_image_engine
+        resolve_image_primary_route resolve_legacy_image_primary_route
+        responses_call transparent_matte_upstream_options
+        """.split()
+    ),
+    "direct": tuple(
+        """
+        direct_image_result_unknown_error download_result_url_bytes
+        fetch_image_url_as_bytes image_request_timeout is_direct_image_result_unknown
+        minimum_image_read_timeout resolve_image_job_base_url
+        select_image_read_timeout wrap_inpaint_prompt
+        """.split()
+    ),
+    "dispatch": tuple(
+        """
+        image_dispatch_candidates image_endpoint_kind_for_engine
+        image_jobs_endpoint_for_engine is_image_job_configuration_error
+        provider_supports_image_jobs should_use_image_jobs
+        validate_selected_image_job_configuration
+        """.split()
+    ),
+    "image_jobs": tuple(
+        """
+        build_image_job_client download_image_job_result image_job_body_base
+        image_job_error image_job_payload image_job_reference_image_entries
+        image_job_sidecar_token submit_and_wait_image_job
+        should_continue_image_job_failover
+        validate_effective_image_job_configuration
+        """.split()
+    ),
+    "lifecycle": tuple(
+        """
+        build_client build_images_client cache_proxied_client close_client
+        close_retired_clients_now delayed_aclose get_client get_images_client
+        resolve_timeout_config schedule_delayed_aclose
+        """.split()
+    ),
+    "retry": tuple(
+        """
+        fallback_retry_backoff_seconds is_retryable_fallback_exception
+        max_attempts_for_exception mentions_safety_policy merge_fallback_errors
+        merge_image_path_errors provider_error_details retry_after_seconds
+        should_continue_image_provider_failover summarize_exception
+        truncate_lane_summary
+        """.split()
+    ),
+    "providers": tuple(
+        """
+        image_quota_claim image_request_attempt_claim is_image_rate_limit_error
+        is_quota_accounting_unavailable pool_select_compat
+        provider_allows_image_endpoint provider_attempt_context
+        provider_capability_error provider_endpoint_locked_error
+        provider_endpoint_unavailable_error record_admin_image_call_or_raise
+        release_unused_image_reservation reserve_admin_image_call
+        """.split()
+    ),
+    "references": tuple(
+        """
+        get_or_upload_reference normalize_reference_image
+        push_reference_to_image_job reference_cache_delete reference_cache_get
+        reference_cache_keys reference_cache_store reference_cache_trim
+        reference_url_is_live resolve_reference_image_urls
+        """.split()
+    ),
+    "requests": ("validate_image_job_base_url", "validated_byok_target_for_request"),
+    "race": ("cancel_and_wait_tasks",),
+    "responses": (
+        "iter_sse",
+        "iter_sse_with_runtime",
+        "responses_call",
+        "responses_client_call",
+        "stream_completion",
+    ),
+    "transport": tuple(
+        """
+        curl_post_multipart curl_post_multipart_using_paths emit_image_progress
+        iter_sse_curl maybe_record_usage_from_event stage_multipart_bytes_to_tmp
+        """.split()
+    ),
+})
 
 _REQUEST_SERVICE_EXPORTS = (
     "add_image_output_options",
@@ -161,6 +290,33 @@ def service_name(name: str) -> str:
     return name.lstrip("_")
 
 
+def compose_upstream_namespace(
+    *,
+    core_values: tuple[Any, ...],
+    infrastructure_values: tuple[Any, ...],
+    module_values: tuple[Any, ...],
+    lifecycle_state: UpstreamLifecycleState,
+) -> dict[str, Any]:
+    """Bind the explicit upstream composition contract without module reflection."""
+
+    module_names = tuple(binding for binding, _group in _MODULE_BINDINGS)
+    groups = (
+        ("core", _CORE_BINDING_NAMES, core_values),
+        ("infrastructure", _INFRASTRUCTURE_BINDING_NAMES, infrastructure_values),
+        ("module", module_names, module_values),
+    )
+    namespace: dict[str, Any] = {}
+    for label, names, values in groups:
+        if len(names) != len(values):
+            raise RuntimeError(
+                f"upstream {label} composition expected {len(names)} values, "
+                f"received {len(values)}"
+            )
+        namespace.update(zip(names, values))
+    namespace["lifecycle_state"] = lifecycle_state
+    return namespace
+
+
 def build_upstream_services(namespace: dict[str, Any]) -> UpstreamServices:
     missing = [
         name
@@ -214,11 +370,23 @@ def resolve_image_upstream_services(
     return runtime.services
 
 
+def bind_upstream_runtime(runtime: ImageUpstreamRuntime) -> ImageUpstreamRuntime:
+    """Bind runtime-aware service functions to one explicit runtime graph."""
+
+    for group_name, names in _RUNTIME_BINDINGS.items():
+        group = getattr(runtime.services, group_name)
+        for name in names:
+            setattr(group, name, partial(getattr(group, name), runtime=runtime))
+    return runtime
+
+
 __all__ = [
     "ImageUpstreamRuntime",
     "UpstreamLifecycleState",
     "UpstreamServices",
+    "bind_upstream_runtime",
     "build_upstream_services",
+    "compose_upstream_namespace",
     "resolve_image_upstream_services",
     "service_group_for",
     "service_name",

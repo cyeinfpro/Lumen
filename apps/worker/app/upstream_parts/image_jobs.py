@@ -979,6 +979,7 @@ async def _image_job_responses_once(
 
 
 __all__ = [
+    "validate_effective_image_job_configuration",
     "_image_job_body_base",
     "_image_job_payload",
     "_build_responses_image_body",

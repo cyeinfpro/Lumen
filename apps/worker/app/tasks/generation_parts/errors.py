@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ...upstream_parts.errors import UpstreamCancelled
+from ...provider_runtime.errors import UpstreamCancelled
 
 
 class TaskCancelled(UpstreamCancelled):

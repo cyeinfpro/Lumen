@@ -165,13 +165,19 @@ export function useVideoSettlingController({
   );
 
   useLayoutEffect(() => {
+    let active = true;
     for (const timer of expiryTimersRef.current.values()) {
       window.clearTimeout(timer);
     }
     expiryTimersRef.current.clear();
     checkpointsRef.current.clear();
     disabledRef.current.clear();
-    setVersion((value) => value + 1);
+    queueMicrotask(() => {
+      if (active) setVersion((value) => value + 1);
+    });
+    return () => {
+      active = false;
+    };
   }, [scopeKey]);
 
   useEffect(() => {
