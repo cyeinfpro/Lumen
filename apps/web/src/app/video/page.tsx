@@ -10,14 +10,11 @@ import {
   deleteVideo,
   enhanceVideoPrompt,
   retryVideoGeneration,
-  uploadImage,
-  videoPosterUrl,
 } from "@/lib/apiClient";
 import type {
   VideoAction,
   VideoGenerationOut,
 } from "@/lib/types";
-import { uuid } from "@/lib/utils";
 import {
   isVideoRequestFenceCurrent,
   mergeVideoGenerationLists as mergeById,
@@ -26,29 +23,12 @@ import {
 import type { VideoRequestFence } from "@/lib/videoEventSnapshot";
 
 import {
-  appendVolcanoAssetReferences,
-  assetIdFromReferenceUrl,
-  DEFAULT_REFERENCE_LIMITS,
   displayPromptReferenceMentions,
-  nextReferenceIdentity,
-  normalizeAssetUrl,
-  referenceCountsFor,
   referenceDisplayToken,
-  referenceKindNoun,
-  referenceLimitMessage,
-  referenceLimitViolation,
   referenceLimitsForModelOption,
   referencePayloadForVideoAction,
-  removeReferenceAndReindexPrompt,
-  removeReferencesAndReindexPrompt,
   referencesForVideoAction,
-  REFERENCE_KINDS,
   promptForVideoAction,
-} from "./video-reference-domain";
-import type {
-  ReferenceKind,
-  ReferenceLimits,
-  VolcanoAssetReferenceCandidate,
 } from "./video-reference-domain";
 import {
   canApplyPromptEnhanceCandidate,
@@ -60,30 +40,14 @@ import type {
   ReferenceDraft,
 } from "./video-workbench-ui";
 import {
-  isAbortError,
-  revokeReferenceObjectUrl,
-  revokeUnusedReferenceObjectUrls,
-  uploadReferenceVideo,
-} from "./video-request-lifecycle";
-import type {
-  DraftUploadRequest,
-  ReferenceUploadRequest,
-  ReferenceUploadResult,
-} from "./video-request-lifecycle";
-import {
   billingModelForAction,
   durationOptionsForModel,
-  durationOrPreferred,
   estimateHoldMicro,
-  firstModelForAction,
   parseSeed,
-  preferredResolution,
   resolutionOptionsForModel,
   toVideoResolution,
 } from "./video-options-model";
 import {
-  cleanReferencePreviewUrl,
-  imageReferencePreviewUrl,
   motionSafeScrollBehavior,
 } from "./video-page-utils";
 import { hasPromptEnhancementPanel } from "./video-page-derived-state";
@@ -97,7 +61,6 @@ import {
   interruptedPromptEnhanceDescription,
   notifyCompletedPromptEnhancement,
   referenceDraftFromHistory,
-  selectedReferenceKind,
   selectedVideoModel,
   videoServiceSummary,
   videoSourceReady,
@@ -108,22 +71,29 @@ import {
   useVideoGenerationFeed,
 } from "./use-video-generation-feed";
 import {
+  useVideoDraftMediaController,
+} from "./use-video-draft-media-controller";
+import {
+  useVideoParameterHandlers,
+} from "./use-video-parameter-handlers";
+import {
+  useVideoPageViewActions,
+} from "./use-video-page-view-actions";
+import {
+  useVideoReferenceSummary,
+} from "./use-video-reference-summary";
+import {
   VideoPageView,
 } from "./video-page-view";
 import type { VideoPageViewModel } from "./video-page-view";
 import {
   formatDurationLabel,
-  hasVideo,
 } from "./video-task-model";
 
 export default function VideoPage() {
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const promptEnhanceAbortRef = useRef<AbortController | null>(null);
   const promptEnhanceEpochRef = useRef(0);
-  const firstFrameUploadAbortRef = useRef<AbortController | null>(null);
-  const firstFrameUploadEpochRef = useRef(0);
-  const referenceUploadAbortRef = useRef<AbortController | null>(null);
-  const referenceUploadEpochRef = useRef(0);
   const draftFenceRef = useRef<VideoRequestFence>({
     taskId: "draft:new",
     epoch: 0,
@@ -133,9 +103,6 @@ export default function VideoPage() {
     epoch: 0,
   });
   const actionRef = useRef<VideoAction>("t2v");
-  const referenceLimitsRef = useRef<ReferenceLimits>(DEFAULT_REFERENCE_LIMITS);
-  const referenceMediaRef = useRef<ReferenceDraft[]>([]);
-  const previousReferenceMediaRef = useRef<ReferenceDraft[]>([]);
   const promptValueRef = useRef("");
 
   const [action, setAction] = useState<VideoAction>("t2v");
@@ -146,16 +113,6 @@ export default function VideoPage() {
   const [aspectRatio, setAspectRatio] = useState("adaptive");
   const [generateAudio, setGenerateAudio] = useState(true);
   const [seed, setSeed] = useState("");
-  const [inputImageId, setInputImageId] = useState("");
-  const [uploadedLabel, setUploadedLabel] = useState("");
-  const [referenceMedia, setReferenceMedia] = useState<ReferenceDraft[]>([]);
-  const [referencePreviewItem, setReferencePreviewItem] =
-    useState<ReferenceDraft | null>(null);
-  const [isVolcanoAssetManagerOpen, setIsVolcanoAssetManagerOpen] =
-    useState(false);
-  const [assetUrlInput, setAssetUrlInput] = useState("");
-  const [assetReferenceKind, setAssetReferenceKind] =
-    useState<ReferenceKind>("video");
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
   const [promptEnhancePreview, setPromptEnhancePreview] = useState("");
   const [promptEnhanceCandidates, setPromptEnhanceCandidates] = useState<
@@ -207,15 +164,6 @@ export default function VideoPage() {
     promptValueRef.current = prompt;
   }, [prompt]);
 
-  useEffect(() => {
-    referenceMediaRef.current = referenceMedia;
-    revokeUnusedReferenceObjectUrls(
-      previousReferenceMediaRef.current,
-      referenceMedia,
-    );
-    previousReferenceMediaRef.current = referenceMedia;
-  }, [referenceMedia]);
-
   useEffect(
     () => () => {
       retryRequestFenceRef.current = nextVideoRequestFence(
@@ -223,9 +171,6 @@ export default function VideoPage() {
         "retry:disposed",
       );
       promptEnhanceAbortRef.current?.abort();
-      firstFrameUploadAbortRef.current?.abort();
-      referenceUploadAbortRef.current?.abort();
-      revokeUnusedReferenceObjectUrls(previousReferenceMediaRef.current, []);
     },
     [],
   );
@@ -242,46 +187,76 @@ export default function VideoPage() {
     () => referenceLimitsForModelOption(selectedModelOption, selectedModel),
     [selectedModel, selectedModelOption],
   );
-  useEffect(() => {
-    referenceLimitsRef.current = referenceLimits;
-  }, [referenceLimits]);
 
-  const assetReferenceKindOptions = useMemo<ReferenceKind[]>(
-    () => REFERENCE_KINDS.filter((kind) => referenceLimits[kind] > 0),
-    [referenceLimits],
-  );
-  const selectedAssetReferenceKind = selectedReferenceKind(
-    assetReferenceKindOptions,
+  const clearPromptEnhanceChoices = useCallback(() => {
+    setPromptEnhancePreview("");
+    setPromptEnhanceCandidates([]);
+    setSelectedPromptEnhanceCandidateId("");
+  }, []);
+
+  const clearPromptEnhanceSelection = useCallback(() => {
+    setPromptEnhancePreview("");
+    setSelectedPromptEnhanceCandidateId("");
+  }, []);
+
+  const abortPromptEnhancement = useCallback(() => {
+    promptEnhanceEpochRef.current += 1;
+    const controller = promptEnhanceAbortRef.current;
+    promptEnhanceAbortRef.current = null;
+    controller?.abort();
+    setIsEnhancingPrompt(false);
+  }, []);
+
+  const beforeMediaChange = useCallback(() => {
+    abortPromptEnhancement();
+    clearPromptEnhanceChoices();
+  }, [abortPromptEnhancement, clearPromptEnhanceChoices]);
+
+  const {
+    addAssetReference,
     assetReferenceKind,
-  );
-  const referenceCounts = useMemo(
-    () => referenceCountsFor(referenceMedia),
-    [referenceMedia],
-  );
-  const existingVolcanoAssetIds = useMemo(
-    () =>
-      new Set(
-        referenceMedia
-          .map((item) => assetIdFromReferenceUrl(item.url))
-          .filter((assetId): assetId is string => Boolean(assetId)),
-      ),
-    [referenceMedia],
-  );
-  const remainingVolcanoAssetLimits = useMemo(
-    () => ({
-      image: Math.max(0, referenceLimits.image - referenceCounts.image),
-      video: Math.max(0, referenceLimits.video - referenceCounts.video),
-    }),
-    [
-      referenceCounts.image,
-      referenceCounts.video,
-      referenceLimits.image,
-      referenceLimits.video,
-    ],
-  );
-  const referenceLimitError = referenceLimitViolation(
+    assetUrlInput,
+    cancelFirstFrameUpload,
+    cancelReferenceUpload,
+    firstFrameUploadPending,
+    handleInputImageIdChange,
+    hasActiveUpload,
+    inputImageId,
+    isVolcanoAssetManagerOpen,
+    loadDraftMedia,
+    referenceMedia,
+    referencePreviewItem,
+    referenceUploadPending,
+    removeDeletedVolcanoAssets,
+    removeReferenceDraft,
+    setAssetReferenceKind,
+    setAssetUrlInput,
+    setIsVolcanoAssetManagerOpen,
+    setReferencePreviewItem,
+    startFirstFrameUpload,
+    startReferenceUpload,
+    uploadedLabel,
+    useVolcanoAssets,
+  } = useVideoDraftMediaController({
+    actionRef,
+    draftFenceRef,
+    promptValueRef,
+    referenceLimits,
+    beforeMediaChange,
+    setPrompt,
+  });
+
+  const {
+    assetReferenceKindOptions,
+    existingVolcanoAssetIds,
+    referenceCounts,
+    referenceLimitError,
+    remainingVolcanoAssetLimits,
+    selectedAssetReferenceKind,
+  } = useVideoReferenceSummary(
     referenceMedia,
     referenceLimits,
+    assetReferenceKind,
   );
   const selectedBillingModel = billingModelForAction(
     options,
@@ -320,51 +295,6 @@ export default function VideoPage() {
   });
   const seedIsValid = !seed.trim() || parseSeed(seed) !== null;
 
-  const clearPromptEnhanceChoices = useCallback(() => {
-    setPromptEnhancePreview("");
-    setPromptEnhanceCandidates([]);
-    setSelectedPromptEnhanceCandidateId("");
-  }, []);
-
-  const clearPromptEnhanceSelection = useCallback(() => {
-    setPromptEnhancePreview("");
-    setSelectedPromptEnhanceCandidateId("");
-  }, []);
-
-  const abortPromptEnhancement = useCallback(() => {
-    promptEnhanceEpochRef.current += 1;
-    const controller = promptEnhanceAbortRef.current;
-    promptEnhanceAbortRef.current = null;
-    controller?.abort();
-    setIsEnhancingPrompt(false);
-  }, []);
-
-  const cancelFirstFrameUpload = useCallback(() => {
-    firstFrameUploadEpochRef.current += 1;
-    const controller = firstFrameUploadAbortRef.current;
-    firstFrameUploadAbortRef.current = null;
-    controller?.abort();
-  }, []);
-
-  const cancelReferenceUpload = useCallback(() => {
-    referenceUploadEpochRef.current += 1;
-    const controller = referenceUploadAbortRef.current;
-    referenceUploadAbortRef.current = null;
-    controller?.abort();
-  }, []);
-
-  const commitReferenceMedia = useCallback(
-    (update: (current: ReferenceDraft[]) => ReferenceDraft[]): boolean => {
-      const current = referenceMediaRef.current;
-      const next = update(current);
-      if (next === current) return false;
-      referenceMediaRef.current = next;
-      setReferenceMedia(next);
-      return true;
-    },
-    [],
-  );
-
   const switchDraftContext = useCallback(
     (taskId: string, nextAction: VideoAction) => {
       draftFenceRef.current = nextVideoRequestFence(
@@ -384,27 +314,9 @@ export default function VideoPage() {
       cancelFirstFrameUpload,
       cancelReferenceUpload,
       clearPromptEnhanceChoices,
+      setIsVolcanoAssetManagerOpen,
+      setReferencePreviewItem,
     ],
-  );
-
-  const isCurrentFirstFrameUpload = useCallback(
-    (request: DraftUploadRequest): boolean =>
-      firstFrameUploadAbortRef.current === request.controller &&
-      firstFrameUploadEpochRef.current === request.epoch &&
-      !request.controller.signal.aborted &&
-      actionRef.current === request.expectedAction &&
-      isVideoRequestFenceCurrent(draftFenceRef.current, request.draftFence),
-    [],
-  );
-
-  const isCurrentReferenceUpload = useCallback(
-    (request: ReferenceUploadRequest): boolean =>
-      referenceUploadAbortRef.current === request.controller &&
-      referenceUploadEpochRef.current === request.epoch &&
-      !request.controller.signal.aborted &&
-      actionRef.current === request.expectedAction &&
-      isVideoRequestFenceCurrent(draftFenceRef.current, request.draftFence),
-    [],
   );
 
   const focusPromptTarget = useCallback(
@@ -412,13 +324,9 @@ export default function VideoPage() {
       focusVideoWorkbenchElement(
         target,
         options,
-        Boolean(
-          promptEnhanceAbortRef.current ||
-          firstFrameUploadAbortRef.current ||
-          referenceUploadAbortRef.current,
-        ),
+        Boolean(promptEnhanceAbortRef.current || hasActiveUpload()),
       ),
-    [],
+    [hasActiveUpload],
   );
 
   const insertPromptText = useCallback(
@@ -458,305 +366,6 @@ export default function VideoPage() {
       insertPromptText(referenceDisplayToken(item));
     },
     [insertPromptText],
-  );
-
-  const uploadMut = useMutation({
-    mutationFn: (request: DraftUploadRequest) =>
-      uploadImage(request.file, { signal: request.controller.signal }),
-    onSuccess: (image, request) => {
-      if (!isCurrentFirstFrameUpload(request)) return;
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      setInputImageId(image.id);
-      setUploadedLabel(`${image.width}x${image.height}`);
-      toast.success("首帧已上传");
-    },
-    onError: (error, request) => {
-      if (isAbortError(error) || !isCurrentFirstFrameUpload(request)) return;
-      toast.error("上传失败", {
-        description: error instanceof Error ? error.message : undefined,
-      });
-    },
-    onSettled: (_data, _error, request) => {
-      if (firstFrameUploadAbortRef.current === request.controller) {
-        firstFrameUploadAbortRef.current = null;
-      }
-    },
-  });
-
-  const referenceUploadMut = useMutation({
-    mutationFn: async (
-      request: ReferenceUploadRequest,
-    ): Promise<ReferenceUploadResult> => {
-      if (
-        referenceMediaRef.current.filter((item) => item.kind === request.kind)
-          .length >= request.limit
-      ) {
-        throw new Error(referenceLimitMessage(request.kind, request.limit));
-      }
-      if (request.kind === "image") {
-        const image = await uploadImage(request.file, {
-          signal: request.controller.signal,
-        });
-        return {
-          kind: "image" as const,
-          image_id: image.id,
-          display: `${image.width}x${image.height}`,
-          previewUrl: imageReferencePreviewUrl(image),
-        };
-      }
-      const video = await uploadReferenceVideo(
-        request.file,
-        request.controller.signal,
-      );
-      return {
-        kind: "video" as const,
-        video_id: video.id,
-        display: video.size_bytes
-          ? `${Math.round(video.size_bytes / 1024 / 1024)}MB`
-          : "视频",
-        previewUrl:
-          cleanReferencePreviewUrl(video.poster_url) ??
-          videoPosterUrl(video.id),
-      };
-    },
-    onSuccess: (reference, request) => {
-      if (!isCurrentReferenceUpload(request)) {
-        revokeReferenceObjectUrl(reference.previewUrl);
-        return;
-      }
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const limit = referenceLimitsRef.current[reference.kind];
-      const accepted = commitReferenceMedia((current) => {
-        const currentCount = current.filter(
-          (item) => item.kind === reference.kind,
-        ).length;
-        if (currentCount >= limit) return current;
-        const identity = nextReferenceIdentity(reference.kind, current);
-        return [
-          ...current,
-          {
-            _key: uuid(),
-            kind: reference.kind,
-            image_id:
-              reference.kind === "image" ? reference.image_id : null,
-            video_id:
-              reference.kind === "video" ? reference.video_id : null,
-            label: identity.label,
-            ref_id: identity.refId,
-            display: reference.display,
-            previewUrl: reference.previewUrl,
-          },
-        ];
-      });
-      if (!accepted) {
-        revokeReferenceObjectUrl(reference.previewUrl);
-        toast.error(referenceLimitMessage(reference.kind, limit));
-        return;
-      }
-      toast.success("参考素材已上传");
-    },
-    onError: (error, request) => {
-      if (isAbortError(error) || !isCurrentReferenceUpload(request)) return;
-      toast.error("上传失败", {
-        description: error instanceof Error ? error.message : undefined,
-      });
-    },
-    onSettled: (_data, _error, request) => {
-      if (referenceUploadAbortRef.current === request.controller) {
-        referenceUploadAbortRef.current = null;
-      }
-    },
-  });
-
-  const startFirstFrameUpload = useCallback(
-    (file: File) => {
-      if (actionRef.current !== "i2v") return;
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      cancelFirstFrameUpload();
-      const controller = new AbortController();
-      const request: DraftUploadRequest = {
-        controller,
-        draftFence: { ...draftFenceRef.current },
-        epoch: firstFrameUploadEpochRef.current + 1,
-        expectedAction: "i2v",
-        file,
-      };
-      firstFrameUploadEpochRef.current = request.epoch;
-      firstFrameUploadAbortRef.current = controller;
-      uploadMut.mutate(request);
-    },
-    [
-      abortPromptEnhancement,
-      cancelFirstFrameUpload,
-      clearPromptEnhanceChoices,
-      uploadMut,
-    ],
-  );
-
-  const startReferenceUpload = useCallback(
-    (file: File) => {
-      if (actionRef.current !== "reference") return;
-      const kind = file.type.startsWith("image/")
-        ? "image"
-        : file.type.startsWith("video/")
-          ? "video"
-          : null;
-      if (!kind) {
-        toast.error("上传失败", { description: "只支持图片或视频" });
-        return;
-      }
-      const limit = referenceLimitsRef.current[kind];
-      if (
-        referenceMediaRef.current.filter((item) => item.kind === kind).length >=
-        limit
-      ) {
-        toast.error(referenceLimitMessage(kind, limit));
-        return;
-      }
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      cancelReferenceUpload();
-      const controller = new AbortController();
-      const request: ReferenceUploadRequest = {
-        controller,
-        draftFence: { ...draftFenceRef.current },
-        epoch: referenceUploadEpochRef.current + 1,
-        expectedAction: "reference",
-        file,
-        kind,
-        limit,
-      };
-      referenceUploadEpochRef.current = request.epoch;
-      referenceUploadAbortRef.current = controller;
-      referenceUploadMut.mutate(request);
-    },
-    [
-      abortPromptEnhancement,
-      cancelReferenceUpload,
-      clearPromptEnhanceChoices,
-      referenceUploadMut,
-    ],
-  );
-
-  const addAssetReference = useCallback(() => {
-    if (referenceUploadAbortRef.current) return;
-    const url = normalizeAssetUrl(assetUrlInput);
-    const kind = selectedAssetReferenceKind;
-    if (!url) {
-      if (assetUrlInput.trim()) {
-        toast.error("请输入 asset-* 或 asset://asset-* 官方素材 ID");
-      }
-      return;
-    }
-    const current = referenceMediaRef.current;
-    const limit = referenceLimitsRef.current[kind];
-    if (current.filter((item) => item.kind === kind).length >= limit) {
-      toast.error(referenceLimitMessage(kind, limit));
-      return;
-    }
-    abortPromptEnhancement();
-    clearPromptEnhanceChoices();
-    commitReferenceMedia((references) => {
-      const identity = nextReferenceIdentity(kind, references);
-      return [
-        ...references,
-        {
-          _key: uuid(),
-          kind,
-          url,
-          label: identity.label,
-          ref_id: identity.refId,
-          display: url,
-          previewUrl: null,
-        },
-      ];
-    });
-    setAssetUrlInput("");
-    toast.success(`官方${referenceKindNoun(kind)}已添加`);
-  }, [
-    abortPromptEnhancement,
-    assetUrlInput,
-    clearPromptEnhanceChoices,
-    commitReferenceMedia,
-    selectedAssetReferenceKind,
-  ]);
-
-  const useVolcanoAssets = useCallback(
-    (assets: VolcanoAssetReferenceCandidate[]) => {
-      if (actionRef.current !== "reference") return;
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const { references, added } = appendVolcanoAssetReferences(
-        referenceMediaRef.current,
-        assets,
-        referenceLimitsRef.current,
-        uuid,
-      );
-      commitReferenceMedia(() => references);
-      setIsVolcanoAssetManagerOpen(false);
-      if (added > 0) toast.success(`已添加 ${added} 个火山素材`);
-    },
-    [abortPromptEnhancement, clearPromptEnhanceChoices, commitReferenceMedia],
-  );
-
-  const removeDeletedVolcanoAssets = useCallback(
-    (assetIds: string[]) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const deletedAssetIds = new Set(assetIds);
-      const currentReferences = referenceMediaRef.current;
-      const removedKeys = new Set(
-        currentReferences
-          .filter((item) => {
-            const assetId = assetIdFromReferenceUrl(item.url);
-            return Boolean(assetId && deletedAssetIds.has(assetId));
-          })
-          .map((item) => item._key),
-      );
-      if (removedKeys.size === 0) return;
-      const next = removeReferencesAndReindexPrompt(
-        promptValueRef.current,
-        currentReferences,
-        (item) => removedKeys.has(item._key),
-      );
-      setReferencePreviewItem((current) =>
-        current && removedKeys.has(current._key) ? null : current,
-      );
-      commitReferenceMedia(() => next.references);
-      promptValueRef.current = next.prompt;
-      setPrompt(next.prompt);
-    },
-    [
-      abortPromptEnhancement,
-      clearPromptEnhanceChoices,
-      commitReferenceMedia,
-    ],
-  );
-
-  const removeReferenceDraft = useCallback(
-    (target: ReferenceDraft) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const next = removeReferenceAndReindexPrompt(
-        promptValueRef.current,
-        referenceMediaRef.current,
-        target,
-      );
-      setReferencePreviewItem((current) =>
-        current?._key === target._key ? null : current,
-      );
-      commitReferenceMedia(() => next.references);
-      promptValueRef.current = next.prompt;
-      setPrompt(next.prompt);
-    },
-    [
-      abortPromptEnhancement,
-      clearPromptEnhanceChoices,
-      commitReferenceMedia,
-    ],
   );
 
   const createMut = useMutation({
@@ -889,12 +498,14 @@ export default function VideoPage() {
       setAspectRatio(item.aspect_ratio);
       setGenerateAudio(item.generate_audio);
       setSeed(item.seed != null ? String(item.seed) : "");
-      setInputImageId(item.input_image_id ?? "");
-      setUploadedLabel(item.input_image_id ? "已从历史任务载入" : "");
       const draftReferenceMedia = item.reference_media.map((reference, index) =>
         referenceDraftFromHistory(reference, index, item.reference_media),
       );
-      commitReferenceMedia(() => draftReferenceMedia);
+      loadDraftMedia(
+        item.input_image_id ?? "",
+        item.input_image_id ? "已从历史任务载入" : "",
+        draftReferenceMedia,
+      );
       setPrompt(
         displayPromptReferenceMentions(item.prompt, draftReferenceMedia),
       );
@@ -904,12 +515,12 @@ export default function VideoPage() {
       });
       toast.success("已套用参数");
     },
-    [commitReferenceMedia, focusPromptTarget, switchDraftContext],
+    [focusPromptTarget, loadDraftMedia, switchDraftContext],
   );
 
   const canEnhancePrompt = canEnhanceVideoPrompt({
-    uploadPending: uploadMut.isPending,
-    referenceUploadPending: referenceUploadMut.isPending,
+    uploadPending: firstFrameUploadPending,
+    referenceUploadPending,
     prompt,
     action,
     inputImageId,
@@ -920,8 +531,7 @@ export default function VideoPage() {
     if (
       isEnhancingPrompt ||
       !canEnhancePrompt ||
-      firstFrameUploadAbortRef.current ||
-      referenceUploadAbortRef.current
+      hasActiveUpload()
     ) {
       return;
     }
@@ -1045,6 +655,7 @@ export default function VideoPage() {
     effectiveDurationS,
     effectiveResolution,
     generateAudio,
+    hasActiveUpload,
     inputImageId,
     isEnhancingPrompt,
     prompt,
@@ -1116,7 +727,7 @@ export default function VideoPage() {
     });
   }, []);
 
-  const uploadsPending = uploadMut.isPending || referenceUploadMut.isPending;
+  const uploadsPending = firstFrameUploadPending || referenceUploadPending;
   const submitDisabledReason = useMemo(
     () =>
       videoSubmitDisabledReason({
@@ -1158,178 +769,55 @@ export default function VideoPage() {
   );
   const canSubmit = submitDisabledReason === "可以提交";
   const submitVideo = useCallback(() => {
-    if (
-      !canSubmit ||
-      firstFrameUploadAbortRef.current ||
-      referenceUploadAbortRef.current
-    ) {
-      return;
-    }
+    if (!canSubmit || hasActiveUpload()) return;
     createMut.mutate();
-  }, [canSubmit, createMut]);
+  }, [canSubmit, createMut, hasActiveUpload]);
 
-  const handleActionChange = useCallback(
-    (nextAction: VideoAction) => {
-      switchDraftContext(`draft:${nextAction}`, nextAction);
-      const nextModel = firstModelForAction(options, nextAction);
-      const nextResolutions = resolutionOptionsForModel(options, nextModel);
-      const nextResolution = nextResolutions.includes(resolution)
-        ? resolution
-        : preferredResolution(nextResolutions);
-      const nextDurations = durationOptionsForModel(
-        options,
-        nextModel,
-        nextAction,
-        nextResolution,
-      );
-      setAction(nextAction);
-      setModel(nextModel);
-      setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
-      );
-    },
-    [options, resolution, switchDraftContext],
-  );
+  const {
+    handleActionChange,
+    handleAspectRatioChange,
+    handleDurationChange,
+    handleGenerateAudioChange,
+    handleModelChange,
+    handleResolutionChange,
+  } = useVideoParameterHandlers({
+    action,
+    options,
+    resolution,
+    selectedModel,
+    beforeParameterChange: beforeMediaChange,
+    switchDraftContext,
+    setAction,
+    setAspectRatio,
+    setDurationS,
+    setGenerateAudio,
+    setModel,
+    setResolution,
+  });
 
-  const handleInputImageIdChange = useCallback(
-    (value: string) => {
-      cancelFirstFrameUpload();
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      setInputImageId(value);
-      setUploadedLabel("");
-    },
-    [
-      abortPromptEnhancement,
-      cancelFirstFrameUpload,
-      clearPromptEnhanceChoices,
-    ],
-  );
+  const {
+    closeReferencePreview,
+    copyVideoPrompt,
+    deleteTaskVideo,
+    insertReferencePreview,
+    previewTaskVideo,
+    useTaskAsDraft,
+  } = useVideoPageViewActions({
+    deleteVideoById: deleteMut.mutate,
+    insertReferenceTag,
+    loadAsDraft,
+    referencePreviewItem,
+    setIsTaskPanelOpen,
+    setReferencePreviewItem,
+    setSelectedVideoId,
+  });
 
-  const handleModelChange = useCallback(
-    (value: string) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const nextResolutions = resolutionOptionsForModel(options, value);
-      const nextResolution = nextResolutions.includes(resolution)
-        ? resolution
-        : preferredResolution(nextResolutions);
-      const nextDurations = durationOptionsForModel(
-        options,
-        value,
-        action,
-        nextResolution,
-      );
-      setModel(value);
-      setResolution(nextResolution);
-      setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
-      );
-    },
-    [
-      abortPromptEnhancement,
-      action,
-      clearPromptEnhanceChoices,
-      options,
-      resolution,
-    ],
-  );
-
-  const handleDurationChange = useCallback(
-    (value: string) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      setDurationS(Number(value));
-    },
-    [abortPromptEnhancement, clearPromptEnhanceChoices],
-  );
-
-  const handleResolutionChange = useCallback(
-    (value: string) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      const nextDurations = durationOptionsForModel(
-        options,
-        selectedModel,
-        action,
-        value,
-      );
-      setResolution(value);
-      setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
-      );
-    },
-    [
-      abortPromptEnhancement,
-      action,
-      clearPromptEnhanceChoices,
-      options,
-      selectedModel,
-    ],
-  );
-
-  const handleAspectRatioChange = useCallback(
-    (value: string) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      setAspectRatio(value);
-    },
-    [abortPromptEnhancement, clearPromptEnhanceChoices],
-  );
-
-  const handleGenerateAudioChange = useCallback(
-    (value: boolean) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceChoices();
-      setGenerateAudio(value);
-    },
-    [abortPromptEnhancement, clearPromptEnhanceChoices],
-  );
-
-  const copyVideoPrompt = useCallback((item: VideoGenerationOut) => {
-    void navigator.clipboard?.writeText(item.prompt);
-    toast.success("描述已复制");
-  }, []);
-
-  const useTaskAsDraft = useCallback(
-    (item: VideoGenerationOut) => {
-      loadAsDraft(item);
-      setIsTaskPanelOpen(false);
-    },
-    [loadAsDraft, setIsTaskPanelOpen],
-  );
-
-  const deleteTaskVideo = useCallback(
-    (item: VideoGenerationOut) => {
-      if (item.video) deleteMut.mutate(item.video.id);
-    },
-    [deleteMut],
-  );
-
-  const previewTaskVideo = useCallback(
-    (item: VideoGenerationOut) => {
-      if (!hasVideo(item)) return;
-      setSelectedVideoId(item.video.id);
-      setIsTaskPanelOpen(false);
-    },
-    [setIsTaskPanelOpen, setSelectedVideoId],
-  );
-
-  const closeReferencePreview = useCallback(
-    () => setReferencePreviewItem(null),
-    [],
-  );
   const registerPromptEditor = useCallback(
     (element: HTMLTextAreaElement | null) => {
       promptRef.current = element;
     },
     [],
   );
-  const insertReferencePreview = useCallback(() => {
-    if (!referencePreviewItem) return;
-    insertReferenceTag(referencePreviewItem);
-    setReferencePreviewItem(null);
-  }, [insertReferenceTag, referencePreviewItem]);
 
   const serviceEnabled = Boolean(options?.enabled);
   const serviceSummary = videoServiceSummary({
@@ -1371,14 +859,14 @@ export default function VideoPage() {
       action,
       onActionChange: handleActionChange,
       firstFrame: {
-        pending: uploadMut.isPending,
+        pending: firstFrameUploadPending,
         inputImageId,
         uploadedLabel,
         onFile: startFirstFrameUpload,
         onInputImageIdChange: handleInputImageIdChange,
       },
       references: {
-        pending: referenceUploadMut.isPending,
+        pending: referenceUploadPending,
         counts: referenceCounts,
         limits: referenceLimits,
         items: referenceMedia,
@@ -1393,7 +881,8 @@ export default function VideoPage() {
         onRemove: removeReferenceDraft,
         onKindChange: setAssetReferenceKind,
         onAssetUrlInputChange: setAssetUrlInput,
-        onAddAssetReference: addAssetReference,
+        onAddAssetReference: () =>
+          addAssetReference(selectedAssetReferenceKind),
       },
       prompt: {
         onPromptEditorChange: registerPromptEditor,

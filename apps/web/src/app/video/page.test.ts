@@ -49,6 +49,22 @@ const generationFeedSource = readFileSync(
   new URL("./use-video-generation-feed.ts", import.meta.url),
   "utf8",
 );
+const draftMediaControllerSource = readFileSync(
+  new URL("./use-video-draft-media-controller.ts", import.meta.url),
+  "utf8",
+);
+const parameterHandlersSource = readFileSync(
+  new URL("./use-video-parameter-handlers.ts", import.meta.url),
+  "utf8",
+);
+const pageViewActionsSource = readFileSync(
+  new URL("./use-video-page-view-actions.ts", import.meta.url),
+  "utf8",
+);
+const referenceSummarySource = readFileSync(
+  new URL("./use-video-reference-summary.ts", import.meta.url),
+  "utf8",
+);
 const requestLifecycleSource = readFileSync(
   new URL("./video-request-lifecycle.ts", import.meta.url),
   "utf8",
@@ -70,6 +86,10 @@ const source = [
   videoPageDomainSource,
   videoPageViewSource,
   generationFeedSource,
+  draftMediaControllerSource,
+  parameterHandlersSource,
+  pageViewActionsSource,
+  referenceSummarySource,
   referenceDomainSource,
   optionsModelSource,
   readFileSync(new URL("./video-page-utils.ts", import.meta.url), "utf8"),
@@ -183,7 +203,7 @@ function taskFixture(
 }
 
 test("video task domain stays extracted from the route page", () => {
-  ok(pageSource.split("\n").length <= 1500);
+  ok(pageSource.split("\n").length <= 1000);
   doesNotMatch(pageSource, /function VideoTaskDrawer\(/);
   doesNotMatch(pageSource, /function VideoPreviewDialog\(/);
   match(pageSource, /from "\.\/video-task-model"/);
@@ -191,6 +211,29 @@ test("video task domain stays extracted from the route page", () => {
   match(taskUiSource, /export function VideoTaskDrawer\(/);
   match(taskUiSource, /export function VideoPreviewDialog\(/);
   match(taskModelSource, /export function isActiveVideo\(/);
+});
+
+test("video route orchestration stays split into focused hooks", () => {
+  match(pageSource, /from "\.\/use-video-draft-media-controller"/);
+  match(pageSource, /from "\.\/use-video-parameter-handlers"/);
+  match(pageSource, /from "\.\/use-video-page-view-actions"/);
+  match(pageSource, /from "\.\/use-video-reference-summary"/);
+  match(
+    draftMediaControllerSource,
+    /export function useVideoDraftMediaController\(/,
+  );
+  match(
+    parameterHandlersSource,
+    /export function useVideoParameterHandlers\(/,
+  );
+  match(
+    pageViewActionsSource,
+    /export function useVideoPageViewActions\(/,
+  );
+  match(
+    referenceSummarySource,
+    /export function useVideoReferenceSummary\(/,
+  );
 });
 
 test("video option and pricing domain stays extracted from the route page", () => {
@@ -882,33 +925,42 @@ test("official asset references keep the selected media kind", () => {
     videoPageViewSource,
     /onClick=\{\(\) => model\.onKindChange\(kind\)\}/,
   );
-  match(pageSource, /const selectedAssetReferenceKind = selectedReferenceKind\(/);
+  match(
+    referenceSummarySource,
+    /const selectedAssetReferenceKind = selectedReferenceKind\(/,
+  );
   match(videoPageDomainSource, /if \(options\.includes\(requested\)\) return requested/);
   match(videoPageDomainSource, /return options\[0\] \?\? "image"/);
-  match(source, /const kind = selectedAssetReferenceKind/);
-  match(source, /const identity = nextReferenceIdentity\(kind, references\)/);
-  match(source, /kind,/);
   match(
-    source,
-    /toast\.success\(`官方\$\{referenceKindNoun\(kind\)\}已添加`\)/,
+    pageSource,
+    /addAssetReference\(selectedAssetReferenceKind\)/,
+  );
+  match(
+    draftMediaControllerSource,
+    /const identity = nextReferenceIdentity\(selectedKind, references\)/,
+  );
+  match(draftMediaControllerSource, /kind: selectedKind,/);
+  match(
+    draftMediaControllerSource,
+    /toast\.success\(`官方\$\{referenceKindNoun\(selectedKind\)\}已添加`\)/,
   );
 });
 
 test("volcano virtual asset manager is integrated with reference drafts", () => {
   match(videoPageViewSource, /from "\.\/volcano-asset-manager"/);
   match(source, />\s*火山虚拟素材库\s*</);
-  match(pageSource, /existingVolcanoAssetIds/);
-  match(pageSource, /remainingVolcanoAssetLimits/);
-  match(pageSource, /assetIdFromReferenceUrl\(item\.url\)/);
-  match(pageSource, /appendVolcanoAssetReferences\(/);
+  match(referenceSummarySource, /existingVolcanoAssetIds/);
+  match(referenceSummarySource, /remainingVolcanoAssetLimits/);
+  match(referenceSummarySource, /assetIdFromReferenceUrl\(item\.url\)/);
+  match(draftMediaControllerSource, /appendVolcanoAssetReferences\(/);
   match(pageSource, /onUse: useVolcanoAssets/);
   match(pageSource, /onDeleted: removeDeletedVolcanoAssets/);
   match(
     videoPageViewSource,
     /onUse=\{model\.assetManager\.onUse\}/,
   );
-  match(pageSource, /removeReferencesAndReindexPrompt\(/);
-  match(pageSource, /removeReferenceAndReindexPrompt\(/);
+  match(draftMediaControllerSource, /removeReferencesAndReindexPrompt\(/);
+  match(draftMediaControllerSource, /removeReferenceAndReindexPrompt\(/);
   match(pageSource, /onRemove: removeReferenceDraft/);
   match(
     videoPageViewSource,
@@ -1129,7 +1181,7 @@ test("video upload state blocks submit and Enter shortcuts", () => {
   match(source, /if \(uploadPending\) return "等待素材上传完成"/);
   match(source, /const canSubmit = submitDisabledReason === "可以提交"/);
   match(source, /!event\.nativeEvent\.isComposing/);
-  match(pageSource, /pending: referenceUploadMut\.isPending/);
+  match(pageSource, /pending: referenceUploadPending/);
   match(videoPageViewSource, /!model\.pending/);
   match(pageSource, /onSubmit: submitVideo/);
   match(
