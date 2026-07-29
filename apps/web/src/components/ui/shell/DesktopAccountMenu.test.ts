@@ -747,6 +747,12 @@ test("identity recovery retains confirmed sessions, retries, and terminates on 4
   match(identityRevalidationSource, /state\.generation !== generation/);
   match(identityRevalidationSource, /state\.retryTimer !== null/);
   match(identityRevalidationSource, /runRef\.current\(true\)/);
+  match(identityRevalidationSource, /registerSessionInvalidation/);
+  match(identityRevalidationSource, /invalidateSessionClientState\(\)/);
+  match(
+    identityRevalidationSource,
+    /clearPreviousUserQueryCache\(queryClient, currentUserId\)/,
+  );
   match(runtimeDefaultsSource, /refetchOnReconnect: false/);
   const revalidationStart = identityRevalidationSource.slice(
     identityRevalidationSource.indexOf(

@@ -105,8 +105,8 @@ test("SSE replay truncation triggers typed snapshot recovery before reconnect", 
 
   match(contracts, /"replay_truncated"/);
   match(useSSE, /recoverSnapshot\?: SnapshotAdapter/);
-  match(runtime, /this\.handleControl\(parsed\.event\)/);
-  match(runtime, /this\.recover\(effect\.reason\)/);
+  match(runtime, /this\.handleControl\(parsed\.event, recoveryId\)/);
+  match(runtime, /this\.recover\(effect\.reason, recoveryId\)/);
   match(machine, /\{ kind: "recoverSnapshot", reason \}/);
   doesNotMatch(useSSE, /INTERNAL_SSE_EVENT_NAMES/);
 });

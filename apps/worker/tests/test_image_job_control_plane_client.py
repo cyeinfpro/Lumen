@@ -8,6 +8,10 @@ import pytest
 from app.provider_runtime.contracts import ImageJobEndpoint
 from app.upstream_clients.image_job_auth import UPSTREAM_AUTH_HEADER
 from app.upstream_clients.image_job_client import ImageJobClient, ImageJobClientError
+from app.upstream_clients.image_job_models import (
+    ImageJobCancelOutcome,
+    ImageJobHandle,
+)
 from app.upstream_clients.url_validation import validate_image_job_control_url
 
 
@@ -177,3 +181,73 @@ async def test_client_policy_disables_environment_and_redirect_inheritance(
     assert captured["trust_env"] is False
     assert captured["follow_redirects"] is False
     assert "proxy" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected"),
+    [
+        (
+            200,
+            {
+                "job_id": "job-1",
+                "outcome": "cancelled_before_dispatch",
+                "status": "cancelled",
+                "outcome_uncertain": False,
+            },
+            ImageJobCancelOutcome.CANCELLED_BEFORE_DISPATCH,
+        ),
+        (
+            202,
+            {
+                "job_id": "job-1",
+                "outcome": "cancel_requested",
+                "status": "cancel_requested",
+                "outcome_uncertain": True,
+            },
+            ImageJobCancelOutcome.CANCEL_REQUESTED,
+        ),
+        (
+            409,
+            {
+                "job_id": "job-1",
+                "outcome": "uncertain",
+                "status": "running",
+                "outcome_uncertain": True,
+            },
+            ImageJobCancelOutcome.UNCERTAIN,
+        ),
+    ],
+)
+async def test_cancel_returns_typed_outcome(
+    status_code: int,
+    payload: dict[str, Any],
+    expected: ImageJobCancelOutcome,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json=payload)
+
+    client = ImageJobClient(
+        ImageJobEndpoint(
+            base_url="https://jobs.test",
+            service_token="service-token",
+        ),
+        timeout=_timeout(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.cancel(
+            ImageJobHandle(job_id="job-1", upstream_api_key="provider-key"),
+            trace_id="trace-cancel",
+        )
+    finally:
+        await client.close()
+
+    assert result.outcome == expected
+    assert result.outcome_uncertain is (
+        expected
+        in {
+            ImageJobCancelOutcome.CANCEL_REQUESTED,
+            ImageJobCancelOutcome.UNCERTAIN,
+        }
+    )

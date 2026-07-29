@@ -15,6 +15,12 @@ const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
 const nodesSource = source("./nodes/CanvasNodes.tsx");
 const imageAssetDropSource = source("./nodes/CanvasImageAssetDropZone.tsx");
 const inspectorSource = source("./CanvasInspector.tsx");
+const staleUploadCleanupSource = source(
+  "../../../lib/canvas/staleUploadCleanup.ts",
+);
+const staleUploadCleanupPolicySource = source(
+  "../../../lib/canvas/staleUploadCleanupPolicy.ts",
+);
 const nodeConfigEditorSource = source("./CanvasNodeConfigEditor.tsx");
 const outputDownloadSource = source("./CanvasOutputDownloadButton.tsx");
 const videoPreviewSource = source("./CanvasVideoPreviewDialog.tsx");
@@ -240,11 +246,11 @@ test("canvas mask uploads request strict server preflight", () => {
 });
 
 test("canvas stale uploads and output selections are fenced", () => {
-  match(inspectorSource, /cleanupStaleCanvasAsset/);
-  match(inspectorSource, /shouldCleanupStaleCanvasAsset/);
-  match(inspectorSource, /asset\.id,\s*asset\.created,\s*request\.initialAssetId/);
-  match(inspectorSource, /createdByRequest &&\s*assetId\.trim\(\)\.length > 0/);
-  match(inspectorSource, /deleteCanvasUploadedAsset/);
+  match(inspectorSource, /cleanupStaleCanvasUpload/);
+  match(imageAssetDropSource, /cleanupStaleCanvasUpload/);
+  match(staleUploadCleanupPolicySource, /uploadedAsset\.created/);
+  match(staleUploadCleanupPolicySource, /canvasGraphReferencesUploadedAsset/);
+  match(staleUploadCleanupSource, /deleteCanvasUploadedAsset/);
   match(apiSource, /selection_revision: selectionRevision/);
   match(querySource, /queueRef = useRef\(new Map<string, Promise<void>>\(\)\)/);
   match(querySource, /revisionRef = useRef\(new Map<string, number>\(\)\)/);

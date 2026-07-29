@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import Generation
 
 from ...provider_runtime.contracts import ResolvedProvider
+from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from ...upstream_parts import GeneratedImageResult
 from .event_delivery import GenerationEventDelivery
 from .image_artifact_contracts import PostprocessedGeneratedImage
@@ -25,6 +26,7 @@ class GenerationProviderContext:
     retry_attempt: int
     quota_task_id: str
     quota_attempt_epoch: int
+    sidecar_execution: ImageJobExecutionHandle | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -279,3 +279,38 @@ def test_current_manifest_routes_critical_domains_without_generic_fallback(
 
     assert expected_rule in {rule["name"] for rule in plan["matched_rules"]}
     assert forbidden_command not in {command["command"] for command in plan["commands"]}
+
+
+@pytest.mark.parametrize(
+    "changed_file",
+    [
+        ".dockerignore",
+        ".env.example",
+        "Dockerfile.python",
+        "docker-compose.yml",
+        "docker-compose.bluegreen.yml",
+        "apps/web/Dockerfile",
+        "scripts/architecture-baseline.json",
+        "scripts/architecture-layers.toml",
+        "scripts/governance_score.py",
+        "docs/refactors/known-defects.json",
+        "docs/refactors/module-ownership.json",
+        "docs/refactors/module-runtime-state-ledger.json",
+    ],
+)
+def test_production_build_and_governance_inputs_require_full_mandatory(
+    changed_file: str,
+) -> None:
+    manifest = test_impact.load_manifest(ROOT / "scripts" / "test-manifest.toml")
+
+    plan = test_impact.build_plan(
+        manifest,
+        changed_files=[changed_file],
+        base="base",
+        head="head",
+        reverse_imports=[],
+    )
+
+    assert plan["full_mandatory"] is True
+    assert plan["full_mandatory_reasons"][0]["file"] == changed_file
+    assert plan["unmatched_changed_files"] == []

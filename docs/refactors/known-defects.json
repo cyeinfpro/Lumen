@@ -1,0 +1,204 @@
+{
+  "defects": [
+    {
+      "fixed_commit": null,
+      "id": "P0-01",
+      "owner": "track-a-worker",
+      "paths": [
+        "apps/worker/app/upstream_parts/image_jobs.py",
+        "apps/worker/app/upstream_parts/image_job_failover.py"
+      ],
+      "regression_tests": [
+        "apps/worker/tests/test_image_job_execution_boundary.py::test_accepted_timeout_recovers_original_job_without_second_submit",
+        "apps/worker/tests/test_image_job_execution_boundary.py::test_progress_persists_accepted_execution_before_polling"
+      ],
+      "severity": "P0",
+      "status": "fixed_local",
+      "summary": "Accepted sidecar jobs can be regenerated and released after poll timeout."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P0-02",
+      "owner": "track-a-worker",
+      "paths": [
+        "apps/worker/app/upstream_parts/image_jobs.py",
+        "apps/worker/app/upstream_parts/direct_requests.py"
+      ],
+      "regression_tests": [
+        "apps/worker/tests/test_image_job_execution_boundary.py::test_succeeded_retry_is_delivery_only",
+        "apps/worker/tests/test_image_job_execution_boundary.py::test_billing_never_releases_unknown_or_incurred_sidecar_cost"
+      ],
+      "severity": "P0",
+      "status": "fixed_local",
+      "summary": "Succeeded sidecar jobs can be regenerated and released after delivery failure."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-01",
+      "owner": "track-a-image-job",
+      "paths": [
+        "apps/worker/app/upstream_clients/image_job_client.py",
+        "image-job/image_job/app_factory.py"
+      ],
+      "regression_tests": [
+        "image-job/tests/test_cancellation_fencing.py::test_delete_queued_job_cancels_before_dispatch",
+        "image-job/tests/test_cancellation_fencing.py::test_delete_running_job_records_uncertain_cancel_request",
+        "image-job/tests/test_cancellation_fencing.py::test_delete_terminal_job_is_idempotent"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Image-job cancellation endpoint and typed outcome contract are missing."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-02",
+      "owner": "track-a-image-job",
+      "paths": [
+        "image-job/image_job/persistence.py"
+      ],
+      "regression_tests": [
+        "image-job/tests/test_cancellation_fencing.py::test_retention_never_cleans_queued_or_running_jobs",
+        "image-job/tests/test_cancellation_fencing.py::test_active_stale_recovery_uses_token_cas"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Retention can clear queued or running jobs."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-03",
+      "owner": "track-a-worker",
+      "paths": [
+        "apps/worker/app/upstream_parts/image_jobs.py"
+      ],
+      "regression_tests": [
+        "apps/worker/tests/test_image_job_execution_boundary.py::test_sidecar_payload_is_clamped_to_one_upstream_image"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Sidecar requests can generate multiple images while only one is delivered."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-04",
+      "owner": "track-b-canvas",
+      "paths": [
+        "apps/api/app/services/task_submission.py"
+      ],
+      "regression_tests": [
+        "apps/api/tests/test_canvas_execution_guards.py::test_canvas_video_submission_preserves_outbox_publish_identity",
+        "apps/api/tests/test_canvas_execution_guards.py::test_canvas_video_submission_defers_commit_and_publishes_after_commit"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Canvas video submission used a stale service signature."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-05",
+      "owner": "track-c-realtime",
+      "paths": [
+        "apps/web/src/features/realtime/model/runtime.ts"
+      ],
+      "regression_tests": [
+        "apps/web/src/features/realtime/model/runtime.test.ts::two tabs both finish local replay snapshots before follower reports open"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Follower tabs can report recovery complete without a local snapshot."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-06",
+      "owner": "track-c-realtime",
+      "paths": [
+        "apps/web/src/features/realtime/model/runtime.ts",
+        "apps/web/src/features/realtime/model/useLumenRealtime.ts"
+      ],
+      "regression_tests": [
+        "apps/web/src/features/realtime/model/runtime.test.ts::auth invalidation invokes explicit callbacks in every tab",
+        "apps/web/src/lib/runtimeResilience.test.ts::auth invalidation marks the session unauthorized and invokes cleanup callback"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "auth_invalidated does not revoke the client session and private state."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-07",
+      "owner": "track-d-video",
+      "paths": [
+        "apps/web/src/app/video/use-video-generation-feed.ts"
+      ],
+      "regression_tests": [
+        "apps/web/src/app/video/video-feed-scope.test.ts::video feed account changes abort and clear the entire old-user runtime",
+        "apps/web/src/app/video/video-feed-scope.test.ts::video feed channels are empty until active items match the current user scope"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Video local state and channels are not scoped by user identity."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-08",
+      "owner": "lead-ci",
+      "paths": [
+        "scripts/test-manifest.toml",
+        "scripts/test_impact.py"
+      ],
+      "regression_tests": [
+        "tests/test_test_impact.py::test_production_build_and_governance_inputs_require_full_mandatory"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Production build inputs could select an empty PR test plan."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-09",
+      "owner": "lead-release",
+      "paths": [
+        ".github/workflows/alembic-expand.yml",
+        ".github/workflows/docker-release.yml"
+      ],
+      "regression_tests": [
+        "tests/test_release_manifest.py::test_alembic_breaking_lint_covers_pr_main_and_release"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Migration lint and release tag main ancestry were bypassable."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-10",
+      "owner": "track-e-updater",
+      "paths": [
+        "scripts/update/services/health.sh",
+        "scripts/update/journal_store.py"
+      ],
+      "regression_tests": [
+        "tests/test_lumenctl_scripts.py::test_lumenctl_install_update_uninstall_smoke_with_fake_docker",
+        "tests/test_update_state_machine.py::test_phase_done_is_after_required_state_and_side_effects"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "Updater committed before final HTTP and compose health proof."
+    },
+    {
+      "fixed_commit": null,
+      "id": "P1-11",
+      "owner": "track-e-release",
+      "paths": [
+        "scripts/promote_release_images.py"
+      ],
+      "regression_tests": [
+        "tests/test_promote_release_images.py::test_first_new_major_rolls_back_absent_aliases_after_partial_write",
+        "tests/test_promote_release_images.py::test_signal_interruption_restores_absent_aliases"
+      ],
+      "severity": "P1",
+      "status": "fixed_local",
+      "summary": "First stable release of a new major cannot promote absent mutable aliases."
+    }
+  ],
+  "version": 1
+}

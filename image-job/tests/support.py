@@ -106,7 +106,16 @@ class ImageJobHarness:
             self.settings,
             http_client=lambda: self.http_client,
             heartbeat=SimpleNamespace(
-                touch_running=lambda job_id: self.touch_running(job_id)
+                touch_running=(
+                    lambda job_id, execution_token=None: (
+                        self.touch_running(job_id)
+                        if execution_token is None
+                        else self.touch_running(
+                            job_id,
+                            execution_token,
+                        )
+                    )
+                )
             ),
             logger=self.log,
         )
@@ -434,7 +443,10 @@ class ImageJobHarness:
             "SELECT * FROM jobs WHERE job_id = ?",
             (job_id,),
         )
-        if row is None or not await self.mark_running(job_id):
+        if row is None:
+            return
+        execution_token = await self.mark_running(job_id)
+        if execution_token is None:
             return
         try:
             fresh = await self.db_one(
@@ -444,6 +456,7 @@ class ImageJobHarness:
             status, images = await self.call_upstream(fresh)
             await self.mark_succeeded(
                 job_id,
+                execution_token=execution_token,
                 upstream_status=status,
                 elapsed_ms=0,
                 images=images,
@@ -452,6 +465,7 @@ class ImageJobHarness:
         except JobFailure as exc:
             await self.mark_failed(
                 job_id,
+                execution_token=execution_token,
                 error=exc.error,
                 upstream_status=exc.upstream_status,
                 upstream_body=exc.upstream_body,

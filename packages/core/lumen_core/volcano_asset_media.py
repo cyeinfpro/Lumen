@@ -93,6 +93,10 @@ class _VideoTranscodeRuntime:
                 self.semaphores[loop] = semaphore
             return semaphore
 
+    def reset(self) -> None:
+        with self.lock:
+            self.semaphores.clear()
+
 
 _VIDEO_TRANSCODE_RUNTIME = _VideoTranscodeRuntime()
 

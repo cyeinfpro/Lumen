@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -41,10 +42,11 @@ from ...db import get_db
 from ...deps import AdminUser, CurrentUser, verify_csrf
 from ...observability import redemption_redeemed_total
 from ...ratelimit import client_ip
-from .compat import current_runtime
+from .composition import build_billing_services
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post(
@@ -58,42 +60,48 @@ async def redeem_code(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RedemptionOut:
-    b = current_runtime()
-    b._require_wallet_user(user)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    commands.require_wallet_user(user)
     normalized_code = billing_core.normalize_redemption_code(body.code)
     if len(normalized_code) < 4:
-        raise b._http("invalid_code", "redemption code is invalid", 422)
-    request_hash = b._redemption_request_hash(normalized_code)
-    idempotency_key = b._redemption_idempotency_key(
+        raise queries.http("invalid_code", "redemption code is invalid", 422)
+    request_hash = queries.redemption_request_hash(normalized_code)
+    idempotency_key = queries.redemption_idempotency_key(
         request,
         user_id=user.id,
         normalized_code=normalized_code,
     )
-    cached = await b._cached_redemption_out(user.id, idempotency_key, request_hash)
+    cached = await queries.cached_redemption_out(user.id, idempotency_key, request_hash)
     if cached is not None:
         return cached
-    await b._lock_redemption_idempotency_key(db, user.id, idempotency_key)
-    cached = await b._cached_redemption_out(user.id, idempotency_key, request_hash)
+    await commands.lock_redemption_idempotency_key(db, user.id, idempotency_key)
+    cached = await queries.cached_redemption_out(user.id, idempotency_key, request_hash)
     if cached is not None:
         return cached
-    usage_id = b._redemption_usage_id(user.id, idempotency_key)
-    existing = await b._redemption_out_for_usage(
+    usage_id = queries.redemption_usage_id(user.id, idempotency_key)
+    existing = await queries.redemption_out_for_usage(
         db,
         user_id=user.id,
         usage_id=usage_id,
         request_hash=request_hash,
     )
     if existing is not None:
-        await b._cache_redemption_out(user.id, idempotency_key, request_hash, existing)
+        await commands.cache_redemption_out(
+            user.id, idempotency_key, request_hash, existing
+        )
         return existing
 
-    await b._require_redemption_operational(db)
-    redis = b.get_redis()
-    await b.REDEMPTION_LIMITER.check(redis, f"rl:redemption:user:{user.id}")
-    await b.REDEMPTION_LIMITER.check(redis, f"rl:redemption:ip:{client_ip(request)}")
+    await commands.require_redemption_operational(db)
+    redis = commands.get_redis()
+    await services.redemption_limiter.check(redis, f"rl:redemption:user:{user.id}")
+    await services.redemption_limiter.check(
+        redis, f"rl:redemption:ip:{client_ip(request)}"
+    )
     code_hashes = [
         billing_core.hash_redemption_code(normalized_code, secret)
-        for secret in await b._redemption_secrets(db)
+        for secret in await queries.redemption_secrets(db)
     ]
     matching_codes = (
         (
@@ -114,16 +122,16 @@ async def redeem_code(
     codes_by_hash = {item.code_hash: item for item in matching_codes}
     code = next((codes_by_hash.get(code_hash) for code_hash in code_hashes), None)
     if code is None:
-        raise b._http("CODE_NOT_FOUND", "redemption code not found", 404)
+        raise queries.http("CODE_NOT_FOUND", "redemption code not found", 404)
     if code.revoked_at is not None:
-        raise b._http("CODE_REVOKED", "redemption code was revoked", 410)
+        raise queries.http("CODE_REVOKED", "redemption code was revoked", 410)
     expires_at = code.expires_at
     if expires_at is not None and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at is not None and expires_at <= now:
-        raise b._http("CODE_EXPIRED", "redemption code expired", 410)
+        raise queries.http("CODE_EXPIRED", "redemption code expired", 410)
     if code.redeemed_count >= code.max_redemptions:
-        raise b._http("CODE_EXHAUSTED", "redemption code is exhausted", 409)
+        raise queries.http("CODE_EXHAUSTED", "redemption code is exhausted", 409)
     try:
         tx = await billing_core.topup_redeem(
             db,
@@ -145,17 +153,17 @@ async def redeem_code(
                 user_id=user.id,
                 amount_micro=code.amount_micro,
                 wallet_tx_id=tx.id,
-                ip_hash=b.request_ip_hash(request),
+                ip_hash=commands.request_ip_hash(request),
             )
         )
         code.redeemed_count += 1
         redemption_redeemed_total.inc()
-        await b.write_audit(
+        await commands.write_audit(
             db,
             event_type="wallet.topup.redeem",
             user_id=user.id,
             actor_email_hash=hash_email(user.email),
-            actor_ip_hash=b.request_ip_hash(request),
+            actor_ip_hash=commands.request_ip_hash(request),
             details={
                 "code_id": code.id,
                 "usage_id": usage_id,
@@ -165,33 +173,35 @@ async def redeem_code(
             autocommit=False,
         )
         await db.commit()
-        await b._invalidate_balance_cache(user.id)
+        await commands.invalidate_balance_cache(user.id)
     except IntegrityError as exc:
         await db.rollback()
-        constraint_name = b._integrity_constraint_name(exc)
-        if constraint_name in b._REDEMPTION_REPLAY_CONSTRAINTS:
-            existing = await b._redemption_out_for_usage(
+        constraint_name = queries.integrity_constraint_name(exc)
+        if constraint_name in services.redemption_replay_constraints:
+            existing = await queries.redemption_out_for_usage(
                 db,
                 user_id=user.id,
                 usage_id=usage_id,
                 request_hash=request_hash,
             )
             if existing is not None:
-                await b._cache_redemption_out(
+                await commands.cache_redemption_out(
                     user.id, idempotency_key, request_hash, existing
                 )
                 return existing
-        if constraint_name == b._REDEMPTION_ALREADY_USED_CONSTRAINT:
-            raise b._http(
+        if constraint_name == services.redemption_already_used_constraint:
+            raise queries.http(
                 "CODE_ALREADY_USED",
                 "this code was already used by this user",
                 409,
             ) from exc
         raise
     response = RedemptionOut(
-        amount=b._money(code.amount_micro), balance=b._money(tx.balance_after)
+        amount=queries.money(code.amount_micro), balance=queries.money(tx.balance_after)
     )
-    await b._cache_redemption_out(user.id, idempotency_key, request_hash, response)
+    await commands.cache_redemption_out(
+        user.id, idempotency_key, request_hash, response
+    )
     return response
 
 
@@ -202,15 +212,17 @@ async def list_my_redemptions(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: str | None = None,
 ) -> RedemptionUsageListOut:
-    b = current_runtime()
-    b._require_wallet_user(user)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    commands.require_wallet_user(user)
     stmt = (
         select(RedemptionCodeUsage)
         .where(RedemptionCodeUsage.user_id == user.id)
         .order_by(RedemptionCodeUsage.redeemed_at.desc(), RedemptionCodeUsage.id.desc())
         .limit(limit + 1)
     )
-    stmt = b._cursor_filter(stmt, RedemptionCodeUsage, cursor, attr="redeemed_at")
+    stmt = queries.cursor_filter(stmt, RedemptionCodeUsage, cursor, attr="redeemed_at")
     rows = (await db.execute(stmt)).scalars().all()
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -219,12 +231,12 @@ async def list_my_redemptions(
             RedemptionUsageOut(
                 id=row.id,
                 code_id=row.code_id,
-                amount=b._money(row.amount_micro),
+                amount=queries.money(row.amount_micro),
                 redeemed_at=row.redeemed_at,
             )
             for row in rows
         ],
-        next_cursor=b._next_cursor(rows, has_more, attr="redeemed_at"),
+        next_cursor=queries.next_cursor(rows, has_more, attr="redeemed_at"),
     )
 
 
@@ -238,7 +250,8 @@ async def admin_list_redemption_codes(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     cursor: str | None = None,
 ) -> AdminRedemptionCodeListOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     stmt = select(RedemptionCode)
     now = datetime.now(timezone.utc)
     if batch_id:
@@ -276,8 +289,8 @@ async def admin_list_redemption_codes(
             else stmt.where(selected)
         )
     elif status not in {None, "", "all"}:
-        raise b._http("invalid_status", "status is invalid", 422)
-    stmt = b._cursor_filter(stmt, RedemptionCode, cursor)
+        raise queries.http("invalid_status", "status is invalid", 422)
+    stmt = queries.cursor_filter(stmt, RedemptionCode, cursor)
     rows = (
         (
             await db.execute(
@@ -292,8 +305,8 @@ async def admin_list_redemption_codes(
     has_more = len(rows) > limit
     rows = rows[:limit]
     return AdminRedemptionCodeListOut(
-        items=[b._redemption_code_out(row, now=now) for row in rows],
-        next_cursor=b._next_cursor(rows, has_more),
+        items=[queries.redemption_code_out(row, now=now) for row in rows],
+        next_cursor=queries.next_cursor(rows, has_more),
     )
 
 
@@ -307,7 +320,8 @@ async def admin_list_redemption_code_usage(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> AdminRedemptionUsageListOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     rows = (
         await db.execute(
             select(RedemptionCodeUsage, User.email)
@@ -327,7 +341,7 @@ async def admin_list_redemption_code_usage(
                 code_id=usage.code_id,
                 user_id=usage.user_id,
                 user_email=email,
-                amount=b._money(usage.amount_micro),
+                amount=queries.money(usage.amount_micro),
                 wallet_tx_id=usage.wallet_tx_id,
                 redeemed_at=usage.redeemed_at,
                 ip_hash=usage.ip_hash,
@@ -349,36 +363,40 @@ async def admin_create_redemption_codes(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminRedemptionCodeCreateOut:
-    b = current_runtime()
-    amount = b._rmb_to_micro_or_422(body.amount_rmb, field="amount_rmb")
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    amount = queries.rmb_to_micro_or_422(body.amount_rmb, field="amount_rmb")
     if amount <= 0:
-        raise b._http("invalid_amount", "amount must be positive", 422)
-    request_hash = b._redemption_batch_request_hash(body, amount_micro=amount)
+        raise queries.http("invalid_amount", "amount must be positive", 422)
+    request_hash = queries.redemption_batch_request_hash(body, amount_micro=amount)
     now = datetime.now(timezone.utc)
-    idempotency_key = b._redemption_batch_idempotency_key(
+    idempotency_key = queries.redemption_batch_idempotency_key(
         request,
         admin_id=admin.id,
         request_hash=request_hash,
         now=now,
     )
-    lock_identity = b._redemption_batch_lock_identity(idempotency_key, request_hash)
-    await b._lock_redemption_batch_idempotency_key(db, admin.id, lock_identity)
-    existing_batch = await b._redemption_batch_for_idempotency(
+    lock_identity = queries.redemption_batch_lock_identity(
+        idempotency_key, request_hash
+    )
+    await commands.lock_redemption_batch_idempotency_key(db, admin.id, lock_identity)
+    existing_batch = await queries.redemption_batch_for_idempotency(
         db,
         admin_id=admin.id,
         idempotency_key=idempotency_key,
         request_hash=request_hash,
-        created_after=now - timedelta(seconds=b._REDEMPTION_DOWNLOAD_TTL_SECONDS),
+        created_after=now - timedelta(seconds=services.redemption_download_ttl_seconds),
     )
     if existing_batch is not None:
-        return await b._replay_redemption_batch(
+        return await queries.replay_redemption_batch(
             existing_batch,
             request_hash=request_hash,
             idempotency_key=idempotency_key,
             response=response,
         )
-    await b._require_bootstrap_completed(db)
-    secret = await b._redemption_secret(db)
+    await commands.require_bootstrap_completed(db)
+    secret = await queries.redemption_secret(db)
     batch_id = new_uuid7()
     batch = RedemptionBatch(
         id=batch_id,
@@ -396,20 +414,21 @@ async def admin_create_redemption_codes(
     except IntegrityError as exc:
         await db.rollback()
         if (
-            b._integrity_constraint_name(exc)
-            != b._REDEMPTION_BATCH_IDEMPOTENCY_CONSTRAINT
+            queries.integrity_constraint_name(exc)
+            != services.redemption_batch_idempotency_constraint
         ):
             raise
-        existing_batch = await b._redemption_batch_for_idempotency(
+        existing_batch = await queries.redemption_batch_for_idempotency(
             db,
             admin_id=admin.id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
-            created_after=now - timedelta(seconds=b._REDEMPTION_DOWNLOAD_TTL_SECONDS),
+            created_after=now
+            - timedelta(seconds=services.redemption_download_ttl_seconds),
         )
         if existing_batch is None:
             raise
-        return await b._replay_redemption_batch(
+        return await queries.replay_redemption_batch(
             existing_batch,
             request_hash=request_hash,
             idempotency_key=idempotency_key,
@@ -432,12 +451,12 @@ async def admin_create_redemption_codes(
                 created_by=admin.id,
             )
         )
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="redemption.create",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={
             "batch_id": batch_id,
             "count": body.count,
@@ -450,7 +469,7 @@ async def admin_create_redemption_codes(
     )
     await db.flush()
     try:
-        token = await b._store_redemption_plaintext_batch(
+        token = await commands.store_redemption_plaintext_batch(
             batch_id=batch_id,
             amount_micro=amount,
             codes=plaintext_codes,
@@ -458,7 +477,7 @@ async def admin_create_redemption_codes(
         )
     except Exception as exc:  # noqa: BLE001
         await db.rollback()
-        raise b._http(
+        raise queries.http(
             "download_cache_unavailable",
             "redemption code download cache is unavailable; no codes were created",
             503,
@@ -468,11 +487,11 @@ async def admin_create_redemption_codes(
     except Exception:
         await db.rollback()
         try:
-            redis = b.get_redis()
-            await redis.delete(b._DOWNLOAD_TOKEN_PREFIX + token)
-            await redis.delete(b._PLAINTEXT_BATCH_PREFIX + batch_id)
+            redis = commands.get_redis()
+            await redis.delete(services.download_token_prefix + token)
+            await redis.delete(services.plaintext_batch_prefix + batch_id)
         except Exception:
-            b.logger.warning(
+            logger.warning(
                 "redemption plaintext cache cleanup failed batch_id=%s token=%s",
                 batch_id,
                 token,
@@ -484,7 +503,7 @@ async def admin_create_redemption_codes(
     return AdminRedemptionCodeCreateOut(
         batch_id=batch_id,
         count=body.count,
-        amount=b._money(amount),
+        amount=queries.money(amount),
         download_token=token,
         plaintext_codes=plaintext_codes,
         expires_at=body.expires_at,
@@ -497,12 +516,16 @@ async def admin_download_redemption_batch_csv(
     _admin: AdminUser,
     download_token: str = Query(min_length=8),
 ) -> StreamingResponse:
-    b = current_runtime()
-    data = await b.get_redis().get(b._DOWNLOAD_TOKEN_PREFIX + download_token)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    data = await commands.get_redis().get(
+        services.download_token_prefix + download_token
+    )
     if data is None:
-        raise b._http("download_token_expired", "download token expired", 410)
+        raise queries.http("download_token_expired", "download token expired", 410)
     text = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
-    b._require_redemption_download_batch(text, batch_id)
+    queries.require_redemption_download_batch(text, batch_id)
     return StreamingResponse(
         io.BytesIO(text.encode("utf-8")),
         media_type="text/csv; charset=utf-8",
@@ -519,14 +542,18 @@ async def admin_download_redemption_batch_txt(
     _admin: AdminUser,
     download_token: str = Query(min_length=8),
 ) -> StreamingResponse:
-    b = current_runtime()
-    data = await b.get_redis().get(b._DOWNLOAD_TOKEN_PREFIX + download_token)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    data = await commands.get_redis().get(
+        services.download_token_prefix + download_token
+    )
     if data is None:
-        raise b._http("download_token_expired", "download token expired", 410)
+        raise queries.http("download_token_expired", "download token expired", 410)
     csv_text = (
         data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
     )
-    b._require_redemption_download_batch(csv_text, batch_id)
+    queries.require_redemption_download_batch(csv_text, batch_id)
     codes = [
         str(row.get("code") or "")
         for row in csv.DictReader(io.StringIO(csv_text))
@@ -554,10 +581,12 @@ async def admin_redownload_redemption_batch(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminRedemptionBatchRedownloadOut:
-    b = current_runtime()
-    payload = await b._load_redemption_plaintext_batch(batch_id)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    payload = await queries.load_redemption_plaintext_batch(batch_id)
     codes = [str(code) for code in payload["codes"]]
-    amount = b._rmb_to_micro_or_422(
+    amount = queries.rmb_to_micro_or_422(
         str(payload.get("amount_rmb") or "0"), field="amount_rmb"
     )
     expires_raw = payload.get("expires_at")
@@ -566,18 +595,18 @@ async def admin_redownload_redemption_batch(
         if isinstance(expires_raw, str) and expires_raw
         else None
     )
-    token = await b._store_redemption_plaintext_batch(
+    token = await commands.store_redemption_plaintext_batch(
         batch_id=batch_id,
         amount_micro=amount,
         codes=codes,
         expires_at=expires_at,
     )
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="redemption.batch.redownload",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={"batch_id": batch_id, "count": len(codes)},
         autocommit=False,
     )
@@ -587,7 +616,7 @@ async def admin_redownload_redemption_batch(
         count=len(codes),
         download_token=token,
         plaintext_codes=codes,
-        expires_in_seconds=b._REDEMPTION_DOWNLOAD_TTL_SECONDS,
+        expires_in_seconds=services.redemption_download_ttl_seconds,
     )
 
 
@@ -602,25 +631,29 @@ async def admin_revoke_redemption_code(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminRedemptionCodeOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     code = await db.get(RedemptionCode, code_id)
     if code is None:
-        raise b._http("not_found", "redemption code not found", 404)
+        raise queries.http("not_found", "redemption code not found", 404)
     if code.revoked_at is not None:
-        raise b._http("ALREADY_REVOKED", "redemption code was already revoked", 409)
+        raise queries.http(
+            "ALREADY_REVOKED", "redemption code was already revoked", 409
+        )
     code.revoked_at = datetime.now(timezone.utc)
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="redemption.revoke",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={"code_id": code_id},
         autocommit=False,
     )
     await db.commit()
     await db.refresh(code)
-    return b._redemption_code_out(code)
+    return queries.redemption_code_out(code)
 
 
 @router.post(
@@ -634,23 +667,22 @@ async def admin_revoke_redemption_batch(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminRedemptionCodeListOut:
-    b = current_runtime()
+    services = build_billing_services()
+    commands = services.commands
     now = datetime.now(timezone.utc)
     await db.execute(
         update(RedemptionCode)
         .where(RedemptionCode.batch_id == batch_id, RedemptionCode.revoked_at.is_(None))
         .values(revoked_at=now)
     )
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="redemption.batch.revoke",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         details={"batch_id": batch_id},
         autocommit=False,
     )
     await db.commit()
-    return await b.admin_list_redemption_codes(
-        admin, db, status="all", batch_id=batch_id
-    )
+    return await admin_list_redemption_codes(admin, db, status="all", batch_id=batch_id)

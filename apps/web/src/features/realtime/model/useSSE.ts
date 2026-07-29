@@ -9,7 +9,10 @@ import {
   useState,
 } from "react";
 import type { RealtimeControlEvent } from "./contracts";
-import type { SnapshotAdapter } from "./replayCoordinator";
+import type {
+  SnapshotAdapter,
+  SnapshotExecutionContext,
+} from "./replayCoordinator";
 import type {
   RealtimeRuntime,
   RealtimeStatus,
@@ -27,9 +30,10 @@ export interface SSEHandlers {
 export type SSEStatus = RealtimeStatus;
 
 export interface UseSSEOptions {
-  onOpen?: (event: Event) => void;
+  onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
   onError?: (event: Event) => void;
   onControl?: (event: RealtimeControlEvent) => void;
+  onAuthInvalidated?: () => void;
   recoverSnapshot?: SnapshotAdapter;
   hiddenCloseDelayMs?: number;
   maxRetryCount?: number;
@@ -62,16 +66,22 @@ export function useSSE(
       handlers[name]?.(data, id);
     },
   );
-  const emitOpen = useEffectEvent((event: Event) => options.onOpen?.(event));
+  const emitOpen = useEffectEvent(
+    (event: Event, context: SnapshotExecutionContext) =>
+      options.onOpen?.(event, context),
+  );
   const emitError = useEffectEvent((event: Event) => options.onError?.(event));
   const emitControl = useEffectEvent((event: RealtimeControlEvent) =>
     options.onControl?.(event),
   );
+  const emitAuthInvalidated = useEffectEvent(() =>
+    options.onAuthInvalidated?.(),
+  );
   const emitRecoverSnapshot = useEffectEvent<SnapshotAdapter>(
-    (scopes, reason, signal) => {
+    (scopes, reason, signal, context) => {
       const recover = options.recoverSnapshot;
       return recover
-        ? recover(scopes, reason, signal)
+        ? recover(scopes, reason, signal, context)
         : Promise.reject(new Error("snapshot adapter unavailable"));
     },
   );
@@ -106,6 +116,7 @@ export function useSSE(
       onOpen: emitOpen,
       onError: emitError,
       onControl: emitControl,
+      onAuthInvalidated: emitAuthInvalidated,
       recoverSnapshot: hasRecoveryAdapter ? emitRecoverSnapshot : undefined,
       hiddenCloseDelayMs: options.hiddenCloseDelayMs,
       maxRetryCount: options.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT,

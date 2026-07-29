@@ -34,7 +34,7 @@ from ...audit import hash_email
 from ...db import get_db
 from ...deps import AdminUser, CurrentUser, verify_csrf
 from ...services.billing.usage import CHARGE_KINDS as _CHARGE_KINDS
-from .compat import current_runtime
+from .composition import build_billing_services
 
 
 router = APIRouter()
@@ -45,7 +45,7 @@ async def get_my_wallet(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WalletOut:
-    return await current_runtime()._wallet_out(db, user)
+    return await build_billing_services().queries.wallet_out(db, user)
 
 
 @router.get("/me/billing/snapshot", response_model=BillingSnapshotOut)
@@ -53,7 +53,8 @@ async def get_my_billing_snapshot(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BillingSnapshotOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     (
         balance,
         multiplier,
@@ -63,7 +64,7 @@ async def get_my_billing_snapshot(
         windows,
         by_kind,
         _count,
-    ) = await b._billing_snapshot_parts(db, user.id)
+    ) = await queries.billing_snapshot_parts(db, user.id)
     return BillingSnapshotOut(
         balance_micro=balance,
         billing_rate_multiplier=multiplier,
@@ -81,8 +82,10 @@ async def list_my_wallet_transactions(
     cursor: str | None = None,
     kind: str | None = Query(default=None, max_length=32),
 ) -> WalletTransactionListOut:
-    b = current_runtime()
-    b._require_wallet_user(user)
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
+    commands.require_wallet_user(user)
     stmt = (
         select(WalletTransaction)
         .where(WalletTransaction.user_id == user.id)
@@ -95,13 +98,13 @@ async def list_my_wallet_transactions(
             if kind == "charge"
             else stmt.where(WalletTransaction.kind == kind)
         )
-    stmt = b._cursor_filter(stmt, WalletTransaction, cursor)
+    stmt = queries.cursor_filter(stmt, WalletTransaction, cursor)
     rows = (await db.execute(stmt)).scalars().all()
     has_more = len(rows) > limit
     rows = rows[:limit]
     return WalletTransactionListOut(
-        items=[b._tx_out(row) for row in rows],
-        next_cursor=b._next_cursor(rows, has_more),
+        items=[queries.tx_out(row) for row in rows],
+        next_cursor=queries.next_cursor(rows, has_more),
     )
 
 
@@ -114,7 +117,8 @@ async def admin_list_wallets(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     cursor: str | None = None,
 ) -> AdminWalletListOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     # The soft-delete boundary is intentionally part of the query contract:
     # User.deleted_at.is_(None)
     stmt = (
@@ -127,14 +131,14 @@ async def admin_list_wallets(
     if q:
         q_clean = q.strip()[:200]
         if q_clean:
-            pattern = f"%{b._escape_like_pattern(q_clean)}%"
+            pattern = f"%{queries.escape_like_pattern(q_clean)}%"
             stmt = stmt.where(
                 or_(
                     User.email.ilike(pattern, escape="\\"),
                     User.id.ilike(pattern, escape="\\"),
                 )
             )
-    stmt = b._cursor_filter(stmt, User, cursor)
+    stmt = queries.cursor_filter(stmt, User, cursor)
     rows = (
         await db.execute(
             stmt.order_by(User.created_at.desc(), User.id.desc()).limit(limit + 1)
@@ -143,7 +147,7 @@ async def admin_list_wallets(
     has_more = len(rows) > limit
     rows = rows[:limit]
     items: list[AdminWalletOut] = []
-    threshold = await b._low_balance_threshold(db)
+    threshold = await queries.low_balance_threshold(db)
     user_ids = [user.id for user, _wallet in rows]
     last_topups: dict[str, datetime] = {}
     last_charges: dict[str, datetime] = {}
@@ -187,16 +191,16 @@ async def admin_list_wallets(
             wallet = wallet or UserWallet(user_id=user.id)
             wallet_out = WalletOut(
                 mode="wallet",
-                balance=b._money(wallet.balance_micro),
-                hold=b._money(wallet.hold_micro),
-                low_balance_threshold=b._money(threshold),
+                balance=queries.money(wallet.balance_micro),
+                hold=queries.money(wallet.hold_micro),
+                low_balance_threshold=queries.money(threshold),
                 frozen=False,
             )
         elif wallet is not None and (wallet.balance_micro > 0 or wallet.hold_micro > 0):
             wallet_out = WalletOut(
                 mode="byok",
-                balance=b._money(wallet.balance_micro),
-                hold=b._money(wallet.hold_micro),
+                balance=queries.money(wallet.balance_micro),
+                hold=queries.money(wallet.hold_micro),
                 frozen=True,
             )
         else:
@@ -213,7 +217,7 @@ async def admin_list_wallets(
         )
     return AdminWalletListOut(
         items=items,
-        next_cursor=b._next_cursor([user for user, _wallet in rows], has_more),
+        next_cursor=queries.next_cursor([user for user, _wallet in rows], has_more),
     )
 
 
@@ -229,26 +233,34 @@ async def admin_adjust_wallet(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> WalletTransactionOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     target = await db.get(User, user_id)
     if target is None or getattr(target, "deleted_at", None) is not None:
-        raise b._http("not_found", "user not found", 404)
+        raise queries.http("not_found", "user not found", 404)
     if target.account_mode != "wallet":
-        raise b._http("ACCOUNT_NOT_WALLET", "target user is not a wallet account", 409)
-    amount = b._rmb_to_micro_or_422(body.amount_rmb_signed, field="amount_rmb_signed")
-    if abs(amount) > b.MAX_ADMIN_ADJUST_MICRO:
-        raise b._http(
+        raise queries.http(
+            "ACCOUNT_NOT_WALLET", "target user is not a wallet account", 409
+        )
+    amount = queries.rmb_to_micro_or_422(
+        body.amount_rmb_signed, field="amount_rmb_signed"
+    )
+    if abs(amount) > services.max_admin_adjust_micro:
+        raise queries.http(
             "amount_too_large",
             "admin wallet adjustment exceeds the per-operation limit",
             422,
-            max_amount_micro=b.MAX_ADMIN_ADJUST_MICRO,
+            max_amount_micro=services.max_admin_adjust_micro,
         )
-    allow_negative = await b._allow_negative_balance(db)
+    allow_negative = await queries.allow_negative_balance(db)
     min_balance_micro = (
-        -b.MAX_ADMIN_NEGATIVE_BALANCE_MICRO if allow_negative and amount < 0 else None
+        -services.max_admin_negative_balance_micro
+        if allow_negative and amount < 0
+        else None
     )
     try:
-        tx = await b.billing_core.adjust(
+        tx = await billing_core.adjust(
             db,
             user_id,
             amount,
@@ -259,26 +271,26 @@ async def admin_adjust_wallet(
         )
     except billing_core.BillingError as exc:
         if exc.code == "negative_balance_limit_exceeded":
-            raise b._http(
+            raise queries.http(
                 exc.code,
                 exc.message,
                 exc.status_code,
-                max_negative_balance_micro=b.MAX_ADMIN_NEGATIVE_BALANCE_MICRO,
+                max_negative_balance_micro=services.max_admin_negative_balance_micro,
             ) from exc
-        raise b._billing_http(exc)
-    await b.write_audit(
+        raise queries.billing_http(exc)
+    await commands.write_audit(
         db,
         event_type="wallet.adjust.admin",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         target_user_id=user_id,
         details={"amount_micro": amount, "reason": body.reason, "tx_id": tx.id},
         autocommit=False,
     )
     await db.commit()
-    await b._invalidate_balance_cache(user_id)
-    return b._tx_out(tx)
+    await commands.invalidate_balance_cache(user_id)
+    return queries.tx_out(tx)
 
 
 @router.get("/admin/wallets/{user_id}", response_model=AdminWalletDetailOut)
@@ -287,11 +299,12 @@ async def admin_get_wallet_detail(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminWalletDetailOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     user = await db.get(User, user_id)
     if user is None or getattr(user, "deleted_at", None) is not None:
-        raise b._http("not_found", "user not found", 404)
-    wallet_out = await b._wallet_out(db, user)
+        raise queries.http("not_found", "user not found", 404)
+    wallet_out = await queries.wallet_out(db, user)
     tx_rows = list(
         (
             await db.execute(
@@ -351,14 +364,14 @@ async def admin_get_wallet_detail(
         last_topup_at=last_topup_at,
         last_charge_at=last_charge_at,
         last_redemption_at=last_redemption_at,
-        transactions=[b._tx_out(tx) for tx in tx_rows],
+        transactions=[queries.tx_out(tx) for tx in tx_rows],
         redemptions=[
             AdminRedemptionUsageOut(
                 id=usage.id,
                 code_id=usage.code_id,
                 user_id=usage.user_id,
                 user_email=email,
-                amount=b._money(usage.amount_micro),
+                amount=queries.money(usage.amount_micro),
                 wallet_tx_id=usage.wallet_tx_id,
                 redeemed_at=usage.redeemed_at,
                 ip_hash=usage.ip_hash,
@@ -380,7 +393,9 @@ async def admin_set_account_mode(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdminWalletOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
+    commands = services.commands
     # Preserve the soft-delete guard alongside the row lock:
     # User.deleted_at.is_(None)
     target = (
@@ -391,14 +406,14 @@ async def admin_set_account_mode(
         )
     ).scalar_one_or_none()
     if target is None:
-        raise b._http("not_found", "user not found", 404)
+        raise queries.http("not_found", "user not found", 404)
     before = target.account_mode
     if before == body.mode:
         return AdminWalletOut(
             user_id=target.id,
             email=target.email,
             account_mode=target.account_mode,  # type: ignore[arg-type]
-            wallet=await b._wallet_out(db, target),
+            wallet=await queries.wallet_out(db, target),
         )
     now = datetime.now(timezone.utc)
     if before == "byok" and body.mode == "wallet":
@@ -410,12 +425,12 @@ async def admin_set_account_mode(
             )
             .values(status="revoked", deleted_at=now, updated_at=now)
         )
-        await b.billing_core.get_wallet(db, user_id, lock=True)
+        await billing_core.get_wallet(db, user_id, lock=True)
     elif before == "wallet" and body.mode == "byok":
-        wallet = await b.billing_core.get_wallet(db, user_id, lock=True)
+        wallet = await billing_core.get_wallet(db, user_id, lock=True)
         assert wallet is not None
         if wallet.hold_micro > 0:
-            raise b._http(
+            raise queries.http(
                 "WALLET_HAS_ACTIVE_HOLDS",
                 "wallet has active holds; cancel or finish pending tasks first",
                 409,
@@ -423,7 +438,7 @@ async def admin_set_account_mode(
             )
         if body.on_residual_balance == "zero" and wallet.balance_micro > 0:
             try:
-                await b.billing_core.adjust(
+                await billing_core.adjust(
                     db,
                     user_id,
                     -wallet.balance_micro,
@@ -431,14 +446,14 @@ async def admin_set_account_mode(
                     reason="account mode changed to byok",
                 )
             except billing_core.BillingError as exc:
-                raise b._billing_http(exc)
+                raise queries.billing_http(exc)
     target.account_mode = body.mode
-    await b.write_audit(
+    await commands.write_audit(
         db,
         event_type="account.mode_change",
         user_id=admin.id,
         actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=b.request_ip_hash(request),
+        actor_ip_hash=commands.request_ip_hash(request),
         target_user_id=user_id,
         details={
             "from": before,
@@ -448,13 +463,13 @@ async def admin_set_account_mode(
         autocommit=False,
     )
     await db.commit()
-    await b._invalidate_balance_cache(user_id)
+    await commands.invalidate_balance_cache(user_id)
     await db.refresh(target)
     return AdminWalletOut(
         user_id=target.id,
         email=target.email,
         account_mode=target.account_mode,  # type: ignore[arg-type]
-        wallet=await b._wallet_out(db, target),
+        wallet=await queries.wallet_out(db, target),
     )
 
 
@@ -471,7 +486,8 @@ async def admin_list_wallet_transactions(
     ref_type: str | None = Query(default=None, max_length=32),
     ref_id: str | None = Query(default=None, max_length=64),
 ) -> WalletTransactionListOut:
-    b = current_runtime()
+    services = build_billing_services()
+    queries = services.queries
     stmt = select(WalletTransaction).where(WalletTransaction.user_id == user_id)
     if kind:
         stmt = (
@@ -483,7 +499,7 @@ async def admin_list_wallet_transactions(
         stmt = stmt.where(WalletTransaction.ref_type == ref_type)
     if ref_id:
         stmt = stmt.where(WalletTransaction.ref_id == ref_id)
-    stmt = b._cursor_filter(stmt, WalletTransaction, cursor)
+    stmt = queries.cursor_filter(stmt, WalletTransaction, cursor)
     rows = (
         (
             await db.execute(
@@ -498,6 +514,6 @@ async def admin_list_wallet_transactions(
     has_more = len(rows) > limit
     rows = rows[:limit]
     return WalletTransactionListOut(
-        items=[b._tx_out(row) for row in rows],
-        next_cursor=b._next_cursor(rows, has_more),
+        items=[queries.tx_out(row) for row in rows],
+        next_cursor=queries.next_cursor(rows, has_more),
     )

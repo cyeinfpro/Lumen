@@ -22,6 +22,7 @@ import {
 import { qk } from "@/lib/queries/queryKeys";
 import {
   registerRuntimeRecovery,
+  requestSessionInvalidation,
   setRealtimeRuntimeStatus,
 } from "@/lib/runtimeResilience";
 import { useSSE, type SSEHandlers } from "./useSSE";
@@ -39,7 +40,10 @@ import {
 } from "./eventEffects";
 import { EventRouter } from "./eventRouter";
 import { ProgressEventCoalescer } from "./progressCoalescer";
-import type { SnapshotAdapter } from "./replayCoordinator";
+import type {
+  SnapshotAdapter,
+  SnapshotExecutionContext,
+} from "./replayCoordinator";
 import type { SnapshotScope } from "./snapshotScopes";
 
 const EVENT_NAMES = [
@@ -70,6 +74,39 @@ const EVENT_NAMES = [
 ] as const;
 
 const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
+const FULL_SNAPSHOT_SCOPES = [
+  "identity",
+  "conversations",
+  "activeTasks",
+  "wallet",
+  "runtimeDefaults",
+] as const satisfies readonly SnapshotScope[];
+
+type InitialSnapshotFlight = {
+  controller: AbortController;
+  connectionGeneration: number;
+  userScope: string;
+};
+
+function staleSnapshotError(): Error {
+  const error = new Error("stale snapshot generation");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertSnapshotCurrent(
+  signal: AbortSignal,
+  context: SnapshotExecutionContext,
+  expectedUserScope: string,
+): void {
+  signal.throwIfAborted();
+  if (
+    context.userScope !== expectedUserScope ||
+    !context.isCurrent()
+  ) {
+    throw staleSnapshotError();
+  }
+}
 
 function sortedTaskIds(ids: Iterable<string>): string[] {
   // 修复非法频道名：空串 id 会拼出 `task:` 这种订阅不到任何东西的频道，并挤占
@@ -168,13 +205,20 @@ function applyCompletionText(
   }
 }
 
-async function refreshCompletions(): Promise<void> {
+async function refreshCompletions(
+  signal: AbortSignal,
+  context: SnapshotExecutionContext,
+  userScope: string,
+): Promise<void> {
   const ids = completionIds(useChatStore.getState().messages).slice(0, 16);
   await Promise.all(
     ids.map(async (id) => {
       try {
-        applyCompletionSnapshot(await getTask("completions", id));
+        const completion = await getTask("completions", id);
+        assertSnapshotCurrent(signal, context, userScope);
+        applyCompletionSnapshot(completion);
       } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
         logError(error, {
           scope: "sse-snapshot",
           extra: { task: "completion", id },
@@ -227,9 +271,11 @@ async function invalidateSnapshotQueries(
 export function useLumenRealtime(): void {
   const userId = useChatStore((state) => state.currentUserId);
   const queryClient = useQueryClient();
-  const lastSnapshotAt = useRef(0);
+  const lastSnapshot = useRef({ userScope: "", syncedAt: 0 });
+  const initialSnapshotFlight = useRef<InitialSnapshotFlight | null>(null);
 
   const channels = useMemo(() => channelsFor(userId), [userId]);
+  const userScope = channels.join(",");
 
   const effectContext = useMemo<LumenRealtimeEffectContext>(
     () => ({
@@ -298,15 +344,16 @@ export function useLumenRealtime(): void {
   );
 
   const recoverSnapshot = useCallback<SnapshotAdapter>(
-    async (scopes, _reason, signal) => {
-      signal.throwIfAborted();
+    async (scopes, _reason, signal, context) => {
+      assertSnapshotCurrent(signal, context, userScope);
       const store = useChatStore.getState();
       const results = await Promise.allSettled([
-        store.hydrateActiveTasks(),
-        store.pollInflightTasks({ maxChecks: 50 }),
-        refreshCompletions(),
+        store.hydrateActiveTasks({ signal }),
+        store.pollInflightTasks({ maxChecks: 50, signal }),
+        refreshCompletions(signal, context, userScope),
         invalidateSnapshotQueries(queryClient, userId, scopes),
       ]);
+      assertSnapshotCurrent(signal, context, userScope);
       const failures = results.filter(
         (result): result is PromiseRejectedResult =>
           result.status === "rejected",
@@ -317,32 +364,69 @@ export function useLumenRealtime(): void {
           "realtime snapshot recovery failed",
         );
       }
-      signal.throwIfAborted();
-      lastSnapshotAt.current = Date.now();
-      return { syncedAt: lastSnapshotAt.current };
+      const syncedAt = Date.now();
+      lastSnapshot.current = { userScope, syncedAt };
+      return { syncedAt };
     },
-    [queryClient, userId],
+    [queryClient, userId, userScope],
   );
 
   const { status, reconnect } = useSSE(channels, handlers, {
     recoverSnapshot,
-    onOpen: () => {
-      if (Date.now() - lastSnapshotAt.current > RECENT_SNAPSHOT_WINDOW_MS) {
-        const signal = new AbortController().signal;
-        void recoverSnapshot([
-          "identity",
-          "conversations",
-          "activeTasks",
-          "wallet",
-          "runtimeDefaults",
-        ], { kind: "replay_gap", reason: "connection_open" }, signal).catch(
-          (error) => {
-            logError(error, { scope: "sse-open-snapshot" });
-          },
-        );
+    onAuthInvalidated: () => {
+      requestSessionInvalidation("realtime_auth_invalidated");
+    },
+    onOpen: (_event, connectionContext) => {
+      initialSnapshotFlight.current?.controller.abort();
+      initialSnapshotFlight.current = null;
+      const recent = lastSnapshot.current;
+      if (
+        recent.userScope === connectionContext.userScope &&
+        Date.now() - recent.syncedAt <= RECENT_SNAPSHOT_WINDOW_MS
+      ) {
+        return;
       }
+      const controller = new AbortController();
+      const flight: InitialSnapshotFlight = {
+        controller,
+        connectionGeneration: connectionContext.connectionGeneration,
+        userScope: connectionContext.userScope,
+      };
+      initialSnapshotFlight.current = flight;
+      void recoverSnapshot(
+        FULL_SNAPSHOT_SCOPES,
+        { kind: "replay_gap", reason: "connection_open" },
+        controller.signal,
+        {
+          ...connectionContext,
+          isCurrent: () =>
+            !controller.signal.aborted &&
+            initialSnapshotFlight.current === flight &&
+            flight.connectionGeneration ===
+              connectionContext.connectionGeneration &&
+            flight.userScope === connectionContext.userScope &&
+            connectionContext.isCurrent(),
+        },
+      )
+        .catch((error) => {
+          if (error instanceof Error && error.name === "AbortError") return;
+          logError(error, { scope: "sse-open-snapshot" });
+        })
+        .finally(() => {
+          if (initialSnapshotFlight.current === flight) {
+            initialSnapshotFlight.current = null;
+          }
+        });
     },
   });
+
+  useEffect(
+    () => () => {
+      initialSnapshotFlight.current?.controller.abort();
+      initialSnapshotFlight.current = null;
+    },
+    [userScope],
+  );
 
   useEffect(() => {
     setRealtimeRuntimeStatus(channels.length > 0 ? status : "idle");

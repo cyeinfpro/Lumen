@@ -137,6 +137,8 @@ def test_docker_release_binds_dispatch_builds_to_resolved_commit() -> None:
     )
     assert "type=raw,value=${{ needs.resolve-ref.outputs.build_tag }}" in workflow
     assert "scripts/promote_release_images.py" in workflow
+    assert "release tag commit is not reachable from origin/main" in workflow
+    assert "git merge-base --is-ancestor" in workflow
     assert (
         "org.opencontainers.image.revision=${{ needs.resolve-ref.outputs.commit }}"
         in workflow
@@ -273,7 +275,11 @@ def test_docker_release_promotes_aliases_only_after_all_signed_builds() -> None:
     assert "--metadata-file" in json.dumps(jobs["merge-web"], sort_keys=True)
 
     release = jobs["release"]
-    assert set(release["needs"]) == {"resolve-ref", "promote"}
+    assert set(release["needs"]) == {
+        "resolve-ref",
+        "promote",
+        "promote-shared",
+    }
     release_encoded = json.dumps(release, sort_keys=True)
     assert "softprops/action-gh-release@" in release_encoded
     assert "needs.promote.outputs.is_prerelease" in release_encoded
@@ -335,7 +341,7 @@ def test_docker_release_main_and_release_promotion_are_explicit() -> None:
     }
 
 
-def test_release_source_of_truth_precedes_stable_shared_aliases() -> None:
+def test_stable_shared_aliases_precede_github_release() -> None:
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     release = jobs["release"]
@@ -343,7 +349,11 @@ def test_release_source_of_truth_precedes_stable_shared_aliases() -> None:
     manifest_run = manifest_step["run"]
     assert isinstance(manifest_run, str)
 
-    assert set(release["needs"]) == {"resolve-ref", "promote"}
+    assert set(release["needs"]) == {
+        "resolve-ref",
+        "promote",
+        "promote-shared",
+    }
     manifest_env = manifest_step["env"]
     assert manifest_env["API_DIGEST"] == "${{ needs.promote.outputs.api_digest }}"
     assert manifest_env["WORKER_DIGEST"] == (
@@ -362,15 +372,40 @@ def test_release_source_of_truth_precedes_stable_shared_aliases() -> None:
     )
 
     shared = jobs["promote-shared"]
-    assert set(shared["needs"]) == {"resolve-ref", "promote", "release"}
-    assert (
-        shared["if"] == "needs.resolve-ref.outputs.is_release == 'true' && "
-        "needs.promote.outputs.is_prerelease == 'false'"
-    )
+    assert set(shared["needs"]) == {"resolve-ref", "promote"}
+    assert shared["if"] == "needs.resolve-ref.outputs.is_release == 'true'"
     assert shared["permissions"] == {"contents": "read", "packages": "write"}
     shared_step = _step(shared, "Publish stable shared aliases")
+    assert shared_step["if"] == "needs.promote.outputs.is_prerelease == 'false'"
     shared_run = shared_step["run"]
     assert isinstance(shared_run, str)
     assert "--phase mutable" in shared_run
     assert "--release-tag" in shared_run
     assert "always()" not in json.dumps(shared, sort_keys=True)
+
+
+def test_alembic_breaking_lint_covers_pr_main_and_release() -> None:
+    alembic_workflow = yaml.load(
+        (
+            ROOT / ".github" / "workflows" / "alembic-expand.yml"
+        ).read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    triggers = alembic_workflow["on"]
+    assert "pull_request" in triggers
+    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["push"]["tags"] == ["v*"]
+
+    docker_workflow = _load_workflow()
+    quality_gate = docker_workflow["jobs"]["quality-gate"]
+    migration_step = _step(quality_gate, "Alembic breaking migration gate")
+    assert migration_step["run"] == (
+        "uv run python scripts/lint_alembic_breaking.py"
+    )
+
+    ci_workflow = yaml.load(
+        (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    ci_step = _step(ci_workflow["jobs"]["backend"], "Alembic breaking migration gate")
+    assert ci_step["run"] == "uv run python scripts/lint_alembic_breaking.py"

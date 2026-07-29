@@ -6,6 +6,9 @@ on:
       - "apps/api/alembic/versions/*.py"
       - "scripts/lint_alembic_breaking.py"
       - ".github/workflows/alembic-expand.yml"
+  push:
+    branches: [main]
+    tags: ["v*"]
 
 jobs:
   lint:

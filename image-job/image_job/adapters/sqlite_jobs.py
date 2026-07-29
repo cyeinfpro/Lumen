@@ -115,8 +115,25 @@ class SQLiteJobRepository:
 class SQLiteJobHeartbeat:
     repository: SQLiteJobRepository
 
-    async def touch_running(self, job_id: str) -> None:
-        await self.repository.execute(
-            "UPDATE jobs SET updated_at = ? WHERE job_id = ? AND status = 'running'",
-            (datetime.now(timezone.utc).isoformat(), job_id),
+    async def touch_running(
+        self,
+        job_id: str,
+        execution_token: str | None = None,
+    ) -> bool:
+        if not execution_token:
+            return False
+        changed = await self.repository.execute(
+            """
+            UPDATE jobs
+            SET updated_at = ?
+            WHERE job_id = ?
+              AND status = 'running'
+              AND execution_token = ?
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                job_id,
+                execution_token,
+            ),
         )
+        return changed == 1

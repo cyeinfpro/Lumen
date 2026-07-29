@@ -9,6 +9,7 @@ from typing import Any
 from lumen_core.generation_resources import ResourceDemand
 
 from ...generation_dispatch import DispatchIdentity
+from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from ...upstream_parts import GeneratedImageResult, GeneratedPayloadInput
 from .admission import WeightedPermit
 from .services import RunGenerationDeps
@@ -92,6 +93,7 @@ class GenerationRunState:
     actual_upstream_route: str | None = None
     actual_upstream_source: str | None = None
     actual_upstream_endpoint: str | None = None
+    sidecar_execution: ImageJobExecutionHandle | None = None
     image_job_meta: dict[str, Any] = field(default_factory=dict)
     provider_used_events: list[dict[str, str]] = field(default_factory=list)
 

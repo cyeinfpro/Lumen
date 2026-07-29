@@ -76,7 +76,7 @@ class ImageCandidateFacade:
     new_pinned_image_download_client: Callable[[Any], Any]
     resolve_public_image_download_target: Callable[[str], Awaitable[Any]]
     image_download_resolution_error: type[BaseException]
-    touch_running: Callable[[str], Awaitable[None]]
+    touch_running: Callable[[str, str | None], Awaitable[object]]
     download_image_url_fn: Callable[..., Awaitable[Any | None]]
     extract_candidates_fn: Callable[..., Awaitable[list[Any]]]
     sse_line_decoder_factory: Callable[[], Any]
@@ -763,6 +763,7 @@ class ImageCandidateFacade:
         chunk: bytes,
         *,
         job_id: str,
+        execution_token: str | None,
     ) -> None:
         next_bytes_seen = state.bytes_seen + len(chunk)
         if next_bytes_seen > self.responses_stream_max_bytes():
@@ -777,7 +778,7 @@ class ImageCandidateFacade:
         state.bytes_seen = next_bytes_seen
         now = time.monotonic()
         if now - state.last_touch >= self.job_heartbeat_interval_s():
-            await self.touch_running(job_id)
+            await self.touch_running(job_id, execution_token)
             state.last_touch = now
 
     async def _consume_responses_stream(
@@ -787,6 +788,7 @@ class ImageCandidateFacade:
         state: _ResponsesStreamState,
         *,
         job_id: str,
+        execution_token: str | None,
     ) -> None:
         byte_iter = response.aiter_bytes()
         while True:
@@ -804,6 +806,7 @@ class ImageCandidateFacade:
                 state,
                 chunk,
                 job_id=job_id,
+                execution_token=execution_token,
             )
             for line in state.line_decoder.feed(chunk):
                 await self._handle_responses_stream_line(
@@ -840,6 +843,7 @@ class ImageCandidateFacade:
         client: httpx.AsyncClient,
         *,
         job_id: str,
+        execution_token: str | None = None,
     ) -> list[Any]:
         state = _ResponsesStreamState(
             cache={},
@@ -852,6 +856,7 @@ class ImageCandidateFacade:
             client,
             state,
             job_id=job_id,
+            execution_token=execution_token,
         )
         await self._finish_responses_stream(response, client, state)
         if state.final_candidates:

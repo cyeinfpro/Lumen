@@ -138,13 +138,14 @@ test("asset prewarm scheduler is bounded and concurrency-limited", () => {
   match(preload, /while \(this\.fulfilled\.size > this\.cacheLimit\)/);
 });
 
-test("SSE replay recovery is leader-owned and singleflight", () => {
+test("SSE replay recovery is local to every tab and singleflight", () => {
   const runtime = source("src/features/realtime/model/runtime.ts");
   const coordinator = source(
     "src/features/realtime/model/replayCoordinator.ts",
   );
 
-  match(runtime, /if \(this\.leader\) void this\.recover\(effect\.reason\)/);
+  match(runtime, /void this\.recover\(effect\.reason, recoveryId\)/);
+  match(runtime, /private localRecoveryResult: SnapshotResult \| null/);
   match(runtime, /type: "recovery_complete"/);
   match(runtime, /type: "recovery_failed"/);
   match(coordinator, /if \(this\.flight\) return this\.flight/);

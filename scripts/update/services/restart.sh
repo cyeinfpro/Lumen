@@ -280,11 +280,5 @@ else
     exit 1
 fi
 
-# 所有启用服务均已按目标 release + Image ID 重建并通过运行态 proof。
-if ! mark_update_committed; then
-    emit_fail restart_services 1
-    exit 1
-fi
-
 emit_done restart_services 0
 }

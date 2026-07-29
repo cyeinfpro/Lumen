@@ -19,6 +19,7 @@ from lumen_core.models import Generation, Message
 from ...observability import safe_outcome, task_duration_seconds
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .event_delivery import stage_generation_event
+from .execution_boundary import release_or_settle_generation
 from .lease import is_cancelled
 from .retry_state import (
     RUNNING_GENERATION_STATUSES,
@@ -78,7 +79,8 @@ async def settle_existing_generated_image(
             MessageStatus.CANCELED,
         ):
             message.status = MessageStatus.FAILED
-        await services.billing.release(
+        await release_or_settle_generation(
+            services.billing,
             session,
             generation,
             reason=EC.CANCELLED.value,
@@ -213,7 +215,8 @@ async def finalize_running_generation_cancel(
                 message.status = MessageStatus.FAILED
             generation = await session.get(Generation, task_id)
             if generation is not None:
-                await services.billing.release(
+                await release_or_settle_generation(
+                    services.billing,
                     session,
                     generation,
                     reason="cancelled",

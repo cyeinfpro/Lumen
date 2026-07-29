@@ -268,6 +268,12 @@ def _should_continue_image_provider_failover(
     services = _runtime_services(runtime)
     if services.providers.is_quota_accounting_unavailable(exc):
         return False
+    payload = getattr(exc, "payload", None)
+    if isinstance(payload, dict) and (
+        payload.get("sidecar_execution_accepted") is True
+        or isinstance(payload.get("sidecar_execution"), dict)
+    ):
+        return False
     if retriable:
         return True
     if (

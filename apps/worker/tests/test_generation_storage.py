@@ -573,7 +573,7 @@ def test_existing_image_retry_checks_cancel_before_success_settlement() -> None:
     source = inspect.getsource(lifecycle.settle_existing_generated_image)
 
     cancel_check = source.index("if await is_cancelled(redis, task_id):")
-    release = source.index("await services.billing.release(")
+    release = source.index("await release_or_settle_generation(")
     success_update = source.index("status=GenerationStatus.SUCCEEDED.value")
     settle = source.index("await services.billing.settle(")
 

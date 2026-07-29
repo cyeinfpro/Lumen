@@ -1835,7 +1835,7 @@ def test_generation_max_attempts_failure_releases_hold() -> None:
 
     assert "generation_attempt_update(" in branch
     assert "statuses=(GenerationStatus.QUEUED.value,)" in branch
-    assert "state.services.billing.release(" in branch
+    assert "release_or_settle_generation(" in branch
     assert "reason=code" in branch
     assert "state.services.billing.flush_after_commit(" in branch
 
@@ -1898,7 +1898,7 @@ def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None
     assert "generation_attempt_update(" in branch
     assert "GenerationStatus.QUEUED.value" in branch
     assert "GenerationStatus.RUNNING.value" in branch
-    assert "state.services.billing.release(" in branch
+    assert "release_or_settle_generation(" in branch
     assert "reason=error_code" in branch
     assert "state.services.billing.flush_after_commit(" in branch
 

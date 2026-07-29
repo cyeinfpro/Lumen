@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 # 单进程并发下载上限：4K PNG 可能十几 MB。allow burst（status_message edit + image
 # fetch 同时多 task 并发）但又不至于把 socket / 磁盘 IO 排队卡死。
 _DOWNLOAD_CONCURRENCY = 4
-_download_sem = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
 
 # 下载前最低空闲磁盘门槛。低于此值直接拒绝下载，避免撑爆 /tmp 后整个 bot 崩。
 _MIN_FREE_DISK_BYTES = 200 * 1024 * 1024  # 200 MB
@@ -50,6 +49,7 @@ class ApiError(Exception):
 
 class LumenApi:
     def __init__(self) -> None:
+        self._download_sem = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
         self._client = httpx.AsyncClient(
             base_url=settings.lumen_api_base.rstrip("/"),
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -58,6 +58,13 @@ class LumenApi:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    def _download_capacity(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_download_sem", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(_DOWNLOAD_CONCURRENCY)
+            self._download_sem = semaphore
+        return semaphore
 
     def _hdr(
         self,
@@ -204,7 +211,7 @@ class LumenApi:
         发送，aiogram 内部自己读 + stream up。caller 发完务必 unlink()。
 
         韧性保护：
-        - 全局 _download_sem 限并发，避免 batch 任务一次性下 16 张把 socket / IO 排满
+        - client-owned semaphore 限并发，避免 batch 任务一次性下 16 张把 socket / IO 排满
         - 下载前 shutil.disk_usage 检查 free，低于 _MIN_FREE_DISK_BYTES 直接拒绝，
           若响应带 Content-Length，还会预留整个文件大小；无长度的流式响应每 8MB
           复查一次空闲空间，
@@ -216,7 +223,7 @@ class LumenApi:
         path = Path(tmp_root) / f"lumen-{image_id[:12]}-{uuid.uuid4().hex[:8]}.bin"
         size = 0
         mime = "image/jpeg"
-        async with _download_sem:
+        async with self._download_capacity():
             try:
                 async with self._client.stream(
                     "GET",

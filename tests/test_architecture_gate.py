@@ -4,6 +4,8 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = spec_from_file_location(
@@ -22,6 +24,7 @@ build_package_graph = MODULE.build_package_graph
 collect_violations = MODULE.collect_violations
 compare_violations = MODULE.compare_violations
 compare_cycles = MODULE.compare_cycles
+load_layer_config = MODULE.load_layer_config
 strongly_connected_components = MODULE.strongly_connected_components
 
 
@@ -248,3 +251,48 @@ def test_architecture_baseline_requires_debt_reduction_to_be_recorded() -> None:
         "new architecture cycle: new",
         "architecture cycle baseline is stale: removed",
     ]
+
+
+def test_architecture_layers_are_loaded_from_toml() -> None:
+    config = load_layer_config(ROOT / "scripts" / "architecture-layers.toml")
+
+    assert {package.name for package in config.packages} == {
+        "api",
+        "core",
+        "image-job",
+        "tgbot",
+        "worker",
+    }
+    assert {rule[1] for rule in config.layer_rules} == {
+        "api-lower-to-routes",
+        "image-job-lower-to-http",
+        "worker-lower-to-tasks",
+    }
+    assert "workflow-domain-layering" in {
+        rule[1] for rule in config.forbidden_rules
+    }
+
+
+def test_architecture_layers_reject_unknown_package(tmp_path: Path) -> None:
+    config = tmp_path / "layers.toml"
+    config.write_text(
+        """
+version = 1
+
+[[packages]]
+name = "api"
+package = "app"
+root = "apps/api/app"
+
+[[rules]]
+name = "bad"
+package = "missing"
+sources = ["app.services"]
+targets = ["app.routes"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown packages"):
+        load_layer_config(config, root=tmp_path)

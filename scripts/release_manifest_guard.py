@@ -214,11 +214,19 @@ def select_matching_release_tag(payload: object, *, alias: str) -> str:
 
 
 def resolve_alias_tag(alias: str) -> str:
-    payload = _download_json(
-        "https://api.github.com/repos/cyeinfpro/Lumen/releases?per_page=100",
-        label="release list response",
-    )
-    return select_matching_release_tag(payload, alias=alias)
+    releases: list[object] = []
+    for page in range(1, 101):
+        payload = _download_json(
+            "https://api.github.com/repos/cyeinfpro/Lumen/releases"
+            f"?per_page=100&page={page}",
+            label=f"release list response page {page}",
+        )
+        if not isinstance(payload, list):
+            raise ManifestError("release list response is invalid")
+        releases.extend(payload)
+        if len(payload) < 100:
+            return select_matching_release_tag(releases, alias=alias)
+    raise ManifestError("release list pagination exceeded the safety limit")
 
 
 def print_entries(*, path: Path, tag: str, services: list[str]) -> None:

@@ -30,16 +30,20 @@ if [ "${HEALTH_FAIL}" -eq 1 ]; then
     log_error "[health_check] 健康检查失败；新代码已上线但状态异常。"
     if [ "${UPDATE_MIGRATION_VERIFIED}" -eq 1 ]; then
         log_update_restore_boundary health_check
-        log_error "  数据库迁移已应用，**不自动回滚**——请执行："
+        log_error "  数据库迁移已应用；恢复策略将按已记录 restore boundary 执行。"
     else
-        log_warn "  本轮未执行数据库迁移，数据库无需恢复；应用 release 已切换，仍不自动回滚。"
-        log_error "  请执行："
+        log_warn "  本轮未执行数据库迁移，将按更新前快照自动恢复旧 release。"
+        log_error "  如自动恢复失败，请执行："
     fi
     log_error "    cd ${CURRENT_LINK}"
     log_error "    COMPOSE_PROJECT_NAME=lumen docker compose logs --tail=120 api worker web"
     log_error "    COMPOSE_PROJECT_NAME=lumen docker compose ps"
     log_error "  状态快照：release_id=${NEW_ID}  image_tag=${TARGET_TAG}  current → $(readlink "${ROOT}/current" 2>/dev/null || echo unknown)"
     log_error "  如需回滚，参考 docs/.. §18 或调高 LUMEN_HEALTH_TIMEOUT_SECONDS 重跑健康。"
+    emit_fail health_check 1
+    exit 1
+fi
+if ! mark_update_committed; then
     emit_fail health_check 1
     exit 1
 fi

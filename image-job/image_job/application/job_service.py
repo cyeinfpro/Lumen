@@ -9,6 +9,7 @@ import logging
 import secrets
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,9 +31,27 @@ from ..observability import current_request_id
 from ..payloads import json_dump, request_hash
 from .auth import credential_hash
 from .result_service import ResultService
+from .stale_jobs import ActiveStalePolicy
 
 
 LOG = logging.getLogger("image-job.jobs")
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    job_id: str
+    outcome: str
+    status: str
+    status_code: int = 200
+    outcome_uncertain: bool = False
+
+    def response(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "outcome": self.outcome,
+            "status": self.status,
+            "outcome_uncertain": self.outcome_uncertain,
+        }
 
 
 class JobServiceFailure(Exception):
@@ -99,6 +118,7 @@ class JobService:
             log=LOG,
         )
         self.results = ResultService(repository, self.persistence)
+        self.stale_jobs = ActiveStalePolicy(settings, repository, LOG)
         # H-19：/metrics 过去只有队列水位，看不出业务是不是在正常出图。
         # uncertain 单独计数尤其重要——它直接等价于「上游可能已扣费但没交付」
         # 的对账工单量，是纯转嫁下必须盯住的资金风险指标。
@@ -298,6 +318,88 @@ class JobService:
     async def fail_interrupted(self) -> None:
         await self.persistence.fail_interrupted_running_jobs()
 
+    async def cancel(
+        self,
+        job_id: str,
+        *,
+        caller: CallerIdentity,
+        upstream: UpstreamCredential | None = None,
+    ) -> CancelResult:
+        row = await self.repository.one(
+            "SELECT * FROM jobs WHERE job_id = ?",
+            (job_id,),
+        )
+        if row is None:
+            raise JobServiceFailure(404, "image job not found")
+        owner_candidates = [caller.owner_hash]
+        if upstream is not None:
+            owner_candidates.append(credential_hash(upstream.authorization))
+        if not any(
+            hmac.compare_digest(str(row["auth_hash"]), candidate)
+            for candidate in owner_candidates
+        ):
+            raise JobServiceFailure(403, "image job belongs to a different key")
+
+        status = str(row["status"])
+        if status in persistence.TERMINAL_JOB_STATUSES:
+            return CancelResult(
+                job_id=job_id,
+                outcome="already_terminal",
+                status=status,
+                outcome_uncertain=bool(
+                    self.persistence.row_get(row, "outcome_uncertain")
+                ),
+            )
+
+        if status == "queued":
+            changed = await self.persistence.mark_cancelled(job_id)
+            if changed:
+                return CancelResult(
+                    job_id=job_id,
+                    outcome="cancelled_before_dispatch",
+                    status="cancelled",
+                )
+        elif status == "running":
+            execution_token = self.persistence.row_get(row, "execution_token")
+            if isinstance(execution_token, str) and execution_token:
+                changed = await self.persistence.mark_cancelled(
+                    job_id,
+                    execution_token=execution_token,
+                    error=(
+                        "cancellation requested after dispatch; "
+                        "upstream outcome is uncertain"
+                    ),
+                )
+                if changed:
+                    return CancelResult(
+                        job_id=job_id,
+                        outcome="cancel_requested",
+                        status="cancel_requested",
+                        status_code=202,
+                        outcome_uncertain=True,
+                    )
+
+        current = await self.repository.one(
+            "SELECT status, outcome_uncertain FROM jobs WHERE job_id = ?",
+            (job_id,),
+        )
+        if current is not None and str(current["status"]) in (
+            persistence.TERMINAL_JOB_STATUSES
+        ):
+            return CancelResult(
+                job_id=job_id,
+                outcome="already_terminal",
+                status=str(current["status"]),
+                outcome_uncertain=bool(current["outcome_uncertain"]),
+            )
+        return CancelResult(
+            job_id=job_id,
+            outcome="uncertain",
+            status=str(current["status"]) if current is not None else status,
+            status_code=409,
+            outcome_uncertain=True,
+        )
+
     async def process(self, job_id: str) -> None:
         row = await self.repository.one(
             "SELECT * FROM jobs WHERE job_id = ?",
@@ -305,7 +407,8 @@ class JobService:
         )
         if row is None or row["status"] != "queued":
             return
-        if not await self.persistence.mark_running(job_id):
+        execution_token = await self.persistence.mark_running(job_id)
+        if execution_token is None:
             return
         started = time.monotonic()
         endpoint = str(row["endpoint"])
@@ -324,6 +427,12 @@ class JobService:
             )
             if fresh is None:
                 return
+            if (
+                fresh["status"] != "running"
+                or self.persistence.row_get(fresh, "execution_token")
+                != execution_token
+            ):
+                return
             try:
                 authorization = self.credential_vault.decrypt_job_row(fresh)
             except CredentialVaultError as exc:
@@ -337,24 +446,27 @@ class JobService:
                 authorization=authorization,
             )
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            await self.persistence.mark_succeeded(
+            changed = await self.persistence.mark_succeeded(
                 job_id,
+                execution_token=execution_token,
                 upstream_status=status,
                 elapsed_ms=elapsed_ms,
                 images=images,
                 endpoint_used=endpoint,
             )
-            self._record_outcome(
-                "jobs_succeeded_total",
-                elapsed_ms,
-                images=len(images),
-            )
+            if changed:
+                self._record_outcome(
+                    "jobs_succeeded_total",
+                    elapsed_ms,
+                    images=len(images),
+                )
         except asyncio.CancelledError:
             raise
         except JobFailure as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            await self.persistence.mark_failed(
+            changed = await self.persistence.mark_failed(
                 job_id,
+                execution_token=execution_token,
                 error=exc.error,
                 upstream_status=exc.upstream_status,
                 upstream_body=exc.upstream_body,
@@ -365,18 +477,20 @@ class JobService:
                 retry_suppressed=exc.retry_suppressed,
                 outcome_uncertain=exc.outcome_uncertain,
             )
-            self._record_outcome(
-                (
-                    "jobs_uncertain_total"
-                    if exc.outcome_uncertain
-                    else "jobs_failed_total"
-                ),
-                elapsed_ms,
-            )
+            if changed:
+                self._record_outcome(
+                    (
+                        "jobs_uncertain_total"
+                        if exc.outcome_uncertain
+                        else "jobs_failed_total"
+                    ),
+                    elapsed_ms,
+                )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            await self.persistence.mark_failed(
+            changed = await self.persistence.mark_failed(
                 job_id,
+                execution_token=execution_token,
                 error=f"image job worker error: {exc.__class__.__name__}: {exc}",
                 elapsed_ms=elapsed_ms,
                 error_class=ERROR_CLASS_INTERNAL,
@@ -385,14 +499,15 @@ class JobService:
                 retry_suppressed=upstream_dispatched,
                 outcome_uncertain=upstream_dispatched,
             )
-            self._record_outcome(
-                (
-                    "jobs_uncertain_total"
-                    if upstream_dispatched
-                    else "jobs_failed_total"
-                ),
-                elapsed_ms,
-            )
+            if changed:
+                self._record_outcome(
+                    (
+                        "jobs_uncertain_total"
+                        if upstream_dispatched
+                        else "jobs_failed_total"
+                    ),
+                    elapsed_ms,
+                )
             LOG.exception(
                 "image job %s crashed request_id=%s",
                 job_id,
@@ -400,6 +515,8 @@ class JobService:
             )
 
     async def reconcile(self) -> None:
+        await self.stale_jobs.run_pass()
+
         rows = await self.repository.all(
             """
             SELECT job_id

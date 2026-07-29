@@ -7,6 +7,7 @@ import argparse
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -206,6 +207,70 @@ def _validate_commands(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return validated
 
 
+def build_plan_identity(
+    plan: dict[str, Any],
+    commands: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    command_set = [
+        {
+            "command": str(command["command"]),
+            "id": str(command["id"]),
+            "resource_tags": sorted(
+                str(resource) for resource in command.get("resource_tags", [])
+            ),
+        }
+        for command in commands
+    ]
+    payload = {
+        "base": str(plan.get("base", "")),
+        "commands": command_set,
+        "head": str(plan.get("head", "")),
+        "plan_schema_version": plan.get("schema_version"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **payload,
+        "digest": digest,
+    }
+
+
+def _validate_previous_results(
+    previous_results: dict[str, Any],
+    *,
+    plan_identity: dict[str, Any],
+    commands: Sequence[dict[str, Any]],
+) -> None:
+    if previous_results.get("plan_identity") != plan_identity:
+        raise ValueError(
+            "--rerun-failed results do not match the current plan "
+            "digest/base/head/command set"
+        )
+    results = previous_results.get("results")
+    if not isinstance(results, list):
+        raise ValueError("--rerun-failed results are missing the results list")
+    result_ids = {
+        str(result.get("id"))
+        for result in results
+        if isinstance(result, dict) and result.get("id")
+    }
+    missing = [
+        str(command["id"])
+        for command in commands
+        if str(command["id"]) not in result_ids
+    ]
+    if missing:
+        raise ValueError(
+            "--rerun-failed cannot skip commands that were never executed: "
+            + ", ".join(missing)
+        )
+
+
 def _merge_results(
     commands: Sequence[dict[str, Any]],
     current: Sequence[CommandResult],
@@ -254,9 +319,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--max-jobs must be at least 1")
     plan = _load_json(args.plan)
     commands = _validate_commands(plan)
+    plan_identity = build_plan_identity(plan, commands)
     results_path = args.results or args.plan.with_suffix(".results.json")
     previous = _load_json(results_path) if results_path.is_file() else None
     try:
+        if args.rerun_failed and previous is not None:
+            _validate_previous_results(
+                previous,
+                plan_identity=plan_identity,
+                commands=commands,
+            )
         selected = select_commands(
             commands,
             rerun_failed=args.rerun_failed,
@@ -300,8 +372,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"failures: {', '.join(result.failures)}")
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "plan": str(args.plan),
+        "plan_identity": plan_identity,
         "started_at": started_at.isoformat(),
         "duration_seconds": round(time.monotonic() - started, 3),
         "selected_command_ids": [str(command["id"]) for command in selected],

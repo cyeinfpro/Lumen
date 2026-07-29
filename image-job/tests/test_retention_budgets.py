@@ -109,10 +109,12 @@ async def test_long_lived_old_row_cannot_starve_indexed_expired_row(
     calls = 0
     expired_row = {
         "job_id": "expired-later",
+        "status": "succeeded",
         "created_at": "2026-07-01T00:00:00+00:00",
         "finished_at": "2026-07-20T00:00:00+00:00",
         "retention_days": 1,
         "images_json": "[]",
+        "retention_expires_at": "2026-07-21T00:00:00+00:00",
     }
 
     async def db_all(
@@ -130,8 +132,7 @@ async def test_long_lived_old_row_cannot_starve_indexed_expired_row(
     async def db_exec(sql: str, params: tuple[Any, ...]) -> int:
         if sql.lstrip().startswith("DELETE FROM jobs"):
             deleted.append(str(params[0]))
-            return 1
-        return 0
+        return 1
 
     facade = _facade(
         tmp_path,

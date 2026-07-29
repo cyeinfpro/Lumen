@@ -1,15 +1,8 @@
 {
   "category_counts": {
-    "module-contextvar": 3
+    "module-contextvar": 2
   },
   "findings": [
-    {
-      "category": "module-contextvar",
-      "line": 9,
-      "path": "apps/api/app/routes/billing_parts/compat.py",
-      "symbol": "_runtime_provider",
-      "target": "ContextVar"
-    },
     {
       "category": "module-contextvar",
       "line": 93,

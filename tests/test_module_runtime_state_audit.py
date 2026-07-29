@@ -139,6 +139,50 @@ ADAPTER = StatelessAdapter()
     assert collect_module_runtime_findings((package,), root=tmp_path) == {}
 
 
+def test_detects_ordinary_class_with_owned_mutable_runtime_state(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "app"
+    package.mkdir()
+    source = package / "runtime.py"
+    source.write_text(
+        """
+import threading
+import weakref
+
+class CacheRuntime:
+    def __init__(self) -> None:
+        self.values: dict[str, int] = {}
+        self.lock = threading.Lock()
+
+class LoopRuntime:
+    def __init__(self) -> None:
+        self.values = weakref.WeakKeyDictionary()
+
+_cache = CacheRuntime()
+_loops = LoopRuntime()
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    findings = collect_module_runtime_findings((package,), root=tmp_path)
+
+    assert list(findings.values()) == [
+        ModuleRuntimeFinding(
+            path="app/runtime.py",
+            line=13,
+            symbol="_cache",
+            class_name="CacheRuntime",
+        ),
+        ModuleRuntimeFinding(
+            path="app/runtime.py",
+            line=14,
+            symbol="_loops",
+            class_name="LoopRuntime",
+        ),
+    ]
+
+
 def test_detects_module_locks_clients_and_semaphores(tmp_path: Path) -> None:
     package = tmp_path / "app"
     package.mkdir()
@@ -398,9 +442,9 @@ def test_repository_ledger_matches_current_total_ceiling() -> None:
     ledger = load_ledger()
     findings = collect_module_runtime_findings()
 
-    assert ledger["max_total"] == 8
-    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 8
-    assert len(findings) == 8
+    assert ledger["max_total"] == 14
+    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 14
+    assert len(findings) == 14
     assert not any(
         finding.path.startswith("image-job/") for finding in findings.values()
     )

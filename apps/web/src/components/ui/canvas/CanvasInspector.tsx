@@ -43,6 +43,7 @@ import {
   formatCanvasTaskElapsed,
   isCanvasExecutionActive,
 } from "@/lib/canvas/executionPresentation";
+import { cleanupStaleCanvasUpload } from "@/lib/canvas/staleUploadCleanup";
 import {
   CANVAS_NODE_TITLE_MAX_CHARS,
   normalizeCanvasNodeTitle,
@@ -67,7 +68,6 @@ import {
   isCanvasExecutableNodeType,
 } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
-import { deleteCanvasUploadedAsset } from "@/lib/api/canvases";
 import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
 import { cn } from "@/lib/utils";
 import { Button, Input, toast } from "@/components/ui/primitives";
@@ -505,24 +505,22 @@ function useCanvasAssetUpload(
         requestRef.current?.id !== request.id ||
         state.selectedNodeId !== request.nodeId
       ) {
-        await cleanupStaleCanvasAsset(
-          state.graph,
-          request.kind,
-          asset.id,
-          asset.created,
-          request.initialAssetId,
-        );
+        await cleanupStaleCanvasUpload({
+          graph: state.graph,
+          kind: request.kind,
+          uploadedAsset: asset,
+          initialAssetId: request.initialAssetId,
+        });
         return;
       }
       const node = state.graph.nodes.find((item) => item.id === request.nodeId);
       if (!node) {
-        await cleanupStaleCanvasAsset(
-          state.graph,
-          request.kind,
-          asset.id,
-          asset.created,
-          request.initialAssetId,
-        );
+        await cleanupStaleCanvasUpload({
+          graph: state.graph,
+          kind: request.kind,
+          uploadedAsset: asset,
+          initialAssetId: request.initialAssetId,
+        });
         return;
       }
       if (
@@ -535,13 +533,12 @@ function useCanvasAssetUpload(
           request.initialDisplayName,
         )
       ) {
-        await cleanupStaleCanvasAsset(
-          state.graph,
-          request.kind,
-          asset.id,
-          asset.created,
-          request.initialAssetId,
-        );
+        await cleanupStaleCanvasUpload({
+          graph: state.graph,
+          kind: request.kind,
+          uploadedAsset: asset,
+          initialAssetId: request.initialAssetId,
+        });
         toast.info("上传已完成，但节点内容已被修改，未自动覆盖。");
         return;
       }
@@ -592,58 +589,6 @@ async function uploadCanvasAsset(
 
 function canvasAssetIdField(kind: CanvasAssetKind): "image_id" | "video_id" {
   return kind === "video" ? "video_id" : "image_id";
-}
-
-function isCanvasAssetReferenced(
-  graph: CanvasDocument["graph"],
-  kind: CanvasAssetKind,
-  assetId: string,
-): boolean {
-  const field = canvasAssetIdField(kind);
-  return graph.nodes.some((node) => node.config[field] === assetId);
-}
-
-function shouldCleanupStaleCanvasAsset(
-  graph: CanvasDocument["graph"],
-  kind: CanvasAssetKind,
-  assetId: string,
-  createdByRequest: boolean,
-  initialAssetId: unknown,
-): boolean {
-  return (
-    createdByRequest &&
-    assetId.trim().length > 0 &&
-    !Object.is(assetId, initialAssetId) &&
-    !isCanvasAssetReferenced(graph, kind, assetId)
-  );
-}
-
-async function cleanupStaleCanvasAsset(
-  graph: CanvasDocument["graph"],
-  kind: CanvasAssetKind,
-  assetId: string,
-  createdByRequest: boolean,
-  initialAssetId: unknown,
-): Promise<void> {
-  if (
-    !shouldCleanupStaleCanvasAsset(
-      graph,
-      kind,
-      assetId,
-      createdByRequest,
-      initialAssetId,
-    )
-  ) {
-    return;
-  }
-  try {
-    await deleteCanvasUploadedAsset(
-      kind === "video" ? "video" : "image",
-      assetId,
-    );
-  } catch {
-    // The server keeps a referenced asset; cleanup is best effort.
-  }
 }
 
 function queryErrorMessage(

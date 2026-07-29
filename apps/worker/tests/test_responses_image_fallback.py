@@ -1428,7 +1428,7 @@ async def test_generate_image_can_use_image_jobs_route(
     progress_types = [
         event["type"]
         for event in progress_events
-        if event["type"] != "fallback_started"
+        if event["type"] not in {"fallback_started", "image_job_execution"}
     ]
     assert progress_types == [
         "image_job_image",
@@ -1436,6 +1436,11 @@ async def test_generate_image_can_use_image_jobs_route(
         "final_image",
         "completed",
     ]
+    assert [
+        event["execution"]["result_state"]
+        for event in progress_events
+        if event["type"] == "image_job_execution"
+    ] == ["pending", "succeeded"]
 
 
 @pytest.mark.asyncio
@@ -1498,7 +1503,7 @@ async def test_edit_image_can_use_image_jobs_route(
     progress_types = [
         event["type"]
         for event in progress_events
-        if event["type"] != "fallback_started"
+        if event["type"] not in {"fallback_started", "image_job_execution"}
     ]
     assert progress_types == [
         "image_job_image",
@@ -1506,6 +1511,11 @@ async def test_edit_image_can_use_image_jobs_route(
         "final_image",
         "completed",
     ]
+    assert [
+        event["execution"]["result_state"]
+        for event in progress_events
+        if event["type"] == "image_job_execution"
+    ] == ["pending", "succeeded"]
     assert {event["source"] for event in progress_events if "source" in event} == {
         "image_jobs",
         "image_jobs_edit",

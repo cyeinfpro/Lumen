@@ -10,9 +10,11 @@ import {
 } from "@/components/QueryProvider";
 import { ApiError, type AuthUser } from "@/lib/apiClient";
 import { resumeSessionClientState } from "@/lib/api/http";
+import { invalidateSessionClientState } from "@/lib/auth/authFailureCoordinator";
 import { isPublicPath } from "@/lib/auth/publicPaths";
 import {
   registerRuntimeRecovery,
+  registerSessionInvalidation,
   type SessionRuntimeStatus,
 } from "@/lib/runtimeResilience";
 import { useChatStore } from "@/store/useChatStore";
@@ -207,6 +209,23 @@ export function useIdentityRevalidation({
     [queryClient],
   );
 
+  const invalidateIdentity = useCallback(() => {
+    const currentUserId =
+      useChatStore.getState().currentUserId ??
+      stateRef.current.retainedUserId ??
+      queryData?.id ??
+      null;
+    resetRecovery(true, true);
+    useChatStore.getState().setCurrentUser(null);
+    if (currentUserId) {
+      clearPreviousUserQueryCache(queryClient, currentUserId);
+    }
+    removeAuthUserQuery(queryClient);
+    void invalidateSessionClientState();
+    setIsolated(true);
+    setIdentityStatus("unauthorized");
+  }, [queryClient, queryData?.id, resetRecovery]);
+
   const acceptIdentity = useCallback(
     (
       user: AuthUser,
@@ -306,11 +325,7 @@ export function useIdentityRevalidation({
         return;
       }
       if (isUnauthorizedIdentityError(error)) {
-        resetRecovery(true, true);
-        useChatStore.getState().setCurrentUser(null);
-        removeAuthUserQuery(queryClient);
-        setIsolated(true);
-        setIdentityStatus("unauthorized");
+        invalidateIdentity();
         return;
       }
 
@@ -336,6 +351,7 @@ export function useIdentityRevalidation({
     },
     [
       enterFailClosed,
+      invalidateIdentity,
       isPublicAuthPath,
       queryData?.id,
       queryClient,
@@ -423,6 +439,14 @@ export function useIdentityRevalidation({
         revalidateIdentity(true);
       }),
     [revalidateIdentity],
+  );
+
+  useEffect(
+    () =>
+      registerSessionInvalidation(() => {
+        invalidateIdentity();
+      }),
+    [invalidateIdentity],
   );
 
   useEffect(() => {

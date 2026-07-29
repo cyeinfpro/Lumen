@@ -672,8 +672,8 @@ def _validate_checkpoint_shape(
     committed = state.get("committed")
     if not isinstance(committed, bool):
         raise SystemExit("update journal v2 state.committed is invalid")
-    if _phase_completed(payload, "restart_services") and not committed:
-        raise SystemExit("restart_services completion requires committed state")
+    if _phase_completed(payload, "health_check") and not committed:
+        raise SystemExit("health_check completion requires committed state")
     expected_env_sha = state.get("expected_env_sha256")
     if expected_env_sha is not None and not isinstance(expected_env_sha, str):
         raise SystemExit("update journal v2 state.expected_env_sha256 is invalid")

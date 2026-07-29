@@ -218,3 +218,12 @@ resources = []
     assert exit_code == 1
     assert payload["ok"] is False
     assert payload["stale"][0]["code"] == "missing-literal"
+
+
+def test_default_production_patterns_cover_real_image_job_package() -> None:
+    assert "image-job/image_job/**/*.py" in (
+        test_manifest_lint.PRODUCTION_PATTERNS
+    )
+    assert "image-job/app/**/*.py" not in (
+        test_manifest_lint.PRODUCTION_PATTERNS
+    )

@@ -1,0 +1,145 @@
+{
+  "modules": [
+    {
+      "composition_root": "apps/api/app/main.py lifespan",
+      "owner": "api-runtime",
+      "path": "apps/api/app/arq_pool.py",
+      "shutdown": "ApiRuntime.close",
+      "symbols": [
+        "_pool_state"
+      ],
+      "test_reset": "apps/api/tests/test_lifespan_cleanup.py"
+    },
+    {
+      "composition_root": "apps/api/app/main.py lifespan",
+      "owner": "api-runtime",
+      "path": "apps/api/app/billing_cache_state.py",
+      "shutdown": "ApiRuntime.close",
+      "symbols": [
+        "_billing_cache_state"
+      ],
+      "test_reset": "apps/api/tests/test_lifespan_cleanup.py"
+    },
+    {
+      "composition_root": "apps/api/app/main.py lifespan",
+      "owner": "api-runtime",
+      "path": "apps/api/app/byok_service.py",
+      "shutdown": "ApiRuntime.close",
+      "symbols": [
+        "_byok_settings_cache_state"
+      ],
+      "test_reset": "apps/api/tests/test_lifespan_cleanup.py"
+    },
+    {
+      "composition_root": "apps/api/app/main.py lifespan",
+      "owner": "api-runtime",
+      "path": "apps/api/app/proxy_pool.py",
+      "shutdown": "ApiRuntime.close",
+      "symbols": [
+        "_proxy_pool_state"
+      ],
+      "test_reset": "apps/api/tests/test_lifespan_cleanup.py"
+    },
+    {
+      "composition_root": "apps/api/app/main.py lifespan",
+      "owner": "api-runtime",
+      "path": "apps/api/app/redis_client.py",
+      "shutdown": "ApiRuntime.close",
+      "symbols": [
+        "_redis_state"
+      ],
+      "test_reset": "apps/api/tests/test_lifespan_cleanup.py"
+    },
+    {
+      "composition_root": "apps/api/app/services/conversations/compaction.py compatibility composition",
+      "owner": "api-conversations",
+      "path": "apps/api/app/services/conversations/compaction.py",
+      "shutdown": "restore_context_summary_adapter(None)",
+      "symbols": [
+        "_CONTEXT_SUMMARY_ADAPTERS"
+      ],
+      "test_reset": "apps/api/tests/test_conversations_compact.py"
+    },
+    {
+      "composition_root": "apps/api/app/services/upload_pipeline.py process_upload_budget",
+      "owner": "api-images",
+      "path": "apps/api/app/services/upload_pipeline.py",
+      "shutdown": "UploadLease.release; no external handle remains at process exit",
+      "symbols": [
+        "_PROCESS_UPLOAD_BUDGET"
+      ],
+      "test_reset": "apps/api/tests/test_upload_pipeline.py"
+    },
+    {
+      "composition_root": "apps/tgbot/app/main.py AsyncExitStack",
+      "owner": "tgbot-runtime",
+      "path": "apps/tgbot/app/tracker.py",
+      "shutdown": "Tracker.aclose",
+      "symbols": [
+        "tracker"
+      ],
+      "test_reset": "apps/tgbot/tests/test_generation_tracking.py"
+    },
+    {
+      "composition_root": "apps/worker/app/main.py startup",
+      "owner": "worker-runtime",
+      "path": "apps/worker/app/provider_pool.py",
+      "shutdown": "WorkerRuntime.close",
+      "symbols": [
+        "_RUNTIME"
+      ],
+      "test_reset": "apps/worker/tests/test_worker_startup.py"
+    },
+    {
+      "composition_root": "apps/worker/app/main.py startup",
+      "owner": "worker-runtime",
+      "path": "apps/worker/app/services/billing_cache.py",
+      "shutdown": "WorkerRuntime.close",
+      "symbols": [
+        "_RUNTIME"
+      ],
+      "test_reset": "apps/worker/tests/test_worker_startup.py"
+    },
+    {
+      "composition_root": "apps/worker/app/main.py startup",
+      "owner": "worker-runtime",
+      "path": "apps/worker/app/tasks/auto_title.py",
+      "shutdown": "WorkerRuntime.close",
+      "symbols": [
+        "_RUNTIME"
+      ],
+      "test_reset": "apps/worker/tests/test_worker_startup.py"
+    },
+    {
+      "composition_root": "lumen_core.context_window module runtime",
+      "owner": "core-context-window",
+      "path": "packages/core/lumen_core/context_window.py",
+      "shutdown": "_TokenCounterRuntime.reset",
+      "symbols": [
+        "_TOKEN_COUNTER_RUNTIME"
+      ],
+      "test_reset": "packages/core/tests/test_context_window_tiktoken.py"
+    },
+    {
+      "composition_root": "provider consumers using resolve_provider_proxy_url",
+      "owner": "core-provider-runtime",
+      "path": "packages/core/lumen_core/providers.py",
+      "shutdown": "close_provider_proxy_tunnels",
+      "symbols": [
+        "_SSH_TUNNEL_RUNTIME"
+      ],
+      "test_reset": "packages/core/tests/test_providers.py"
+    },
+    {
+      "composition_root": "lumen_core.volcano_asset_media module runtime",
+      "owner": "core-media-runtime",
+      "path": "packages/core/lumen_core/volcano_asset_media.py",
+      "shutdown": "_VideoTranscodeRuntime.reset",
+      "symbols": [
+        "_VIDEO_TRANSCODE_RUNTIME"
+      ],
+      "test_reset": "packages/core/tests/test_volcano_asset_media.py"
+    }
+  ],
+  "version": 1
+}

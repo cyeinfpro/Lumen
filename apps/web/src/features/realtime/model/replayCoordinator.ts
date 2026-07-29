@@ -9,10 +9,17 @@ export type SnapshotResult = {
   syncedAt?: number;
 };
 
+export type SnapshotExecutionContext = {
+  connectionGeneration: number;
+  userScope: string;
+  isCurrent(): boolean;
+};
+
 export type SnapshotAdapter = (
   scopes: readonly SnapshotScope[],
   reason: RecoveryReason,
   signal: AbortSignal,
+  context: SnapshotExecutionContext,
 ) => Promise<SnapshotResult>;
 
 export class ReplayCoordinator {
@@ -27,11 +34,22 @@ export class ReplayCoordinator {
   recover(
     reason: RecoveryReason,
     signal: AbortSignal,
+    context: SnapshotExecutionContext,
   ): Promise<SnapshotResult> {
     if (this.flight) return this.flight;
-    const flight = this.snapshot(scopesForRecovery(reason), reason, signal)
+    const flight = this.snapshot(
+      scopesForRecovery(reason),
+      reason,
+      signal,
+      context,
+    )
       .then((result) => {
         signal.throwIfAborted();
+        if (!context.isCurrent()) {
+          const error = new Error("stale snapshot generation");
+          error.name = "AbortError";
+          throw error;
+        }
         this.lastSuccessfulSync = result.syncedAt ?? Date.now();
         return result;
       })

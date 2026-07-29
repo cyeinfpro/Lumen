@@ -317,7 +317,7 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
 
     cancel_update = cancelled.index("generation_attempt_update(")
     cancel_release = cancelled.index(
-        "await services.billing.release(",
+        "await release_or_settle_generation(",
         cancel_update,
     )
     cancel_stage = cancelled.index(
@@ -376,7 +376,7 @@ def test_lifecycle_settlement_preserves_transaction_order() -> None:
     cancel_source = inspect.getsource(lifecycle.finalize_running_generation_cancel)
     running_update = cancel_source.index("generation_attempt_update(")
     running_release = cancel_source.index(
-        "await services.billing.release(",
+        "await release_or_settle_generation(",
         running_update,
     )
     running_stage = cancel_source.index(

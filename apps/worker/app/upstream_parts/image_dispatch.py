@@ -494,6 +494,9 @@ async def _dispatch_image(
 
     runtime = request.upstream_runtime
     services = _request_services(request)
+    if request.request_context.sidecar_execution is not None:
+        yield await services.image_jobs.resume_image_job(request)
+        return
     channel = await services.core.resolve_image_channel()
     engine = await services.core.resolve_image_engine()
     dispatch_endpoint_kind = _image_endpoint_kind_for_engine(

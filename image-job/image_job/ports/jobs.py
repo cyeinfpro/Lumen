@@ -32,4 +32,8 @@ class JobRepository(Protocol):
 
 
 class JobHeartbeatPort(Protocol):
-    async def touch_running(self, job_id: str) -> None: ...
+    async def touch_running(
+        self,
+        job_id: str,
+        execution_token: str | None = None,
+    ) -> bool: ...

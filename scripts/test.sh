@@ -37,6 +37,10 @@ if [ "${LUMEN_TEST_SKIP_GOVERNANCE:-0}" != "1" ]; then
     echo
     echo "==> python module runtime state budget"
     uv run python scripts/module_runtime_state_audit.py
+
+    echo
+    echo "==> governance baseline monotonicity"
+    uv run python scripts/baseline_monotonic.py
 fi
 
 ensure_web_deps() {

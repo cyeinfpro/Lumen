@@ -40,6 +40,7 @@ jobs:
   impact-plan:
     runs-on: ubuntu-latest
     outputs:
+      comparison_base: ${{ steps.base.outputs.base }}
       full_mandatory: ${{ steps.split.outputs.full_mandatory }}
       backend_has_tests: ${{ steps.split.outputs.backend_has_tests }}
       frontend_has_tests: ${{ steps.split.outputs.frontend_has_tests }}
@@ -183,6 +184,12 @@ jobs:
         run: uv run python scripts/check_complexity.py
       - name: Module runtime state gate
         run: uv run python scripts/module_runtime_state_audit.py
+      - name: Governance baseline monotonicity gate
+        env:
+          GOVERNANCE_BASE_SHA: ${{ needs.impact-plan.outputs.comparison_base }}
+        run: uv run python scripts/baseline_monotonic.py
+      - name: Alembic breaking migration gate
+        run: uv run python scripts/lint_alembic_breaking.py
       - name: Download impact plan
         if: github.event_name == 'pull_request' && needs.impact-plan.outputs.full_mandatory != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

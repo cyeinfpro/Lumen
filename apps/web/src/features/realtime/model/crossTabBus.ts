@@ -37,7 +37,7 @@ export class CrossTabBus {
     if (!this.factory && typeof BroadcastChannel === "undefined") return;
     const factory =
       this.factory ?? createBroadcastChannel;
-    this.channel = factory(`lumen:sse:v2:${hashKey(this.channelKey)}`);
+    this.channel = factory(`lumen:sse:v3:${hashKey(this.channelKey)}`);
     this.channel.onmessage = (event) => {
       if (!isCrossTabMessage(event.data, this.channelKey)) return;
       if (event.data.sender === this.tabId) return;
