@@ -2307,15 +2307,15 @@ async def test_reference_media_snapshots_defers_required_variant_render() -> Non
 
 
 def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
-    source = inspect.getsource(videos.cancel_video_generation)
+    source = inspect.getsource(videos._video_generation_routes.cancel_video_generation)
     compact_source = " ".join(source.split())
 
     assert (
         "row.status == VideoGenerationStatus.QUEUED.value and not row.provider_task_id"
         in compact_source
     )
-    assert "tx = await billing_core.release" in source
-    assert "if tx is None:" in source
+    assert "await billing_core.release" in source
+    assert "if transaction is None:" in source
     assert "await db.rollback()" in source
     assert "if balance_changed:" in source
     assert "publish_sse_event" not in source
@@ -2398,7 +2398,7 @@ async def test_cancel_video_generation_rolls_back_when_hold_release_missing(
 
 
 def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
-    source = inspect.getsource(videos.retry_video_generation)
+    source = inspect.getsource(videos._video_generation_routes.retry_video_generation)
 
     assert "account_mode_forbidden" in source
     assert "video_retry_not_terminal" in source
@@ -2409,16 +2409,16 @@ def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
 
 
 def test_list_video_generations_batches_video_lookup() -> None:
-    source = inspect.getsource(videos.list_video_generations)
+    source = inspect.getsource(videos._video_generation_routes.list_video_generations)
 
     assert "Video.owner_generation_id.in_(generation_ids)" in source
     assert "videos_by_generation_id" in source
 
 
 def test_list_video_generations_next_cursor_uses_last_returned_row() -> None:
-    source = inspect.getsource(videos.list_video_generations)
+    source = inspect.getsource(videos._video_generation_routes.list_video_generations)
 
-    assert "_encode_cursor(page[-1])" in source
+    assert "deps.encode_cursor(page[-1])" in source
     assert "_encode_cursor(rows[limit])" not in source
 
 
