@@ -15,6 +15,7 @@ from .billing_parts import common as common_service
 from .billing_parts import completion as completion_service
 from .billing_parts import completion_pricing
 from .billing_parts import generation as generation_service
+from .billing_parts import helpers
 from .billing_parts.helpers import (
     allow_negative_balance as _allow_negative_balance,
     apply_rate_multiplier_micro as _apply_rate_multiplier_micro,
@@ -59,6 +60,7 @@ _existing_wallet_tx = common_service.existing_wallet_tx
 _record_balance_cache_refresh = common_service.record_balance_cache_refresh
 _record_window_cache_increment = common_service.record_window_cache_increment
 _ensure_billing_window_usage_event = common_service.ensure_billing_window_usage_event
+_setting_bool = helpers.setting_bool
 
 
 def completion_billing_ref_id(completion: Completion) -> str:
