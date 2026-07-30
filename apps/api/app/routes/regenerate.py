@@ -39,7 +39,6 @@ from lumen_core.schemas import (
     RegenerateIn,
     RegenerateOut,
 )
-from lumen_core.providers import parse_provider_bool
 from lumen_core.runtime_settings import get_spec
 
 from ..billing_cache_state import invalidate_balance_cache
@@ -49,6 +48,7 @@ from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..services.generation_queue import release_generation_queue_state
+from . import regenerate_options as _regenerate_options
 from .messages import (
     DEFAULT_IMAGE_OUTPUT_FORMAT as _DEFAULT_IMAGE_OUTPUT_FORMAT,
     await_post_commit_publishes as _await_post_commit_publishes,
@@ -61,6 +61,14 @@ from .messages import (
 )
 
 _release_generation_queue_state = release_generation_queue_state
+_chat_params_from_user_content = _regenerate_options.chat_params_from_user_content
+_str_option = _regenerate_options.str_option
+_bool_option = _regenerate_options.bool_option
+_compression_option = _regenerate_options.compression_option
+_IMAGE_RENDER_QUALITY_VALUES = _regenerate_options.IMAGE_RENDER_QUALITY_VALUES
+_IMAGE_OUTPUT_FORMAT_VALUES = _regenerate_options.IMAGE_OUTPUT_FORMAT_VALUES
+_IMAGE_BACKGROUND_VALUES = _regenerate_options.IMAGE_BACKGROUND_VALUES
+_IMAGE_MODERATION_VALUES = _regenerate_options.IMAGE_MODERATION_VALUES
 
 
 router = APIRouter()
@@ -279,12 +287,6 @@ _INTENT_BY_STR = MappingProxyType(
         "image_to_image": Intent.IMAGE_TO_IMAGE,
     }
 )
-_IMAGE_RENDER_QUALITY_VALUES = frozenset(("auto", "low", "medium", "high"))
-_IMAGE_OUTPUT_FORMAT_VALUES = frozenset(("png", "jpeg", "webp"))
-_IMAGE_BACKGROUND_VALUES = frozenset(("auto", "opaque", "transparent"))
-_IMAGE_MODERATION_VALUES = frozenset(("auto", "low"))
-
-
 async def _default_image_output_format(db: AsyncSession) -> str:
     spec = get_spec("image.output_format")
     if spec is not None:
@@ -356,47 +358,6 @@ async def _lookup_idempotent_regenerate(
         completion_id=comp_hit.id if comp_hit else None,
         generation_ids=[g.id for g in gen_hits],
     )
-
-
-def _chat_params_from_user_content(content: dict[str, Any]) -> ChatParamsIn:
-    effort = content.get("reasoning_effort")
-    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
-        effort = None
-    vector_store_ids = content.get("vector_store_ids")
-    if not isinstance(vector_store_ids, list):
-        vector_store_ids = []
-    return ChatParamsIn(
-        reasoning_effort=effort,
-        fast=content.get("fast") is True,
-        web_search=content.get("web_search") is True,
-        file_search=content.get("file_search") is True,
-        vector_store_ids=[v for v in vector_store_ids if isinstance(v, str)],
-        code_interpreter=content.get("code_interpreter") is True,
-        image_generation=content.get("image_generation") is True,
-    )
-
-
-def _str_option(value: Any, allowed: set[str], default: str | None) -> str | None:
-    return value if isinstance(value, str) and value in allowed else default
-
-
-def _bool_option(value: Any, default: bool = False) -> bool:
-    try:
-        return parse_provider_bool(value, default=default)
-    except ValueError:
-        return default
-
-
-def _compression_option(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        compression = int(value)
-    except (TypeError, ValueError):
-        return None
-    if 0 <= compression <= 100:
-        return compression
-    return None
 
 
 async def _ordered_target_generations(
