@@ -22,12 +22,15 @@ SPEC.loader.exec_module(MODULE)
 
 ComplexityBudget = MODULE.ComplexityBudget
 MetricBudget = MODULE.MetricBudget
+RoleFileBudget = MODULE.RoleFileBudget
 compare_budgets = MODULE.compare_budgets
 compare_file_budgets = MODULE.compare_file_budgets
 compare_metric_budgets = MODULE.compare_metric_budgets
 collect_python_metrics = MODULE.collect_python_metrics
 collect_violations = MODULE.collect_violations
 function_identities = MODULE.function_identities
+role_ceiling_errors = MODULE.role_ceiling_errors
+source_role_budget = MODULE.source_role_budget
 
 
 def test_complexity_gate_requires_improvements_to_tighten_baseline() -> None:
@@ -283,6 +286,98 @@ def test_update_shell_modules_use_strict_400_line_limit(tmp_path: Path) -> None:
     assert findings == {"scripts/update/oversized.sh": 401}
     assert compare_file_budgets(findings, {}) == [
         "new oversized source file: scripts/update/oversized.sh (401 > 400 lines)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    [
+        (
+            "apps/api/app/routes/auth.py",
+            ("Python route/controller", 800),
+        ),
+        (
+            "apps/api/app/services/export.py",
+            ("Python service/adapter", 1000),
+        ),
+        (
+            "apps/web/src/app/page.tsx",
+            ("React page/component", 800),
+        ),
+        (
+            "apps/web/src/app/use-upload-controller.ts",
+            ("React hook/controller", 600),
+        ),
+        (
+            "scripts/install.sh",
+            ("shell entrypoint", 600),
+        ),
+        (
+            "apps/web/src/lib/domain.ts",
+            ("general module", 1000),
+        ),
+    ],
+)
+def test_role_file_ceiling_classification(
+    tmp_path: Path,
+    relative: str,
+    expected: tuple[str, int],
+) -> None:
+    original_root = MODULE.ROOT
+    MODULE.ROOT = tmp_path
+    try:
+        assert source_role_budget(tmp_path / relative) == expected
+    finally:
+        MODULE.ROOT = original_root
+
+
+def test_role_ceiling_scan_excludes_tests_and_reports_hard_limits(
+    tmp_path: Path,
+) -> None:
+    route = tmp_path / "apps" / "api" / "app" / "routes" / "auth.py"
+    component = tmp_path / "apps" / "web" / "src" / "Feature.tsx"
+    hook = tmp_path / "apps" / "web" / "src" / "useFeature.ts"
+    test_file = tmp_path / "apps" / "web" / "src" / "Feature.test.tsx"
+    for path, lines in (
+        (route, 801),
+        (component, 801),
+        (hook, 601),
+        (test_file, 1200),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("line\n" * lines, encoding="utf-8")
+
+    original_root = MODULE.ROOT
+    MODULE.ROOT = tmp_path
+    try:
+        findings = MODULE.collect_role_ceiling_violations(("apps",))
+    finally:
+        MODULE.ROOT = original_root
+
+    assert findings == {
+        "apps/api/app/routes/auth.py": RoleFileBudget(
+            role="Python route/controller",
+            line_count=801,
+            limit=800,
+        ),
+        "apps/web/src/Feature.tsx": RoleFileBudget(
+            role="React page/component",
+            line_count=801,
+            limit=800,
+        ),
+        "apps/web/src/useFeature.ts": RoleFileBudget(
+            role="React hook/controller",
+            line_count=601,
+            limit=600,
+        ),
+    }
+    assert role_ceiling_errors(findings) == [
+        "role ceiling exceeded: apps/api/app/routes/auth.py "
+        "(Python route/controller, 801 > 800 lines)",
+        "role ceiling exceeded: apps/web/src/Feature.tsx "
+        "(React page/component, 801 > 800 lines)",
+        "role ceiling exceeded: apps/web/src/useFeature.ts "
+        "(React hook/controller, 601 > 600 lines)",
     ]
 
 
