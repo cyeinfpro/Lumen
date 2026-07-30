@@ -3,21 +3,9 @@
 import {
   ArrowDown,
   ArrowUp,
-  AlignHorizontalJustifyCenter,
-  AlignHorizontalJustifyEnd,
-  AlignHorizontalJustifyStart,
-  AlignHorizontalSpaceBetween,
-  AlignVerticalJustifyCenter,
-  AlignVerticalJustifyEnd,
-  AlignVerticalJustifyStart,
-  AlignVerticalSpaceBetween,
   Check,
-  Copy,
   Image as ImageIcon,
-  LayoutGrid,
   Loader2,
-  Play,
-  Scan,
   Trash2,
   Video,
 } from "lucide-react";
@@ -34,61 +22,51 @@ import {
   uploadImage,
   videoPosterUrl,
 } from "@/lib/apiClient";
-import {
-  canvasExecutionElapsedMs,
-  canvasExecutionPrimaryTask,
-  canvasExecutionProgressPercent,
-  canvasExecutionStageLabel,
-  canvasExecutionStatusLabel,
-  formatCanvasTaskElapsed,
-  isCanvasExecutionActive,
-} from "@/lib/canvas/executionPresentation";
 import { cleanupStaleCanvasUpload } from "@/lib/canvas/staleUploadCleanup";
-import {
-  CANVAS_NODE_TITLE_MAX_CHARS,
-  normalizeCanvasNodeTitle,
-} from "@/lib/canvas/constants";
-import {
-  canvasVideoCapabilityError,
-  validateCanvasNodeExecution,
-} from "@/lib/canvas/graph";
+import { normalizeCanvasNodeTitle } from "@/lib/canvas/constants";
 import type {
   CanvasDocument,
   CanvasEdgeDefinition,
   CanvasEdgeDetailsUpdate,
-  CanvasExecutionTaskDetail,
   CanvasNodeDefinition,
-  CanvasNodeExecution,
-  CanvasNodeType,
   CanvasOutput,
 } from "@/lib/canvas/types";
 import {
   CANVAS_NODE_SPECS,
-  findMatchingCanvasNodeCatalogItem,
   isCanvasExecutableNodeType,
 } from "@/lib/canvas/registry";
 import type { CanvasEditorStore } from "@/lib/canvas/store";
-import { useSelectCanvasOutputMutation } from "@/lib/queries/canvases";
-import { cn } from "@/lib/utils";
-import { Button, Input, toast } from "@/components/ui/primitives";
+import { Button, toast } from "@/components/ui/primitives";
 import {
-  ColorSwatchField,
-  InlineConfigConfirmation,
   InspectorSection,
   InspectorShell,
   ReadOnlyRow,
   SelectField,
-  ToggleField,
 } from "./CanvasInspectorFields";
 import type { SelectOption } from "./CanvasInspectorFields";
-import { CanvasNodeConfigEditor } from "./CanvasNodeConfigEditor";
+import { CanvasBatchInspector } from "./CanvasInspectorBatch";
+import type { CanvasInspectorProps } from "./CanvasInspectorContracts";
+import { CanvasInspectorExecutionHistory } from "./CanvasInspectorExecutionHistory";
+import type { CanvasHistoryOutputProps } from "./CanvasInspectorExecutionHistory";
+import {
+  canvasNodePreset,
+  incompatibleVideoConnectionCount,
+  inspectorRunDisabledReason,
+  inspectorVideoRunDisabledReason,
+  queryErrorMessage,
+} from "./CanvasInspectorModel";
+import { CanvasInspectorNodePanel } from "./CanvasInspectorNodePanel";
 import { CanvasOutputDownloadButton } from "./CanvasOutputDownloadButton";
 import {
   useCanvasStore,
   useCanvasStoreApi,
 } from "./CanvasStoreProvider";
 
-type CanvasEdgeRole = NonNullable<CanvasEdgeDefinition["role"]>;
+export type {
+  CanvasInspectorProps,
+  CanvasSelectionAlignment,
+  CanvasSelectionDistribution,
+} from "./CanvasInspectorContracts";
 
 interface PendingConfigChange {
   nodeId: string;
@@ -96,28 +74,7 @@ interface PendingConfigChange {
   removedConnections: number;
 }
 
-export type CanvasSelectionAlignment =
-  | "left"
-  | "horizontal-center"
-  | "right"
-  | "top"
-  | "vertical-center"
-  | "bottom";
-
-export type CanvasSelectionDistribution = "horizontal" | "vertical";
-
-export interface CanvasInspectorProps {
-  document: CanvasDocument;
-  onRunNode: (nodeId: string) => void;
-  runningNodeId?: string | null;
-  onDuplicateSelection?: () => void;
-  onAlignSelection?: (alignment: CanvasSelectionAlignment) => void;
-  onDistributeSelection?: (
-    distribution: CanvasSelectionDistribution,
-  ) => void;
-  onAutoLayoutSelection?: () => void;
-  onFitSelection?: () => void;
-}
+type CanvasEdgeRole = NonNullable<CanvasEdgeDefinition["role"]>;
 
 const DATA_TYPE_LABELS: Record<CanvasEdgeDefinition["data_type"], string> = {
   text: "文本",
@@ -181,7 +138,7 @@ export function CanvasInspector({
 
   if (selectedNodes.length > 1) {
     return (
-      <BatchInspector
+      <CanvasBatchInspector
         nodes={selectedNodes}
         onDuplicateSelection={onDuplicateSelection}
         onAlignSelection={onAlignSelection}
@@ -291,153 +248,77 @@ function CanvasNodeInspector({
     );
 
   return (
-    <InspectorShell
+    <CanvasInspectorNodePanel
+      node={node}
       eyebrow={preset?.label ?? CANVAS_NODE_SPECS[node.type].label}
-      title={node.title}
-    >
-      <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto">
-        <InspectorSection title="节点">
-          <Input
-            label="名称"
-            defaultValue={node.title}
-            key={`${node.id}:${node.title}`}
-            maxLength={CANVAS_NODE_TITLE_MAX_CHARS}
-            onBlur={(event) => {
-              const title = normalizeCanvasNodeTitle(
-                event.currentTarget.value,
-                node.title,
-              );
-              event.currentTarget.value = title;
-              if (title !== node.title) updateNodeTitle(node.id, title);
-            }}
+      graph={graph}
+      patch={patch}
+      uploading={assetUpload.uploading}
+      onUploadImage={assetUpload.uploadImage}
+      onUploadVideo={assetUpload.uploadVideo}
+      videoOptions={videoOptionsQuery.data}
+      videoOptionsLoading={videoOptionsQuery.isLoading}
+      videoOptionsError={videoOptionsError}
+      videoOptionsRetrying={
+        videoOptionsQuery.isFetching && !videoOptionsQuery.isLoading
+      }
+      onRetryVideoOptions={() => {
+        void videoOptionsQuery.refetch();
+      }}
+      pendingConfigChange={visiblePendingChange}
+      history={
+        executions.length > 0 ? (
+          <CanvasInspectorExecutionHistory
+            executions={executions}
+            document={document}
+            selectedNodeId={node.id}
+            OutputComponent={HistoryOutput}
           />
-          <ToggleField
-            label="折叠节点"
-            checked={node.ui.collapsed === true}
-            onChange={(collapsed) =>
-              updateNodeAppearance(node.id, {
-                ui: {
-                  ...node.ui,
-                  collapsed,
-                },
-              })
-            }
-          />
-          <ColorSwatchField
-            value={node.ui.color_tag ?? null}
-            onChange={(colorTag) =>
-              updateNodeAppearance(node.id, {
-                ui: {
-                  ...node.ui,
-                  color_tag: colorTag,
-                },
-              })
-            }
-          />
-        </InspectorSection>
-
-        <CanvasNodeConfigEditor
-          node={node}
-          graph={graph}
-          patch={patch}
-          uploading={assetUpload.uploading}
-          onUploadImage={assetUpload.uploadImage}
-          onUploadVideo={assetUpload.uploadVideo}
-          videoOptions={videoOptionsQuery.data}
-          videoOptionsLoading={videoOptionsQuery.isLoading}
-          videoOptionsError={videoOptionsError}
-          videoOptionsRetrying={
-            videoOptionsQuery.isFetching && !videoOptionsQuery.isLoading
+        ) : null
+      }
+      canRun={canRun}
+      runDisabledReason={runDisabledReason}
+      running={runningNodeId === node.id}
+      onCommitTitle={(value) => {
+        const title = normalizeCanvasNodeTitle(value, node.title);
+        if (title !== node.title) updateNodeTitle(node.id, title);
+        return title;
+      }}
+      onToggleCollapsed={(collapsed) =>
+        updateNodeAppearance(node.id, {
+          ui: {
+            ...node.ui,
+            collapsed,
+          },
+        })
+      }
+      onChangeColorTag={(colorTag) =>
+        updateNodeAppearance(node.id, {
+          ui: {
+            ...node.ui,
+            color_tag: colorTag,
+          },
+        })
+      }
+      onCancelPendingChange={() => setPendingConfigChange(null)}
+      onConfirmPendingChange={() => {
+        if (visiblePendingChange) {
+          const currentNode = graph.nodes.find(
+            (item) => item.id === visiblePendingChange.nodeId,
+          );
+          if (currentNode) {
+            updateNodeConfig(currentNode.id, {
+              ...currentNode.config,
+              ...visiblePendingChange.changes,
+            });
           }
-          onRetryVideoOptions={() => {
-            void videoOptionsQuery.refetch();
-          }}
-        />
-
-        {visiblePendingChange ? (
-          <InlineConfigConfirmation
-            removedConnections={visiblePendingChange.removedConnections}
-            onCancel={() => setPendingConfigChange(null)}
-            onConfirm={() => {
-              const currentNode = graph.nodes.find(
-                (item) => item.id === visiblePendingChange.nodeId,
-              );
-              if (currentNode) {
-                updateNodeConfig(currentNode.id, {
-                  ...currentNode.config,
-                  ...visiblePendingChange.changes,
-                });
-              }
-              setPendingConfigChange(null);
-            }}
-          />
-        ) : null}
-
-        {executions.length > 0 ? (
-          <ExecutionHistory executions={executions} document={document} />
-        ) : null}
-      </div>
-
-      <footer className="mobile-dialog-footer grid shrink-0 gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/92 p-3">
-        {runDisabledReason ? (
-          <p
-            role="alert"
-            className="type-caption text-[var(--danger-fg)]"
-          >
-            {runDisabledReason}
-          </p>
-        ) : null}
-        <div className="flex items-center justify-between gap-3">
-          <Button
-            variant="ghost"
-            leftIcon={<Trash2 className="h-4 w-4" />}
-            onClick={() => removeNodes([node.id])}
-            className="text-[var(--danger-fg)] hover:bg-[var(--danger-soft)]"
-          >
-            删除
-          </Button>
-          {canRun ? (
-            <Button
-              variant="primary"
-              loading={runningNodeId === node.id}
-              disabled={Boolean(runDisabledReason)}
-              leftIcon={<Play className="h-4 w-4" />}
-              onClick={() => onRunNode(node.id)}
-            >
-              运行节点
-            </Button>
-          ) : (
-            <Button variant="secondary" disabled>
-              无需运行
-            </Button>
-          )}
-        </div>
-      </footer>
-    </InspectorShell>
+        }
+        setPendingConfigChange(null);
+      }}
+      onDelete={() => removeNodes([node.id])}
+      onRun={() => onRunNode(node.id)}
+    />
   );
-}
-
-function inspectorRunDisabledReason(
-  graph: CanvasDocument["graph"],
-  node: CanvasNodeDefinition,
-): string | null {
-  if (!isCanvasExecutableNodeType(node.type)) return null;
-  const validation = validateCanvasNodeExecution(graph, node.id);
-  return validation.valid ? null : validation.reason;
-}
-
-function inspectorVideoRunDisabledReason(
-  graph: CanvasDocument["graph"],
-  node: CanvasNodeDefinition,
-  options: Awaited<ReturnType<typeof fetchVideoOptions>> | undefined,
-  loading: boolean,
-  error: string | null,
-): string | null {
-  if (CANVAS_NODE_SPECS[node.type].family !== "video") return null;
-  if (loading) return "正在加载视频能力";
-  if (error) return error;
-  if (!options) return "视频能力尚未加载";
-  return canvasVideoCapabilityError(node, options, graph);
 }
 
 type CanvasAssetKind = "image" | "mask" | "video";
@@ -589,19 +470,6 @@ async function uploadCanvasAsset(
 
 function canvasAssetIdField(kind: CanvasAssetKind): "image_id" | "video_id" {
   return kind === "video" ? "video_id" : "image_id";
-}
-
-function queryErrorMessage(
-  isError: boolean,
-  error: unknown,
-  fallback: string,
-): string | null {
-  if (!isError) return null;
-  return error instanceof Error ? error.message : fallback;
-}
-
-function canvasNodePreset(node: CanvasNodeDefinition) {
-  return findMatchingCanvasNodeCatalogItem(node);
 }
 
 function CanvasEdgeInspector({
@@ -780,439 +648,13 @@ function EdgeOrderControl({
   );
 }
 
-function BatchInspector({
-  nodes,
-  onDuplicateSelection,
-  onAlignSelection,
-  onDistributeSelection,
-  onAutoLayoutSelection,
-  onFitSelection,
-  onDeleteSelection,
-}: {
-  nodes: CanvasNodeDefinition[];
-  onDuplicateSelection?: () => void;
-  onAlignSelection?: (alignment: CanvasSelectionAlignment) => void;
-  onDistributeSelection?: (
-    distribution: CanvasSelectionDistribution,
-  ) => void;
-  onAutoLayoutSelection?: () => void;
-  onFitSelection?: () => void;
-  onDeleteSelection: () => void;
-}) {
-  const hasGeneralActions =
-    onDuplicateSelection || onAutoLayoutSelection || onFitSelection;
-  return (
-    <InspectorShell eyebrow="批量检查器" title={`已选择 ${nodes.length} 个节点`}>
-      <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto">
-        <InspectorSection title="选择摘要">
-          <p className="type-body-sm text-[var(--fg-1)]">
-            {selectionSummary(nodes)}
-          </p>
-        </InspectorSection>
-
-        {hasGeneralActions ? (
-          <InspectorSection title="批量操作">
-            <div
-              className="grid grid-cols-2 gap-2"
-              role="group"
-              aria-label="批量节点操作"
-            >
-              {onDuplicateSelection ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  leftIcon={<Copy className="h-4 w-4" aria-hidden />}
-                  onClick={onDuplicateSelection}
-                >
-                  复制节点
-                </Button>
-              ) : null}
-              {onAutoLayoutSelection ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  leftIcon={<LayoutGrid className="h-4 w-4" aria-hidden />}
-                  onClick={onAutoLayoutSelection}
-                >
-                  自动布局
-                </Button>
-              ) : null}
-              {onFitSelection ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  leftIcon={<Scan className="h-4 w-4" aria-hidden />}
-                  onClick={onFitSelection}
-                >
-                  适应选择
-                </Button>
-              ) : null}
-            </div>
-          </InspectorSection>
-        ) : null}
-
-        {onAlignSelection ? (
-          <InspectorSection title="对齐">
-            <div
-              className="grid grid-cols-3 gap-2"
-              role="group"
-              aria-label="节点对齐方式"
-            >
-              <BatchLayoutButton
-                label="左对齐"
-                icon={<AlignHorizontalJustifyStart className="h-4 w-4" />}
-                onClick={() => onAlignSelection("left")}
-              />
-              <BatchLayoutButton
-                label="水平居中"
-                icon={<AlignHorizontalJustifyCenter className="h-4 w-4" />}
-                onClick={() => onAlignSelection("horizontal-center")}
-              />
-              <BatchLayoutButton
-                label="右对齐"
-                icon={<AlignHorizontalJustifyEnd className="h-4 w-4" />}
-                onClick={() => onAlignSelection("right")}
-              />
-              <BatchLayoutButton
-                label="顶部对齐"
-                icon={<AlignVerticalJustifyStart className="h-4 w-4" />}
-                onClick={() => onAlignSelection("top")}
-              />
-              <BatchLayoutButton
-                label="垂直居中"
-                icon={<AlignVerticalJustifyCenter className="h-4 w-4" />}
-                onClick={() => onAlignSelection("vertical-center")}
-              />
-              <BatchLayoutButton
-                label="底部对齐"
-                icon={<AlignVerticalJustifyEnd className="h-4 w-4" />}
-                onClick={() => onAlignSelection("bottom")}
-              />
-            </div>
-          </InspectorSection>
-        ) : null}
-
-        {onDistributeSelection ? (
-          <InspectorSection title="均匀分布">
-            <div
-              className="grid grid-cols-2 gap-2"
-              role="group"
-              aria-label="节点分布方式"
-            >
-              <Button
-                size="sm"
-                variant="outline"
-                leftIcon={
-                  <AlignHorizontalSpaceBetween
-                    className="h-4 w-4"
-                    aria-hidden
-                  />
-                }
-                onClick={() => onDistributeSelection("horizontal")}
-              >
-                水平分布
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                leftIcon={
-                  <AlignVerticalSpaceBetween
-                    className="h-4 w-4"
-                    aria-hidden
-                  />
-                }
-                onClick={() => onDistributeSelection("vertical")}
-              >
-                垂直分布
-              </Button>
-            </div>
-          </InspectorSection>
-        ) : null}
-      </div>
-
-      <footer className="mobile-dialog-footer shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/92 p-3">
-        <Button
-          variant="danger"
-          fullWidth
-          leftIcon={<Trash2 className="h-4 w-4" aria-hidden />}
-          onClick={onDeleteSelection}
-        >
-          删除所选
-        </Button>
-      </footer>
-    </InspectorShell>
-  );
-}
-
-function BatchLayoutButton({
-  label,
-  icon,
-  onClick,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      size="sm"
-      variant="outline"
-      className="min-w-0 px-2 text-[11px]"
-      leftIcon={<span aria-hidden>{icon}</span>}
-      onClick={onClick}
-    >
-      {label}
-    </Button>
-  );
-}
-
-function ExecutionHistory({
-  executions,
-  document,
-}: {
-  executions: CanvasNodeExecution[];
-  document: CanvasDocument;
-}) {
-  const selectedNodeId = useCanvasStore((state) => state.selectedNodeId);
-  const selectOutput = useSelectCanvasOutputMutation(document.id);
-  const current = document.selections.find(
-    (selection) => selection.node_id === selectedNodeId,
-  );
-  return (
-    <InspectorSection title="历史输出">
-      <div className="grid gap-2">
-        {executions.map((execution) => (
-          <div key={execution.id} className="border-b border-[var(--border-subtle)] pb-3 last:border-0">
-            <div className="flex items-center justify-between gap-2">
-              <span
-                className={cn(
-                  "type-caption font-medium",
-                  execution.status === "partial_failed"
-                    ? "text-[var(--warning-fg)]"
-                    : "text-[var(--fg-2)]",
-                )}
-              >
-                {canvasExecutionStatusLabel(execution.status)}
-              </span>
-              <span className="type-caption text-[var(--fg-3)]">
-                {execution.created_at
-                  ? new Date(execution.created_at).toLocaleString("zh-CN")
-                  : ""}
-              </span>
-            </div>
-            <ExecutionTaskDetails execution={execution} />
-            {execution.error_message ||
-            canvasExecutionPrimaryTask(execution)?.error_message ? (
-              <p
-                role={execution.status === "partial_failed" ? "status" : "alert"}
-                className={cn(
-                  "mt-2 type-caption",
-                  execution.status === "partial_failed"
-                    ? "text-[var(--warning-fg)]"
-                    : "text-[var(--danger-fg)]",
-                )}
-              >
-                {execution.error_message ??
-                  canvasExecutionPrimaryTask(execution)?.error_message}
-              </p>
-            ) : null}
-            {execution.outputs.length > 0 ? (
-              <div className="mt-2 grid grid-cols-3 gap-2">
-                {execution.outputs.map((output, index) => (
-                  <HistoryOutput
-                    key={`${execution.id}:${index}`}
-                    output={output}
-                    index={index}
-                    active={
-                      current?.execution_id === execution.id &&
-                      current.output_index === index
-                    }
-                    loading={
-                      selectOutput.isPending &&
-                      selectOutput.variables?.nodeId === execution.node_id
-                    }
-                    onSelect={() =>
-                      selectOutput.mutate(
-                        {
-                          nodeId: execution.node_id,
-                          executionId: execution.id,
-                          outputIndex: index,
-                          selectionRevision: current?.revision,
-                        },
-                        {
-                          onError: (error) => toast.error(error.message),
-                        },
-                      )
-                    }
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    </InspectorSection>
-  );
-}
-
-function ExecutionTaskDetails({
-  execution,
-}: {
-  execution: CanvasNodeExecution;
-}) {
-  const task = canvasExecutionPrimaryTask(execution);
-  const active = isCanvasExecutionActive(execution);
-  const [detailsOpen, setDetailsOpen] = useState(active);
-  if (!task && !active) return null;
-  const progress = canvasExecutionProgressPercent(execution);
-  const stage = canvasExecutionStageLabel(execution);
-  const elapsed = formatCanvasTaskElapsed(canvasExecutionElapsedMs(execution));
-  const rows = task ? executionTaskRows(task, elapsed) : [];
-  return (
-    <div className="mt-2 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56 p-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="type-caption font-medium text-[var(--fg-1)]">
-          {stage}
-        </span>
-        <span className="type-mono-meta tabular-nums text-[var(--fg-2)]">
-          {progress !== null
-            ? `${progress}%`
-            : elapsed
-              ? `已用 ${elapsed}`
-              : "进行中"}
-        </span>
-      </div>
-      <div
-        role="progressbar"
-        aria-label={`${stage}进度`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={progress ?? undefined}
-        className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--bg-3)]"
-      >
-        <span
-          className={cn(
-            "block h-full rounded-full bg-[var(--accent)]",
-            progress === null
-              ? "w-1/3 animate-pulse motion-reduce:animate-none"
-              : "w-full origin-left transition-transform duration-[var(--dur-base)] ease-[var(--ease-develop)]",
-          )}
-          style={
-            progress === null
-              ? undefined
-              : { transform: `scaleX(${progress / 100})` }
-          }
-        />
-      </div>
-      {rows.length > 0 ? (
-        <details
-          className="mt-2"
-          open={detailsOpen}
-          onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
-        >
-          <summary className="cursor-pointer type-caption text-[var(--fg-2)]">
-            任务详情
-          </summary>
-          <dl className="mt-2 grid grid-cols-[68px_minmax(0,1fr)] gap-x-2 gap-y-1.5 type-caption">
-            {rows.map(([label, value]) => (
-              <div key={label} className="contents">
-                <dt className="text-[var(--fg-3)]">{label}</dt>
-                <dd className="min-w-0 break-words text-[var(--fg-1)]">
-                  {value}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-function executionTaskRows(
-  task: CanvasExecutionTaskDetail,
-  elapsed: string | null,
-): Array<[string, string]> {
-  const taskId =
-    task.video_generation_id ??
-    task.generation_id ??
-    task.completion_id ??
-    task.id;
-  const provider = [task.provider_name, task.provider_kind]
-    .filter(Boolean)
-    .join(" · ");
-  const output = [
-    task.resolution,
-    task.duration_s != null ? `${task.duration_s} 秒` : null,
-    task.aspect_ratio,
-    task.size_requested,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const rows: Array<[string, string]> = [
-    ["任务 ID", taskId],
-    ["类型", canvasTaskKindLabel(task.kind)],
-    ["模型", task.model ?? ""],
-    ["供应商", provider],
-    ["模式", canvasTaskActionLabel(task.action)],
-    ["规格", output],
-    [
-      "音频",
-      task.generate_audio == null
-        ? ""
-        : task.generate_audio
-          ? "生成音频"
-          : "静音",
-    ],
-    ["尝试", task.attempt == null ? "" : String(task.attempt + 1)],
-    ["耗时", elapsed ?? ""],
-    ["更新时间", formatCanvasTaskTime(task.updated_at)],
-  ];
-  return rows.filter((row) => Boolean(row[1]));
-}
-
-function canvasTaskKindLabel(kind: string): string {
-  return (
-    {
-      generation: "图片生成",
-      completion: "文本处理",
-      video_generation: "视频生成",
-    }[kind] ?? kind
-  );
-}
-
-function canvasTaskActionLabel(action: string | null | undefined): string {
-  if (!action) return "";
-  return (
-    {
-      t2v: "文生视频",
-      i2v: "图生视频",
-      reference: "参考生成",
-      generate: "生成",
-      edit: "编辑",
-    }[action] ?? action
-  );
-}
-
-function formatCanvasTaskTime(value: string | null | undefined): string {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN");
-}
-
 function HistoryOutput({
   output,
   index,
   active,
   loading,
   onSelect,
-}: {
-  output: CanvasOutput;
-  index: number;
-  active: boolean;
-  loading: boolean;
-  onSelect: () => void;
-}) {
+}: CanvasHistoryOutputProps) {
   const Icon = output.type === "image" ? ImageIcon : Video;
   const sources = historyOutputPreviewSources(output);
   const sourceKey = sources.join("\n");
@@ -1322,35 +764,4 @@ function portLabel(
   const spec = CANVAS_NODE_SPECS[node.type];
   const ports = direction === "input" ? spec.inputs : spec.outputs;
   return ports.find((port) => port.id === handle)?.label ?? "未知端口";
-}
-
-function selectionSummary(nodes: CanvasNodeDefinition[]): string {
-  const counts = new Map<CanvasNodeType, number>();
-  for (const node of nodes) {
-    counts.set(node.type, (counts.get(node.type) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([type, count]) => `${CANVAS_NODE_SPECS[type].label} ${count} 个`)
-    .join("，");
-}
-
-function incompatibleVideoConnectionCount(
-  graph: CanvasDocument["graph"],
-  node: CanvasNodeDefinition,
-  nextConfig: Record<string, unknown>,
-): number {
-  if (node.type !== "video_generate") return 0;
-  const currentMode = String(node.config.mode ?? "t2v");
-  const nextMode = String(nextConfig.mode ?? "t2v");
-  if (currentMode === nextMode) return 0;
-  const blocked =
-    nextMode === "t2v"
-      ? new Set(["first_frame", "reference_images", "reference_videos"])
-      : nextMode === "i2v"
-        ? new Set(["reference_images", "reference_videos"])
-        : new Set(["first_frame"]);
-  return graph.edges.filter(
-    (edge) =>
-      edge.target_node_id === node.id && blocked.has(edge.target_handle),
-  ).length;
 }
