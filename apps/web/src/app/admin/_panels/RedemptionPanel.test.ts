@@ -13,6 +13,10 @@ const viewsSource = readFileSync(
   new URL("./RedemptionPanelViews.tsx", import.meta.url),
   "utf8",
 );
+const walletViewsSource = readFileSync(
+  new URL("./RedemptionWalletViews.tsx", import.meta.url),
+  "utf8",
+);
 const mobileStylesSource = readFileSync(
   new URL("../admin-mobile.module.css", import.meta.url),
   "utf8",
@@ -48,8 +52,6 @@ test("redemption queries expose independent error and retry states", () => {
   const stateContracts = [
     ["function RedemptionCodesContent", "export function RedemptionCodesCard", "暂无兑换码"],
     ["function RedemptionUsageContent", "export function RedemptionUsageCard", "暂无兑换记录"],
-    ["export function WalletList", "function WalletSummaryCard", "没有匹配用户"],
-    ["function WalletTransactionsContent", "function WalletTransactionsCard", "暂无流水"],
   ] as const;
 
   for (const [start, end, emptyLabel] of stateContracts) {
@@ -64,8 +66,24 @@ test("redemption queries expose independent error and retry states", () => {
       `${start} must not present empty before its error state`,
     );
   }
+  for (const [start, end, emptyLabel] of [
+    ["export function WalletList", "function WalletSummaryCard", "没有匹配用户"],
+    ["function WalletTransactionsContent", "function WalletTransactionsCard", "暂无流水"],
+  ] as const) {
+    const stateSource = between(walletViewsSource, start, end);
+    const errorIndex = stateSource.indexOf("isError");
+    const retryIndex = stateSource.indexOf("onRetry", errorIndex);
+    const emptyIndex = stateSource.indexOf(emptyLabel, errorIndex);
+    ok(errorIndex >= 0, `${start} must render an error state`);
+    ok(retryIndex > errorIndex, `${start} must expose its retry action`);
+    ok(emptyIndex > errorIndex, `${start} must not present empty before its error state`);
+  }
 
-  strictEqual((viewsSource.match(/role="alert"/g) ?? []).length, 4);
+  strictEqual(
+    (viewsSource.match(/role="alert"/g) ?? []).length +
+      (walletViewsSource.match(/role="alert"/g) ?? []).length,
+    4,
+  );
 });
 
 test("clipboard rejection is consumed and reported to the user", async () => {
@@ -119,7 +137,7 @@ test("batch code modal uses the shared modal lifecycle and constrained layout", 
   const modalSource = between(
     viewsSource,
     "export function NewCodesModal",
-    "export function WalletSearchForm",
+    "export {",
   );
 
   match(viewsSource, /useBodyScrollLock/);
@@ -177,6 +195,7 @@ test("RedemptionPanel modules remain type-correct under the web tsconfig", () =>
   const rootNames = [
     fileURLToPath(new URL("./RedemptionPanel.tsx", import.meta.url)),
     fileURLToPath(new URL("./RedemptionPanelViews.tsx", import.meta.url)),
+    fileURLToPath(new URL("./RedemptionWalletViews.tsx", import.meta.url)),
   ];
   const config = ts.readConfigFile(configPath, ts.sys.readFile);
   strictEqual(config.error, undefined);
