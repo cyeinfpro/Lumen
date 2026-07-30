@@ -1,58 +1,29 @@
-import { ApiError } from "@/lib/apiClient";
 import type {
   VideoProviderItemIn,
   VideoProviderItemOut,
   VideoProviderKind,
 } from "@/lib/types";
 import { evaluateVolcanoAssetCredentials } from "./videoProviderAssetRules";
+import type {
+  Draft,
+  Issue,
+  ModelDraft,
+  ProviderSummary,
+  VideoAction,
+} from "./videoProviderPanelTypes";
 
-export type VideoAction = "t2v" | "i2v" | "reference";
-
-export type ModelDraft = {
-  _key: number;
-  model: string;
-  t2v: string;
-  i2v: string;
-  reference: string;
-};
-
-export type Draft = {
-  _key: number;
-  original_name?: string;
-  name: string;
-  kind: VideoProviderKind;
-  base_url: string;
-  api_key: string;
-  access_key_id: string;
-  secret_access_key: string;
-  project_name: string;
-  region: string;
-  enabled: boolean;
-  priority: number;
-  weight: number;
-  concurrency: number;
-  supports_idempotency: boolean;
-  proxy: string;
-  models: ModelDraft[];
-};
-
-type IssueSeverity = "error" | "warning";
-
-export type Issue = {
-  severity: IssueSeverity;
-  message: string;
-};
-
-export type ProviderSummary = {
-  name: string;
-  kind: VideoProviderKind;
-  enabled: boolean;
-  hasKey: boolean;
-  capabilities: Set<VideoAction>;
-  modelNames: string[];
-  concurrency: number;
-  issues: Issue[];
-};
+export type {
+  Draft,
+  Issue,
+  ModelDraft,
+  ProviderSummary,
+  VideoAction,
+} from "./videoProviderPanelTypes";
+export {
+  issueTone,
+  saveError,
+  sourceLabel,
+} from "./videoProviderPanelPresentation";
 
 const VOLCANO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
 export const VOLCANO_DEFAULT_PROJECT_NAME = "default";
@@ -667,27 +638,6 @@ function originalProvider(
 ): VideoProviderItemOut | undefined {
   if (!draft.original_name) return undefined;
   return serverItems.find((item) => item.name === draft.original_name);
-}
-
-export function saveError(err: Error): string {
-  if (err instanceof ApiError) {
-    return err.message || `保存失败 (HTTP ${err.status})`;
-  }
-  return err.message || "保存失败";
-}
-
-export function sourceLabel(source: string | undefined): string {
-  if (source === "db") return "数据库";
-  if (source === "env") return "环境变量";
-  return "未配置";
-}
-
-export function issueTone(
-  issues: Issue[],
-): "danger" | "warning" | "success" {
-  if (issues.some((item) => item.severity === "error")) return "danger";
-  if (issues.length > 0) return "warning";
-  return "success";
 }
 
 export function analyzeProvider(
