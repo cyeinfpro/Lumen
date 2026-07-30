@@ -6,34 +6,17 @@
 // - origin=project_candidate（项目里调 useCreateModelCandidatesMutation 派发的）
 
 import { motion } from "framer-motion";
-import {
-  AlertTriangle,
-  Bookmark,
-  CheckCircle2,
-  Eraser,
-  ExternalLink,
-  ImageIcon,
-  Library,
-  Maximize2,
-  RefreshCw,
-  Trash2,
-  X,
-} from "lucide-react";
-import Image from "next/image";
-import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { X } from "lucide-react";
+import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
-import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { cn } from "@/lib/utils";
-import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
   ApparelModelLibraryJob,
   ApparelModelLibraryJobItem,
-  ApparelModelLibraryJobStatus,
   ApparelModelLibrarySaveJobItemIn,
   ModelLibraryAppearance,
   ModelLibraryItemAgeSegment,
@@ -42,53 +25,8 @@ import {
   MODEL_LIBRARY_APPEARANCE_LABEL,
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
-import {
-  useApparelModelLibraryJobsInfiniteQuery,
-  useClearApparelModelLibraryJobsMutation,
-  useDeleteApparelModelLibraryJobMutation,
-  useSaveApparelModelLibraryJobItemMutation,
-} from "@/lib/queries";
-import { useUiStore } from "@/store/useUiStore";
-import { formatRelativeTime } from "../utils";
-import {
-  AGE_LABEL,
-  buildReferenceSummary,
-} from "./ModelLibraryJobsModel";
-
-function jobItemToLightboxItem(item: ApparelModelLibraryJobItem): LightboxItem {
-  return {
-    id: item.image_id,
-    url: item.image_url,
-    thumbUrl: item.thumb_url ?? undefined,
-    previewUrl: item.display_url ?? item.image_url,
-    prompt: item.style_tags.join("、") || undefined,
-    filename: item.download_filename ?? undefined,
-  };
-}
-
-function isFreeJobItem(item: ApparelModelLibraryJobItem): boolean {
-  return (
-    item.billing_free === true ||
-    item.billing_label === "free" ||
-    item.is_dual_race_bonus === true
-  );
-}
-
-function openJobLightbox(items: ApparelModelLibraryJobItem[], initialId: string) {
-  if (items.length === 0) return;
-  const lightboxItems = items.map(jobItemToLightboxItem);
-  useUiStore.getState().openLightboxFromItems(lightboxItems, initialId);
-}
-
-type AppearanceKey = keyof typeof MODEL_LIBRARY_APPEARANCE_LABEL;
-
-const STATUS_LABEL: Record<ApparelModelLibraryJobStatus, string> = {
-  queued: "排队中",
-  running: "生成中",
-  succeeded: "已完成",
-  failed: "失败",
-  partial: "部分成功",
-};
+import { useSaveApparelModelLibraryJobItemMutation } from "@/lib/queries";
+import { AGE_LABEL } from "./ModelLibraryJobsModel";
 
 const ORIGIN_LABEL: Record<"library_generate" | "project_candidate", string> = {
   library_generate: "独立生成",

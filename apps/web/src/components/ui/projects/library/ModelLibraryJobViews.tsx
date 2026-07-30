@@ -10,44 +10,27 @@ import {
   AlertTriangle,
   Bookmark,
   CheckCircle2,
-  Eraser,
   ExternalLink,
   ImageIcon,
   Library,
   Maximize2,
-  RefreshCw,
   Trash2,
-  X,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/primitives/Button";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { cn } from "@/lib/utils";
 import type { LightboxItem } from "@/components/ui/lightbox/types";
 import type {
   ApparelModelLibraryJob,
   ApparelModelLibraryJobItem,
   ApparelModelLibraryJobStatus,
-  ApparelModelLibrarySaveJobItemIn,
-  ModelLibraryAppearance,
-  ModelLibraryItemAgeSegment,
 } from "@/lib/apiClient";
-import {
-  MODEL_LIBRARY_APPEARANCE_LABEL,
-  MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
-} from "@/lib/apiClient";
-import {
-  useApparelModelLibraryJobsInfiniteQuery,
-  useClearApparelModelLibraryJobsMutation,
-  useDeleteApparelModelLibraryJobMutation,
-  useSaveApparelModelLibraryJobItemMutation,
-} from "@/lib/queries";
+import { MODEL_LIBRARY_APPEARANCE_LABEL } from "@/lib/apiClient";
+import { useDeleteApparelModelLibraryJobMutation } from "@/lib/queries";
 import { useUiStore } from "@/store/useUiStore";
 import { formatRelativeTime } from "../utils";
 import {
