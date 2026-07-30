@@ -35,10 +35,7 @@ import type {
   PosterStyleItem,
   PosterStyleSourceFilter,
 } from "@/lib/apiClient";
-import {
-  POSTER_STYLE_CATEGORY_LABEL,
-  POSTER_STYLE_SOURCE_LABEL,
-} from "@/lib/apiClient";
+import { POSTER_STYLE_CATEGORY_LABEL } from "@/lib/apiClient";
 import {
   useBatchDeletePosterStylesMutation,
   useDeletePosterStyleMutation,
@@ -48,37 +45,11 @@ import {
 import { cn } from "@/lib/utils";
 import { formatShortDate } from "../projects/utils";
 import { PosterStyleDetailDrawer } from "./PosterStyleDetailDrawer";
-
-// category 顺序（含 all 与 user_favorites）
-const CATEGORY_TABS: Array<[PosterStyleCategoryFilter, string]> = [
-  ["all", POSTER_STYLE_CATEGORY_LABEL.all],
-  ["user_favorites", POSTER_STYLE_CATEGORY_LABEL.user_favorites],
-  ["illustration", POSTER_STYLE_CATEGORY_LABEL.illustration],
-  ["3d", POSTER_STYLE_CATEGORY_LABEL["3d"]],
-  ["minimal", POSTER_STYLE_CATEGORY_LABEL.minimal],
-  ["retro", POSTER_STYLE_CATEGORY_LABEL.retro],
-  ["traditional", POSTER_STYLE_CATEGORY_LABEL.traditional],
-  ["photo", POSTER_STYLE_CATEGORY_LABEL.photo],
-  ["other", POSTER_STYLE_CATEGORY_LABEL.other],
-];
-
-const SOURCE_FILTERS: Array<[PosterStyleSourceFilter, string]> = [
-  ["all", POSTER_STYLE_SOURCE_LABEL.all],
-  ["preset", POSTER_STYLE_SOURCE_LABEL.preset],
-  ["favorite", POSTER_STYLE_SOURCE_LABEL.favorite],
-  ["user_upload", POSTER_STYLE_SOURCE_LABEL.user_upload],
-  ["generated", POSTER_STYLE_SOURCE_LABEL.generated],
-];
-
-const SOURCE_LABEL_SHORT: Record<
-  Exclude<PosterStyleSourceFilter, "all">,
-  string
-> = {
-  preset: "预设",
-  favorite: "收藏",
-  user_upload: "上传",
-  generated: "生成",
-};
+import {
+  CATEGORY_TABS,
+  SOURCE_FILTERS,
+  SOURCE_LABEL_SHORT,
+} from "./posterStyleBrowserConfig";
 
 export interface PosterStyleBrowserProps {
   /** "新建风格"按钮的回调（跳到 create tab） */
