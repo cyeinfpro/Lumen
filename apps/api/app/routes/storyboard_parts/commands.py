@@ -5,7 +5,12 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Conversation, User, WorkflowRun, WorkflowStep
+from lumen_core.model_entities import (
+    Conversation,
+    User,
+    WorkflowRun,
+    WorkflowStep,
+)
 
 from ...services.storyboard import patching as storyboard_patching
 from ...services.storyboard.common import (

@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import json
 import logging
-import sys
 import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,16 @@ _CHAT_SEND_INTERVAL_SEC = 1.05
 _CHAT_SEND_CACHE_CAP = 2048
 
 
-def _listener_module() -> Any:
-    return sys.modules["app.listener"]
+@dataclass
+class ListenerRuntimeState:
+    """Mutable state owned by one listener lifecycle."""
+
+    progress_last_edit: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    chat_send_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    chat_send_next_at: OrderedDict[int, float] = field(default_factory=OrderedDict)
+    dispatch_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(8)
+    )
 
 
 # winner SUCCEEDED 之后，dual_race bonus 还没发 EV_GEN_ATTACHED；listener 不能
@@ -102,8 +111,12 @@ def _decode(s: Any) -> str:
     return str(s)
 
 
-def _should_throttle_progress(gen_id: str) -> bool:
-    progress_last_edit = _listener_module()._listener_runtime().progress_last_edit
+def _should_throttle_progress(
+    gen_id: str,
+    *,
+    runtime: ListenerRuntimeState,
+) -> bool:
+    progress_last_edit = runtime.progress_last_edit
     now = time.monotonic()
     last = progress_last_edit.get(gen_id, 0.0)
     if now - last < _PROGRESS_THROTTLE_SEC:
@@ -117,8 +130,11 @@ def _should_throttle_progress(gen_id: str) -> bool:
     return False
 
 
-def _chat_send_lock(chat_id: int) -> asyncio.Lock:
-    runtime = _listener_module()._listener_runtime()
+def _chat_send_lock(
+    chat_id: int,
+    *,
+    runtime: ListenerRuntimeState,
+) -> asyncio.Lock:
     lock = runtime.chat_send_locks.get(chat_id)
     if lock is None:
         lock = asyncio.Lock()
@@ -126,9 +142,12 @@ def _chat_send_lock(chat_id: int) -> asyncio.Lock:
     return lock
 
 
-async def _wait_chat_send_slot(chat_id: int) -> None:
-    runtime = _listener_module()._listener_runtime()
-    lock = _chat_send_lock(chat_id)
+async def _wait_chat_send_slot(
+    chat_id: int,
+    *,
+    runtime: ListenerRuntimeState,
+) -> None:
+    lock = _chat_send_lock(chat_id, runtime=runtime)
     async with lock:
         now = time.monotonic()
         next_at = runtime.chat_send_next_at.get(chat_id, 0.0)
@@ -167,6 +186,7 @@ async def _chat_action_heartbeat(
 async def _send_document_with_backoff(
     bot: Bot,
     *,
+    runtime: ListenerRuntimeState,
     chat_id: int,
     path: Path,
     filename: str,
@@ -174,7 +194,7 @@ async def _send_document_with_backoff(
     reply_markup: Any,
 ) -> None:
     for attempt in range(3):
-        await _wait_chat_send_slot(chat_id)
+        await _wait_chat_send_slot(chat_id, runtime=runtime)
         try:
             await bot.send_document(
                 chat_id=chat_id,
@@ -195,7 +215,11 @@ async def _send_document_with_backoff(
     raise RuntimeError(f"send_document exhausted retry-after attempts chat={chat_id}")
 
 
-async def _load_active_user_ids(redis: aioredis.Redis) -> set[str]:
+async def _load_active_user_ids(
+    redis: aioredis.Redis,
+    *,
+    tracker: Any,
+) -> set[str]:
     """Return active users and incrementally rebuild missing upgrade-era entries."""
 
     now = int(time.time())
@@ -209,6 +233,7 @@ async def _load_active_user_ids(redis: aioredis.Redis) -> set[str]:
     active_user_ids.update(
         await _recover_active_user_ids(
             redis,
+            tracker=tracker,
             max_scan_batches=(
                 _FALLBACK_ACTIVE_SCAN_BATCHES
                 if active_user_ids
@@ -247,6 +272,7 @@ def _stream_generation_ids(entries: Any) -> list[str]:
 async def _recover_active_user_ids(
     redis: aioredis.Redis,
     *,
+    tracker: Any,
     max_scan_batches: int,
 ) -> set[str]:
     """Run one cluster-throttled, bounded migration scan over replay streams."""
@@ -334,7 +360,7 @@ async def _recover_active_user_ids(
         if not exists or user_id in recovered:
             continue
         try:
-            if await _listener_module().tracker.refresh(gen_id, user_id):
+            if await tracker.refresh(gen_id, user_id):
                 recovered.add(user_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning(

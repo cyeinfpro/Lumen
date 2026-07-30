@@ -6,8 +6,14 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import AuthSession, User
-from lumen_core.schemas import RuntimeDefaultsOut, UserOut
+from lumen_core.model_entities import (
+    AuthSession,
+    User,
+)
+from lumen_core.schema_models import (
+    RuntimeDefaultsOut,
+    UserOut,
+)
 
 from .runtime import AuthRuntimeAdapter
 

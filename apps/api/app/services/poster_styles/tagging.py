@@ -25,11 +25,11 @@ from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     build_effective_provider_config,
     endpoint_kind_allowed,
-    resolve_provider_proxy_url,
     weighted_priority_order,
 )
 from lumen_core.schemas import PosterStyleAutoTagOut
 
+from ...proxy_pool import resolve_provider_proxy_url
 from .serialization import parse_tagging_text
 from .tagging_runtime import PosterTaggingRuntime
 

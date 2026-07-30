@@ -56,11 +56,11 @@ from lumen_core.constants import (
 )
 from lumen_core.providers import (
     ProviderProxyDefinition,
-    close_provider_proxy_tunnels,  # noqa: F401 - late-bound lifecycle facade
     endpoint_kind_allowed,  # noqa: F401 - late-bound provider facade
     parse_provider_bool,  # noqa: F401 - late-bound provider facade
+)
+from lumen_core.providers_parts.selection import (
     provider_supports_route,  # noqa: F401 - late-bound provider facade
-    resolve_provider_proxy_url,  # noqa: F401 - late-bound request facade
 )
 from lumen_core.url_security import (
     PublicHttpBodyTooLarge,  # noqa: F401 - late-bound request facade
@@ -198,6 +198,8 @@ except Exception:  # noqa: BLE001
 
 
 logger = logging.getLogger(__name__)
+close_provider_proxy_tunnels = provider_pool.close_provider_proxy_tunnels
+resolve_provider_proxy_url = provider_pool.resolve_provider_proxy_url
 
 
 def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:

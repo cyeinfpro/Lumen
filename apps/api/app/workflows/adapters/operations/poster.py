@@ -81,7 +81,7 @@ from ..workflow_runtime import (
     publish_bundles as _publish_bundles,
     step as _step,
 )
-from .poster_helpers import (
+from .poster_parts.helpers import (
     poster_brand_attachment_ids as _poster_brand_attachment_ids,
     poster_image_params as _poster_image_params,
     poster_load_style as _poster_load_style,

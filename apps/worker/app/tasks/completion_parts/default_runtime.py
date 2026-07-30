@@ -5,7 +5,7 @@ from __future__ import annotations
 # This facade intentionally exposes the historical module namespace while all
 # implementation logic lives in dependency-explicit leaf modules.
 # ruff: noqa: F403, F405
-from .default_runtime_parts.compat import *
+from .default_runtime_parts.composition import *
 
 from .default_runtime_parts import (
     composition,
@@ -16,7 +16,27 @@ from .default_runtime_parts import (
     tool_runtime,
 )
 
-__all__ = PUBLIC_FACADE_EXPORTS
+__all__ = tuple(
+    """
+    _CODE_INTERPRETER_TOOL_TYPE _CompletionToolTracker _FILE_SEARCH_TOOL_TYPE
+    _IMAGE_GENERATION_TOOL_TYPE _LeaseLost _STICKY_TEXT_CHAR_LIMIT _SummaryBoundary
+    _TaskCancelled _ToolCallState _ToolIdleTimeout _WEB_SEARCH_TOOL_TYPE
+    _apply_url_citations _context_circuit_open _decode_upstream_image_b64
+    _estimated_summary_source _extract_completed_output_text
+    _extract_image_events_from_response _extract_reasoning_delta
+    _extract_reasoning_text_from_item _extract_reasoning_text_from_response
+    _extract_tool_call_update _extract_url_citations
+    _fallback_completion_usage_tokens _fallback_pack _finalize_completion_text
+    _first_str _instructions_with_summary_guardrail _make_quality_probes
+    _markdown_link _merge_tool_call_state _message_after_summary
+    _message_created_at _normalize_tool_status _normalize_tool_type
+    _pack_with_existing_summary _packed_with_input _role_eq
+    _sticky_text_from_message _summarize_tool_error _summary_age_seconds
+    _summary_compressed_at _summary_covers_boundary _summary_created_at
+    _tool_display_label _tool_image_dedupe_key _tool_status_rank
+    _truncate_sticky_text _with_summary_guardrail PackedContext run_completion
+    """.split()
+)
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("lumen.worker.completion")

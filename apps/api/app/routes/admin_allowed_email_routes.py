@@ -11,8 +11,11 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from lumen_core.models import AllowedEmail, User
-from lumen_core.schemas import AllowedEmailOut
+from lumen_core.model_entities import (
+    AllowedEmail,
+    User,
+)
+from lumen_core.schema_models import AllowedEmailOut
 
 
 class AllowedEmailIn(BaseModel):

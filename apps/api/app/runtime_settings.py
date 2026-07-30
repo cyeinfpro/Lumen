@@ -25,11 +25,11 @@ from lumen_core.runtime_settings import (
     parse_value,
 )
 from lumen_core.providers import (
-    DEFAULT_PROVIDER_PURPOSES,
     has_embedding_purpose,
-    normalize_provider_purposes,
     parse_provider_json,
 )
+from lumen_core.providers_parts.config import normalize_provider_purposes
+from lumen_core.providers_parts.definitions import DEFAULT_PROVIDER_PURPOSES
 from lumen_core.schemas import SystemSettingItem
 
 logger = logging.getLogger(__name__)

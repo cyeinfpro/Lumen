@@ -10,7 +10,10 @@ from typing import Any
 from sqlalchemy import select
 
 from lumen_core.constants import GenerationErrorCode as EC, Role
-from lumen_core.models import Conversation, Message
+from lumen_core.model_entities import (
+    Conversation,
+    Message,
+)
 
 from ...provider_runtime.errors import UpstreamError
 from ...provider_runtime.upstream_services import ImageUpstreamRuntime

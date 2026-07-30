@@ -68,9 +68,10 @@ test("lightbox and composer gestures avoid stale direction and layout animation"
   const lightbox = source(
     "src/components/ui/lightbox/LightboxGestures.ts",
   );
-  const desktopComposer = source(
-    "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
-  );
+  const desktopComposer = [
+    source("src/components/ui/composer/desktop/DesktopComposerPill.tsx"),
+    source("src/components/ui/composer/desktop/DesktopComposerButtons.tsx"),
+  ].join("\n");
   const mobileComposer = [
     source("src/components/ui/composer/mobile/MobileComposerPill.tsx"),
     source("src/components/ui/composer/mobile/MobileComposerButtons.tsx"),

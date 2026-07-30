@@ -9,8 +9,8 @@ from PIL import Image as PILImage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.model_image_metadata import model_image_filename
-from lumen_core.models import Image
-from lumen_core.schemas import ImageOut
+from lumen_core.model_entities import Image
+from lumen_core.schema_models import ImageOut
 
 from ...domain.variants import deterministic_variant_key
 from ...processing.model_metadata import MODEL_LIBRARY_METADATA_PROFILE

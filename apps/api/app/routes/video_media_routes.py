@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Video
+from lumen_core.model_entities import Video
 from lumen_core.volcano_asset_media import (
     VOLCANO_ASSET_VIDEO_KIND,
     VOLCANO_ASSET_VIDEO_MIME,

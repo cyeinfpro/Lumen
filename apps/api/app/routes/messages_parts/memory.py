@@ -13,7 +13,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.memory import canonical_memory_text, extract_memories
-from lumen_core.models import (
+from lumen_core.model_entities import (
     Conversation,
     MemoryAudit,
     Message,

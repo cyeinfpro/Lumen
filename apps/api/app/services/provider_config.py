@@ -13,10 +13,10 @@ from lumen_core.models import SystemSetting
 from lumen_core.providers import (
     DEFAULT_IMAGE_EDIT_INPUT_TRANSPORT,
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
-    DEFAULT_PROVIDER_PURPOSES,
     build_legacy_provider,
     parse_provider_config_json,
 )
+from lumen_core.providers_parts.definitions import DEFAULT_PROVIDER_PURPOSES
 from lumen_core.runtime_settings import get_spec
 from lumen_core.video_providers import parse_video_provider_config_json
 

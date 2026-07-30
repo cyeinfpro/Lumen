@@ -16,12 +16,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
+from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.runtime_settings import get_spec
 
 from ..config import settings
 from ..deps import AdminUser, verify_csrf
 from ..db import get_db
+from ..proxy_pool import resolve_provider_proxy_url
 from ..runtime_settings import get_setting
 from ..services.admin import update_status as _update_status
 from ..services.admin import update_stream as _update_stream
@@ -59,7 +60,6 @@ from . import admin_update_systemd as _update_systemd
 
 _MARKER_CLEANUP_RUNTIME_STATE_KEY = _update_runtime.MARKER_CLEANUP_RUNTIME_STATE_KEY
 _MarkerCleanupRuntime = _update_runtime.MarkerCleanupRuntime
-
 
 def _marker_cleanup_runtime(request: Request) -> _MarkerCleanupRuntime:
     return _update_runtime.marker_cleanup_runtime(request)

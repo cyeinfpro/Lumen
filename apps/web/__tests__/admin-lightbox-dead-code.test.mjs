@@ -60,27 +60,30 @@ test("admin panels contain no proxy draft state or unreachable update group", ()
 });
 
 test("desktop lightbox scopes transient and async state to the active image", () => {
-  const source = read(
+  const controller = read(
     "src/components/ui/lightbox/DesktopLightboxController.tsx",
+  );
+  const mediaActions = read(
+    "src/components/ui/lightbox/useDesktopLightboxMediaActions.ts",
   );
 
   assert.match(
-    source,
+    controller,
     /const imageStateKey = `\$\{lightbox\.imageId \?\? ""\}\\n/,
   );
   assert.match(
-    source,
+    controller,
     /activeImageStateKeyRef\.current !== imageStateKey/,
   );
-  assert.match(source, /const sourceImageKey = imageStateKey;/);
+  assert.match(controller, /const sourceImageKey = imageStateKey;/);
   assert.match(
-    source,
+    controller,
     /activeImageStateKeyRef\.current !== sourceImageKey/,
   );
-  assert.match(source, /const downloadSeqRef = useRef\(0\);/);
-  assert.match(source, /const shareSeqRef = useRef\(0\);/);
+  assert.match(mediaActions, /const downloadSeqRef = useRef\(0\);/);
+  assert.match(mediaActions, /const shareSeqRef = useRef\(0\);/);
   assert.match(
-    source,
+    mediaActions,
     /activeImageStateKeyRef\.current === operationKey[\s\S]*?operationSeq/,
   );
 });

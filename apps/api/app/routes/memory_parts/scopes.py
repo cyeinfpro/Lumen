@@ -10,7 +10,12 @@ from typing import Any
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Conversation, User, UserMemory, UserMemoryScope
+from lumen_core.model_entities import (
+    Conversation,
+    User,
+    UserMemory,
+    UserMemoryScope,
+)
 
 from .contracts import (
     ConversationActiveScopeIn,

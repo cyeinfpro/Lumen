@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from lumen_core.schemas import ProviderProxyOut, VideoProviderItemOut
+from lumen_core.schema_models import (
+    ProviderProxyOut,
+    VideoProviderItemOut,
+)
 
 from .presentation import mask_key, mask_secret
 

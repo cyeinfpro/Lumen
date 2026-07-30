@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.schemas import (
+from lumen_core.video_asset_schemas import (
     VideoAssetOperationAction,
     VideoAssetOperationOut,
 )

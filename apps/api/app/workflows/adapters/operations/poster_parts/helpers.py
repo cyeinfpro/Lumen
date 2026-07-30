@@ -6,17 +6,21 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from lumen_core.models import PosterStyleItem, WorkflowRun, WorkflowStep
-from lumen_core.schemas import ImageParamsIn
+from lumen_core.model_entities import (
+    PosterStyleItem,
+    WorkflowRun,
+    WorkflowStep,
+)
+from lumen_core.schema_models import ImageParamsIn
 
-from ...application.poster_design import (
+from ....application.poster_design import (
     POSTER_MASTER_ASPECT,
     PosterStyleSnapshot,
     build_poster_step_seeds,
     poster_brand_attachment_ids as collect_poster_brand_attachment_ids,
 )
-from ..serialization import http as _http
-from ..workflow_runtime import image_params as _image_params
+from ...serialization import http as _http
+from ...workflow_runtime import image_params as _image_params
 
 
 def poster_image_params(
@@ -46,7 +50,7 @@ def poster_master_image_params(quality_mode: str) -> ImageParamsIn:
 async def poster_find_preset_item(
     db: AsyncSession, *, user_id: str, style_id: str
 ) -> dict[str, Any] | None:
-    from ....services.poster_styles.workflow_lookup import (
+    from .....services.poster_styles.workflow_lookup import (
         bootstrap_local_presets_if_empty,
         find_preset_item,
     )

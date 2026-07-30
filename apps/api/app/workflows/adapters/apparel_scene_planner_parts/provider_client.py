@@ -13,13 +13,13 @@ from typing import Any
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.providers import (
+from lumen_core.providers_parts.definitions import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
-    resolve_provider_proxy_url,
 )
 from lumen_core.vision_tagging import extract_response_text, responses_url
 
+from ....proxy_pool import resolve_provider_proxy_url
 from ...domain.apparel_scene_fallbacks import clean_text
 from .contracts import SceneProviderSelection
 

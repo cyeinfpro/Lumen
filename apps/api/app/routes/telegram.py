@@ -67,12 +67,13 @@ from .prompts import (
     resolve_provider_order,
     stream_enhance,
 )
-from lumen_core.providers import parse_proxy_item, resolve_provider_proxy_url
+from lumen_core.providers import parse_proxy_item
 from ..proxy_pool import (
     DEFAULT_STRATEGY,
     pick_proxy,
     report_failure as pool_report_failure,
     report_success as pool_report_success,
+    resolve_provider_proxy_url,
 )
 from ..ratelimit import RateLimiter, require_client_ip
 from . import telegram_image_options as _telegram_image_options

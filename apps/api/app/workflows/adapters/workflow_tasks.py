@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import Intent, Role
-from lumen_core.models import (
+from lumen_core.model_entities import (
     Completion,
     Conversation,
     Generation,
@@ -15,7 +15,10 @@ from lumen_core.models import (
     ModelCandidate,
     User,
 )
-from lumen_core.schemas import ChatParamsIn, ImageParamsIn
+from lumen_core.schema_models import (
+    ChatParamsIn,
+    ImageParamsIn,
+)
 
 from ...redis_client import get_redis
 from ...services.message_submission import (

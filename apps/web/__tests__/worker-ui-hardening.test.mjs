@@ -439,7 +439,7 @@ test("desktop memo comparator rejects stale callbacks and consumes copy rejectio
   const harness = createReactHarness();
   const errors = [];
   const exports = loadModule(
-    "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+    "src/components/ui/chat/desktop/DesktopConversationTurns.tsx",
     baseChatMocks(harness, {
       "@/lib/clipboard": {
         tryCopyTextToClipboard: async () => false,
@@ -500,7 +500,7 @@ test("desktop memo comparator rejects stale callbacks and consumes copy rejectio
   findElement(copyTree, (node) => node.type === "button").props.onClick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(errors, ["复制失败"]);
-  assert.equal(typeof exports.DesktopConversationCanvas, "function");
+  assert.equal(typeof exports.AssistantTurn, "function");
 });
 
 test("a stale mask upload cannot clear the current upload state", async () => {
@@ -762,14 +762,18 @@ test("shared clipboard helper consumes rejected writes for feedback callers", as
 test("mask export stops re-encoding the full-resolution canvas for its preview", () => {
   // 审计 I-4：toBlob 已经把画布编码成 PNG 了，紧接着的 canvas.toDataURL 是第二次
   // 全分辨率编码，而且是同步的 —— 4K 图上直接冻主线程，产出的 base64 还会进 store。
-  const maskSource = source("src/components/ui/inpaint/MaskBoard.tsx");
+  const maskSource = source(
+    "src/components/ui/inpaint/mask-board/canvasRendering.ts",
+  );
 
   assert.match(maskSource, /const MASK_PREVIEW_MAX_EDGE = \d+/);
   assert.match(
     maskSource,
-    /const preview_data_url = renderMaskPreviewDataUrl\(canvas, W, H\)/,
+    /preview_data_url: renderMaskPreviewDataUrl\(canvas, width, height\)/,
   );
-  const exportBody = maskSource.slice(maskSource.indexOf("const exportMask"));
+  const exportBody = maskSource.slice(
+    maskSource.indexOf("export async function exportMaskCanvas"),
+  );
   assert.equal(/canvas\.toDataURL/.test(exportBody), false);
 });
 

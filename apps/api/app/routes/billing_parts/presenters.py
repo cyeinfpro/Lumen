@@ -6,13 +6,13 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from lumen_core.models import (
+from lumen_core.model_entities import (
     AuditLog,
     PricingRule,
     RedemptionCode,
     WalletTransaction,
 )
-from lumen_core.schemas import (
+from lumen_core.schema_models import (
     AdminBillingAuditEventOut,
     AdminRedemptionCodeOut,
     PricingRuleOut,

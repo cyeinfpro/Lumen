@@ -8,7 +8,10 @@ from typing import Any, Awaitable, Callable
 from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.schemas import VideoAssetOperationOut, VideoAssetOut
+from lumen_core.video_asset_schemas import (
+    VideoAssetOperationOut,
+    VideoAssetOut,
+)
 from lumen_core.volcano_assets import VolcanoAssetQuotaKey
 
 from .._volcano_asset_retry import RetryDependencies, retry_failed_operation

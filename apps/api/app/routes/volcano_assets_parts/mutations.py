@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.schemas import (
+from lumen_core.video_asset_schemas import (
     VideoAssetCreateIn,
     VideoAssetGroupCreateIn,
     VideoAssetGroupUpdateIn,

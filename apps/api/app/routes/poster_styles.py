@@ -48,7 +48,7 @@ from lumen_core.models import (
     WorkflowRun,
     WorkflowStep,
 )
-from lumen_core.providers import parse_proxy_json, resolve_provider_proxy_url
+from lumen_core.providers import parse_proxy_json
 from lumen_core.schemas import (
     ChatParamsIn,
     ImageParamsIn,
@@ -70,6 +70,7 @@ from lumen_core.schemas import (
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf
+from ..proxy_pool import resolve_provider_proxy_url
 from ..runtime import ApiRuntime
 from ..runtime_settings import get_setting
 from ..services.poster_styles import generation as poster_style_generation

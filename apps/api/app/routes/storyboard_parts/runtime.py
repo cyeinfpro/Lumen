@@ -8,7 +8,12 @@ from typing import Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Conversation, User, WorkflowRun, WorkflowStep
+from lumen_core.model_entities import (
+    Conversation,
+    User,
+    WorkflowRun,
+    WorkflowStep,
+)
 
 from ...services.storyboard.contracts import (
     StoryboardImageTask,

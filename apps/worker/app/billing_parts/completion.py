@@ -6,7 +6,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Completion, WalletTransaction
+from lumen_core.model_entities import (
+    Completion,
+    WalletTransaction,
+)
 from lumen_core.pricing import CostBreakdown, UsageTokens
 
 from .contracts import CompletionDependencies

@@ -26,7 +26,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
+from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.providers_parts.proxy_runtime import (
+    ProviderProxyRuntime,
+    close_provider_proxy_tunnels as _close_provider_proxy_tunnels,
+    resolve_provider_proxy_url as _resolve_provider_proxy_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +56,23 @@ _LOCAL_COOLDOWN_TTL_SECONDS = 30
 @dataclass
 class _ProxyPoolState:
     local_cooldown: dict[str, float] = field(default_factory=dict)
+    provider_proxy: ProviderProxyRuntime = field(default_factory=ProviderProxyRuntime)
 
 
 _proxy_pool_state = _ProxyPoolState()
+
+
+async def resolve_provider_proxy_url(
+    proxy: ProviderProxyDefinition | None,
+) -> str | None:
+    return await _resolve_provider_proxy_url(
+        proxy,
+        runtime=_proxy_pool_state.provider_proxy,
+    )
+
+
+async def close_provider_proxy_tunnels() -> None:
+    await _close_provider_proxy_tunnels(runtime=_proxy_pool_state.provider_proxy)
 
 
 def _local_cooldown_mark(name: str, ttl_seconds: float | None = None) -> None:

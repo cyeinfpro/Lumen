@@ -58,6 +58,7 @@ from .context_summary_parts.common import (
 from .context_summary_parts import config as _config
 from .context_summary_parts.results import (
     SegmentSummaryExecution as _SegmentSummaryExecution,
+    SummaryRequest as _SummaryRequest,
     worker_compact_summary_payload as _worker_compact_summary_payload,
 )
 from .context_summary_parts.segments import (

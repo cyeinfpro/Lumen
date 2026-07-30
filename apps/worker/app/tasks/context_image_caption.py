@@ -20,8 +20,9 @@ from sqlalchemy import update
 
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.models import Image
-from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
+from lumen_core.providers import ProviderProxyDefinition
 
+from ..provider_pool import resolve_provider_proxy_url
 from ..provider_runtime.errors import UpstreamError
 from ..provider_runtime.http_headers import upstream_auth_headers
 from ..storage import storage

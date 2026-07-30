@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.arq_jobs import arq_job_id
-from lumen_core.models import OutboxEvent
+from lumen_core.model_entities import OutboxEvent
 
 from ...services.storyboard import assembly as assembly_policy
 from ...services.storyboard.common import (

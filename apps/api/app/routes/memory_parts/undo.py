@@ -12,7 +12,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import MemoryAudit, User, UserMemory, UserMemoryStaging
+from lumen_core.model_entities import (
+    MemoryAudit,
+    User,
+    UserMemory,
+    UserMemoryStaging,
+)
 
 from .contracts import MemoryUndoIn
 

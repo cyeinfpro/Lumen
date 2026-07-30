@@ -442,9 +442,9 @@ def test_repository_ledger_matches_current_total_ceiling() -> None:
     ledger = load_ledger()
     findings = collect_module_runtime_findings()
 
-    assert ledger["max_total"] == 14
-    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 14
-    assert len(findings) == 14
+    assert ledger["max_total"] == 13
+    assert sum(entry["max_instances"] for entry in ledger["modules"].values()) == 13
+    assert len(findings) == 13
     assert not any(
         finding.path.startswith("image-job/") for finding in findings.values()
     )

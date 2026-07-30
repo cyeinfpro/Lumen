@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from lumen_core.schemas import (
+from lumen_core.video_asset_schemas import (
     VideoAssetCreateAcceptedOut,
     VideoAssetOperationOut,
     VideoAssetOut,

@@ -31,6 +31,7 @@ from lumen_core.vision_tagging import (
 )
 
 from ...config import settings
+from ...proxy_pool import resolve_provider_proxy_url
 from ...runtime_settings import get_setting
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,7 @@ async def auto_tag_owned_model_library_image(
                         proxy=getattr(provider, "proxy", None),
                         purpose="model_library_tagging",
                         instructions=MODEL_LIBRARY_TAGGING_INSTRUCTIONS,
+                        proxy_resolver=resolve_provider_proxy_url,
                     )
                 except VisionTaggingUpstreamError as exc:
                     last_err = f"{exc.error_code}:{exc.status_code}:{exc}"

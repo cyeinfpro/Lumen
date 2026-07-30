@@ -13,7 +13,7 @@ from typing import Any
 from PIL import Image as PILImage
 from PIL import ImageOps, UnidentifiedImageError
 
-from lumen_core.models import Image
+from lumen_core.model_entities import Image
 
 from .volcano_asset_media_types import (
     VOLCANO_ASSET_IMAGE_KIND,

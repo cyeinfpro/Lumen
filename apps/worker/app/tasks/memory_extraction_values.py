@@ -12,7 +12,10 @@ from datetime import datetime
 from typing import Any
 
 from lumen_core.memory import ExtractedMemory, canonical_memory_text
-from lumen_core.models import Message, UserMemory
+from lumen_core.model_entities import (
+    Message,
+    UserMemory,
+)
 
 _MAX_POSITIVE_SIGNAL = 20
 _logger = logging.getLogger("app.tasks.memory_extraction")

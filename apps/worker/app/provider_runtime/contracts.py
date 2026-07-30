@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from lumen_core.providers import DEFAULT_PROVIDER_PURPOSES, ProviderProxyDefinition
+from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.providers_parts.definitions import DEFAULT_PROVIDER_PURPOSES
 
 
 @dataclass(frozen=True)

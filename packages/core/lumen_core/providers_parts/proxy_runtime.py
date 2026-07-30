@@ -44,7 +44,7 @@ class _SshTunnel:
     process: asyncio.subprocess.Process
 
 
-class _SshTunnelRuntime:
+class ProviderProxyRuntime:
     def __init__(self) -> None:
         self.tunnels: dict[str, _SshTunnel] = {}
         self.lock = asyncio.Lock()
@@ -53,7 +53,6 @@ class _SshTunnelRuntime:
         self.tunnels.clear()
 
 
-_SSH_TUNNEL_RUNTIME = _SshTunnelRuntime()
 _SSH_TUNNEL_START_ATTEMPTS = 3
 _SSH_TUNNEL_READY_CHECKS = 30
 
@@ -435,21 +434,25 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
 
 
-def _running_ssh_tunnel(key: str) -> _SshTunnel | None:
-    tunnel = _SSH_TUNNEL_RUNTIME.tunnels.get(key)
+def _running_ssh_tunnel(
+    runtime: ProviderProxyRuntime,
+    key: str,
+) -> _SshTunnel | None:
+    tunnel = runtime.tunnels.get(key)
     if tunnel is None or tunnel.process.returncode is not None:
         return None
     return tunnel
 
 
 async def _close_stale_ssh_tunnels(
+    runtime: ProviderProxyRuntime,
     proxy: ProviderProxyDefinition,
     current_key: str,
 ) -> None:
-    for old_key, tunnel in list(_SSH_TUNNEL_RUNTIME.tunnels.items()):
+    for old_key, tunnel in list(runtime.tunnels.items()):
         if old_key == current_key or not old_key.startswith(f"{proxy.name}\x1f"):
             continue
-        _SSH_TUNNEL_RUNTIME.tunnels.pop(old_key, None)
+        runtime.tunnels.pop(old_key, None)
         await _terminate_process(tunnel.process)
 
 
@@ -551,6 +554,7 @@ async def _wait_for_ssh_tunnel(
 
 
 async def _start_ssh_tunnel_attempt(
+    runtime: ProviderProxyRuntime,
     proxy: ProviderProxyDefinition,
     *,
     ssh_bin: str,
@@ -585,7 +589,7 @@ async def _start_ssh_tunnel_attempt(
         )
         url, error = await _wait_for_ssh_tunnel(proc, local_port)
         if url is not None:
-            _SSH_TUNNEL_RUNTIME.tunnels[key] = _SshTunnel(url=url, process=proc)
+            runtime.tunnels[key] = _SshTunnel(url=url, process=proc)
             tunnel_started = True
         return url, error
     finally:
@@ -596,24 +600,28 @@ async def _start_ssh_tunnel_attempt(
         _unlink_quietly(temporary_known_hosts_path)
 
 
-async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
+async def _ensure_ssh_socks_proxy(
+    runtime: ProviderProxyRuntime,
+    proxy: ProviderProxyDefinition,
+) -> str:
     ssh_bin = shutil.which("ssh")
     if not ssh_bin:
         raise RuntimeError("ssh binary not found; cannot start ssh proxy")
     key = _ssh_tunnel_key(proxy)
-    existing = _running_ssh_tunnel(key)
+    existing = _running_ssh_tunnel(runtime, key)
     if existing is not None:
         return existing.url
 
-    async with _SSH_TUNNEL_RUNTIME.lock:
-        existing = _running_ssh_tunnel(key)
+    async with runtime.lock:
+        existing = _running_ssh_tunnel(runtime, key)
         if existing is not None:
             return existing.url
-        await _close_stale_ssh_tunnels(proxy, key)
+        await _close_stale_ssh_tunnels(runtime, proxy, key)
 
         last_error = ""
         for _attempt in range(_SSH_TUNNEL_START_ATTEMPTS):
             url, last_error = await _start_ssh_tunnel_attempt(
+                runtime,
                 proxy,
                 ssh_bin=ssh_bin,
                 key=key,
@@ -629,18 +637,20 @@ async def _ensure_ssh_socks_proxy(proxy: ProviderProxyDefinition) -> str:
 
 async def resolve_provider_proxy_url(
     proxy: ProviderProxyDefinition | None,
+    *,
+    runtime: ProviderProxyRuntime,
 ) -> str | None:
     if proxy is None or not proxy.enabled:
         return None
     if proxy.protocol == "socks5":
         return socks_proxy_url(proxy)
     if proxy.protocol == "ssh":
-        return await _ensure_ssh_socks_proxy(proxy)
+        return await _ensure_ssh_socks_proxy(runtime, proxy)
     raise RuntimeError(f"unsupported proxy protocol: {proxy.protocol}")
 
 
-async def close_provider_proxy_tunnels() -> None:
-    tunnels = list(_SSH_TUNNEL_RUNTIME.tunnels.values())
-    _SSH_TUNNEL_RUNTIME.clear()
+async def close_provider_proxy_tunnels(*, runtime: ProviderProxyRuntime) -> None:
+    tunnels = list(runtime.tunnels.values())
+    runtime.clear()
     for tunnel in tunnels:
         await _terminate_process(tunnel.process)

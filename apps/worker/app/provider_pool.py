@@ -33,9 +33,11 @@ from lumen_core.providers import (
     ProviderProxyDefinition,
     build_effective_provider_config,
     endpoint_kind_allowed,
+)
+from lumen_core.providers_parts import proxy_runtime as provider_proxy_runtime
+from lumen_core.providers_parts.selection import (
     provider_supports_route,
     route_to_purpose,
-    resolve_provider_proxy_url,  # noqa: F401 - late-bound probe facade
 )
 
 from .config import settings as _cfg
@@ -289,7 +291,9 @@ class ProviderPool(
         *,
         probe_runtime: ProviderProbeRuntime | None = None,
     ) -> None:
-        self._probe_runtime = probe_runtime or build_provider_probe_runtime()
+        self._probe_runtime = probe_runtime or build_provider_probe_runtime(
+            resolve_proxy_url=resolve_provider_proxy_url,
+        )
         self._providers: list[ProviderConfig] = []
         self._proxies: dict[str, ProviderProxyDefinition] = {}
         self._health: dict[str, ProviderHealth] = {}
@@ -861,9 +865,20 @@ class ProviderPoolRuntime:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_probe_at: float = 0.0
     last_image_probe_at: float = 0.0
+    provider_proxy: provider_proxy_runtime.ProviderProxyRuntime = field(default_factory=provider_proxy_runtime.ProviderProxyRuntime)
 
 
 _RUNTIME = ProviderPoolRuntime()
+
+
+async def resolve_provider_proxy_url(
+    proxy: ProviderProxyDefinition | None,
+) -> str | None:
+    return await provider_proxy_runtime.resolve_provider_proxy_url(proxy, runtime=_RUNTIME.provider_proxy)
+
+
+async def close_provider_proxy_tunnels() -> None:
+    await provider_proxy_runtime.close_provider_proxy_tunnels(runtime=_RUNTIME.provider_proxy)
 
 
 async def get_pool() -> ProviderPool:

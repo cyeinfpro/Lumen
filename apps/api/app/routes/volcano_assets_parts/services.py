@@ -11,8 +11,11 @@ from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Image, Video
-from lumen_core.schemas import VideoAssetCreateIn
+from lumen_core.model_entities import (
+    Image,
+    Video,
+)
+from lumen_core.video_asset_schemas import VideoAssetCreateIn
 from lumen_core.video_providers import VideoProviderDefinition
 from lumen_core.volcano_assets import (
     normalize_asset,

@@ -24,7 +24,7 @@ from lumen_core.volcano_assets import (
     VOLCANO_ASSET_MAX_ASSETS,  # noqa: F401 - compatibility runtime export
     VOLCANO_ASSET_MAX_GROUPS,  # noqa: F401 - compatibility runtime export
     VOLCANO_ASSET_OPERATION_TTL_SECONDS,
-    VolcanoAssetClient,
+    VolcanoAssetClient as _CoreVolcanoAssetClient,
     VolcanoAssetCreateRateLimited,
     VolcanoAssetQuotaExceeded,  # noqa: F401 - compatibility runtime export
     VolcanoAssetQuotaKey,
@@ -43,6 +43,7 @@ from lumen_core.volcano_assets import (
 )
 from .. import runtime_settings
 from ..db import SessionLocal
+from ..provider_pool import resolve_provider_proxy_url
 from ..storage_writes import StorageWriteCoordinator
 from . import (
     volcano_asset_actions as _action_parts,
@@ -88,6 +89,12 @@ from .volcano_assets_parts.receipts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class VolcanoAssetClient(_CoreVolcanoAssetClient):
+    def __init__(self, provider: Any) -> None:
+        super().__init__(provider, proxy_resolver=resolve_provider_proxy_url)
+
 
 _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
     {

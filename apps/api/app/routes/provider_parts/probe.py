@@ -11,12 +11,10 @@ from lumen_core.byok import (
     extract_response_output_text,
     extract_sse_output_text,
 )
-from lumen_core.providers import (
-    ProviderProxyDefinition,
-    endpoint_kind_allowed,
-    resolve_provider_proxy_url,
-)
+from lumen_core.providers_parts.definitions import ProviderProxyDefinition
+from lumen_core.providers_parts.selection import endpoint_kind_allowed
 
+from ...proxy_pool import resolve_provider_proxy_url
 from .presentation import (
     normalize_image_jobs_endpoint,
     normalize_image_jobs_endpoint_lock,

@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import (
+from lumen_core.model_entities import (
     Completion,
     Conversation,
     Generation,
@@ -15,7 +15,10 @@ from lumen_core.models import (
     Message,
     User,
 )
-from lumen_core.schemas import MessageOut, PostMessageOut
+from lumen_core.schema_models import (
+    MessageOut,
+    PostMessageOut,
+)
 
 
 async def lock_idempotency_key(

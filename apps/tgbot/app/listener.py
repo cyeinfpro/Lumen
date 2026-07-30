@@ -29,9 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections import OrderedDict
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -66,18 +64,7 @@ ACTIVE_USER_STREAM_TTL_SECONDS = _listener_support.ACTIVE_USER_STREAM_TTL_SECOND
 TRACK_KEY_PREFIX = _listener_support.TRACK_KEY_PREFIX
 
 
-@dataclass
-class ListenerRuntimeState:
-    """Mutable state owned by one listener lifecycle."""
-
-    progress_last_edit: OrderedDict[str, float] = field(default_factory=OrderedDict)
-    chat_send_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
-    chat_send_next_at: OrderedDict[int, float] = field(default_factory=OrderedDict)
-    dispatch_semaphore: asyncio.Semaphore = field(
-        default_factory=lambda: asyncio.Semaphore(8)
-    )
-
-
+ListenerRuntimeState = _listener_support.ListenerRuntimeState
 _LISTENER_RUNTIME: ContextVar[ListenerRuntimeState | None] = ContextVar(
     "tgbot_listener_runtime",
     default=None,
@@ -114,20 +101,71 @@ _cursor_key = _listener_support._cursor_key
 _fallback_stream_cursor_key = _listener_support._fallback_stream_cursor_key
 _initial_cursor = _listener_support._initial_cursor
 _decode = _listener_support._decode
-_should_throttle_progress = _listener_support._should_throttle_progress
-_chat_send_lock = _listener_support._chat_send_lock
-_wait_chat_send_slot = _listener_support._wait_chat_send_slot
 _chat_action_heartbeat = _listener_support._chat_action_heartbeat
-_send_document_with_backoff = _listener_support._send_document_with_backoff
-_load_active_user_ids = _listener_support._load_active_user_ids
 _stream_generation_ids = _listener_support._stream_generation_ids
-_recover_active_user_ids = _listener_support._recover_active_user_ids
 _load_cursor = _listener_support._load_cursor
 _save_cursor = _listener_support._save_cursor
 _RECONNECT_BACKOFF_MAX_SEC = _listener_support._RECONNECT_BACKOFF_MAX_SEC
 _RECONNECT_ALERT_THRESHOLD = _listener_support._RECONNECT_ALERT_THRESHOLD
 _DISPATCH_MAX_ATTEMPTS = _listener_support._DISPATCH_MAX_ATTEMPTS
 _DISPATCH_ATTEMPT_TTL_SEC = _listener_support._DISPATCH_ATTEMPT_TTL_SEC
+
+
+def _should_throttle_progress(gen_id: str) -> bool:
+    return _listener_support._should_throttle_progress(
+        gen_id,
+        runtime=_listener_runtime(),
+    )
+
+
+def _chat_send_lock(chat_id: int) -> asyncio.Lock:
+    return _listener_support._chat_send_lock(
+        chat_id,
+        runtime=_listener_runtime(),
+    )
+
+
+async def _wait_chat_send_slot(chat_id: int) -> None:
+    await _listener_support._wait_chat_send_slot(
+        chat_id,
+        runtime=_listener_runtime(),
+    )
+
+
+async def _send_document_with_backoff(
+    bot: Bot,
+    *,
+    chat_id: int,
+    path: Path,
+    filename: str,
+    caption: str | None,
+    reply_markup: Any,
+) -> None:
+    await _listener_support._send_document_with_backoff(
+        bot,
+        runtime=_listener_runtime(),
+        chat_id=chat_id,
+        path=path,
+        filename=filename,
+        caption=caption,
+        reply_markup=reply_markup,
+    )
+
+
+async def _load_active_user_ids(redis: aioredis.Redis) -> set[str]:
+    return await _listener_support._load_active_user_ids(redis, tracker=tracker)
+
+
+async def _recover_active_user_ids(
+    redis: aioredis.Redis,
+    *,
+    max_scan_batches: int,
+) -> set[str]:
+    return await _listener_support._recover_active_user_ids(
+        redis,
+        tracker=tracker,
+        max_scan_batches=max_scan_batches,
+    )
 
 
 class _TerminalDeliveryBusy(RuntimeError):

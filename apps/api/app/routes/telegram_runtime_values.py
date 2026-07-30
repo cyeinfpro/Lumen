@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.providers import parse_provider_bool
+from lumen_core.providers_parts.config import parse_provider_bool
 from lumen_core.runtime_settings import get_spec
 
 from ..runtime_settings import get_setting
