@@ -1625,18 +1625,11 @@ def test_storage_apply_restarts_all_backup_mount_path_watchers() -> None:
 
 def test_admin_update_panel_arms_stream_after_trigger_success() -> None:
     """The panel should live-update after a trigger without requiring Refresh status."""
+    panel_dir = ROOT / "apps/web/src/app/admin/_panels"
     panel_sources = "\n".join(
-        (
-            (ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.tsx").read_text(
-                encoding="utf-8"
-            ),
-            (
-                ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.helpers.ts"
-            ).read_text(encoding="utf-8"),
-            (
-                ROOT / "apps/web/src/app/admin/_panels/AdminUpdatePanel.hooks.ts"
-            ).read_text(encoding="utf-8"),
-        )
+        path.read_text(encoding="utf-8")
+        for path in sorted(panel_dir.glob("AdminUpdatePanel*"))
+        if path.suffix in {".ts", ".tsx"}
     )
 
     assert "updateStreamArmed" in panel_sources
