@@ -108,7 +108,38 @@ from . import (
     retry_policy as upstream_retry_policy,
     transport as upstream_transport,
 )
-from .image_execution import ImageRequestContext
+from .observability_helpers import (
+    log_upstream_call as _log_upstream_call,
+    record_usage as _record_usage,
+)
+from .request_options import (
+    add_image_output_options as _add_image_output_options,
+    append_transparent_matte_prompt as _append_transparent_matte_prompt,
+    image_request_policy as _image_request_policy,
+    is_transparent_image_request as _is_transparent_image_request,
+    normalize_image_background as _normalize_image_background,
+    normalize_image_moderation as _normalize_image_moderation,
+    normalize_image_output_compression as _normalize_image_output_compression,
+    normalize_image_output_format as _normalize_image_output_format,
+    normalize_image_quality as _normalize_image_quality,
+    summarize_upstream_error_detail as _summarize_upstream_error_detail,
+    transparent_matte_upstream_options as _transparent_matte_upstream_options,
+)
+from .response_helpers import (
+    b64_value_if_str as _b64_value_if_str,
+    extract_image_b64_from_payload as _extract_image_b64_from_payload,
+    extract_image_billable_count as _extract_image_billable_count,
+    extract_image_result as _extract_image_result,
+    extract_image_results as _extract_image_results,
+    extract_response_image_b64 as _extract_response_image_b64,
+    extract_response_revised_prompt as _extract_response_revised_prompt,
+    is_responses_error_terminal as _is_responses_error_terminal,
+    is_responses_success_terminal as _is_responses_success_terminal,
+    parse_error as _parse_error,
+    stable_sort_tools as _stable_sort_tools,
+    validate_responses_body as _validate_responses_body,
+    with_error_context as _with_error_context,
+)
 
 # Referenced by the composed public service graph below.
 _COMPOSED_INFRASTRUCTURE_DEPENDENCIES = (
@@ -193,34 +224,6 @@ _KNOWN_OUTPUT_ITEM_TYPES = frozenset(
         "image_generation_call",  # /v1/responses + image_generation 工具的 item 类型
     }
 )
-
-# ---- Responses SSE 终止事件白名单 ----
-# 兼容网关常见返回形态：除了官方 `response.completed`，部分实现会用 `response.done`
-# 作为成功终态；失败时则可能用 `response.failed` / `response.incomplete` / `error`。
-# 旧版只认 `response.completed` 会在两种场景误判：
-# 1) 上游已经 terminal，但 Lumen 还在等 EOF → 最终报 missing completed。
-# 2) 上游已给出 failed/incomplete details，但最终错误只表现为 drained without image，
-#    丢掉了上游真实原因（rate_limit / moderation / server_error）。
-_RESPONSES_SUCCESS_TERMINAL_EVENTS = frozenset({"response.completed", "response.done"})
-_RESPONSES_ERROR_TERMINAL_EVENTS = frozenset(
-    {"response.failed", "response.incomplete", "error"}
-)
-_RESPONSES_TERMINAL_EVENTS = (
-    _RESPONSES_SUCCESS_TERMINAL_EVENTS | _RESPONSES_ERROR_TERMINAL_EVENTS
-)
-
-
-def _is_responses_success_terminal(event_type: Any) -> bool:
-    return (
-        isinstance(event_type, str) and event_type in _RESPONSES_SUCCESS_TERMINAL_EVENTS
-    )
-
-
-def _is_responses_error_terminal(event_type: Any) -> bool:
-    return (
-        isinstance(event_type, str) and event_type in _RESPONSES_ERROR_TERMINAL_EVENTS
-    )
-
 
 # Sentinel event：iterator 在 200 但 Content-Type 不是 text/event-stream 时 yield，
 # 由 _responses_image_stream 主循环识别并按 JSON 提图。命名带 ``_lumen.`` 前缀，
@@ -410,191 +413,6 @@ _TRANSPARENT_MATTE_PROMPT_NOTE = (
 _LOG_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _LOG_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/=\-]+", re.IGNORECASE)
 _LOG_API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}\b")
-
-
-def _redact_upstream_log_text(value: str) -> str:
-    text = _LOG_EMAIL_RE.sub("[email]", value)
-    text = _LOG_BEARER_RE.sub("Bearer [redacted]", text)
-    text = _LOG_API_KEY_RE.sub("[api_key]", text)
-    return text[:300]
-
-
-def _summarize_upstream_error_detail(
-    detail: dict[str, Any] | None,
-) -> dict[str, Any] | str:
-    if not isinstance(detail, dict):
-        return "none"
-    summary: dict[str, Any] = {}
-    for key in ("code", "type", "param", "status"):
-        value = detail.get(key)
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            summary[key] = value
-    message = detail.get("message")
-    if isinstance(message, str) and message:
-        summary["message"] = _redact_upstream_log_text(message)
-    if summary:
-        return summary
-    return {"keys": sorted(str(key) for key in detail.keys())[:10]}
-
-
-def _image_request_policy(
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> upstream_image_requests.ImageRequestPolicy:
-    """Snapshot current service policy so test fakes remain call-time visible."""
-    services = _runtime_services(runtime)
-    core = services.core
-    return services.infrastructure.upstream_image_requests.ImageRequestPolicy(
-        upstream_model=services.infrastructure.UPSTREAM_MODEL,
-        default_responses_model=core.DEFAULT_IMAGE_RESPONSES_MODEL,
-        default_image_instructions=core.DEFAULT_IMAGE_INSTRUCTIONS,
-        image_qualities=core.IMAGE_QUALITIES,
-        image_output_formats=core.IMAGE_OUTPUT_FORMATS,
-        image_backgrounds=core.IMAGE_BACKGROUNDS,
-        image_moderations=core.IMAGE_MODERATIONS,
-        default_image_quality="high",
-        default_image_output_format=core.DEFAULT_IMAGE_OUTPUT_FORMAT,
-        default_image_output_compression=core.DEFAULT_IMAGE_OUTPUT_COMPRESSION,
-        default_image_background=core.DEFAULT_IMAGE_BACKGROUND,
-        default_image_moderation=core.DEFAULT_IMAGE_MODERATION,
-        transparent_matte_prompt_note=core.TRANSPARENT_MATTE_PROMPT_NOTE,
-        partial_images_max_pixels=core.PARTIAL_IMAGES_MAX_PIXELS,
-        image_job_retention_days=core.IMAGE_JOB_RETENTION_DAYS,
-    )
-
-
-def _normalize_image_quality(
-    value: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    return services.requests.normalize_image_quality(
-        value,
-        policy=_image_request_policy(runtime=runtime),
-    )
-
-
-def _normalize_image_output_format(
-    value: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    return services.requests.normalize_image_output_format(
-        value,
-        policy=_image_request_policy(runtime=runtime),
-    )
-
-
-def _normalize_image_output_compression(
-    value: int | None,
-    *,
-    output_format: str,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> int | None:
-    services = _runtime_services(runtime)
-    return services.requests.normalize_image_output_compression(
-        value,
-        output_format=output_format,
-        policy=_image_request_policy(runtime=runtime),
-    )
-
-
-def _normalize_image_background(
-    value: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    return services.requests.normalize_image_background(
-        value,
-        policy=_image_request_policy(runtime=runtime),
-    )
-
-
-def _normalize_image_moderation(
-    value: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    return services.requests.normalize_image_moderation(
-        value,
-        policy=_image_request_policy(runtime=runtime),
-    )
-
-
-def _add_image_output_options(
-    body: dict[str, Any],
-    *,
-    output_format: str | None,
-    output_compression: int | None,
-    background: str | None,
-    moderation: str | None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> None:
-    services = _runtime_services(runtime)
-    services.requests.add_image_output_options(
-        body,
-        output_format=output_format,
-        output_compression=output_compression,
-        background=background,
-        moderation=moderation,
-        hooks=upstream_image_requests.ImageOutputOptionsHooks(
-            normalize_image_background=services.core.normalize_image_background,
-            normalize_image_output_format=services.core.normalize_image_output_format,
-            normalize_image_output_compression=(
-                services.core.normalize_image_output_compression
-            ),
-            normalize_image_moderation=services.core.normalize_image_moderation,
-        ),
-    )
-
-
-def _is_transparent_image_request(
-    background: str | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> bool:
-    services = _runtime_services(runtime)
-    return services.requests.is_transparent_image_request(
-        background,
-        normalize_image_background=services.core.normalize_image_background,
-    )
-
-
-def _append_transparent_matte_prompt(
-    prompt: str,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    return services.requests.append_transparent_matte_prompt(
-        prompt,
-        policy=services.core.image_request_policy(),
-    )
-
-
-def _transparent_matte_upstream_options(
-    *,
-    prompt: str,
-    output_format: str | None,
-    background: str | None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> tuple[str, str | None, str | None]:
-    services = _runtime_services(runtime)
-    return services.requests.transparent_matte_upstream_options(
-        prompt=prompt,
-        output_format=output_format,
-        background=background,
-        hooks=upstream_image_requests.TransparentMatteHooks(
-            is_transparent_image_request=(services.core.is_transparent_image_request),
-            append_transparent_matte_prompt=(
-                services.core.append_transparent_matte_prompt
-            ),
-        ),
-    )
 
 
 async def close_client(*, runtime: ImageUpstreamRuntime) -> None:
@@ -855,338 +673,11 @@ def _attach_image_idempotency_key(
     )
 
 
-def _extract_response_meta_headers(
-    response_headers: Any,
-) -> dict[str, Any]:
-    """从上游响应 headers（dict / httpx.Headers）里抽 lumen 关心的元信息。
-
-    缺失字段以 None 占位，方便统一打日志结构化字段。
-    """
-    if response_headers is None:
-        return {"x_request_id": None, "x_codex_primary_used_percent": None}
-    try:
-        x_req_id = response_headers.get("x-request-id")
-    except Exception:  # noqa: BLE001
-        x_req_id = None
-    try:
-        used_pct = response_headers.get("x-codex-primary-used-percent")
-    except Exception:  # noqa: BLE001
-        used_pct = None
-    used_pct_int: int | None = None
-    if isinstance(used_pct, str) and used_pct.strip():
-        try:
-            used_pct_int = int(float(used_pct))
-        except (TypeError, ValueError):
-            used_pct_int = None
-    return {
-        "x_request_id": x_req_id if isinstance(x_req_id, str) else None,
-        "x_codex_primary_used_percent": used_pct_int,
-    }
-
-
-def _log_upstream_call(
-    *,
-    endpoint: str,
-    status: int,
-    duration_ms: float,
-    trace_id: str,
-    response_headers: Any = None,
-) -> None:
-    """统一的上游 HTTP 调用元信息日志 + Prometheus 埋点。
-
-    endpoint 取值受 prom label 约束：当前固定 `responses` / `responses_compact` /
-    `images_generations` / `images_edits`。新增端点请同步更新 metrics_upstream 文档。
-    """
-    meta = _extract_response_meta_headers(response_headers)
-    used_pct = meta.get("x_codex_primary_used_percent")
-    logger.info(
-        "upstream.call endpoint=%s status=%s duration_ms=%.1f trace_id=%s "
-        "x_request_id=%s x_codex_primary_used_percent=%s",
-        endpoint,
-        status,
-        duration_ms,
-        trace_id,
-        meta.get("x_request_id"),
-        used_pct,
-    )
-    try:
-        record_upstream_request(status_code=status, endpoint=endpoint)
-        record_upstream_duration(
-            seconds=max(0.0, duration_ms / 1000.0), endpoint=endpoint
-        )
-        if isinstance(used_pct, int):
-            record_used_percent(p=used_pct)
-    except Exception:  # noqa: BLE001
-        # metrics 埋点不允许影响主链路；任何异常都吞掉。
-        logger.debug("metrics record failed", exc_info=True)
-
-
-def _record_usage(usage: Any) -> None:
-    """从上游 `usage` 字段提取 token 计数并写入 Prometheus + 日志。
-
-    上游字段路径（响应或 SSE response.completed.response.usage）：
-    - input_tokens / output_tokens / total_tokens
-    - input_tokens_details.cached_tokens
-    - output_tokens_details.reasoning_tokens
-    """
-    if not isinstance(usage, dict):
-        return
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    total_tokens = usage.get("total_tokens")
-    in_details = usage.get("input_tokens_details")
-    out_details = usage.get("output_tokens_details")
-    cached_tokens = (
-        in_details.get("cached_tokens") if isinstance(in_details, dict) else None
-    )
-    reasoning_tokens = (
-        out_details.get("reasoning_tokens") if isinstance(out_details, dict) else None
-    )
-
-    def _as_int(v: Any) -> int | None:
-        if v is None:
-            return None
-        try:
-            n = int(v)
-        except (TypeError, ValueError):
-            return None
-        return max(0, n)
-
-    inp = _as_int(input_tokens)
-    outp = _as_int(output_tokens)
-    cached = _as_int(cached_tokens)
-    reasoning = _as_int(reasoning_tokens)
-    total = _as_int(total_tokens)
-    logger.info(
-        "upstream.usage input_tokens=%s output_tokens=%s cached_tokens=%s "
-        "reasoning_tokens=%s total_tokens=%s",
-        inp,
-        outp,
-        cached,
-        reasoning,
-        total,
-    )
-    try:
-        if inp is not None:
-            record_upstream_tokens(kind="input", n=inp)
-        if outp is not None:
-            record_upstream_tokens(kind="output", n=outp)
-        if cached is not None:
-            record_upstream_tokens(kind="cached", n=cached)
-        if reasoning is not None:
-            record_upstream_tokens(kind="reasoning", n=reasoning)
-    except Exception:  # noqa: BLE001
-        logger.debug("metrics tokens record failed", exc_info=True)
-
-
-def _validate_responses_body(body: dict[str, Any]) -> None:
-    """请求 schema 预校验——参考 probe report §2.C1 的硬约束：
-
-    - `instructions` 必须存在且为字符串（可为空串；完全缺失 = 上游 400 `Instructions are required`）
-    - `input` 必须是 list（不是 = 上游 400 `Input must be a list`）
-    - 有 `tools` 时，必须同时带 `parallel_tool_calls` / `tool_choice`，否则上游可能 4xx
-
-    所有错误都按 4xx terminal 处理（重试无意义）。
-    """
-    instructions = body.get("instructions")
-    if not isinstance(instructions, str):
-        # 防御性兜底：调用方组 body 时若漏掉 instructions（None / 缺失 / 非 string），
-        # 注入空串保持字段存在；图像路径标准模板用 "" 与 Codex CLI 一致，不影响上游接受。
-        body["instructions"] = ""
-        logger.warning(
-            "upstream body missing instructions string; injected empty fallback"
-        )
-    input_field = body.get("input")
-    if not isinstance(input_field, list):
-        raise UpstreamError(
-            "upstream body.input must be a list",
-            status_code=400,
-            error_code=EC.INVALID_REQUEST_ERROR.value,
-            payload={"input_type": type(input_field).__name__},
-        )
-    tools = body.get("tools")
-    if tools:
-        if not isinstance(tools, list):
-            raise UpstreamError(
-                "upstream body.tools must be a list",
-                status_code=400,
-                error_code=EC.INVALID_REQUEST_ERROR.value,
-            )
-        if "tool_choice" not in body:
-            raise UpstreamError(
-                "upstream body.tools requires tool_choice",
-                status_code=400,
-                error_code=EC.INVALID_REQUEST_ERROR.value,
-            )
-        if "parallel_tool_calls" not in body:
-            # 上游对该字段在多 tool 场景下要求显式给出；保守默认 False（图像 / chat 场景实际都不并行）。
-            body["parallel_tool_calls"] = False
-
-
-def _stable_sort_tools(tools: list[Any]) -> list[Any]:
-    """按工具 name（缺省回退 type）排序——保证 prompt cache 前缀稳定。
-
-    上游 prompt cache 命中要求请求体逐字节相同；tools 数组顺序抖动会让 cache miss。
-    本函数不会修改输入 list，返回新副本；非 dict / 没有 name & type 的元素排在尾部。
-    """
-    return upstream_image_requests._stable_sort_tools(tools)
-
-
-def _parse_error(payload: dict[str, Any], status_code: int) -> UpstreamError:
-    err = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(err, dict):
-        code = err.get("code") or err.get("type") or "upstream_error"
-        msg = err.get("message") or "upstream error"
-        return UpstreamError(
-            msg, status_code=status_code, error_code=code, payload=payload
-        )
-    detail = payload.get("detail") if isinstance(payload, dict) else None
-    if isinstance(detail, str) and detail:
-        return UpstreamError(
-            detail,
-            status_code=status_code,
-            error_code=EC.UPSTREAM_ERROR.value,
-            payload=payload,
-        )
-    return UpstreamError(
-        f"upstream http {status_code}",
-        status_code=status_code,
-        error_code=EC.UPSTREAM_ERROR.value,
-        payload=payload if isinstance(payload, dict) else {},
-    )
-
-
-def _with_error_context(
-    exc: UpstreamError,
-    *,
-    path: str,
-    method: str,
-    url: str,
-) -> UpstreamError:
-    payload = dict(exc.payload)
-    payload.setdefault("path", path)
-    payload.setdefault("method", method)
-    payload.setdefault("url", url)
-    exc.payload = payload
-    return exc
-
-
-async def _extract_image_results(
-    payload: Any,
-    status_code: int,
-    *,
-    proxy_url: str | None = None,
-    request_context: ImageRequestContext | None = None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> list[tuple[str, str | None]]:
-    runtime = runtime or (
-        request_context.upstream_runtime if request_context is not None else None
-    )
-    services = _runtime_services(runtime)
-    fetch_image_url_as_bytes = services.direct.fetch_image_url_as_bytes
-    if request_context is not None:
-
-        async def fetch_image_url_as_bytes(
-            image_url: str,
-            *,
-            proxy_url: str | None = None,
-        ) -> bytes:
-            return await services.direct.fetch_image_url_as_bytes(
-                image_url,
-                proxy_url=proxy_url,
-                request_context=request_context,
-            )
-
-    return await services.direct.extract_image_results(
-        payload,
-        status_code,
-        fetch_image_url_as_bytes=fetch_image_url_as_bytes,
-        upstream_error_type=services.infrastructure.UpstreamError,
-        bad_response_error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-        no_image_returned_error_code=(
-            services.infrastructure.EC.NO_IMAGE_RETURNED.value
-        ),
-        proxy_url=proxy_url,
-    )
-
-
-async def _extract_image_result(
-    payload: Any,
-    status_code: int,
-    *,
-    proxy_url: str | None = None,
-    request_context: ImageRequestContext | None = None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> tuple[str, str | None]:
-    runtime = runtime or (
-        request_context.upstream_runtime if request_context is not None else None
-    )
-    services = _runtime_services(runtime)
-    kwargs: dict[str, Any] = {"proxy_url": proxy_url}
-    if request_context is not None:
-        kwargs["request_context"] = request_context
-    return (
-        await services.core.extract_image_results(
-            payload,
-            status_code,
-            **kwargs,
-        )
-    )[0]
-
-
 # 图生图 multipart 走 curl 子进程——实测在同一台服务器上 httpx.AsyncClient 发出
 # 同样 body 被上游网关持续 502，但 curl 命令发同样请求能 200 出图。原因尚未定位
 # （怀疑 httpx 的 multipart boundary / header 组合触发了网关某条规则）。
 # 绕法：edit 路径只用 curl，保留 retry + fallback 语义。
 _CURL_BIN = shutil.which("curl") or "/usr/bin/curl"
-
-
-def _extract_response_image_b64(
-    event: dict[str, Any],
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str | None:
-    services = _runtime_services(runtime)
-    return services.responses.extract_response_image_b64(event)
-
-
-def _extract_response_revised_prompt(
-    event: dict[str, Any],
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str | None:
-    services = _runtime_services(runtime)
-    return services.responses.extract_response_revised_prompt(event)
-
-
-def _b64_value_if_str(
-    value: Any,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str | None:
-    services = _runtime_services(runtime)
-    return services.responses.b64_value_if_str(value)
-
-
-def _extract_image_b64_from_payload(
-    payload: Any,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str | None:
-    services = _runtime_services(runtime)
-    return services.responses.extract_image_b64_from_payload(
-        payload,
-        b64_value_if_str=services.core.b64_value_if_str,
-    )
-
-
-def _extract_image_billable_count(
-    payload: Any,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> int | None:
-    services = _runtime_services(runtime)
-    return services.responses.extract_image_billable_count(payload)
 
 
 # 带 partial_images 时上游能承载的像素上限（见 _responses_image_stream 里的说明）。
@@ -1309,79 +800,174 @@ async def responses_call(
 def build_image_upstream_runtime() -> ImageUpstreamRuntime:
     namespace = compose_upstream_namespace(
         core_values=(
-            _DEFAULT_RESOLVE_RUNTIME, _CURL_BIN, _DEFAULT_IMAGE_BACKGROUND,
-            DEFAULT_IMAGE_INSTRUCTIONS, _DEFAULT_IMAGE_JOB_BASE_URL,
-            _DEFAULT_IMAGE_MODERATION, _DEFAULT_IMAGE_OUTPUT_COMPRESSION,
-            _DEFAULT_IMAGE_OUTPUT_FORMAT, DEFAULT_IMAGE_RESPONSES_MODEL,
-            _DUAL_RACE_BONUS_GRACE_4K_S, _DUAL_RACE_BONUS_GRACE_S,
+            _DEFAULT_RESOLVE_RUNTIME,
+            _CURL_BIN,
+            _DEFAULT_IMAGE_BACKGROUND,
+            DEFAULT_IMAGE_INSTRUCTIONS,
+            _DEFAULT_IMAGE_JOB_BASE_URL,
+            _DEFAULT_IMAGE_MODERATION,
+            _DEFAULT_IMAGE_OUTPUT_COMPRESSION,
+            _DEFAULT_IMAGE_OUTPUT_FORMAT,
+            DEFAULT_IMAGE_RESPONSES_MODEL,
+            _DUAL_RACE_BONUS_GRACE_4K_S,
+            _DUAL_RACE_BONUS_GRACE_S,
             _DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_4K_S,
-            _DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S, _FALLBACK_429_DEFAULT_WAIT_S,
-            _FALLBACK_429_MAX_WAIT_S, _FALLBACK_MAX_ATTEMPTS,
-            _FALLBACK_MAX_ATTEMPTS_429, _FALLBACK_MAX_ATTEMPTS_4XX,
-            _FALLBACK_MAX_ATTEMPTS_5XX, _FALLBACK_RETRY_BACKOFF_BASE_S,
-            _FALLBACK_RETRY_BACKOFF_MAX_S, _FALLBACK_RETRY_ERROR_CODES,
-            _IMAGE_4K_PIXELS, _IMAGE_BACKGROUNDS, _IMAGE_CHANNEL_AUTO,
-            _IMAGE_CHANNEL_IMAGE_JOBS_ONLY, _IMAGE_CHANNEL_STREAM_ONLY,
-            _IMAGE_JOB_DOWNLOAD_MAX_BYTES, _IMAGE_JOB_FAILOVER_CLASSES,
-            _IMAGE_JOB_POLL_INTERVAL_S, _IMAGE_JOB_RETENTION_DAYS,
-            _IMAGE_JOB_TIMEOUT_S, _IMAGE_MODERATIONS, _IMAGE_OUTPUT_FORMATS,
-            _IMAGE_PROVIDER_FAILOVER_ERROR_CODES, _IMAGE_QUALITIES,
-            _IMAGE_READ_TIMEOUT_4K_S, _IMAGE_READ_TIMEOUT_MIN_S,
-            _IMAGE_ROUTE_DUAL_RACE, _IMAGE_ROUTE_IMAGE2, _IMAGE_ROUTE_RESPONSES,
-            _JSON_PAYLOAD_SENTINEL_TYPE, _KNOWN_OUTPUT_ITEM_TYPES,
-            _MAX_REFERENCE_IMAGE_PIXELS, _MAX_NORMALIZED_IMAGE_BYTES,
-            _MAX_REFERENCE_IMAGE_BYTES, _NON_SSE_JSON_MAX_BYTES,
-            _PARTIAL_IMAGES_MAX_PIXELS, _PROXIED_CLIENT_CACHE_MAX,
+            _DUAL_RACE_IMAGE_JOBS_BONUS_GRACE_S,
+            _FALLBACK_429_DEFAULT_WAIT_S,
+            _FALLBACK_429_MAX_WAIT_S,
+            _FALLBACK_MAX_ATTEMPTS,
+            _FALLBACK_MAX_ATTEMPTS_429,
+            _FALLBACK_MAX_ATTEMPTS_4XX,
+            _FALLBACK_MAX_ATTEMPTS_5XX,
+            _FALLBACK_RETRY_BACKOFF_BASE_S,
+            _FALLBACK_RETRY_BACKOFF_MAX_S,
+            _FALLBACK_RETRY_ERROR_CODES,
+            _IMAGE_4K_PIXELS,
+            _IMAGE_BACKGROUNDS,
+            _IMAGE_CHANNEL_AUTO,
+            _IMAGE_CHANNEL_IMAGE_JOBS_ONLY,
+            _IMAGE_CHANNEL_STREAM_ONLY,
+            _IMAGE_JOB_DOWNLOAD_MAX_BYTES,
+            _IMAGE_JOB_FAILOVER_CLASSES,
+            _IMAGE_JOB_POLL_INTERVAL_S,
+            _IMAGE_JOB_RETENTION_DAYS,
+            _IMAGE_JOB_TIMEOUT_S,
+            _IMAGE_MODERATIONS,
+            _IMAGE_OUTPUT_FORMATS,
+            _IMAGE_PROVIDER_FAILOVER_ERROR_CODES,
+            _IMAGE_QUALITIES,
+            _IMAGE_READ_TIMEOUT_4K_S,
+            _IMAGE_READ_TIMEOUT_MIN_S,
+            _IMAGE_ROUTE_DUAL_RACE,
+            _IMAGE_ROUTE_IMAGE2,
+            _IMAGE_ROUTE_RESPONSES,
+            _JSON_PAYLOAD_SENTINEL_TYPE,
+            _KNOWN_OUTPUT_ITEM_TYPES,
+            _MAX_REFERENCE_IMAGE_PIXELS,
+            _MAX_NORMALIZED_IMAGE_BYTES,
+            _MAX_REFERENCE_IMAGE_BYTES,
+            _NON_SSE_JSON_MAX_BYTES,
+            _PARTIAL_IMAGES_MAX_PIXELS,
+            _PROXIED_CLIENT_CACHE_MAX,
             _PROXIED_CLIENT_CLOSE_DELAY_SECONDS,
-            _PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS, _RACE_CANCEL_WAIT_S,
-            _RACE_SINGLE_LANE_PIXELS, _REFERENCE_CACHE_HEAD_TIMEOUT_S,
-            _REFERENCE_CACHE_KEY_PREFIX, _REFERENCE_CACHE_LRU_SUFFIX,
-            _REFERENCE_CACHE_MAX_ENTRIES, _REFERENCE_CACHE_TTL_S,
-            _REFERENCE_PUSH_TIMEOUT_S, _RETRY_HTTPX_EXC, _RETRY_STATUS,
-            _SAFETY_POLICY_ERROR_MARKERS, _SSE_MAX_BYTES, _SSE_MAX_LINES,
-            _SSE_MAX_LINE_BYTES, _TEXT_STREAM_INTERRUPTED_ERROR_CODE,
-            _TRANSPARENT_MATTE_PROMPT_NOTE, _add_image_output_options,
-            _append_transparent_matte_prompt, _apply_retry_cache_busters,
-            _attach_image_idempotency_key, _auth_headers, _b64_value_if_str,
-            _client, _client_timeout_config, _configure_pil_max_image_pixels,
-            _extract_image_b64_from_payload, _extract_image_billable_count,
-            _extract_image_result, _extract_image_results,
-            _extract_response_image_b64, _extract_response_revised_prompt,
-            _has_explicit_image_dispatch_setting, _image_file_fingerprints,
-            _image_idempotency_key, _image_request_policy, _images_client,
-            _images_client_timeout_config, _generate_trace_id,
-            _is_transparent_image_request, _is_responses_error_terminal,
-            _is_responses_success_terminal, _json_dumps_stable,
-            _log_upstream_call, _normalize_image_background,
-            _normalize_image_moderation, _normalize_image_output_compression,
-            _normalize_image_output_format, _normalize_image_quality,
-            _parse_error, _parse_retry_after_seconds, _post_with_retry,
-            _provider_proxy, _proxied_clients, _proxied_images_clients,
-            _record_usage, _resolve_image_channel, _resolve_image_engine,
-            _resolve_legacy_image_primary_route, _resolve_runtime,
-            _runtime_parts, _runtime_provider_name, _stable_sort_tools,
-            _summarize_upstream_error_detail, _transparent_matte_upstream_options,
-            _validate_responses_body, _with_error_context, resolve_db,
-            resolve_image_primary_route, responses_call, tempfile,
+            _PROXIED_CLIENT_IDLE_CLOSE_TIMEOUT_SECONDS,
+            _RACE_CANCEL_WAIT_S,
+            _RACE_SINGLE_LANE_PIXELS,
+            _REFERENCE_CACHE_HEAD_TIMEOUT_S,
+            _REFERENCE_CACHE_KEY_PREFIX,
+            _REFERENCE_CACHE_LRU_SUFFIX,
+            _REFERENCE_CACHE_MAX_ENTRIES,
+            _REFERENCE_CACHE_TTL_S,
+            _REFERENCE_PUSH_TIMEOUT_S,
+            _RETRY_HTTPX_EXC,
+            _RETRY_STATUS,
+            _SAFETY_POLICY_ERROR_MARKERS,
+            _SSE_MAX_BYTES,
+            _SSE_MAX_LINES,
+            _SSE_MAX_LINE_BYTES,
+            _TEXT_STREAM_INTERRUPTED_ERROR_CODE,
+            _TRANSPARENT_MATTE_PROMPT_NOTE,
+            _add_image_output_options,
+            _append_transparent_matte_prompt,
+            _apply_retry_cache_busters,
+            _attach_image_idempotency_key,
+            _auth_headers,
+            _b64_value_if_str,
+            _client,
+            _client_timeout_config,
+            _configure_pil_max_image_pixels,
+            _extract_image_b64_from_payload,
+            _extract_image_billable_count,
+            _extract_image_result,
+            _extract_image_results,
+            _extract_response_image_b64,
+            _extract_response_revised_prompt,
+            _has_explicit_image_dispatch_setting,
+            _image_file_fingerprints,
+            _image_idempotency_key,
+            _image_request_policy,
+            _images_client,
+            _images_client_timeout_config,
+            _generate_trace_id,
+            _is_transparent_image_request,
+            _is_responses_error_terminal,
+            _is_responses_success_terminal,
+            _json_dumps_stable,
+            _log_upstream_call,
+            _normalize_image_background,
+            _normalize_image_moderation,
+            _normalize_image_output_compression,
+            _normalize_image_output_format,
+            _normalize_image_quality,
+            _parse_error,
+            _parse_retry_after_seconds,
+            _post_with_retry,
+            _provider_proxy,
+            _proxied_clients,
+            _proxied_images_clients,
+            _record_usage,
+            _resolve_image_channel,
+            _resolve_image_engine,
+            _resolve_legacy_image_primary_route,
+            _resolve_runtime,
+            _runtime_parts,
+            _runtime_provider_name,
+            _stable_sort_tools,
+            _summarize_upstream_error_detail,
+            _transparent_matte_upstream_options,
+            _validate_responses_body,
+            _with_error_context,
+            resolve_db,
+            resolve_image_primary_route,
+            responses_call,
+            tempfile,
         ),
         infrastructure_values=(
-            EC, PILImage, PublicHttpBodyTooLarge, UPSTREAM_MODEL,
-            UnidentifiedImageError, UpstreamCancelled, UpstreamError, asyncio,
-            base64, close_provider_proxy_tunnels, download_public_http_url,
-            download_public_http_url_to_file, endpoint_kind_allowed, hashlib,
-            httpx, logger, parse_provider_bool, pinned_async_http_transport,
-            provider_pool, provider_supports_route, resolve,
-            resolve_provider_proxy_url, resolve_public_http_target, settings,
-            time, upstream_image_requests, validate_image_job_sidecar_token,
+            EC,
+            PILImage,
+            PublicHttpBodyTooLarge,
+            UPSTREAM_MODEL,
+            UnidentifiedImageError,
+            UpstreamCancelled,
+            UpstreamError,
+            asyncio,
+            base64,
+            close_provider_proxy_tunnels,
+            download_public_http_url,
+            download_public_http_url_to_file,
+            endpoint_kind_allowed,
+            hashlib,
+            httpx,
+            logger,
+            parse_provider_bool,
+            pinned_async_http_transport,
+            provider_pool,
+            provider_supports_route,
+            resolve,
+            resolve_provider_proxy_url,
+            resolve_public_http_target,
+            settings,
+            time,
+            upstream_image_requests,
+            validate_image_job_sidecar_token,
         ),
         module_values=(
-            upstream_client_lifecycle, upstream_direct_failover,
-            upstream_direct_images, upstream_direct_requests,
-            upstream_image_dispatch, upstream_image_job_failover,
-            upstream_image_jobs, upstream_image_race, upstream_image_stream,
-            upstream_provider_selection, upstream_reference_images,
-            upstream_request_targets, upstream_responses,
-            upstream_responses_client, upstream_retry_policy, upstream_transport,
+            upstream_client_lifecycle,
+            upstream_direct_failover,
+            upstream_direct_images,
+            upstream_direct_requests,
+            upstream_image_dispatch,
+            upstream_image_job_failover,
+            upstream_image_jobs,
+            upstream_image_race,
+            upstream_image_stream,
+            upstream_provider_selection,
+            upstream_reference_images,
+            upstream_request_targets,
+            upstream_responses,
+            upstream_responses_client,
+            upstream_retry_policy,
+            upstream_transport,
         ),
         lifecycle_state=UpstreamLifecycleState.create(),
     )
