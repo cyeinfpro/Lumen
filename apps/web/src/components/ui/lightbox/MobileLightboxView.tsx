@@ -19,7 +19,7 @@ import {
 import { motion, type MotionValue } from "framer-motion";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
-import { DURATION, EASE, SPRING } from "@/lib/motion";
+import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
@@ -34,66 +34,14 @@ import {
 } from "./mobileLightboxMedia";
 import type { LightboxItem } from "./types";
 
-export type ImgStatus = "loading" | "loaded" | "error";
-export type DownloadStatus = "idle" | "downloading" | "success" | "error";
-export type ActionNotice = {
-  kind: "success" | "error" | "info";
-  text: string;
-} | null;
-export type VisibleSlide = {
-  item: LightboxItem;
-  offset: -1 | 0 | 1;
-};
-export type ThumbnailItem = {
-  item: LightboxItem;
-  itemIdx: number;
-};
-
-interface MobileLightboxViewProps {
-  current: LightboxItem | null;
-  idx: number;
-  total: number;
-  isFirst: boolean;
-  isLast: boolean;
-  paramsOpen: boolean;
-  imgStatus: ImgStatus;
-  useFallback: boolean;
-  fallbackItemIds: ReadonlySet<string>;
-  chromeVisible: boolean;
-  zoomLevel: number;
-  downloadStatus: DownloadStatus;
-  actionNotice: ActionNotice;
-  boundaryHint: "first" | "last" | null;
-  lightboxAction: LightboxAction | null;
-  visibleSlides: VisibleSlide[];
-  thumbItems: ThumbnailItem[];
-  gestureTargetRef: RefObject<HTMLDivElement | null>;
-  downloadAnchorRef: RefObject<HTMLAnchorElement | null>;
-  dialogRootRef: RefObject<HTMLDivElement | null>;
-  closeButtonRef: RefObject<HTMLButtonElement | null>;
-  activeThumbRef: RefObject<HTMLButtonElement | null>;
-  dialogTitleId: string;
-  dragX: MotionValue<number>;
-  dragY: MotionValue<number>;
-  scale: MotionValue<number>;
-  haloOpacity: MotionValue<number>;
-  onClose: () => void;
-  onGoto: (delta: 1 | -1) => void;
-  onResetZoom: () => void;
-  onDownload: () => void;
-  onSwitchItem: (item: LightboxItem) => void;
-  onMarkFallback: (id: string) => void;
-  setUseFallback: Dispatch<SetStateAction<boolean>>;
-  setImgStatus: Dispatch<SetStateAction<ImgStatus>>;
-  onIterate: () => void;
-  onInpaint: () => void;
-  onUpscale: () => void;
-  onReroll: () => void;
-  onCopyPrompt: () => void;
-  onShare: () => void;
-  onOpenParams: () => void;
-  onCloseParams: () => void;
-}
+import type {
+  ImgStatus,
+  DownloadStatus,
+  VisibleSlide,
+  ThumbnailItem,
+  MobileLightboxViewProps,
+} from "./MobileLightboxViewTypes";
+export type { ActionNotice, DownloadStatus, ImgStatus, ThumbnailItem, VisibleSlide } from "./MobileLightboxViewTypes";
 
 export function MobileLightboxView({
   current,
@@ -238,41 +186,7 @@ export function MobileLightboxView({
   );
 }
 
-function LightboxNotice({
-  actionNotice,
-  boundaryHint,
-}: {
-  actionNotice: ActionNotice;
-  boundaryHint: "first" | "last" | null;
-}) {
-  if (!actionNotice && !boundaryHint) return null;
-  const text =
-    boundaryHint === "first"
-      ? "已经是第一张"
-      : boundaryHint === "last"
-        ? "已经是最后一张"
-        : actionNotice?.text;
-  const isError = actionNotice?.kind === "error";
-  return (
-    <motion.div
-      key={actionNotice?.text ?? boundaryHint}
-      initial={{ opacity: 0, y: -8, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -8, scale: 0.98 }}
-      transition={SPRING.snap}
-      role={isError ? "alert" : "status"}
-      aria-live={isError ? "assertive" : "polite"}
-      className={cn(
-        "pointer-events-none absolute left-1/2 top-[calc(env(safe-area-inset-top)+4.25rem)]",
-        "-translate-x-1/2 rounded-full border px-3 py-1.5",
-        "bg-black/62 text-[12px] text-white/86 shadow-lg",
-        isError ? "border-danger-border" : "border-white/12",
-      )}
-    >
-      {text}
-    </motion.div>
-  );
-}
+import { LightboxNotice } from "./MobileLightboxNotice";
 
 function LightboxImageStage({
   current,
