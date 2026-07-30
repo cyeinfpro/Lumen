@@ -32,6 +32,7 @@ const nodeConfigEditorSource = source("./CanvasNodeConfigEditor.tsx");
 const outputDownloadSource = source("./CanvasOutputDownloadButton.tsx");
 const videoPreviewSource = source("./CanvasVideoPreviewDialog.tsx");
 const workspaceToolsSource = source("./useCanvasWorkspaceTools.ts");
+const workspaceToolDomainSource = source("./canvasWorkspaceToolDomain.ts");
 const commandMenuSource = source("./CanvasCommandMenu.tsx");
 const viewportControlsSource = source("./CanvasViewportControls.tsx");
 const paletteSource = source("./CanvasNodePalette.tsx");
@@ -239,9 +240,9 @@ test("canvas catalog creation persists presets and filters quick connections by 
   match(paletteSource, /application\/lumen-canvas-node/);
   match(viewportSource, /findCanvasNodeCatalogItem/);
   match(viewportSource, /preset_id: catalogItem\.id/);
-  match(workspaceToolsSource, /catalogAcceptsConnection/);
-  match(workspaceToolsSource, /createCanvasNodeFromCatalog/);
-  match(workspaceToolsSource, /validateCanvasConnection\(candidateGraph/);
+  match(workspaceToolDomainSource, /catalogAcceptsConnection/);
+  match(workspaceToolDomainSource, /createCanvasNodeFromCatalog/);
+  match(workspaceToolDomainSource, /validateCanvasConnection\(candidateGraph/);
 });
 
 test("canvas mask uploads request strict server preflight", () => {
