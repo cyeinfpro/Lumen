@@ -8,22 +8,15 @@ import { useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertCircle,
-  CheckCircle2,
-  Clock,
-  Edit3,
   Eye,
   EyeOff,
   Network,
-  Plus,
   Power,
   PowerOff,
   RefreshCw,
-  RotateCcw,
-  Save,
   Snowflake,
   Trash2,
   X,
-  XCircle,
   Zap,
 } from "lucide-react";
 
@@ -45,6 +38,13 @@ import type {
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import { EmptyBlock, ErrorBlock } from "../_components/AdminFeedback";
+import {
+  Field,
+  FieldInline,
+  FieldSelect,
+  LatencyBadge,
+  ProxyToolbar,
+} from "./ProxyPanelFields";
 
 // ———————————————— Draft 类型 ————————————————
 
@@ -351,101 +351,6 @@ export function ProxiesPanel() {
         提示：测试只会发一个空请求验证代理通路，不会消耗 API 配额。
       </p>
     </section>
-  );
-}
-
-function ProxyToolbar({
-  isEditing,
-  hasProxies,
-  testingAll,
-  saving,
-  editError,
-  onStartEdit,
-  onTestAll,
-  onRefresh,
-  onSave,
-  onCancel,
-  onAdd,
-}: {
-  isEditing: boolean;
-  hasProxies: boolean;
-  testingAll: boolean;
-  saving: boolean;
-  editError: string | null;
-  onStartEdit: () => void;
-  onTestAll: () => void;
-  onRefresh: () => void;
-  onSave: () => void;
-  onCancel: () => void;
-  onAdd: () => void;
-}) {
-  if (!isEditing) {
-    return (
-      <div className="flex items-center gap-2 flex-wrap">
-        <Button
-          variant="primary"
-          size="md"
-          onClick={onStartEdit}
-          leftIcon={<Edit3 className="w-3.5 h-3.5" />}
-        >
-          编辑代理列表
-        </Button>
-        <Button
-          variant="secondary"
-          size="md"
-          onClick={onTestAll}
-          disabled={testingAll || !hasProxies}
-          loading={testingAll}
-          leftIcon={!testingAll ? <Zap className="w-3.5 h-3.5" /> : undefined}
-        >
-          {testingAll ? "全部测试中" : "全部测一遍"}
-        </Button>
-        <Button
-          variant="secondary"
-          size="md"
-          onClick={onRefresh}
-          leftIcon={<RefreshCw className="w-3.5 h-3.5" />}
-        >
-          刷新
-        </Button>
-      </div>
-    );
-  }
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <Button
-        variant="primary"
-        size="md"
-        onClick={onSave}
-        disabled={saving}
-        loading={saving}
-        leftIcon={!saving ? <Save className="w-3.5 h-3.5" /> : undefined}
-      >
-        {saving ? copy.state.saving : "保存代理列表"}
-      </Button>
-      <Button
-        variant="secondary"
-        size="md"
-        onClick={onCancel}
-        disabled={saving}
-        leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
-      >
-        {copy.action.cancel}
-      </Button>
-      <Button
-        variant="secondary"
-        size="md"
-        onClick={onAdd}
-        leftIcon={<Plus className="w-3.5 h-3.5" />}
-      >
-        加一个代理
-      </Button>
-      {editError && (
-        <span className="inline-flex items-center gap-1 type-caption text-danger">
-          <AlertCircle className="w-3 h-3" /> {editError}
-        </span>
-      )}
-    </div>
   );
 }
 
@@ -821,140 +726,5 @@ function ProxyEditRow({
         </div>
       </div>
     </li>
-  );
-}
-
-// ———————————————— 共用小组件 ————————————————
-
-function LatencyBadge({
-  tested,
-  testing,
-}: {
-  tested: ProxyTestOut | null | undefined;
-  testing: boolean;
-}) {
-  if (testing) {
-    return (
-      <span className="inline-flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
-        <RefreshCw className="w-3 h-3 animate-spin" /> 测试中
-      </span>
-    );
-  }
-  if (!tested) {
-    return (
-      <span className="inline-flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
-        <Clock className="w-3 h-3" /> 还未测过
-      </span>
-    );
-  }
-  if (!tested.ok) {
-    return (
-      <span
-        className="inline-flex items-center gap-1.5 type-caption text-danger"
-        title={tested.error ?? ""}
-      >
-        <XCircle className="w-3.5 h-3.5" /> 不通
-      </span>
-    );
-  }
-  const ms = Math.max(0, tested.latency_ms);
-  const color =
-    ms < 200 ? "text-success" : ms < 600 ? "text-warning" : "text-danger";
-  return (
-    <span className={"inline-flex items-center gap-1.5 type-caption " + color}>
-      <CheckCircle2 className="w-3.5 h-3.5" />
-      <span className="font-mono tabular-nums">{ms.toFixed(0)} ms</span>
-    </span>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  value,
-  onChange,
-  inputMode,
-}: {
-  label: string;
-  hint: string;
-  value: string;
-  onChange: (v: string) => void;
-  inputMode?: "text" | "numeric";
-}) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="type-caption text-[var(--fg-1)]">{label}</span>
-      <input
-        type="text"
-        value={value}
-        inputMode={inputMode}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors"
-      />
-      <span className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</span>
-    </label>
-  );
-}
-
-function FieldInline({
-  label,
-  value,
-  onChange,
-  placeholder,
-  mono,
-  inputMode,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  mono?: boolean;
-  inputMode?: "text" | "numeric";
-}) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        inputMode={inputMode}
-        autoComplete="off"
-        className={
-          "h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors " +
-          (mono ? "font-mono" : "")
-        }
-      />
-    </label>
-  );
-}
-
-function FieldSelect({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }
