@@ -9,7 +9,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -18,13 +17,11 @@ import {
   ArrowDownToLine,
   Copy,
   Check,
-  ImagePlus,
   RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { Markdown } from "@/components/ui/Markdown";
-import { ViewportImage } from "@/components/ui/ViewportImage";
 import { cn } from "@/lib/utils";
 import { tryCopyTextToClipboard } from "@/lib/clipboard";
 import { CompletionStatusLine } from "@/components/ui/chat/CompletionStatusLine";
@@ -34,18 +31,14 @@ import { useHistoryPaging } from "@/hooks/useHistoryPaging";
 import type {
   AssistantMessage,
   Generation,
-  GeneratedImage,
   Intent,
   Message,
   UserMessage,
 } from "@/lib/types";
-import { cancelTask, imageVariantUrl } from "@/lib/apiClient";
-import { prewarmImage } from "@/features/assets";
-import { aspectRatioToCss } from "@/lib/sizing";
-import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
-import type { LightboxItem } from "@/components/ui/lightbox/types";
+import { cancelTask } from "@/lib/apiClient";
 import { DevelopingCard } from "./DevelopingCard";
 import { SceneDivider } from "./SceneDivider";
+import { FinalImage } from "./MobileConversationImage";
 
 const VIRTUALIZE_AFTER = 50;
 
@@ -109,48 +102,6 @@ function generationIdsOf(msg: AssistantMessage): string[] {
   return msg.generation_id ? [msg.generation_id] : [];
 }
 
-function formatElapsed(g: Generation): string | null {
-  if (!g.finished_at || !g.started_at) return null;
-  const ms = Math.max(0, g.finished_at - g.started_at);
-  return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
-}
-
-function aspectRatioNumber(
-  image: Pick<GeneratedImage, "width" | "height">,
-  fallback: string,
-): number | null {
-  if (image.width && image.height && image.height > 0) {
-    return image.width / image.height;
-  }
-  const match = fallback.match(/^(\d+)\s*:\s*(\d+)$/);
-  if (!match) return null;
-  const w = Number(match[1]);
-  const h = Number(match[2]);
-  return w > 0 && h > 0 ? w / h : null;
-}
-
-function singleImageWidthClass(ratio: number | null): string {
-  if (ratio !== null && ratio < 0.58) return "max-w-[min(44%,176px)]";
-  if (ratio !== null && ratio < 0.9) return "max-w-[min(60%,260px)]";
-  if (ratio !== null && ratio > 1.7) return "max-w-[min(82%,340px)]";
-  return "max-w-[min(76%,320px)]";
-}
-
-function openLightbox(
-  items: LightboxItem[],
-  initialId: string,
-  fromRect: DOMRect | null,
-) {
-  if (typeof window === "undefined") return;
-  if (items.length === 0) return;
-  window.dispatchEvent(
-    new CustomEvent("lumen:open-lightbox", {
-      // MobileLightbox 监听契约：{ items: LightboxItem[], initialId, fromRect? }
-      detail: { items, initialId, fromRect: fromRect ?? undefined },
-    }),
-  );
-}
-
 function assistantGenerationsRenderSignature(
   msg: AssistantMessage,
   generations: Record<string, Generation>,
@@ -158,30 +109,6 @@ function assistantGenerationsRenderSignature(
   return generationIdsOf(msg)
     .map((id) => generationRenderSignature(generations[id]))
     .join("|");
-}
-
-function conversationImageSrc(image: GeneratedImage): string {
-  return (
-    image.preview_url ??
-    image.thumb_url ??
-    image.display_url ??
-    image.data_url
-  );
-}
-
-function lightboxThumbUrl(image: GeneratedImage): string | undefined {
-  return image.thumb_url ?? image.preview_url;
-}
-
-function isFreeGeneration(gen: Generation, image: GeneratedImage): boolean {
-  return (
-    gen.billing_free === true ||
-    gen.billing_label === "free" ||
-    gen.is_dual_race_bonus === true ||
-    image.billing_free === true ||
-    image.billing_label === "free" ||
-    image.is_dual_race_bonus === true
-  );
 }
 
 function HistoryLoadControl({
@@ -799,147 +726,3 @@ function areAssistantTurnPropsEqual(
     assistantGenerationsRenderSignature(next.msg, next.generations)
   );
 }
-
-// ———————————————————————————————————————————————————
-// 最终图 + 参数尾行 + 点击 Lightbox
-// ———————————————————————————————————————————————————
-interface FinalImageProps {
-  gen: Generation;
-  image: GeneratedImage;
-  onEditImage: (id: string) => void;
-  inGrid?: boolean;
-}
-
-const FinalImage = memo(function FinalImage({
-  gen,
-  image,
-  onEditImage,
-  inGrid = false,
-}: FinalImageProps) {
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const [loaded, setLoaded] = useState(false);
-
-  const ratioCss = aspectRatioToCss(gen.aspect_ratio);
-  const ratio = aspectRatioNumber(image, gen.aspect_ratio);
-  const isLongImage = ratio !== null && ratio < 0.58;
-  const cardSrc = conversationImageSrc(image);
-  const lightboxPreview =
-    image.display_url ?? imageVariantUrl(image.id, "display2048");
-  const free = isFreeGeneration(gen, image);
-  const elapsed = formatElapsed(gen);
-  const tail = [
-    gen.aspect_ratio,
-    image.size_actual || `${image.width}x${image.height}`,
-    elapsed ?? null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const handleCopy = () => {
-    void tryCopyTextToClipboard(gen.prompt).then((success) => {
-      pushMobileToast(
-        success ? "已复制 prompt" : "复制失败",
-        success ? "success" : "danger",
-      );
-    });
-  };
-
-  const handleClick = () => {
-    // 点击图：打开 Lightbox（Phase 6 监听该事件）
-    const rect = imgRef.current?.getBoundingClientRect() ?? null;
-    const item = imageResultToLightboxItem(gen, image, {
-      // url 用 binary 保留下载 / 新标签页打开原图能力；
-      // previewUrl 用 display2048 避免手机 decode 4K 原图卡死。
-      previewUrl: lightboxPreview,
-      thumbUrl: lightboxThumbUrl(image),
-      createdAt: gen.finished_at ?? gen.started_at,
-    });
-    openLightbox([item], image.id, rect);
-  };
-
-  const handlePreviewIntent = () => {
-    prewarmImage(lightboxPreview);
-  };
-
-  return (
-    <div
-      className={cn("flex w-full flex-col gap-1", inGrid ? "" : singleImageWidthClass(ratio))}
-    >
-      <button
-        type="button"
-        onClick={handleClick}
-        onPointerDown={handlePreviewIntent}
-        onFocus={handlePreviewIntent}
-        aria-label="查看大图"
-        className={cn(
-          "relative block w-full overflow-hidden p-0",
-          "rounded-[var(--radius-md)] bg-[var(--bg-1)]",
-          "shadow-[var(--shadow-1)]",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          isLongImage && (inGrid ? "h-[min(24vh,168px)] min-h-[112px]" : "h-[min(30vh,220px)] min-h-[140px]"),
-        )}
-        style={
-          isLongImage
-            ? { contain: "layout paint" }
-            : { aspectRatio: ratioCss, contain: "layout paint" }
-        }
-      >
-        {/* skeleton 占位：图未 load 完之前给一层柔和 shimmer */}
-        {!loaded && (
-          <span
-            aria-hidden
-            className="absolute inset-0 bg-[var(--bg-2)] animate-pulse motion-reduce:animate-none"
-          />
-        )}
-        <ViewportImage
-          ref={imgRef}
-          src={cardSrc}
-          alt={gen.prompt}
-          rootMargin={inGrid ? "320px 0px" : "520px 0px"}
-          persistAfterVisible
-          fetchPriority="low"
-          onLoad={() => setLoaded(true)}
-          className={cn(
-            "w-full h-full transition-opacity duration-300 motion-reduce:transition-none",
-            isLongImage ? "object-contain" : "object-cover",
-            loaded ? "opacity-100" : "opacity-0",
-          )}
-        />
-        {free && (
-          <span className="pointer-events-none absolute left-2 top-2 z-10 rounded-full border border-[var(--border-strong)] bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
-            free
-          </span>
-        )}
-      </button>
-      <div className="flex items-center gap-1.5 px-0.5">
-        <button
-          type="button"
-          onClick={handleCopy}
-          className={cn(
-            "flex min-h-11 min-w-0 flex-1 items-center text-left text-[10px] tabular-nums text-[var(--fg-3)]",
-            "truncate transition-colors hover:text-[var(--fg-1)] active:opacity-70 motion-reduce:transition-none",
-          )}
-          style={{ fontFamily: "var(--font-mono)" }}
-          aria-label="复制 prompt"
-          title={gen.prompt}
-        >
-          {tail}
-        </button>
-        <button
-          type="button"
-          onClick={() => onEditImage(image.id)}
-          className={cn(
-            "shrink-0 inline-flex min-h-11 items-center gap-1 px-2 rounded-full",
-            "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-            "text-[10px] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
-            "active:scale-[0.95] transition-[background-color,color,transform] motion-reduce:transition-none",
-          )}
-          aria-label="用作参考图"
-        >
-          <ImagePlus className="w-3 h-3" aria-hidden />
-          参考图
-        </button>
-      </div>
-    </div>
-  );
-});
