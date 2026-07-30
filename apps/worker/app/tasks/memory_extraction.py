@@ -5,11 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import re
-import unicodedata
-from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,7 +15,6 @@ from sqlalchemy import func, select, update
 from lumen_core.constants import conv_channel
 from lumen_core.memory import (
     ExtractedMemory,
-    canonical_memory_text,
     cosine_similarity,
     deterministic_embedding,
     embedding_literal,
@@ -33,13 +28,15 @@ from lumen_core.models import (
     Message,
     User,
     UserMemory,
-    UserMemoryScope,
     UserMemoryStaging,
 )
 
 from ..db import SessionLocal
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..sse_publish import publish_event
+from . import memory_extraction_values as _memory_values
+from . import memory_maintenance as _memory_maintenance
+from . import memory_prompt_storage as _memory_prompt_storage
 from .memory_extraction_parts.contracts import (
     CompletedMemoryExtraction as _CompletedMemoryExtraction,
     MemoryExtractionClaim as _MemoryExtractionClaim,
@@ -82,6 +79,25 @@ _MEMORY_EXTRACTION_LEASE_SECONDS = 600
 _MEMORY_UNDO_CLEANUP_BATCH = 1000
 
 _logger = logging.getLogger(__name__)
+
+AssembledMemoryPrompt = _memory_values.AssembledMemoryPrompt
+_MAX_POSITIVE_SIGNAL = _memory_values._MAX_POSITIVE_SIGNAL
+_responses_text = _memory_values._responses_text
+_strip_json_fences = _memory_values._strip_json_fences
+_parse_llm_candidates = _memory_values._parse_llm_candidates
+_append_path = _memory_values._append_path
+_bump_positive_signal = _memory_values._bump_positive_signal
+_usage_payload = _memory_values._usage_payload
+_log_llm_usage = _memory_values._log_llm_usage
+_text_from_message = _memory_values._text_from_message
+_topic_key = _memory_values._topic_key
+_decay = _memory_values._decay
+_memory_lines = _memory_values._memory_lines
+_conversation_disabled_memory_ids = _memory_values.conversation_disabled_memory_ids
+_clip_lines = _memory_values._clip_lines
+_default_scope = _memory_prompt_storage._default_scope
+_memory_scope_context = _memory_prompt_storage._memory_scope_context
+_prompt_memory_rows = _memory_prompt_storage._prompt_memory_rows
 
 
 async def _embedding_provider_available(ctx: dict[str, Any] | None) -> bool:
@@ -162,141 +178,6 @@ _EXTRACTION_INSTRUCTIONS = """从用户单轮消息中抽取长期适用的账�
 电话、地址、身份证、银行卡、API key、密码、验证码、邮箱+密码组合等敏感信息一律输出空数组。
 directive 只用于用户明确要求你记住，例如“记住…”或“remember…”。“我以后都不喝牛奶了”这类表态是 statement。
 多数消息没有记忆点，允许输出 {"items":[]}。"""
-
-
-@dataclass(frozen=True)
-class AssembledMemoryPrompt:
-    profile_text: str | None
-    constraints_text: str | None
-    context_text: str | None
-    used_memory_ids: list[str]
-    used_memory_summary: list[dict[str, str]]
-    scope_hint_text: str | None = None
-    confirmation_candidate_id: str | None = None
-    confirmation_instruction: str | None = None
-
-
-async def _default_scope(session: Any, user_id: str) -> UserMemoryScope:
-    scope = (
-        await session.execute(
-            select(UserMemoryScope).where(
-                UserMemoryScope.user_id == user_id,
-                UserMemoryScope.is_default.is_(True),
-            )
-        )
-    ).scalar_one_or_none()
-    if scope is not None:
-        return scope
-    scope = UserMemoryScope(user_id=user_id, name="default", is_default=True)
-    session.add(scope)
-    await session.flush()
-    return scope
-
-
-def _responses_text(payload: dict[str, Any]) -> str:
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text.strip()
-    chunks: list[str] = []
-    for item in payload.get("output") or []:
-        if not isinstance(item, dict):
-            continue
-        for part in item.get("content") or []:
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text") or part.get("output_text")
-            if isinstance(text, str):
-                chunks.append(text)
-    return "".join(chunks).strip()
-
-
-def _strip_json_fences(text: str) -> str:
-    value = (text or "").strip()
-    if value.startswith("```"):
-        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
-        value = re.sub(r"\s*```$", "", value)
-    return value.strip()
-
-
-def _parse_llm_candidates(raw: str) -> list[ExtractedMemory]:
-    try:
-        payload = json.loads(_strip_json_fences(raw))
-    except json.JSONDecodeError:
-        return []
-    raw_items = payload.get("items") if isinstance(payload, dict) else payload
-    if not isinstance(raw_items, list):
-        return []
-    items: list[ExtractedMemory] = []
-    for row in raw_items:
-        if not isinstance(row, dict):
-            continue
-        memory_type = row.get("type")
-        content = row.get("content")
-        excerpt = row.get("source_excerpt")
-        intent = row.get("intent_kind")
-        if memory_type not in {"profile", "preference", "avoid", "project"}:
-            continue
-        if not isinstance(content, str) or not content.strip():
-            continue
-        try:
-            confidence = float(row.get("confidence", 0.82))
-        except (TypeError, ValueError):
-            confidence = 0.82
-        items.append(
-            ExtractedMemory(
-                type=memory_type,
-                content=content.strip()[:200],
-                confidence=max(0.0, min(1.0, confidence)),
-                source_excerpt=(excerpt if isinstance(excerpt, str) else content)[:160],
-                intent_kind="directive" if intent == "directive" else "statement",
-            )
-        )
-    return items[:5]
-
-
-def _append_path(base_url: str, path: str) -> str:
-    base = (base_url or "").rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}{path}"
-    return f"{base}/v1{path}"
-
-
-def _bump_positive_signal(memory: Any, amount: int = 1) -> None:
-    try:
-        current = int(getattr(memory, "positive_signal", 0) or 0)
-    except (TypeError, ValueError):
-        current = 0
-    try:
-        delta = max(0, int(amount))
-    except (TypeError, ValueError):
-        delta = 0
-    memory.positive_signal = min(_MAX_POSITIVE_SIGNAL, current + delta)
-
-
-def _usage_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    usage = payload.get("usage") if isinstance(payload, dict) else None
-    return usage if isinstance(usage, dict) else {}
-
-
-def _log_llm_usage(provider_name: str, payload: dict[str, Any]) -> None:
-    usage = _usage_payload(payload)
-    if not usage:
-        return
-    try:
-        usage_text = json.dumps(
-            usage,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except (TypeError, ValueError):
-        usage_text = str(usage)
-    _logger.info(
-        "memory_extraction.llm_usage provider=%s usage=%.500s",
-        provider_name,
-        usage_text,
-    )
 
 
 async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[float]:
@@ -467,118 +348,6 @@ async def _try_llm_extract(
                 continue
             continue
     return []
-
-
-def _text_from_message(msg: Message | None) -> str:
-    content = msg.content if msg is not None and isinstance(msg.content, dict) else {}
-    text = content.get("text") if isinstance(content, dict) else ""
-    return text if isinstance(text, str) else ""
-
-
-def _topic_key(text: str) -> str:
-    value = unicodedata.normalize("NFC", canonical_memory_text(text))
-    value = re.sub(r"(用户|我|喜欢|偏好|不喜欢|不要|别|不|请|以后|回答)", "", value)
-    return value
-
-
-def _decay(memory: UserMemory, now: datetime) -> float:
-    if memory.pinned:
-        return 1.0
-    if memory.type in {"profile", "avoid"}:
-        return 1.0
-    anchor = memory.last_used_at or memory.created_at
-    days = max(0.0, (now - anchor).total_seconds() / 86400)
-    if memory.type == "project":
-        return math.exp(-days / 30.0)
-    return math.exp(-days / 90.0)
-
-
-def _memory_lines(title: str, memories: list[UserMemory]) -> str | None:
-    if not memories:
-        return None
-    lines = [f"<{title}>"]
-    for memory in memories:
-        lines.append(f"- {memory.content}")
-    lines.append(f"</{title}>")
-    return "\n".join(lines)
-
-
-async def _conversation_disabled_memory_ids(
-    redis: Any | None, conversation_id: str
-) -> set[str]:
-    if redis is None:
-        return set()
-    try:
-        raw_values = await redis.smembers(
-            f"memory:conversation:{conversation_id}:disabled"
-        )
-    except Exception:
-        return set()
-    disabled: set[str] = set()
-    for value in raw_values or []:
-        if isinstance(value, bytes):
-            disabled.add(value.decode("utf-8", errors="ignore"))
-        elif isinstance(value, str):
-            disabled.add(value)
-    return disabled
-
-
-def _clip_lines(memories: list[UserMemory], *, max_chars: int) -> list[UserMemory]:
-    out: list[UserMemory] = []
-    used = 0
-    for memory in memories:
-        cost = len(memory.content) + 4
-        if out and used + cost > max_chars:
-            break
-        out.append(memory)
-        used += cost
-    return out
-
-
-async def _memory_scope_context(
-    session: Any,
-    *,
-    user_id: str,
-    conversation: Conversation,
-) -> tuple[set[str], UserMemoryScope | None]:
-    default_scope = await _default_scope(session, user_id)
-    scope_ids = {default_scope.id}
-    active_scope = None
-    if conversation.active_scope_id:
-        scope_ids.add(conversation.active_scope_id)
-        active_scope = await session.get(
-            UserMemoryScope,
-            conversation.active_scope_id,
-        )
-    return scope_ids, active_scope
-
-
-async def _prompt_memory_rows(
-    session: Any,
-    *,
-    user_id: str,
-    conversation_id: str,
-    scope_ids: set[str],
-    redis: Any | None,
-) -> list[UserMemory]:
-    rows = list(
-        (
-            await session.execute(
-                select(UserMemory).where(
-                    UserMemory.user_id == user_id,
-                    UserMemory.disabled.is_(False),
-                    UserMemory.superseded_by.is_(None),
-                    UserMemory.scope_id.in_(scope_ids),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
-    if not disabled_ids:
-        return rows
-    return [memory for memory in rows if memory.id not in disabled_ids]
 
 
 async def _ranked_prompt_memories(
@@ -1164,42 +933,11 @@ async def memory_extract(
 
 
 async def cleanup_memory(ctx: dict[str, Any]) -> None:
-    _ = ctx
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=30)
-    async with SessionLocal() as session:
-        pending = (
-            (
-                await session.execute(
-                    select(UserMemoryStaging).where(
-                        UserMemoryStaging.decision == "pending",
-                        UserMemoryStaging.expires_at < now,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for row in pending:
-            row.decision = "rejected"
-            row.decided_at = now
-        old_deleted = (
-            (
-                await session.execute(
-                    select(UserMemory).where(
-                        UserMemory.disabled.is_(True),
-                        UserMemory.deleted_at.is_not(None),
-                        UserMemory.deleted_at < cutoff,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for memory in old_deleted:
-            await session.delete(memory)
-        await session.commit()
-    await _cleanup_expired_memory_extraction_undo(now)
+    await _memory_maintenance.cleanup_memory(
+        ctx,
+        session_factory=SessionLocal,
+        cleanup_expired_undo=_cleanup_expired_memory_extraction_undo,
+    )
 
 
 async def _cleanup_expired_memory_extraction_undo(now: datetime) -> int:
@@ -1244,48 +982,9 @@ async def memory_reembed(
 
 
 async def flush_memory_last_used(ctx: dict[str, Any]) -> None:
-    """Drain memory:last_used_pending ZSET into one batched UPDATE per timestamp.
-
-    Why ZSET: assemble_user_memory_prompt fan-outs N writes per chat turn; per
-    DESIGN §7.3 step 8 we batch them into one cron tick instead of hammering
-    user_memories with row-by-row UPDATEs. Race: a second producer may bump a
-    member's score between our zrange and zrem; we lose at most one timestamp
-    update — non-fatal because last_used_at only feeds decay scoring.
-    """
-    redis = ctx.get("redis")
-    if redis is None:
-        return
-    try:
-        members = await redis.zrange(_LAST_USED_PENDING_KEY, 0, -1, withscores=True)
-    except Exception:
-        return
-    if not members:
-        return
-    by_score: dict[float, list[str]] = defaultdict(list)
-    member_names: list[str] = []
-    for member, score in members:
-        if isinstance(member, bytes):
-            member = member.decode("utf-8", errors="ignore")
-        if not isinstance(member, str):
-            continue
-        member_names.append(member)
-        by_score[float(score)].append(member)
-    if not by_score:
-        return
-    async with SessionLocal() as session:
-        for score, ids in by_score.items():
-            ts = datetime.fromtimestamp(score, tz=timezone.utc)
-            await session.execute(
-                update(UserMemory)
-                .where(UserMemory.id.in_(ids))
-                .values(last_used_at=ts)
-                .execution_options(synchronize_session=False)
-            )
-        await session.commit()
-    try:
-        await redis.zrem(_LAST_USED_PENDING_KEY, *member_names)
-    except Exception:
-        _logger.warning(
-            "flush_memory_last_used zrem failed members=%d",
-            len(member_names),
-        )
+    await _memory_maintenance.flush_memory_last_used(
+        ctx,
+        session_factory=SessionLocal,
+        last_used_pending_key=_LAST_USED_PENDING_KEY,
+        logger=_logger,
+    )
