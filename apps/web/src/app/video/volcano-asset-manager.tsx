@@ -48,8 +48,9 @@ import {
   assetSelection,
   uploadBlocksGroupMutation,
 } from "./volcano-asset-manager-state";
+import { useVolcanoAssetManagerController } from "./volcano-asset-manager-controller";
+import { VolcanoAssetManagerPresentation } from "./volcano-asset-manager-presentation";
 import type {
-  ActiveSession,
   DeleteTarget,
   GroupFormState,
   Notice,
@@ -60,11 +61,7 @@ import {
   ASSET_PAGE_SIZE,
   GROUP_PAGE_SIZE,
 } from "./volcano-asset-manager-types";
-import { VolcanoAssetManagerView } from "./volcano-asset-manager-view";
-import { useVolcanoAssetData } from "./use-volcano-asset-data";
-import { useVolcanoOperationController } from "./use-volcano-operation-controller";
 import { useVolcanoUploadController } from "./use-volcano-upload-controller";
-import { useVolcanoUploadQueue } from "./use-volcano-upload-queue";
 
 export type {
   VolcanoAssetManagerProps,
@@ -85,12 +82,6 @@ export function VolcanoAssetManager({
   const uploadInputId = useId();
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const sessionCounterRef = useRef(0);
-  const activeSessionRef = useRef<ActiveSession>({
-    id: 0,
-    open: false,
-    model,
-  });
   const [groupSearch, setGroupSearch] = useState("");
   const [groupForm, setGroupForm] = useState<GroupFormState | null>(null);
   const [groupFormError, setGroupFormError] = useState<string | null>(null);
@@ -111,149 +102,41 @@ export function VolcanoAssetManager({
     initialFocusRef: closeButtonRef,
   });
 
-  const isSessionActive = useCallback(
-    (sessionId: number, expectedModel?: string) => {
-      const current = activeSessionRef.current;
-      return (
-        current.open &&
-        current.id === sessionId &&
-        (!expectedModel || current.model === expectedModel)
-      );
-    },
-    [],
-  );
-
-  const uploadQueue = useVolcanoUploadQueue(activeSessionRef);
-  const operationController = useVolcanoOperationController({
-    activeSessionRef,
-    isSessionActive,
-    setNotice,
-  });
-  const assetData = useVolcanoAssetData({
-    model,
+  const resetSessionUi = useCallback(() => {
+    setSelected([]);
+    setNotice(null);
+    setDeleteTarget(null);
+    setGroupForm(null);
+    setGroupFormError(null);
+    setRenameAsset(null);
+    setGroupSearch("");
+    setDragActive(false);
+  }, []);
+  const {
     activeSessionRef,
     isSessionActive,
     uploadQueue,
+    operationController,
+    assetData,
+  } = useVolcanoAssetManagerController({
+    open,
+    model,
+    resetSessionUi,
+    setNotice,
   });
   const {
-    abortUploadRequests,
-    pauseActiveUploadQueue,
-    resetUploadScheduling,
-    restoreUploadQueue,
-    showUploads,
-  } = uploadQueue;
-  const {
-    abortOperationRequests,
-    pauseActiveOperationQueue,
-    restoreOperationQueue,
-    resumePausedOperations,
-    showOperations,
-  } = operationController;
-  const {
-    abortDataRequests,
     assetPage: requestedAssetPage,
     assetSearch: requestedAssetSearch,
-    assetSearchInput,
     capability,
-    loadCapability,
     refreshAssets: refreshRequestedAssets,
-    resetData,
     selectedGroupId: requestedGroupId,
     setAssetPage,
-    setAssetSearch,
     statusFilter: requestedStatusFilter,
     typeFilter: requestedTypeFilter,
   } = assetData;
 
-  const abortSessionRequests = useCallback(() => {
-    abortDataRequests();
-    abortUploadRequests();
-    abortOperationRequests();
-  }, [
-    abortDataRequests,
-    abortOperationRequests,
-    abortUploadRequests,
-  ]);
-
   useEffect(() => {
-    const sessionId = sessionCounterRef.current + 1;
-    sessionCounterRef.current = sessionId;
-    activeSessionRef.current = { id: sessionId, open, model };
-    abortSessionRequests();
-    resetUploadScheduling();
-    const restoredUploads = restoreUploadQueue(model);
-    const restoredOperations = restoreOperationQueue(model, sessionId);
-    if (!open) return;
-    const timer = window.setTimeout(() => {
-      if (!isSessionActive(sessionId, model)) return;
-      setSelected([]);
-      showUploads(restoredUploads);
-      showOperations(restoredOperations);
-      setNotice(null);
-      setDeleteTarget(null);
-      setGroupForm(null);
-      setGroupFormError(null);
-      setRenameAsset(null);
-      setGroupSearch("");
-      setDragActive(false);
-      resetData();
-      void loadCapability(sessionId);
-      resumePausedOperations(restoredOperations);
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-      pauseActiveUploadQueue(model);
-      pauseActiveOperationQueue(model);
-      if (activeSessionRef.current.id === sessionId) {
-        activeSessionRef.current = {
-          id: sessionId,
-          open: false,
-          model,
-        };
-      }
-      abortSessionRequests();
-    };
-  }, [
-    abortSessionRequests,
-    isSessionActive,
-    loadCapability,
-    model,
-    open,
-    pauseActiveOperationQueue,
-    pauseActiveUploadQueue,
-    resetData,
-    resetUploadScheduling,
-    restoreOperationQueue,
-    restoreUploadQueue,
-    resumePausedOperations,
-    showOperations,
-    showUploads,
-  ]);
-
-  useEffect(() => {
-    if (!open) return;
-    const sessionId = activeSessionRef.current.id;
-    const timer = window.setTimeout(() => {
-      if (!isSessionActive(sessionId, model)) return;
-      setAssetSearch(assetSearchInput.trim());
-      setAssetPage(1);
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [
-    assetSearchInput,
-    isSessionActive,
-    model,
-    open,
-    setAssetPage,
-    setAssetSearch,
-  ]);
-
-  useEffect(() => {
-    if (
-      !open ||
-      !capability?.ready ||
-      !requestedGroupId
-    ) {
+    if (!open || !capability?.ready || !requestedGroupId) {
       return;
     }
     const sessionId = activeSessionRef.current.id;
@@ -263,6 +146,7 @@ export function VolcanoAssetManager({
     );
     return () => window.clearTimeout(timer);
   }, [
+    activeSessionRef,
     capability?.ready,
     open,
     refreshRequestedAssets,
@@ -340,8 +224,7 @@ export function VolcanoAssetManager({
     assetData.projectAssetTotal == null
       ? null
       : volcanoQuotaUsage(
-          assetData.projectAssetTotal +
-            uploadController.pendingAssetCreates,
+          assetData.projectAssetTotal + uploadController.pendingAssetCreates,
           VOLCANO_PROJECT_ASSET_LIMIT,
         );
   const blockedUploadIds = useMemo(() => {
@@ -365,9 +248,7 @@ export function VolcanoAssetManager({
         volcanoGroupLockKey(assetData.selectedGroupId),
       )
     : undefined;
-  const selectedGroupDeleting = Boolean(
-    selectedGroupOperation?.blocksChildren,
-  );
+  const selectedGroupDeleting = Boolean(selectedGroupOperation?.blocksChildren);
   const uploadDisabledReason = selectedGroupOperation
     ? selectedGroupDeleting
       ? "该素材组正在删除，暂不能上传"
@@ -435,13 +316,10 @@ export function VolcanoAssetManager({
       form.mode === "rename" &&
       uploadQueue.uploadsRef.current.some(
         (item) =>
-          item.groupId === form.groupId &&
-          uploadBlocksGroupMutation(item),
+          item.groupId === form.groupId && uploadBlocksGroupMutation(item),
       )
     ) {
-      setGroupFormError(
-        "该素材组仍有上传或后台创建任务，请等待完成后再编辑",
-      );
+      setGroupFormError("该素材组仍有上传或后台创建任务，请等待完成后再编辑");
       return;
     }
     const lockKey =
@@ -483,11 +361,7 @@ export function VolcanoAssetManager({
             : undefined,
         submit: (signal) =>
           form.mode === "create"
-            ? createVideoAssetGroup(
-                model,
-                { name, description },
-                { signal },
-              )
+            ? createVideoAssetGroup(model, { name, description }, { signal })
             : patchVideoAssetGroup(
                 form.groupId || "",
                 model,
@@ -498,23 +372,15 @@ export function VolcanoAssetManager({
           const group = volcanoOperationGroupResult(operation);
           if (group) {
             assetData.setGroups((current) => {
-              const exists = current.some(
-                (item) => item.id === group.id,
-              );
+              const exists = current.some((item) => item.id === group.id);
               return exists
-                ? current.map((item) =>
-                    item.id === group.id ? group : item,
-                  )
+                ? current.map((item) => (item.id === group.id ? group : item))
                 : [group, ...current];
             });
             assetData.setSelectedGroupId(group.id);
           }
           await Promise.all([
-            assetData.refreshGroups(
-              group?.id ?? form.groupId,
-              true,
-              sessionId,
-            ),
+            assetData.refreshGroups(group?.id ?? form.groupId, true, sessionId),
             assetData.refreshProjectAssetTotal(true, sessionId),
           ]);
         },
@@ -564,10 +430,7 @@ export function VolcanoAssetManager({
       setNotice({ tone: "error", text: "素材名称不能为空" });
       return;
     }
-    const lockKey = volcanoAssetLockKey(
-      target.asset.group_id,
-      target.asset.id,
-    );
+    const lockKey = volcanoAssetLockKey(target.asset.group_id, target.asset.id);
     if (operationController.operationHasConflict(lockKey)) {
       setNotice({
         tone: "error",
@@ -584,19 +447,12 @@ export function VolcanoAssetManager({
       },
       {
         submit: (signal) =>
-          patchVideoAsset(
-            target.asset.id,
-            model,
-            { name },
-            { signal },
-          ),
+          patchVideoAsset(target.asset.id, model, { name }, { signal }),
         onSucceeded: async (_result, operation, sessionId) => {
           const asset = volcanoOperationAssetResult(operation);
           if (asset) {
             assetData.setAssets((current) =>
-              current.map((item) =>
-                item.id === asset.id ? asset : item,
-              ),
+              current.map((item) => (item.id === asset.id ? asset : item)),
             );
             setSelected((current) =>
               current.map((item) =>
@@ -615,20 +471,15 @@ export function VolcanoAssetManager({
           });
           if (!isSessionActive(sessionId, model)) return false;
           const matched = result.items.find(
-            (item) =>
-              item.id === target.asset.id && item.name === name,
+            (item) => item.id === target.asset.id && item.name === name,
           );
           if (matched) {
             assetData.setAssets((current) =>
-              current.map((item) =>
-                item.id === matched.id ? matched : item,
-              ),
+              current.map((item) => (item.id === matched.id ? matched : item)),
             );
             setSelected((current) =>
               current.map((item) =>
-                item.id === matched.id
-                  ? assetSelection(matched)
-                  : item,
+                item.id === matched.id ? assetSelection(matched) : item,
               ),
             );
           }
@@ -658,14 +509,12 @@ export function VolcanoAssetManager({
       target.kind === "group" &&
       uploadQueue.uploadsRef.current.some(
         (item) =>
-          item.groupId === target.group.id &&
-          uploadBlocksGroupMutation(item),
+          item.groupId === target.group.id && uploadBlocksGroupMutation(item),
       )
     ) {
       setNotice({
         tone: "error",
-        text:
-          "该素材组仍有上传或后台创建任务，请先等待结果或移除未提交文件",
+        text: "该素材组仍有上传或后台创建任务，请先等待结果或移除未提交文件",
       });
       setDeleteTarget(null);
       return;
@@ -693,25 +542,17 @@ export function VolcanoAssetManager({
                   [target.asset.id],
                 );
                 assetData.setAssets((current) =>
-                  current.filter(
-                    (item) => !deletedIds.includes(item.id),
-                  ),
+                  current.filter((item) => !deletedIds.includes(item.id)),
                 );
                 setSelected((current) =>
-                  current.filter(
-                    (item) => !deletedIds.includes(item.id),
-                  ),
+                  current.filter((item) => !deletedIds.includes(item.id)),
                 );
                 notifyDeletedReferences(deletedIds);
                 await Promise.all([
                   assetData.refreshAssets(true, sessionId),
                   assetData.refreshProjectAssetTotal(true, sessionId),
                 ]);
-                void assetData.refreshGroups(
-                  undefined,
-                  true,
-                  sessionId,
-                );
+                void assetData.refreshGroups(undefined, true, sessionId);
               },
               verifyUnknown: async (signal, sessionId) => {
                 const result = await scanVideoAssets({
@@ -726,25 +567,14 @@ export function VolcanoAssetManager({
                 );
                 if (deleted) {
                   assetData.setAssets((current) =>
-                    current.filter(
-                      (item) => item.id !== target.asset.id,
-                    ),
+                    current.filter((item) => item.id !== target.asset.id),
                   );
                   setSelected((current) =>
-                    current.filter(
-                      (item) => item.id !== target.asset.id,
-                    ),
+                    current.filter((item) => item.id !== target.asset.id),
                   );
                   notifyDeletedReferences([target.asset.id]);
-                  void assetData.refreshProjectAssetTotal(
-                    true,
-                    sessionId,
-                  );
-                  void assetData.refreshGroups(
-                    undefined,
-                    true,
-                    sessionId,
-                  );
+                  void assetData.refreshProjectAssetTotal(true, sessionId);
+                  void assetData.refreshGroups(undefined, true, sessionId);
                 }
                 await assetData.refreshAssets(true, sessionId);
                 return deleted;
@@ -778,22 +608,16 @@ export function VolcanoAssetManager({
                 );
                 notifyDeletedReferences(deletedIds);
                 assetData.setGroups((current) =>
-                  current.filter(
-                    (item) => item.id !== target.group.id,
-                  ),
+                  current.filter((item) => item.id !== target.group.id),
                 );
                 assetData.setSelectedGroupId((current) =>
                   current === target.group.id ? null : current,
                 );
                 setSelected((current) =>
-                  current.filter(
-                    (item) => item.group_id !== target.group.id,
-                  ),
+                  current.filter((item) => item.group_id !== target.group.id),
                 );
                 assetData.setAssets((current) =>
-                  current.filter(
-                    (item) => item.group_id !== target.group.id,
-                  ),
+                  current.filter((item) => item.group_id !== target.group.id),
                 );
                 for (const item of uploadQueue.uploadsRef.current.filter(
                   (upload) => upload.groupId === target.group.id,
@@ -801,22 +625,14 @@ export function VolcanoAssetManager({
                   uploadQueue.uploadControllersRef.current
                     .get(item.id)
                     ?.abort();
-                  uploadQueue.uploadControllersRef.current.delete(
-                    item.id,
-                  );
+                  uploadQueue.uploadControllersRef.current.delete(item.id);
                   uploadQueue.uploadNamesRef.current.delete(item.id);
                 }
                 uploadQueue.commitUploadQueue(model, (current) =>
-                  current.filter(
-                    (item) => item.groupId !== target.group.id,
-                  ),
+                  current.filter((item) => item.groupId !== target.group.id),
                 );
                 await Promise.all([
-                  assetData.refreshGroups(
-                    undefined,
-                    true,
-                    sessionId,
-                  ),
+                  assetData.refreshGroups(undefined, true, sessionId),
                   assetData.refreshProjectAssetTotal(true, sessionId),
                 ]);
               },
@@ -833,27 +649,18 @@ export function VolcanoAssetManager({
                 if (deleted) {
                   notifyDeletedReferences(deletedGroupAssetIds);
                   assetData.setGroups((current) =>
-                    current.filter(
-                      (item) => item.id !== target.group.id,
-                    ),
+                    current.filter((item) => item.id !== target.group.id),
                   );
                   assetData.setSelectedGroupId((current) =>
                     current === target.group.id ? null : current,
                   );
                   setSelected((current) =>
-                    current.filter(
-                      (item) => item.group_id !== target.group.id,
-                    ),
+                    current.filter((item) => item.group_id !== target.group.id),
                   );
                   uploadQueue.commitUploadQueue(model, (current) =>
-                    current.filter(
-                      (item) => item.groupId !== target.group.id,
-                    ),
+                    current.filter((item) => item.groupId !== target.group.id),
                   );
-                  void assetData.refreshProjectAssetTotal(
-                    true,
-                    sessionId,
-                  );
+                  void assetData.refreshProjectAssetTotal(true, sessionId);
                 }
                 return deleted;
               },
@@ -884,7 +691,7 @@ export function VolcanoAssetManager({
   };
 
   return (
-    <VolcanoAssetManagerView
+    <VolcanoAssetManagerPresentation
       open={open}
       titleId={titleId}
       descriptionId={descriptionId}
@@ -893,142 +700,44 @@ export function VolcanoAssetManager({
       closeButtonRef={closeButtonRef}
       onKeyDown={onDialogKeyDown}
       onClose={onClose}
-      capability={{
-        value: assetData.capability,
-        loading: assetData.capabilityLoading,
-        error: assetData.capabilityError,
-        onRetry: () => void assetData.loadCapability(),
-      }}
-      quotas={{
-        projectAssetTotal: assetData.projectAssetTotal,
-        projectGroupTotal: assetData.projectGroupTotal,
-        quotaLoading: assetData.quotaLoading,
-        quotaError: assetData.quotaError,
-      }}
-      groups={{
-        groups: assetData.groups,
-        filteredGroups,
-        groupTotal: assetData.groupTotal,
-        loading: assetData.groupsLoading,
-        error: assetData.groupsError,
-        search: groupSearch,
-        selectedGroupId: assetData.selectedGroupId,
-        form: groupForm,
-        formError: groupFormError,
-        createDisabledReason: groupCreateDisabledReason,
-        uploads: uploadQueue.uploads,
-        pendingOperationsByLock,
-        onSearchChange: setGroupSearch,
-        onOpenCreate: () => {
-          setGroupForm({
-            mode: "create",
-            name: "",
-            description: "",
-          });
-          setGroupFormError(null);
-        },
-        onFormChange: setGroupForm,
-        onCancelForm: () => setGroupForm(null),
-        onSaveForm: saveGroup,
-        onSelect: assetData.selectGroup,
-        onRename: (group) => {
-          setGroupForm({
-            mode: "rename",
-            groupId: group.id,
-            name: group.name,
-            description: group.description,
-          });
-          setGroupFormError(null);
-        },
-        onDelete: (group) =>
-          setDeleteTarget({ kind: "group", group }),
-      }}
-      uploads={{
-        operations: operationController.operations,
-        uploads: uploadQueue.uploads,
-        blockedUploadIds,
-        disabledReason: uploadDisabledReason,
-        pendingAssetCreates: uploadController.pendingAssetCreates,
-        dragActive,
-        notice,
-        onRetryOperation: operationController.retryOperation,
-        onDismissOperation: operationController.dismissOperation,
-        onDragActive: setDragActive,
-        onFiles: uploadController.enqueueFiles,
-        onRename: uploadController.renameUpload,
-        onRemove: uploadController.removeUpload,
-        onRetry: uploadController.retryUpload,
-      }}
-      assets={{
-        selectedGroup,
-        selectedGroupId: assetData.selectedGroupId,
-        totalCount: assetData.assetTotal,
-        loadedAssetCount: loadedAssets.length,
-        searchInput: assetData.assetSearchInput,
-        search: assetData.assetSearch,
-        typeFilter: assetData.typeFilter,
-        statusFilter: assetData.statusFilter,
-        loading: assetData.assetsLoading,
-        error: assetData.assetsError,
-        visibleAssets: loadedAssets,
-        page: Math.min(assetData.assetPage, totalAssetPages),
-        totalPages: totalAssetPages,
-        selected,
-        existingIds,
-        remainingLimits,
-        selectedImageCount,
-        selectedVideoCount,
-        pendingOperationsByLock,
-        selectedGroupDeleting,
-        selectedGroupOperation,
-        renameAsset,
-        onSearchInputChange: assetData.setAssetSearchInput,
-        onTypeFilterChange: assetData.changeTypeFilter,
-        onStatusFilterChange: assetData.changeStatusFilter,
-        onRefresh: () => {
-          void assetData.refreshAssets(false);
-          void assetData.refreshProjectAssetTotal(true);
-          void assetData.refreshGroups(undefined, true);
-        },
-        onRenameAssetChange: (name) =>
-          setRenameAsset((current) =>
-            current ? { ...current, name } : current,
-          ),
-        onCancelRename: () => setRenameAsset(null),
-        onSaveRename: saveAssetName,
-        onToggle: toggleAsset,
-        onOpenRename: (asset) =>
-          setRenameAsset({
-            asset,
-            name: asset.name || "",
-          }),
-        onDelete: (asset) =>
-          setDeleteTarget({ kind: "asset", asset }),
-        onPreviousPage: () =>
-          assetData.setAssetPage((current) =>
-            Math.max(1, current - 1),
-          ),
-        onNextPage: () =>
-          assetData.setAssetPage((current) =>
-            Math.min(totalAssetPages, current + 1),
-          ),
-      }}
-      selection={{
-        selected,
-        selectedImageCount,
-        selectedVideoCount,
-        remainingLimits,
-        onClear: () => setSelected([]),
-        onUse: () => {
-          onUse(selected);
-          onClose();
-        },
-      }}
-      deleteDialog={{
-        target: deleteTarget,
-        onClose: () => setDeleteTarget(null),
-        onConfirm: confirmDelete,
-      }}
+      remainingLimits={remainingLimits}
+      onUse={onUse}
+      assetData={assetData}
+      uploadQueue={uploadQueue}
+      operationController={operationController}
+      uploadController={uploadController}
+      pendingOperationsByLock={pendingOperationsByLock}
+      blockedUploadIds={blockedUploadIds}
+      uploadDisabledReason={uploadDisabledReason}
+      groupCreateDisabledReason={groupCreateDisabledReason}
+      groupSearch={groupSearch}
+      setGroupSearch={setGroupSearch}
+      filteredGroups={filteredGroups}
+      groupForm={groupForm}
+      setGroupForm={setGroupForm}
+      groupFormError={groupFormError}
+      setGroupFormError={setGroupFormError}
+      dragActive={dragActive}
+      setDragActive={setDragActive}
+      notice={notice}
+      selectedGroup={selectedGroup}
+      loadedAssets={loadedAssets}
+      totalAssetPages={totalAssetPages}
+      selected={selected}
+      setSelected={setSelected}
+      existingIds={existingIds}
+      selectedImageCount={selectedImageCount}
+      selectedVideoCount={selectedVideoCount}
+      selectedGroupDeleting={selectedGroupDeleting}
+      selectedGroupOperation={selectedGroupOperation}
+      renameAsset={renameAsset}
+      setRenameAsset={setRenameAsset}
+      deleteTarget={deleteTarget}
+      setDeleteTarget={setDeleteTarget}
+      saveGroup={saveGroup}
+      saveAssetName={saveAssetName}
+      toggleAsset={toggleAsset}
+      confirmDelete={confirmDelete}
     />
   );
 }
