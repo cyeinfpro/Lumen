@@ -7,20 +7,16 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import logging
-from datetime import datetime, timedelta, timezone
-from types import MappingProxyType
-from typing import Annotated, Any, Awaitable, Literal, cast
+from datetime import datetime, timedelta, timezone  # noqa: F401
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import and_, desc, func, or_, select, update
+from pydantic import BaseModel, Field
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from lumen_core.models import (
-    AllowedEmail,
     AuthSession,
     Completion,
     Conversation,
@@ -28,11 +24,7 @@ from lumen_core.models import (
     Image,
     ImageVariant,
     Message,
-    OutboxDeadLetter,
-    OutboxEvent,
     User,
-    VideoGeneration,
-    WorkflowRun,
 )
 from lumen_core.schemas import AdminUserOut, AllowedEmailOut
 from lumen_core.utils import ensure_utc
@@ -53,23 +45,18 @@ from ..redis_client import get_redis
 from ..security import hash_password
 from ..services.admin import request_events as _request_events
 from ._admin_common import admin_http as _http, write_admin_audit
-from .admin_context_metrics import (
-    context_health_zero as _context_health_zero,
-    fold_context_metrics as _fold_context_metrics,
-    hourly_context_metric_keys as _hourly_context_metric_keys,
-    iso_z as _iso_z,
-    redis_text as _redis_text,
-)
 from .media_delivery import (
     image_storage_path,
     image_storage_streaming_response,
 )
 from .me import cancel_account_active_tasks, post_commit_account_task_cleanup
+from . import admin_allowed_email_routes as _admin_allowed_email_routes
+from . import admin_context_routes as _admin_context_routes
+from . import admin_dlq_routes as _admin_dlq_routes
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
-
 
 _CONTEXT_METRIC_FIELDS = (
     "summary_attempts",
@@ -78,8 +65,10 @@ _CONTEXT_METRIC_FIELDS = (
     "manual_compact_calls",
     "cold_start_count",
 )
-_CONTEXT_CIRCUIT_STATE_KEY = "context:circuit:breaker:state"
-_CONTEXT_CIRCUIT_UNTIL_KEY = "context:circuit:breaker:until"
+_CONTEXT_CIRCUIT_STATE_KEY = _admin_context_routes.CONTEXT_CIRCUIT_STATE_KEY
+_CONTEXT_CIRCUIT_UNTIL_KEY = _admin_context_routes.CONTEXT_CIRCUIT_UNTIL_KEY
+_context_health_zero = _admin_context_routes.context_health_zero
+_hourly_context_metric_keys = _admin_context_routes.hourly_context_metric_keys
 
 # Request-event symbols remain exported from this route for compatibility.
 _RequestEventImageOut = _request_events.RequestEventImageOut
@@ -87,7 +76,6 @@ _RequestEventLiveLane = _request_events.RequestEventLiveLane
 _RequestEventOut = _request_events.RequestEventOut
 _RequestEventModelStatOut = _request_events.RequestEventModelStatOut
 _RequestEventsOut = _request_events.RequestEventsOut
-
 
 # Request-event compatibility facade.  Keep the old private names available
 # because operators and tests import them directly.
@@ -188,67 +176,24 @@ async def _request_event_model_stats_for_filters(
 
 
 async def _read_context_circuit(redis: Any, now: datetime) -> tuple[str, str | None]:
-    raw_state = await redis.get(_CONTEXT_CIRCUIT_STATE_KEY)
-    state_text = (_redis_text(raw_state) or "closed").strip()
-    until: str | None = None
-    if state_text.startswith("{"):
-        try:
-            parsed = json.loads(state_text)
-            if isinstance(parsed, dict):
-                state_text = str(parsed.get("state") or "closed")
-                until = _redis_text(parsed.get("until"))
-        except Exception:
-            state_text = "closed"
-    if state_text not in {"closed", "open", "half_open"}:
-        state_text = "closed"
-
-    if until is None:
-        raw_until = await redis.get(_CONTEXT_CIRCUIT_UNTIL_KEY)
-        until = _redis_text(raw_until)
-    if until is None and state_text == "open":
-        try:
-            ttl_ms = await redis.pttl(_CONTEXT_CIRCUIT_STATE_KEY)
-        except Exception:
-            ttl_ms = -1
-        if ttl_ms and ttl_ms > 0:
-            until = _iso_z(now + timedelta(milliseconds=ttl_ms))
-    if state_text != "open":
-        until = None
-    return state_text, until
+    return await _admin_context_routes.read_context_circuit(redis, now)
 
 
 @router.get("/context/health")
 async def context_health(_admin: AdminUser) -> dict:
-    out = _context_health_zero()
-    redis = get_redis()
-    now = datetime.now(timezone.utc)
-    try:
-        state, until = await _read_context_circuit(redis, now)
-        metric_rows = []
-        for key in _hourly_context_metric_keys(now):
-            metric_rows.append(
-                await cast(
-                    Awaitable[dict[str, str]],
-                    redis.hgetall(key),
-                )
-            )
-        out["circuit_breaker_state"] = state
-        out["circuit_breaker_until"] = until
-        out["last_24h"] = _fold_context_metrics(metric_rows)
-        return out
-    except Exception:
-        logger.warning("context health degraded", exc_info=True)
-        return _context_health_zero(
-            degraded=True,
-            degrade_reason="redis_unavailable",
+    return await _admin_context_routes.context_health(
+        deps=_admin_context_routes.ContextHealthDependencies(
+            get_redis=get_redis,
+            now=lambda: datetime.now(timezone.utc),
+            logger=logger,
         )
+    )
 
 
 # ---------- AllowedEmails ----------
 
 
-class _AllowedEmailIn(BaseModel):
-    email: EmailStr
+_AllowedEmailIn = _admin_allowed_email_routes.AllowedEmailIn
 
 
 @router.get("/allowed_emails")
@@ -256,31 +201,17 @@ async def list_allowed_emails(
     _admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    Inviter = aliased(User)
-    rows = (
-        await db.execute(
-            select(AllowedEmail, Inviter.email)
-            .join(
-                Inviter,
-                and_(
-                    Inviter.id == AllowedEmail.invited_by,
-                    Inviter.deleted_at.is_(None),
-                ),
-                isouter=True,
-            )
-            .order_by(AllowedEmail.created_at.desc())
-        )
-    ).all()
-    items = [
-        AllowedEmailOut(
-            id=ae.id,
-            email=ae.email,
-            invited_by_email=inviter_email,
-            created_at=ae.created_at,
-        )
-        for ae, inviter_email in rows
-    ]
-    return {"items": items}
+    return await _admin_allowed_email_routes.list_allowed_emails(db)
+
+
+def _allowed_email_dependencies() -> (
+    _admin_allowed_email_routes.AllowedEmailDependencies
+):
+    return _admin_allowed_email_routes.AllowedEmailDependencies(
+        http_error=_http,
+        write_admin_audit=write_admin_audit,
+        hash_email=hash_email,
+    )
 
 
 @router.post(
@@ -295,30 +226,12 @@ async def add_allowed_email(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AllowedEmailOut:
-    email = str(body.email).lower().strip()
-    exists = (
-        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
-    ).scalar_one_or_none()
-    if exists:
-        raise _http("already_exists", "email already allowed", 409)
-
-    ae = AllowedEmail(email=email, invited_by=admin.id)
-    db.add(ae)
-    await db.flush()
-    await write_admin_audit(
-        db,
-        request,
-        admin,
-        event_type="admin.allowed_email.add",
-        details={"email_hash": hash_email(email), "id": ae.id},
-    )
-    await db.commit()
-    await db.refresh(ae)
-    return AllowedEmailOut(
-        id=ae.id,
-        email=ae.email,
-        invited_by_email=admin.email,
-        created_at=ae.created_at,
+    return await _admin_allowed_email_routes.add_allowed_email(
+        body=body,
+        request=request,
+        admin=admin,
+        db=db,
+        deps=_allowed_email_dependencies(),
     )
 
 
@@ -333,21 +246,13 @@ async def delete_allowed_email(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
-    ae = (
-        await db.execute(select(AllowedEmail).where(AllowedEmail.id == ae_id))
-    ).scalar_one_or_none()
-    if not ae:
-        raise _http("not_found", "allowed email not found", 404)
-    await write_admin_audit(
-        db,
-        request,
-        admin,
-        event_type="admin.allowed_email.delete",
-        details={"email_hash": hash_email(ae.email), "id": ae.id},
+    await _admin_allowed_email_routes.delete_allowed_email(
+        allowed_email_id=ae_id,
+        request=request,
+        admin=admin,
+        db=db,
+        deps=_allowed_email_dependencies(),
     )
-    await db.delete(ae)
-    await db.commit()
-    return None
 
 
 # ---------- Users ----------
@@ -841,171 +746,6 @@ async def get_admin_image_variant(
     )
 
 
-# ---------- DLQ (Outbox dead-letter management) ----------
-
-
-class _DlqItemOut(BaseModel):
-    id: str
-    outbox_id: str | None
-    event_type: str
-    payload: dict[str, Any]
-    error_class: str | None
-    error_message: str | None
-    retry_count: int
-    failed_at: datetime
-    resolved_at: datetime | None
-
-
-DlqTaskKind = Literal[
-    "generation",
-    "completion",
-    "video_generation",
-    "storyboard_assembly",
-]
-
-DlqKind = DlqTaskKind | Literal["sse"]
-
-_DLQ_KIND_BY_EVENT_TYPE = MappingProxyType(
-    {
-        "outbox.generation": "generation",
-        "outbox.completion": "completion",
-        "outbox.video_generation": "video_generation",
-        "outbox.storyboard_assembly": "storyboard_assembly",
-        "outbox.sse": "sse",
-    }
-)
-
-
-async def _dlq_task_exists(
-    db: AsyncSession,
-    *,
-    kind: DlqTaskKind,
-    task_id: str,
-) -> bool:
-    if kind == "generation":
-        stmt = select(Generation.id).join(User, User.id == Generation.user_id)
-    elif kind == "completion":
-        stmt = select(Completion.id).join(User, User.id == Completion.user_id)
-    elif kind == "video_generation":
-        stmt = select(VideoGeneration.id).join(
-            User,
-            User.id == VideoGeneration.user_id,
-        )
-    else:
-        stmt = (
-            select(WorkflowRun.id)
-            .join(User, User.id == WorkflowRun.user_id)
-            .where(WorkflowRun.type == "storyboard")
-        )
-    exists = (
-        await db.execute(
-            stmt.where(
-                stmt.selected_columns[0] == task_id,
-                User.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    return exists is not None
-
-
-async def _soft_deleted_dlq_task_ids(
-    db: AsyncSession,
-    *,
-    kind: DlqTaskKind,
-    task_ids: set[str],
-) -> set[str]:
-    if not task_ids:
-        return set()
-    if kind == "generation":
-        stmt = (
-            select(Generation.id)
-            .join(User, User.id == Generation.user_id)
-            .where(
-                Generation.id.in_(task_ids),
-                User.deleted_at.is_not(None),
-            )
-        )
-    elif kind == "completion":
-        stmt = (
-            select(Completion.id)
-            .join(User, User.id == Completion.user_id)
-            .where(
-                Completion.id.in_(task_ids),
-                User.deleted_at.is_not(None),
-            )
-        )
-    elif kind == "video_generation":
-        stmt = (
-            select(VideoGeneration.id)
-            .join(User, User.id == VideoGeneration.user_id)
-            .where(
-                VideoGeneration.id.in_(task_ids),
-                User.deleted_at.is_not(None),
-            )
-        )
-    else:
-        stmt = (
-            select(WorkflowRun.id)
-            .join(User, User.id == WorkflowRun.user_id)
-            .where(
-                WorkflowRun.id.in_(task_ids),
-                WorkflowRun.type == "storyboard",
-                User.deleted_at.is_not(None),
-            )
-        )
-    return set((await db.execute(stmt)).scalars())
-
-
-async def _soft_deleted_dlq_row_ids(
-    db: AsyncSession,
-    rows: list[OutboxDeadLetter],
-) -> set[str]:
-    task_rows_by_kind: dict[DlqTaskKind, dict[str, set[str]]] = {}
-    sse_rows_by_user: dict[str, set[str]] = {}
-
-    for row in rows:
-        kind = _DLQ_KIND_BY_EVENT_TYPE.get(row.event_type)
-        if kind is None:
-            continue
-        payload = dict(row.payload or {})
-        if kind == "sse":
-            user_id = payload.get("user_id")
-            if isinstance(user_id, str) and user_id:
-                sse_rows_by_user.setdefault(user_id, set()).add(row.id)
-            continue
-        task_id = payload.get("task_id") or payload.get("id")
-        if isinstance(task_id, str) and task_id:
-            task_rows_by_kind.setdefault(kind, {}).setdefault(task_id, set()).add(
-                row.id
-            )
-
-    row_ids: set[str] = set()
-    for kind, rows_by_task in task_rows_by_kind.items():
-        deleted_task_ids = await _soft_deleted_dlq_task_ids(
-            db,
-            kind=kind,
-            task_ids=set(rows_by_task),
-        )
-        for task_id in deleted_task_ids:
-            row_ids.update(rows_by_task[task_id])
-
-    if sse_rows_by_user:
-        deleted_user_ids = set(
-            (
-                await db.execute(
-                    select(User.id).where(
-                        User.id.in_(sse_rows_by_user),
-                        User.deleted_at.is_not(None),
-                    )
-                )
-            ).scalars()
-        )
-        for user_id in deleted_user_ids:
-            row_ids.update(sse_rows_by_user[user_id])
-
-    return row_ids
-
-
 @router.get("/dlq")
 async def list_dlq(
     _admin: AdminUser,
@@ -1013,146 +753,19 @@ async def list_dlq(
     limit: int = Query(default=50, ge=1, le=200),
     include_resolved: bool = Query(default=False),
 ) -> dict:
-    stmt = select(OutboxDeadLetter)
-    if not include_resolved:
-        stmt = stmt.where(OutboxDeadLetter.resolved_at.is_(None))
-    stmt = stmt.order_by(desc(OutboxDeadLetter.failed_at)).limit(limit)
-    rows = list((await db.execute(stmt)).scalars())
-    items = [
-        _DlqItemOut(
-            id=r.id,
-            outbox_id=r.outbox_id,
-            event_type=r.event_type,
-            payload=dict(r.payload or {}),
-            error_class=r.error_class,
-            error_message=r.error_message,
-            retry_count=r.retry_count,
-            failed_at=r.failed_at,
-            resolved_at=r.resolved_at,
-        )
-        for r in rows
-    ]
-    return {"items": items, "total": len(items)}
-
-
-async def _load_dlq_retry_row(
-    db: AsyncSession,
-    dlq_id: str,
-) -> OutboxDeadLetter:
-    row = (
-        await db.execute(
-            select(OutboxDeadLetter)
-            .where(OutboxDeadLetter.id == dlq_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if not row:
-        raise _http("not_found", "dlq item not found", 404)
-    if row.resolved_at is not None:
-        raise _http("already_resolved", "dlq item already resolved", 409)
-    return row
-
-
-def _validate_dlq_retry_row(row: OutboxDeadLetter) -> tuple[DlqKind, dict[str, Any]]:
-    kind = _DLQ_KIND_BY_EVENT_TYPE.get(row.event_type)
-    if kind is None:
-        raise _http(
-            "unsupported_event_type",
-            f"DLQ retry does not support {row.event_type}",
-            422,
-        )
-    if row.error_class not in {"OutboxEnqueueFailed", "OutboxPublishFailed"}:
-        raise _http(
-            "unrepairable_dlq_payload",
-            "malformed or invalid outbox payload must be repaired before retry",
-            422,
-        )
-    return kind, dict(row.payload or {})
-
-
-async def _validate_dlq_retry_owner(
-    db: AsyncSession,
-    *,
-    row: OutboxDeadLetter,
-    kind: DlqKind,
-    payload: dict[str, Any],
-    dlq_id: str,
-) -> str | None:
-    task_id = payload.get("task_id") or payload.get("id")
-    if kind == "sse":
-        user_id = payload.get("user_id")
-        valid = (
-            isinstance(user_id, str)
-            and bool(user_id)
-            and isinstance(payload.get("channel"), str)
-            and bool(payload.get("channel"))
-            and isinstance(payload.get("event_name"), str)
-            and bool(payload.get("event_name"))
-            and isinstance(payload.get("data"), dict)
-        )
-        if not valid:
-            raise _http("invalid_payload", "DLQ SSE payload is invalid", 400)
-        exists = (
-            await db.execute(
-                select(User.id).where(
-                    User.id == user_id,
-                    User.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-        task_id = user_id
-    else:
-        if not isinstance(task_id, str) or not task_id:
-            raise _http("invalid_task_id", "dlq payload task_id is invalid", 400)
-        exists = await _dlq_task_exists(db, kind=kind, task_id=task_id)
-    if exists:
-        return str(task_id)
-    logger.info(
-        "dlq retry skipped: task_or_user_missing dlq_id=%s task_id=%s event_type=%s",
-        dlq_id,
-        task_id,
-        row.event_type,
-    )
-    raise _http(
-        "task_not_found",
-        "dlq payload references an unknown task or deleted user",
-        404,
+    return await _admin_dlq_routes.list_dlq(
+        db=db,
+        limit=limit,
+        include_resolved=include_resolved,
     )
 
 
-async def _prepare_dlq_outbox(
-    db: AsyncSession,
-    *,
-    row: OutboxDeadLetter,
-    kind: DlqKind,
-    payload: dict[str, Any],
-) -> OutboxEvent:
-    outbox = None
-    if row.outbox_id:
-        outbox = (
-            await db.execute(
-                select(OutboxEvent)
-                .where(OutboxEvent.id == row.outbox_id)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-    if outbox is None:
-        outbox = OutboxEvent(kind=kind, payload={}, published_at=None)
-        db.add(outbox)
-        await db.flush()
-        row.outbox_id = outbox.id
-    elif outbox.kind != kind:
-        raise _http(
-            "outbox_kind_mismatch",
-            "DLQ event type does not match its outbox row",
-            409,
-        )
-    payload["outbox_id"] = str(outbox.id)
-    outbox.payload = payload
-    outbox.published_at = None
-    row.retry_count = (row.retry_count or 0) + 1
-    row.error_message = "retry scheduled via durable outbox"
-    return outbox
+def _dlq_route_dependencies() -> _admin_dlq_routes.DlqRouteDependencies:
+    return _admin_dlq_routes.DlqRouteDependencies(
+        http_error=_http,
+        write_admin_audit=write_admin_audit,
+        logger=logger,
+    )
 
 
 @router.post("/dlq/{dlq_id}/retry", dependencies=[Depends(verify_csrf)])
@@ -1162,42 +775,13 @@ async def retry_dlq(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    row = await _load_dlq_retry_row(db, dlq_id)
-    kind, payload = _validate_dlq_retry_row(row)
-    task_id = await _validate_dlq_retry_owner(
-        db,
-        row=row,
-        kind=kind,
-        payload=payload,
+    return await _admin_dlq_routes.retry_dlq(
         dlq_id=dlq_id,
+        request=request,
+        admin=admin,
+        db=db,
+        deps=_dlq_route_dependencies(),
     )
-    outbox = await _prepare_dlq_outbox(
-        db,
-        row=row,
-        kind=kind,
-        payload=payload,
-    )
-    await write_admin_audit(
-        db,
-        request,
-        admin,
-        event_type="admin.dlq.retry",
-        details={
-            "dlq_id": dlq_id,
-            "event_type": row.event_type,
-            "requeued": True,
-            "task_id": task_id,
-            "outbox_id": outbox.id,
-        },
-    )
-    await db.commit()
-    return {
-        "ok": True,
-        "dlq_id": dlq_id,
-        "requeued": True,
-        "resolved": False,
-        "outbox_id": outbox.id,
-    }
 
 
 @router.post("/dlq/sweep-deleted-users", dependencies=[Depends(verify_csrf)])
@@ -1207,74 +791,10 @@ async def sweep_dlq_for_deleted_users(
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(default=500, ge=1, le=5000),
 ) -> dict:
-    """Mark DLQ rows whose owning user was soft-deleted as resolved.
-
-    Why: ``retry_dlq`` joins ``User.deleted_at IS NULL`` for safety, which
-    means dead letters owned by soft-deleted users can never be retried and
-    silently accumulate. This sweeper closes them out as ``resolved`` (not
-    physically deleted, so the audit/forensics trail is preserved) and
-    writes an admin audit row capturing the sweep size.
-    """
-    swept_ids: list[str] = []
-    scanned = 0
-    now = datetime.now(timezone.utc)
-    cursor: tuple[datetime, str] | None = None
-    while True:
-        stmt = select(OutboxDeadLetter).where(
-            OutboxDeadLetter.resolved_at.is_(None),
-            OutboxDeadLetter.event_type.in_(tuple(_DLQ_KIND_BY_EVENT_TYPE)),
-        )
-        if cursor is not None:
-            failed_at, dlq_id = cursor
-            stmt = stmt.where(
-                or_(
-                    OutboxDeadLetter.failed_at > failed_at,
-                    and_(
-                        OutboxDeadLetter.failed_at == failed_at,
-                        OutboxDeadLetter.id > dlq_id,
-                    ),
-                )
-            )
-        rows = list(
-            (
-                await db.execute(
-                    stmt.order_by(
-                        OutboxDeadLetter.failed_at.asc(),
-                        OutboxDeadLetter.id.asc(),
-                    ).limit(limit)
-                )
-            ).scalars()
-        )
-        if not rows:
-            break
-
-        scanned += len(rows)
-        deleted_owner_row_ids = await _soft_deleted_dlq_row_ids(db, rows)
-        for row in rows:
-            if row.id not in deleted_owner_row_ids:
-                continue
-            row.resolved_at = now
-            row.error_message = (
-                (row.error_message or "") + " | swept: owner soft-deleted"
-            ).strip(" |")
-            swept_ids.append(row.id)
-
-        cursor = (rows[-1].failed_at, rows[-1].id)
-        if len(rows) < limit:
-            break
-
-    await write_admin_audit(
-        db,
-        request,
-        admin,
-        event_type="admin.dlq.sweep_deleted_users",
-        details={"swept": len(swept_ids), "scanned": scanned},
+    return await _admin_dlq_routes.sweep_dlq_for_deleted_users(
+        request=request,
+        admin=admin,
+        db=db,
+        limit=limit,
+        deps=_dlq_route_dependencies(),
     )
-    await db.commit()
-    logger.info(
-        "dlq sweep deleted-users admin=%s swept=%d scanned=%d",
-        admin.id,
-        len(swept_ids),
-        scanned,
-    )
-    return {"ok": True, "swept": len(swept_ids), "scanned": scanned}
