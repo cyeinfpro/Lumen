@@ -7,15 +7,12 @@ V1 不实现：variations、share、shares/*（V1.1+）。
 
 from __future__ import annotations
 
-import errno
 import logging
-import os
-import secrets
-import shutil
-from datetime import datetime, timedelta, timezone
+import os  # noqa: F401
+import shutil  # noqa: F401
+from datetime import datetime, timezone
 from pathlib import Path
-from types import MappingProxyType
-from typing import Annotated, Any, BinaryIO, Iterator
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
@@ -28,7 +25,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from PIL import Image as PILImage
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -47,9 +43,6 @@ from lumen_core.models import (
     ImageVariant,
     Share,
     User,
-)
-from lumen_core.model_image_metadata import (
-    model_image_filename,
 )
 from lumen_core.schemas import ImageOut
 from lumen_core.volcano_asset_media import (
@@ -71,14 +64,6 @@ from ...ratelimit import (
     require_client_ip,
 )
 from ...redis_client import get_redis
-from ._file_delivery import (
-    etag_matches_if_none_match as _etag_matches_if_none_match,
-    internal_redirect_enabled as _internal_redirect_enabled,
-    iter_open_file_and_close as _iter_delivery_file_and_close,
-    open_regular_file_no_symlink as _open_regular_file_no_symlink,
-    storage_streaming_response as _build_storage_streaming_response,
-)
-from ...services import storage_files
 from ..composition import (
     create_image_route_lifespan,
     get_upload_command_service,
@@ -88,54 +73,37 @@ from ..domain.artifact import ArtifactStatus
 from ..domain.variants import (
     ALLOWED_VARIANTS,
     DISPLAY_VARIANT,
-    PREVIEW_VARIANT,
-    THUMB_VARIANT,
     VARIANT_MEDIA_TYPE,
     VIDEO_REFERENCE_VARIANT,
-    deterministic_variant_key,
 )
-from ..processing.model_metadata import MODEL_LIBRARY_METADATA_PROFILE
 from .create_variant import (
     CreateVariantService,
     VariantError,
-    make_display_variant,
 )
-from .deliver import DeliverySpec, deliver_artifact
-from .upload import (
-    UploadCommandError,
-    UploadCommandService,
-    UploadPolicy,
+from .http_route_parts import (
+    presentation as route_presentation,
+    reference_access,
+    storage as route_storage,
+    upload as route_upload,
 )
+from .upload import UploadCommandService
 from .visibility_batch import ImageVisibilityCandidate, visible_image_ids
 
 
 router = APIRouter(lifespan=create_image_route_lifespan())
 logger = logging.getLogger(__name__)
 
-_VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
-
-_LINK_UNSUPPORTED_ERRNOS = frozenset(
-    {
-        errno.EPERM,
-        errno.EACCES,
-        errno.EXDEV,
-        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
-        errno.EOPNOTSUPP,
-    }
-)
-
-
-MAX_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_LONG_SIDE = 4096
-VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE = 8192
-MAX_IMAGE_PIXELS = 64_000_000
-PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
-ALLOWED_MIME = frozenset({"image/png", "image/jpeg", "image/webp"})
-EXT_BY_MIME = MappingProxyType(
-    {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
-)
-NORMALIZABLE_UPLOAD_MIME = frozenset({"image/mpo", "image/x-mpo"})
-MIN_STORAGE_FREE_BYTES = 512 * 1024 * 1024
+MAX_BYTES = route_upload.MAX_BYTES
+MAX_LONG_SIDE = route_upload.MAX_LONG_SIDE
+VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE = route_upload.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+MAX_IMAGE_PIXELS = route_upload.MAX_IMAGE_PIXELS
+ALLOWED_MIME = route_upload.ALLOWED_MIME
+EXT_BY_MIME = route_upload.EXT_BY_MIME
+NORMALIZABLE_UPLOAD_MIME = route_upload.NORMALIZABLE_UPLOAD_MIME
+MIN_STORAGE_FREE_BYTES = route_storage.MIN_STORAGE_FREE_BYTES
+PILImage = route_upload.PILImage
+_etag_matches_if_none_match = route_storage.etag_matches_if_none_match
+_open_regular_file_no_symlink = route_storage.open_regular_file_no_symlink
 
 VIDEO_REFERENCE_IMAGE_KIND = VIDEO_REFERENCE_VARIANT
 VIDEO_REFERENCE_IMAGE_MIME = "image/jpeg"
@@ -207,149 +175,38 @@ async def _ensure_public_image_visible(db: AsyncSession, img: Image) -> None:
         raise _http("not_found", "image not found", 404)
 
 
-def _too_many_pixels() -> HTTPException:
-    return _http(
-        "too_many_pixels",
-        f"image exceeds safe pixel limit ({MAX_IMAGE_PIXELS} pixels)",
-        413,
-    )
-
-
-def _enforce_pixel_limit(
-    size: tuple[int, int],
-    *,
-    max_long_side: int | None = MAX_LONG_SIDE,
-) -> None:
-    width, height = size
-    if width <= 0 or height <= 0:
-        raise _http("invalid_image", "invalid image size", 400)
-    if width * height > MAX_IMAGE_PIXELS:
-        raise _too_many_pixels()
-    if max_long_side is not None and max(width, height) > max_long_side:
-        raise _http(
-            "too_large",
-            f"image long side exceeds {max_long_side}px",
-            413,
-        )
-
-
-def _upload_requests_mask_preflight(purpose: str | None, filename: str | None) -> bool:
-    purpose_norm = (purpose or "").strip().lower()
-    if purpose_norm in {"mask", "inpaint_mask", "inpaint-mask"}:
-        return True
-    name = Path(filename or "").name.lower()
-    stem = Path(name).stem
-    return stem == "mask" or stem.startswith("mask_")
-
-
-def _upload_allows_large_dimensions(purpose: str | None) -> bool:
-    return (purpose or "").strip().lower() == "volcano_asset"
-
-
-def _key_for_upload(user_id: str, image_id: str, ext: str) -> str:
-    return f"u/{user_id}/uploads/{image_id}.{ext}"
-
-
-def _key_for_normalized_ref(user_id: str, image_id: str) -> str:
-    return f"u/{user_id}/uploads/{image_id}.ref.webp"
+_too_many_pixels = route_upload.too_many_pixels
+_enforce_pixel_limit = route_upload.enforce_pixel_limit
+_upload_requests_mask_preflight = route_upload.upload_requests_mask_preflight
+_upload_allows_large_dimensions = route_upload.upload_allows_large_dimensions
+_key_for_upload = route_upload.key_for_upload
+_key_for_normalized_ref = route_upload.key_for_normalized_ref
 
 
 def _fs_path(storage_key: str) -> Path:
-    return storage_files.resolve_storage_path(
-        settings.storage_root,
-        storage_key,
-        error_factory=_http,
-    )
+    return route_storage.storage_path(storage_key, error_factory=_http)
 
 
-def _storage_usage_path(root: Path) -> Path:
-    current = root
-    while not current.exists() and current != current.parent:
-        current = current.parent
-    return current
+_storage_usage_path = route_storage.storage_usage_path
 
 
 def _minimum_storage_free_bytes() -> int:
-    raw = os.environ.get("LUMEN_MIN_STORAGE_FREE_BYTES", "").strip()
-    if not raw:
-        return MIN_STORAGE_FREE_BYTES
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        logger.warning("invalid LUMEN_MIN_STORAGE_FREE_BYTES=%r; using default", raw)
-        return MIN_STORAGE_FREE_BYTES
+    return route_storage.minimum_storage_free_bytes(logger)
 
 
 def _ensure_storage_free_space(incoming_bytes: int) -> None:
-    root = Path(settings.storage_root).resolve()
-    usage = shutil.disk_usage(_storage_usage_path(root))
-    required = max(0, incoming_bytes) + _minimum_storage_free_bytes()
-    if usage.free < required:
-        raise _http(
-            "storage_insufficient_space",
-            "not enough free storage to accept this upload",
-            507,
-        )
-
-
-def _image_url(image_id: str) -> str:
-    # 相对路径：前端同源请求，反代 /api/* → 后端 /*。
-    # 不拼 public_base_url：避免把 dev/prod host 焊进 API 响应，导致
-    # HTTPS 前端拿到 http://IP:8000/... 触发 Mixed Content。
-    return f"/api/images/{image_id}/binary"
-
-
-def _variant_url(image_id: str, kind: str) -> str:
-    return f"/api/images/{image_id}/variants/{kind}"
-
-
-def _variant_key_for_image(img: Image, kind: str) -> str:
-    return deterministic_variant_key(
-        image_id=img.id,
-        source_key=img.storage_key,
-        kind=kind,
+    route_storage.ensure_storage_free_space(
+        incoming_bytes,
+        error_factory=_http,
+        logger=logger,
     )
 
 
-def _make_display_variant(
-    path: Path, max_side: int = 2048
-) -> tuple[bytes, tuple[int, int]]:
-    try:
-        return make_display_variant(
-            path,
-            max_pixels=MAX_IMAGE_PIXELS,
-            max_side=max_side,
-        )
-    except VariantError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
-
-
-async def _image_out(db: AsyncSession, img: Image) -> ImageOut:
-    variants = (
-        (await db.execute(select(ImageVariant).where(ImageVariant.image_id == img.id)))
-        .scalars()
-        .all()
-    )
-    kinds = {v.kind for v in variants}
-    return ImageOut(
-        id=img.id,
-        source=img.source,
-        parent_image_id=img.parent_image_id,
-        owner_generation_id=img.owner_generation_id,
-        width=img.width,
-        height=img.height,
-        mime=img.mime,
-        blurhash=img.blurhash,
-        url=_image_url(img.id),
-        display_url=_variant_url(img.id, DISPLAY_VARIANT),
-        preview_url=(
-            _variant_url(img.id, PREVIEW_VARIANT) if PREVIEW_VARIANT in kinds else None
-        ),
-        thumb_url=_variant_url(img.id, THUMB_VARIANT)
-        if THUMB_VARIANT in kinds
-        else None,
-        metadata_jsonb=img.metadata_jsonb or {},
-    )
+_image_url = route_presentation.image_url
+_variant_url = route_presentation.variant_url
+_variant_key_for_image = route_presentation.variant_key_for_image
+_make_display_variant = route_upload.make_route_display_variant
+_image_out = route_presentation.image_out
 
 
 async def _check_upload_rate_limit(user_id: str) -> None:
@@ -357,22 +214,7 @@ async def _check_upload_rate_limit(user_id: str) -> None:
     await UPLOADS_LIMITER.check(redis, f"rl:upload:{user_id}")
 
 
-def _upload_metadata_finalizer(
-    image_id: str,
-    extension: str,
-    metadata: dict[str, Any],
-) -> None:
-    model_payload = metadata.get("model_library")
-    if not isinstance(model_payload, dict):
-        return
-    metadata["suggested_filename"] = model_image_filename(
-        image_id=image_id,
-        ext=extension,
-        age_segment=model_payload.get("age_segment"),
-        gender=model_payload.get("gender"),
-        appearance_direction=model_payload.get("appearance_direction"),
-        style_tags=model_payload.get("style_tags") or [],
-    )
+_upload_metadata_finalizer = route_upload.upload_metadata_finalizer
 
 
 async def _check_public_image_lookup_rate_limit(request: Request) -> None:
@@ -389,67 +231,17 @@ async def _check_signed_image_rate_limit(request: Request) -> None:
     )
 
 
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _write_new_file_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        try:
-            os.link(tmp, path)
-            _fsync_directory(path.parent)
-        except OSError as exc:
-            if isinstance(exc, FileExistsError):
-                raise
-            if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
-                raise
-            _write_new_file_exclusive(path, data)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def _write_new_file_exclusive(path: Path, data: bytes) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        _fsync_directory(path.parent)
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-
-
 def _unlink_file_if_exists(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-        _fsync_directory(path.parent)
-    except OSError:
-        logger.warning(
-            "failed to remove orphan upload file path=%s", path, exc_info=True
-        )
+    route_storage.unlink_file_if_exists(path, logger=logger)
 
 
-def _iter_open_file_and_close(f: BinaryIO) -> Iterator[bytes]:
-    yield from _iter_delivery_file_and_close(f)
+_fsync_directory = route_storage.fsync_directory
+_write_new_file_atomic = route_storage.write_new_file_atomic
+_write_new_file_exclusive = route_storage.write_new_file_exclusive
+
+
+def _iter_open_file_and_close(f: Any):
+    yield from route_storage.iter_open_file_and_close(f)
 
 
 def _storage_streaming_response(
@@ -462,28 +254,19 @@ def _storage_streaming_response(
     request: Request | None = None,
     inline_filename: str | None = None,
 ) -> Response:
-    return deliver_artifact(
-        DeliverySpec(
-            path=path,
-            storage_key=storage_key,
-            media_type=media_type,
-            etag=etag,
-            cache_control=cache_control,
-            inline_filename=inline_filename,
-        ),
+    return route_storage.storage_streaming_response(
+        path,
+        media_type=media_type,
+        etag=etag,
+        cache_control=cache_control,
+        validate_storage_key=_fs_path,
+        storage_key=storage_key,
         request=request,
-        response_builder=lambda delivery_path, **kwargs: (
-            _build_storage_streaming_response(
-                delivery_path,
-                **kwargs,
-                etag_matches=_etag_matches_if_none_match,
-                validate_storage_key=_fs_path,
-                open_file=_open_regular_file_no_symlink,
-                iter_file=_iter_open_file_and_close,
-                redirect_enabled=_internal_redirect_enabled,
-            )
-        ),
+        inline_filename=inline_filename,
     )
+
+
+upload_image_impl = route_upload.upload_image_impl
 
 
 @router.post("/upload", response_model=ImageOut, dependencies=[Depends(verify_csrf)])
@@ -511,58 +294,6 @@ async def upload_image(
         upload_command_service=upload_command_service,
         image_out=_image_out,
     )
-
-
-async def upload_image_impl(
-    user: Any,
-    db: AsyncSession,
-    *,
-    file: UploadFile,
-    purpose: str | None,
-    reference_width: int | None,
-    reference_height: int | None,
-    check_upload_rate_limit: Any,
-    ensure_storage_free_space: Any,
-    upload_command_service: UploadCommandService,
-    image_out: Any,
-) -> ImageOut:
-    await check_upload_rate_limit(user.id)
-    try:
-        ensure_storage_free_space(0)
-        reference_size = (
-            (reference_width, reference_height)
-            if isinstance(reference_width, int) and isinstance(reference_height, int)
-            else None
-        )
-        img = await upload_command_service.execute(
-            user_id=user.id,
-            upload_file=file,
-            filename=file.filename,
-            policy=UploadPolicy(
-                allowed_mime=ALLOWED_MIME,
-                normalizable_mime=NORMALIZABLE_UPLOAD_MIME,
-                extensions=EXT_BY_MIME,
-                max_bytes=MAX_BYTES,
-                max_pixels=MAX_IMAGE_PIXELS,
-                max_long_side=(
-                    VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
-                    if _upload_allows_large_dimensions(purpose)
-                    else MAX_LONG_SIDE
-                ),
-                mask_requested=_upload_requests_mask_preflight(
-                    purpose,
-                    file.filename,
-                ),
-                reference_size=reference_size,
-            ),
-            metadata_profile=MODEL_LIBRARY_METADATA_PROFILE,
-            metadata_finalizer=_upload_metadata_finalizer,
-            storage_guard=ensure_storage_free_space,
-        )
-    except UploadCommandError as exc:
-        raise _http(exc.code, exc.message, exc.status_code) from exc
-
-    return await image_out(db, img)
 
 
 @router.get("/{image_id}", response_model=ImageOut)
@@ -799,41 +530,10 @@ async def get_image_signed_impl(
     )
 
 
-def _parse_video_reference_token_expiry(raw: Any) -> datetime | None:
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        value = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _video_reference_token_is_valid(
-    metadata: dict[str, Any],
-    *,
-    token: str,
-    updated_at: datetime | None,
-) -> bool:
-    expected = metadata.get("video_reference_access_token")
-    if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
-        return False
-    expires_at = _parse_video_reference_token_expiry(
-        metadata.get("video_reference_access_token_expires_at")
-    )
-    now = datetime.now(timezone.utc)
-    if expires_at is not None:
-        return expires_at > now
-    if updated_at is None:
-        return False
-    fallback_updated_at = (
-        updated_at.replace(tzinfo=timezone.utc)
-        if updated_at.tzinfo is None
-        else updated_at.astimezone(timezone.utc)
-    )
-    return fallback_updated_at + _VIDEO_REFERENCE_ACCESS_TOKEN_TTL > now
+_parse_video_reference_token_expiry = (
+    reference_access.parse_video_reference_token_expiry
+)
+_video_reference_token_is_valid = reference_access.video_reference_token_is_valid
 
 
 @router.get("/reference/{image_id}/binary")
