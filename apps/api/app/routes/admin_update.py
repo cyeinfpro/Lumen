@@ -83,9 +83,7 @@ _LOG_TAIL_CHARS = 6000
 _PID_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
 
 _LUMEN_ROOT = os.environ.get("LUMEN_ROOT", "/opt/lumen")
-
 _RELEASE_LIST_LIMIT = 10
-
 _TRIGGER_DELIMITER_RE = re.compile(
     r"^=== update (?:trigger|unit started) ", re.MULTILINE
 )
@@ -436,22 +434,24 @@ def _start_update_via_path_unit(
     started_at: datetime,
 ) -> tuple[int, str] | None:
     return _update_launcher.start_update_via_path_unit(
-        backup_root=Path(settings.backup_root).expanduser(),
+        runtime=_update_launcher.PathUnitLaunchRuntime(
+            backup_root=Path(settings.backup_root).expanduser(),
+            log_path=_update_log_path(),
+            request_path=_update_runner_request_path(),
+            trigger_path=_update_trigger_path(),
+            marker_path=_update_marker_path(),
+            unit=_UPDATE_RUNNER_UNIT,
+            write_marker=_write_marker,
+            request_payload=_runner_request_payload,
+            chmod=chmod_tolerate_eperm,
+            trigger_only_mode=_runner_trigger_only_mode,
+            wait_for_log_append=_wait_for_log_append,
+            trigger_timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
+            unit_is_running=_unit_is_running,
+        ),
         env=env,
         log_fh=log_fh,
         started_at=started_at,
-        log_path=_update_log_path(),
-        request_path=_update_runner_request_path(),
-        trigger_path=_update_trigger_path(),
-        marker_path=_update_marker_path(),
-        unit=_UPDATE_RUNNER_UNIT,
-        write_marker=_write_marker,
-        request_payload=_runner_request_payload,
-        chmod=chmod_tolerate_eperm,
-        trigger_only_mode=_runner_trigger_only_mode,
-        wait_for_log_append=_wait_for_log_append,
-        trigger_timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
-        unit_is_running=_unit_is_running,
     )
 
 

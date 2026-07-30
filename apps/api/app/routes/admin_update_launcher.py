@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
@@ -20,25 +21,43 @@ def _unlink_all(paths: tuple[Path, ...]) -> None:
             pass
 
 
+@dataclass(frozen=True)
+class PathUnitLaunchRuntime:
+    backup_root: Path
+    log_path: Path
+    request_path: Path
+    trigger_path: Path
+    marker_path: Path
+    unit: str
+    write_marker: Callable[[int, str, str | None], None]
+    request_payload: Callable[[dict[str, str], datetime], dict[str, object]]
+    chmod: Callable[[Path, int], None]
+    trigger_only_mode: Callable[[], bool]
+    wait_for_log_append: Callable[..., bool]
+    trigger_timeout_sec: float
+    unit_is_running: Callable[[str], bool]
+
+
 def start_update_via_path_unit(
     *,
-    backup_root: Path,
+    runtime: PathUnitLaunchRuntime,
     env: dict[str, str],
     log_fh: TextIO,
     started_at: datetime,
-    log_path: Path,
-    request_path: Path,
-    trigger_path: Path,
-    marker_path: Path,
-    unit: str,
-    write_marker: Callable[[int, str, str | None], None],
-    request_payload: Callable[[dict[str, str], datetime], dict[str, object]],
-    chmod: Callable[[Path, int], None],
-    trigger_only_mode: Callable[[], bool],
-    wait_for_log_append: Callable[..., bool],
-    trigger_timeout_sec: float,
-    unit_is_running: Callable[[str], bool],
 ) -> tuple[int, str] | None:
+    backup_root = runtime.backup_root
+    log_path = runtime.log_path
+    request_path = runtime.request_path
+    trigger_path = runtime.trigger_path
+    marker_path = runtime.marker_path
+    unit = runtime.unit
+    write_marker = runtime.write_marker
+    request_payload = runtime.request_payload
+    chmod = runtime.chmod
+    trigger_only_mode = runtime.trigger_only_mode
+    wait_for_log_append = runtime.wait_for_log_append
+    trigger_timeout_sec = runtime.trigger_timeout_sec
+    unit_is_running = runtime.unit_is_running
     backup_root.mkdir(parents=True, exist_ok=True)
     try:
         initial_log_size = log_path.stat().st_size
