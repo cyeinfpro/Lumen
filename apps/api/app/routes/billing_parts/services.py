@@ -135,6 +135,14 @@ from ...services.billing.wallet_activity import (
     wallet_activity_window_end as _wallet_activity_window_end,
 )
 from ...services.billing_cache import BillingCacheService
+from .presenters import (
+    audit_out as _audit_out,
+    cursor_filter as _cursor_filter,
+    next_cursor as _next_cursor,
+    pricing_rule_out as _pricing_rule_out,
+    redemption_code_out as _redemption_code_out,
+    transaction_out as _tx_out,
+)
 from ...services.idempotency import cache_json, get_cached_json
 from ...services.pricing_cache import (
     invalidate_pricing_cache as _invalidate_pricing_cache,
@@ -383,22 +391,6 @@ def _require_wallet_user(user: User) -> None:
         )
 
 
-def _pricing_rule_out(rule: PricingRule) -> PricingRuleOut:
-    return PricingRuleOut(
-        id=rule.id,
-        scope=rule.scope,  # type: ignore[arg-type]
-        key=rule.key,
-        variant=rule.variant,
-        unit=rule.unit,  # type: ignore[arg-type]
-        price=_money(rule.price_micro),
-        priority=rule.priority,
-        enabled=rule.enabled,
-        note=rule.note,
-        created_at=rule.created_at,
-        updated_at=rule.updated_at,
-    )
-
-
 async def _wallet_out(db: AsyncSession, user: User) -> WalletOut:
     mode = getattr(user, "account_mode", "wallet")
     if mode != "wallet":
@@ -432,82 +424,6 @@ async def _wallet_out(db: AsyncSession, user: User) -> WalletOut:
         frozen=False,
         activity_24h=activity_24h,
     )
-
-
-def _tx_out(tx: WalletTransaction) -> WalletTransactionOut:
-    return WalletTransactionOut(
-        id=tx.id,
-        kind=tx.kind,
-        amount=_money(tx.amount_micro),
-        balance_after=_money(tx.balance_after),
-        hold_after=_money(tx.hold_after),
-        ref_type=tx.ref_type,
-        ref_id=tx.ref_id,
-        meta=tx.meta or {},
-        created_at=tx.created_at,
-        created_by_admin=tx.created_by_admin,
-    )
-
-
-def _redemption_code_out(
-    code: RedemptionCode, *, now: datetime | None = None
-) -> AdminRedemptionCodeOut:
-    usable_count = max(0, int(code.max_redemptions) - int(code.redeemed_count))
-    return AdminRedemptionCodeOut(
-        id=code.id,
-        code_prefix=code.code_prefix,
-        amount=_money(code.amount_micro),
-        max_redemptions=code.max_redemptions,
-        redeemed_count=code.redeemed_count,
-        usable_count=usable_count,
-        status=_redemption_status(code, now=now),  # type: ignore[arg-type]
-        batch_id=code.batch_id,
-        note=code.note,
-        expires_at=code.expires_at,
-        revoked_at=code.revoked_at,
-        created_by=code.created_by,
-        created_at=code.created_at,
-        updated_at=code.updated_at,
-    )
-
-
-def _audit_out(row: AuditLog) -> AdminBillingAuditEventOut:
-    return AdminBillingAuditEventOut(
-        id=row.id,
-        event_type=row.event_type,
-        user_id=row.user_id,
-        target_user_id=row.target_user_id,
-        details=row.details or {},
-        created_at=row.created_at,
-    )
-
-
-def _cursor_filter(
-    stmt: Any,
-    model: Any,
-    cursor: str | None,
-    *,
-    attr: str = "created_at",
-) -> Any:
-    if not cursor:
-        return stmt
-    try:
-        ts_raw, row_id = cursor.split("|", 1)
-        ts = datetime.fromisoformat(ts_raw)
-    except ValueError:
-        raise _http("invalid_cursor", "cursor is invalid", 422)
-    timestamp = getattr(model, attr)
-    return stmt.where((timestamp < ts) | ((timestamp == ts) & (model.id < row_id)))
-
-
-def _next_cursor(
-    rows: Sequence[Any], has_more: bool, attr: str = "created_at"
-) -> str | None:
-    if not has_more or not rows:
-        return None
-    last = rows[-1]
-    ts = getattr(last, attr)
-    return f"{ts.isoformat()}|{last.id}"
 
 
 async def _store_redemption_plaintext_batch(
