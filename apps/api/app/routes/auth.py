@@ -1,4 +1,5 @@
-"""Auth 路由（DESIGN §5.1 简化版）。
+# ruff: noqa: F401
+"""Auth 路由与历史兼容 facade。
 
 V1 实现：signup / login / logout / me，以及最小密码重置后端。
 不实现：OAuth、refresh rotation（session 直接用 cookie 引用 auth_sessions 行）。
@@ -10,10 +11,10 @@ import hashlib
 import logging
 import re
 import secrets
-from dataclasses import dataclass
+import sys
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -23,8 +24,8 @@ from fastapi import (
     Request,
     Response,
 )
-from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, update
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,6 +79,10 @@ from ..security import (
     verify_password,
 )
 from ..services.email import EmailDeliveryError, send_password_reset_email
+from .auth_parts import password_reset as _password_reset
+from .auth_parts import runtime_defaults as _runtime_defaults_part
+from .auth_parts import signup as _signup
+from .auth_parts.runtime import AuthRuntimeAdapter
 
 
 router = APIRouter()
@@ -108,8 +113,8 @@ _MAX_PASSWORD_LEN = 128
 # history, screenshot) lets an attacker reset the account. Shortening the
 # window to 15 minutes meaningfully reduces this exposure while still
 # accommodating typical email delivery latencies.
-_PASSWORD_RESET_TTL_SECONDS = 15 * 60
-_PASSWORD_RESET_KEY_PREFIX = "pwd_reset"
+_PASSWORD_RESET_TTL_SECONDS = _password_reset.PASSWORD_RESET_TTL_SECONDS
+_PASSWORD_RESET_KEY_PREFIX = _password_reset.PASSWORD_RESET_KEY_PREFIX
 _PASSWORD_RESET_REQUEST_IP_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 300, always_on=True
 )
@@ -125,44 +130,15 @@ _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER = RateLimiter(
 _PASSWORD_RESET_CONFIRM_USER_LIMITER = RateLimiter(
     capacity=5, refill_per_sec=5 / 3600, always_on=True
 )
-_CLAIM_PASSWORD_RESET_TOKEN_LUA = """
-local user_id = redis.call('GET', KEYS[1])
-if not user_id then
-  return {0, ''}
-end
-local ttl_ms = redis.call('PTTL', KEYS[1])
-if ttl_ms <= 0 then
-  return {0, ''}
-end
-if redis.call('EXISTS', KEYS[2]) ~= 0 then
-  return {2, ''}
-end
-redis.call('HSET', KEYS[2], 'owner', ARGV[1], 'user_id', user_id)
-redis.call('PEXPIRE', KEYS[2], ttl_ms)
-redis.call('DEL', KEYS[1])
-return {1, user_id}
-"""
-_RESTORE_PASSWORD_RESET_TOKEN_LUA = """
-if redis.call('HGET', KEYS[2], 'owner') ~= ARGV[1] then
-  return 0
-end
-local user_id = redis.call('HGET', KEYS[2], 'user_id')
-local ttl_ms = redis.call('PTTL', KEYS[2])
-if not user_id or ttl_ms <= 0 then
-  return 0
-end
-if redis.call('SET', KEYS[1], user_id, 'PX', ttl_ms, 'NX') then
-  redis.call('DEL', KEYS[2])
-  return 1
-end
-return -1
-"""
-_CONSUME_PASSWORD_RESET_CLAIM_LUA = """
-if redis.call('HGET', KEYS[1], 'owner') == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-"""
+_CLAIM_PASSWORD_RESET_TOKEN_LUA = (
+    _password_reset.CLAIM_PASSWORD_RESET_TOKEN_LUA
+)
+_RESTORE_PASSWORD_RESET_TOKEN_LUA = (
+    _password_reset.RESTORE_PASSWORD_RESET_TOKEN_LUA
+)
+_CONSUME_PASSWORD_RESET_CLAIM_LUA = (
+    _password_reset.CONSUME_PASSWORD_RESET_CLAIM_LUA
+)
 _DEV_ENVS = frozenset({"dev", "development", "local", "test"})
 _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE = (
     "verification failed; please verify your API key again"
@@ -177,12 +153,11 @@ _ALLOWED_EMAIL_INTEGRITY_MARKERS = (
     "allowed_emails_email_key",
 )
 
-
-@dataclass(frozen=True, slots=True)
-class _SignupAccess:
-    allow: AllowedEmail | None
-    invite: InviteLink | None
-    role: str
+_SignupAccess = _signup.SignupAccess
+PasswordResetRequestIn = _password_reset.PasswordResetRequestIn
+PasswordResetConfirmIn = _password_reset.PasswordResetConfirmIn
+OkOut = _password_reset.OkOut
+_runtime = AuthRuntimeAdapter(sys.modules[__name__])
 
 
 def _sanitize_ua(raw: str | None) -> str:
@@ -217,42 +192,27 @@ def _validate_password_strength(password: str) -> None:
 
 
 def _password_reset_key(token: str) -> str:
-    return f"{_PASSWORD_RESET_KEY_PREFIX}:{hash_token(token)}"
+    return _password_reset.password_reset_key(_runtime, token)
 
 
 def _password_reset_claim_key(token: str) -> str:
-    return f"{_PASSWORD_RESET_KEY_PREFIX}:claim:{hash_token(token)}"
+    return _password_reset.password_reset_claim_key(_runtime, token)
 
 
 def _password_reset_url(token: str, public_base_url: str) -> str:
-    return f"{public_base_url.rstrip('/')}/reset-password/{token}"
+    return _password_reset.password_reset_url(token, public_base_url)
 
 
 def _redis_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
+    return _password_reset.redis_text(value)
 
 
 def _integrity_error_text(exc: IntegrityError) -> str:
-    parts: list[str] = [str(exc)]
-    orig = getattr(exc, "orig", None)
-    if orig is not None:
-        parts.append(str(orig))
-        diag = getattr(orig, "diag", None)
-        if diag is not None:
-            for attr in ("constraint_name", "table_name", "column_name"):
-                value = getattr(diag, attr, None)
-                if value:
-                    parts.append(str(value))
-    return " ".join(parts).lower()
+    return _signup.integrity_error_text(exc)
 
 
 def _integrity_error_matches(exc: IntegrityError, markers: tuple[str, ...]) -> bool:
-    text = _integrity_error_text(exc)
-    return any(marker in text for marker in markers)
+    return _signup.integrity_error_matches(exc, markers)
 
 
 async def _reject_signup(
@@ -265,18 +225,16 @@ async def _reject_signup(
     message: str,
     status_code: int,
 ) -> None:
-    verify_password(_DUMMY_PASSWORD_HASH, password)
-    logger.info(
-        "signup_rejected",
-        extra={"email_hash": _log_hash(email), "reason": reason},
+    await _signup.reject_signup(
+        _runtime,
+        request=request,
+        email=email,
+        password=password,
+        reason=reason,
+        code=code,
+        message=message,
+        status_code=status_code,
     )
-    await write_audit_isolated(
-        event_type="auth.signup.fail",
-        actor_email=email,
-        actor_ip_hash=request_ip_hash(request),
-        details={"reason": reason},
-    )
-    raise _bad(code, message, status_code)
 
 
 async def _reject_byok_signup(
@@ -289,14 +247,16 @@ async def _reject_byok_signup(
     message: str,
     status_code: int,
 ) -> None:
-    verify_password(_DUMMY_PASSWORD_HASH, password)
-    await write_audit_isolated(
-        event_type="auth.signup.byok.fail",
-        actor_email=email,
-        actor_ip_hash=request_ip_hash(request),
-        details={"reason": reason},
+    await _signup.reject_byok_signup(
+        _runtime,
+        request=request,
+        email=email,
+        password=password,
+        reason=reason,
+        code=code,
+        message=message,
+        status_code=status_code,
     )
-    raise _bad(code, message, status_code)
 
 
 async def _validated_byok_pending(
@@ -307,47 +267,14 @@ async def _validated_byok_pending(
     password: str,
     token: str,
 ) -> tuple[PendingApiKeyVerification, datetime]:
-    existing = (
-        await db.execute(
-            select(User).where(User.email == email, User.deleted_at.is_(None))
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason="email_taken_masked_as_invalid_token",
-            code="invalid_verification_token",
-            message=_BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
-            status_code=400,
-        )
-
-    token_hash = verification_token_hash(token)
-    pending = (
-        await db.execute(
-            select(PendingApiKeyVerification)
-            .where(PendingApiKeyVerification.token_hash == token_hash)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-    now = datetime.now(timezone.utc)
-    if (
-        pending is None
-        or pending.consumed_at is not None
-        or ensure_utc(pending.expires_at) <= now
-    ):
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason="invalid_verification_token",
-            code="invalid_verification_token",
-            message=_BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
-            status_code=400,
-        )
-    return pending, now
+    return await _signup.validated_byok_pending(
+        _runtime,
+        db,
+        request=request,
+        email=email,
+        password=password,
+        token=token,
+    )
 
 
 async def _byok_signup_access(
@@ -360,65 +287,16 @@ async def _byok_signup_access(
     now: datetime,
     bypasses_allowlist: bool,
 ) -> tuple[AllowedEmail | None, InviteLink | None, str]:
-    allow = (
-        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
-    ).scalar_one_or_none()
-    if bypasses_allowlist or allow is not None:
-        return allow, None, "member"
-    if not body.invite_token:
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason="email_not_invited",
-            code="email_not_invited",
-            message="this email is not on the invite allowlist",
-            status_code=403,
-        )
-
-    invite_row = (
-        await db.execute(
-            select(InviteLink, User)
-            .join(User, User.id == InviteLink.created_by, isouter=True)
-            .where(InviteLink.token == body.invite_token)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).first()
-    invite = invite_row[0] if invite_row is not None else None
-    invite_creator = invite_row[1] if invite_row is not None else None
-    if invite is None:
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason="invalid_invite",
-            code="invalid_invite",
-            message="invite token not found",
-            status_code=403,
-        )
-    reason = _invite_validity_reason(invite, now, invite_creator)
-    if reason is not None:
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason=reason,
-            code="invalid_invite",
-            message=f"invite is {reason}",
-            status_code=403,
-        )
-    if invite.email is not None and invite.email.lower() != email:
-        await _reject_byok_signup(
-            request=request,
-            email=email,
-            password=password,
-            reason="invite_email_mismatch",
-            code="invite_email_mismatch",
-            message="this invite is bound to a different email",
-            status_code=403,
-        )
-    return allow, invite, invite.role or "member"
+    return await _signup.byok_signup_access(
+        _runtime,
+        db,
+        body=body,
+        request=request,
+        email=email,
+        password=password,
+        now=now,
+        bypasses_allowlist=bypasses_allowlist,
+    )
 
 
 async def _claim_password_reset_token(
@@ -428,21 +306,13 @@ async def _claim_password_reset_token(
     *,
     owner: str,
 ) -> str | None:
-    result = await redis.eval(
-        _CLAIM_PASSWORD_RESET_TOKEN_LUA,
-        2,
+    return await _password_reset.claim_password_reset_token(
+        _runtime,
+        redis,
         token_key,
         claim_key,
-        owner,
+        owner=owner,
     )
-    if not isinstance(result, (list, tuple)) or len(result) < 2:
-        raise RuntimeError("unexpected password reset claim response")
-    if int(result[0]) != 1:
-        return None
-    user_id = _redis_text(result[1])
-    if not user_id:
-        raise RuntimeError("password reset claim omitted user id")
-    return user_id
 
 
 async def _restore_password_reset_token(
@@ -452,14 +322,13 @@ async def _restore_password_reset_token(
     *,
     owner: str,
 ) -> bool:
-    result = await redis.eval(
-        _RESTORE_PASSWORD_RESET_TOKEN_LUA,
-        2,
+    return await _password_reset.restore_password_reset_token(
+        _runtime,
+        redis,
         token_key,
         claim_key,
-        owner,
+        owner=owner,
     )
-    return int(result) == 1
 
 
 async def _consume_password_reset_claim(
@@ -468,17 +337,12 @@ async def _consume_password_reset_claim(
     *,
     owner: str,
 ) -> None:
-    try:
-        await redis.eval(
-            _CONSUME_PASSWORD_RESET_CLAIM_LUA,
-            1,
-            claim_key,
-            owner,
-        )
-    except Exception:
-        # The original token was removed before the DB transaction began.
-        # Leaving this owner-bound claim to expire cannot make it reusable.
-        logger.warning("password_reset_claim_consume_failed", exc_info=True)
+    await _password_reset.consume_password_reset_claim(
+        _runtime,
+        redis,
+        claim_key,
+        owner=owner,
+    )
 
 
 def _is_dev_env() -> bool:
@@ -542,52 +406,14 @@ class CsrfOut(BaseModel):
     csrf_token: str
 
 
-class PasswordResetRequestIn(BaseModel):
-    email: EmailStr
+RuntimeDefaultsProvider = _runtime_defaults_part.RuntimeDefaultsProvider
 
 
-class PasswordResetConfirmIn(BaseModel):
-    token: str = Field(min_length=1)
-    new_password: str = Field(max_length=_MAX_PASSWORD_LEN)
-
-
-class OkOut(BaseModel):
-    ok: bool
-
-
-class RuntimeDefaultsProvider(Protocol):
-    async def load(self) -> RuntimeDefaultsOut: ...
-
-    def safe_defaults(self) -> RuntimeDefaultsOut: ...
-
-
-class _DatabaseRuntimeDefaultsProvider:
+class _DatabaseRuntimeDefaultsProvider(
+    _runtime_defaults_part.DatabaseRuntimeDefaultsProvider
+):
     def __init__(self, db: AsyncSession) -> None:
-        self._db = db
-
-    @staticmethod
-    def safe_defaults() -> RuntimeDefaultsOut:
-        return RuntimeDefaultsOut()
-
-    async def load(self) -> RuntimeDefaultsOut:
-        defaults = self.safe_defaults()
-
-        spec = get_spec(_GENERATION_FAST_DEFAULT_KEY)
-        if spec is not None:
-            raw = await get_setting(self._db, spec)
-            if raw in {"0", "1"}:
-                defaults.fast = raw == "1"
-        for nav_key, setting_key in _NAV_VISIBILITY_SETTING_KEYS.items():
-            nav_spec = get_spec(setting_key)
-            if nav_spec is None:
-                continue
-            raw = await get_setting(self._db, nav_spec)
-            if raw in {"0", "1"}:
-                setattr(defaults.nav_visibility, nav_key, raw == "1")
-        canvas_spec = get_spec(_CANVAS_ENABLED_KEY)
-        if canvas_spec is not None:
-            defaults.canvas_enabled = await get_setting(self._db, canvas_spec) == "1"
-        return defaults
+        super().__init__(_runtime, db)
 
 
 async def _runtime_defaults(db: AsyncSession) -> RuntimeDefaultsOut:
@@ -611,25 +437,18 @@ def _record_runtime_defaults_degraded() -> None:
 
 
 def _user_out_snapshot(user: User) -> UserOut:
-    notification_email = getattr(user, "notification_email", None)
-    return UserOut(
-        id=user.id,
-        email=user.email,
-        display_name=user.display_name,
-        role=user.role,
-        account_mode=getattr(user, "account_mode", None) or "wallet",
-        notification_email=(
-            True if notification_email is None else bool(notification_email)
-        ),
-        default_system_prompt_id=getattr(user, "default_system_prompt_id", None),
-    )
+    return _runtime_defaults_part.user_out_snapshot(user)
 
 
 def _auth_response_snapshot(
     user: User,
     session: AuthSession,
 ) -> tuple[str, UserOut]:
-    return generate_csrf_token(session.id), _user_out_snapshot(user)
+    return _runtime_defaults_part.auth_response_snapshot(
+        _runtime,
+        user,
+        session,
+    )
 
 
 async def _user_out_with_runtime_defaults(
@@ -705,16 +524,7 @@ async def _create_session(
 def _invite_validity_reason(
     inv: InviteLink, now: datetime, creator: User | None = None
 ) -> str | None:
-    """Return None if the invite is currently usable; else a short reason."""
-    if inv.revoked_at is not None:
-        return "revoked"
-    if inv.used_at is not None:
-        return "used"
-    if inv.expires_at is not None and ensure_utc(inv.expires_at) <= now:
-        return "expired"
-    if creator is None or creator.deleted_at is not None:
-        return "creator_deleted"
-    return None
+    return _signup.invite_validity_reason(_runtime, inv, now, creator)
 
 
 async def _standard_signup_access(
@@ -723,81 +533,13 @@ async def _standard_signup_access(
     request: Request,
     email: str,
 ) -> _SignupAccess:
-    existing = (
-        await db.execute(
-            select(User).where(User.email == email, User.deleted_at.is_(None))
-        )
-    ).scalar_one_or_none()
-    if existing:
-        await _reject_signup(
-            request=request,
-            email=email,
-            password=body.password,
-            reason="email_taken",
-            code="email_taken",
-            message="an account with this email already exists",
-            status_code=409,
-        )
-
-    allow = (
-        await db.execute(select(AllowedEmail).where(AllowedEmail.email == email))
-    ).scalar_one_or_none()
-    if allow is not None:
-        return _SignupAccess(allow=allow, invite=None, role="member")
-    if not body.invite_token:
-        await _reject_signup(
-            request=request,
-            email=email,
-            password=body.password,
-            reason="email_not_invited",
-            code="email_not_invited",
-            message="this email is not on the invite allowlist",
-            status_code=403,
-        )
-
-    invite_row = (
-        await db.execute(
-            select(InviteLink, User)
-            .join(User, User.id == InviteLink.created_by, isouter=True)
-            .where(InviteLink.token == body.invite_token)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).first()
-    invite = invite_row[0] if invite_row is not None else None
-    invite_creator = invite_row[1] if invite_row is not None else None
-    if invite is None:
-        await _reject_signup(
-            request=request,
-            email=email,
-            password=body.password,
-            reason="invalid_invite",
-            code="invalid_invite",
-            message="invite token not found",
-            status_code=403,
-        )
-    reason = _invite_validity_reason(invite, datetime.now(timezone.utc), invite_creator)
-    if reason is not None:
-        await _reject_signup(
-            request=request,
-            email=email,
-            password=body.password,
-            reason=reason,
-            code="invalid_invite",
-            message=f"invite is {reason}",
-            status_code=403,
-        )
-    if invite.email is not None and invite.email.lower() != email:
-        await _reject_signup(
-            request=request,
-            email=email,
-            password=body.password,
-            reason="invite_email_mismatch",
-            code="invite_email_mismatch",
-            message="this invite is bound to a different email",
-            status_code=403,
-        )
-    return _SignupAccess(allow=None, invite=invite, role=invite.role or "member")
+    return await _signup.standard_signup_access(
+        _runtime,
+        db,
+        body,
+        request,
+        email,
+    )
 
 
 async def _persist_standard_signup(
@@ -807,80 +549,14 @@ async def _persist_standard_signup(
     email: str,
     access: _SignupAccess,
 ) -> tuple[User, AuthSession, str, UserOut]:
-    user = User(
-        email=email,
-        password_hash=hash_password(body.password),
-        display_name=body.display_name or email.split("@")[0],
-        email_verified=False,
-        role=access.role,
+    return await _signup.persist_standard_signup(
+        _runtime,
+        db,
+        body,
+        request,
+        email,
+        access,
     )
-    db.add(user)
-    try:
-        await db.flush()
-        if access.invite is not None:
-            access.invite.used_at = datetime.now(timezone.utc)
-            access.invite.used_by = user.id
-            if access.allow is None:
-                db.add(
-                    AllowedEmail(
-                        email=email,
-                        invited_by=access.invite.created_by,
-                    )
-                )
-        session, _ = await _create_session(db, user, request)
-        csrf, user_out = _auth_response_snapshot(user, session)
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        if _integrity_error_matches(exc, _USER_EMAIL_INTEGRITY_MARKERS):
-            logger.info(
-                "signup_rejected",
-                extra={"email_hash": _log_hash(email), "reason": "email_taken_race"},
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "email_taken"},
-            )
-            raise _bad(
-                "email_taken", "an account with this email already exists", 409
-            ) from exc
-        if _integrity_error_matches(exc, _ALLOWED_EMAIL_INTEGRITY_MARKERS):
-            logger.info(
-                "signup_rejected",
-                extra={
-                    "email_hash": _log_hash(email),
-                    "reason": "allowlist_integrity_conflict",
-                },
-            )
-            await write_audit_isolated(
-                event_type="auth.signup.fail",
-                actor_email=email,
-                actor_ip_hash=request_ip_hash(request),
-                details={"reason": "allowlist_integrity_conflict"},
-            )
-            raise _bad(
-                "signup_conflict",
-                "signup could not be completed; please retry",
-                409,
-            ) from exc
-        logger.exception(
-            "signup_integrity_error",
-            extra={"email_hash": _log_hash(email)},
-        )
-        await write_audit_isolated(
-            event_type="auth.signup.fail",
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"reason": "integrity_conflict_unclassified"},
-        )
-        raise _bad(
-            "signup_unavailable",
-            "signup is temporarily unavailable",
-            503,
-        ) from exc
-    return user, session, csrf, user_out
 
 
 @router.post(
@@ -937,105 +613,13 @@ async def signup_byok(
     response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserOut:
-    byok_settings = await read_byok_settings(db)
-    if not byok_settings.mode_enabled or not byok_settings.byok_signup_enabled:
-        raise _bad("byok_disabled", "BYOK signup is disabled", 403)
-
-    email = body.email.strip().lower()
-    if not email or not body.password:
-        raise _bad("invalid_input", "email and password are required", 422)
-    _validate_password_strength(body.password)
-
-    token = body.verification_token.strip()
-    if not token:
-        raise _bad("invalid_verification_token", "verification token is invalid", 400)
-
-    # Why: do the email-existence check *before* the token check, and collapse
-    # both branches into the same generic `invalid_verification_token`. This
-    # closes the user-enumeration side channel from §8.3 — an attacker can no
-    # longer probe whether `email_taken` ever fires (vs token-expired). The
-    # pending token is *not consumed* in either failure path so a legitimate
-    # user who got the token via a different account can still finish signup
-    # by changing the email.
-    pending, now = await _validated_byok_pending(
-        db,
-        request=request,
-        email=email,
-        password=body.password,
-        token=token,
-    )
-    allow, invite, role = await _byok_signup_access(
-        db,
+    return await _signup.signup_byok(
+        _runtime,
         body=body,
         request=request,
-        email=email,
-        password=body.password,
-        now=now,
-        bypasses_allowlist=byok_settings.byok_signup_bypasses_allowlist,
+        response=response,
+        db=db,
     )
-
-    user = User(
-        email=email,
-        password_hash=hash_password(body.password),
-        display_name=body.display_name or email.split("@")[0],
-        email_verified=False,
-        role=role,
-        account_mode="byok",
-    )
-    db.add(user)
-    try:
-        await db.flush()
-        credential = UserApiCredential(
-            user_id=user.id,
-            supplier_id=pending.supplier_id,
-            key_ciphertext=pending.key_ciphertext,
-            key_hash=pending.key_hash,
-            key_hint=pending.key_hint,
-            status="active",
-            last_verified_at=pending.verified_at,
-            capabilities_jsonb={},
-        )
-        db.add(credential)
-        pending.consumed_at = now
-
-        if invite is not None:
-            invite.used_at = now
-            invite.used_by = user.id
-            if not allow:
-                db.add(AllowedEmail(email=email, invited_by=invite.created_by))
-        elif byok_settings.byok_signup_bypasses_allowlist and not allow:
-            # Why: when allowlist is bypassed via BYOK, still record the email
-            # in AllowedEmail so subsequent re-signups / OAuth callbacks have a
-            # consistent allowlist view (matches the invite branch above).
-            # invited_by=None marks the row as bypass-sourced.
-            db.add(AllowedEmail(email=email, invited_by=None))
-
-        session, _ = await _create_session(db, user, request)
-        csrf, user_out = _auth_response_snapshot(user, session)
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        await write_audit_isolated(
-            event_type="auth.signup.byok.fail",
-            actor_email=email,
-            actor_ip_hash=request_ip_hash(request),
-            details={"reason": "integrity_conflict_masked_as_invalid_token"},
-        )
-        raise _bad(
-            "invalid_verification_token",
-            _BYOK_SIGNUP_VERIFICATION_FAILED_MESSAGE,
-            400,
-        ) from exc
-
-    _set_auth_cookies(response, session.id, csrf)
-    await _write_post_commit_audit_best_effort(
-        event_type="auth.signup.byok.success",
-        user_id=user.id,
-        actor_email=email,
-        actor_ip_hash=request_ip_hash(request),
-        details={"role": role, "supplier_id": pending.supplier_id},
-    )
-    return await _user_out_with_runtime_defaults(user_out, db)
 
 
 @router.post(
@@ -1111,54 +695,13 @@ async def password_reset_request(
     background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OkOut:
-    email = body.email.strip().lower()
-    redis = get_redis()
-    await _PASSWORD_RESET_REQUEST_IP_LIMITER.check(
-        redis, f"rl:pwd_reset_request:ip:{require_client_ip(request)}"
+    return await _password_reset.password_reset_request(
+        _runtime,
+        body=body,
+        request=request,
+        background_tasks=background_tasks,
+        db=db,
     )
-    await _PASSWORD_RESET_REQUEST_EMAIL_LIMITER.check(
-        redis, f"rl:pwd_reset_request:email:{_log_hash(email) or 'unknown'}"
-    )
-    user = (
-        await db.execute(
-            select(User).where(User.email == email, User.deleted_at.is_(None))
-        )
-    ).scalar_one_or_none()
-    try:
-        public_base_url = await resolve_public_base_url(request, db)
-    except Exception:
-        logger.exception(
-            "password_reset_public_base_url_failed",
-            extra={"email_hash": _log_hash(email)},
-        )
-        return OkOut(ok=True)
-    if user is None:
-        return OkOut(ok=True)
-
-    token = secrets.token_urlsafe(32)
-    key = _password_reset_key(token)
-    reset_url = _password_reset_url(token, public_base_url)
-    try:
-        await redis.set(
-            key,
-            user.id,
-            ex=_PASSWORD_RESET_TTL_SECONDS,
-        )
-    except Exception:
-        logger.exception(
-            "password_reset_token_store_failed",
-            extra={"email_hash": _log_hash(email), "user_id": user.id},
-        )
-        return OkOut(ok=True)
-    background_tasks.add_task(
-        _send_password_reset_email_or_delete,
-        redis,
-        key,
-        email,
-        user.id,
-        reset_url,
-    )
-    return OkOut(ok=True)
 
 
 @router.post("/password/reset-confirm", response_model=OkOut)
@@ -1167,119 +710,16 @@ async def password_reset_confirm(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> OkOut:
-    token = body.token.strip()
-    if not token:
-        raise _bad("invalid_token", "reset token is invalid or expired", 400)
-    _validate_password_strength(body.new_password)
-
-    redis = get_redis()
-    await _PASSWORD_RESET_CONFIRM_IP_LIMITER.check(
-        redis, f"rl:pwd_reset_confirm:ip:{require_client_ip(request)}"
+    return await _password_reset.password_reset_confirm(
+        _runtime,
+        body=body,
+        request=request,
+        db=db,
     )
-    key = _password_reset_key(token)
-    await _PASSWORD_RESET_CONFIRM_TOKEN_LIMITER.check(
-        redis, f"rl:pwd_reset_confirm:token:{hash_token(token)}"
-    )
-    claim_key = _password_reset_claim_key(token)
-    claim_owner = secrets.token_urlsafe(24)
-    try:
-        raw_user_id = await _claim_password_reset_token(
-            redis,
-            key,
-            claim_key,
-            owner=claim_owner,
-        )
-    except Exception as exc:
-        logger.error("password_reset_token_claim_failed", exc_info=True)
-        raise _bad(
-            "reset_unavailable",
-            "password reset is temporarily unavailable",
-            503,
-        ) from exc
-    if not raw_user_id:
-        raise _bad("invalid_token", "reset token is invalid or expired", 400)
-
-    try:
-        await _PASSWORD_RESET_CONFIRM_USER_LIMITER.check(
-            redis, f"rl:pwd_reset_confirm:user:{raw_user_id}"
-        )
-        user = (
-            await db.execute(
-                select(User).where(User.id == raw_user_id).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if user is None or user.deleted_at is not None:
-            raise _bad("invalid_token", "reset token is invalid or expired", 400)
-
-        now = datetime.now(timezone.utc)
-        user.password_hash = hash_password(body.new_password)
-        await db.execute(
-            update(AuthSession)
-            .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
-            .values(revoked_at=now)
-        )
-    except Exception:
-        rollback_succeeded = False
-        try:
-            await db.rollback()
-            rollback_succeeded = True
-        except Exception:
-            logger.error("password_reset_db_rollback_failed", exc_info=True)
-
-        if rollback_succeeded:
-            try:
-                restored = await _restore_password_reset_token(
-                    redis,
-                    key,
-                    claim_key,
-                    owner=claim_owner,
-                )
-            except Exception:
-                logger.error("password_reset_token_restore_failed", exc_info=True)
-            else:
-                if not restored:
-                    logger.error("password_reset_token_restore_rejected")
-        raise
-
-    try:
-        await db.commit()
-    except Exception as exc:
-        # A commit exception does not prove the transaction failed: the database
-        # may have durably applied it before the client lost the acknowledgement.
-        # Never restore the already-claimed token across this uncertainty.
-        try:
-            await db.rollback()
-        except Exception:
-            logger.error("password_reset_db_rollback_failed", exc_info=True)
-        await _consume_password_reset_claim(
-            redis,
-            claim_key,
-            owner=claim_owner,
-        )
-        logger.error(
-            "password_reset_commit_outcome_uncertain",
-            extra={"user_id": raw_user_id},
-            exc_info=True,
-        )
-        raise _bad(
-            "reset_outcome_uncertain",
-            "password reset result is uncertain; request a new reset link before retrying",
-            503,
-        ) from exc
-
-    await _consume_password_reset_claim(
-        redis,
-        claim_key,
-        owner=claim_owner,
-    )
-    return OkOut(ok=True)
 
 
 async def _delete_password_reset_token(redis: Any, key: str) -> None:
-    try:
-        await redis.delete(key)
-    except Exception:
-        logger.error("password_reset_token_delete_failed", exc_info=True)
+    await _password_reset.delete_password_reset_token(_runtime, redis, key)
 
 
 async def _send_password_reset_email_or_delete(
@@ -1289,25 +729,14 @@ async def _send_password_reset_email_or_delete(
     user_id: str,
     reset_url: str,
 ) -> None:
-    try:
-        await send_password_reset_email(
-            to_email=email,
-            reset_url=reset_url,
-            expires_minutes=_PASSWORD_RESET_TTL_SECONDS // 60,
-        )
-    except EmailDeliveryError:
-        await _delete_password_reset_token(redis, key)
-        logger.error(
-            "password_reset_email_delivery_failed",
-            extra={"email_hash": _log_hash(email), "user_id": user_id},
-            exc_info=True,
-        )
-    except Exception:
-        await _delete_password_reset_token(redis, key)
-        logger.exception(
-            "password_reset_email_unexpected_failed",
-            extra={"email_hash": _log_hash(email), "user_id": user_id},
-        )
+    await _password_reset.send_password_reset_email_or_delete(
+        _runtime,
+        redis,
+        key,
+        email,
+        user_id,
+        reset_url,
+    )
 
 
 @router.get("/csrf", response_model=CsrfOut)
