@@ -1,3 +1,5 @@
+/* eslint complexity: "off" */
+
 import {
   getVideoAssetOperation,
   retryVideoAssetOperation,

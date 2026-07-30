@@ -24,8 +24,8 @@ const operationRunnerSource = readFileSync(
   new URL("./volcano-operation-runner.ts", import.meta.url),
   "utf8",
 );
-const uploadControllerSource = readFileSync(
-  new URL("./use-volcano-upload-controller.ts", import.meta.url),
+const uploadRunnerSource = readFileSync(
+  new URL("./volcano-upload-runner.ts", import.meta.url),
   "utf8",
 );
 
@@ -537,11 +537,11 @@ test("Volcano operation start time is write-once across progress callbacks", () 
     /runner\.onProgress\?\.\(operation, sessionId, operationStartedAt\)/,
   );
   assert.match(
-    uploadControllerSource,
+    uploadRunnerSource,
     /operationStartedAt,\s*\n\s*operationRetryable:/,
   );
   assert.doesNotMatch(
-    uploadControllerSource,
+    uploadRunnerSource,
     /queuedItem\?\.operationStartedAt \?\? Date\.now\(\)/,
   );
 });
@@ -824,6 +824,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
     "use-volcano-operation-controller.ts",
     "volcano-operation-runner.ts",
     "use-volcano-upload-controller.ts",
+    "volcano-upload-runner.ts",
     "use-volcano-upload-polling.ts",
     "use-volcano-upload-queue.ts",
   ];
@@ -1024,12 +1025,12 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /merged\.added === 0/);
   assert.match(managerSource, /asset_types: assetTypes/);
   assert.match(
-    managerSourceByName.get("use-volcano-upload-controller.ts") || "",
+    managerSourceByName.get("volcano-upload-runner.ts") || "",
     /verifyUnknown:[\s\S]*?scanVideoAssets\([\s\S]*?possibleSubmittedAssets/,
   );
   assert.match(
-    managerSourceByName.get("use-volcano-upload-controller.ts") || "",
-    /const verifyUntrackedUpload = useCallback\([\s\S]*?scanVideoAssets\([\s\S]*?possibleSubmittedAssets/,
+    managerSourceByName.get("volcano-upload-runner.ts") || "",
+    /function verifyUntrackedVolcanoUpload\([\s\S]*?scanVideoAssets\([\s\S]*?possibleSubmittedAssets/,
   );
   assert.match(
     managerSource,
