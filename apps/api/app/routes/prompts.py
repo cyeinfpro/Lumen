@@ -26,7 +26,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.models import Image, Video, new_uuid7
-from lumen_core.pricing import UsageTokens, parse_usage
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
@@ -60,6 +59,7 @@ from ._prompt_enhance_templates import (
     VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE,
 )
 from .prompt_parts import content as _prompt_content
+from .prompt_parts import billing as _prompt_billing
 from .prompt_parts import failover as _prompt_failover
 from .prompt_parts import keepalive as _prompt_keepalive
 from .prompt_parts import upstream as _prompt_upstream
@@ -437,97 +437,31 @@ async def _billing_allow_negative(db: AsyncSession) -> bool:
     )
 
 
+def _prompt_billing_runtime() -> _prompt_billing.BillingRuntime:
+    return _prompt_billing.BillingRuntime(
+        attempts=_ENHANCE_ATTEMPTS,
+        billing_enabled=_billing_enabled,
+        billing_cache_aware=_billing_cache_aware,
+        billing_allow_negative=_billing_allow_negative,
+        new_id=new_uuid7,
+        rate_multiplier_x10000=_rate_multiplier_x10000,
+        pricing_snapshot_key=_enhance_pricing_snapshot_key,
+        invalidate_balance_cache=invalidate_balance_cache,
+        write_audit=write_audit,
+        hash_email=hash_email,
+        release_hold=_release_prompt_enhance_hold,
+        logger=logger,
+    )
+
+
 async def _prepare_prompt_enhance_billing(
     db: AsyncSession,
     user: Any,
 ) -> _EnhanceBillingContext | None:
-    if getattr(user, "account_mode", "wallet") != "wallet":
-        return None
-    if not await _billing_enabled(db):
-        return None
-
-    request_id = new_uuid7()
-    rate_multiplier_x10000 = _rate_multiplier_x10000(user)
-    cache_aware = await _billing_cache_aware(db)
-    allow_negative = await _billing_allow_negative(db)
-    pricing_snapshots: dict[str, dict[str, Any]] = {}
-    preview = 0
-    for attempt in _ENHANCE_ATTEMPTS:
-        service_tier = attempt.service_tier or "standard"
-        snapshot_key = _enhance_pricing_snapshot_key(attempt.model, service_tier)
-        if snapshot_key in pricing_snapshots:
-            continue
-        try:
-            snapshot = await billing_core.completion_pricing_snapshot(
-                db,
-                model=attempt.model,
-                service_tier=service_tier,
-            )
-            attempt_preview = billing_core.completion_breakdown_from_snapshot(
-                snapshot,
-                model=attempt.model,
-                tokens=billing_core.UsageTokens(input_tokens=1, output_tokens=1),
-                rate_multiplier_x10000=rate_multiplier_x10000,
-                service_tier=service_tier,
-            ).actual_cost_micro
-        except billing_core.BillingError as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail={"error": {"code": exc.code, "message": exc.message}},
-            ) from exc
-        pricing_snapshots[snapshot_key] = snapshot
-        preview = max(preview, int(attempt_preview))
-    if preview <= 0 and rate_multiplier_x10000 > 0:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "code": "PRICING_MISSING",
-                    "message": (
-                        "missing enabled chat pricing rule for "
-                        f"{_ENHANCE_ATTEMPTS[0].model}"
-                    ),
-                }
-            },
-        )
-    hold_amount = 0 if rate_multiplier_x10000 == 0 else max(10_000, int(preview or 0))
-    if hold_amount > 0:
-        try:
-            await billing_core.hold(
-                db,
-                user.id,
-                hold_amount,
-                ref_type="prompt_enhance",
-                ref_id=request_id,
-                idempotency_key=f"prompt_enhance:hold:{request_id}",
-                allow_negative=allow_negative,
-                meta={
-                    "route": "prompts.enhance",
-                    "model": _ENHANCE_ATTEMPTS[0].model,
-                    "service_tier": _ENHANCE_ATTEMPTS[0].service_tier or "standard",
-                    "estimated_cost_micro": preview,
-                    "preauth_micro": hold_amount,
-                    "pricing_snapshots": pricing_snapshots,
-                    "rate_multiplier_x10000": rate_multiplier_x10000,
-                },
-            )
-        except billing_core.BillingError as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail={"error": {"code": exc.code, "message": exc.message}},
-            ) from exc
-        await db.commit()
-        await invalidate_balance_cache(user.id)
-    return _EnhanceBillingContext(
-        db=db,
-        user_id=user.id,
-        user_email=getattr(user, "email", None),
-        request_id=request_id,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        cache_aware=cache_aware,
-        allow_negative=allow_negative,
-        hold_amount_micro=hold_amount,
-        pricing_snapshots=pricing_snapshots,
+    return await _prompt_billing.prepare_prompt_enhance_billing(
+        db,
+        user,
+        runtime=_prompt_billing_runtime(),
     )
 
 
@@ -538,294 +472,12 @@ def _capture_enhance_usage(
     provider: ProviderDefinition,
     attempt: _EnhanceAttempt,
 ) -> None:
-    if capture is None:
-        return
-    response = event.get("response")
-    response_obj = response if isinstance(response, dict) else {}
-    usage = event.get("usage")
-    if not isinstance(usage, dict):
-        usage = response_obj.get("usage")
-    if not isinstance(usage, dict):
-        return
-
-    response_id = response_obj.get("id") or event.get("response_id")
-    model = response_obj.get("model") or event.get("model") or attempt.model
-    capture.provider_name = provider.name
-    capture.model = model if isinstance(model, str) and model.strip() else attempt.model
-    capture.service_tier = attempt.service_tier or "standard"
-    capture.pricing_snapshot_key = _enhance_pricing_snapshot_key(
-        attempt.model,
-        capture.service_tier,
-    )
-    capture.response_id = (
-        response_id if isinstance(response_id, str) and response_id.strip() else None
-    )
-    capture.usage = usage
-
-
-def _normalize_usage_for_billing(
-    usage: UsageTokens,
-    *,
-    cache_aware: bool,
-) -> UsageTokens:
-    if cache_aware:
-        return usage.normalized()
-    legacy_cache_input_tokens = usage.cache_read_tokens + usage.cache_creation_tokens
-    return UsageTokens(
-        input_tokens=usage.input_tokens + legacy_cache_input_tokens,
-        output_tokens=usage.output_tokens,
-        reasoning_tokens=usage.reasoning_tokens,
-        image_output_tokens=usage.image_output_tokens,
-    ).normalized()
-
-
-def _usage_is_empty(usage: UsageTokens) -> bool:
-    return all(
-        value <= 0
-        for value in (
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
-            usage.cache_creation_5m_tokens,
-            usage.cache_creation_1h_tokens,
-            usage.reasoning_tokens,
-            usage.image_output_tokens,
-        )
-    )
-
-
-def _held_amount_breakdown(
-    billing: _EnhanceBillingContext,
-    *,
-    cost: int | None = None,
-) -> billing_core.CostBreakdown:
-    actual_cost = billing.hold_amount_micro if cost is None else cost
-    return billing_core.CostBreakdown(
-        input_cost_micro=actual_cost,
-        output_cost_micro=0,
-        cache_read_cost_micro=0,
-        cache_creation_cost_micro=0,
-        image_output_cost_micro=0,
-        reasoning_cost_micro=0,
-        long_context_applied=False,
-        priority_tier_applied=False,
-        rate_multiplier_x10000=billing.rate_multiplier_x10000,
-        total_cost_micro=actual_cost,
-        actual_cost_micro=actual_cost,
-        pricing_source="held_amount_fallback",
-    )
-
-
-async def _audit_held_amount_fallback(
-    billing: _EnhanceBillingContext,
-    *,
-    model: str,
-    usage: UsageTokens,
-    error: str,
-) -> None:
-    await write_audit(
-        billing.db,
-        event_type="billing.pricing.hold_fallback_after_upstream",
-        user_id=billing.user_id,
-        actor_email_hash=hash_email(billing.user_email),
-        details={
-            "scope": "chat_model",
-            "model": model,
-            "prompt_enhance_id": billing.request_id,
-            "usage": usage.model_dump(),
-            "actual_micro": billing.hold_amount_micro,
-            "error": error,
-        },
-        autocommit=False,
-    )
-
-
-async def _resolve_prompt_enhance_breakdown(
-    billing: _EnhanceBillingContext,
-    capture: _EnhanceUsageCapture,
-    *,
-    model: str,
-    usage: UsageTokens,
-) -> billing_core.CostBreakdown:
-    try:
-        snapshot = billing.pricing_snapshots.get(
-            capture.pricing_snapshot_key
-            or _enhance_pricing_snapshot_key(model, capture.service_tier)
-        )
-        if snapshot is not None:
-            return billing_core.completion_breakdown_from_snapshot(
-                snapshot,
-                model=model,
-                tokens=usage,
-                rate_multiplier_x10000=billing.rate_multiplier_x10000,
-                service_tier=capture.service_tier,
-            )
-        return await billing_core.estimate_completion_breakdown(
-            billing.db,
-            model=model,
-            tokens=usage,
-            rate_multiplier_x10000=billing.rate_multiplier_x10000,
-            service_tier=capture.service_tier,
-        )
-    except billing_core.BillingError as exc:
-        if (
-            exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}
-            or billing.hold_amount_micro <= 0
-        ):
-            raise
-        await _audit_held_amount_fallback(
-            billing,
-            model=model,
-            usage=usage,
-            error=exc.message,
-        )
-        return _held_amount_breakdown(billing)
-
-
-def _effective_prompt_enhance_cost(
-    billing: _EnhanceBillingContext,
-    breakdown: billing_core.CostBreakdown,
-) -> tuple[int, billing_core.CostBreakdown]:
-    cost = breakdown.actual_cost_micro
-    if cost > 0 or billing.hold_amount_micro <= 0:
-        return cost, breakdown
-    cost = billing.hold_amount_micro
-    return cost, _held_amount_breakdown(billing, cost=cost)
-
-
-async def _audit_fallback_pricing(
-    billing: _EnhanceBillingContext,
-    *,
-    breakdown: billing_core.CostBreakdown,
-    model: str,
-    ref_id: str,
-    usage: UsageTokens,
-) -> None:
-    if breakdown.pricing_source != "fallback":
-        return
-    await write_audit(
-        billing.db,
-        event_type="billing.pricing.fallback_used",
-        user_id=billing.user_id,
-        actor_email_hash=hash_email(billing.user_email),
-        details={
-            "model": model,
-            "prompt_enhance_id": ref_id,
-            "usage": usage.model_dump(),
-        },
-        autocommit=False,
-    )
-
-
-def _prompt_enhance_tx_meta(
-    billing: _EnhanceBillingContext,
-    capture: _EnhanceUsageCapture,
-    *,
-    breakdown: billing_core.CostBreakdown,
-    model: str,
-    response_id: str,
-    usage: UsageTokens,
-) -> dict[str, Any]:
-    return {
-        "route": "prompts.enhance",
-        "model": model,
-        "provider": capture.provider_name,
-        "response_id": response_id,
-        "tokens_in": usage.input_tokens,
-        "tokens_out": usage.output_tokens,
-        "cache_read_tokens": usage.cache_read_tokens,
-        "cache_creation_tokens": usage.cache_creation_tokens,
-        "cache_creation_5m_tokens": usage.cache_creation_5m_tokens,
-        "cache_creation_1h_tokens": usage.cache_creation_1h_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "image_output_tokens": usage.image_output_tokens,
-        "cost_breakdown": breakdown.model_dump(),
-        "rate_multiplier_x10000": billing.rate_multiplier_x10000,
-        "service_tier": capture.service_tier,
-    }
-
-
-async def _settle_or_charge_prompt_enhance(
-    billing: _EnhanceBillingContext,
-    *,
-    cost: int,
-    ref_id: str,
-    tx_meta: dict[str, Any],
-) -> Any:
-    if billing.hold_amount_micro > 0:
-        return await billing_core.settle(
-            billing.db,
-            billing.user_id,
-            ref_type="prompt_enhance",
-            ref_id=ref_id,
-            actual_micro=cost,
-            idempotency_key=f"prompt_enhance:settle:{ref_id}",
-            allow_negative=billing.allow_negative,
-            meta={**tx_meta, "preauth_micro": billing.hold_amount_micro},
-        )
-    return await billing_core.charge(
-        billing.db,
-        billing.user_id,
-        cost,
-        ref_type="prompt_enhance",
-        ref_id=ref_id,
-        idempotency_key=f"prompt_enhance:{ref_id}",
-        allow_negative=billing.allow_negative,
-        record_zero=True,
-        kind="charge_completion",
-        meta=tx_meta,
-    )
-
-
-async def _audit_prompt_enhance_charge(
-    billing: _EnhanceBillingContext,
-    capture: _EnhanceUsageCapture,
-    tx: Any,
-    *,
-    breakdown: billing_core.CostBreakdown,
-    cost: int,
-    ref_id: str,
-    response_id: str,
-    usage: UsageTokens,
-) -> None:
-    if tx is None:
-        return
-    await write_audit(
-        billing.db,
-        event_type="wallet.charge.completion",
-        user_id=billing.user_id,
-        actor_email_hash=hash_email(billing.user_email),
-        details={
-            "completion_id": ref_id,
-            "prompt_enhance_id": ref_id,
-            "response_id": response_id,
-            "route": "prompts.enhance",
-            "cost_micro": cost,
-            "usage": usage.model_dump(),
-            "cost_breakdown": breakdown.model_dump(),
-            "service_tier": capture.service_tier,
-            "amount_micro": tx.amount_micro,
-            "balance_after": tx.balance_after,
-        },
-        autocommit=False,
-    )
-    if cost != 0 or billing.rate_multiplier_x10000 != 0:
-        return
-    await write_audit(
-        billing.db,
-        event_type="wallet.charge.zero_rate",
-        user_id=billing.user_id,
-        actor_email_hash=hash_email(billing.user_email),
-        details={
-            "prompt_enhance_id": ref_id,
-            "response_id": response_id,
-            "tx_id": tx.id,
-            "ref_type": "prompt_enhance",
-            "ref_id": ref_id,
-            "rate_multiplier_x10000": 0,
-        },
-        autocommit=False,
+    _prompt_billing.capture_enhance_usage(
+        capture,
+        event,
+        provider=provider,
+        attempt=attempt,
+        pricing_snapshot_key=_enhance_pricing_snapshot_key,
     )
 
 
@@ -833,60 +485,11 @@ async def _charge_prompt_enhance(
     billing: _EnhanceBillingContext,
     capture: _EnhanceUsageCapture,
 ) -> None:
-    if not capture.usage:
-        await _release_prompt_enhance_hold(billing, reason="missing_usage")
-        return
-    model = capture.model or _ENHANCE_ATTEMPTS[0].model
-    usage = _normalize_usage_for_billing(
-        parse_usage(model, capture.usage),
-        cache_aware=billing.cache_aware,
-    )
-    if _usage_is_empty(usage):
-        await _release_prompt_enhance_hold(billing, reason="zero_usage")
-        return
-    breakdown = await _resolve_prompt_enhance_breakdown(
+    await _prompt_billing.charge_prompt_enhance(
         billing,
         capture,
-        model=model,
-        usage=usage,
+        runtime=_prompt_billing_runtime(),
     )
-    response_id = capture.response_id or billing.request_id
-    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
-    cost, breakdown = _effective_prompt_enhance_cost(billing, breakdown)
-    await _audit_fallback_pricing(
-        billing,
-        breakdown=breakdown,
-        model=model,
-        ref_id=ref_id,
-        usage=usage,
-    )
-    tx_meta = _prompt_enhance_tx_meta(
-        billing,
-        capture,
-        breakdown=breakdown,
-        model=model,
-        response_id=response_id,
-        usage=usage,
-    )
-    tx = await _settle_or_charge_prompt_enhance(
-        billing,
-        cost=cost,
-        ref_id=ref_id,
-        tx_meta=tx_meta,
-    )
-    await _audit_prompt_enhance_charge(
-        billing,
-        capture,
-        tx,
-        breakdown=breakdown,
-        cost=cost,
-        ref_id=ref_id,
-        response_id=response_id,
-        usage=usage,
-    )
-    await billing.db.commit()
-    if tx is not None:
-        await invalidate_balance_cache(billing.user_id)
 
 
 async def _release_prompt_enhance_hold(
@@ -894,21 +497,11 @@ async def _release_prompt_enhance_hold(
     *,
     reason: str,
 ) -> None:
-    if billing is None or billing.hold_amount_micro <= 0:
-        return
-    try:
-        await billing_core.release(
-            billing.db,
-            billing.user_id,
-            ref_type="prompt_enhance",
-            ref_id=billing.request_id,
-            idempotency_key=f"prompt_enhance:release:{billing.request_id}:{reason}",
-            meta={"route": "prompts.enhance", "reason": reason},
-        )
-        await billing.db.commit()
-        await invalidate_balance_cache(billing.user_id)
-    except Exception:
-        logger.exception("prompt enhance billing hold release failed")
+    await _prompt_billing.release_prompt_enhance_hold(
+        billing,
+        reason=reason,
+        runtime=_prompt_billing_runtime(),
+    )
 
 
 async def _release_prompt_enhance_hold_detached(
