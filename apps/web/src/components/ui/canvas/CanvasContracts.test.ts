@@ -12,7 +12,14 @@ const workspacePersistenceSource = source("./CanvasWorkspacePersistence.ts");
 const viewportSource = source("./CanvasViewport.tsx");
 const topBarSource = source("./CanvasTopBar.tsx");
 const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
-const nodesSource = source("./nodes/CanvasNodes.tsx");
+const nodesSource = [
+  source("./nodes/CanvasNodes.tsx"),
+  source("./nodes/CanvasNodesContent.tsx"),
+  source("./nodes/CanvasNodesPorts.tsx"),
+  source("./nodes/CanvasNodesPresentation.tsx"),
+  source("./nodes/CanvasNodesPreview.tsx"),
+  source("./nodes/CanvasNodesTypes.ts"),
+].join("\n");
 const imageAssetDropSource = source("./nodes/CanvasImageAssetDropZone.tsx");
 const inspectorSource = source("./CanvasInspector.tsx");
 const staleUploadCleanupSource = source(
