@@ -9,6 +9,7 @@ function source(path: string) {
 const workspaceSource = source("./CanvasWorkspace.tsx");
 const workspaceInteractionsSource = source("./CanvasWorkspaceInteractions.ts");
 const workspacePersistenceSource = source("./CanvasWorkspacePersistence.ts");
+const persistenceDomainSource = source("./canvasPersistenceDomain.ts");
 const viewportSource = source("./CanvasViewport.tsx");
 const topBarSource = source("./CanvasTopBar.tsx");
 const mobileToolbarSource = source("./mobile/CanvasMobileToolbar.tsx");
@@ -194,13 +195,13 @@ test("canvas autosave retries exact batches and only publishes accepted acknowle
   match(workspacePersistenceSource, /blurActiveCanvasEditor/);
   match(workspacePersistenceSource, /visibilitychange/);
   match(workspacePersistenceSource, /state\.pendingOperations\.length === 0/);
-  match(workspacePersistenceSource, /CANVAS_CLIENT_LEASE_TTL_MS/);
+  match(persistenceDomainSource, /CANVAS_CLIENT_LEASE_TTL_MS/);
   match(
-    workspacePersistenceSource,
+    persistenceDomainSource,
     /CANVAS_SUSPENDED_CLIENT_LEASE_TTL_MS/,
   );
-  match(workspacePersistenceSource, /event\.persisted/);
-  match(workspacePersistenceSource, /pageshow/);
+  match(persistenceDomainSource, /event\.persisted/);
+  match(persistenceDomainSource, /pageshow/);
   match(workspacePersistenceSource, /listCanvasDrafts/);
 });
 
