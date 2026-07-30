@@ -12,28 +12,16 @@ import {
   useState,
 } from "react";
 import {
-  ArrowUp,
-  ChevronDown,
-  Code2,
-  FileSearch,
-  Globe2,
-  ImagePlus,
   Loader2,
-  MessageSquare,
-  Palette,
   Paperclip,
-  SquareDashedMousePointer,
   Sparkles,
   X,
-  Zap,
 } from "lucide-react";
 import {
-  SegmentedControl,
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
-import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
-import { useChatStore, type ReasoningEffort } from "@/store/useChatStore";
-import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
+import { useChatStore } from "@/store/useChatStore";
+import type { ComposerMode } from "@/store/chat/types";
 import { cn } from "@/lib/utils";
 import { logError } from "@/lib/logger";
 import {
@@ -49,14 +37,17 @@ import {
 } from "./DesktopPopover";
 import {
   ComposerExecutionControls,
-  COUNT_OPTIONS,
-  QUALITY_OPTIONS,
-  RENDER_QUALITY_OPTIONS,
 } from "./DesktopComposerExecutionControls";
+import {
+  IconBtn,
+  ModeSegment,
+  SendButton,
+} from "./DesktopComposerButtons";
+import { AdvancedComposerSettings } from "./DesktopComposerAdvancedSettings";
+import { DesktopComposerAttachmentTray } from "./DesktopComposerAttachmentTray";
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { useComposerAttachmentDnd } from "../shared/useComposerAttachmentDnd";
 import { useMaskInpaint } from "../shared/useMaskInpaint";
-import { AttachmentRoleBadge } from "../shared/AttachmentRoleBadge";
 import { useComposerAttachmentRoles } from "../shared/attachmentRoles";
 import { buildComposerExecutionSummary } from "../shared/executionSummary";
 import {
@@ -69,59 +60,20 @@ import {
   selectValue,
 } from "../shared/composerViewState";
 import { useComposerCostEstimate } from "../shared/useComposerCostEstimate";
-import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import {
   PromptEnhancementCandidate,
   usePromptEnhancementCandidate,
 } from "../shared/PromptEnhancementCandidate";
 import { LazyMaskCanvas } from "../LazyMaskCanvas";
+import {
+  desktopComposerFrameClass,
+  desktopComposerFrameWidth,
+  parseDesktopComposerSlash,
+} from "./desktopComposerPresentation";
 
 interface DesktopComposerPillProps {
   onSubmit: () => void | Promise<void>;
   onMetricsChange?: (metrics: { height: number; bottom: number }) => void;
-}
-
-type ComposerMode = "chat" | "image";
-
-const REASONING_OPTIONS: { value: ReasoningEffort; label: string; hint: string }[] = [
-  { value: "none", label: "最快", hint: "直接回复" },
-  { value: "low", label: "低", hint: "轻量思考" },
-  { value: "medium", label: "中", hint: "平衡" },
-  { value: "high", label: "高", hint: "多想一步" },
-  { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
-];
-
-// 斜杠命令：/ask → chat；/image → image
-function parseSlash(text: string): {
-  stripped: string;
-  force?: "chat" | "image";
-} {
-  const m = /^\s*\/(ask|image)(\s+|$)/i.exec(text);
-  if (!m) return { stripped: text };
-  const cmd = m[1].toLowerCase();
-  return {
-    stripped: text.slice(m[0].length).trim(),
-    force: cmd === "ask" ? "chat" : "image",
-  };
-}
-
-function composerFrameClass(expanded: boolean, isDragActive: boolean): string {
-  return cn(
-    "fixed bottom-4 -translate-x-1/2",
-    "max-w-[var(--content-composer)]",
-    "overflow-visible",
-    "rounded-[var(--radius-panel)]",
-    "bg-[var(--bg-1)]/97",
-    "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
-    isDragActive
-      ? "border-[var(--accent)]"
-      : "border-[var(--border-subtle)] focus-within:border-[var(--accent-border)]",
-    expanded ? "shadow-[var(--shadow-2)]" : "shadow-[var(--shadow-1)]",
-  );
-}
-
-function composerFrameWidth(): string {
-  return "min(var(--content-composer), calc(100vw - var(--studio-sidebar-offset, 0px) - 40px))";
 }
 
 export function DesktopComposerPill({
@@ -298,7 +250,7 @@ export function DesktopComposerPill({
 
   // ———— 斜杠命令即时设置 forceIntent ————
   useEffect(() => {
-    const parsed = parseSlash(text);
+    const parsed = parseDesktopComposerSlash(text);
     if (parsed.force) {
       setForceIntent(parsed.force);
     } else {
@@ -415,7 +367,7 @@ export function DesktopComposerPill({
       setShutterBurst(false);
     }, 200);
     // 斜杠命令最终落地：剥离前缀
-    const parsed = parseSlash(currentText);
+    const parsed = parseDesktopComposerSlash(currentText);
     if (parsed.force) {
       setForceIntent(parsed.force);
       setText(parsed.stripped);
@@ -531,10 +483,10 @@ export function DesktopComposerPill({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={(e) => void handleDrop(e)}
-      className={composerFrameClass(expanded, isDragActive)}
+      className={desktopComposerFrameClass(expanded, isDragActive)}
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
-        width: composerFrameWidth(),
+        width: desktopComposerFrameWidth(),
         zIndex: selectValue(
           expanded,
           "var(--z-composer-expanded, 45)" as unknown as number,
@@ -612,145 +564,20 @@ export function DesktopComposerPill({
       {renderWhen(expanded, (
         <div className="flex flex-col">
           {/* 附件托盘 */}
-          <AnimatePresence>
-            {renderWhen(isDragActive, (
-              <motion.div
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: DURATION.quick, ease: EASE.shutter }}
-              >
-                <div
-                  className={cn(
-                    "mx-3 mt-3 flex items-center justify-center gap-2 rounded-[var(--radius-card)]",
-                    "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
-                    "px-3 py-3 text-xs text-[var(--amber-400)]",
-                  )}
-                >
-                  <Paperclip className="h-3.5 w-3.5" aria-hidden />
-                  <span>松开上传图片，最多 {MAX_COMPOSER_ATTACHMENTS} 张</span>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-
-          {/* 附件托盘 */}
-          {renderWhen(attachments.length > 0, (
-            <div
-              className={cn(
-                "flex gap-2 overflow-x-auto overscroll-x-contain no-scrollbar",
-                "px-3 pt-3",
-              )}
-            >
-              {attachments.map((att, idx) => {
-                const isFirst = idx === 0;
-                const showMaskBadge = isFirst && inpaint.maskActive;
-                const role = attachmentRoles.getRole(att.id);
-                return (
-                  <div
-                    key={att.id}
-                    draggable={attachments.length > 1}
-                    onDragStart={(event) =>
-                      handleAttachmentDragStart(event, att.id)
-                    }
-                    onDragOver={handleAttachmentDragOver}
-                    onDrop={(event) => handleAttachmentDrop(event, att.id)}
-                    onDragEnd={handleAttachmentDragEnd}
-                    className={cn(
-                      "relative shrink-0 w-16 h-16 rounded-[var(--radius-panel)] overflow-hidden",
-                      "border bg-[var(--bg-2)]",
-                      attachments.length > 1 &&
-                        "cursor-grab active:cursor-grabbing",
-                      draggingAttachmentId === att.id && "opacity-55",
-                      showMaskBadge
-                        ? "border-[var(--amber-400)]/70"
-                        : "border-[var(--border-subtle)]",
-                    )}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={att.data_url}
-                      alt=""
-                      draggable={false}
-                      className="w-full h-full object-cover"
-                      loading="lazy"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => insertImageMention(idx + 1)}
-                      aria-label={`插入 @图${idx + 1}`}
-                      title={`插入 @图${idx + 1}`}
-                      className={cn(
-                        "absolute top-0.5 left-0.5 h-5 px-1 rounded-[var(--radius-control)]",
-                        "bg-[var(--bg-0)]/80 text-[10px] font-semibold text-[var(--amber-400)]",
-                        "backdrop-blur-sm leading-none",
-                        "active:scale-[0.94] transition-transform",
-                      )}
-                      style={{ fontFamily: "var(--font-mono)" }}
-                    >
-                      @图{idx + 1}
-                    </button>
-                    <AttachmentRoleBadge
-                      role={role}
-                      imageNumber={idx + 1}
-                      onClick={() => attachmentRoles.cycleRole(att.id)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(att.id)}
-                      aria-label="移除参考图"
-                      className={cn(
-                        "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                        "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
-                        "flex items-center justify-center",
-                        "active:scale-[0.92] transition-transform",
-                      )}
-                    >
-                      <X className="w-3 h-3" aria-hidden />
-                    </button>
-                  </div>
-                );
-              })}
-              {/* 局部修改按钮：单张参考图 + image 模式时可用 */}
-              {renderWhen(isImageMode, (
-                <button
-                  type="button"
-                  onClick={inpaint.openInpaint}
-                  disabled={inpaint.disabled}
-                  aria-label="局部修改"
-                  title={inpaint.tooltip}
-                  className={cn(
-                    "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
-                    "w-16 h-16 rounded-[var(--radius-panel)] border text-[10px] font-medium",
-                    "transition-colors",
-                    selectValue(
-                      inpaint.disabled,
-                      "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed",
-                      selectValue(
-                        inpaint.maskActive,
-                        "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10 hover:bg-[var(--amber-400)]/15",
-                        "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:border-[var(--border)]",
-                      ),
-                    ),
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  )}
-                >
-                  <SquareDashedMousePointer
-                    className="w-4 h-4"
-                    aria-hidden
-                  />
-                  <span>
-                    {selectValue(inpaint.maskActive, "重涂", "局部")}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ))}
-          {renderWhen(Boolean(attachmentRoles.hint), (
-            <div className="px-3 pt-1 text-[11px] leading-4 text-[var(--fg-2)]">
-              {attachmentRoles.hint}
-            </div>
-          ))}
+          <DesktopComposerAttachmentTray
+            attachments={attachments}
+            attachmentRoles={attachmentRoles}
+            draggingAttachmentId={draggingAttachmentId}
+            inpaint={inpaint}
+            isDragActive={isDragActive}
+            isImageMode={isImageMode}
+            onAttachmentDragStart={handleAttachmentDragStart}
+            onAttachmentDragOver={handleAttachmentDragOver}
+            onAttachmentDrop={handleAttachmentDrop}
+            onAttachmentDragEnd={handleAttachmentDragEnd}
+            onInsertImageMention={insertImageMention}
+            onRemoveAttachment={removeAttachment}
+          />
 
           {/* 错误条 */}
           <AnimatePresence>
@@ -966,428 +793,5 @@ export function DesktopComposerPill({
       />
     ))}
     </>
-  );
-}
-
-// ———————————————————————————————————————————————————
-// 子组件
-// ———————————————————————————————————————————————————
-
-function IconBtn({
-  label,
-  onClick,
-  disabled,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      title={label}
-      className={cn(
-        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-[var(--radius-control)]",
-        "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
-        "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-        "disabled:opacity-40 disabled:cursor-not-allowed",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function SendButton({
-  canSubmit,
-  isSending,
-  burst,
-  onClick,
-  size = "lg",
-}: {
-  canSubmit: boolean;
-  isSending: boolean;
-  burst?: boolean;
-  onClick: () => void;
-  size?: "md" | "lg";
-}) {
-  const dim = size === "lg" ? "w-10 h-10" : "w-9 h-9";
-  const isActive = canSubmit || isSending;
-  return (
-    <Pressable
-      size="inline"
-      minHit={false}
-      pressScale="tight"
-      haptic={false}
-      onPress={onClick}
-      disabled={!canSubmit}
-      aria-label="发送"
-      aria-busy={isSending || undefined}
-      className={cn(
-        "shrink-0 inline-flex items-center justify-center rounded-full",
-        dim,
-        "transition-[background-color,box-shadow,opacity] duration-[var(--dur-normal)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/70",
-        isActive
-          ? [
-              "bg-[var(--amber-400)] text-[var(--bg-0)]",
-              burst
-                ? "shadow-[var(--shadow-amber)]"
-                : "shadow-[var(--shadow-1)]",
-            ].join(" ")
-          : "bg-[var(--bg-3)] text-[var(--fg-3)] cursor-not-allowed",
-      )}
-    >
-      {isSending ? (
-        <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
-      ) : (
-        <ArrowUp className="w-4 h-4" aria-hidden />
-      )}
-    </Pressable>
-  );
-}
-
-function ModeSegment({
-  value,
-  onChange,
-}: {
-  value: ComposerMode;
-  onChange: (v: ComposerMode) => void;
-}) {
-  return (
-    <div className="shrink-0">
-      <SegmentedControl<ComposerMode>
-        value={value}
-        onChange={onChange}
-        ariaLabel="模式"
-        density="compact"
-        items={[
-          {
-            value: "chat",
-            label: (
-              <span className="inline-flex items-center gap-1.5">
-                <MessageSquare className="w-3.5 h-3.5" aria-hidden />
-                <span>对话</span>
-              </span>
-            ),
-          },
-          {
-            value: "image",
-            label: (
-              <span className="inline-flex items-center gap-1.5">
-                <Palette className="w-3.5 h-3.5" aria-hidden />
-                <span>生图</span>
-              </span>
-            ),
-          },
-        ]}
-      />
-    </div>
-  );
-}
-
-function AdvancedComposerSettings({
-  mode,
-  quality,
-  onQualityChange,
-  renderQuality,
-  onRenderQualityChange,
-  aspect,
-  onAspectChange,
-  count,
-  onCountChange,
-  reasoningEffort,
-  onReasoningEffortChange,
-  webSearch,
-  onWebSearchChange,
-  fileSearch,
-  onFileSearchChange,
-  codeInterpreter,
-  onCodeInterpreterChange,
-  imageGeneration,
-  onImageGenerationChange,
-  fast,
-  onFastChange,
-  onClose,
-}: {
-  mode: ComposerMode;
-  quality: Quality;
-  onQualityChange: (value: Quality) => void;
-  renderQuality: RenderQualityChoice;
-  onRenderQualityChange: (value: RenderQualityChoice) => void;
-  aspect: AspectRatio;
-  onAspectChange: (value: AspectRatio) => void;
-  count: number;
-  onCountChange: (value: number) => void;
-  reasoningEffort: ReasoningEffort;
-  onReasoningEffortChange: (value: ReasoningEffort) => void;
-  webSearch: boolean;
-  onWebSearchChange: (value: boolean) => void;
-  fileSearch: boolean;
-  onFileSearchChange: (value: boolean) => void;
-  codeInterpreter: boolean;
-  onCodeInterpreterChange: (value: boolean) => void;
-  imageGeneration: boolean;
-  onImageGenerationChange: (value: boolean) => void;
-  fast: boolean;
-  onFastChange: (value: boolean) => void;
-  onClose: () => void;
-}) {
-  const imageMode = mode === "image";
-
-  return (
-    <div className="flex min-h-0 flex-col">
-      <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-        <p className="text-[13px] font-semibold text-[var(--fg-0)]">
-          执行设置
-        </p>
-        {/* @hit-area-ok: desktop-only popover; mobile uses MobileAdvancedSettings. */}
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="关闭执行设置"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
-        >
-          <X className="h-4 w-4" aria-hidden />
-        </button>
-      </div>
-
-      <div className="min-h-0 overflow-y-auto p-4">
-        {imageMode ? (
-          <div className="grid gap-5 lg:grid-cols-[minmax(220px,0.72fr)_minmax(360px,1.28fr)]">
-            <div className="grid content-start gap-4">
-              <section className="grid gap-2" aria-labelledby="image-output-settings">
-                <h3
-                  id="image-output-settings"
-                  className="text-[11px] font-medium text-[var(--fg-2)]"
-                >
-                  输出
-                </h3>
-                <div className="grid grid-cols-2 gap-2">
-                  <SettingSelect
-                    label="尺寸"
-                    value={quality}
-                    onChange={(value) => onQualityChange(value as Quality)}
-                    options={QUALITY_OPTIONS}
-                  />
-                  <SettingSelect
-                    label="质量"
-                    value={renderQuality}
-                    onChange={(value) =>
-                      onRenderQualityChange(value as RenderQualityChoice)
-                    }
-                    options={RENDER_QUALITY_OPTIONS}
-                  />
-                  <SettingSelect
-                    label="数量"
-                    value={String(count)}
-                    onChange={(value) => onCountChange(Number(value))}
-                    options={COUNT_OPTIONS.map((value) => ({
-                      value: String(value),
-                      label: `${value} 张`,
-                    }))}
-                  />
-                </div>
-              </section>
-
-              <section className="grid gap-2" aria-labelledby="image-speed-settings">
-                <h3
-                  id="image-speed-settings"
-                  className="text-[11px] font-medium text-[var(--fg-2)]"
-                >
-                  执行
-                </h3>
-                <ToggleRow
-                  active={fast}
-                  onClick={() => onFastChange(!fast)}
-                  icon={<Zap className="h-4 w-4" aria-hidden />}
-                  label="Fast"
-                  detail="优先更快完成"
-                />
-              </section>
-            </div>
-
-            <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56">
-              <AspectRatioPicker
-                value={aspect}
-                onChange={onAspectChange}
-                className="w-full max-w-none"
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="grid gap-5">
-            <section className="grid gap-2" aria-labelledby="reasoning-settings">
-              <h3
-                id="reasoning-settings"
-                className="text-[11px] font-medium text-[var(--fg-2)]"
-              >
-                推理强度
-              </h3>
-              <div className="grid gap-2 sm:grid-cols-5">
-                {REASONING_OPTIONS.map((option) => {
-                  const active = option.value === reasoningEffort;
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      onClick={() => onReasoningEffortChange(option.value)}
-                      aria-pressed={active}
-                      className={cn(
-                        "min-h-14 rounded-[var(--radius-card)] border px-3 py-2 text-left",
-                        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-                        active
-                          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
-                          : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
-                      )}
-                    >
-                      <span className="block text-[12px] font-medium">
-                        {option.label}
-                      </span>
-                      <span className="mt-0.5 block text-[10px] text-[var(--fg-2)]">
-                        {option.hint}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="grid gap-2" aria-labelledby="tool-settings">
-              <h3
-                id="tool-settings"
-                className="text-[11px] font-medium text-[var(--fg-2)]"
-              >
-                工具
-              </h3>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                <ToggleRow
-                  active={webSearch}
-                  onClick={() => onWebSearchChange(!webSearch)}
-                  icon={<Globe2 className="h-4 w-4" aria-hidden />}
-                  label="联网搜索"
-                  detail="获取最新网页信息"
-                />
-                <ToggleRow
-                  active={fileSearch}
-                  onClick={() => onFileSearchChange(!fileSearch)}
-                  icon={<FileSearch className="h-4 w-4" aria-hidden />}
-                  label="文件检索"
-                  detail="搜索已配置资料"
-                />
-                <ToggleRow
-                  active={codeInterpreter}
-                  onClick={() => onCodeInterpreterChange(!codeInterpreter)}
-                  icon={<Code2 className="h-4 w-4" aria-hidden />}
-                  label="代码工具"
-                  detail="运行分析与计算"
-                />
-                <ToggleRow
-                  active={imageGeneration}
-                  onClick={() => onImageGenerationChange(!imageGeneration)}
-                  icon={<ImagePlus className="h-4 w-4" aria-hidden />}
-                  label="对话生图"
-                  detail="允许回答中生成图片"
-                />
-                <ToggleRow
-                  active={fast}
-                  onClick={() => onFastChange(!fast)}
-                  icon={<Zap className="h-4 w-4" aria-hidden />}
-                  label="Fast"
-                  detail="优先更快完成"
-                />
-              </div>
-            </section>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SettingSelect({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  options: ReadonlyArray<{ value: string; label: string }>;
-}) {
-  return (
-    <label className="grid gap-1.5">
-      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
-      <span className="relative">
-        <select
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          className="h-10 w-full appearance-none rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 pr-8 text-[12px] text-[var(--fg-0)] outline-none transition-colors hover:bg-[var(--bg-2)] focus-visible:shadow-[var(--ring)]"
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        <ChevronDown
-          className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]"
-          aria-hidden
-        />
-      </span>
-    </label>
-  );
-}
-
-function ToggleRow({
-  active,
-  onClick,
-  icon,
-  label,
-  detail,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-  detail: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "flex min-h-14 items-center gap-3 rounded-[var(--radius-card)] border px-3 text-left",
-        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-        active
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
-          : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
-      )}
-    >
-      <span
-        className={cn(
-          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)]",
-          active
-            ? "bg-[var(--accent)] text-[var(--accent-on)]"
-            : "bg-[var(--bg-2)] text-[var(--fg-2)]",
-        )}
-      >
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="block text-[12px] font-medium">{label}</span>
-        <span className="mt-0.5 block truncate text-[10px] text-[var(--fg-2)]">
-          {detail}
-        </span>
-      </span>
-    </button>
   );
 }
