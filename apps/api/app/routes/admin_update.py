@@ -3,24 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import grp
-import json
 import os
-import pwd
 import re
-import shlex
 import shutil
 import subprocess
-import time
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+import time  # noqa: F401
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, AsyncIterator, Awaitable, Callable, TextIO
+from typing import Annotated, AsyncIterator, TextIO
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
@@ -54,52 +47,25 @@ from .admin_backups import (
     maintenance_marker_busy,
     open_private_append,
 )
+from . import admin_update_environment as _update_environment
+from . import admin_update_launcher as _update_launcher
+from . import admin_update_marker as _update_marker
+from . import admin_update_preferences as _update_preferences
+from . import admin_update_runtime as _update_runtime
+from . import admin_update_schemas as _update_schemas
+from . import admin_update_streaming as _update_streaming
+from . import admin_update_systemd as _update_systemd
 
 
-_MARKER_CLEANUP_RUNTIME_STATE_KEY = "_admin_update_marker_cleanup_runtime"
-
-
-@dataclass(slots=True)
-class _MarkerCleanupRuntime:
-    tasks: set[asyncio.Task[None]] = field(default_factory=set)
-
-    def schedule(
-        self,
-        proc: subprocess.Popen[bytes],
-        cleanup: Callable[[subprocess.Popen[bytes]], Awaitable[None]],
-    ) -> asyncio.Task[None]:
-        task = asyncio.create_task(cleanup(proc))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
-        return task
-
-    async def shutdown(self) -> None:
-        tasks = list(self.tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self.tasks.difference_update(tasks)
+_MARKER_CLEANUP_RUNTIME_STATE_KEY = _update_runtime.MARKER_CLEANUP_RUNTIME_STATE_KEY
+_MarkerCleanupRuntime = _update_runtime.MarkerCleanupRuntime
 
 
 def _marker_cleanup_runtime(request: Request) -> _MarkerCleanupRuntime:
-    runtime = getattr(request.app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, None)
-    if not isinstance(runtime, _MarkerCleanupRuntime):
-        raise RuntimeError("admin update marker cleanup runtime is unavailable")
-    return runtime
+    return _update_runtime.marker_cleanup_runtime(request)
 
 
-@asynccontextmanager
-async def _marker_cleanup_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    runtime = _MarkerCleanupRuntime()
-    setattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, runtime)
-    try:
-        yield
-    finally:
-        await runtime.shutdown()
-        if getattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY, None) is runtime:
-            delattr(app.state, _MARKER_CLEANUP_RUNTIME_STATE_KEY)
-
+_marker_cleanup_lifespan = _update_runtime.marker_cleanup_lifespan
 
 router = APIRouter(
     prefix="/admin/update",
@@ -116,28 +82,14 @@ _UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
 _PID_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
 
-# Release directory layout — overridable via env so unit tests / non-prod
-# installs can point at a sandbox without touching config.py schema.
 _LUMEN_ROOT = os.environ.get("LUMEN_ROOT", "/opt/lumen")
 
 _RELEASE_LIST_LIMIT = 10
 
-# Step protocol regexes — see update.sh contract.
-_STEP_LINE_RE = re.compile(
-    r"^::lumen-step::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+status=(?P<status>start|done|fail)"
-    r"(?:\s+rc=(?P<rc>-?\d+))?"
-    r"(?:\s+dur_ms=(?P<dur_ms>-?\d+))?"
-    r"(?:\s+ts=(?P<ts>\S+))?"
-    r"\s*$"
-)
-_INFO_LINE_RE = re.compile(
-    r"^::lumen-info::\s+phase=(?P<phase>[A-Za-z0-9_]+)\s+key=(?P<key>[A-Za-z0-9_]+)\s+value=(?P<value>.*)$"
-)
 _TRIGGER_DELIMITER_RE = re.compile(
     r"^=== update (?:trigger|unit started) ", re.MULTILINE
 )
 
-# SSE knobs — keep in sync with nginx idle / proxy_read_timeout.
 _SSE_HEARTBEAT_SEC = 15.0
 _SSE_MAX_DURATION_SEC = 60 * 60  # 1h hard cap to prevent leaks
 _SSE_LOG_POLL_SEC = 0.3  # tail-F poll interval
@@ -148,11 +100,7 @@ _SEMVER_UPDATE_TAG_RE = re.compile(
 )
 
 
-@dataclass(frozen=True)
-class UpdateMarker:
-    pid: int
-    started_at: str | None
-    unit: str | None = None
+UpdateMarker = _update_marker.UpdateMarker
 
 
 def _ensure_update_not_running(marker: UpdateMarker | None) -> None:
@@ -205,38 +153,15 @@ def _lumen_root() -> Path:
 
 
 def _read_dotenv_value(path: Path, key: str) -> str | None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (FileNotFoundError, OSError):
-        return None
-    prefix = f"{key}="
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or not line.startswith(prefix):
-            continue
-        value = line[len(prefix) :].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        return value or None
-    return None
+    return _update_environment.read_dotenv_value(path, key)
 
 
 def _shared_env_path(script: Path | None = None) -> Path:
-    configured = os.environ.get("LUMEN_SHARED_ENV", "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    root = _lumen_root()
-    candidate = root / "shared" / ".env"
-    if candidate.is_file():
-        return candidate
-    if script is not None:
-        release_env = script.parent.parent / ".env"
-        try:
-            if release_env.is_file():
-                return release_env.resolve()
-        except OSError:
-            pass
-    return candidate
+    return _update_environment.shared_env_path(
+        script,
+        configured_path=os.environ.get("LUMEN_SHARED_ENV", "").strip(),
+        lumen_root=_lumen_root,
+    )
 
 
 def _runner_trigger_only_mode() -> bool:
@@ -298,101 +223,50 @@ def _runner_request_payload(
 
 
 def _pid_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return _update_marker.pid_is_running(pid)
 
 
 def _marker_is_stale(started_at: str | None) -> bool:
-    if not started_at:
-        return False
-    try:
-        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return False
-    age = datetime.now(timezone.utc) - started.astimezone(timezone.utc)
-    return age.total_seconds() > _PID_MARKER_STALE_AFTER_SECONDS
+    return _update_marker.marker_is_stale(
+        started_at,
+        stale_after_seconds=_PID_MARKER_STALE_AFTER_SECONDS,
+    )
 
 
 def _unit_is_running(unit: str) -> bool:
-    if not unit or shutil.which("systemctl") is None:
-        return False
-    result = subprocess.run(
-        ["systemctl", "is-active", "--quiet", unit],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    return result.returncode == 0
+    return _update_marker.unit_is_running(unit)
 
 
 def _parse_marker_text(raw: str) -> UpdateMarker:
-    pid = 0
-    started_at: str | None = None
-    unit: str | None = None
-    for line in raw.splitlines():
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        if key == "pid":
-            try:
-                pid = int(value)
-            except ValueError:
-                pid = 0
-        elif key == "started_at":
-            started_at = value.strip() or None
-        elif key == "unit":
-            unit = value.strip() or None
-    return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
+    return _update_marker.parse_marker_text(raw)
 
 
 def _marker_is_live(marker: UpdateMarker) -> bool:
-    if marker.unit:
-        if _runner_trigger_only_mode() and not _marker_is_stale(marker.started_at):
-            return True
-        if _unit_is_running(marker.unit):
-            return True
-    return bool(
-        marker.pid
-        and _pid_is_running(marker.pid)
-        and not _marker_is_stale(marker.started_at)
+    return _update_marker.marker_is_live(
+        marker,
+        trigger_only_mode=_runner_trigger_only_mode,
+        marker_is_stale_fn=_marker_is_stale,
+        unit_is_running_fn=_unit_is_running,
+        pid_is_running_fn=_pid_is_running,
     )
 
 
 def _read_marker() -> UpdateMarker | None:
-    marker_path = _update_marker_path()
-    try:
-        marker = _parse_marker_text(marker_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError):
-        return None
-    if _marker_is_live(marker):
-        return marker
-    try:
-        marker_path.unlink()
-    except OSError:
-        pass
-    return None
+    return _update_marker.read_marker(
+        _update_marker_path(),
+        parse_marker=_parse_marker_text,
+        marker_is_live_fn=_marker_is_live,
+    )
 
 
 def _write_marker(pid: int, started_at: str, unit: str | None = None) -> None:
-    marker = _update_marker_path()
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    tmp = marker.with_suffix(f"{marker.suffix}.tmp")
-    lines = [f"pid={pid}", f"started_at={started_at}"]
-    if unit:
-        lines.append(f"unit={unit}")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    chmod_tolerate_eperm(tmp, 0o600)
-    tmp.replace(marker)
+    _update_marker.write_marker(
+        _update_marker_path(),
+        pid=pid,
+        started_at=started_at,
+        unit=unit,
+        chmod=chmod_tolerate_eperm,
+    )
 
 
 def _open_update_log() -> TextIO:
@@ -428,127 +302,39 @@ def _read_log_full() -> str:
 
 
 def _clean_proxy_env(env: dict[str, str]) -> None:
-    for key in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        env.pop(key, None)
+    _update_environment.clean_proxy_env(env)
 
 
 def _apply_proxy_env(env: dict[str, str], proxy_url: str) -> None:
-    env["LUMEN_UPDATE_PROXY_URL"] = proxy_url
-    env["LUMEN_HTTP_PROXY"] = proxy_url
-    env["HTTP_PROXY"] = proxy_url
-    env["HTTPS_PROXY"] = proxy_url
-    env["ALL_PROXY"] = proxy_url
-    env["http_proxy"] = proxy_url
-    env["https_proxy"] = proxy_url
-    env["all_proxy"] = proxy_url
+    _update_environment.apply_proxy_env(env, proxy_url)
 
 
 def _proxy_url_from_env_file(path: Path) -> str | None:
-    for key in (
-        "LUMEN_UPDATE_PROXY_URL",
-        "LUMEN_HTTP_PROXY",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "https_proxy",
-        "http_proxy",
-        "all_proxy",
-    ):
-        value = _read_dotenv_value(path, key)
-        if value:
-            return value
-    return None
+    return _update_environment.proxy_url_from_env_file(path)
 
 
 def _apply_dotenv_proxy_env(env: dict[str, str], env_file: Path) -> str | None:
-    proxy_url = _proxy_url_from_env_file(env_file)
-    if not proxy_url:
-        return None
-    _apply_proxy_env(env, proxy_url)
-    no_proxy = (
-        _read_dotenv_value(env_file, "NO_PROXY")
-        or _read_dotenv_value(env_file, "no_proxy")
-        or "127.0.0.1,localhost,::1"
-    )
-    env.setdefault("NO_PROXY", no_proxy)
-    env.setdefault("no_proxy", no_proxy)
-    return proxy_url
+    return _update_environment.apply_dotenv_proxy_env(env, env_file)
 
 
 def _mask_proxy_url(proxy_url: str) -> str:
-    if "@" not in proxy_url:
-        return proxy_url
-    scheme, rest = proxy_url.split("://", 1) if "://" in proxy_url else ("", proxy_url)
-    _auth, host = rest.rsplit("@", 1)
-    return f"{scheme}://***@{host}" if scheme else f"***@{host}"
+    return _update_environment.mask_proxy_url(proxy_url)
 
 
 def _systemd_unit_name(started_at: datetime) -> str:
-    stamp = started_at.strftime("%Y%m%d%H%M%S")
-    return f"lumen-update-{stamp}-{os.getpid()}.service"
+    return _update_systemd.systemd_unit_name(started_at)
 
 
 def _current_service_identity_properties() -> list[str]:
-    user = pwd.getpwuid(os.getuid()).pw_name
-    group = grp.getgrgid(os.getgid()).gr_name
-    return ["--property", f"User={user}", "--property", f"Group={group}"]
+    return _update_systemd.current_service_identity_properties()
 
 
 def _write_update_env_file(env: dict[str, str], unit: str) -> Path:
-    path = _update_marker_path().with_name(f".update.{unit}.env")
-    keys = {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "LANG",
-        "LC_ALL",
-        "LUMEN_UPDATE_NONINTERACTIVE",
-        "LUMEN_UPDATE_GIT_PULL",
-        "LUMEN_UPDATE_BUILD",
-        "LUMEN_UPDATE_MODE",
-        "LUMEN_UPDATE_SYSTEMD_UNIT",
-        "LUMEN_UPDATE_CHANNEL",
-        "LUMEN_UPDATE_RESOLVED_TAG",
-        "LUMEN_UPDATE_IDEMPOTENCY_KEY",
-        "LUMEN_UPDATE_FORCE_REDEPLOY",
-        "LUMEN_IMAGE_TAG",
-        "LUMEN_VERSION",
-        "LUMEN_HTTP_PROXY",
-        "LUMEN_UPDATE_PROXY_URL",
-        "LUMEN_API_HEALTH_URL",
-        "LUMEN_WEB_HEALTH_URL",
-        "LUMEN_HEALTH_COMPOSE_ATTEMPTS",
-        "LUMEN_HEALTH_COMPOSE_INTERVAL",
-        "LUMEN_HEALTH_TIMEOUT_SECONDS",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    }
-
-    lines = []
-    for key in sorted(keys):
-        value = env.get(key)
-        if value is None:
-            continue
-        lines.append(f"export {key}={shlex.quote(value)}")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    chmod_tolerate_eperm(tmp, 0o600)
-    tmp.replace(path)
-    return path
+    return _update_systemd.write_update_env_file(
+        env,
+        unit,
+        marker_path=_update_marker_path(),
+    )
 
 
 def _systemd_run_command(
@@ -561,49 +347,15 @@ def _systemd_run_command(
     marker_path: Path,
     user_mode: bool = False,
 ) -> list[str]:
-    wrapper = r"""
-set -euo pipefail
-log_path="$1"
-env_file="$2"
-marker_path="$3"
-script="$4"
-cleanup() {
-  rm -f "$env_file" "$marker_path"
-}
-trap cleanup EXIT
-exec >>"$log_path" 2>&1
-set -a
-. "$env_file"
-set +a
-printf '=== update unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "$LUMEN_UPDATE_SYSTEMD_UNIT"
-/usr/bin/env bash "$script"
-"""
-    cmd: list[str] = ["systemd-run"]
-    if user_mode:
-        cmd.append("--user")
-    cmd += [
-        "--unit",
-        unit,
-        "--collect",
-        "--property",
-        f"WorkingDirectory={root}",
-    ]
-    if not user_mode:
-        # User= and Group= are only valid in system mode; --user implicitly runs
-        # under the invoking user's manager.
-        cmd += _current_service_identity_properties()
-    cmd += [
-        "/usr/bin/env",
-        "bash",
-        "-lc",
-        wrapper,
-        "bash",
-        str(log_path),
-        str(env_file),
-        str(marker_path),
-        str(script),
-    ]
-    return cmd
+    return _update_systemd.systemd_run_command(
+        unit=unit,
+        root=root,
+        script=script,
+        log_path=log_path,
+        env_file=env_file,
+        marker_path=marker_path,
+        user_mode=user_mode,
+    )
 
 
 def _systemd_run_inline_command(
@@ -614,51 +366,17 @@ def _systemd_run_inline_command(
     inline_script: str,
     user_mode: bool = False,
 ) -> list[str]:
-    """Build a systemd-run command that executes an inline shell snippet.
-
-    Used by the rollback endpoint — there is no wrapper EnvironmentFile, the
-    script is passed verbatim. stdout/stderr are appended to ``log_path`` so
-    the existing SSE stream surfaces the rollback progress with no extra wiring.
-    """
-    wrapper = r"""
-set -euo pipefail
-log_path="$1"
-inline="$2"
-exec >>"$log_path" 2>&1
-printf '=== rollback unit started at=%s unit=%s ===\n' "$(date -u +%FT%TZ)" "${LUMEN_UPDATE_SYSTEMD_UNIT:-unknown}"
-/usr/bin/env bash -c "$inline"
-"""
-    cmd: list[str] = ["systemd-run"]
-    if user_mode:
-        cmd.append("--user")
-    cmd += [
-        "--unit",
-        unit,
-        "--collect",
-        "--property",
-        f"WorkingDirectory={root}",
-        "--setenv",
-        f"LUMEN_UPDATE_SYSTEMD_UNIT={unit}",
-    ]
-    if not user_mode:
-        cmd += _current_service_identity_properties()
-    cmd += [
-        "/usr/bin/env",
-        "bash",
-        "-lc",
-        wrapper,
-        "bash",
-        str(log_path),
-        inline_script,
-    ]
-    return cmd
+    return _update_systemd.systemd_run_inline_command(
+        unit=unit,
+        root=root,
+        log_path=log_path,
+        inline_script=inline_script,
+        user_mode=user_mode,
+    )
 
 
 def _systemd_run_available() -> bool:
-    return (
-        shutil.which("systemd-run") is not None
-        and shutil.which("systemctl") is not None
-    )
+    return _update_systemd.systemd_run_available()
 
 
 def _run_systemd_command(
@@ -666,16 +384,7 @@ def _run_systemd_command(
     env: dict[str, str],
     cwd: Path,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=str(cwd),
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        close_fds=True,
-        env=env,
-        check=False,
-    )
+    return _update_systemd.run_systemd_command(command, env, cwd)
 
 
 def _systemd_run_attempts(
@@ -687,13 +396,7 @@ def _systemd_run_attempts(
     env_file: Path,
     marker_path: Path,
 ) -> list[tuple[str, list[str]]]:
-    """Build the ordered list of systemd-run attempts.
-
-    Cheapest first (system bus as current uid), then sudo (works with NOPASSWD
-    or cached creds), then the user manager (works without root if linger is
-    enabled for the runtime user).
-    """
-    system_cmd = _systemd_run_command(
+    return _update_systemd.systemd_run_attempts(
         unit=unit,
         root=root,
         script=script,
@@ -701,20 +404,6 @@ def _systemd_run_attempts(
         env_file=env_file,
         marker_path=marker_path,
     )
-    user_cmd = _systemd_run_command(
-        unit=unit,
-        root=root,
-        script=script,
-        log_path=log_path,
-        env_file=env_file,
-        marker_path=marker_path,
-        user_mode=True,
-    )
-    attempts: list[tuple[str, list[str]]] = [("systemd-run", system_cmd)]
-    if shutil.which("sudo") is not None:
-        attempts.append(("sudo -n systemd-run", ["sudo", "-n", *system_cmd]))
-    attempts.append(("systemd-run --user", user_cmd))
-    return attempts
 
 
 def _systemd_run_inline_attempts(
@@ -724,29 +413,12 @@ def _systemd_run_inline_attempts(
     log_path: Path,
     inline_script: str,
 ) -> list[tuple[str, list[str]]]:
-    """Same fallback chain as ``_systemd_run_attempts`` but for inline shell.
-
-    Used by the rollback endpoint to reuse the path-unit / sudo / user-mode
-    cascade without having to involve update.sh.
-    """
-    system_cmd = _systemd_run_inline_command(
+    return _update_systemd.systemd_run_inline_attempts(
         unit=unit,
         root=root,
         log_path=log_path,
         inline_script=inline_script,
     )
-    user_cmd = _systemd_run_inline_command(
-        unit=unit,
-        root=root,
-        log_path=log_path,
-        inline_script=inline_script,
-        user_mode=True,
-    )
-    attempts: list[tuple[str, list[str]]] = [("systemd-run", system_cmd)]
-    if shutil.which("sudo") is not None:
-        attempts.append(("sudo -n systemd-run", ["sudo", "-n", *system_cmd]))
-    attempts.append(("systemd-run --user", user_cmd))
-    return attempts
 
 
 def _log_attempt_failure(
@@ -754,16 +426,7 @@ def _log_attempt_failure(
     label: str,
     result: subprocess.CompletedProcess[str],
 ) -> None:
-    log_fh.write(f"\n[{label}] failed (rc={result.returncode})\n")
-    if result.stdout:
-        log_fh.write(result.stdout)
-        if not result.stdout.endswith("\n"):
-            log_fh.write("\n")
-    if result.stderr:
-        log_fh.write(result.stderr)
-        if not result.stderr.endswith("\n"):
-            log_fh.write("\n")
-    log_fh.flush()
+    _update_systemd.log_attempt_failure(log_fh, label, result)
 
 
 def _start_update_via_path_unit(
@@ -772,92 +435,24 @@ def _start_update_via_path_unit(
     log_fh: TextIO,
     started_at: datetime,
 ) -> tuple[int, str] | None:
-    """Trigger lumen-update-runner.service via the path-watched trigger file.
-
-    Writes a constrained JSON request and ``.update.trigger``.
-    PID 1 — not lumen-api — launches the runner, so all of lumen-api's sandbox
-    constraints (NoNewPrivileges, ProtectSystem=strict) and the polkit/sudo
-    plumbing become irrelevant. Synchronously waits up to ~10s for the runner
-    to become active so callers get a deterministic success/fail signal.
-    """
-    backup_root = Path(settings.backup_root).expanduser()
-    backup_root.mkdir(parents=True, exist_ok=True)
-    log_path = _update_log_path()
-    try:
-        initial_log_size = log_path.stat().st_size
-    except OSError:
-        initial_log_size = 0
-    request_path = _update_runner_request_path()
-    trigger_path = _update_trigger_path()
-    unit = _UPDATE_RUNNER_UNIT
-
-    # 1) Marker first so concurrent triggers see the lock immediately.
-    _write_marker(0, started_at.isoformat(), unit=unit)
-
-    # 2) Fixed-schema request for the root-owned runner. The runner rejects
-    # unknown fields and never accepts executable paths from this file.
-    request_text = json.dumps(
-        _runner_request_payload(env, started_at),
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
+    return _update_launcher.start_update_via_path_unit(
+        backup_root=Path(settings.backup_root).expanduser(),
+        env=env,
+        log_fh=log_fh,
+        started_at=started_at,
+        log_path=_update_log_path(),
+        request_path=_update_runner_request_path(),
+        trigger_path=_update_trigger_path(),
+        marker_path=_update_marker_path(),
+        unit=_UPDATE_RUNNER_UNIT,
+        write_marker=_write_marker,
+        request_payload=_runner_request_payload,
+        chmod=chmod_tolerate_eperm,
+        trigger_only_mode=_runner_trigger_only_mode,
+        wait_for_log_append=_wait_for_log_append,
+        trigger_timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
+        unit_is_running=_unit_is_running,
     )
-    request_tmp = request_path.with_suffix(f"{request_path.suffix}.tmp")
-    request_tmp.write_text(request_text + "\n", encoding="utf-8")
-    chmod_tolerate_eperm(request_tmp, 0o600)
-    request_tmp.replace(request_path)
-
-    # 3) Trigger file. Content is the ISO timestamp; PathChanged on the path
-    #    unit fires on close-after-write and starts the runner unit.
-    trigger_tmp = trigger_path.with_suffix(f"{trigger_path.suffix}.tmp")
-    trigger_tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
-    chmod_tolerate_eperm(trigger_tmp, 0o600)
-    trigger_tmp.replace(trigger_path)
-
-    # 4) Wait for the runner to come up. The path-watcher latency is normally
-    #    < 1s; allow generous slack so a busy host doesn't return a misleading
-    #    failure. Exit early as soon as we observe the unit active.
-    if _runner_trigger_only_mode():
-        # Containerised lumen-api can't query host systemd. The only reliable
-        # in-container confirmation is that the host runner appended output to
-        # the bind-mounted update log after the trigger file changed.
-        if _wait_for_log_append(
-            log_path,
-            initial_size=initial_log_size,
-            timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
-        ):
-            return 0, unit
-        log_fh.write(
-            f"\n[{unit}] trigger file was written, but the host runner did not "
-            f"append output within {int(_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC)}s. "
-            "Check that lumen-update.path is installed, enabled, and watching "
-            "the same backup directory mounted into lumen-api.\n"
-        )
-        log_fh.flush()
-        for path in (trigger_path, request_path, _update_marker_path()):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        return None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if _unit_is_running(unit):
-            return 0, unit
-        time.sleep(0.3)
-
-    # Runner did not pick up the trigger. Clean staged files so the caller can
-    # try the next attempt and we don't leave a stale lock.
-    log_fh.write(
-        f"\n[{unit}] path-unit trigger did not activate within 15s; falling through.\n"
-    )
-    log_fh.flush()
-    for path in (trigger_path, request_path, _update_marker_path()):
-        try:
-            path.unlink()
-        except OSError:
-            pass
-    return None
 
 
 def _start_update_systemd_unit(
@@ -867,94 +462,33 @@ def _start_update_systemd_unit(
     log_fh: TextIO,
     started_at: datetime,
 ) -> tuple[int, str] | None:
-    """Try to launch update.sh in a transient systemd unit.
-
-    Returns ``(0, unit_name)`` on the first successful attempt; returns ``None``
-    when every attempt fails so the caller can fall back to a detached
-    subprocess. Each attempt's stdout/stderr is appended to ``log_fh`` so the
-    operator can see the real reason via the admin UI.
-    """
-    root = script.parent.parent
-    unit = _systemd_unit_name(started_at)
-    log_path = _update_log_path()
-    marker_path = _update_marker_path()
-    env = dict(env)
-    env["LUMEN_UPDATE_SYSTEMD_UNIT"] = unit
-    # `systemd-run --user` needs XDG_RUNTIME_DIR (and the dbus session it implies)
-    # to reach the runtime user's manager. lumen-api inherits a system-service
-    # environment without these vars, so inject them explicitly. Harmless for the
-    # other attempts: system-mode systemd-run ignores XDG_RUNTIME_DIR, and `sudo`
-    # strips it from the child env unless told otherwise.
-    runtime_dir = f"/run/user/{os.getuid()}"
-    env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
-    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
-    env_file = _write_update_env_file(env, unit)
-    _write_marker(0, started_at.isoformat(), unit=unit)
-
-    for label, command in _systemd_run_attempts(
-        unit=unit,
-        root=root,
+    return _update_launcher.start_update_systemd_unit(
         script=script,
-        log_path=log_path,
-        env_file=env_file,
-        marker_path=marker_path,
-    ):
-        result = _run_systemd_command(command, env, root)
-        if result.returncode == 0:
-            return 0, unit
-        _log_attempt_failure(log_fh, label, result)
-
-    # Every attempt failed — clean up the staged files so the caller's fallback
-    # path can rewrite the marker for its own pid.
-    try:
-        marker_path.unlink()
-    except OSError:
-        pass
-    try:
-        env_file.unlink()
-    except OSError:
-        pass
-    return None
+        env=env,
+        log_fh=log_fh,
+        started_at=started_at,
+        systemd_unit_name=_systemd_unit_name,
+        log_path=_update_log_path(),
+        marker_path=_update_marker_path(),
+        write_env_file=_write_update_env_file,
+        write_marker=_write_marker,
+        systemd_attempts=_systemd_run_attempts,
+        run_systemd_command=_run_systemd_command,
+        log_attempt_failure=_log_attempt_failure,
+    )
 
 
 async def _resolve_update_proxy(
     db: AsyncSession,
 ) -> tuple[ProviderProxyDefinition | None, str | None]:
-    use_spec = get_spec("update.use_proxy_pool")
-    name_spec = get_spec("update.proxy_name")
-    use_raw = await get_setting(db, use_spec) if use_spec is not None else None
-    if str(use_raw or "0").strip() != "1":
-        return None, None
-
-    proxies = [proxy for proxy in await load_proxies(db) if proxy.enabled]
-    if not proxies:
-        raise _http(
-            "proxy_unavailable",
-            "update proxy pool is enabled but has no enabled proxies",
-            409,
-        )
-
-    name_raw = await get_setting(db, name_spec) if name_spec is not None else None
-    target_name = str(name_raw or "").strip()
-    if target_name:
-        proxy = next((p for p in proxies if p.name == target_name), None)
-        if proxy is None:
-            raise _http(
-                "proxy_not_found",
-                f"update proxy '{target_name}' not found or disabled",
-                409,
-            )
-    else:
-        proxy = proxies[0]
-
-    proxy_url = await resolve_provider_proxy_url(proxy)
-    if not proxy_url:
-        raise _http(
-            "proxy_resolve_failed",
-            f"update proxy '{proxy.name}' could not be resolved",
-            409,
-        )
-    return proxy, proxy_url
+    return await _update_preferences.resolve_update_proxy(
+        db,
+        get_spec=get_spec,
+        get_setting=get_setting,
+        load_proxies=load_proxies,
+        resolve_proxy_url=resolve_provider_proxy_url,
+        http_error=_http,
+    )
 
 
 StepRecord = _update_status.StepRecord
@@ -963,25 +497,8 @@ UpdateStatusOut = _update_status.UpdateStatusOut
 SystemMaintenanceOut = _update_status.SystemMaintenanceOut
 
 
-class UpdateTriggerOut(BaseModel):
-    accepted: bool
-    pid: int | None = None
-    unit: str | None = None
-    started_at: datetime
-    proxy_name: str | None = None
-    log_path: str
-    note: str
-    target_tag: str | None = None
-    idempotency_key: str | None = None
-    replayed: bool = False
-
-
-class UpdateTriggerIn(BaseModel):
-    target_tag: str | None = None
-    force_redeploy: bool = False
-    channel: str | None = None
-    confirm_update: bool = False
-    confirmed_target_tag: str | None = None
+UpdateTriggerOut = _update_schemas.UpdateTriggerOut
+UpdateTriggerIn = _update_schemas.UpdateTriggerIn
 
 
 def _list_releases(
@@ -1026,81 +543,39 @@ def _maintenance_snapshot() -> SystemMaintenanceOut:
 
 
 async def _update_channel(db: AsyncSession) -> str:
-    spec = get_spec("update.channel")
-    if spec is None:
-        return "stable"
-    raw = await get_setting(db, spec)
-    value = (raw or "stable").strip().lower()
-    return (
-        value if value in {"stable", "main", "pinned", "minor", "major"} else "stable"
+    return await _update_preferences.update_channel(
+        db,
+        get_spec=get_spec,
+        get_setting=get_setting,
     )
 
 
 async def _update_check_ttl(db: AsyncSession) -> int:
-    spec = get_spec("update.check_ttl_sec")
-    if spec is None:
-        return 1200
-    raw = await get_setting(db, spec)
-    try:
-        return max(0, int(raw)) if raw is not None else 1200
-    except ValueError:
-        return 1200
+    return await _update_preferences.update_check_ttl(
+        db,
+        get_spec=get_spec,
+        get_setting=get_setting,
+    )
 
 
 async def _update_allow_prerelease(db: AsyncSession) -> bool:
-    spec = get_spec("update.allow_prerelease")
-    if spec is None:
-        return False
-    raw = await get_setting(db, spec)
-    return str(raw or "0").strip() in {"1", "true", "yes", "on"}
+    return await _update_preferences.update_allow_prerelease(
+        db,
+        get_spec=get_spec,
+        get_setting=get_setting,
+    )
 
 
 def _sse_format(event: str, data: object) -> str:
-    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    return f"event: {event}\ndata: {payload}\n\n"
+    return _update_streaming.sse_format(event, data)
 
 
 def _classify_log_line(line: str) -> tuple[str, dict[str, object]]:
-    stripped = line.rstrip("\n").rstrip("\r")
-    step = _STEP_LINE_RE.match(stripped.strip())
-    if step:
-        rc = step.group("rc")
-        duration = step.group("dur_ms")
-        return "step", {
-            "phase": step.group("phase"),
-            "status": "done"
-            if step.group("status") == "fail"
-            else step.group("status"),
-            "ts": step.group("ts"),
-            "rc": int(rc) if rc is not None else None,
-            "dur_ms": int(duration) if duration is not None else None,
-        }
-    info = _INFO_LINE_RE.match(stripped.strip())
-    if info:
-        return "info", {
-            "phase": info.group("phase"),
-            "key": info.group("key"),
-            "value": info.group("value").rstrip(),
-        }
-    return "log", {"line": stripped}
+    return _update_streaming.classify_log_line(line)
 
 
 def _read_incremental(path: Path, last_pos: int) -> tuple[str, int]:
-    try:
-        size = path.stat().st_size
-    except (FileNotFoundError, OSError):
-        return "", last_pos
-    if size < last_pos:
-        last_pos = 0
-    if size == last_pos:
-        return "", last_pos
-    try:
-        with path.open("rb") as handle:
-            handle.seek(last_pos)
-            chunk = handle.read(size - last_pos)
-    except OSError:
-        return "", last_pos
-    return chunk.decode("utf-8", errors="replace"), size
+    return _update_streaming.read_incremental(path, last_pos)
 
 
 def _wait_for_log_append(
@@ -1109,15 +584,11 @@ def _wait_for_log_append(
     initial_size: int,
     timeout_sec: float,
 ) -> bool:
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        try:
-            if path.stat().st_size > initial_size:
-                return True
-        except OSError:
-            pass
-        time.sleep(0.25)
-    return False
+    return _update_streaming.wait_for_log_append(
+        path,
+        initial_size=initial_size,
+        timeout_sec=timeout_sec,
+    )
 
 
 async def _stream_update_events(request: Request) -> AsyncIterator[str]:
@@ -1199,27 +670,12 @@ async def update_check(
 
 @router.get("/stream")
 async def update_stream(request: Request, _admin: AdminUser) -> StreamingResponse:
-    """SSE feed of update progress.
-
-    Browsers consume via ``new EventSource('/api/admin/update/stream')``.
-    Events:
-      - ``state``  full UpdateStatusOut snapshot, sent once on connect
-      - ``step``   StepRecord delta (phase transitioned)
-      - ``info``   k/v from ::lumen-info:: lines
-      - ``log``    raw log lines (batched) for free-form output
-      - ``ping``   heartbeat every 15s
-      - ``done``   final state + reason; client should close
-    """
     return StreamingResponse(
         _stream_update_events(request),
         media_type="text/event-stream",
         headers={
-            # ``no-cache`` + ``X-Accel-Buffering: no`` are belt-and-suspenders
-            # against intermediaries (nginx/cloudflare) buffering the response.
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
-            # Force Connection: keep-alive even if the proxy strips upstream
-            # signalling — SSE is fundamentally a long-lived GET.
             "Connection": "keep-alive",
         },
     )
