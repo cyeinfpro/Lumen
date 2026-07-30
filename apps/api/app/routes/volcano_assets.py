@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -12,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.models import new_uuid7
 from lumen_core.schemas import (
     VideoAssetCapabilitiesOut,
-    VideoAssetCreateAcceptedOut,
     VideoAssetCreateIn,
     VideoAssetGroupCreateIn,
     VideoAssetGroupListOut,
@@ -62,11 +60,9 @@ from ._volcano_asset_ownership import (
     owned_resource_receipts,
     resource_owner_user_id,
 )
-from ._volcano_asset_retry import (
-    RetryDependencies,
-    retry_failed_operation,
-)
 from .videos import video_provider_state
+from .volcano_assets_parts import mutations as _mutation_routes
+from .volcano_assets_parts import operation_routes as _operation_routes
 from .volcano_assets_parts import operations as _operations
 from .volcano_assets_parts import routes as _route_queries
 from .volcano_assets_parts import serialization as _serialization
@@ -85,6 +81,57 @@ _REDIS_RETRY_BASE_DELAY_SECONDS = _operations.REDIS_RETRY_BASE_DELAY_SECONDS
 _MEMBER_LIST_PAGE_SIZE = 100
 VOLCANO_ASSET_CREATE_QPM = _operations.VOLCANO_ASSET_CREATE_QPM
 VOLCANO_ASSET_CREATE_WINDOW_SECONDS = _operations.VOLCANO_ASSET_CREATE_WINDOW_SECONDS
+_capability = _validation.capability
+_is_admin = _validation.is_admin
+_utc_iso = _serialization.utc_iso
+_retry_redis_call = _operations.retry_redis_call
+_operation_quota_key = _serialization.operation_quota_key
+_operation_asset_response = _serialization.operation_asset_response
+_same_operation_scope = _serialization.same_operation_scope
+_http_error_code = _validation.http_error_code
+
+
+def _mutation_route_dependencies() -> _mutation_routes.MutationRouteDependencies:
+    return _mutation_routes.MutationRouteDependencies(
+        require_provider=_require_provider,
+        require_resource_owner=_require_resource_owner,
+        resolve_local_asset_source=_resolve_local_asset_source,
+        public_base_url=_public_base_url,
+        queue_operation=_queue_operation,
+        new_id=new_uuid7,
+        normalize_asset_name=normalize_volcano_asset_name,
+        aigc_group_type=_AIGC_GROUP_TYPE,
+    )
+
+
+def _operation_route_dependencies() -> _operation_routes.OperationRouteDependencies:
+    return _operation_routes.OperationRouteDependencies(
+        get_redis=get_redis,
+        redis_get_operation=_redis_get_operation,
+        is_admin=_is_admin,
+        http_error=_http,
+        require_provider=_require_provider,
+        provider_snapshot_matches=operation_matches_provider_snapshot,
+        client_factory=VolcanoAssetClient,
+        get_asset=_get_asset,
+        http_error_code=_http_error_code,
+        require_resource_owner=_require_resource_owner,
+        operation_asset_response=_operation_asset_response,
+        owned_operation=_owned_operation,
+        operation_out=_operation_out,
+        allowed_actions=_OPERATION_ACTIONS,
+        rate_limit_http=_rate_limit_http,
+        operation_quota_key=_operation_quota_key,
+        acquire_rate_limit=acquire_volcano_create_rate_limit,
+        compare_and_set=compare_and_set_volcano_asset_operation,
+        release_admission_slot=_release_admission_slot,
+        same_operation_scope=_same_operation_scope,
+        enqueue_operation=_enqueue_operation,
+        mark_enqueue_failed=_mark_enqueue_failed,
+        utc_iso=_utc_iso,
+        audit_write_best_effort=_audit_write_best_effort,
+        logger=logger,
+    )
 
 
 def _query_route_dependencies() -> _route_queries.QueryRouteDependencies:
@@ -123,19 +170,6 @@ def _http(
         status_code,
         headers=headers,
         **details,
-    )
-
-
-def _capability(
-    providers: list[VideoProviderDefinition],
-    *,
-    model: str,
-    errors: list[str] | None = None,
-) -> tuple[VideoProviderDefinition | None, str | None]:
-    return _validation.capability(
-        providers,
-        model=model,
-        errors=errors,
     )
 
 
@@ -178,10 +212,6 @@ async def _resource_owner_user_id(
         resource_type=resource_type,
         resource_id=resource_id,
     )
-
-
-def _is_admin(user: Any) -> bool:
-    return _validation.is_admin(user)
 
 
 async def _owned_resource_receipts(
@@ -332,14 +362,6 @@ async def _audit_write_best_effort(
     )
 
 
-def _utc_iso() -> str:
-    return _serialization.utc_iso()
-
-
-async def _retry_redis_call(call: Callable[[], Awaitable[Any]]) -> Any:
-    return await _operations.retry_redis_call(call)
-
-
 async def _redis_get_operation(
     redis: Any,
     operation_id: str,
@@ -360,22 +382,12 @@ async def _redis_set_operation(redis: Any, operation: dict[str, Any]) -> None:
     )
 
 
-def _operation_quota_key(operation: dict[str, Any]) -> VolcanoAssetQuotaKey:
-    return _serialization.operation_quota_key(operation)
-
-
 def _operation_out(operation: dict[str, Any]) -> VideoAssetOperationOut:
     return _serialization.operation_out(
         operation,
         http_error=_http,
         now_iso=_utc_iso,
     )
-
-
-def _operation_asset_response(
-    operation: dict[str, Any],
-) -> VideoAssetCreateAcceptedOut:
-    return _serialization.operation_asset_response(operation)
 
 
 async def _owned_operation(
@@ -425,13 +437,6 @@ async def _mark_enqueue_failed(
         compare_and_set=compare_and_set_volcano_asset_operation,
         now_iso=_utc_iso,
     )
-
-
-def _same_operation_scope(
-    left: dict[str, Any],
-    right: dict[str, Any],
-) -> bool:
-    return _serialization.same_operation_scope(left, right)
 
 
 def _same_operation_intent(
@@ -492,10 +497,6 @@ async def _queue_operation(
 
 def _rate_limit_http(exc: VolcanoAssetCreateRateLimited) -> HTTPException:
     return _operations.rate_limit_http(exc, http_error=_http)
-
-
-def _http_error_code(exc: HTTPException) -> str | None:
-    return _validation.http_error_code(exc)
 
 
 @router.get("/capabilities", response_model=VideoAssetCapabilitiesOut)
@@ -565,29 +566,13 @@ async def create_group(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    fields = {
-        "name": body.name,
-        "description": body.description,
-        "group_type": _AIGC_GROUP_TYPE,
-    }
-    return await _queue_operation(
-        action="create_group",
+    return await _mutation_routes.create_group(
+        body=body,
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_fields={
-            "target_id": None,
-            "fields": fields,
-            "name": body.name,
-            "description": body.description,
-            "group_type": _AIGC_GROUP_TYPE,
-        },
-        audit_details={
-            "resource": "asset_group",
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
@@ -605,32 +590,14 @@ async def update_group(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
-        user=user,
-        provider=provider,
-        resource_type="group",
-        resource_id=group_id,
-    )
-    fields = body.model_dump(exclude_none=True)
-    return await _queue_operation(
-        action="update_group",
+    return await _mutation_routes.update_group(
+        group_id=group_id,
+        body=body,
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_fields={
-            "target_id": group_id,
-            "fields": fields,
-            "group_id": group_id,
-            **fields,
-        },
-        audit_details={
-            "resource": "asset_group",
-            "group_id": group_id,
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
@@ -647,32 +614,13 @@ async def delete_group(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
-        user=user,
-        provider=provider,
-        resource_type="group",
-        resource_id=group_id,
-    )
-    return await _queue_operation(
-        action="delete_group",
+    return await _mutation_routes.delete_group(
+        group_id=group_id,
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_fields={
-            "target_id": group_id,
-            "fields": {"cascade_assets": True},
-            "group_id": group_id,
-            "cascade_assets": True,
-        },
-        audit_details={
-            "resource": "asset_group",
-            "group_id": group_id,
-            "cascade_assets": True,
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
@@ -713,59 +661,13 @@ async def get_asset(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoAssetOut:
-    try:
-        operation = await _redis_get_operation(get_redis(), asset_id)
-    except Exception:  # noqa: BLE001
-        operation = None
-        logger.warning(
-            "video_asset.operation_lookup_failed",
-            exc_info=True,
-        )
-    if operation is not None:
-        owned = str(operation.get("user_id") or "") == str(user.id)
-        same_model = not operation.get("model") or operation.get("model") == model
-        if (
-            not (_is_admin(user) or owned)
-            or not same_model
-            or operation.get("action") != "create_asset"
-        ):
-            raise _http(
-                "video_asset_operation_not_found",
-                "video asset operation was not found",
-                404,
-            )
-        result = operation.get("result")
-        if operation.get("status") == "succeeded" and isinstance(result, dict):
-            real_asset_id = str(result.get("id") or "")
-            if real_asset_id:
-                provider = await _require_provider(db, model=model)
-                if operation_matches_provider_snapshot(operation, provider):
-                    try:
-                        current = await _get_asset(
-                            VolcanoAssetClient(provider),
-                            provider,
-                            real_asset_id,
-                        )
-                    except HTTPException as exc:
-                        if _http_error_code(exc) != "volcano_asset_not_found":
-                            raise
-                    else:
-                        return VideoAssetOut(**current)
-        return VideoAssetOut(
-            **_operation_asset_response(operation).model_dump(
-                include=set(VideoAssetOut.model_fields)
-            )
-        )
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
+    return await _operation_routes.get_asset(
+        asset_id=asset_id,
+        model=model,
         user=user,
-        provider=provider,
-        resource_type="asset",
-        resource_id=asset_id,
+        db=db,
+        deps=_operation_route_dependencies(),
     )
-    asset = await _get_asset(VolcanoAssetClient(provider), provider, asset_id)
-    return VideoAssetOut(**asset)
 
 
 @router.get(
@@ -796,54 +698,13 @@ async def retry_operation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoAssetOperationOut:
-    redis = get_redis()
-    operation = await _owned_operation(
+    return await _operation_routes.retry_operation(
         operation_id=operation_id,
-        user_id=user.id,
-        redis=redis,
+        request=request,
+        user=user,
+        db=db,
+        deps=_operation_route_dependencies(),
     )
-    result = await retry_failed_operation(
-        redis,
-        operation_id,
-        operation,
-        user_id=str(user.id),
-        allowed_actions=_OPERATION_ACTIONS,
-        deps=RetryDependencies(
-            http_error=_http,
-            rate_limit_error=_rate_limit_http,
-            operation_quota_key=_operation_quota_key,
-            acquire_rate_limit=acquire_volcano_create_rate_limit,
-            compare_and_set=compare_and_set_volcano_asset_operation,
-            release_admission_slot=_release_admission_slot,
-            same_operation_scope=_same_operation_scope,
-            enqueue_operation=_enqueue_operation,
-            mark_enqueue_failed=_mark_enqueue_failed,
-            utc_iso=_utc_iso,
-            logger=logger,
-        ),
-    )
-    operation = result.operation
-    if result.audit_required:
-        await _audit_write_best_effort(
-            db=db,
-            request=request,
-            user=user,
-            event_type=(
-                f"video_asset_operation.{result.action}.retry"
-                if operation.get("status") != "failed"
-                else (f"video_asset_operation.{result.action}.retry_enqueue_failed")
-            ),
-            details={
-                "operation_id": operation_id,
-                "action": result.action,
-                "attempt": operation["attempt"],
-                "target_id": operation.get("target_id"),
-                "model": operation.get("model"),
-                "provider_name": operation.get("provider_name"),
-                "project_name": operation.get("project_name"),
-            },
-        )
-    return _operation_out(operation)
 
 
 @router.post(
@@ -859,55 +720,13 @@ async def create_asset(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
-        user=user,
-        provider=provider,
-        resource_type="group",
-        resource_id=body.group_id,
-    )
-    source = await _resolve_local_asset_source(
+    return await _mutation_routes.create_asset(
         body=body,
-        request=request,
-        user_id=user.id,
-        db=db,
-    )
-    public_base_url = await _public_base_url(request, db)
-    operation_id = new_uuid7()
-    asset_name = normalize_volcano_asset_name(
-        body.name,
-        fallback_id=operation_id,
-    )
-    fields = {
-        "group_id": body.group_id,
-        "name": asset_name,
-        "asset_type": source.asset_type,
-        "local_source_id": source.local_id,
-    }
-    return await _queue_operation(
-        action="create_asset",
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_id=operation_id,
-        operation_fields={
-            "target_id": None,
-            "fields": fields,
-            "group_id": body.group_id,
-            "name": asset_name,
-            "asset_type": source.asset_type,
-            "local_source_id": source.local_id,
-            "public_base_url": public_base_url,
-        },
-        audit_details={
-            "resource": "asset",
-            "group_id": body.group_id,
-            "asset_type": source.asset_type,
-            "local_source_id": source.local_id,
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
@@ -925,32 +744,14 @@ async def update_asset(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
-        user=user,
-        provider=provider,
-        resource_type="asset",
-        resource_id=asset_id,
-    )
-    fields = {"name": body.name}
-    return await _queue_operation(
-        action="update_asset",
+    return await _mutation_routes.update_asset(
+        asset_id=asset_id,
+        body=body,
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_fields={
-            "target_id": asset_id,
-            "fields": fields,
-            "asset_id": asset_id,
-            "name": body.name,
-        },
-        audit_details={
-            "resource": "asset",
-            "asset_id": asset_id,
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
@@ -967,30 +768,13 @@ async def delete_asset(
     db: Annotated[AsyncSession, Depends(get_db)],
     model: Annotated[str, Query(min_length=1, max_length=128)],
 ) -> VideoAssetOperationOut:
-    provider = await _require_provider(db, model=model)
-    await _require_resource_owner(
-        db,
-        user=user,
-        provider=provider,
-        resource_type="asset",
-        resource_id=asset_id,
-    )
-    return await _queue_operation(
-        action="delete_asset",
+    return await _mutation_routes.delete_asset(
+        asset_id=asset_id,
         request=request,
         user=user,
         db=db,
         model=model,
-        provider=provider,
-        operation_fields={
-            "target_id": asset_id,
-            "fields": {},
-            "asset_id": asset_id,
-        },
-        audit_details={
-            "resource": "asset",
-            "asset_id": asset_id,
-        },
+        deps=_mutation_route_dependencies(),
     )
 
 
