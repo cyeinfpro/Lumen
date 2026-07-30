@@ -53,6 +53,7 @@ from .provider_runtime.probe_runtime import (
 )
 from .provider_runtime.probes import ProviderProbeMixin
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
+from .provider_pool_parts import image_selection as _image_selection
 from .validation import validate_provider_base_url
 
 logger = logging.getLogger(__name__)
@@ -136,40 +137,12 @@ class TextProviderAttempt:
         self._reported = True
 
 
-_ImageCandidate = tuple[ProviderConfig, tuple[int, float, float]]
+_ImageCandidate = _image_selection.ImageCandidate
+_ImageHealthSnapshot = _image_selection.ImageHealthSnapshot
+_ImageCandidateQuery = _image_selection.ImageCandidateQuery
 
 
-@dataclass(frozen=True)
-class _ImageHealthSnapshot:
-    text_circuit_open: bool
-    image_cooldown_until: float | None
-    image_rate_limited_until: float | None
-    inflight: int
-    last_attempted: float | None
-    last_used: float | None
-
-
-@dataclass
-class _ImageCandidateBuckets:
-    candidates: list[_ImageCandidate] = field(default_factory=list)
-    mask_file_candidates: list[_ImageCandidate] = field(default_factory=list)
-    mask_url_candidates: list[_ImageCandidate] = field(default_factory=list)
-
-    def add(
-        self,
-        candidate: _ImageCandidate,
-        *,
-        requires_mask: bool,
-        mask_transport_required: bool,
-    ) -> None:
-        provider, _sort_key = candidate
-        if not requires_mask or not mask_transport_required:
-            self.candidates.append(candidate)
-        elif provider.image_edit_input_transport == "file":
-            self.mask_file_candidates.append(candidate)
-        else:
-            self.mask_url_candidates.append(candidate)
-
+class _ImageCandidateBuckets(_image_selection.ImageCandidateBuckets):
     def select(
         self,
         *,
@@ -177,34 +150,12 @@ class _ImageCandidateBuckets:
         mask_transport_required: bool,
         task_id: str | None,
     ) -> list[_ImageCandidate]:
-        if not requires_mask or not mask_transport_required:
-            return self.candidates
-        if self.mask_file_candidates:
-            return self.mask_file_candidates
-        if self.mask_url_candidates:
-            logger.info(
-                "image mask file-mode exhausted; falling back to url transport "
-                "task=%s candidates=%d",
-                task_id,
-                len(self.mask_url_candidates),
-            )
-        return self.mask_url_candidates
-
-
-@dataclass(frozen=True)
-class _ImageCandidateQuery:
-    avoided: set[str]
-    endpoint_kind: str | None
-    ignore_cooldown: bool
-    redis: Any
-    account_limiter: Any
-    wall_now: float
-    mono_now: float
-    requires_mask: bool
-    mask_transport_required: bool
-    task_id: str | None
-    size_bucket: str | None
-    cost_class: str | None
+        return self.select_with_logger(
+            requires_mask=requires_mask,
+            mask_transport_required=mask_transport_required,
+            task_id=task_id,
+            logger=logger,
+        )
 
 
 class _UntrackedTextProviderAttempt:
@@ -243,15 +194,7 @@ def _image_endpoint_skip_reason(
     provider: ProviderConfig,
     endpoint_kind: str | None,
 ) -> str | None:
-    if not endpoint_kind_allowed(provider, endpoint_kind):
-        return f"endpoint_locked_to_{provider.image_jobs_endpoint}"
-    if not provider_supports_route(
-        provider,
-        route="image",
-        endpoint_kind=endpoint_kind,
-    ):
-        return "capability_unsupported"
-    return None
+    return _image_selection.image_endpoint_skip_reason(provider, endpoint_kind)
 
 
 def _image_health_skip_reason(
@@ -260,105 +203,53 @@ def _image_health_skip_reason(
     ignore_cooldown: bool,
     now: float,
 ) -> str | None:
-    if snapshot.text_circuit_open:
-        return "text_circuit_open"
-    if (
-        not ignore_cooldown
-        and snapshot.image_cooldown_until is not None
-        and now < snapshot.image_cooldown_until
-    ):
-        return "image_cooldown"
-    if (
-        not ignore_cooldown
-        and snapshot.image_rate_limited_until is not None
-        and now < snapshot.image_rate_limited_until
-    ):
-        return "image_rate_limited"
-    return None
+    return _image_selection.image_health_skip_reason(
+        snapshot,
+        ignore_cooldown=ignore_cooldown,
+        now=now,
+    )
 
 
 def _image_last_attempt_key(snapshot: _ImageHealthSnapshot) -> float:
-    attempted_or_used = (
-        snapshot.last_attempted
-        if snapshot.last_attempted is not None
-        else snapshot.last_used
-    )
-    return attempted_or_used if attempted_or_used is not None else float("-inf")
+    return _image_selection.image_last_attempt_key(snapshot)
 
 
 def _image_candidate_sort_key(
     candidate: _ImageCandidate,
 ) -> tuple[int, float, float, int]:
-    provider, (inflight, last_used, adaptive_score) = candidate
-    return inflight, adaptive_score, last_used, -provider.priority
+    return _image_selection.image_candidate_sort_key(candidate)
 
 
 def _resolved_image_provider(provider: ProviderConfig) -> ResolvedProvider:
-    return ResolvedProvider(
-        name=provider.name,
-        base_url=provider.base_url,
-        api_key=provider.api_key,
-        proxy=provider.proxy,
-        image_jobs_enabled=provider.image_jobs_enabled,
-        image_jobs_endpoint=provider.image_jobs_endpoint,
-        image_jobs_endpoint_lock=provider.image_jobs_endpoint_lock,
-        image_jobs_base_url=provider.image_jobs_base_url,
-        image_edit_input_transport=provider.image_edit_input_transport,
-        image_concurrency=provider.image_concurrency,
-        image_rate_limit=provider.image_rate_limit,
-        image_daily_quota=provider.image_daily_quota,
-        responses_supported=provider.responses_supported,
-        purposes=provider.purposes,
-        image_generations_supported=provider.image_generations_supported,
-        image_responses_supported=provider.image_responses_supported,
-    )
+    return _image_selection.resolved_image_provider(provider)
 
 
 def _decode_avoided_provider(value: Any) -> str | None:
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
-            return None
-    return value if isinstance(value, str) else None
+    return _image_selection.decode_avoided_provider(value)
 
 
 async def _load_avoided_image_providers(
     redis: Any,
     task_id: str | None,
 ) -> set[str]:
-    if not task_id or redis is None:
-        return set()
-    try:
-        raw = await redis.smembers(f"generation:image_queue:avoid:{task_id}")
-    except Exception:  # noqa: BLE001
-        return set()
-    return {
-        decoded
-        for item in raw or []
-        if (decoded := _decode_avoided_provider(item)) is not None
-    }
+    return await _image_selection.load_avoided_image_providers(
+        redis,
+        task_id,
+        decoder=_decode_avoided_provider,
+    )
 
 
 def _only_avoided_image_providers(
     avoided: set[str],
     skipped: list[tuple[str, str]],
 ) -> bool:
-    return bool(avoided) and all(
-        reason == "avoided_from_previous_attempt" for _, reason in skipped
-    )
+    return _image_selection.only_avoided_image_providers(avoided, skipped)
 
 
 def _all_image_accounts_failed(
     skipped: list[tuple[str, str]],
 ) -> UpstreamError:
-    detail = ", ".join(f"{name}({reason})" for name, reason in skipped) or "none"
-    return UpstreamError(
-        f"all accounts unavailable for image: {detail}",
-        error_code=EC.ALL_ACCOUNTS_FAILED.value,
-        status_code=503,
-        payload={"skipped": skipped},
-    )
+    return _image_selection.all_image_accounts_failed(skipped)
 
 
 @contextmanager
@@ -389,7 +280,10 @@ async def _validate_provider_base_url(raw_base: str) -> str:
 # ---------------------------------------------------------------------------
 # ProviderPool
 # ---------------------------------------------------------------------------
-class ProviderPool(ProviderProbeMixin):
+class ProviderPool(
+    _image_selection.ProviderPoolImageSelectionMixin,
+    ProviderProbeMixin,
+):
     def __init__(
         self,
         *,
@@ -418,6 +312,30 @@ class ProviderPool(ProviderProbeMixin):
     def get_redis(self) -> Any:
         """Public accessor for the attached Redis client; absent returns None."""
         return self._redis
+
+    def _image_selection_dependencies(
+        self,
+    ) -> _image_selection.ImageSelectionDependencies:
+        from . import account_limiter
+
+        return _image_selection.ImageSelectionDependencies(
+            logger=logger,
+            monotonic=time.monotonic,
+            wall_time=time.time,
+            account_limiter=account_limiter,
+            health_type=ProviderHealth,
+            health_snapshot_type=_ImageHealthSnapshot,
+            candidate_buckets_type=_ImageCandidateBuckets,
+            candidate_query_type=_ImageCandidateQuery,
+            endpoint_skip_reason=_image_endpoint_skip_reason,
+            health_skip_reason=_image_health_skip_reason,
+            last_attempt_key=_image_last_attempt_key,
+            load_avoided_providers=_load_avoided_image_providers,
+            only_avoided_providers=_only_avoided_image_providers,
+            all_accounts_failed=_all_image_accounts_failed,
+            candidate_sort_key=_image_candidate_sort_key,
+            resolved_provider=_resolved_image_provider,
+        )
 
     # ---- 配置加载 --------------------------------------------------------
 
@@ -933,303 +851,6 @@ class ProviderPool(ProviderProbeMixin):
             h.total_requests += total
             h.successful_requests += success
             h.failed_requests += fail
-
-    def _image_health_snapshot(
-        self,
-        health: ProviderHealth,
-        *,
-        endpoint_kind: str | None,
-        now: float,
-    ) -> _ImageHealthSnapshot:
-        endpoint_key = endpoint_kind or ""
-        with self._stats_lock:
-            return _ImageHealthSnapshot(
-                text_circuit_open=self._is_open(health, now),
-                image_cooldown_until=health.image_cooldown_until,
-                image_rate_limited_until=health.image_rate_limited_until,
-                inflight=health.image_inflight.get(endpoint_key, 0),
-                last_attempted=health.image_last_attempted_at_per_ek.get(endpoint_key),
-                last_used=health.image_last_used_at_per_ek.get(endpoint_key),
-            )
-
-    async def _image_quota_skip_reason(
-        self,
-        provider: ProviderConfig,
-        health: ProviderHealth,
-        *,
-        redis: Any,
-        account_limiter: Any,
-        wall_now: float,
-        mono_now: float,
-    ) -> str | None:
-        try:
-            allowed, retry_after = await account_limiter.check_quota(
-                redis,
-                provider.name,
-                provider.image_rate_limit,
-                provider.image_daily_quota,
-                now=wall_now,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "account_limiter.check_quota raised provider=%s err=%s — "
-                "treating as temporarily unavailable",
-                provider.name,
-                exc,
-            )
-            allowed = False
-            retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
-        if allowed:
-            return None
-        with self._stats_lock:
-            health.image_rate_limited_until = mono_now + max(1.0, retry_after)
-        return f"quota_exhausted retry_after={retry_after:.0f}s"
-
-    async def _qualify_image_candidate(
-        self,
-        provider: ProviderConfig,
-        *,
-        avoided: set[str],
-        endpoint_kind: str | None,
-        ignore_cooldown: bool,
-        redis: Any,
-        account_limiter: Any,
-        wall_now: float,
-        mono_now: float,
-        size_bucket: str | None,
-        cost_class: str | None,
-    ) -> tuple[_ImageCandidate | None, str | None]:
-        reason = _image_endpoint_skip_reason(provider, endpoint_kind)
-        if reason is not None:
-            return None, reason
-        health = self._health.setdefault(provider.name, ProviderHealth())
-        if provider.name in avoided:
-            return None, "avoided_from_previous_attempt"
-        snapshot = self._image_health_snapshot(
-            health,
-            endpoint_kind=endpoint_kind,
-            now=mono_now,
-        )
-        reason = _image_health_skip_reason(
-            snapshot,
-            ignore_cooldown=ignore_cooldown,
-            now=mono_now,
-        )
-        if reason is not None:
-            return None, reason
-        reason = await self._image_quota_skip_reason(
-            provider,
-            health,
-            redis=redis,
-            account_limiter=account_limiter,
-            wall_now=wall_now,
-            mono_now=mono_now,
-        )
-        if reason is not None:
-            return None, reason
-        adaptive_score = self._image_candidate_adaptive_score(
-            health=health,
-            endpoint_kind=endpoint_kind,
-            size_bucket=size_bucket,
-            cost_class=cost_class,
-        )
-        return (
-            provider,
-            (snapshot.inflight, _image_last_attempt_key(snapshot), adaptive_score),
-        ), None
-
-    async def _collect_image_candidates(
-        self,
-        enabled: list[ProviderConfig],
-        *,
-        query: _ImageCandidateQuery,
-    ) -> tuple[list[_ImageCandidate], list[tuple[str, str]]]:
-        buckets = _ImageCandidateBuckets()
-        skipped: list[tuple[str, str]] = []
-        for provider in enabled:
-            candidate, reason = await self._qualify_image_candidate(
-                provider,
-                avoided=query.avoided,
-                endpoint_kind=query.endpoint_kind,
-                ignore_cooldown=query.ignore_cooldown,
-                redis=query.redis,
-                account_limiter=query.account_limiter,
-                wall_now=query.wall_now,
-                mono_now=query.mono_now,
-                size_bucket=query.size_bucket,
-                cost_class=query.cost_class,
-            )
-            if candidate is None:
-                skipped.append((provider.name, reason or "unavailable"))
-                continue
-            buckets.add(
-                candidate,
-                requires_mask=query.requires_mask,
-                mask_transport_required=query.mask_transport_required,
-            )
-        return buckets.select(
-            requires_mask=query.requires_mask,
-            mask_transport_required=query.mask_transport_required,
-            task_id=query.task_id,
-        ), skipped
-
-    async def _select_for_image(
-        self,
-        *,
-        purpose: str = "image",
-        ignore_cooldown: bool = False,
-        task_id: str | None = None,
-        endpoint_kind: str | None = None,
-        acquire_inflight: bool = True,
-        requires_mask: bool = False,
-        mask_transport_required: bool = True,
-        queue_lane: str | None = None,
-        size_bucket: str | None = None,
-        cost_class: str | None = None,
-    ) -> list[ResolvedProvider]:
-        """按账号视角选号：跳过熔断 / image cooldown / 配额耗尽的账号，
-        剩余候选按 inflight/last-used 基线 + EWMA 健康分升序排序。
-
-        ignore_cooldown=True 时，单任务遍历场景下跳过 image_cooldown / image_rate_limited
-        过滤——上次失败不代表下次失败，让任务把所有 enabled 账号都试一遍。
-        text 熔断（auth 类硬故障）和 quota 耗尽仍然过滤。
-
-        排序最高优先级是当前 endpoint_kind 维度的 in-flight 计数：让并发请求
-        自然落到不同号上，避免 image_last_used_at 只在 success 时更新带来的
-        "select-then-update"雪崩（多个 task 同时看到同一个候选第一名）。
-        次优先级是 image_last_used_at_per_ek（按 endpoint_kind 维度，避免一个号
-        在 responses lane 成功后污染 generations lane 的排序），最后是 priority。
-
-        acquire_inflight=True（默认）时，return 前对列表第 0 个候选 incr inflight；
-        caller 必须用 try/finally 保证最终 release（无论是否实际使用第 0 个）。
-        Reserve 等只为"挑号占 zset"不真正发请求的路径应传 False。
-
-        这一层是 sub2api"一号一 key"部署形态下的核心调度：让多次生图请求自然
-        分散到不同账号，避免单号被打到 OpenAI quota 上限。配额检查走
-        account_limiter（rate_limit/daily_quota 都为空时短路，让"先放开跑"的
-        策略不查 Redis）。
-        """
-        enabled = [p for p in self._providers if p.enabled and purpose in p.purposes]
-        if not enabled:
-            raise UpstreamError(
-                "no upstream providers configured or all disabled",
-                error_code=EC.NO_PROVIDERS.value,
-                status_code=503,
-            )
-
-        now = time.monotonic()
-        wall_now = time.time()
-        redis = self.get_redis()
-
-        from . import account_limiter
-
-        avoided = await _load_avoided_image_providers(redis, task_id)
-        candidates, skipped = await self._collect_image_candidates(
-            enabled,
-            query=_ImageCandidateQuery(
-                avoided=avoided,
-                endpoint_kind=endpoint_kind,
-                ignore_cooldown=ignore_cooldown,
-                redis=redis,
-                account_limiter=account_limiter,
-                wall_now=wall_now,
-                mono_now=now,
-                requires_mask=requires_mask,
-                mask_transport_required=mask_transport_required,
-                task_id=task_id,
-                size_bucket=size_bucket,
-                cost_class=cost_class or queue_lane,
-            ),
-        )
-        if not candidates:
-            if _only_avoided_image_providers(avoided, skipped):
-                logger.info(
-                    "image avoid set fully overlaps providers task=%s avoided=%s — "
-                    "ignoring avoid",
-                    task_id,
-                    sorted(avoided),
-                )
-                return await self._select_for_image(
-                    ignore_cooldown=ignore_cooldown,
-                    task_id=None,
-                    endpoint_kind=endpoint_kind,
-                    acquire_inflight=acquire_inflight,
-                    requires_mask=requires_mask,
-                    mask_transport_required=mask_transport_required,
-                    queue_lane=queue_lane,
-                    size_bucket=size_bucket,
-                    cost_class=cost_class,
-                )
-            raise _all_image_accounts_failed(skipped)
-
-        candidates.sort(key=_image_candidate_sort_key)
-        if acquire_inflight and task_id:
-            candidates = await self._reserve_first_quota_candidate(
-                candidates,
-                redis=redis,
-                account_limiter=account_limiter,
-                task_id=task_id,
-                wall_now=wall_now,
-                mono_now=now,
-                skipped=skipped,
-            )
-            if not candidates:
-                raise _all_image_accounts_failed(skipped)
-        result = [_resolved_image_provider(provider) for provider, _ in candidates]
-        if acquire_inflight and result:
-            self.acquire_image_inflight(result[0].name, endpoint_kind)
-        return result
-
-    async def _reserve_first_quota_candidate(
-        self,
-        candidates: list[_ImageCandidate],
-        *,
-        redis: Any,
-        account_limiter: Any,
-        task_id: str,
-        wall_now: float,
-        mono_now: float,
-        skipped: list[tuple[str, str]],
-    ) -> list[_ImageCandidate]:
-        """Reserve quota for the provider whose inflight slot we are claiming.
-
-        ``check_quota`` is still used while gathering candidates so exhausted
-        providers are filtered early. This second pass closes the race for the
-        selected provider by re-checking and reserving in one Redis script.
-        """
-        if redis is None:
-            return candidates
-        for idx, (provider, sort_key) in enumerate(candidates):
-            try:
-                allowed, retry_after, _member = await account_limiter.reserve_quota(
-                    redis,
-                    provider.name,
-                    provider.image_rate_limit,
-                    provider.image_daily_quota,
-                    task_id=task_id,
-                    now=wall_now,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "account_limiter.reserve_quota raised provider=%s err=%s — "
-                    "treating as temporarily unavailable",
-                    provider.name,
-                    exc,
-                )
-                allowed = False
-                retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
-            if allowed:
-                if idx == 0:
-                    return candidates
-                return [(provider, sort_key)] + candidates[:idx] + candidates[idx + 1 :]
-            h = self._health.setdefault(provider.name, ProviderHealth())
-            with self._stats_lock:
-                h.image_rate_limited_until = mono_now + max(1.0, retry_after)
-            skipped.append(
-                (provider.name, f"quota_exhausted retry_after={retry_after:.0f}s")
-            )
-        return []
-
 
 # ---------------------------------------------------------------------------
 # 单例
