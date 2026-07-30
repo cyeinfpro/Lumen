@@ -818,6 +818,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
     "volcano-asset-manager-state.ts",
     "volcano-asset-manager-helpers.ts",
     "volcano-asset-manager-components.tsx",
+    "volcano-asset-card.tsx",
     "volcano-asset-manager-view.tsx",
     "use-volcano-asset-data.ts",
     "use-volcano-operation-controller.ts",
