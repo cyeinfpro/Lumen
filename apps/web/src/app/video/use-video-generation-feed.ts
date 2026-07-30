@@ -33,7 +33,6 @@ import {
   isAbortError,
   recordGenerationRefreshFailure,
 } from "./video-request-lifecycle";
-import type { GenerationRefreshRequest } from "./video-request-lifecycle";
 import {
   filteredVideoHistoryItems,
 } from "./video-page-derived-state";
@@ -66,41 +65,27 @@ import {
 } from "./video-feed-scope";
 import type {
   VideoFeedRuntime,
-  VideoFeedScopeToken,
 } from "./video-feed-scope";
 import {
   userScopedQueryKey,
   useUserQueryScope,
 } from "@/lib/queries/userScope";
 
-const VIDEO_EVENTS = [
-  "video.queued",
-  "video.submitted",
-  "video.progress",
-  "video.fetching",
-  "video.succeeded",
-  "video.failed",
-  "video.canceled",
-];
-const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
-const VIDEO_HISTORY_PAGE_SIZE = 12;
+import {
+  VIDEO_EVENTS,
+  VIDEO_HISTORY_PAGE_SIZE,
+  VIDEO_REFRESH_MIN_INTERVAL_MS,
+  type GenerationRefreshOptions,
+  type GenerationRefreshScheduleOptions,
+  type ScheduleGenerationRefresh,
+  type ScopedGenerationRefreshRequest,
+} from "./video-generation-feed-config";
 
-export type GenerationRefreshOptions = {
-  forceHistorySync?: boolean;
-};
-
-export type GenerationRefreshScheduleOptions = GenerationRefreshOptions & {
-  delayMs?: number;
-};
-
-export type ScheduleGenerationRefresh = (
-  id: string,
-  opts?: GenerationRefreshScheduleOptions,
-) => void;
-
-type ScopedGenerationRefreshRequest = GenerationRefreshRequest & {
-  scope: VideoFeedScopeToken;
-};
+export type {
+  GenerationRefreshOptions,
+  GenerationRefreshScheduleOptions,
+  ScheduleGenerationRefresh,
+} from "./video-generation-feed-config";
 
 type ScopedVideoItems = {
   userId: string | null;
