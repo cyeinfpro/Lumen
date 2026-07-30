@@ -20,8 +20,8 @@ const managerStateUrl = new URL(
 const managerState = (await import(
   managerStateUrl.href
 )) as typeof import("./volcano-asset-manager-state");
-const operationControllerSource = readFileSync(
-  new URL("./use-volcano-operation-controller.ts", import.meta.url),
+const operationRunnerSource = readFileSync(
+  new URL("./volcano-operation-runner.ts", import.meta.url),
   "utf8",
 );
 const uploadControllerSource = readFileSync(
@@ -533,7 +533,7 @@ test("Volcano operation start time is write-once across progress callbacks", () 
   assert.equal(domain.volcanoOperationStartedAt(undefined, 2_000), 2_000);
   assert.equal(domain.volcanoOperationStartedAt(Number.NaN, 3_000), 3_000);
   assert.match(
-    operationControllerSource,
+    operationRunnerSource,
     /runner\.onProgress\?\.\(operation, sessionId, operationStartedAt\)/,
   );
   assert.match(
@@ -822,6 +822,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
     "volcano-asset-manager-view.tsx",
     "use-volcano-asset-data.ts",
     "use-volcano-operation-controller.ts",
+    "volcano-operation-runner.ts",
     "use-volcano-upload-controller.ts",
     "use-volcano-upload-polling.ts",
     "use-volcano-upload-queue.ts",
