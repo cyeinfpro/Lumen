@@ -23,23 +23,17 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
-from datetime import datetime
 from typing import Annotated, Literal
 from types import MappingProxyType
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
-    EXPLICIT_ALIGN,
-    MAX_EXPLICIT_PIXELS,
-    MAX_MESSAGE_ATTACHMENTS,
     MAX_EXPLICIT_SIDE,
-    MIN_EXPLICIT_PIXELS,
 )
 from lumen_core.models import (
     Conversation,
@@ -73,26 +67,43 @@ from .prompts import (
     resolve_provider_order,
     stream_enhance,
 )
-from lumen_core.providers import (
-    parse_provider_bool,
-    parse_proxy_item,
-    resolve_provider_proxy_url,
-)
-from lumen_core.runtime_settings import get_spec
+from lumen_core.providers import parse_proxy_item, resolve_provider_proxy_url
 from ..proxy_pool import (
     DEFAULT_STRATEGY,
     pick_proxy,
     report_failure as pool_report_failure,
     report_success as pool_report_success,
 )
-from ..runtime_settings import get_setting
 from ..ratelimit import RateLimiter, require_client_ip
+from . import telegram_image_options as _telegram_image_options
+from . import telegram_runtime_values as _telegram_runtime_values
+from .telegram_schemas import (
+    BindIn,
+    BindOut,
+    EnhancePromptIn,
+    EnhancePromptOut,
+    GenerateIn,
+    GenerateOut,
+    GenerationStatusOut,
+    LinkCodeOut,
+    ProxyReportIn,
+    RuntimeAccessOut,
+    RuntimeConfigOut,
+    RuntimeProxyOut,
+    TaskListItem,
+    TaskListOut,
+)
 
 logger = logging.getLogger(__name__)
 
 # /me/telegram/* 走 session 鉴权；/telegram/* 走 bot-token。
 router_me = APIRouter()
 router_bot = APIRouter()
+_aspect_ratio_to_size = _telegram_image_options.aspect_ratio_to_size
+_align_pair = _telegram_image_options.align_pair
+_bool_option = _telegram_runtime_values.bool_option
+_get_setting_str = _telegram_runtime_values.get_setting_str
+_get_setting_int = _telegram_runtime_values.get_setting_int
 
 
 # ---------- helpers ----------
@@ -213,54 +224,6 @@ def _gen_link_code() -> str:
     return secrets.token_urlsafe(16).rstrip("=")
 
 
-def _aspect_ratio_to_size(ratio: str, max_long_side: int) -> str:
-    """按 ratio 和用户期望长边，算出符合 upstream 显式 size 约束的 fixed_size。
-
-    约束（lumen_core.constants）：
-      - 长宽对齐 EXPLICIT_ALIGN（16）
-      - 长边 ≤ MAX_EXPLICIT_SIDE
-      - 像素总数 ∈ [MIN_EXPLICIT_PIXELS, MAX_EXPLICIT_PIXELS]
-    所以 1:1+4K 不能直接给 3840×3840（14.7M 像素超上限）；先按比例对像素预算开方。
-    """
-    a, _, b = ratio.partition(":")
-    try:
-        ra, rb = float(a), float(b)
-    except ValueError:
-        return _align_pair(max_long_side, max_long_side)
-    if ra <= 0 or rb <= 0:
-        return _align_pair(max_long_side, max_long_side)
-
-    long_r = max(ra, rb)
-    short_r = min(ra, rb)
-    # 像素预算下允许的最长边：long * (long * short_r/long_r) ≤ MAX_EXPLICIT_PIXELS
-    pixel_cap_long = int((MAX_EXPLICIT_PIXELS * long_r / short_r) ** 0.5)
-    long_side = min(max_long_side, MAX_EXPLICIT_SIDE, pixel_cap_long)
-    short_side = int(round(long_side * short_r / long_r))
-
-    long_side = max(EXPLICIT_ALIGN, (long_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
-    short_side = max(EXPLICIT_ALIGN, (short_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
-
-    # 像素下限保护：极端窄比例 + 1K 可能跌到 MIN 之下，按比例放大短边对齐
-    while (
-        long_side * short_side < MIN_EXPLICIT_PIXELS and long_side < MAX_EXPLICIT_SIDE
-    ):
-        long_side += EXPLICIT_ALIGN
-        short_side = int(round(long_side * short_r / long_r))
-        short_side = max(
-            EXPLICIT_ALIGN, (short_side // EXPLICIT_ALIGN) * EXPLICIT_ALIGN
-        )
-
-    if ra >= rb:
-        return f"{long_side}x{short_side}"
-    return f"{short_side}x{long_side}"
-
-
-def _align_pair(a: int, b: int) -> str:
-    a = max(EXPLICIT_ALIGN, (a // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
-    b = max(EXPLICIT_ALIGN, (b // EXPLICIT_ALIGN) * EXPLICIT_ALIGN)
-    return f"{a}x{b}"
-
-
 async def _get_or_create_tg_conversation(
     db: AsyncSession, user_id: str
 ) -> Conversation:
@@ -289,97 +252,6 @@ async def _get_or_create_tg_conversation(
     await db.commit()
     await db.refresh(conv)
     return conv
-
-
-# ---------- schemas ----------
-
-
-class LinkCodeOut(BaseModel):
-    code: str
-    expires_in: int
-    deep_link: str | None = None
-
-
-class BindIn(BaseModel):
-    chat_id: str = Field(min_length=1, max_length=64)
-    code: str = Field(min_length=4, max_length=32)
-    tg_user_id: str | None = Field(default=None, min_length=1, max_length=64)
-    tg_username: str | None = Field(default=None, max_length=64)
-
-
-class BindOut(BaseModel):
-    user_id: str
-    email: str
-    display_name: str
-
-
-class GenerateIn(BaseModel):
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=64)
-    prompt: str = Field(min_length=1, max_length=10000)
-    aspect_ratio: Literal[
-        "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "4:5"
-    ] = "1:1"
-    render_quality: Literal["low", "medium", "high", "auto"] = "high"
-    count: int = Field(default=1, ge=1, le=16)
-    resolution: Literal["1k", "2k", "4k"] = "2k"
-    output_format: Literal["png", "jpeg", "webp"] = "jpeg"
-    fast: bool = False
-    # 当带 attachment_image_ids 时切到 image_to_image 意图（迭代/编辑）
-    attachment_image_ids: list[str] = Field(
-        default_factory=list, max_length=MAX_MESSAGE_ATTACHMENTS
-    )
-
-
-class GenerateOut(BaseModel):
-    user_id: str
-    conversation_id: str
-    message_id: str
-    generation_ids: list[str]
-
-
-class EnhancePromptIn(BaseModel):
-    text: str = Field(min_length=1, max_length=10000)
-
-
-class EnhancePromptOut(BaseModel):
-    enhanced: str
-
-
-class GenerationStatusOut(BaseModel):
-    id: str
-    conversation_id: str
-    status: str
-    progress_stage: str
-    error_code: str | None = None
-    error_message: str | None = None
-    image_ids: list[str] = Field(default_factory=list)
-    input_image_ids: list[str] = Field(default_factory=list)
-    prompt: str
-    created_at: datetime
-    # 完整的生成参数：retry 直接用这些回填，不必再扫 /telegram/tasks 推断
-    aspect_ratio: str
-    size_requested: str
-    render_quality: str = "medium"
-    output_format: str = "jpeg"
-    fast: bool = False
-    web_url: str | None = None
-    edit_url: str | None = None
-    project_url: str | None = None
-
-
-class TaskListItem(BaseModel):
-    id: str
-    status: str
-    prompt_excerpt: str
-    aspect_ratio: str
-    size_requested: str
-    image_ids: list[str]
-    error_message: str | None = None
-    created_at: datetime
-
-
-class TaskListOut(BaseModel):
-    items: list[TaskListItem]
 
 
 # ---------- /me/telegram/link-code ----------
@@ -565,57 +437,6 @@ async def unbind_telegram(
 # ---------- runtime-config / proxy 池接口（bot bootstrap + failover） ----------
 
 
-class RuntimeProxyOut(BaseModel):
-    name: str
-    url: str  # 已 resolve 后的 socks5://… 字符串
-
-
-class RuntimeConfigOut(BaseModel):
-    bot_enabled: bool
-    bot_token: str  # 可能为空，bot 自己 fallback env
-    bot_username: str
-    allowed_user_ids: str
-    proxy: RuntimeProxyOut | None  # None 表示池里没有可用 proxy
-    proxy_strategy: str
-    failure_threshold: int
-    cooldown_seconds: int
-
-
-class RuntimeAccessOut(BaseModel):
-    bot_enabled: bool
-    allowed_user_ids: str
-
-
-def _bool_option(value: object, default: bool = False) -> bool:
-    try:
-        return parse_provider_bool(value, default=default)
-    except ValueError:
-        return default
-
-
-async def _get_setting_str(db: AsyncSession, key: str, default: str = "") -> str:
-    spec = get_spec(key)
-    if spec is None:
-        return default
-    raw = await get_setting(db, spec)
-    if raw is None:
-        return default
-    return str(raw).strip()
-
-
-async def _get_setting_int(db: AsyncSession, key: str, default: int) -> int:
-    spec = get_spec(key)
-    if spec is None:
-        return default
-    raw = await get_setting(db, spec)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
 @router_bot.get(
     "/telegram/runtime-config",
     response_model=RuntimeConfigOut,
@@ -699,11 +520,6 @@ async def access_config(
         bot_enabled=bot_enabled,
         allowed_user_ids=allowed_user_ids,
     )
-
-
-class ProxyReportIn(BaseModel):
-    name: str = Field(min_length=1, max_length=64)
-    success: bool = False  # 默认是失败上报；显式设 true 可清失败计数
 
 
 @router_bot.post(
