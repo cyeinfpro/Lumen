@@ -18,7 +18,6 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -26,18 +25,13 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { copyTextToClipboard } from "@/lib/clipboard";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
-import { useCreateShareMutation } from "@/lib/queries";
 import { useInpaintStore } from "@/store/useInpaintStore";
 import { useLightboxGestures } from "./LightboxGestures";
 import {
   MobileLightboxView,
-  type ActionNotice,
-  type DownloadStatus,
   type ImgStatus,
   type ThumbnailItem,
   type VisibleSlide,
@@ -48,6 +42,8 @@ import {
   preloadImage,
   preloadLightboxItem,
 } from "./mobileLightboxMedia";
+import { useMobileLightboxDialog } from "./useMobileLightboxDialog";
+import { useMobileLightboxMediaActions } from "./useMobileLightboxMediaActions";
 import {
   CLOSE_EVENT,
   OPEN_EVENT,
@@ -74,111 +70,8 @@ const PRELOAD_NEIGHBOR_RADIUS = 2;
 const THUMB_WINDOW_SIZE = 17;
 const EMPTY_LIGHTBOX_ITEMS: LightboxItem[] = [];
 
-function extensionFromMime(mime: string | null | undefined): string | null {
-  if (!mime) return null;
-  const normalized = mime.split(";")[0]?.trim().toLowerCase();
-  if (!normalized?.startsWith("image/")) return null;
-  const ext = normalized.slice("image/".length);
-  if (!ext) return null;
-  if (ext === "jpeg") return "jpg";
-  if (ext === "svg+xml") return "svg";
-  return ext;
-}
-
-function extensionFromSrc(src: string): string | null {
-  if (src.startsWith("data:")) {
-    const mimeMatch = src.match(/^data:([^;]+);/);
-    return extensionFromMime(mimeMatch?.[1]);
-  }
-  try {
-    const pathname = new URL(src, window.location.href).pathname;
-    const match = pathname.match(/\.([a-z0-9]+)$/i);
-    return match?.[1]?.toLowerCase() ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function downloadFilename(
-  id: string,
-  src: string,
-  mime?: string,
-  preferred?: string,
-): string {
-  if (preferred?.trim()) return preferred.trim();
-  const ext = extensionFromMime(mime) ?? extensionFromSrc(src) ?? "png";
-  return `lumen-${id}.${ext}`;
-}
-
-async function fetchImageBlob(src: string): Promise<Blob> {
-  const response = src.startsWith("data:")
-    ? await fetch(src)
-    : await fetch(src, { credentials: "include" });
-  if (!response.ok) {
-    throw new Error(`Image download failed: ${response.status}`);
-  }
-  return response.blob();
-}
-
-function isIosLike(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return (
-    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
-  );
-}
-
-function canShareFile(file: File): boolean {
-  return (
-    typeof navigator !== "undefined" &&
-    typeof navigator.share === "function" &&
-    typeof navigator.canShare === "function" &&
-    navigator.canShare({ files: [file] })
-  );
-}
-
-async function shareDownloadedFile(
-  blob: Blob,
-  filename: string,
-  fallbackMime: string | undefined,
-): Promise<"shared" | "canceled" | "unavailable"> {
-  if (!isIosLike() || typeof File === "undefined") return "unavailable";
-  const file = new File([blob], filename, {
-    type: blob.type || fallbackMime || "image/png",
-  });
-  if (!canShareFile(file)) return "unavailable";
-  try {
-    await navigator.share({
-      files: [file],
-      title: filename,
-    });
-    return "shared";
-  } catch (error) {
-    return error instanceof DOMException && error.name === "AbortError"
-      ? "canceled"
-      : "unavailable";
-  }
-}
-
-function triggerAnchorDownload(
-  anchor: HTMLAnchorElement,
-  href: string,
-  filename: string,
-) {
-  anchor.href = href;
-  anchor.download = filename;
-  anchor.removeAttribute("target");
-  anchor.removeAttribute("rel");
-  anchor.click();
-}
-
-async function writeClipboardText(text: string): Promise<void> {
-  await copyTextToClipboard(text);
-}
-
 export function MobileLightbox() {
   const searchParams = useSearchParams();
-  const createShareMutation = useCreateShareMutation();
   // 订阅 useUiStore.lightbox.action：dialog 模式下「设为当前模特」等附加按钮。
   // MobileLightbox 自身仍以本地 OpenState 作为 source of truth，因此这里只读 action。
   const lightboxAction = useUiStore((s) => s.lightbox.action);
@@ -189,10 +82,23 @@ export function MobileLightbox() {
   const [useFallback, setUseFallback] = useState(false);
   const gestureTargetRef = useRef<HTMLDivElement | null>(null);
   const downloadAnchorRef = useRef<HTMLAnchorElement | null>(null);
-  const dialogRootRef = useRef<HTMLDivElement | null>(null);
-  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
-  const dialogTitleId = useId();
+  const items = state?.items ?? EMPTY_LIGHTBOX_ITEMS;
+  const idx = state ? items.findIndex((item) => item.id === state.currentId) : -1;
+  const current = idx >= 0 ? items[idx] : null;
+  const total = items.length;
+  const isFirst = idx <= 0;
+  const isLast = idx < 0 || idx === total - 1;
+  const {
+    downloadStatus,
+    actionNotice,
+    resetMediaActions,
+    handleDownload,
+    handleCopyPrompt,
+    handleShare,
+  } = useMobileLightboxMediaActions({
+    current,
+    downloadAnchorRef,
+  });
   const dragX = useMotionValue(0);
   const dragY = useMotionValue(0);
   const scale = useMotionValue(1);
@@ -208,8 +114,6 @@ export function MobileLightbox() {
   const [prevUrlImg, setPrevUrlImg] = useState<string | null>(null);
   const [chromeVisible, setChromeVisible] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [downloadStatus, setDownloadStatus] = useState<DownloadStatus>("idle");
-  const [actionNotice, setActionNotice] = useState<ActionNotice>(null);
   const [boundaryHint, setBoundaryHint] = useState<"first" | "last" | null>(
     null,
   );
@@ -221,9 +125,7 @@ export function MobileLightbox() {
   const imgStatusRef = useRef<ImgStatus>("loading");
   const paramsOpenRef = useRef(false);
   const lastChromeActivityRef = useRef(0);
-  const feedbackTimerRef = useRef<number | null>(null);
   const boundaryTimerRef = useRef<number | null>(null);
-  const downloadResetTimerRef = useRef<number | null>(null);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
   const switchSeqRef = useRef(0);
   const preloadAbortRef = useRef<AbortController | null>(null);
@@ -274,38 +176,12 @@ export function MobileLightbox() {
     }
   }, []);
 
-  const clearFeedbackTimer = useCallback(() => {
-    if (feedbackTimerRef.current !== null) {
-      window.clearTimeout(feedbackTimerRef.current);
-      feedbackTimerRef.current = null;
-    }
-  }, []);
-
   const clearBoundaryTimer = useCallback(() => {
     if (boundaryTimerRef.current !== null) {
       window.clearTimeout(boundaryTimerRef.current);
       boundaryTimerRef.current = null;
     }
   }, []);
-
-  const clearDownloadResetTimer = useCallback(() => {
-    if (downloadResetTimerRef.current !== null) {
-      window.clearTimeout(downloadResetTimerRef.current);
-      downloadResetTimerRef.current = null;
-    }
-  }, []);
-
-  const showNotice = useCallback(
-    (notice: NonNullable<ActionNotice>) => {
-      clearFeedbackTimer();
-      setActionNotice(notice);
-      feedbackTimerRef.current = window.setTimeout(() => {
-        setActionNotice(null);
-        feedbackTimerRef.current = null;
-      }, 1700);
-    },
-    [clearFeedbackTimer],
-  );
 
   const showBoundaryHint = useCallback(
     (edge: "first" | "last") => {
@@ -379,9 +255,8 @@ export function MobileLightbox() {
       resetMotion();
       setParamsOpen(false);
       setChromeVisible(true);
-      setDownloadStatus("idle");
+      resetMediaActions();
       setBoundaryHint(null);
-      setActionNotice(null);
       setUseFallback(knownFallback);
       setImgStatus(isImageDecoded(nextDisplayUrl) ? "loaded" : "loading");
       setState((prev) => (prev ? { ...prev, currentId: nextItem.id } : prev));
@@ -418,7 +293,13 @@ export function MobileLightbox() {
         setImgStatus("loaded");
       })();
     },
-    [fallbackItemIds, markItemFallback, resetMotion, stopSwipeAnimation],
+    [
+      fallbackItemIds,
+      markItemFallback,
+      resetMediaActions,
+      resetMotion,
+      stopSwipeAnimation,
+    ],
   );
 
   // —— event listener：按依赖更新，避免 handler 读旧状态 ——
@@ -447,9 +328,7 @@ export function MobileLightbox() {
           : "loading",
       );
       setUseFallback(knownFallback);
-      setDownloadStatus("idle");
-      clearDownloadResetTimer();
-      setActionNotice(null);
+      resetMediaActions();
       setBoundaryHint(null);
       replaceRef.current(initialId);
     };
@@ -465,9 +344,7 @@ export function MobileLightbox() {
       resetMotion();
       setImgStatus("loading");
       setUseFallback(false);
-      setDownloadStatus("idle");
-      clearDownloadResetTimer();
-      setActionNotice(null);
+      resetMediaActions();
       setBoundaryHint(null);
       replaceRef.current(null);
       useUiStore.getState().closeLightbox();
@@ -480,25 +357,21 @@ export function MobileLightbox() {
     };
   }, [
     clearChromeTimer,
-    clearDownloadResetTimer,
     fallbackItemIds,
+    resetMediaActions,
     resetMotion,
     stopSwipeAnimation,
   ]);
 
   useEffect(() => {
     return () => {
-      clearFeedbackTimer();
       clearBoundaryTimer();
-      clearDownloadResetTimer();
       stopSwipeAnimation();
       preloadAbortRef.current?.abort();
       preloadAbortRef.current = null;
     };
   }, [
     clearBoundaryTimer,
-    clearDownloadResetTimer,
-    clearFeedbackTimer,
     stopSwipeAnimation,
   ]);
 
@@ -529,8 +402,7 @@ export function MobileLightbox() {
       resetMotion();
       setImgStatus("loading");
       setUseFallback(false);
-      setDownloadStatus("idle");
-      setActionNotice(null);
+      resetMediaActions();
       setBoundaryHint(null);
       setState((prev) => {
         if (!prev) return prev;
@@ -546,7 +418,14 @@ export function MobileLightbox() {
     return () => {
       canceled = true;
     };
-  }, [prevUrlImg, resetMotion, state, switchToItem, urlImg]);
+  }, [
+    prevUrlImg,
+    resetMediaActions,
+    resetMotion,
+    state,
+    switchToItem,
+    urlImg,
+  ]);
 
   // —— 切图 ——
   const goto = useCallback(
@@ -625,9 +504,7 @@ export function MobileLightbox() {
     resetMotion();
     setImgStatus("loading");
     setUseFallback(false);
-    setDownloadStatus("idle");
-    clearDownloadResetTimer();
-    setActionNotice(null);
+    resetMediaActions();
     setBoundaryHint(null);
     replaceRef.current(null);
     // 同步清空 store：openLightboxFromItems 写入了 open=true / action，
@@ -636,91 +513,28 @@ export function MobileLightbox() {
     useUiStore.getState().closeLightbox();
   }, [
     clearChromeTimer,
-    clearDownloadResetTimer,
+    resetMediaActions,
     resetMotion,
     stopSwipeAnimation,
   ]);
 
-  // —— 键盘：Esc 关 / ←→ 切 / Tab 焦点循环 ——
-  useEffect(() => {
-    if (!state) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        if (paramsOpen) {
-          setParamsOpen(false);
-          setChromeVisible(true);
-          scheduleChromeHide();
-          return;
-        }
-        close();
-        return;
-      }
-      if (e.key === "ArrowLeft") {
-        goto(-1);
-        return;
-      }
-      if (e.key === "ArrowRight") {
-        goto(1);
-        return;
-      }
-      if (e.key === "Tab") {
-        const root = dialogRootRef.current;
-        if (!root) return;
-        const focusables = Array.from(
-          root.querySelectorAll<HTMLElement>(
-            'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ),
-        ).filter((el) => !el.hasAttribute("data-focus-skip"));
-        if (focusables.length === 0) {
-          e.preventDefault();
-          return;
-        }
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-        const active = document.activeElement as HTMLElement | null;
-        if (e.shiftKey) {
-          if (active === first || !root.contains(active)) {
-            e.preventDefault();
-            last.focus();
-          }
-        } else if (active === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [state, close, goto, paramsOpen, scheduleChromeHide]);
-
   const isOpen = state !== null;
-
-  // —— 打开时焦点移到关闭按钮，关闭时还原 ——
-  useEffect(() => {
-    if (!isOpen) return;
-    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
-    let raf = 0;
-    raf = requestAnimationFrame(() => {
-      const target = closeButtonRef.current ?? dialogRootRef.current;
-      target?.focus({ preventScroll: true });
-    });
-    return () => {
-      cancelAnimationFrame(raf);
-      const prev = previouslyFocusedRef.current;
-      if (prev && typeof prev.focus === "function") {
-        try {
-          prev.focus({ preventScroll: true });
-        } catch {
-          /* noop */
-        }
-      }
-      previouslyFocusedRef.current = null;
-    };
-  }, [isOpen]);
-
-  // —— body 滚动锁（防 iOS 橡皮筋穿透）——
-  useBodyScrollLock(isOpen, { documentOverscrollBehavior: "none" });
+  const handleCloseParams = useCallback(() => {
+    setParamsOpen(false);
+    setChromeVisible(true);
+    scheduleChromeHide();
+  }, [scheduleChromeHide]);
+  const {
+    dialogRootRef,
+    closeButtonRef,
+    dialogTitleId,
+  } = useMobileLightboxDialog({
+    open: isOpen,
+    paramsOpen,
+    onClose: close,
+    onGoto: goto,
+    onCloseParams: handleCloseParams,
+  });
 
   const openCurrentId = state?.currentId ?? null;
   useEffect(() => {
@@ -744,145 +558,6 @@ export function MobileLightbox() {
     paramsOpen,
     scheduleChromeHide,
   ]);
-
-  const handleDownload = useCallback(() => {
-    const currentState = state;
-    if (!currentState) return;
-    const currentItem = currentState.items.find(
-      (item) => item.id === currentState.currentId,
-    );
-    const anchor = downloadAnchorRef.current;
-    if (!currentItem || !anchor) return;
-
-    void (async () => {
-      let objectUrl: string | null = null;
-      clearDownloadResetTimer();
-      setDownloadStatus("downloading");
-      setActionNotice({ kind: "info", text: "正在下载原图" });
-      try {
-        const blob = await fetchImageBlob(currentItem.url);
-        const fallbackMime =
-          currentItem.mime ?? currentItem.mime_type ?? currentItem.content_type;
-        const filename = downloadFilename(
-          currentItem.id,
-          currentItem.url,
-          blob.type || fallbackMime,
-          currentItem.filename ?? currentItem.file_name,
-        );
-
-        const shareResult = await shareDownloadedFile(
-          blob,
-          filename,
-          fallbackMime,
-        );
-        if (shareResult === "shared") {
-          setDownloadStatus("success");
-          showNotice({ kind: "success", text: "已发送到分享菜单" });
-          return;
-        }
-        if (shareResult === "canceled") {
-          setDownloadStatus("idle");
-          setActionNotice(null);
-          return;
-        }
-
-        objectUrl = URL.createObjectURL(blob);
-        triggerAnchorDownload(anchor, objectUrl, filename);
-        setDownloadStatus("success");
-        showNotice({ kind: "success", text: "已开始下载" });
-      } catch {
-        triggerAnchorDownload(
-          anchor,
-          currentItem.url,
-          downloadFilename(
-            currentItem.id,
-            currentItem.url,
-            currentItem.mime ??
-              currentItem.mime_type ??
-              currentItem.content_type,
-            currentItem.filename ?? currentItem.file_name,
-          ),
-        );
-        setDownloadStatus("error");
-        showNotice({ kind: "error", text: "下载失败，已尝试打开原图" });
-      } finally {
-        if (objectUrl) {
-          const urlToRevoke = objectUrl;
-          window.setTimeout(() => URL.revokeObjectURL(urlToRevoke), 1000);
-        }
-        downloadResetTimerRef.current = window.setTimeout(() => {
-          setDownloadStatus("idle");
-          downloadResetTimerRef.current = null;
-        }, 1800);
-      }
-    })();
-  }, [clearDownloadResetTimer, showNotice, state]);
-
-  const handleCopyPrompt = useCallback(() => {
-    const currentState = state;
-    if (!currentState) return;
-    const currentItem = currentState.items.find(
-      (item) => item.id === currentState.currentId,
-    );
-    if (!currentItem?.prompt) return;
-    void writeClipboardText(currentItem.prompt)
-      .then(() => showNotice({ kind: "success", text: "Prompt 已复制" }))
-      .catch(() => showNotice({ kind: "error", text: "复制失败" }));
-  }, [showNotice, state]);
-
-  const handleShare = useCallback(() => {
-    const currentState = state;
-    if (!currentState || typeof window === "undefined") return;
-    if (createShareMutation.isPending) {
-      showNotice({ kind: "info", text: "正在生成分享链接" });
-      return;
-    }
-    const currentItem = currentState.items.find(
-      (item) => item.id === currentState.currentId,
-    );
-    if (!currentItem) return;
-
-    void (async () => {
-      setActionNotice({ kind: "info", text: "正在生成分享链接" });
-      let link: string;
-      try {
-        const share = await createShareMutation.mutateAsync({
-          imageId: currentItem.id,
-          show_prompt: false,
-        });
-        link = share.url;
-      } catch {
-        showNotice({ kind: "error", text: "分享链接生成失败" });
-        return;
-      }
-
-      if (
-        typeof navigator !== "undefined" &&
-        typeof navigator.share === "function"
-      ) {
-        try {
-          await navigator.share({
-            title: "Lumen image",
-            text: "Lumen image",
-            url: link,
-          });
-          showNotice({ kind: "success", text: "已打开分享菜单" });
-          return;
-        } catch (error) {
-          if (error instanceof DOMException && error.name === "AbortError") {
-            return;
-          }
-        }
-      }
-
-      try {
-        await writeClipboardText(link);
-        showNotice({ kind: "success", text: "分享链接已复制" });
-      } catch {
-        showNotice({ kind: "error", text: "复制失败，请手动复制" });
-      }
-    })();
-  }, [createShareMutation, showNotice, state]);
 
   const handleIterate = useCallback(() => {
     if (!state) return;
@@ -923,13 +598,6 @@ export function MobileLightbox() {
       height: img.height,
     });
   }, [state, close]);
-
-  const items = state?.items ?? EMPTY_LIGHTBOX_ITEMS;
-  const idx = state ? items.findIndex((x) => x.id === state.currentId) : -1;
-  const current = idx >= 0 ? items[idx] : null;
-  const total = items.length;
-  const isFirst = idx <= 0;
-  const isLast = idx < 0 || idx === total - 1;
 
   useEffect(() => {
     if (!current || idx < 0) return;
@@ -1112,11 +780,7 @@ export function MobileLightbox() {
         setParamsOpen(true);
         setChromeVisible(true);
       }}
-      onCloseParams={() => {
-        setParamsOpen(false);
-        setChromeVisible(true);
-        scheduleChromeHide();
-      }}
+      onCloseParams={handleCloseParams}
     />
   );
 }
