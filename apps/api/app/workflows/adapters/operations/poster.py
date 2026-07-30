@@ -19,10 +19,8 @@ from lumen_core.models import (
     Message,
     PosterMaster,
     PosterRender,
-    PosterStyleItem,
     User,
     WorkflowRun,
-    WorkflowStep,
     new_uuid7,
 )
 from lumen_core.schemas import (
@@ -49,13 +47,9 @@ from ...application.output_values import (
 )
 from ...application.poster_design import (
     POSTER_DEFAULT_TARGET_ASPECTS,
-    POSTER_MASTER_ASPECT,
     POSTER_WORKFLOW_TYPE,
-    PosterStyleSnapshot,
-    build_poster_step_seeds,
     merge_poster_copy_corrections,
     pending_poster_aspects,
-    poster_brand_attachment_ids as collect_poster_brand_attachment_ids,
     poster_copy_analysis_prompt as _poster_copy_analysis_prompt,
     poster_parse_copy_analysis_text as _poster_parse_copy_analysis_text,
     poster_revision_prompt as _poster_revision_prompt,
@@ -83,10 +77,16 @@ from ..workflow_runtime import (
     get_or_create_workflow_conversation as _get_or_create_workflow_conversation,
     get_owned_conversation as _get_owned_conversation,
     get_run as _get_run,
-    image_params as _image_params,
     load_steps as _load_steps,
     publish_bundles as _publish_bundles,
     step as _step,
+)
+from .poster_helpers import (
+    poster_brand_attachment_ids as _poster_brand_attachment_ids,
+    poster_image_params as _poster_image_params,
+    poster_load_style as _poster_load_style,
+    poster_master_image_params as _poster_master_image_params,
+    poster_seed_steps as _poster_seed_steps,
 )
 
 
@@ -112,104 +112,6 @@ logger = logging.getLogger("app.routes.workflows.poster")
 # 7. prompt cache friendly：所有 prompt 前缀稳定（风格 + 信息密度 + 母版指令固定），
 #    用户具体文案在末尾
 # ===========================================================================
-# ---- size helpers ----------------------------------------------------------
-# 用 _fixed_size_for_quality 已经覆盖了所有比例的 4K preset，
-# 多尺寸成品按 quality_mode 选 4k / high。我们对接 apparel 的同一函数。
-def _poster_image_params(
-    *,
-    aspect_ratio: str,
-    quality_mode: str,
-    count: int = 1,
-) -> ImageParamsIn:
-    """统一构造海报 ImageParamsIn。premium → final_quality='4k'。"""
-    final_quality = "4k" if quality_mode == "premium" else "high"
-    return _image_params(
-        aspect_ratio=aspect_ratio,
-        count=count,
-        render_quality="high",
-        final_quality=final_quality,
-        fast=False,
-    )
-
-
-def _poster_master_image_params(quality_mode: str) -> ImageParamsIn:
-    return _poster_image_params(
-        aspect_ratio=POSTER_MASTER_ASPECT,
-        quality_mode=quality_mode,
-        count=1,
-    )
-
-
-async def _poster_find_preset_item(
-    db: AsyncSession, *, user_id: str, style_id: str
-) -> dict[str, Any] | None:
-    from ....services.poster_styles.workflow_lookup import (
-        bootstrap_local_presets_if_empty,
-        find_preset_item,
-    )
-
-    await bootstrap_local_presets_if_empty()
-    return await find_preset_item(db, user_id=user_id, item_id=style_id)
-
-
-def _poster_style_from_preset(raw: dict[str, Any]) -> PosterStyleSnapshot:
-    return PosterStyleSnapshot.from_mapping(raw)
-
-
-async def _poster_load_style(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    style_id: str,
-) -> PosterStyleItem | PosterStyleSnapshot:
-    """Load a poster style for workflow creation.
-    User-created styles are private DB rows and must match ``user_id``. Presets
-    live in the poster-style JSON index rather than ``poster_style_items``.
-    """
-    if style_id.startswith("preset:"):
-        preset = await _poster_find_preset_item(db, user_id=user_id, style_id=style_id)
-        if preset is not None:
-            return _poster_style_from_preset(preset)
-        raise _http("style_not_found", "poster style not found", 404)
-    row = (
-        await db.execute(
-            select(PosterStyleItem).where(
-                PosterStyleItem.id == style_id,
-                PosterStyleItem.user_id == user_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise _http("style_not_found", "poster style not found", 404)
-    return row
-
-
-def _poster_brand_attachment_ids(run: WorkflowRun) -> list[str]:
-    metadata = run.metadata_jsonb if isinstance(run.metadata_jsonb, dict) else {}
-    return collect_poster_brand_attachment_ids(
-        metadata,
-        getattr(run, "product_image_ids", None) or [],
-    )
-
-
-# ---- step / state helpers --------------------------------------------------
-def _poster_seed_steps(run: WorkflowRun) -> list[WorkflowStep]:
-    metadata = run.metadata_jsonb if isinstance(run.metadata_jsonb, dict) else {}
-    return [
-        WorkflowStep(
-            workflow_run_id=run.id,
-            step_key=seed.step_key,
-            status=seed.status,
-            input_json=dict(seed.input_json),
-            output_json=dict(seed.output_json),
-        )
-        for seed in build_poster_step_seeds(
-            user_prompt=run.user_prompt,
-            metadata=metadata,
-        )
-    ]
-
-
 @dataclass(frozen=True, slots=True)
 class _PosterWorkflowTaskContext:
     db: AsyncSession
