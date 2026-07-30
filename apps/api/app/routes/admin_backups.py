@@ -16,28 +16,26 @@ import os
 import re
 import shutil
 import signal
-import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, NamedTuple, TextIO
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ..config import settings
 from ..deps import AdminUser, verify_csrf
 from ..services.system_lock import LockBusy, SystemOperationLockService
 from ._admin_common import admin_http as _http, write_admin_audit_isolated
-
+from . import admin_backup_catalog as _backup_catalog
 
 router = APIRouter(prefix="/admin/backups", tags=["admin"])
 
-
 # YYYYMMDD-HHMMSS 严格格式：8 位日期 + 短横线 + 6 位时间。
-_TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
+_TIMESTAMP_RE = _backup_catalog.TIMESTAMP_RE
 # 备份点配对一致性窗口：PG 和 Redis 文件 mtime 偏差应 ≤ 该秒数。
-_PAIR_MTIME_WINDOW_SEC = 600
+_PAIR_MTIME_WINDOW_SEC = _backup_catalog.PAIR_MTIME_WINDOW_SEC
 _BACKUP_TIMEOUT_SECONDS = 180
 _BACKUP_TRIGGER_START_TIMEOUT_SECONDS = 15
 _MAINTENANCE_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
@@ -50,18 +48,13 @@ _RESTORE_LOG_NAME = ".restore.log"
 _RESTORE_RUNNER_UNIT = "lumen-restore-runner.service"
 _UPDATE_RUNNING_MARKER = ".update.running"
 
-
 class _ScriptResult(NamedTuple):
     returncode: int
     stdout: str
     stderr: str
 
 
-class _BackupPair(NamedTuple):
-    pg: Path
-    redis: Path
-    pg_stat: os.stat_result
-    redis_stat: os.stat_result
+_BackupPair = _backup_catalog.BackupPair
 
 
 def _chmod_tolerate_eperm(path: Path | str, mode: int) -> None:
@@ -354,124 +347,18 @@ async def _run_script(
     )
 
 
-# ---- Schemas ----
-
-
-class BackupItem(BaseModel):
-    timestamp: str  # e.g. 20260424-123000
-    created_at: datetime
-    pg_size: int
-    redis_size: int
-    # 跨源一致性：两个文件 mtime 的偏差秒数；超出窗口则 consistent=False。
-    mtime_skew_sec: int
-    consistent: bool
-
-
-class BackupListOut(BaseModel):
-    items: list[BackupItem]
-    total: int
-
-
-class RestoreIn(BaseModel):
-    timestamp: str = Field(min_length=15, max_length=15, pattern=r"^[0-9]{8}-[0-9]{6}$")
-
-
-# ---- Listing ----
-
-
-def _parse_ts(name: str, suffix: str) -> str | None:
-    """'20260424-123000.pg.dump.gz' → '20260424-123000'; 不符合返回 None。"""
-    if not name.endswith(suffix):
-        return None
-    stem = name[: -len(suffix)]
-    if not _TIMESTAMP_RE.fullmatch(stem):
-        return None
-    return stem
-
-
-def _resolved_backup_dir(backup_root: Path, name: str) -> Path:
-    directory = (backup_root / name).resolve(strict=True)
-    directory.relative_to(backup_root)
-    if not directory.is_dir():
-        raise ValueError(f"{name} backup path is not a directory")
-    return directory
-
-
-def _regular_file_lstat(path: Path) -> os.stat_result:
-    st = path.lstat()
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError(f"{path.name} is not a regular backup file")
-    return st
-
-
-def _backup_pair_for_timestamp(backup_root: Path, ts: str) -> _BackupPair:
-    pg_dir = _resolved_backup_dir(backup_root, "pg")
-    redis_dir = _resolved_backup_dir(backup_root, "redis")
-    pg = pg_dir / f"{ts}.pg.dump.gz"
-    rd = redis_dir / f"{ts}.redis.tgz"
-
-    pg.resolve(strict=True).relative_to(pg_dir)
-    rd.resolve(strict=True).relative_to(redis_dir)
-
-    pg_stat = _regular_file_lstat(pg)
-    redis_stat = _regular_file_lstat(rd)
-    return _BackupPair(pg=pg, redis=rd, pg_stat=pg_stat, redis_stat=redis_stat)
+BackupItem = _backup_catalog.BackupItem
+BackupListOut = _backup_catalog.BackupListOut
+RestoreIn = _backup_catalog.RestoreIn
+_parse_ts = _backup_catalog.parse_ts
+_resolved_backup_dir = _backup_catalog.resolved_backup_dir
+_regular_file_lstat = _backup_catalog.regular_file_lstat
+_backup_pair_for_timestamp = _backup_catalog.backup_pair_for_timestamp
 
 
 @router.get("", response_model=BackupListOut)
 async def list_backups(_admin: AdminUser) -> BackupListOut:
-    backup_root = _backup_root()
-    pg_dir = backup_root / "pg"
-    redis_dir = backup_root / "redis"
-    if not pg_dir.is_dir() or not redis_dir.is_dir():
-        return BackupListOut(items=[], total=0)
-
-    pg_map: dict[str, tuple[int, float]] = {}
-    for p in pg_dir.iterdir():
-        ts = _parse_ts(p.name, ".pg.dump.gz")
-        if ts is None:
-            continue
-        try:
-            st = _regular_file_lstat(p)
-            pg_map[ts] = (st.st_size, st.st_mtime)
-        except (OSError, ValueError):
-            continue
-
-    redis_map: dict[str, tuple[int, float]] = {}
-    for p in redis_dir.iterdir():
-        ts = _parse_ts(p.name, ".redis.tgz")
-        if ts is None:
-            continue
-        try:
-            st = _regular_file_lstat(p)
-            redis_map[ts] = (st.st_size, st.st_mtime)
-        except (OSError, ValueError):
-            continue
-
-    # 只返回配对成功的
-    paired = sorted(set(pg_map) & set(redis_map), reverse=True)
-    items: list[BackupItem] = []
-    for ts in paired:
-        # 从文件名反解时间（UTC）；格式 YYYYMMDD-HHMMSS
-        try:
-            dt = datetime.strptime(ts, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        pg_size, pg_mtime = pg_map[ts]
-        redis_size, redis_mtime = redis_map[ts]
-        skew = int(abs(pg_mtime - redis_mtime))
-        items.append(
-            BackupItem(
-                timestamp=ts,
-                created_at=dt,
-                pg_size=pg_size,
-                redis_size=redis_size,
-                mtime_skew_sec=skew,
-                consistent=skew <= _PAIR_MTIME_WINDOW_SEC,
-            )
-        )
-    return BackupListOut(items=items, total=len(items))
-
+    return _backup_catalog.list_backup_items(_backup_root())
 
 # ---- Trigger backup now ----
 
