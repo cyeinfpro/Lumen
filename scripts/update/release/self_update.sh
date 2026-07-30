@@ -47,7 +47,7 @@ else
         backup.sh restore.sh update.sh \
         update/runner.sh update/phases.sh update/bootstrap.sh \
         update/common.sh update/phase_contract.sh update/journal.sh \
-        update/journal_store.py \
+        update/journal_store.py update/journal_validation.py \
         update/release/manifest.sh update/release/runner_units.sh \
         update/release/source_helpers.sh update/release/self_update.sh \
         update/release/check.sh update/release/fetch.sh \
