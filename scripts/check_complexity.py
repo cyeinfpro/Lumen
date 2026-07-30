@@ -31,9 +31,25 @@ DEFAULT_LINE_PATHS = (
     "scripts/update.sh",
     "scripts/update",
 )
+DEFAULT_ROLE_LINE_PATHS = (
+    "apps/worker/app",
+    "apps/api/app",
+    "packages/core/lumen_core",
+    "image-job/image_job",
+    "apps/web/src",
+    "scripts/install.sh",
+    "scripts/lumenctl.sh",
+    "scripts/lib.sh",
+)
 MAX_COMPLEXITY = 15
 MAX_FILE_LINES = 1500
 MAX_SHELL_FILE_LINES = 400
+MAX_ROUTE_CONTROLLER_LINES = 800
+MAX_SERVICE_ADAPTER_LINES = 1000
+MAX_REACT_COMPONENT_LINES = 800
+MAX_REACT_CONTROLLER_LINES = 600
+MAX_SHELL_ENTRYPOINT_LINES = 600
+MAX_GENERAL_MODULE_LINES = 1000
 MAX_FUNCTION_LINES = 200
 MAX_FUNCTION_PARAMETERS = 12
 MAX_NESTING_DEPTH = 6
@@ -53,6 +69,13 @@ class ComplexityBudget:
 @dataclass(frozen=True)
 class MetricBudget:
     value: int
+
+
+@dataclass(frozen=True)
+class RoleFileBudget:
+    role: str
+    line_count: int
+    limit: int
 
 
 class ComplexityScanError(RuntimeError):
@@ -303,6 +326,102 @@ def collect_oversized_files(paths: tuple[str, ...]) -> dict[str, int]:
     if failures:
         raise ComplexityScanError(failures)
     return dict(sorted(oversized.items()))
+
+
+def _is_test_source(path: Path) -> bool:
+    return (
+        "__tests__" in path.parts
+        or "tests" in path.parts
+        or ".test." in path.name
+        or ".spec." in path.name
+    )
+
+
+def _is_controller_name(path: Path) -> bool:
+    stem = path.stem.lower()
+    return (
+        "controller" in stem
+        or stem.startswith("use-")
+        or (
+            path.stem.startswith("use")
+            and len(path.stem) > 3
+            and path.stem[3].isupper()
+        )
+        or "hooks" in path.parts
+    )
+
+
+def source_role_budget(path: Path) -> tuple[str, int]:
+    relative = _display_path(path)
+    parts = Path(relative).parts
+    if path.suffix == ".sh":
+        return "shell entrypoint", MAX_SHELL_ENTRYPOINT_LINES
+    if path.suffix == ".py":
+        if "services" in parts or "adapters" in parts or "service" in path.stem.lower():
+            return "Python service/adapter", MAX_SERVICE_ADAPTER_LINES
+        if (
+            parts[:4] == ("apps", "api", "app", "routes")
+            or "controller" in path.stem.lower()
+        ):
+            return "Python route/controller", MAX_ROUTE_CONTROLLER_LINES
+        return "general module", MAX_GENERAL_MODULE_LINES
+    if path.suffix in {".ts", ".tsx"} and _is_controller_name(path):
+        return "React hook/controller", MAX_REACT_CONTROLLER_LINES
+    if path.suffix == ".tsx":
+        return "React page/component", MAX_REACT_COMPONENT_LINES
+    return "general module", MAX_GENERAL_MODULE_LINES
+
+
+def collect_role_ceiling_violations(
+    paths: tuple[str, ...],
+) -> dict[str, RoleFileBudget]:
+    violations: dict[str, RoleFileBudget] = {}
+    failures: dict[str, str] = {}
+    for raw_path in paths:
+        path = ROOT / raw_path
+        try:
+            candidates = [path] if path.is_file() else list(path.rglob("*"))
+        except OSError as exc:
+            failures.update(_scan_failure(path, exc).failures)
+            continue
+        for candidate in candidates:
+            try:
+                is_file = candidate.is_file()
+            except OSError as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
+                continue
+            if (
+                not is_file
+                or candidate.suffix not in SOURCE_SUFFIXES
+                or _is_test_source(candidate)
+            ):
+                continue
+            try:
+                source = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                failures.update(_scan_failure(candidate, exc).failures)
+                continue
+            line_count = len(source.splitlines())
+            role, limit = source_role_budget(candidate)
+            if line_count > limit:
+                violations[_display_path(candidate)] = RoleFileBudget(
+                    role=role,
+                    line_count=line_count,
+                    limit=limit,
+                )
+    if failures:
+        raise ComplexityScanError(failures)
+    return dict(sorted(violations.items()))
+
+
+def role_ceiling_errors(
+    violations: dict[str, RoleFileBudget],
+) -> list[str]:
+    return [
+        f"role ceiling exceeded: {path} "
+        f"({budget.role}, {budget.line_count} > {budget.limit} lines)"
+        for path, budget in violations.items()
+    ]
 
 
 def collect_violations(paths: tuple[str, ...]) -> dict[str, ComplexityBudget]:
@@ -599,10 +718,26 @@ def main() -> int:
             "function_parameters": {},
             "nesting_depth": {},
         }
+    try:
+        role_violations = collect_role_ceiling_violations(DEFAULT_ROLE_LINE_PATHS)
+    except ComplexityScanError as exc:
+        failures.update(exc.failures)
+        role_violations = {}
     if failures:
         print("Complexity scan failed closed; unscanned files:", file=sys.stderr)
         for path, reason in sorted(failures.items()):
             print(f"- {path}: {reason}", file=sys.stderr)
+        return 1
+
+    role_errors = role_ceiling_errors(role_violations)
+    if role_errors:
+        print("Complexity budget failed:", file=sys.stderr)
+        for error in role_errors:
+            print(f"- {error}", file=sys.stderr)
+        print(
+            "Role ceilings are hard limits and cannot be grandfathered.",
+            file=sys.stderr,
+        )
         return 1
 
     if args.update_baseline:
@@ -636,7 +771,8 @@ def main() -> int:
         "Complexity budget passed: "
         f"{len(current)} grandfathered violations; "
         f"{len(oversized_files)} grandfathered oversized files; "
-        f"{metric_count} multi-dimensional findings."
+        f"{metric_count} multi-dimensional findings; "
+        "0 role-ceiling violations."
     )
     return 0
 
