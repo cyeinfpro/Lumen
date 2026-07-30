@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
 import random
-import secrets
-import time
+import time  # noqa: F401 - compatibility monkeypatch surface
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Any
 
-from arq import Retry
 from lumen_core.models import AuditLog
 from lumen_core.video_providers import (
     VideoProviderDefinition,
@@ -57,6 +52,12 @@ from . import (
 )
 from . import (
     volcano_asset_dispatch as _dispatch_parts,
+)
+from . import (
+    volcano_asset_operation_lease as _lease_parts,
+)
+from . import (
+    volcano_asset_reconciliation as _reconciliation_parts,
 )
 from .volcano_asset_runtime import VolcanoAssetRuntimeContext
 from .volcano_asset_inventory import (
@@ -101,13 +102,24 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "VolcanoAssetRedisUnavailable": lambda: VolcanoAssetRedisUnavailable,
         "VolcanoAssetServiceError": lambda: VolcanoAssetServiceError,
         "_LeaseLostError": lambda: _LeaseLostError,
+        "_ALLOCATE_OPERATION_FENCING_SCRIPT": (
+            lambda: _ALLOCATE_OPERATION_FENCING_SCRIPT
+        ),
+        "_CONFIRM_OPERATION_FENCE_SCRIPT": lambda: _CONFIRM_OPERATION_FENCE_SCRIPT,
+        "_JOB_NAME": lambda: _JOB_NAME,
+        "_OPERATION_LOCK_RENEW_INTERVAL_SECONDS": (
+            lambda: _OPERATION_LOCK_RENEW_INTERVAL_SECONDS
+        ),
+        "_OPERATION_LOCK_TTL_SECONDS": lambda: _OPERATION_LOCK_TTL_SECONDS,
         "_OperationFailure": lambda: _OperationFailure,
         "_RELEASE_OPERATION_LOCK_SCRIPT": lambda: _RELEASE_OPERATION_LOCK_SCRIPT,
         "_RENEW_OPERATION_LOCK_SCRIPT": lambda: _RENEW_OPERATION_LOCK_SCRIPT,
+        "_SET_FENCED_OPERATION_SCRIPT": lambda: _SET_FENCED_OPERATION_SCRIPT,
         "_SUPPORTED_ACTIONS": lambda: _SUPPORTED_ACTIONS,
         "_SuccessPersistenceError": lambda: _SuccessPersistenceError,
         "_ambiguous_create_asset_failure": lambda: _ambiguous_create_asset_failure,
         "_ambiguous_create_group_failure": lambda: _ambiguous_create_group_failure,
+        "_asset_matches_operation": lambda: _asset_matches_operation,
         "_asset_target_reached": lambda: _asset_target_reached,
         "_complete_operation": lambda: _complete_operation,
         "_confirm_operation_lock": lambda: _confirm_operation_lock,
@@ -118,12 +130,14 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "_get_scoped_asset": lambda: _get_scoped_asset,
         "_get_scoped_group": lambda: _get_scoped_group,
         "_group_target_reached": lambda: _group_target_reached,
+        "_explicit_asset_total": lambda: _explicit_asset_total,
         "_is_not_found": lambda: _is_not_found,
         "_list_group_asset_ids_best_effort": lambda: _list_group_asset_ids_best_effort,
         "_media_failure": lambda: _media_failure,
         "_operation_contract_failure": lambda: _operation_contract_failure,
         "_operation_deleted_asset_ids": lambda: _operation_deleted_asset_ids,
         "_operation_has_value": lambda: _operation_has_value,
+        "_parse_operation_time": lambda: _parse_operation_time,
         "_persist_terminal_operation": lambda: _persist_terminal_operation,
         "_process_create_asset": lambda: _process_create_asset,
         "_process_create_group": lambda: _process_create_group,
@@ -133,6 +147,7 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "_process_update_asset": lambda: _process_update_asset,
         "_process_update_group": lambda: _process_update_group,
         "_provider_for_operation": lambda: _provider_for_operation,
+        "_process_locked": lambda: _process_locked,
         "_read_success_receipt": lambda: _read_success_receipt,
         "_reconcile_ambiguous_submit": lambda: _reconcile_ambiguous_submit,
         "_reconcile_update_asset": lambda: _reconcile_update_asset,
@@ -157,6 +172,7 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "video_provider_binding_fingerprint": lambda: (
             video_provider_binding_fingerprint
         ),
+        "volcano_asset_operation_key": lambda: volcano_asset_operation_key,
         "volcano_asset_quota_key": lambda: volcano_asset_quota_key,
     }
 )
@@ -170,17 +186,23 @@ _RUNTIME_CONTEXT = VolcanoAssetRuntimeContext(_resolve_runtime_dependency)
 _action_parts.install_runtime(_RUNTIME_CONTEXT)
 _create_parts.install_runtime(_RUNTIME_CONTEXT)
 _dispatch_parts.install_runtime(_RUNTIME_CONTEXT)
+_lease_parts.install_runtime(_RUNTIME_CONTEXT)
+_reconciliation_parts.install_runtime(_RUNTIME_CONTEXT)
 
-_JOB_NAME = "process_volcano_asset_operation"
-_OPERATION_LOCK_TTL_SECONDS = 10 * 60
-_OPERATION_LOCK_RENEW_INTERVAL_SECONDS = 60
+_JOB_NAME = _lease_parts._JOB_NAME
+_OPERATION_LOCK_TTL_SECONDS = _lease_parts._OPERATION_LOCK_TTL_SECONDS
+_OPERATION_LOCK_RENEW_INTERVAL_SECONDS = (
+    _lease_parts._OPERATION_LOCK_RENEW_INTERVAL_SECONDS
+)
+_RELEASE_OPERATION_LOCK_SCRIPT = _lease_parts._RELEASE_OPERATION_LOCK_SCRIPT
+_RENEW_OPERATION_LOCK_SCRIPT = _lease_parts._RENEW_OPERATION_LOCK_SCRIPT
+_ALLOCATE_OPERATION_FENCING_SCRIPT = (
+    _lease_parts._ALLOCATE_OPERATION_FENCING_SCRIPT
+)
+_CONFIRM_OPERATION_FENCE_SCRIPT = _lease_parts._CONFIRM_OPERATION_FENCE_SCRIPT
+_SET_FENCED_OPERATION_SCRIPT = _lease_parts._SET_FENCED_OPERATION_SCRIPT
 _REDIS_RETRY_ATTEMPTS = 3
 _REDIS_RETRY_BASE_DELAY_SECONDS = 0.02
-_AMBIGUOUS_RECONCILE_ATTEMPTS = 3
-_GROUP_RECONCILE_BEFORE_SECONDS = 2 * 60
-_GROUP_RECONCILE_AFTER_SECONDS = 10 * 60
-_ASSET_SCAN_PAGE_SIZE = 100
-_ASSET_SCAN_MAX_ITEMS = 3000
 _SUPPORTED_ACTIONS = frozenset(
     {
         "create_group",
@@ -191,80 +213,6 @@ _SUPPORTED_ACTIONS = frozenset(
         "delete_asset",
     }
 )
-_OPERATION_FENCING_KEY_PREFIX = "video-assets:operation-fencing:"
-_RELEASE_OPERATION_LOCK_SCRIPT = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-"""
-_RENEW_OPERATION_LOCK_SCRIPT = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-  return redis.call('EXPIRE', KEYS[1], ARGV[2])
-end
-return 0
-"""
-_ALLOCATE_OPERATION_FENCING_SCRIPT = """
--- volcano-operation-fence-allocate
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-  return 0
-end
-local fencing = redis.call('INCR', KEYS[2])
-redis.call('EXPIRE', KEYS[2], ARGV[2])
-return fencing
-"""
-_CONFIRM_OPERATION_FENCE_SCRIPT = """
--- volcano-operation-fence-confirm
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-  return -1
-end
-if tostring(redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then
-  return -2
-end
-if ARGV[3] ~= '' then
-  local raw = redis.call('GET', KEYS[3])
-  if not raw then
-    return -3
-  end
-  local ok, operation = pcall(cjson.decode, raw)
-  if not ok or type(operation) ~= 'table' then
-    return -4
-  end
-  if tonumber(operation['attempt'] or 1) ~= tonumber(ARGV[3]) then
-    return -5
-  end
-end
-redis.call('EXPIRE', KEYS[1], ARGV[4])
-return 1
-"""
-_SET_FENCED_OPERATION_SCRIPT = """
--- volcano-operation-fence-set
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then
-  return -1
-end
-if tostring(redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then
-  return -2
-end
-local raw = redis.call('GET', KEYS[3])
-if not raw then
-  return -3
-end
-local ok, current = pcall(cjson.decode, raw)
-if not ok or type(current) ~= 'table' then
-  return -4
-end
-if tonumber(current['attempt'] or 1) ~= tonumber(ARGV[3]) then
-  return -5
-end
-local current_status = tostring(current['status'] or '')
-if (current_status == 'succeeded' or current_status == 'failed')
-    and ARGV[7] ~= '1' then
-  return -6
-end
-redis.call('SET', KEYS[3], ARGV[4], 'EX', ARGV[5])
-redis.call('EXPIRE', KEYS[1], ARGV[6])
-return 1
-"""
 
 
 class _OperationFailure(RuntimeError):
@@ -291,86 +239,8 @@ class _LeaseLostError(RuntimeError):
     """The operation lease is no longer owned by this worker."""
 
 
-@dataclass
-class _OperationFence:
-    operation_id: str
-    lock_key: str
-    lock_token: str
-    fencing_key: str
-    fencing: int
-    lease_lost: asyncio.Event
-    lease_deadline: float
-    attempt: int | None = None
-
-    def bind(self, operation: dict[str, Any]) -> None:
-        attempt = max(1, int(operation.get("attempt") or 1))
-        if self.attempt is None:
-            self.attempt = attempt
-            return
-        if self.attempt != attempt:
-            self.mark_lost()
-            raise _LeaseLostError(
-                "Volcano asset operation attempt fence was superseded"
-            )
-
-    def mark_confirmed(self) -> None:
-        self.lease_deadline = time.monotonic() + _OPERATION_LOCK_TTL_SECONDS
-
-    def mark_lost(self) -> None:
-        self.lease_lost.set()
-
-    def expired(self) -> bool:
-        return time.monotonic() >= self.lease_deadline
-
-    def details(self) -> dict[str, Any]:
-        if self.attempt is None:
-            raise RuntimeError("Volcano asset operation fence is not bound")
-        return {
-            "lock_token": self.lock_token,
-            "attempt": self.attempt,
-            "fencing": self.fencing,
-        }
-
-
-@dataclass
-class _OperationPersistence:
-    redis: Any
-    fence: _OperationFence
-
-    def bind(self, operation: dict[str, Any]) -> None:
-        self.fence.bind(operation)
-
-    async def confirm(self) -> None:
-        await _confirm_operation_fence(self.redis, self.fence)
-
-    async def update(
-        self,
-        operation: dict[str, Any],
-        **changes: Any,
-    ) -> None:
-        candidate = {
-            **operation,
-            **changes,
-            "updated_at": _utc_iso(),
-        }
-        await self.replace(operation, candidate)
-
-    async def replace(
-        self,
-        operation: dict[str, Any],
-        candidate: dict[str, Any],
-        *,
-        terminal: bool = False,
-    ) -> None:
-        self.bind(candidate)
-        await _set_fenced_operation(
-            self.redis,
-            self.fence,
-            candidate,
-            terminal=terminal,
-        )
-        operation.clear()
-        operation.update(candidate)
+_OperationFence = _lease_parts._OperationFence
+_OperationPersistence = _lease_parts._OperationPersistence
 
 
 def _utc_iso() -> str:
@@ -436,104 +306,10 @@ async def _update_operation(
     await _set_operation(redis, operation)
 
 
-def _operation_fencing_key(operation_id: str) -> str:
-    return f"{_OPERATION_FENCING_KEY_PREFIX}{operation_id}"
-
-
-async def _allocate_operation_fencing(
-    redis: Any,
-    *,
-    lock_key: str,
-    lock_token: str,
-    fencing_key: str,
-) -> int:
-    fencing = await _retry_redis_call(
-        lambda: redis.eval(
-            _ALLOCATE_OPERATION_FENCING_SCRIPT,
-            2,
-            lock_key,
-            fencing_key,
-            lock_token,
-            VOLCANO_ASSET_OPERATION_TTL_SECONDS,
-        )
-    )
-    return max(0, int(fencing or 0))
-
-
-def _raise_lost_fence(fence: _OperationFence) -> None:
-    fence.mark_lost()
-    raise _LeaseLostError("Volcano asset operation lease was lost")
-
-
-async def _confirm_operation_fence(
-    redis: Any,
-    fence: _OperationFence,
-) -> None:
-    if fence.lease_lost.is_set() or fence.expired():
-        _raise_lost_fence(fence)
-    try:
-        confirmed = await _retry_redis_call(
-            lambda: redis.eval(
-                _CONFIRM_OPERATION_FENCE_SCRIPT,
-                3,
-                fence.lock_key,
-                fence.fencing_key,
-                volcano_asset_operation_key(fence.operation_id),
-                fence.lock_token,
-                fence.fencing,
-                "" if fence.attempt is None else fence.attempt,
-                _OPERATION_LOCK_TTL_SECONDS,
-            )
-        )
-    except VolcanoAssetRedisUnavailable:
-        if fence.expired():
-            _raise_lost_fence(fence)
-        raise
-    if int(confirmed or 0) != 1:
-        _raise_lost_fence(fence)
-    fence.mark_confirmed()
-
-
-async def _set_fenced_operation(
-    redis: Any,
-    fence: _OperationFence,
-    operation: dict[str, Any],
-    *,
-    terminal: bool,
-) -> None:
-    if fence.attempt is None:
-        fence.bind(operation)
-    if fence.lease_lost.is_set() or fence.expired():
-        _raise_lost_fence(fence)
-    payload = json.dumps(
-        operation,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    try:
-        stored = await _retry_redis_call(
-            lambda: redis.eval(
-                _SET_FENCED_OPERATION_SCRIPT,
-                3,
-                fence.lock_key,
-                fence.fencing_key,
-                volcano_asset_operation_key(fence.operation_id),
-                fence.lock_token,
-                fence.fencing,
-                fence.attempt,
-                payload,
-                VOLCANO_ASSET_OPERATION_TTL_SECONDS,
-                _OPERATION_LOCK_TTL_SECONDS,
-                1 if terminal else 0,
-            )
-        )
-    except VolcanoAssetRedisUnavailable:
-        if fence.expired():
-            _raise_lost_fence(fence)
-        raise
-    if int(stored or 0) != 1:
-        _raise_lost_fence(fence)
-    fence.mark_confirmed()
+_operation_fencing_key = _lease_parts._operation_fencing_key
+_allocate_operation_fencing = _lease_parts._allocate_operation_fencing
+_confirm_operation_fence = _lease_parts._confirm_operation_fence
+_set_fenced_operation = _lease_parts._set_fenced_operation
 
 
 async def _provider_for_operation(
@@ -716,152 +492,10 @@ async def _source_url_for_submit(
     return public_url
 
 
-async def _scan_operation_assets(
-    client: VolcanoAssetClient,
-    provider: VideoProviderDefinition,
-    operation: dict[str, Any],
-) -> tuple[list[dict[str, Any]], bool]:
-    group_id = str(operation.get("group_id") or "")
-    name = str(operation.get("name") or "")
-    if not group_id or not name:
-        return [], True
-    seen_ids: set[str] = set()
-    matches: list[dict[str, Any]] = []
-    page_number = 1
-    scanned_items = 0
-    known_total: int | None = None
-    while scanned_items < _ASSET_SCAN_MAX_ITEMS:
-        raw = await client.request(
-            "ListAssets",
-            {
-                "ProjectName": provider.project_name,
-                "Filter": {
-                    "GroupType": _AIGC_GROUP_TYPE,
-                    "GroupIds": [group_id],
-                    "Name": name,
-                },
-                "PageNumber": page_number,
-                "PageSize": _ASSET_SCAN_PAGE_SIZE,
-            },
-        )
-        listed = normalize_asset_list(
-            raw,
-            project_name=provider.project_name,
-            page_number=page_number,
-            page_size=_ASSET_SCAN_PAGE_SIZE,
-        )
-        items = listed["items"]
-        explicit_total = _explicit_asset_total(raw)
-        if explicit_total is not None:
-            known_total = max(known_total or 0, explicit_total)
-        if not items:
-            return matches, True
-        remaining = _ASSET_SCAN_MAX_ITEMS - scanned_items
-        scanned_items += min(len(items), remaining)
-        items = items[:remaining]
-        page_ids = {str(asset.get("id") or "") for asset in items if asset.get("id")}
-        new_ids = page_ids - seen_ids
-        if not new_ids:
-            return matches, False
-        for asset in items:
-            asset_id = str(asset.get("id") or "")
-            if asset_id in new_ids and _asset_matches_operation(
-                asset,
-                provider,
-                operation,
-            ):
-                matches.append(asset)
-        seen_ids.update(new_ids)
-        if known_total is not None and len(seen_ids) >= known_total:
-            return matches, True
-        if scanned_items >= _ASSET_SCAN_MAX_ITEMS:
-            return matches, False
-        page_number += 1
-    return matches, False
-
-
-async def _find_existing_submitted_asset(
-    client: VolcanoAssetClient,
-    provider: VideoProviderDefinition,
-    operation: dict[str, Any],
-) -> dict[str, Any] | None:
-    assets, complete = await _scan_operation_assets(client, provider, operation)
-    if not complete:
-        return None
-    baseline_asset_ids = {
-        str(asset_id)
-        for asset_id in (
-            operation.get("baseline_asset_ids")
-            if isinstance(operation.get("baseline_asset_ids"), list)
-            else []
-        )
-        if asset_id is not None and str(asset_id)
-    }
-    submit_started_at = _parse_operation_time(operation.get("submit_started_at"))
-    lower_bound = (
-        submit_started_at - timedelta(seconds=_GROUP_RECONCILE_BEFORE_SECONDS)
-        if submit_started_at is not None
-        else None
-    )
-    upper_bound = (
-        submit_started_at + timedelta(seconds=_GROUP_RECONCILE_AFTER_SECONDS)
-        if submit_started_at is not None
-        else None
-    )
-    matches: list[dict[str, Any]] = []
-    for asset in assets:
-        asset_id = str(asset.get("id") or "")
-        created_at = _parse_operation_time(asset.get("create_time"))
-        if (
-            asset_id
-            and asset_id not in baseline_asset_ids
-            and (
-                created_at is None
-                or lower_bound is None
-                or upper_bound is None
-                or lower_bound <= created_at <= upper_bound
-            )
-        ):
-            matches.append(asset)
-    return matches[0] if len(matches) == 1 else None
-
-
-async def _snapshot_group_asset_ids(
-    client: VolcanoAssetClient,
-    provider: VideoProviderDefinition,
-    operation: dict[str, Any],
-) -> list[str]:
-    assets, complete = await _scan_operation_assets(client, provider, operation)
-    if not complete:
-        raise _OperationFailure(
-            "volcano_asset_inventory_incomplete",
-            "could not safely inventory existing Volcano assets",
-            retryable=True,
-            retry_after_seconds=10,
-        )
-    return sorted(str(asset["id"]) for asset in assets)
-
-
-async def _reconcile_ambiguous_submit(
-    client: VolcanoAssetClient,
-    provider: VideoProviderDefinition,
-    operation: dict[str, Any],
-) -> dict[str, Any] | None:
-    for attempt in range(_AMBIGUOUS_RECONCILE_ATTEMPTS):
-        if attempt:
-            delay = min(2.0, 0.25 * (2 ** (attempt - 1)))
-            await asyncio.sleep(delay + random.uniform(0, delay))
-        try:
-            asset = await _find_existing_submitted_asset(
-                client,
-                provider,
-                operation,
-            )
-        except VolcanoAssetServiceError:
-            continue
-        if asset is not None:
-            return asset
-    return None
+_scan_operation_assets = _reconciliation_parts._scan_operation_assets
+_find_existing_submitted_asset = _reconciliation_parts._find_existing_submitted_asset
+_snapshot_group_asset_ids = _reconciliation_parts._snapshot_group_asset_ids
+_reconcile_ambiguous_submit = _reconciliation_parts._reconcile_ambiguous_submit
 
 
 async def _persist_terminal_operation(
@@ -947,51 +581,9 @@ async def _release_quota_best_effort(
     return False
 
 
-async def _renew_operation_lock(
-    redis: Any,
-    lock_key: str,
-    lock_token: str,
-) -> bool:
-    renewed = await _retry_redis_call(
-        lambda: redis.eval(
-            _RENEW_OPERATION_LOCK_SCRIPT,
-            1,
-            lock_key,
-            lock_token,
-            _OPERATION_LOCK_TTL_SECONDS,
-        )
-    )
-    return bool(renewed)
-
-
-async def _operation_lock_heartbeat(
-    persistence: _OperationPersistence,
-) -> None:
-    while True:
-        remaining = persistence.fence.lease_deadline - time.monotonic()
-        if remaining <= 0:
-            persistence.fence.mark_lost()
-            return
-        await asyncio.sleep(min(_OPERATION_LOCK_RENEW_INTERVAL_SECONDS, remaining))
-        if persistence.fence.expired():
-            persistence.fence.mark_lost()
-            return
-        try:
-            await persistence.confirm()
-        except VolcanoAssetRedisUnavailable:
-            logger.warning(
-                "video_asset.operation_lock_renew_unavailable",
-                exc_info=True,
-            )
-            continue
-        except _LeaseLostError:
-            return
-
-
-async def _confirm_operation_lock(
-    persistence: _OperationPersistence,
-) -> None:
-    await persistence.confirm()
+_renew_operation_lock = _lease_parts._renew_operation_lock
+_operation_lock_heartbeat = _lease_parts._operation_lock_heartbeat
+_confirm_operation_lock = _lease_parts._confirm_operation_lock
 
 
 async def _defer_for_rate_limit(
@@ -1200,183 +792,8 @@ _process_create_asset = _create_parts._process_create_asset
 _process_locked = _dispatch_parts._process_locked
 
 
-async def _schedule_lock_recovery(
-    redis: Any,
-    operation_id: str,
-    expected_attempt: int | None,
-    expected_delivery_generation: int | None,
-    lock_key: str,
-) -> bool:
-    current_token = await _retry_redis_call(lambda: redis.get(lock_key))
-    if isinstance(current_token, bytes):
-        current_token = current_token.decode("utf-8", errors="replace")
-    if not isinstance(current_token, str) or not current_token:
-        return False
-    token_digest = hashlib.sha256(current_token.encode("utf-8")).hexdigest()[:12]
-    attempt_key = expected_attempt if expected_attempt is not None else "current"
-    delivery_key = (
-        expected_delivery_generation
-        if expected_delivery_generation is not None
-        else "current"
-    )
-    marker_key = (
-        f"video-assets:operation-lock-recovery:{operation_id}:"
-        f"{attempt_key}:{delivery_key}:{token_digest}"
-    )
-    marker_token = secrets.token_hex(12)
-    claimed = await _retry_redis_call(
-        lambda: redis.set(
-            marker_key,
-            marker_token,
-            nx=True,
-            ex=_OPERATION_LOCK_TTL_SECONDS,
-        )
-    )
-    if not claimed:
-        return False
-    try:
-        await _retry_redis_call(
-            lambda: redis.enqueue_job(
-                _JOB_NAME,
-                operation_id,
-                expected_attempt,
-                expected_delivery_generation,
-                _defer_by=timedelta(seconds=_OPERATION_LOCK_TTL_SECONDS + 5),
-                _job_id=(
-                    f"volcano-asset:{operation_id}:lock-recovery:"
-                    f"{token_digest}:{marker_token[:8]}"
-                ),
-            )
-        )
-    except VolcanoAssetRedisUnavailable:
-        with suppress(VolcanoAssetRedisUnavailable):
-            await _retry_redis_call(
-                lambda: redis.eval(
-                    _RELEASE_OPERATION_LOCK_SCRIPT,
-                    1,
-                    marker_key,
-                    marker_token,
-                )
-            )
-        raise
-    return True
-
-
-async def process_volcano_asset_operation(
-    ctx: dict[str, Any],
-    operation_id: str,
-    expected_attempt: int | None = None,
-    expected_delivery_generation: int | None = None,
-) -> dict[str, Any]:
-    """Run one operation under a Redis lease to prevent duplicate submits."""
-    redis = ctx.get("redis")
-    if redis is None:
-        raise RuntimeError("Redis is required for Volcano asset operations")
-    lock_key = f"video-assets:operation-lock:{operation_id}"
-    lock_token = secrets.token_hex(16)
-    try:
-        locked = await _retry_redis_call(
-            lambda: redis.set(
-                lock_key,
-                lock_token,
-                nx=True,
-                ex=_OPERATION_LOCK_TTL_SECONDS,
-            )
-        )
-    except VolcanoAssetRedisUnavailable as exc:
-        raise Retry(defer=5 + random.uniform(0, 2)) from exc
-    if not locked:
-        try:
-            recovery_scheduled = await _schedule_lock_recovery(
-                redis,
-                operation_id,
-                expected_attempt,
-                expected_delivery_generation,
-                lock_key,
-            )
-        except VolcanoAssetRedisUnavailable as exc:
-            raise Retry(defer=5 + random.uniform(0, 2)) from exc
-        return {
-            "status": "locked",
-            "operation_id": operation_id,
-            "retry_after_seconds": _OPERATION_LOCK_TTL_SECONDS + 5,
-            "recovery_scheduled": recovery_scheduled,
-        }
-    lease_lost = asyncio.Event()
-    fencing_key = _operation_fencing_key(operation_id)
-    try:
-        fencing = await _allocate_operation_fencing(
-            redis,
-            lock_key=lock_key,
-            lock_token=lock_token,
-            fencing_key=fencing_key,
-        )
-    except VolcanoAssetRedisUnavailable as exc:
-        with suppress(VolcanoAssetRedisUnavailable):
-            await _retry_redis_call(
-                lambda: redis.eval(
-                    _RELEASE_OPERATION_LOCK_SCRIPT,
-                    1,
-                    lock_key,
-                    lock_token,
-                )
-            )
-        raise Retry(defer=5 + random.uniform(0, 2)) from exc
-    if fencing <= 0:
-        lease_lost.set()
-        raise Retry(defer=5 + random.uniform(0, 2))
-    persistence = _OperationPersistence(
-        redis=redis,
-        fence=_OperationFence(
-            operation_id=operation_id,
-            lock_key=lock_key,
-            lock_token=lock_token,
-            fencing_key=fencing_key,
-            fencing=fencing,
-            lease_lost=lease_lost,
-            lease_deadline=time.monotonic() + _OPERATION_LOCK_TTL_SECONDS,
-        ),
-    )
-    heartbeat = asyncio.create_task(_operation_lock_heartbeat(persistence))
-    try:
-        try:
-            return await _process_locked(
-                ctx,
-                operation_id,
-                expected_attempt,
-                expected_delivery_generation,
-                persistence=persistence,
-            )
-        except _create_parts._IntentLockBusyError as exc:
-            delay = exc.retry_after_seconds
-            raise Retry(defer=delay + random.uniform(0, delay / 4)) from exc
-        except (
-            _LeaseLostError,
-            _SuccessPersistenceError,
-            VolcanoAssetRedisUnavailable,
-        ) as exc:
-            job_try = max(1, int(ctx.get("job_try") or 1))
-            delay = min(60.0, 5.0 * (2 ** min(job_try - 1, 3)))
-            raise Retry(defer=delay + random.uniform(0, delay / 4)) from exc
-    finally:
-        heartbeat.cancel()
-        with suppress(asyncio.CancelledError):
-            await heartbeat
-        try:
-            await _retry_redis_call(
-                lambda: redis.eval(
-                    _RELEASE_OPERATION_LOCK_SCRIPT,
-                    1,
-                    lock_key,
-                    lock_token,
-                )
-            )
-        except VolcanoAssetRedisUnavailable:
-            logger.warning(
-                "video_asset.operation_lock_release_failed operation_id=%s",
-                operation_id,
-                exc_info=True,
-            )
+_schedule_lock_recovery = _lease_parts._schedule_lock_recovery
+process_volcano_asset_operation = _lease_parts.process_volcano_asset_operation
 
 
 __all__ = ["process_volcano_asset_operation"]
