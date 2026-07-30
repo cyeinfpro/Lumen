@@ -12,7 +12,11 @@ from lumen_core.byok_retention import (
     cutoffs,
 )
 from lumen_core.constants import DEFAULT_CHAT_INSTRUCTIONS
-from lumen_core.models import Completion, Conversation, Message
+from lumen_core.model_entities import (
+    Completion,
+    Conversation,
+    Message,
+)
 
 from .. import context_loading, history
 from ..context import PackedContext

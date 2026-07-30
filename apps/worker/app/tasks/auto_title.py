@@ -31,13 +31,14 @@ from lumen_core.constants import (
     conv_channel,
 )
 from lumen_core.models import Conversation, Message
-from lumen_core.providers import ProviderProxyDefinition, resolve_provider_proxy_url
+from lumen_core.providers import ProviderProxyDefinition
 
 import httpx
 
 from ..db import SessionLocal, affected_rows
 from ..provider_runtime.errors import UpstreamError
 from ..provider_runtime.http_headers import upstream_auth_headers
+from ..provider_pool import resolve_provider_proxy_url
 from ..sse_publish import publish_event
 
 logger = logging.getLogger(__name__)

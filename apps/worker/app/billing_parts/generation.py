@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Generation
+from lumen_core.model_entities import Generation
 
 from .contracts import (
     GenerationDependencies,

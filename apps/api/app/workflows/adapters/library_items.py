@@ -13,7 +13,6 @@ from lumen_core.models import Image, ModelLibraryHiddenPreset, ModelLibraryItem,
 from lumen_core.providers import (
     ProviderProxyDefinition,
     parse_proxy_json,
-    resolve_provider_proxy_url,
 )
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
@@ -22,6 +21,7 @@ from lumen_core.schemas import (
 )
 
 from ...config import settings
+from ...proxy_pool import resolve_provider_proxy_url
 from ...runtime_settings import get_setting
 from ..domain.apparel_library import (
     MODEL_LIBRARY_FETCH_TIMEOUT_SECONDS,

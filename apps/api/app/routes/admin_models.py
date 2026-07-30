@@ -21,7 +21,6 @@ from lumen_core.providers import (
     ProviderDefinition,
     build_effective_provider_config,
     endpoint_kind_allowed,
-    resolve_provider_proxy_url,
 )
 from lumen_core.schemas import (
     AdminModelOut,
@@ -31,6 +30,7 @@ from lumen_core.schemas import (
 
 from ..db import get_db
 from ..deps import AdminUser
+from ..proxy_pool import resolve_provider_proxy_url
 from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import read_providers as _read_providers
 

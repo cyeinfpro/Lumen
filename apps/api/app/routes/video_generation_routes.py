@@ -17,8 +17,12 @@ from lumen_core.constants import (
     VideoGenerationStatus,
     task_channel,
 )
-from lumen_core.models import OutboxEvent, Video, VideoGeneration
-from lumen_core.schemas import (
+from lumen_core.model_entities import (
+    OutboxEvent,
+    Video,
+    VideoGeneration,
+)
+from lumen_core.schema_models import (
     VideoCreateIn,
     VideoGenerationOut,
     VideoGenerationsOut,

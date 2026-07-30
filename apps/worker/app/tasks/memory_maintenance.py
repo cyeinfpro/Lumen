@@ -9,7 +9,10 @@ from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select, update
 
-from lumen_core.models import UserMemory, UserMemoryStaging
+from lumen_core.model_entities import (
+    UserMemory,
+    UserMemoryStaging,
+)
 
 
 async def cleanup_memory(

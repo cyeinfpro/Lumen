@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import (
+from lumen_core.model_entities import (
     Completion,
     Generation,
     OutboxDeadLetter,

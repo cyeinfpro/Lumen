@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import WorkflowRun
+from lumen_core.model_entities import WorkflowRun
 
 from ...services.storyboard.common import STORYBOARD_WORKFLOW_TYPE
 from ...services.storyboard.contracts import StoryboardRunListOut, StoryboardRunOut

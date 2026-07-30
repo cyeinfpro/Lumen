@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import (
+from lumen_core.model_entities import (
     AuditLog,
     BillingWindowUsageEvent,
     Completion,

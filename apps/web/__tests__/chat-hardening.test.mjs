@@ -406,14 +406,24 @@ test("desktop and mobile canvases share generation render signatures", () => {
   const desktop = source(
     "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
   );
+  const desktopTurns = source(
+    "src/components/ui/chat/desktop/DesktopConversationTurns.tsx",
+  );
   const mobile = source(
     "src/components/ui/chat/mobile/MobileConversationCanvas.tsx",
   );
 
   match(shared, /export function generationRenderSignature/);
-  match(desktop, /from "@\/components\/ui\/chat\/generationRenderSignature"/);
+  match(
+    desktopTurns,
+    /from "@\/components\/ui\/chat\/generationRenderSignature"/,
+  );
+  match(
+    desktop,
+    /generationSignature,[\s\S]*?from "\.\/DesktopConversationTurns"/,
+  );
   match(mobile, /from "@\/components\/ui\/chat\/generationRenderSignature"/);
-  doesNotMatch(desktop, /function generationRenderSignature/);
+  doesNotMatch(desktopTurns, /function generationRenderSignature/);
   doesNotMatch(mobile, /function generationRenderSignature/);
 });
 
@@ -477,8 +487,14 @@ test("desktop studio uses one compact control family and aligned content rails",
   const composer = source(
     "src/components/ui/composer/desktop/DesktopComposerPill.tsx",
   );
+  const composerButtons = source(
+    "src/components/ui/composer/desktop/DesktopComposerButtons.tsx",
+  );
   const canvas = source(
     "src/components/ui/chat/desktop/DesktopConversationCanvas.tsx",
+  );
+  const turns = source(
+    "src/components/ui/chat/desktop/DesktopConversationTurns.tsx",
   );
   const divider = source(
     "src/components/ui/chat/desktop/DesktopSceneDivider.tsx",
@@ -499,8 +515,9 @@ test("desktop studio uses one compact control family and aligned content rails",
   match(contextBar, /aria-pressed=\{fast\}/);
   doesNotMatch(contextBar, /role="menu"/);
   doesNotMatch(contextBar, /role="menuitemcheckbox"/);
-  match(composer, /density="compact"/);
-  match(canvas, /max-w-\[var\(--content-composer\)\]/);
+  match(composer, /<ModeSegment/);
+  match(composerButtons, /density="compact"/);
+  match(turns, /max-w-\[var\(--content-composer\)\]/);
   match(canvas, /aria-label="回到最新"/);
   match(canvas, /var\(--studio-sidebar-offset, 0px\) \/ 2/);
   match(divider, /max-w-\[var\(--content-composer\)\]/);

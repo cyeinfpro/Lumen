@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-from types import ModuleType
+from collections.abc import Callable
+from types import MappingProxyType
 from typing import Any
 
 
 class ModelLibraryRuntimeAdapter:
-    """Resolve facade-owned dependencies at call time for monkeypatch compatibility."""
+    """Resolve an explicit dependency whitelist at call time."""
 
     def __init__(
         self,
-        bindings: ModuleType,
-        *,
-        required_bindings: tuple[object, ...] = (),
+        **bindings: Callable[[], Any],
     ) -> None:
-        self._bindings = bindings
-        self._required_bindings = required_bindings
+        self._bindings = MappingProxyType(dict(bindings))
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._bindings, name)
+        try:
+            provider = self._bindings[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+        return provider()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.providers_parts.definitions import ProviderProxyDefinition
 
 
 async def resolve_update_proxy(

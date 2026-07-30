@@ -19,7 +19,10 @@ from lumen_core.context_window import (
     estimate_text_tokens,
     is_summary_usable,
 )
-from lumen_core.models import Conversation, Message
+from lumen_core.model_entities import (
+    Conversation,
+    Message,
+)
 
 from . import planning
 from .common import (

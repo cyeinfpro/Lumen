@@ -17,8 +17,11 @@ from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
 )
-from lumen_core.models import Completion, Generation
-from lumen_core.schemas import (
+from lumen_core.model_entities import (
+    Completion,
+    Generation,
+)
+from lumen_core.schema_models import (
     ActiveTasksOut,
     CompletionOut,
     GenerationOut,

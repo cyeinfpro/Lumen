@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import (
+from lumen_core.model_entities import (
     AllowedEmail,
     AuthSession,
     InviteLink,
@@ -18,7 +18,11 @@ from lumen_core.models import (
     User,
     UserApiCredential,
 )
-from lumen_core.schemas import SignupByokIn, SignupIn, UserOut
+from lumen_core.schema_models import (
+    SignupByokIn,
+    SignupIn,
+    UserOut,
+)
 
 from .runtime import AuthRuntimeAdapter
 

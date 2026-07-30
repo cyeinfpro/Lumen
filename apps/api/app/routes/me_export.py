@@ -16,8 +16,12 @@ from typing import Any, BinaryIO, Iterator
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Conversation, Image, Message
-from lumen_core.schemas import public_message_content
+from lumen_core.model_entities import (
+    Conversation,
+    Image,
+    Message,
+)
+from lumen_core.message_content import public_message_content
 
 from ..config import settings
 

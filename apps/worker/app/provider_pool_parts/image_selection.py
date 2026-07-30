@@ -8,7 +8,7 @@ import logging
 from typing import Any
 
 from lumen_core.constants import GenerationErrorCode as EC
-from lumen_core.providers import (
+from lumen_core.providers_parts.selection import (
     endpoint_kind_allowed,
     provider_supports_route,
 )

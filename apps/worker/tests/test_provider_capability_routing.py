@@ -21,7 +21,7 @@ from app.provider_pool import ProviderConfig, ProviderHealth, ProviderPool
 from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import ImageExecutionRequest
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
-from lumen_core.providers import provider_supports_route
+from lumen_core.providers_parts.selection import provider_supports_route
 
 
 TEST_UPSTREAM_RUNTIME = build_image_upstream_runtime()

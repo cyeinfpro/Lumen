@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -17,7 +18,7 @@ from typing import Any, Mapping
 import httpx
 
 from .constants import GenerationErrorCode as EC
-from .providers import ProviderProxyDefinition, resolve_provider_proxy_url
+from .providers import ProviderProxyDefinition
 
 
 VALID_MODEL_LIBRARY_AGE_SEGMENTS: frozenset[str] = frozenset(
@@ -507,6 +508,10 @@ async def call_vision_tagging_upstream_one(
     api_key: str,
     purpose: str,
     instructions: str,
+    proxy_resolver: Callable[
+        [ProviderProxyDefinition | None],
+        Awaitable[str | None],
+    ],
     proxy: ProviderProxyDefinition | None = None,
     auth_headers: Mapping[str, str] | None = None,
     read_timeout_s: float = TAGGING_HTTP_TIMEOUT_S,
@@ -534,7 +539,7 @@ async def call_vision_tagging_upstream_one(
         "content-type": "application/json",
     }
     try:
-        proxy_url = await resolve_provider_proxy_url(proxy)
+        proxy_url = await proxy_resolver(proxy)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=10.0,

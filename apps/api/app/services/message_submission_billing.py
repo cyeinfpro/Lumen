@@ -17,9 +17,9 @@ from lumen_core.constants import (
     IMAGE_MULTI_GEN_STAGGER_CAP_S,
     IMAGE_MULTI_GEN_STAGGER_S,
 )
-from lumen_core.models import SystemSetting
+from lumen_core.model_entities import SystemSetting
 from lumen_core.runtime_settings import get_spec
-from lumen_core.schemas import ChatParamsIn
+from lumen_core.schema_models import ChatParamsIn
 
 from ..runtime_settings import get_setting
 from ..task_billing import (

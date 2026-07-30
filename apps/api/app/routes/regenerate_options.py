@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from lumen_core.providers import parse_provider_bool
-from lumen_core.schemas import ChatParamsIn
+from lumen_core.providers_parts.config import parse_provider_bool
+from lumen_core.schema_models import ChatParamsIn
 
 
 IMAGE_RENDER_QUALITY_VALUES = frozenset(("auto", "low", "medium", "high"))

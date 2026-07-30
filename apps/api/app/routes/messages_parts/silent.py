@@ -14,8 +14,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS, MAX_PROMPT_CHARS, Intent, Role
-from lumen_core.models import Conversation, Generation, Image, Message, User
-from lumen_core.schemas import ChatParamsIn, ImageParamsIn, MessageOut
+from lumen_core.model_entities import (
+    Conversation,
+    Generation,
+    Image,
+    Message,
+    User,
+)
+from lumen_core.schema_models import (
+    ChatParamsIn,
+    ImageParamsIn,
+    MessageOut,
+)
 
 
 SILENT_GENERATION_REQUEST_HASH_KEY = "request_hash"

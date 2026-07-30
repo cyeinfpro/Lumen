@@ -560,6 +560,10 @@ async def lifespan(app: FastAPI):
         arq = await get_arq_pool()
         lifecycle.own("arq", close_arq_pool)
 
+        from .proxy_pool import close_provider_proxy_tunnels
+
+        lifecycle.own("provider_proxy", close_provider_proxy_tunnels)
+
         poster_tagging = build_poster_tagging_runtime(
             r,
             concurrency=poster_style_tagging.auto_tag_concurrency(),

@@ -9,7 +9,12 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Completion, Conversation, Message, User
+from lumen_core.model_entities import (
+    Completion,
+    Conversation,
+    Message,
+    User,
+)
 
 from .contracts import (
     ConversationActiveScopeIn,

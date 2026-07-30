@@ -10,7 +10,7 @@ from lumen_core.constants import (
     EV_GEN_PROGRESS,
     GenerationStage,
 )
-from lumen_core.models import Generation
+from lumen_core.model_entities import Generation
 
 from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from .diagnostics import (

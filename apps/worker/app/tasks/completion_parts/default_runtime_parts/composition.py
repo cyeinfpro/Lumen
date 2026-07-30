@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+# ruff: noqa: F401
+import asyncio
+import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
+import httpx
+from PIL import Image as PILImage
+from sqlalchemy import select, update
+from sqlalchemy import text as sa_text
+
+from lumen_core import billing as billing_core
+from lumen_core.byok_retention import (
+    BYOK_DEFAULT_DELETE_ENABLED,
+    ByokRetentionPolicy,
+    applies_to_account_mode as byok_retention_applies_to_account_mode,
+    cutoffs as byok_retention_cutoffs,
+)
 from ..bindings import (
     CompletionBillingBindings,
     CompletionBindings,
@@ -18,8 +34,32 @@ from ..bindings import (
 )
 from ..contracts import CompletionCommand, CompletionResult
 from ..runtime import CompletionRuntime
-from lumen_core.constants import DEFAULT_CHAT_MODEL, RETRY_BACKOFF_SECONDS
-from lumen_core.models import User, new_uuid7
+from lumen_core.constants import (
+    DEFAULT_CHAT_INSTRUCTIONS,
+    DEFAULT_CHAT_MODEL,
+    EV_COMP_IMAGE,
+    EV_COMP_PROGRESS,
+    CompletionStatus,
+    GenerationErrorCode as EC,
+    RETRY_BACKOFF_SECONDS,
+)
+from lumen_core.context_window import (
+    CONTEXT_INPUT_TOKEN_BUDGET,
+    compose_summary_guardrail,
+    count_tokens,
+    estimate_system_prompt_tokens,
+    estimate_text_tokens,
+    get_input_budget,
+)
+from lumen_core.model_entities import (
+    Completion,
+    Conversation,
+    Image,
+    ImageVariant,
+    Message,
+    User,
+)
+from lumen_core.model_base import new_uuid7
 from lumen_core.pricing import parse_usage
 from lumen_core.queue_metadata import completion_queue_metadata, merge_queue_metadata
 
@@ -32,50 +72,138 @@ from ....byok_runtime import (
     record_user_credential_runtime_error,
     resolve_user_credential_runtime,
 )
-from ....db import affected_rows
-from ....observability import upstream_calls_total
+from ....db import SessionLocal, affected_rows
+from ....observability import (
+    completion_cancel_check_errors_total,
+    get_tracer,
+    safe_outcome,
+    task_duration_seconds,
+    upstream_calls_total,
+)
 from ....provider_runtime.errors import UpstreamError
-from ....retry import RetryDecision
-from ... import memory_extraction
+from ....provider_runtime.upstream_services import ImageUpstreamRuntime
+from ....retry import RetryDecision, is_retriable
+from ....sse_publish import publish_event as _publish_sse_event
+from ....storage import storage
+from ....storage_writes import StorageWriteCoordinator
+from ....upstream_parts.responses_client import stream_completion
+from ... import context_summary, memory_extraction
+from ... import outbox as _completion_outbox
 from ...state import is_completion_terminal
-from .. import tool_images as completion_tool_images
+from .. import context_loading as _completion_context_loading
+from .. import history as _completion_history
+from .. import stream as _completion_stream
+from .. import tool_images as _completion_tool_images
+from ..artifact_codec import (
+    compute_blurhash as _generation_compute_blurhash,
+    make_display as _make_display,
+    make_preview as _make_preview,
+    make_thumb as _make_thumb,
+    sha256 as _sha256,
+)
+from ..artifact_storage import (
+    cleanup_completion_image_files_on_error as _cleanup_storage_on_error,
+    write_completion_image_files as _write_generation_files,
+)
 from ..citation_text import (
-    apply_url_citations,
-    extract_completed_output_text,
-    extract_url_citations,
-    finalize_completion_text,
+    apply_url_citations as _apply_url_citations,
+    extract_completed_output_text as _extract_completed_output_text,
+    extract_url_citations as _extract_url_citations,
+    finalize_completion_text as _finalize_completion_text,
+    markdown_link as _markdown_link,
 )
-from ..history import instructions_with_summary_guardrail
+from ..context import (
+    PackedContext,
+    estimated_summary_source as _estimated_summary_source,
+    fallback_pack as _fallback_pack,
+    make_quality_probes as _make_quality_probes,
+    pack_with_existing_summary as _pack_with_existing_summary,
+    packed_with_input as _packed_with_input,
+)
+from ..context_enrichment import (
+    inject_user_memory_context,
+    record_completion_context_metadata,
+)
+from ..context_loading import (
+    context_circuit_open as _context_circuit_open,
+    pick_current_user as _pick_current_user,
+    pick_first_user as _pick_first_user,
+)
+from ..history import (
+    STICKY_TEXT_CHAR_LIMIT as _STICKY_TEXT_CHAR_LIMIT,
+    SummaryBoundary as _SummaryBoundary,
+    instructions_with_summary_guardrail as _instructions_with_summary_guardrail,
+    message_after_summary as _message_after_summary,
+    message_created_at as _message_created_at,
+    role_eq as _role_eq,
+    sticky_text_from_message as _sticky_text_from_message,
+    summary_age_seconds as _summary_age_seconds,
+    summary_compressed_at as _summary_compressed_at,
+    summary_covers_boundary as _summary_covers_boundary,
+    summary_created_at as _summary_created_at,
+    truncate_sticky_text as _truncate_sticky_text,
+    with_summary_guardrail as _with_summary_guardrail,
+)
+from ..image_storage_runtime import (
+    CompletionToolImageBudget,
+    CompletionToolImageCodec,
+    CompletionToolImageEvents,
+    CompletionToolImageRepository,
+    CompletionToolImageService,
+    CompletionToolImageStorage,
+)
 from ..request_metadata import (
-    completion_upstream_provider_event,
-    merge_completion_upstream_metadata,
-    normalize_reasoning_effort_for_upstream,
+    completion_upstream_provider_event as _completion_upstream_provider_event,
+    content_str_list as _content_str_list,
+    merge_completion_upstream_metadata as _merge_completion_upstream_metadata,
+    normalize_reasoning_effort_for_upstream as _normalize_reasoning_effort_for_upstream,
+    split_csv_ids as _split_csv_ids,
 )
+from ..runner import run_completion as _run_completion
+from ..services import build_completion_services
 from ..stream import (
-    extract_reasoning_delta,
-    extract_reasoning_text_from_response,
-    raise_for_terminal_response_event,
+    LeaseLost as _LeaseLost,
+    TaskCancelled as _TaskCancelled,
+    ToolIdleTimeout as _ToolIdleTimeout,
+    extract_reasoning_delta as _extract_reasoning_delta,
+    extract_reasoning_text_from_item as _extract_reasoning_text_from_item,
+    extract_reasoning_text_from_response as _extract_reasoning_text_from_response,
+    next_completion_stream_event as _next_completion_stream_event,
+    raise_for_terminal_response_event as _raise_for_terminal_response_event,
 )
 from ..tool_images import (
-    CompletionUsageAccumulator,
-    completion_event_payload,
-    estimate_completion_request_input_tokens,
-    estimate_completion_tool_output_tokens,
-    extract_image_events_from_response,
-    settle_cancelled_completion_billing,
-    tool_image_dedupe_key,
+    CompletionUsageAccumulator as _CompletionUsageAccumulator,
+    completion_event_payload as _completion_event_payload,
+    decode_upstream_image_b64 as _decode_upstream_image_b64,
+    estimate_completion_request_input_tokens as _estimate_completion_request_input_tokens,
+    estimate_completion_tool_output_tokens as _estimate_completion_tool_output_tokens,
+    extract_image_events_from_response as _extract_image_events_from_response,
+    fallback_completion_usage_tokens as _fallback_completion_usage_tokens,
+    settle_cancelled_completion_billing as _settle_cancelled_completion_billing,
+    tool_image_dedupe_key as _tool_image_dedupe_key,
 )
-from ..tool_state import CompletionToolTracker, summarize_tool_error
+from ..tool_state import (
+    CODE_INTERPRETER_TOOL_TYPE as _CODE_INTERPRETER_TOOL_TYPE,
+    CompletionToolTracker as _CompletionToolTracker,
+    FILE_SEARCH_TOOL_TYPE as _FILE_SEARCH_TOOL_TYPE,
+    IMAGE_GENERATION_TOOL_TYPE as _IMAGE_GENERATION_TOOL_TYPE,
+    ToolCallState as _ToolCallState,
+    WEB_SEARCH_TOOL_TYPE as _WEB_SEARCH_TOOL_TYPE,
+    extract_tool_call_update as _extract_tool_call_update,
+    first_str as _first_str,
+    merge_tool_call_state as _merge_tool_call_state,
+    normalize_tool_status as _normalize_tool_status,
+    normalize_tool_type as _normalize_tool_type,
+    summarize_tool_error as _summarize_tool_error,
+    tool_display_label as _tool_display_label,
+    tool_status_rank as _tool_status_rank,
+)
 from ....upstream_parts.responses import (
-    extract_response_image_b64,
-    extract_response_revised_prompt,
+    extract_response_image_b64 as _extract_response_image_b64,
+    extract_response_revised_prompt as _extract_response_revised_prompt,
 )
 
-from .compat import (
-    select,
-    update,
-)
-
+__all__ = [name for name in tuple(locals()) if not name.startswith("__")]
 
 @dataclass(frozen=True, slots=True)
 class CompletionAdapterCallbacks:
@@ -134,31 +262,31 @@ def build_bindings(
         context=CompletionContextBindings(
             DEFAULT_CHAT_MODEL=DEFAULT_CHAT_MODEL,
             _inject_user_memory_context=callbacks.inject_user_memory_context,
-            _instructions_with_summary_guardrail=instructions_with_summary_guardrail,
+            _instructions_with_summary_guardrail=_instructions_with_summary_guardrail,
             _pack_recent_history=callbacks.pack_recent_history,
             _record_completion_context_metadata=callbacks.record_context_metadata,
             runtime_settings=runtime_settings,
         ),
         tools=CompletionToolBindings(
-            _CompletionToolTracker=CompletionToolTracker,
-            _CompletionUsageAccumulator=CompletionUsageAccumulator,
+            _CompletionToolTracker=_CompletionToolTracker,
+            _CompletionUsageAccumulator=_CompletionUsageAccumulator,
             _chat_tools_from_content=callbacks.chat_tools_from_content,
-            _completion_tool_images=completion_tool_images,
+            _completion_tool_images=_completion_tool_images,
             _configure_chat_tools=callbacks.configure_chat_tools,
             _estimate_completion_request_input_tokens=(
-                estimate_completion_request_input_tokens
+                _estimate_completion_request_input_tokens
             ),
             _estimate_completion_tool_output_tokens=(
-                estimate_completion_tool_output_tokens
+                _estimate_completion_tool_output_tokens
             ),
-            _extract_image_events_from_response=extract_image_events_from_response,
-            _extract_response_image_b64=extract_response_image_b64,
-            _extract_response_revised_prompt=extract_response_revised_prompt,
+            _extract_image_events_from_response=_extract_image_events_from_response,
+            _extract_response_image_b64=_extract_response_image_b64,
+            _extract_response_revised_prompt=_extract_response_revised_prompt,
             _publish_completion_tool_progress=callbacks.publish_tool_progress,
             _publish_completion_tool_updates=callbacks.publish_tool_updates,
             tool_image_service=callbacks.build_tool_image_service(storage_writes),
-            _summarize_tool_error=summarize_tool_error,
-            _tool_image_dedupe_key=tool_image_dedupe_key,
+            _summarize_tool_error=_summarize_tool_error,
+            _tool_image_dedupe_key=_tool_image_dedupe_key,
             _tool_limited_completion_body=callbacks.tool_limited_completion_body,
         ),
         persistence=CompletionPersistenceBindings(
@@ -177,18 +305,18 @@ def build_bindings(
         ),
         upstream=CompletionUpstreamBindings(
             UpstreamError=UpstreamError,
-            _apply_url_citations=apply_url_citations,
-            _completion_upstream_provider_event=completion_upstream_provider_event,
-            _extract_completed_output_text=extract_completed_output_text,
-            _extract_reasoning_delta=extract_reasoning_delta,
-            _extract_reasoning_text_from_response=extract_reasoning_text_from_response,
-            _extract_url_citations=extract_url_citations,
-            _finalize_completion_text=finalize_completion_text,
-            _merge_completion_upstream_metadata=merge_completion_upstream_metadata,
+            _apply_url_citations=_apply_url_citations,
+            _completion_upstream_provider_event=_completion_upstream_provider_event,
+            _extract_completed_output_text=_extract_completed_output_text,
+            _extract_reasoning_delta=_extract_reasoning_delta,
+            _extract_reasoning_text_from_response=_extract_reasoning_text_from_response,
+            _extract_url_citations=_extract_url_citations,
+            _finalize_completion_text=_finalize_completion_text,
+            _merge_completion_upstream_metadata=_merge_completion_upstream_metadata,
             _normalize_reasoning_effort_for_upstream=(
-                normalize_reasoning_effort_for_upstream
+                _normalize_reasoning_effort_for_upstream
             ),
-            _raise_for_terminal_response_event=raise_for_terminal_response_event,
+            _raise_for_terminal_response_event=_raise_for_terminal_response_event,
             _record_completion_upstream_metadata=callbacks.record_upstream_metadata,
             stream_completion=partial(
                 callbacks.stream_completion,
@@ -199,7 +327,9 @@ def build_bindings(
             _fallback_completion_tool_image_tokens=(
                 completion_billing.fallback_completion_tool_image_tokens
             ),
-            _settle_cancelled_completion_billing=(settle_cancelled_completion_billing),
+            _settle_cancelled_completion_billing=(
+                _settle_cancelled_completion_billing
+            ),
             _settle_failed_completion_billing=callbacks.settle_failed_billing,
             byok_error_message=byok_error_message,
             byok_error_to_generation_code=byok_error_to_generation_code,
@@ -211,7 +341,7 @@ def build_bindings(
         ),
         events=CompletionEventBindings(
             _COMPLETION_EVENT_HOOKS=callbacks.event_hooks,
-            _completion_event_payload=completion_event_payload,
+            _completion_event_payload=_completion_event_payload,
             _deliver_completion_event=callbacks.deliver_event,
             _stage_completion_event=callbacks.stage_event,
             _tracer=callbacks.tracer,

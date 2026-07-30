@@ -21,7 +21,6 @@ from lumen_core.memory import (
     extract_memories,
     parse_embedding_literal,
 )
-from lumen_core.providers import resolve_provider_proxy_url
 from lumen_core.models import (
     Conversation,
     MemoryAudit,
@@ -32,6 +31,7 @@ from lumen_core.models import (
 )
 
 from ..db import SessionLocal
+from ..provider_pool import resolve_provider_proxy_url
 from ..provider_runtime.upstream_services import ImageUpstreamRuntime
 from ..sse_publish import publish_event
 from . import memory_extraction_values as _memory_values

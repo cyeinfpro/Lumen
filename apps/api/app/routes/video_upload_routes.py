@@ -12,8 +12,11 @@ from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import User, Video
-from lumen_core.schemas import VideoUploadOut
+from lumen_core.model_entities import (
+    User,
+    Video,
+)
+from lumen_core.schema_models import VideoUploadOut
 
 
 @dataclass(frozen=True)

@@ -17,8 +17,8 @@ from lumen_core.byok import (
 from lumen_core.providers import (
     ProviderProxyDefinition,
     endpoint_kind_allowed,
-    resolve_provider_proxy_url,
 )
+from lumen_core.providers_parts.proxy_runtime import socks_proxy_url
 
 from .contracts import ProviderConfig
 
@@ -92,7 +92,23 @@ class ProviderProbeRuntime:
     image_probe_min_b64_len: int = 1000
 
 
-def build_provider_probe_runtime() -> ProviderProbeRuntime:
+async def _resolve_proxy_without_runtime(
+    proxy: ProviderProxyDefinition | None,
+) -> str | None:
+    if proxy is None:
+        return None
+    if proxy.protocol == "socks5":
+        return socks_proxy_url(proxy)
+    raise RuntimeError("SSH provider proxy requires an application-owned runtime")
+
+
+def build_provider_probe_runtime(
+    *,
+    resolve_proxy_url: Callable[
+        [ProviderProxyDefinition],
+        Awaitable[str | None],
+    ] = _resolve_proxy_without_runtime,
+) -> ProviderProbeRuntime:
     """Build probe dependencies for one provider-pool instance."""
     return ProviderProbeRuntime(
         monotonic=time.monotonic,
@@ -104,7 +120,7 @@ def build_provider_probe_runtime() -> ProviderProbeRuntime:
         extract_response_text=extract_response_output_text,
         extract_sse_text=extract_sse_output_text,
         endpoint_allowed=endpoint_kind_allowed,
-        resolve_proxy_url=resolve_provider_proxy_url,
+        resolve_proxy_url=resolve_proxy_url,
         ewma=ewma,
     )
 

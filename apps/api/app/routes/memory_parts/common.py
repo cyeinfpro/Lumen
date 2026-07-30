@@ -10,7 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import conv_channel, user_channel
-from lumen_core.models import (
+from lumen_core.model_entities import (
     MemoryAudit,
     User,
     UserMemory,

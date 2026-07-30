@@ -9,7 +9,10 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import AuthSession, User
+from lumen_core.model_entities import (
+    AuthSession,
+    User,
+)
 
 from .runtime import AuthRuntimeAdapter
 

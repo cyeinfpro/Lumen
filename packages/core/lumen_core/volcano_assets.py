@@ -15,7 +15,6 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 import httpx
 
-from lumen_core.providers import resolve_provider_proxy_url
 from lumen_core.video_providers import VideoProviderDefinition
 
 from .volcano_asset_quota import (
@@ -791,13 +790,12 @@ class VolcanoAssetClient:
         proxy_resolver: Callable[
             [Any],
             Awaitable[str | None],
-        ]
-        | None = None,
+        ],
     ) -> None:
         if provider.kind != "volcano" or not provider.asset_management_ready:
             raise ValueError("official Volcano asset credentials are required")
         self.provider = provider
-        self._proxy_resolver = proxy_resolver or resolve_provider_proxy_url
+        self._proxy_resolver = proxy_resolver
 
     async def request(self, action: str, body: dict[str, Any]) -> Any:
         signed = build_signed_asset_request(

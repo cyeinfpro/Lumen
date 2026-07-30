@@ -10,8 +10,11 @@ from typing import BinaryIO
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from lumen_core.models import Image, Share
-from lumen_core.schemas import ShareOut
+from lumen_core.model_entities import (
+    Image,
+    Share,
+)
+from lumen_core.schema_models import ShareOut
 
 from ..config import settings
 from ..services import storage_files

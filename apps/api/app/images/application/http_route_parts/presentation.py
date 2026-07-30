@@ -3,8 +3,11 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Image, ImageVariant
-from lumen_core.schemas import ImageOut
+from lumen_core.model_entities import (
+    Image,
+    ImageVariant,
+)
+from lumen_core.schema_models import ImageOut
 
 from ...domain.variants import (
     DISPLAY_VARIANT,

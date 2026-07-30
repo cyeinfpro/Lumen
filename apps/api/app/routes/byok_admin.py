@@ -9,8 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import ApiSupplierTemplate, UserApiCredential
-from lumen_core.schemas import (
+from lumen_core.model_entities import (
+    ApiSupplierTemplate,
+    UserApiCredential,
+)
+from lumen_core.schema_models import (
     ApiSupplierProbeIn,
     ApiSupplierStatsOut,
     ApiSupplierTemplateIn,

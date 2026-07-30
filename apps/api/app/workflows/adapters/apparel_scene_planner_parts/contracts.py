@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from lumen_core.providers import ProviderDefinition
+from lumen_core.providers_parts.definitions import ProviderDefinition
 
 from ...ports.runtime_state import ProviderRoundRobinStatePort
 

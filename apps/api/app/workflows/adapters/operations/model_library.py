@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable, cast
 
@@ -31,7 +30,6 @@ from lumen_core.schemas import (
     ApparelModelLibrarySaveJobItemIn,
     ImageOut,
     ImageParamsIn,
-    ModelAgeSegment,
 )
 from ....deps import CurrentUser
 from ....observability import (
@@ -125,26 +123,37 @@ from .model_library_parts.runtime import ModelLibraryRuntimeAdapter
 logger = logging.getLogger("app.routes.workflows.model_library")
 WORKFLOW_TYPE = "apparel_model_showcase"
 _runtime = ModelLibraryRuntimeAdapter(
-    sys.modules[__name__],
-    required_bindings=(
-        or_,
-        GenerationStatus,
-        Generation,
-        Image,
-        parse_model_image_metadata,
-        ModelAgeSegment,
-        _model_library_job_status,
-        ModelLibraryJobItemValues,
-        _clean_optional_text,
-        _dedupe_nonempty,
-        extract_bonus_image_ids,
-        resolve_model_library_job_item,
-        _task_error_summary,
-        _image_url,
-        MODEL_CANDIDATE_COUNT,
-        _image_out_map,
-        _workflow_generation_rows_from_task_ids,
+    ApparelModelLibraryJobItemOut=lambda: ApparelModelLibraryJobItemOut,
+    ApparelModelLibraryJobOut=lambda: ApparelModelLibraryJobOut,
+    Generation=lambda: Generation,
+    GenerationStatus=lambda: GenerationStatus,
+    Image=lambda: Image,
+    MODEL_CANDIDATE_COUNT=lambda: MODEL_CANDIDATE_COUNT,
+    MODEL_LIBRARY_GENERATE_STEP_KEY=lambda: MODEL_LIBRARY_GENERATE_STEP_KEY,
+    ModelLibraryItem=lambda: ModelLibraryItem,
+    ModelLibraryJobItemValues=lambda: ModelLibraryJobItemValues,
+    WorkflowStep=lambda: WorkflowStep,
+    _clean_optional_text=lambda: _clean_optional_text,
+    _clean_style_tags=lambda: _clean_style_tags,
+    _dedupe_nonempty=lambda: _dedupe_nonempty,
+    _extract_bonus_ids=lambda: _extract_bonus_ids,
+    _gather_job_image_outs=lambda: _gather_job_image_outs,
+    _image_out_map=lambda: _image_out_map,
+    _image_url=lambda: _image_url,
+    _job_item_out=lambda: _job_item_out,
+    _model_library_image_meta_by_id=lambda: _model_library_image_meta_by_id,
+    _model_library_job_status=lambda: _model_library_job_status,
+    _model_library_run_inputs=lambda: _model_library_run_inputs,
+    _normalize_age_segment=lambda: _normalize_age_segment,
+    _task_error_summary=lambda: _task_error_summary,
+    _workflow_generation_rows_from_task_ids=(
+        lambda: _workflow_generation_rows_from_task_ids
     ),
+    extract_bonus_image_ids=lambda: extract_bonus_image_ids,
+    or_=lambda: or_,
+    parse_model_image_metadata=lambda: parse_model_image_metadata,
+    resolve_model_library_job_item=lambda: resolve_model_library_job_item,
+    select=lambda: select,
 )
 
 

@@ -10,8 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import Intent
-from lumen_core.models import Conversation, User
-from lumen_core.schemas import MessageOut, PostMessageIn, PostMessageOut
+from lumen_core.model_entities import (
+    Conversation,
+    User,
+)
+from lumen_core.schema_models import (
+    MessageOut,
+    PostMessageIn,
+    PostMessageOut,
+)
 
 from ...services.message_request import (
     PersistMessageRequestCommand,

@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 from urllib.parse import urlsplit
 
-from .providers import normalize_provider_purposes, parse_provider_bool
+from .providers import parse_provider_bool
+from .providers_parts.config import normalize_provider_purposes
 from .video_providers import validate_video_providers
 
 from .runtime_setting_specs import SUPPORTED_SETTINGS, SettingSpec

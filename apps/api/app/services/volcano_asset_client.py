@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from lumen_core import volcano_assets as _shared
-from lumen_core.providers import resolve_provider_proxy_url
 
+from ..proxy_pool import resolve_provider_proxy_url
 
 httpx = _shared.httpx
 

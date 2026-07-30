@@ -18,7 +18,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.models import (
+from lumen_core.model_entities import (
     AuditLog,
     PricingRule,
     RedemptionBatch,
@@ -28,10 +28,10 @@ from lumen_core.models import (
     UserApiCredential,
     UserWallet,
     WalletTransaction,
-    new_uuid7,
 )
+from lumen_core.model_base import new_uuid7
 from lumen_core.runtime_settings import get_spec
-from lumen_core.schemas import (
+from lumen_core.schema_models import (
     AdminBillingAuditEventOut,
     AdminBillingBootstrapIn,
     AdminBillingOverviewOut,
@@ -62,10 +62,10 @@ from lumen_core.schemas import (
     RedemptionOut,
     RedemptionUsageListOut,
     RedemptionUsageOut,
-    WalletOut,
     WalletTransactionListOut,
     WalletTransactionOut,
 )
+from lumen_core.billing_schemas import WalletOut
 
 from ...audit import hash_email, request_ip_hash, write_audit
 from ...billing_cache_state import (

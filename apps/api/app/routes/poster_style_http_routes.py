@@ -8,8 +8,11 @@ from typing import Annotated, Any, AsyncContextManager, Awaitable, Callable
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import WorkflowRun, WorkflowStep
-from lumen_core.schemas import (
+from lumen_core.model_entities import (
+    WorkflowRun,
+    WorkflowStep,
+)
+from lumen_core.schema_models import (
     ImageParamsIn,
     PosterStyleAutoTagOut,
     PosterStyleBatchDeleteIn,

@@ -9,8 +9,9 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from lumen_core.providers import ProviderDefinition, resolve_provider_proxy_url
+from lumen_core.providers import ProviderDefinition
 
+from ...proxy_pool import resolve_provider_proxy_url
 from ...task_billing import EnhanceUsageCapture, enhance_pricing_snapshot_key
 
 logger = logging.getLogger(__name__)

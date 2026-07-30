@@ -6,8 +6,17 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import Intent, MAX_PROMPT_CHARS, Role
-from lumen_core.models import Message, User, WorkflowRun, WorkflowStep
-from lumen_core.schemas import ChatParamsIn, ImageParamsIn, VideoCreateIn
+from lumen_core.model_entities import (
+    Message,
+    User,
+    WorkflowRun,
+    WorkflowStep,
+)
+from lumen_core.schema_models import (
+    ChatParamsIn,
+    ImageParamsIn,
+    VideoCreateIn,
+)
 
 from ...services.storyboard import patching as storyboard_patching
 from ...services.storyboard.common import (

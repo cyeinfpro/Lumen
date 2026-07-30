@@ -32,9 +32,9 @@ from lumen_core.providers import (
     RoundRobinState,
     build_effective_provider_config,
     endpoint_kind_allowed,
-    provider_supports_route,
     weighted_priority_order,
 )
+from lumen_core.providers_parts.selection import provider_supports_route
 from lumen_core.runtime_settings import get_spec
 from lumen_core.vision_tagging import image_record_to_data_url
 

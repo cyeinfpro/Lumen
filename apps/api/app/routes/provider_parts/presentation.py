@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-from lumen_core.providers import (
+from lumen_core.providers_parts.config import (
     normalize_image_edit_input_transport,
     normalize_provider_purposes,
 )
-from lumen_core.schemas import (
+from lumen_core.schema_models import (
     ProviderItemOut,
     ProviderProxyOut,
     ProviderPurpose,

@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from lumen_core import billing as billing_core
-from lumen_core.models import Completion, Generation
+from lumen_core.model_entities import (
+    Completion,
+    Generation,
+)
 
 from .. import runtime_settings
 
