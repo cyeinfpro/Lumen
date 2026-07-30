@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable, cast
 
@@ -116,10 +117,35 @@ from ..workflow_runtime import (
     soft_delete_workflow_generated_images as _soft_delete_workflow_generated_images,
     workflow_generation_rows_from_task_ids as _workflow_generation_rows_from_task_ids,
 )
+from .model_library_parts import job_items as _job_items
+from .model_library_parts import jobs as _jobs
+from .model_library_parts.runtime import ModelLibraryRuntimeAdapter
 
 
 logger = logging.getLogger("app.routes.workflows.model_library")
 WORKFLOW_TYPE = "apparel_model_showcase"
+_runtime = ModelLibraryRuntimeAdapter(
+    sys.modules[__name__],
+    required_bindings=(
+        or_,
+        GenerationStatus,
+        Generation,
+        Image,
+        parse_model_image_metadata,
+        ModelAgeSegment,
+        _model_library_job_status,
+        ModelLibraryJobItemValues,
+        _clean_optional_text,
+        _dedupe_nonempty,
+        extract_bonus_image_ids,
+        resolve_model_library_job_item,
+        _task_error_summary,
+        _image_url,
+        MODEL_CANDIDATE_COUNT,
+        _image_out_map,
+        _workflow_generation_rows_from_task_ids,
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +232,7 @@ def _model_library_run_inputs(step: WorkflowStep) -> dict[str, Any]:
 
 async def _saved_image_id_set(db: AsyncSession, user_id: str) -> dict[str, str]:
     """{ image_id -> library_item_id } map: 看哪些图已经收藏到当前用户的库。"""
-    rows = (
-        await db.execute(
-            select(ModelLibraryItem.image_id, ModelLibraryItem.id)
-            .where(ModelLibraryItem.user_id == user_id)
-            .order_by(ModelLibraryItem.created_at.asc())
-        )
-    ).all()
-    out: dict[str, str] = {}
-    for image_id, item_id in rows:
-        if not image_id or not item_id:
-            continue
-        out.setdefault(str(image_id), str(item_id))
-    return out
+    return await _job_items.saved_image_id_set(db, user_id, runtime=_runtime)
 
 
 async def _gather_job_image_outs(
@@ -227,22 +241,12 @@ async def _gather_job_image_outs(
     user_id: str,
     image_ids: list[str],
 ) -> dict[str, ImageOut]:
-    if not image_ids:
-        return {}
-    images = list(
-        (
-            await db.execute(
-                select(Image).where(
-                    Image.id.in_(image_ids),
-                    Image.user_id == user_id,
-                    Image.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    return await _job_items.gather_job_image_outs(
+        db,
+        user_id=user_id,
+        image_ids=image_ids,
+        runtime=_runtime,
     )
-    return await _image_out_map(db, images)
 
 
 async def _model_library_image_meta_by_id(
@@ -251,97 +255,12 @@ async def _model_library_image_meta_by_id(
     user_id: str,
     image_ids: list[str],
 ) -> dict[str, dict[str, Any]]:
-    ids = _dedupe_nonempty(image_ids)
-    if not ids:
-        return {}
-    images = list(
-        (
-            await db.execute(
-                select(Image).where(
-                    Image.id.in_(ids),
-                    Image.user_id == user_id,
-                    Image.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    return await _job_items.model_library_image_meta_by_id(
+        db,
+        user_id=user_id,
+        image_ids=image_ids,
+        runtime=_runtime,
     )
-    gen_ids = _dedupe_nonempty(image.owner_generation_id or "" for image in images)
-    generation_req: dict[str, dict[str, Any]] = {}
-    if gen_ids:
-        generations = list(
-            (
-                await db.execute(
-                    select(Generation).where(
-                        Generation.id.in_(gen_ids),
-                        Generation.user_id == user_id,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        generation_req = {
-            generation.id: dict(generation.upstream_request or {})
-            for generation in generations
-            if isinstance(generation.upstream_request, dict)
-        }
-    out: dict[str, dict[str, Any]] = {}
-    for image in images:
-        meta: dict[str, Any] = {"mime": image.mime}
-        stored = image.metadata_jsonb if isinstance(image.metadata_jsonb, dict) else {}
-        parsed = parse_model_image_metadata(stored.get("model_library"))
-        if parsed is not None:
-            meta.update(
-                {
-                    "age_segment": parsed.age_segment,
-                    "gender": parsed.gender,
-                    "appearance_direction": parsed.appearance_direction,
-                    "style_tags": list(parsed.style_tags or []),
-                    "prompt_hint": parsed.prompt_hint,
-                }
-            )
-        filename = _clean_optional_text(stored.get("suggested_filename"), max_len=160)
-        if filename:
-            meta["download_filename"] = filename
-        for key in (
-            "is_dual_race_bonus",
-            "billing_free",
-            "billing_label",
-            "billing_exempt_reason",
-        ):
-            if key in stored:
-                meta[key] = stored[key]
-        req = generation_req.get(image.owner_generation_id or "", {})
-        if req:
-            for key in (
-                "is_dual_race_bonus",
-                "billing_free",
-                "billing_label",
-                "billing_exempt_reason",
-            ):
-                if key in req and key not in meta:
-                    meta[key] = req[key]
-            if not meta.get("age_segment"):
-                meta["age_segment"] = _clean_optional_text(
-                    req.get("workflow_model_library_age_segment"), max_len=32
-                )
-            if not meta.get("gender"):
-                meta["gender"] = _clean_optional_text(
-                    req.get("workflow_model_library_gender"), max_len=16
-                )
-            if not meta.get("appearance_direction"):
-                meta["appearance_direction"] = _clean_optional_text(
-                    req.get("workflow_model_library_appearance_direction"),
-                    max_len=80,
-                )
-            if not meta.get("style_tags"):
-                meta["style_tags"] = _clean_style_tags(
-                    req.get("workflow_model_library_style_tags") or []
-                )
-        out[image.id] = meta
-    return out
 
 
 def _job_item_out(
@@ -355,67 +274,23 @@ def _job_item_out(
     appearance_direction: str | None,
     image_meta: dict[str, Any] | None = None,
 ) -> ApparelModelLibraryJobItemOut:
-    resolved = resolve_model_library_job_item(
-        ModelLibraryJobItemValues(
-            image_id=image_id,
-            image_url=(
-                image_out.url if image_out is not None else _image_url(image_id)
-            ),
-            display_url=(image_out.display_url if image_out is not None else None),
-            thumb_url=(image_out.thumb_url if image_out is not None else None),
-            mime=(image_out.mime if image_out is not None else None),
-            saved_item_id=saved_item_id,
-            age_segment=age_segment,
-            gender=gender,
-            style_tags=style_tags,
-            appearance_direction=appearance_direction,
-            image_meta=image_meta or {},
-            image_is_dual_race_bonus=bool(
-                getattr(image_out, "is_dual_race_bonus", False)
-                if image_out is not None
-                else False
-            ),
-            image_billing_free=bool(
-                getattr(image_out, "billing_free", False)
-                if image_out is not None
-                else False
-            ),
-            image_billing_label=(
-                getattr(image_out, "billing_label", None)
-                if image_out is not None
-                else None
-            ),
-            image_billing_exempt_reason=(
-                getattr(image_out, "billing_exempt_reason", None)
-                if image_out is not None
-                else None
-            ),
-        ),
-    )
-    return ApparelModelLibraryJobItemOut(
-        image_id=resolved.image_id,
-        image_url=resolved.image_url,
-        display_url=resolved.display_url,
-        thumb_url=resolved.thumb_url,
-        saved_item_id=resolved.saved_item_id,
-        style_tags=list(resolved.style_tags),
-        appearance_direction=resolved.appearance_direction,
-        gender=resolved.gender,
-        download_filename=resolved.download_filename,
-        is_dual_race_bonus=resolved.is_dual_race_bonus,
-        billing_free=resolved.billing_free,
-        billing_label=resolved.billing_label,
-        billing_exempt_reason=resolved.billing_exempt_reason,
+    return _job_items.job_item_out(
+        image_id=image_id,
+        image_out=image_out,
+        saved_item_id=saved_item_id,
+        age_segment=age_segment,
+        gender=gender,
+        style_tags=style_tags,
+        appearance_direction=appearance_direction,
+        image_meta=image_meta,
+        runtime=_runtime,
     )
 
 
 def _extract_bonus_ids(
     step: WorkflowStep | None, image_ids: Iterable[str]
 ) -> list[str]:
-    if step is None:
-        return []
-    output = step.output_json if isinstance(step.output_json, dict) else {}
-    return extract_bonus_image_ids(output, image_ids)
+    return _job_items.extract_bonus_ids(step, image_ids, runtime=_runtime)
 
 
 async def _workflow_produced_model_image_ids(
@@ -425,47 +300,12 @@ async def _workflow_produced_model_image_ids(
     steps: list[WorkflowStep],
 ) -> set[str]:
     """Image ids produced by a model workflow, including dual_race bonus outputs."""
-    produced = {
-        iid
-        for step in steps
-        for iid in (step.image_ids or [])
-        if isinstance(iid, str) and iid
-    }
-    for step in steps:
-        produced.update(_extract_bonus_ids(step, produced))
-    all_task_ids = _dedupe_nonempty(
-        task_id for step in steps for task_id in (step.task_ids or [])
+    return await _job_items.workflow_produced_model_image_ids(
+        db,
+        user_id=user_id,
+        steps=steps,
+        runtime=_runtime,
     )
-    if not all_task_ids:
-        return produced
-    owned = (
-        (
-            await db.execute(
-                select(Image.id).where(
-                    Image.user_id == user_id,
-                    Image.deleted_at.is_(None),
-                    or_(
-                        Image.owner_generation_id.in_(all_task_ids),
-                        Image.owner_generation_id.in_(
-                            select(Generation.id).where(
-                                Generation.user_id == user_id,
-                                Generation.upstream_request[
-                                    "parent_generation_id"
-                                ].astext.in_(all_task_ids),
-                                Generation.upstream_request["is_dual_race_bonus"]
-                                .as_boolean()
-                                .is_(True),
-                            )
-                        ),
-                    ),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    produced.update(iid for iid in owned if isinstance(iid, str) and iid)
-    return produced
 
 
 async def _job_from_library_run(
@@ -474,136 +314,11 @@ async def _job_from_library_run(
     run: WorkflowRun,
     saved_map: dict[str, str],
 ) -> ApparelModelLibraryJobOut:
-    step = (
-        await db.execute(
-            select(WorkflowStep).where(
-                WorkflowStep.workflow_run_id == run.id,
-                WorkflowStep.step_key == MODEL_LIBRARY_GENERATE_STEP_KEY,
-            )
-        )
-    ).scalar_one_or_none()
-    inputs: dict[str, Any] = {}
-    image_ids: list[str] = []
-    requested = 0
-    step_status = "queued"
-    if step is not None:
-        inputs = _model_library_run_inputs(step)
-        image_ids = [iid for iid in (step.image_ids or []) if isinstance(iid, str)]
-        requested = max(
-            inputs.get("count") or 0,
-            len(step.task_ids or []),
-            len(image_ids),
-        )
-        step_status = step.status
-    finished = len(image_ids)
-    # dual_race loser 写回的 bonus image_ids（与 winner image_ids 物理隔离）
-    bonus_ids = _extract_bonus_ids(step, image_ids)
-    # 一次查询拿到 winner + bonus 全部 image meta，省一次 DB roundtrip
-    image_out_map = await _gather_job_image_outs(
-        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
-    )
-    image_meta_map = await _model_library_image_meta_by_id(
-        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
-    )
-    tagging_results = (step.output_json or {}).get("tagging_results") if step else None
-    tagging_map: dict[str, dict[str, Any]] = (
-        tagging_results if isinstance(tagging_results, dict) else {}
-    )
-    items = [
-        _job_item_out(
-            image_id=iid,
-            image_out=image_out_map.get(iid),
-            saved_item_id=saved_map.get(iid),
-            age_segment=inputs.get("age_segment"),
-            gender=(image_meta_map.get(iid) or {}).get("gender")
-            or (tagging_map.get(iid) or {}).get("gender")
-            or inputs.get("gender"),
-            style_tags=_clean_style_tags(
-                [
-                    *(inputs.get("style_tags") or []),
-                    *((tagging_map.get(iid) or {}).get("style_tags") or []),
-                ]
-            ),
-            appearance_direction=(tagging_map.get(iid) or {}).get(
-                "appearance_direction"
-            ),
-            image_meta=image_meta_map.get(iid),
-        )
-        for iid in image_ids
-    ]
-    # candidate（loser）不跑 tagging，但可沿用任务元信息手动入库。
-    candidates = [
-        _job_item_out(
-            image_id=bid,
-            image_out=image_out_map.get(bid),
-            saved_item_id=saved_map.get(bid),
-            age_segment=inputs.get("age_segment"),
-            gender=(image_meta_map.get(bid) or {}).get("gender")
-            or inputs.get("gender"),
-            style_tags=inputs.get("style_tags") or [],
-            appearance_direction=inputs.get("appearance_direction"),
-            image_meta=image_meta_map.get(bid),
-        )
-        for bid in bonus_ids
-    ]
-    error_message = None
-    if step is not None:
-        out_json = step.output_json if isinstance(step.output_json, dict) else {}
-        error_message = _clean_optional_text(out_json.get("error_message"), max_len=400)
-        task_generations = await _workflow_generation_rows_from_task_ids(
-            db,
-            user_id=run.user_id,
-            task_ids=list(step.task_ids or []),
-            include_dual_bonus=False,
-        )
-        failed_generations = [
-            generation
-            for generation in task_generations
-            if generation.status == GenerationStatus.FAILED.value
-        ]
-        active_generations = [
-            generation
-            for generation in task_generations
-            if generation.status
-            in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
-        ]
-        if failed_generations and not active_generations and finished < requested:
-            if step_status == "running":
-                step_status = "failed"
-            if error_message is None:
-                error_message = _clean_optional_text(
-                    _task_error_summary(failed_generations, "模特库生成失败"),
-                    max_len=400,
-                )
-    job_status = _model_library_job_status(
-        step_status=step_status,
-        requested_count=requested,
-        finished_count=finished,
-    )
-    return ApparelModelLibraryJobOut(
-        job_id=run.id,
-        origin="library_generate",
-        workflow_run_id=run.id,
-        project_title=None,
-        status=job_status,  # type: ignore[arg-type]
-        requested_count=requested,
-        finished_count=finished,
-        age_segment=inputs.get("age_segment"),
-        gender=inputs.get("gender"),
-        appearance_direction=inputs.get("appearance_direction"),
-        extra_requirements=inputs.get("extra_requirements"),
-        reference_image_id=inputs.get("reference_image_id"),
-        reference_image_url=(
-            _image_url(inputs["reference_image_id"])
-            if inputs.get("reference_image_id")
-            else None
-        ),
-        extracted_profile=inputs.get("extracted_profile"),
-        items=items,
-        candidates=candidates,
-        error_message=error_message,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
+    return await _jobs.job_from_library_run(
+        db,
+        run=run,
+        saved_map=saved_map,
+        runtime=_runtime,
     )
 
 
@@ -614,113 +329,12 @@ async def _job_from_project_candidate_step(
     step: WorkflowStep,
     saved_map: dict[str, str],
 ) -> ApparelModelLibraryJobOut:
-    image_ids = [iid for iid in (step.image_ids or []) if isinstance(iid, str)]
-    requested_count = MODEL_CANDIDATE_COUNT
-    raw_input = step.input_json if isinstance(step.input_json, dict) else {}
-    candidate_count = raw_input.get("candidate_count")
-    if isinstance(candidate_count, int) and candidate_count > 0:
-        requested_count = candidate_count
-    # dual_race loser 写回的 bonus image_ids（如该 origin 也走 dual_race）
-    bonus_ids = _extract_bonus_ids(step, image_ids)
-    image_out_map = await _gather_job_image_outs(
-        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
-    )
-    image_meta_map = await _model_library_image_meta_by_id(
-        db, user_id=run.user_id, image_ids=image_ids + bonus_ids
-    )
-    profile = (run.metadata_jsonb or {}).get("model_profile") or {}
-    age_segment = (
-        _normalize_age_segment(profile.get("age_segment"))
-        if isinstance(profile, dict)
-        else None
-    )
-    gender = profile.get("gender") if isinstance(profile, dict) else None
-    appearance_direction = (
-        profile.get("appearance_direction") if isinstance(profile, dict) else None
-    )
-    items = [
-        _job_item_out(
-            image_id=iid,
-            image_out=image_out_map.get(iid),
-            saved_item_id=saved_map.get(iid),
-            age_segment=age_segment,
-            gender=gender,
-            style_tags=[],
-            appearance_direction=appearance_direction,
-            image_meta=image_meta_map.get(iid),
-        )
-        for iid in image_ids
-    ]
-    candidates = [
-        _job_item_out(
-            image_id=bid,
-            image_out=image_out_map.get(bid),
-            saved_item_id=saved_map.get(bid),
-            age_segment=age_segment,
-            gender=gender,
-            style_tags=[],
-            appearance_direction=appearance_direction,
-            image_meta=image_meta_map.get(bid),
-        )
-        for bid in bonus_ids
-    ]
-    out_json = step.output_json if isinstance(step.output_json, dict) else {}
-    error_message = _clean_optional_text(out_json.get("error_message"), max_len=400)
-    step_status = step.status
-    task_generations = await _workflow_generation_rows_from_task_ids(
+    return await _jobs.job_from_project_candidate_step(
         db,
-        user_id=run.user_id,
-        task_ids=list(step.task_ids or []),
-        include_dual_bonus=False,
-    )
-    failed_generations = [
-        generation
-        for generation in task_generations
-        if generation.status == GenerationStatus.FAILED.value
-    ]
-    active_generations = [
-        generation
-        for generation in task_generations
-        if generation.status
-        in {GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value}
-    ]
-    if (
-        failed_generations
-        and not active_generations
-        and len(image_ids) < requested_count
-    ):
-        if step_status == "running":
-            step_status = "failed"
-        if error_message is None:
-            error_message = _clean_optional_text(
-                _task_error_summary(failed_generations, "项目模特候选生成失败"),
-                max_len=400,
-            )
-    job_status = _model_library_job_status(
-        step_status=step_status,
-        requested_count=requested_count,
-        finished_count=len(image_ids),
-    )
-    return ApparelModelLibraryJobOut(
-        job_id=f"{run.id}:model_candidates",
-        origin="project_candidate",
-        workflow_run_id=run.id,
-        project_title=run.title,
-        status=job_status,  # type: ignore[arg-type]
-        requested_count=requested_count,
-        finished_count=len(image_ids),
-        age_segment=cast(ModelAgeSegment | None, age_segment),
-        gender=gender,
-        appearance_direction=appearance_direction,
-        extra_requirements=None,
-        reference_image_id=None,
-        reference_image_url=None,
-        extracted_profile=None,
-        items=items,
-        candidates=candidates,
-        error_message=error_message,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
+        run=run,
+        step=step,
+        saved_map=saved_map,
+        runtime=_runtime,
     )
 
 
