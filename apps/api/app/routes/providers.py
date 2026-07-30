@@ -11,36 +11,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Any, Awaitable, Literal, cast
+from typing import Annotated, Any, Awaitable, cast
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.byok import (
-    build_provider_probe_request,
-    extract_response_output_text as _extract_response_output_text,
-    extract_sse_output_text as _extract_sse_output_text,
-)
-from lumen_core.providers import (
-    ProviderProxyDefinition,
-    endpoint_kind_allowed,
-    normalize_provider_purposes,
-    normalize_image_edit_input_transport,
-    parse_proxy_item,
-    resolve_provider_proxy_url,
-)
+from lumen_core.providers import ProviderProxyDefinition, parse_proxy_item
 from lumen_core.video_providers import parse_video_provider_config_json
 from lumen_core.models import SystemSetting
 from lumen_core.runtime_settings import get_spec, validate_providers
 from lumen_core.schemas import (
     ProviderItemOut,
-    ProviderPurpose,
     ProviderProbeResult,
     ProviderProxyOut,
     ProviderStatsItem,
@@ -49,7 +33,6 @@ from lumen_core.schemas import (
     ProvidersProbeIn,
     ProvidersProbeOut,
     ProvidersUpdateIn,
-    VideoProviderItemOut,
     VideoProvidersOut,
     VideoProvidersUpdateIn,
 )
@@ -70,6 +53,35 @@ from ._video_provider_update import (
     build_video_provider_update,
     validate_video_provider_items,
 )
+from .provider_parts import presentation as _presentation
+from .provider_parts import probe as _probe
+from .provider_parts import video as _video
+
+httpx = _probe.httpx
+_mask_key = _presentation.mask_key
+_mask_secret = _presentation.mask_secret
+_normalize_bool = _presentation.normalize_bool
+_normalize_capability = _presentation.normalize_capability
+_normalize_image_concurrency = _presentation.normalize_image_concurrency
+_normalize_image_edit_transport = _presentation.normalize_image_edit_transport
+_normalize_image_jobs_base_url = _presentation.normalize_image_jobs_base_url
+_normalize_image_jobs_endpoint = _presentation.normalize_image_jobs_endpoint
+_normalize_image_jobs_endpoint_lock = _presentation.normalize_image_jobs_endpoint_lock
+_normalize_proxy_type = _presentation.normalize_proxy_type
+_normalize_purposes = _presentation.normalize_purposes
+_safe_int = _presentation.safe_int
+_to_out = _presentation.provider_out
+_to_proxy_out = _presentation.proxy_out
+_ProbeOutcome = _probe.ProbeOutcome
+_classify_probe_status = _probe.classify_probe_status
+_probe_blocked_by_endpoint_lock = _probe.probe_blocked_by_endpoint_lock
+_probe_error_detail_from_payload = _probe.probe_error_detail_from_payload
+_probe_http_error_message = _probe.probe_http_error_message
+_probe_one = _probe.probe_one
+_responses_url = _probe.responses_url
+_truncate_probe_error = _probe.truncate_probe_error
+_parse_video_raw_config = _video.parse_video_raw_config
+_to_video_provider_out = _video.video_provider_out
 
 router = APIRouter(prefix="/admin/providers", tags=["admin-providers"])
 
@@ -86,190 +98,6 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
 
 class ProviderEnabledPatchIn(BaseModel):
     enabled: bool
-
-
-def _responses_url(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/responses"
-    return f"{base}/v1/responses"
-
-
-def _mask_key(key: str) -> str:
-    if not key:
-        return ""
-    if len(key) <= 8:
-        return "****"
-    return key[:4] + "..." + key[-4:]
-
-
-def _mask_secret(value: str | None) -> str | None:
-    if not value:
-        return None
-    if len(value) <= 4:
-        return "****"
-    return "****" + value[-4:]
-
-
-def _normalize_proxy_type(value: str, *, fallback: bool = False) -> str:
-    raw = (value or "socks5").strip().lower()
-    if raw in {"s5", "socks", "socks5", "socks5h"}:
-        return "socks5"
-    if raw == "ssh":
-        return "ssh"
-    return "socks5" if fallback else raw
-
-
-def _safe_int(value: object, default: int, *, minimum: int | None = None) -> int:
-    try:
-        parsed = (
-            int(value)
-            if isinstance(value, (str, bytes, bytearray, int, float))
-            else default
-        )
-    except (TypeError, ValueError):
-        parsed = default
-    if minimum is not None:
-        parsed = max(minimum, parsed)
-    return parsed
-
-
-def _normalize_capability(raw: Any) -> bool | None:
-    """Capability tri-state from persisted dict shape. None = 未知，保留旧行为。"""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        text = raw.strip().lower()
-        if text in {"true", "1", "yes", "y"}:
-            return True
-        if text in {"false", "0", "no", "n"}:
-            return False
-    return None
-
-
-def _normalize_bool(raw: Any, *, default: bool = False) -> bool:
-    parsed = _normalize_capability(raw)
-    return default if parsed is None else parsed
-
-
-def _normalize_purposes(raw: Any) -> list[ProviderPurpose]:
-    return [
-        cast(ProviderPurpose, purpose) for purpose in normalize_provider_purposes(raw)
-    ]
-
-
-def _normalize_image_edit_transport(
-    raw: Any,
-) -> Literal["url", "file"]:
-    return cast(
-        Literal["url", "file"],
-        normalize_image_edit_input_transport(raw),
-    )
-
-
-def _to_out(it: dict, idx: int) -> ProviderItemOut:
-    endpoint = _normalize_image_jobs_endpoint(it.get("image_jobs_endpoint"))
-    return ProviderItemOut(
-        name=it.get("name") or f"provider-{idx}",
-        base_url=it.get("base_url", ""),
-        api_key_hint=_mask_key(it.get("api_key", "")),
-        priority=_safe_int(it.get("priority"), 0),
-        weight=_safe_int(it.get("weight"), 1, minimum=1),
-        enabled=_normalize_bool(it.get("enabled"), default=True),
-        purposes=_normalize_purposes(it.get("purposes")),
-        proxy=it.get("proxy") if isinstance(it.get("proxy"), str) else None,
-        image_jobs_enabled=_normalize_bool(
-            it.get("image_jobs_enabled"),
-            default=False,
-        ),
-        image_jobs_endpoint=endpoint,
-        image_jobs_endpoint_lock=_normalize_image_jobs_endpoint_lock(
-            it.get("image_jobs_endpoint_lock"), endpoint
-        ),
-        image_jobs_base_url=_normalize_image_jobs_base_url(
-            it.get("image_jobs_base_url")
-        ),
-        image_edit_input_transport=_normalize_image_edit_transport(
-            it.get("image_edit_input_transport")
-        ),
-        image_concurrency=_normalize_image_concurrency(it.get("image_concurrency")),
-        responses_supported=_normalize_capability(it.get("responses_supported")),
-        image_generations_supported=_normalize_capability(
-            it.get("image_generations_supported")
-        ),
-        image_responses_supported=_normalize_capability(
-            it.get("image_responses_supported")
-        ),
-    )
-
-
-_IMAGE_JOBS_ENDPOINT_VALUES = frozenset({"auto", "generations", "responses"})
-
-
-def _normalize_image_jobs_endpoint(raw: Any) -> str:
-    if isinstance(raw, str):
-        value = raw.strip().lower()
-        if value in _IMAGE_JOBS_ENDPOINT_VALUES:
-            return value
-    return "auto"
-
-
-def _normalize_image_jobs_endpoint_lock(raw: Any, endpoint: str) -> bool:
-    # auto 时 lock 没有意义——避免 UI 残留 lock=true 但 endpoint 改回 auto 的脏配置。
-    if endpoint == "auto":
-        return False
-    return _normalize_bool(raw, default=False)
-
-
-def _normalize_image_jobs_base_url(raw: Any) -> str:
-    if not isinstance(raw, str):
-        return ""
-    value = raw.strip().rstrip("/")
-    if not value:
-        return ""
-    if not (value.startswith("http://") or value.startswith("https://")):
-        return ""
-    return value
-
-
-_IMAGE_CONCURRENCY_MAX = 32
-
-
-def _normalize_image_concurrency(raw: Any) -> int:
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 1
-    return max(1, min(_IMAGE_CONCURRENCY_MAX, value))
-
-
-def _to_proxy_out(it: dict, idx: int) -> ProviderProxyOut:
-    proxy_type = _normalize_proxy_type(
-        it.get("type") or it.get("protocol") or "socks5",
-        fallback=True,
-    )
-    port = _safe_int(
-        it.get("port"),
-        22 if proxy_type == "ssh" else 1080,
-        minimum=1,
-    )
-    port = min(65535, port)
-    return ProviderProxyOut(
-        name=it.get("name") or f"proxy-{idx}",
-        type=proxy_type,
-        host=it.get("host", ""),
-        port=port,
-        username=it.get("username") if isinstance(it.get("username"), str) else None,
-        password_hint=_mask_secret(it.get("password")),
-        private_key_path=(
-            it.get("private_key_path")
-            if isinstance(it.get("private_key_path"), str)
-            else None
-        ),
-        enabled=_normalize_bool(it.get("enabled"), default=True),
-    )
 
 
 async def _read_setting_value(db: AsyncSession, key: str) -> str | None:
@@ -316,69 +144,16 @@ async def _read_video_enabled(db: AsyncSession) -> bool:
     return _normalize_bool(raw, default=False)
 
 
-def _parse_video_raw_config(raw: str | None) -> tuple[list[dict], list[dict]]:
-    if not raw:
-        return [], []
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return [], []
-    if isinstance(value, list):
-        return [it for it in value if isinstance(it, dict)], []
-    if not isinstance(value, dict):
-        return [], []
-    providers = value.get("providers", [])
-    proxies = value.get("proxies", [])
-    if not isinstance(providers, list):
-        providers = []
-    if not isinstance(proxies, list):
-        proxies = []
-    return (
-        [it for it in providers if isinstance(it, dict)],
-        [it for it in proxies if isinstance(it, dict)],
-    )
-
-
-def _to_video_provider_out(provider: Any) -> VideoProviderItemOut:
-    is_volcano = provider.kind == "volcano"
-    return VideoProviderItemOut(
-        name=provider.name,
-        kind=provider.kind,
-        base_url=provider.base_url,
-        api_key_hint=_mask_key(provider.api_key),
-        access_key_id_hint=(_mask_key(provider.access_key_id) if is_volcano else None),
-        secret_access_key_hint=(
-            _mask_secret(provider.secret_access_key) if is_volcano else None
-        ),
-        project_name=provider.project_name if is_volcano else None,
-        region=provider.region if is_volcano else None,
-        asset_management_ready=provider.asset_management_ready,
-        enabled=provider.enabled,
-        priority=provider.priority,
-        weight=provider.weight,
-        concurrency=provider.concurrency,
-        supports_idempotency=provider.supports_idempotency,
-        proxy=provider.proxy_name,
-        models=dict(provider.models or {}),
-    )
-
-
 def _video_proxy_options(
     raw_video: str | None,
     raw_shared: str | None,
 ) -> list[ProviderProxyOut]:
-    _shared_items, shared_proxies = _parse_config(raw_shared or "")
-    _video_items, video_proxies = _parse_video_raw_config(raw_video)
-    items = [*shared_proxies, *video_proxies]
-    out: list[ProviderProxyOut] = []
-    seen: set[str] = set()
-    for idx, item in enumerate(items):
-        proxy = _to_proxy_out(item, idx)
-        if proxy.name in seen:
-            continue
-        seen.add(proxy.name)
-        out.append(proxy)
-    return out
+    return _video.video_proxy_options(
+        raw_video,
+        raw_shared,
+        parse_shared=_parse_config,
+        present_proxy=_to_proxy_out,
+    )
 
 
 @router.get("", response_model=ProvidersOut)
@@ -814,171 +589,6 @@ async def patch_provider_enabled(
 # ---------------------------------------------------------------------------
 # 探活
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _ProbeOutcome:
-    ok: bool
-    latency_ms: int
-    error: str | None
-    http_status: int | None
-    # 详见 ProviderProbeResult.capability_signal 注释
-    capability_signal: str | None
-
-    def __iter__(self):
-        # 向后兼容：旧 caller 解包 ``ok, latency, err = await _probe_one(...)``
-        # 仍然工作；新调用方走属性访问。
-        yield self.ok
-        yield self.latency_ms
-        yield self.error
-
-
-def _classify_probe_status(status: int) -> tuple[str, str | None]:
-    """根据 HTTP status 给 capability_signal + 默认 error 描述。
-
-    - 404/405 → unsupported（端点不存在 / 方法不被允许，可据此把 capability=False）
-    - 401/403 → auth（鉴权 / 权限，不能判定能力）
-    - 429/5xx → transient（临时不健康，不能判定能力）
-    - 其它 4xx → 不明确（可能是请求体问题），保守返回 None
-    """
-    if status in (404, 405):
-        return "unsupported", f"HTTP {status}"
-    if status in (401, 403):
-        return "auth", f"HTTP {status}"
-    if status == 429 or 500 <= status < 600:
-        return "transient", f"HTTP {status}"
-    return "unsupported" if status == 501 else "", f"HTTP {status}"  # 511 等
-
-
-def _truncate_probe_error(value: str, *, limit: int = 240) -> str:
-    text = " ".join(value.strip().split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 8].rstrip() + "…\n（已截断）"
-
-
-def _probe_error_detail_from_payload(payload: object) -> str | None:
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            message = error.get("message") or error.get("code")
-            if isinstance(message, str) and message.strip():
-                return _truncate_probe_error(message)
-        if isinstance(error, str) and error.strip():
-            return _truncate_probe_error(error)
-        message = payload.get("message") or payload.get("detail")
-        if isinstance(message, str) and message.strip():
-            return _truncate_probe_error(message)
-    return None
-
-
-def _probe_http_error_message(resp: httpx.Response, fallback: str | None) -> str:
-    detail: str | None = None
-    try:
-        detail = _probe_error_detail_from_payload(resp.json())
-    except Exception:  # noqa: BLE001
-        detail = None
-    if not detail and resp.text:
-        detail = _truncate_probe_error(resp.text)
-    prefix = fallback or f"HTTP {resp.status_code}"
-    return f"{prefix}: {detail}" if detail else prefix
-
-
-async def _probe_one(
-    base_url: str,
-    api_key: str,
-    *,
-    proxy: ProviderProxyDefinition | None = None,
-) -> _ProbeOutcome:
-    url = _responses_url(base_url)
-    headers = {
-        "authorization": f"Bearer {api_key}",
-        "content-type": "application/json",
-    }
-    body = build_provider_probe_request()
-    t0 = time.monotonic()
-    try:
-        proxy_url = await resolve_provider_proxy_url(proxy)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_PROBE_TIMEOUT_S),
-            proxy=proxy_url,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            resp = await client.post(url, json=body, headers=headers)
-        latency = int((time.monotonic() - t0) * 1000)
-        if resp.status_code >= 400:
-            signal, err = _classify_probe_status(resp.status_code)
-            return _ProbeOutcome(
-                ok=False,
-                latency_ms=latency,
-                error=_probe_http_error_message(resp, err),
-                http_status=resp.status_code,
-                capability_signal=signal or None,
-            )
-        try:
-            payload = resp.json()
-            text = _extract_response_output_text(payload)
-        except Exception:  # noqa: BLE001
-            text = _extract_sse_output_text(resp.text)
-            if not text:
-                return _ProbeOutcome(
-                    ok=False,
-                    latency_ms=latency,
-                    error="bad_json",
-                    http_status=resp.status_code,
-                    capability_signal=None,
-                )
-        if "9801" in text:
-            # 200 + 文本能解析 → 端点确认支持
-            return _ProbeOutcome(
-                ok=True,
-                latency_ms=latency,
-                error=None,
-                http_status=resp.status_code,
-                capability_signal="supported",
-            )
-        # 200 但答错——可能是模型口径不一致；不是 capability 问题
-        return _ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error="wrong_answer",
-            http_status=resp.status_code,
-            capability_signal=None,
-        )
-    except httpx.TimeoutException:
-        latency = int((time.monotonic() - t0) * 1000)
-        return _ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error="timeout",
-            http_status=None,
-            capability_signal="transient",
-        )
-    except Exception as exc:
-        latency = int((time.monotonic() - t0) * 1000)
-        message = _truncate_probe_error(str(exc))
-        error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
-        return _ProbeOutcome(
-            ok=False,
-            latency_ms=latency,
-            error=error,
-            http_status=None,
-            capability_signal=None,
-        )
-
-
-def _probe_blocked_by_endpoint_lock(it: dict[str, Any]) -> bool:
-    endpoint = _normalize_image_jobs_endpoint(it.get("image_jobs_endpoint"))
-    if endpoint == "auto":
-        return False
-    probe_view = {
-        "image_jobs_endpoint": endpoint,
-        "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
-            it.get("image_jobs_endpoint_lock"), endpoint
-        ),
-    }
-    return not endpoint_kind_allowed(probe_view, "responses")
 
 
 @router.post(
