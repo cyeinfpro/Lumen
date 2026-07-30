@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
 import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from types import MappingProxyType
 from typing import Any, Awaitable, Callable
 
-from fastapi import HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
@@ -28,25 +22,13 @@ from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
     GenerationAction,
-    IMAGE_MULTI_GEN_STAGGER_CAP_S,
-    IMAGE_MULTI_GEN_STAGGER_S,
-    MAX_PROMPT_CHARS,
     Intent,
     MessageStatus,
     Role,
     conv_channel,
     task_channel,
 )
-from lumen_core.models import (
-    ApiSupplierTemplate,
-    Completion,
-    Conversation,
-    Message,
-    OutboxEvent,
-    SystemSetting,
-    SystemPrompt,
-    UserApiCredential,
-)
+from lumen_core.models import Completion, Conversation, Message, OutboxEvent
 from lumen_core.queue_metadata import generation_queue_metadata
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schemas import (
@@ -59,7 +41,6 @@ from lumen_core.sizing import ResolvedSize, resolve_size
 
 from ..arq_pool import get_arq_pool
 from ..audit import write_audit
-from ..byok_service import read_byok_settings_cached
 from ..runtime_settings import get_setting
 from ..sse_publish import publish_sse_event, publish_sse_events
 from ..task_billing import (
@@ -80,10 +61,33 @@ from .message_generation_tasks import (
     prepare_generation_billing,
 )
 
+from .message_submission_billing import (
+    billing_http_error as _billing_http_error,
+    billing_allow_negative,
+    billing_enabled,
+    billing_image_thresholds,
+    billing_setting_raw,
+    chat_max_tool_invocations,
+    chat_tool_budget_setting_micro,
+    ensure_chat_wallet_preflight,
+    generation_child_idempotency_key,
+    idempotency_lock_key,
+    idempotency_lookup_keys,
+    image_multi_generation_defer_s,
+    http_error as _http,
+    stored_idempotency_key,
+)
+from .message_submission_prompting import (
+    TaskCredentialPin,
+    build_structured_system_prompt,
+    resolve_system_prompt_for_message,
+    resolve_task_credential_pin,
+    sanitize_system_prompt_source as _sanitize_system_prompt_source,
+)
+
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT_SOURCE_LIMIT = MAX_PROMPT_CHARS
 IMAGE_OUTPUT_FORMAT_VALUES = frozenset({"png", "jpeg", "webp"})
 DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 GENERATION_FAST_DEFAULT_KEY = "generation.fast_default"
@@ -112,26 +116,6 @@ _TRANSPARENT_BACKGROUND_NEGATIVE_CONTEXT_RE = re.compile(
     r"scenery|lighting|shadows?|text|pattern|elements?)\b",
     re.IGNORECASE,
 )
-_PROMPT_CONTROL_TRANSLATION = MappingProxyType(
-    {**{i: " " for i in range(32) if i not in (9, 10, 13)}, 127: " "}
-)
-_SYSTEM_PROMPT_SECTION_TAG_RE = re.compile(r"(\[/?)(SYSTEM_[A-Z0-9_]+)(\])")
-_SYSTEM_PROMPT_SECTION_TAG_ESCAPE = "\u200b"
-_CHAT_TOOL_BUDGET_SETTINGS = MappingProxyType(
-    {
-        "web_search": ("chat.tool_web_search_micro", "CHAT_TOOL_WEB_SEARCH_MICRO"),
-        "file_search": ("chat.tool_file_search_micro", "CHAT_TOOL_FILE_SEARCH_MICRO"),
-        "code_interpreter": (
-            "chat.tool_code_interpreter_micro",
-            "CHAT_TOOL_CODE_INTERPRETER_MICRO",
-        ),
-        "image_generation": (
-            "chat.tool_image_generation_micro",
-            "CHAT_TOOL_IMAGE_GENERATION_MICRO",
-        ),
-    }
-)
-_MAX_TOOL_INVOCATIONS_DEFAULT = 8
 
 AsyncCallable = Callable[..., Awaitable[Any]]
 
@@ -143,15 +127,6 @@ class AssistantTaskResult:
     generation_ids: list[str]
     outbox_payloads: list[dict[str, Any]]
     outbox_rows: list[OutboxEvent]
-
-
-@dataclass(frozen=True)
-class TaskCredentialPin:
-    credential_id: str
-    supplier_id: str
-    default_chat_model: str
-    fast_chat_model: str | None
-    default_image_model: str | None
 
 
 @dataclass(frozen=True)
@@ -176,265 +151,6 @@ class CompletionTaskServices:
     ensure_chat_wallet_preflight: AsyncCallable
     billing_allow_negative: AsyncCallable
     write_audit: AsyncCallable
-
-
-def _http(code: str, msg: str, http: int = 400, **extra: Any) -> HTTPException:
-    err: dict[str, Any] = {"code": code, "message": msg}
-    if extra:
-        err["details"] = extra
-    return HTTPException(status_code=http, detail={"error": err})
-
-
-def idempotency_lock_key(
-    user_id: str,
-    conv_id: str,
-    idempotency_key: str,
-) -> str:
-    return f"{user_id}:{conv_id}:{idempotency_key}"
-
-
-def stored_idempotency_key(conv_id: str, idempotency_key: str) -> str:
-    digest = hashlib.sha256(
-        f"{conv_id}:{idempotency_key}".encode("utf-8", errors="replace")
-    ).hexdigest()
-    return f"cv:{digest[:61]}"
-
-
-def generation_child_idempotency_key(base_key: str, index: int) -> str:
-    if index <= 1:
-        return base_key
-    suffix = f":g{index}"
-    prefix_len = 64 - len(suffix)
-    return f"{base_key[:prefix_len]}{suffix}"
-
-
-def image_multi_generation_defer_s(index: int) -> int:
-    if index <= 1:
-        return 0
-    return min(IMAGE_MULTI_GEN_STAGGER_CAP_S, (index - 1) * IMAGE_MULTI_GEN_STAGGER_S)
-
-
-def idempotency_lookup_keys(
-    conv_id: str,
-    idempotency_key: str,
-) -> tuple[str, str]:
-    return (idempotency_key, stored_idempotency_key(conv_id, idempotency_key))
-
-
-async def billing_setting_raw(db: AsyncSession, key: str) -> str | None:
-    spec = get_spec(key)
-    if spec is None:
-        return None
-    try:
-        return await get_setting(db, spec)
-    except (AssertionError, IndexError):
-        if key.startswith("billing."):
-            return None
-        raise
-
-
-async def billing_enabled(db: AsyncSession) -> bool:
-    return billing_core.parse_bool_setting(
-        await billing_setting_raw(db, "billing.enabled"),
-        False,
-    )
-
-
-async def billing_allow_negative(db: AsyncSession) -> bool:
-    return billing_core.parse_bool_setting(
-        await billing_setting_raw(db, "billing.allow_negative_balance"),
-        False,
-    )
-
-
-def _parse_nonnegative_micro(value: object) -> int:
-    if value in (None, ""):
-        return 0
-    try:
-        return max(0, int(str(value).strip()))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _enabled_chat_tools(chat_params: ChatParamsIn | None) -> list[str]:
-    if chat_params is None:
-        return []
-    tools: list[str] = []
-    if chat_params.web_search:
-        tools.append("web_search")
-    if chat_params.file_search:
-        tools.append("file_search")
-    if chat_params.code_interpreter:
-        tools.append("code_interpreter")
-    if chat_params.image_generation:
-        tools.append("image_generation")
-    return tools
-
-
-async def chat_tool_budget_setting_micro(
-    db: AsyncSession,
-    tool_name: str,
-) -> int:
-    setting = _CHAT_TOOL_BUDGET_SETTINGS.get(tool_name)
-    if setting is None:
-        return 0
-    setting_key, env_key = setting
-    raw: object | None = None
-    try:
-        raw = (
-            await db.execute(
-                select(SystemSetting.value).where(SystemSetting.key == setting_key)
-            )
-        ).scalar_one_or_none()
-    except Exception:
-        logger.warning(
-            "chat tool budget setting lookup failed key=%s",
-            setting_key,
-            exc_info=True,
-        )
-    if raw in (None, ""):
-        raw = os.environ.get(env_key)
-    return _parse_nonnegative_micro(raw)
-
-
-async def chat_max_tool_invocations(db: AsyncSession) -> int:
-    raw: object | None = None
-    try:
-        raw = (
-            await db.execute(
-                select(SystemSetting.value).where(
-                    SystemSetting.key == "chat.max_tool_invocations"
-                )
-            )
-        ).scalar_one_or_none()
-    except Exception:
-        logger.warning("chat max_tool_invocations lookup failed", exc_info=True)
-    if raw in (None, ""):
-        raw = os.environ.get("CHAT_MAX_TOOL_INVOCATIONS")
-    if isinstance(raw, bool):
-        return _MAX_TOOL_INVOCATIONS_DEFAULT
-    if isinstance(raw, int):
-        parsed = raw
-    elif isinstance(raw, str):
-        try:
-            parsed = int(raw.strip())
-        except ValueError:
-            return _MAX_TOOL_INVOCATIONS_DEFAULT
-    else:
-        return _MAX_TOOL_INVOCATIONS_DEFAULT
-    return min(64, max(1, parsed))
-
-
-async def _estimate_chat_tool_budget_micro(
-    db: AsyncSession,
-    chat_params: ChatParamsIn | None,
-    *,
-    chat_tool_budget_setting_fn: AsyncCallable = chat_tool_budget_setting_micro,
-    chat_max_tool_invocations_fn: AsyncCallable = chat_max_tool_invocations,
-) -> tuple[int, dict[str, int]]:
-    budget_by_tool: dict[str, int] = {}
-    max_tool_invocations = int(await chat_max_tool_invocations_fn(db))
-    for tool_name in _enabled_chat_tools(chat_params):
-        amount = int(await chat_tool_budget_setting_fn(db, tool_name))
-        if amount > 0:
-            budget_by_tool[tool_name] = amount * max_tool_invocations
-    return sum(budget_by_tool.values()), budget_by_tool
-
-
-async def billing_image_thresholds(db: AsyncSession) -> dict[str, int]:
-    return billing_core.parse_thresholds(
-        await billing_setting_raw(db, "billing.image_size_thresholds")
-    )
-
-
-def _billing_http_error(exc: billing_core.BillingError) -> HTTPException:
-    return _http(exc.code, exc.message, exc.status_code)
-
-
-async def ensure_chat_wallet_preflight(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    user_email: str | None,
-    account_mode: str,
-    model: str,
-    chat_params: ChatParamsIn | None = None,
-    billing_enabled_fn: AsyncCallable = billing_enabled,
-    billing_allow_negative_fn: AsyncCallable = billing_allow_negative,
-    user_rate_multiplier_fn: AsyncCallable = user_rate_multiplier_x10000,
-    chat_tool_budget_setting_fn: AsyncCallable = chat_tool_budget_setting_micro,
-    chat_max_tool_invocations_fn: AsyncCallable = chat_max_tool_invocations,
-) -> ChatWalletPreflight | None:
-    _ = user_email
-    if account_mode != "wallet" or not await billing_enabled_fn(db):
-        return None
-    wallet = await billing_core.get_wallet(db, user_id, lock=True)
-    if wallet is None:
-        raise _http("WALLET_UNAVAILABLE", "wallet could not be initialized", 503)
-    rate_multiplier_x10000 = int(await user_rate_multiplier_fn(db, user_id))
-    if rate_multiplier_x10000 > 0 and wallet.balance_micro < 10_000:
-        raise _http(
-            "INSUFFICIENT_BALANCE",
-            "insufficient wallet balance",
-            402,
-            required_micro=10_000,
-            balance_micro=int(wallet.balance_micro),
-        )
-    try:
-        pricing_snapshot = await billing_core.completion_pricing_snapshot(
-            db,
-            model=model,
-        )
-        cost_preview = billing_core.completion_breakdown_from_snapshot(
-            pricing_snapshot,
-            model=model,
-            tokens=billing_core.UsageTokens(input_tokens=1, output_tokens=1),
-            rate_multiplier_x10000=rate_multiplier_x10000,
-        ).actual_cost_micro
-    except billing_core.BillingError as exc:
-        raise _billing_http_error(exc) from exc
-    if cost_preview <= 0 and rate_multiplier_x10000 > 0:
-        raise _billing_http_error(
-            billing_core.BillingError(
-                "PRICING_MISSING",
-                f"missing enabled chat pricing rule for {model}",
-                503,
-            )
-        )
-    tool_budget_micro, budget_by_tool = await _estimate_chat_tool_budget_micro(
-        db,
-        chat_params,
-        chat_tool_budget_setting_fn=chat_tool_budget_setting_fn,
-        chat_max_tool_invocations_fn=chat_max_tool_invocations_fn,
-    )
-    budget_by_tool = {
-        tool_name: apply_rate_multiplier_micro(amount, rate_multiplier_x10000)
-        for tool_name, amount in budget_by_tool.items()
-    }
-    tool_budget_micro = sum(budget_by_tool.values())
-    preauth_micro = (
-        0
-        if rate_multiplier_x10000 == 0
-        else max(10_000, int(cost_preview or 0) + tool_budget_micro)
-    )
-    if wallet.balance_micro < preauth_micro and not await billing_allow_negative_fn(db):
-        raise _http(
-            "INSUFFICIENT_BALANCE",
-            "insufficient wallet balance",
-            402,
-            required_micro=preauth_micro,
-            balance_micro=int(wallet.balance_micro),
-            estimated_model_micro=int(cost_preview or 0),
-            tool_budget_micro=tool_budget_micro,
-        )
-    return ChatWalletPreflight(
-        estimated_model_micro=int(cost_preview or 0),
-        tool_budget_micro=tool_budget_micro,
-        preauth_micro=preauth_micro,
-        tool_budget_by_tool=budget_by_tool,
-        pricing_snapshot=pricing_snapshot,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-    )
 
 
 async def resolve_fast_default(
@@ -732,170 +448,6 @@ async def ensure_file_search_configured(
         "FILE_SEARCH_NOT_CONFIGURED",
         "file_search requires vector_store_ids or a configured default vector store",
         400,
-    )
-
-
-def _non_blank(text: str | None) -> str | None:
-    if text is None:
-        return None
-    return text if text.strip() else None
-
-
-def _sanitize_system_prompt_source(text: str | None) -> str | None:
-    prompt = _non_blank(text)
-    if prompt is None:
-        return None
-    normalized = unicodedata.normalize("NFKC", prompt)
-    cleaned = normalized.translate(_PROMPT_CONTROL_TRANSLATION).strip()
-    if not cleaned:
-        return None
-    if len(cleaned) > SYSTEM_PROMPT_SOURCE_LIMIT:
-        logger.warning(
-            "system prompt source truncated: original_len=%d limit=%d",
-            len(cleaned),
-            SYSTEM_PROMPT_SOURCE_LIMIT,
-        )
-        cleaned = cleaned[:SYSTEM_PROMPT_SOURCE_LIMIT]
-    return cleaned
-
-
-def _escape_system_prompt_section_body(text: str) -> str:
-    return _SYSTEM_PROMPT_SECTION_TAG_RE.sub(
-        lambda match: (
-            f"{match.group(1)}{_SYSTEM_PROMPT_SECTION_TAG_ESCAPE}"
-            f"{match.group(2)}{match.group(3)}"
-        ),
-        text,
-    )
-
-
-def build_structured_system_prompt(
-    *,
-    explicit_prompt: str | None,
-    conversation_prompt: str | None,
-    legacy_conversation_prompt: str | None,
-    global_prompt: str | None,
-) -> str | None:
-    sections: list[str] = []
-    for tag, candidate in (
-        ("SYSTEM_GLOBAL", global_prompt),
-        ("SYSTEM_CONVERSATION_LEGACY", legacy_conversation_prompt),
-        ("SYSTEM_CONVERSATION", conversation_prompt),
-        ("SYSTEM_EXPLICIT", explicit_prompt),
-    ):
-        prompt = _sanitize_system_prompt_source(candidate)
-        if prompt is not None:
-            safe_prompt = _escape_system_prompt_section_body(prompt)
-            sections.append(f"[{tag}]\n{safe_prompt}\n[/{tag}]")
-    if not sections:
-        return None
-    return "\n".join(("[SYSTEM_PROMPTS]", *sections, "[/SYSTEM_PROMPTS]"))
-
-
-async def _load_owned_prompt_content(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    prompt_id: str | None,
-) -> str | None:
-    if not prompt_id:
-        return None
-    return (
-        await db.execute(
-            select(SystemPrompt.content).where(
-                SystemPrompt.id == prompt_id,
-                SystemPrompt.user_id == user_id,
-            )
-        )
-    ).scalar_one_or_none()
-
-
-async def resolve_system_prompt_for_message(
-    db: AsyncSession,
-    *,
-    user_id: str,
-    default_system_prompt_id: str | None,
-    conv: Conversation,
-    explicit_prompt: str | None,
-) -> str | None:
-    conversation_prompt = await _load_owned_prompt_content(
-        db,
-        user_id=user_id,
-        prompt_id=conv.default_system_prompt_id,
-    )
-    global_prompt = await _load_owned_prompt_content(
-        db,
-        user_id=user_id,
-        prompt_id=default_system_prompt_id,
-    )
-    return build_structured_system_prompt(
-        explicit_prompt=explicit_prompt,
-        conversation_prompt=conversation_prompt,
-        legacy_conversation_prompt=conv.default_system,
-        global_prompt=global_prompt,
-    )
-
-
-async def resolve_task_credential_pin(
-    db: AsyncSession,
-    user_id: str,
-    required_purpose: str,
-    account_mode: str,
-    *,
-    read_byok_settings_cached_fn: AsyncCallable = read_byok_settings_cached,
-) -> TaskCredentialPin | None:
-    if account_mode != "byok":
-        return None
-    byok_settings = await read_byok_settings_cached_fn(db)
-    if not byok_settings.mode_enabled:
-        raise _http("byok_disabled", "BYOK is disabled", 403)
-    active_row = (
-        await db.execute(
-            select(UserApiCredential, ApiSupplierTemplate)
-            .join(
-                ApiSupplierTemplate,
-                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
-            )
-            .where(
-                UserApiCredential.user_id == user_id,
-                UserApiCredential.status == "active",
-                UserApiCredential.deleted_at.is_(None),
-                ApiSupplierTemplate.deleted_at.is_(None),
-                ApiSupplierTemplate.enabled.is_(True),
-            )
-            .order_by(UserApiCredential.created_at.desc())
-            .limit(1)
-        )
-    ).first()
-    if active_row is not None:
-        active, supplier = active_row
-        rate_limited_until = getattr(active, "rate_limited_until", None)
-        if rate_limited_until is not None:
-            if rate_limited_until.tzinfo is None:
-                rate_limited_until = rate_limited_until.replace(tzinfo=timezone.utc)
-            if rate_limited_until > datetime.now(timezone.utc):
-                raise _http(
-                    "NO_ACTIVE_API_KEY",
-                    "your API key is currently rate limited",
-                    412,
-                )
-        if required_purpose not in set(supplier.purposes or []):
-            raise _http(
-                "NO_ACTIVE_API_KEY",
-                "your current API Key does not support this task type",
-                412,
-            )
-        return TaskCredentialPin(
-            credential_id=active.id,
-            supplier_id=active.supplier_id,
-            default_chat_model=supplier.default_chat_model or DEFAULT_CHAT_MODEL,
-            fast_chat_model=supplier.fast_chat_model,
-            default_image_model=getattr(supplier, "default_image_model", None),
-        )
-    raise _http(
-        "NO_ACTIVE_API_KEY",
-        "please upload an active API key before starting new tasks",
-        412,
     )
 
 
@@ -1405,3 +957,29 @@ async def publish_assistant_task(
                 assistant_msg_id,
                 exc_info=True,
             )
+
+
+__all__ = [
+    "AssistantTaskResult",
+    "TaskCredentialPin",
+    "_sanitize_system_prompt_source",
+    "billing_allow_negative",
+    "billing_enabled",
+    "billing_image_thresholds",
+    "billing_setting_raw",
+    "build_structured_system_prompt",
+    "chat_max_tool_invocations",
+    "chat_tool_budget_setting_micro",
+    "create_assistant_task",
+    "ensure_chat_wallet_preflight",
+    "ensure_file_search_configured",
+    "generation_child_idempotency_key",
+    "idempotency_lock_key",
+    "idempotency_lookup_keys",
+    "image_multi_generation_defer_s",
+    "publish_assistant_task",
+    "publish_message_appended",
+    "resolve_system_prompt_for_message",
+    "resolve_task_credential_pin",
+    "stored_idempotency_key",
+]
