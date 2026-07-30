@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import secrets
-import stat
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, BinaryIO
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -39,12 +36,13 @@ from ..ratelimit import (
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..services import storage_files
+from . import share_delivery as _share_delivery
 
 
 router_authed = APIRouter(tags=["shares"])
 router_public = APIRouter(tags=["shares-public"])
 SHARE_EXPIRATION_DAYS_KEY = "site.share_expiration_days"
-MAX_MULTI_SHARE_IMAGES = 100
+MAX_MULTI_SHARE_IMAGES = _share_delivery.MAX_MULTI_SHARE_IMAGES
 DISPLAY_VARIANT = "display2048"
 PREVIEW_VARIANT = "preview1024"
 THUMB_VARIANT = "thumb256"
@@ -56,6 +54,16 @@ VARIANT_MEDIA_TYPE = MappingProxyType(
         THUMB_VARIANT: "image/jpeg",
     }
 )
+_share_url = _share_delivery.share_url
+_share_image_url = _share_delivery.share_image_url
+_share_image_item_url = _share_delivery.share_image_item_url
+_share_image_variant_url = _share_delivery.share_image_variant_url
+_share_image_ids = _share_delivery.share_image_ids
+_to_share_out = _share_delivery.to_share_out
+_open_storage_file_safe = _share_delivery.open_storage_file_safe
+_storage_key_exists = _share_delivery.storage_key_exists
+_share_image_response = _share_delivery.share_image_response
+_image_etag = _share_delivery.image_etag
 
 
 def _http(code: str, msg: str, http: int) -> HTTPException:
@@ -64,62 +72,7 @@ def _http(code: str, msg: str, http: int) -> HTTPException:
     )
 
 
-def _share_url(token: str, public_base_url: str) -> str:
-    # Share URL 是要复制粘贴给外部用户的分享链接，必须绝对 URL（含 host）。
-    return f"{public_base_url.rstrip('/')}/share/{token}"
-
-
-def _share_image_url(token: str) -> str:
-    # 图片二进制走 API —— 相对同源路径，由前端 /api 反代到后端 /share/{token}/image。
-    return f"/api/share/{token}/image"
-
-
-def _share_image_item_url(token: str, image_id: str) -> str:
-    return f"/api/share/{token}/images/{image_id}"
-
-
-def _share_image_variant_url(token: str, image_id: str, kind: str) -> str:
-    return f"/api/share/{token}/images/{image_id}/variants/{kind}"
-
-
-def _share_image_ids(s: Share) -> list[str]:
-    raw = getattr(s, "image_ids", None)
-    seen: set[str] = set()
-    ids: list[str] = []
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, str):
-                continue
-            clean = item.strip()
-            if not clean or clean in seen:
-                continue
-            seen.add(clean)
-            ids.append(clean)
-            if len(ids) >= MAX_MULTI_SHARE_IMAGES:
-                break
-        if ids:
-            return ids
-    image_id = getattr(s, "image_id", None)
-    return [image_id] if isinstance(image_id, str) and image_id else []
-
-
-def _to_share_out(s: Share, public_base_url: str) -> ShareOut:
-    image_ids = _share_image_ids(s)
-    return ShareOut(
-        id=s.id,
-        image_id=s.image_id,
-        image_ids=image_ids,
-        token=s.token,
-        url=_share_url(s.token, public_base_url),
-        image_url=_share_image_url(s.token),
-        show_prompt=s.show_prompt,
-        expires_at=s.expires_at,
-        revoked_at=s.revoked_at,
-        created_at=s.created_at,
-    )
-
-
-def _fs_path(storage_key: str) -> Path:
+def _fs_path(storage_key: str):
     return storage_files.resolve_storage_path(
         settings.storage_root,
         storage_key,
@@ -127,66 +80,8 @@ def _fs_path(storage_key: str) -> Path:
     )
 
 
-def _open_storage_file_safe(storage_key: str) -> tuple[BinaryIO, int]:
-    path = _fs_path(storage_key)
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        before = path.stat()
-        fd = os.open(path, flags)
-        try:
-            after = os.fstat(fd)
-            if (
-                before.st_dev != after.st_dev
-                or before.st_ino != after.st_ino
-                or not stat.S_ISREG(after.st_mode)
-            ):
-                raise _http("invalid_path", "storage path changed while opening", 400)
-            return os.fdopen(fd, "rb"), after.st_size
-        except Exception:
-            os.close(fd)
-            raise
-    except FileNotFoundError as exc:
-        raise _http("not_found", "binary missing", 404) from exc
-    except OSError as exc:
-        raise _http("invalid_path", "invalid storage path", 400) from exc
-
-
-def _storage_key_exists(storage_key: str) -> bool:
-    try:
-        return _fs_path(storage_key).is_file()
-    except HTTPException:
-        return False
-
-
-def _iter_open_file_and_close(f: BinaryIO):
+def _iter_open_file_and_close(f):
     yield from storage_files.iter_open_file_and_close(f)
-
-
-def _share_image_response(
-    opened: BinaryIO,
-    size: int,
-    *,
-    media_type: str,
-    etag: str,
-) -> StreamingResponse:
-    headers = {
-        "Cache-Control": "no-cache, must-revalidate",
-        "Content-Length": str(size),
-        "ETag": etag,
-        "X-Content-Type-Options": "nosniff",
-    }
-    return StreamingResponse(
-        _iter_open_file_and_close(opened),
-        media_type=media_type,
-        headers=headers,
-    )
-
-
-def _image_etag(img: Image) -> str:
-    sha = getattr(img, "sha256", None)
-    return f'"{sha}"' if isinstance(sha, str) and sha else f'"{img.id}-orig"'
 
 
 async def _check_share_preview_rate_limit(request: Request) -> None:
