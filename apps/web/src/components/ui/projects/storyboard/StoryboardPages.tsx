@@ -9,37 +9,31 @@ import {
   Clapperboard,
   Film,
   Loader2,
-  Play,
   Plus,
   RefreshCw,
   Save,
   Settings2,
   Trash2,
   WandSparkles,
-  X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
 
+import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import type {
   StoryboardAsset,
   StoryboardRun,
   StoryboardShot,
 } from "@/lib/apiClient";
 import { useUserQueryScope } from "@/components/QueryProvider";
-import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
-import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
-import { toast } from "@/components/ui/primitives/Toast";
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useSSE } from "@/features/realtime";
+import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
   qk,
   useApproveStoryboardAssetMutation,
   useApproveStoryboardKeyframeMutation,
   useApproveStoryboardShotMutation,
-  useAssembleStoryboardMutation,
   useCreateStoryboardAssetMutation,
   useCreateStoryboardMutation,
   useCreateStoryboardShotMutation,
@@ -54,8 +48,6 @@ import {
   useRebuildStoryboardShotsMutation,
   useStoryboardQuery,
   useStoryboardsQuery,
-  useSubmitAllStoryboardShotsMutation,
-  useSubmitStoryboardShotMutation,
 } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -68,197 +60,26 @@ import {
 } from "../components/ProjectTopBar";
 import { formatRelativeTime } from "../utils";
 import { StoryboardMediaFrame } from "./StoryboardMediaFrame";
-
-type StoryboardStage =
-  | "idea"
-  | "script"
-  | "assets"
-  | "shots"
-  | "keyframes"
-  | "videos"
-  | "assembly";
-
-const STAGES: Array<{
-  id: StoryboardStage;
-  label: string;
-  description: string;
-}> = [
-  { id: "idea", label: "想法", description: "项目名、想法和视觉风格" },
-  { id: "script", label: "脚本", description: "脚本正文与锁定状态" },
-  { id: "assets", label: "设定", description: "人物、场景、道具设定图" },
-  { id: "shots", label: "分镜", description: "镜头拆分、顺序和绑定" },
-  { id: "keyframes", label: "分镜图", description: "关键帧生成与审批" },
-  { id: "videos", label: "视频", description: "逐镜头图生视频队列" },
-  { id: "assembly", label: "成片", description: "合成、预览和下载" },
-];
-
-const STORYBOARD_SEED_MIN = -1;
-const STORYBOARD_SEED_MAX = 4_294_967_295;
-
-function parseStoryboardStage(value: string | null): StoryboardStage | null {
-  return STAGES.some((stage) => stage.id === value)
-    ? (value as StoryboardStage)
-    : null;
-}
-
-// 审计 I-1：分镜页全部 mutation 必须显式 onError，且提示要带具体动作名。
-// makeQueryClient 的全局兜底只能给出泛化文案，用户无法判断是哪一步失败；
-// 生成 / 提交 / 合成属于计费动作，静默失败会让用户以为没执行而重复点击 → 二次扣费。
-// 显式 onError 会覆盖全局兜底（React Query 对 defaultOptions.mutations 做浅合并），
-// 因此不会出现双重 toast；重试由 mutations.retry = 0 统一关闭，不做静默重试。
-function notifyStoryboardError(action: string) {
-  return (error: Error) => {
-    toast.error(`${action}失败`, {
-      description: error.message || "请稍后重试",
-    });
-  };
-}
-
-function parseStoryboardSeed(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isSafeInteger(parsed) &&
-    parsed >= STORYBOARD_SEED_MIN &&
-    parsed <= STORYBOARD_SEED_MAX
-    ? parsed
-    : null;
-}
-
-const STATUS_TEXT: Record<string, string> = {
-  draft: "草稿",
-  in_progress: "进行中",
-  completed: "完成",
-  waiting_input: "待输入",
-  generating: "生成中",
-  ready: "待批准",
-  approved: "已批准",
-  keyframe_generating: "关键帧生成中",
-  keyframe_ready: "关键帧待批准",
-  keyframe_approved: "关键帧已批准",
-  done: "完成",
-  compositing: "合成中",
-  failed: "失败",
-};
-
-type StageCompletion = {
-  done: boolean;
-  active: boolean;
-  count: string;
-};
-
-const SHOT_APPROVED_STATUSES = new Set([
-  "approved",
-  "keyframe_generating",
-  "keyframe_ready",
-  "keyframe_approved",
-  "generating",
-  "done",
-]);
-
-function stageResult(
-  run: StoryboardRun,
-  stage: StoryboardStage,
-  done: boolean,
-  count: string,
-): StageCompletion {
-  return { done, active: run.current_stage === stage, count };
-}
-
-function countedStageResult(
-  run: StoryboardRun,
-  stage: StoryboardStage,
-  total: number,
-  completed: number,
-): StageCompletion {
-  return stageResult(
-    run,
-    stage,
-    total > 0 && completed === total,
-    total ? `${completed}/${total}` : "0",
-  );
-}
-
-function stageCompletion(run: StoryboardRun, stage: StoryboardStage): {
-  done: boolean;
-  active: boolean;
-  count: string;
-} {
-  switch (stage) {
-    case "idea":
-      return stageResult(run, stage, Boolean(run.idea.trim()), "");
-    case "script":
-      return stageResult(
-        run,
-        stage,
-        run.script_confirmed,
-        run.script_confirmed ? "已锁定" : run.script ? "待锁定" : "",
-      );
-    case "assets":
-      return countedStageResult(
-        run,
-        stage,
-        run.assets.length,
-        run.assets.filter((asset) => asset.status === "approved").length,
-      );
-    case "shots":
-      return countedStageResult(
-        run,
-        stage,
-        run.shots.length,
-        run.shots.filter((shot) => SHOT_APPROVED_STATUSES.has(shot.status)).length,
-      );
-    case "keyframes":
-      return countedStageResult(
-        run,
-        stage,
-        run.shots.length,
-        run.shots.filter(
-          (shot) => shot.keyframe_approved_at && !shot.keyframe_stale,
-        ).length,
-      );
-    case "videos":
-      return countedStageResult(
-        run,
-        stage,
-        run.shots.length,
-        run.shots.filter((shot) => shot.status === "done").length,
-      );
-    case "assembly": {
-      const status = run.assembly?.status;
-      return stageResult(
-        run,
-        stage,
-        status === "done",
-        status ? (STATUS_TEXT[status] ?? status) : "",
-      );
-    }
-  }
-}
-
-function isStageUnlocked(run: StoryboardRun, stage: StoryboardStage): boolean {
-  if (stage === "idea") return true;
-  if (stage === "script") return Boolean(run.idea.trim());
-  if (stage === "assets") return run.script_confirmed;
-  if (stage === "shots") return true;
-  if (stage === "keyframes") return run.shots.length > 0;
-  if (stage === "videos") {
-    return run.shots.length > 0 && run.shots.every((shot) => Boolean(shot.keyframe_approved_at) && !shot.keyframe_stale);
-  }
-  return run.shots.length > 0 && run.shots.every((shot) => shot.status === "done");
-}
-
-function defaultStage(run: StoryboardRun): StoryboardStage {
-  if (STAGES.some((stage) => stage.id === run.current_stage)) {
-    return run.current_stage as StoryboardStage;
-  }
-  if (!run.script_confirmed) return "script";
-  if (run.assets.length === 0) return "assets";
-  if (run.shots.length === 0) return "shots";
-  if (run.shots.some((shot) => !shot.keyframe_approved_at || shot.keyframe_stale)) return "keyframes";
-  if (run.shots.some((shot) => shot.status !== "done")) return "videos";
-  return "assembly";
-}
+import {
+  defaultStage,
+  isStageUnlocked,
+  parseStoryboardStage,
+  type StoryboardStage,
+} from "./StoryboardDomain";
+import { SettingsPanel } from "./StoryboardSettingsPanel";
+import { StageRail } from "./StoryboardStageRail";
+import { AssemblyStage, VideosStage } from "./StoryboardVideoStages";
+import {
+  IconAction,
+  InfoLine,
+  LabeledInput,
+  LabeledTextarea,
+  Metric,
+  notifyStoryboardError,
+  StageShell,
+  StatusPill,
+  STATUS_TEXT,
+} from "./StoryboardShared";
 
 export function StoryboardIndexPage() {
   const router = useRouter();
@@ -655,261 +476,6 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
   );
 }
 
-function StageRail({
-  run,
-  activeStage,
-  onSelect,
-}: {
-  run: StoryboardRun;
-  activeStage: StoryboardStage;
-  onSelect: (stage: StoryboardStage) => void;
-}) {
-  return (
-    <aside
-      aria-label="分镜步骤"
-      className="scrollbar-none min-h-0 shrink-0 overflow-x-auto border-b border-[var(--border)] p-2 md:overflow-x-hidden md:overflow-y-auto md:border-b-0 md:p-3"
-    >
-      <div className="flex w-max gap-2 md:grid md:w-auto">
-        {STAGES.map((stage, index) => {
-          const meta = stageCompletion(run, stage.id);
-          const unlocked = isStageUnlocked(run, stage.id);
-          const active = activeStage === stage.id;
-          return (
-            <button
-              key={stage.id}
-              type="button"
-              onClick={() => onSelect(stage.id)}
-              disabled={!unlocked}
-              aria-current={active ? "step" : undefined}
-              className={cn(
-                "grid min-h-14 min-w-[116px] shrink-0 gap-1 rounded-[var(--radius-card)] border px-3 py-2 text-left transition md:min-h-[76px] md:min-w-0 md:p-3",
-                active
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
-                  : "border-[var(--border)] bg-[var(--bg-1)]/74 hover:bg-[var(--bg-2)]",
-                !unlocked && "cursor-not-allowed opacity-55 hover:bg-[var(--bg-1)]/74",
-              )}
-            >
-              <span className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                  {String(index + 1).padStart(2, "0")}
-                </span>
-                <span
-                  className={cn(
-                    "inline-flex h-5 min-w-5 items-center justify-center rounded-full border px-1 text-[10px]",
-                    meta.done
-                      ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-fg)]"
-                      : "border-[var(--border)] text-[var(--fg-2)]",
-                  )}
-                >
-                  {meta.done ? <Check className="h-3 w-3" /> : meta.count}
-                </span>
-              </span>
-              <span className="text-sm font-semibold text-[var(--fg-0)]">{stage.label}</span>
-              <span className="hidden line-clamp-1 text-xs text-[var(--fg-2)] md:block">
-                {stage.description}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </aside>
-  );
-}
-
-interface StoryboardSettingsDraft {
-  model: string;
-  resolution: string;
-  aspectRatio: string;
-  generateAudio: boolean;
-  seed: string;
-}
-
-function settingsDraftFromRun(run: StoryboardRun): StoryboardSettingsDraft {
-  return {
-    model: run.model,
-    resolution: run.resolution,
-    aspectRatio: run.aspect_ratio,
-    generateAudio: run.generate_audio,
-    seed: run.seed == null ? "" : String(run.seed),
-  };
-}
-
-function SettingsPanel({
-  run,
-  mobileOpen,
-  onMobileClose,
-}: {
-  run: StoryboardRun;
-  mobileOpen: boolean;
-  onMobileClose: () => void;
-}) {
-  const [draft, setDraft] = useState(() => settingsDraftFromRun(run));
-  const dirty =
-    draft.model !== run.model ||
-    draft.resolution !== run.resolution ||
-    draft.aspectRatio !== run.aspect_ratio ||
-    draft.generateAudio !== run.generate_audio ||
-    draft.seed !== (run.seed == null ? "" : String(run.seed));
-  const patch = usePatchStoryboardMutation(run.id, {
-    onSuccess: (data) => {
-      setDraft(settingsDraftFromRun(data));
-      toast.success("视频参数已保存");
-    },
-    onError: notifyStoryboardError("保存视频参数"),
-  });
-  const parsedSeed = parseStoryboardSeed(draft.seed);
-  const seedInvalid = Boolean(draft.seed.trim()) && parsedSeed === null;
-  const saveDisabled =
-    patch.isPending ||
-    seedInvalid ||
-    !dirty ||
-    !draft.model.trim() ||
-    !draft.resolution.trim() ||
-    !draft.aspectRatio.trim();
-  const save = () =>
-    patch.mutate({
-      model: draft.model.trim(),
-      resolution: draft.resolution.trim(),
-      aspect_ratio: draft.aspectRatio.trim(),
-      generate_audio: draft.generateAudio,
-      seed: parsedSeed,
-    });
-  const fields = (
-    <StoryboardSettingsFields
-      draft={draft}
-      dirty={dirty}
-      seedInvalid={seedInvalid}
-      saving={patch.isPending}
-      saveDisabled={saveDisabled}
-      onChange={setDraft}
-      onReset={() => setDraft(settingsDraftFromRun(run))}
-      onSave={save}
-    />
-  );
-
-  return (
-    <>
-      <aside className="hidden min-h-0 overflow-y-auto p-3 lg:block">
-        {fields}
-      </aside>
-      <BottomSheet
-        open={mobileOpen}
-        onClose={onMobileClose}
-        ariaLabel="视频参数"
-        snapPoints={["88%"]}
-      >
-        <header className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-5 py-3">
-          <div className="flex items-center gap-2">
-            <Settings2 className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-sm font-semibold">视频参数</h2>
-          </div>
-          <button
-            type="button"
-            onClick={onMobileClose}
-            aria-label="关闭视频参数"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-        <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-3">
-          {fields}
-        </div>
-      </BottomSheet>
-    </>
-  );
-}
-
-function StoryboardSettingsFields({
-  draft,
-  dirty,
-  seedInvalid,
-  saving,
-  saveDisabled,
-  onChange,
-  onReset,
-  onSave,
-}: {
-  draft: StoryboardSettingsDraft;
-  dirty: boolean;
-  seedInvalid: boolean;
-  saving: boolean;
-  saveDisabled: boolean;
-  onChange: Dispatch<SetStateAction<StoryboardSettingsDraft>>;
-  onReset: () => void;
-  onSave: () => void;
-}) {
-  return (
-    <div className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
-      <div className="hidden items-center gap-2 lg:flex">
-        <Settings2 className="h-4 w-4 text-[var(--accent)]" />
-        <h2 className="text-sm font-semibold">视频参数</h2>
-      </div>
-      <LabeledInput
-        label="模型"
-        value={draft.model}
-        onChange={(model) => onChange((current) => ({ ...current, model }))}
-      />
-      <LabeledInput
-        label="分辨率"
-        value={draft.resolution}
-        onChange={(resolution) =>
-          onChange((current) => ({ ...current, resolution }))
-        }
-      />
-      <LabeledInput
-        label="比例"
-        value={draft.aspectRatio}
-        onChange={(aspectRatio) =>
-          onChange((current) => ({ ...current, aspectRatio }))
-        }
-      />
-      <LabeledInput
-        label="Seed"
-        value={draft.seed}
-        onChange={(seed) => onChange((current) => ({ ...current, seed }))}
-      />
-      {seedInvalid ? (
-        <p className="text-xs text-[var(--danger)]" role="alert">
-          Seed 需为 -1 到 4294967295 的整数
-        </p>
-      ) : null}
-      <label className="flex min-h-11 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
-        <span>生成音频</span>
-        <input
-          type="checkbox"
-          checked={draft.generateAudio}
-          onChange={(event) =>
-            onChange((current) => ({
-              ...current,
-              generateAudio: event.target.checked,
-            }))
-          }
-        />
-      </label>
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={onReset}
-          disabled={!dirty || saving}
-          className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm text-[var(--fg-1)] disabled:opacity-50"
-        >
-          取消修改
-        </button>
-        <button
-          type="button"
-          disabled={saveDisabled}
-          onClick={onSave}
-          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)] disabled:cursor-not-allowed disabled:opacity-55"
-        >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          保存参数
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function IdeaStage({ run }: { run: StoryboardRun }) {
   const patch = usePatchStoryboardMutation(run.id, {
     onError: notifyStoryboardError("保存想法"),
@@ -1199,259 +765,5 @@ function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot 
         <IconAction icon={Check} label="批准" disabled={!shot.keyframe_image_id || shot.keyframe_stale} loading={approve.isPending} onClick={() => approve.mutate()} />
       </div>
     </article>
-  );
-}
-
-function VideosStage({ run }: { run: StoryboardRun }) {
-  // 全部提交会逐段派发图生视频（计费动作），失败必须显式告知。
-  const submitAll = useSubmitAllStoryboardShotsMutation(run.id, {
-    onError: notifyStoryboardError("全部提交视频"),
-  });
-  return (
-    <StageShell title="视频" actionLabel="全部提交" loading={submitAll.isPending} onAction={() => submitAll.mutate()}>
-      <div className="grid gap-2">
-        {run.shots.map((shot) => (
-          <VideoQueueRow key={shot.id} run={run} shot={shot} />
-        ))}
-      </div>
-    </StageShell>
-  );
-}
-
-function VideoQueueRow({ run, shot }: { run: StoryboardRun; shot: StoryboardShot }) {
-  // 提交视频段属于计费动作。
-  const submit = useSubmitStoryboardShotMutation(run.id, shot.id, {
-    onError: notifyStoryboardError("提交视频段"),
-  });
-  const pct = shot.video_progress_pct ?? (shot.status === "done" ? 100 : 0);
-  const canSubmitVideo =
-    shot.status === "keyframe_approved" &&
-    Boolean(shot.keyframe_image_id) &&
-    !shot.keyframe_stale;
-  return (
-    <article className="grid gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-3 md:grid-cols-[88px_minmax(0,1fr)_auto] md:items-center">
-      <StoryboardMediaFrame
-        src={shot.keyframe_display_url || shot.keyframe_image_url}
-        alt={`${shot.title} 视频参考帧`}
-        className="aspect-video w-full rounded-[var(--radius-control)] border border-[var(--border)] md:w-20"
-        emptyClassName="grid aspect-video place-items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] md:w-20"
-        emptyIconClassName="h-5 w-5 text-[var(--fg-2)]"
-        sizes="80px"
-      />
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-            SEG {String(shot.index).padStart(2, "0")}
-          </span>
-          <StatusPill status={shot.video_status || shot.status} />
-        </div>
-        <h3 className="mt-1 truncate text-sm font-semibold">{shot.title}</h3>
-        <div className="mt-2 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
-          <div className="h-full bg-[var(--accent)] transition-all" style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
-        </div>
-      </div>
-      <div className="flex gap-2">
-        {shot.video?.url ? (
-          <a href={shot.video.url} target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs hover:bg-[var(--bg-2)] sm:min-h-9">
-            <Play className="h-3.5 w-3.5" />
-            预览
-          </a>
-        ) : null}
-        <IconAction icon={Film} label="提交" disabled={!canSubmitVideo} loading={submit.isPending} onClick={() => submit.mutate()} />
-      </div>
-    </article>
-  );
-}
-
-function AssemblyStage({ run }: { run: StoryboardRun }) {
-  // 合成成片属于计费动作。
-  const assemble = useAssembleStoryboardMutation(run.id, {
-    onError: notifyStoryboardError("合成成片"),
-  });
-  const ready = run.shots.length > 0 && run.shots.every((shot) => shot.status === "done");
-  return (
-    <StageShell title="成片" actionLabel="合成成片" loading={assemble.isPending} disabled={!ready} onAction={() => assemble.mutate()}>
-      <div className="grid gap-4 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold">合成状态</p>
-            <p className="mt-1 text-sm text-[var(--fg-1)]">
-              {STATUS_TEXT[run.assembly?.status || "waiting_input"] ?? run.assembly?.status ?? "等待视频段完成"}
-            </p>
-          </div>
-          <StatusPill status={run.assembly?.status || "waiting_input"} />
-        </div>
-        {run.assembly?.video_url ? (
-          <video src={run.assembly.video_url} poster={run.assembly.poster_url || undefined} controls className="max-h-[62vh] w-full rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]" />
-        ) : (
-          <div className="grid min-h-52 place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-center text-[var(--fg-2)]">
-            {ready ? "所有片段已完成，可以合成成片。" : "所有视频段完成后才能合成成片。"}
-          </div>
-        )}
-        {run.assembly?.video_url ? (
-          <a href={run.assembly.video_url} download className="inline-flex min-h-11 w-fit items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] sm:min-h-10">
-            下载 mp4
-          </a>
-        ) : null}
-      </div>
-    </StageShell>
-  );
-}
-
-function StageShell({
-  title,
-  children,
-  actionLabel,
-  loading,
-  disabled,
-  onAction,
-}: {
-  title: string;
-  children: ReactNode;
-  actionLabel: string;
-  loading?: boolean;
-  disabled?: boolean;
-  onAction: () => void;
-}) {
-  return (
-    <section className="grid gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="type-section-title">{title}</h2>
-        <button
-          type="button"
-          onClick={onAction}
-          disabled={disabled || loading}
-          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] disabled:opacity-60 sm:min-h-10"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          {actionLabel}
-        </button>
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function LabeledInput({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="grid gap-1.5 text-sm">
-      <span className="text-xs font-medium text-[var(--fg-2)]">{label}</span>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[16px] text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)] sm:min-h-10 md:text-base"
-      />
-    </label>
-  );
-}
-
-function LabeledTextarea({
-  label,
-  value,
-  onChange,
-  rows,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  rows: number;
-}) {
-  return (
-    <label className="grid gap-1.5 text-sm">
-      <span className="text-xs font-medium text-[var(--fg-2)]">{label}</span>
-      <textarea
-        value={value}
-        rows={rows}
-        onChange={(event) => onChange(event.target.value)}
-        className="resize-y rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-[16px] text-[var(--fg-0)] outline-none transition focus:border-[var(--border-strong)] md:text-base"
-      />
-    </label>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2">
-      <p className="text-[10px] text-[var(--fg-2)]">{label}</p>
-      <p className="mt-0.5 font-mono text-xs text-[var(--fg-0)]">{value}</p>
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: string }) {
-  const success = ["approved", "keyframe_approved", "done", "completed"].includes(status);
-  const busy = [
-    "generating",
-    "keyframe_generating",
-    "compositing",
-    "running",
-    "queued",
-    "submitting",
-    "submit_unknown",
-    "submitted",
-  ].includes(status);
-  return (
-    <span
-      className={cn(
-        "inline-flex min-h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-medium",
-        success
-          ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-fg)]"
-          : busy
-            ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-            : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-1)]",
-      )}
-    >
-      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-      {STATUS_TEXT[status] ?? status}
-    </span>
-  );
-}
-
-function InfoLine({ text, tone = "neutral" }: { text: string; tone?: "neutral" | "success" }) {
-  return (
-    <p
-      className={cn(
-        "rounded-[var(--radius-control)] border px-3 py-2 text-xs leading-5",
-        tone === "success"
-          ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-fg)]"
-          : "border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]",
-      )}
-    >
-      {text}
-    </p>
-  );
-}
-
-function IconAction({
-  icon: Icon,
-  label,
-  loading,
-  disabled,
-  onClick,
-}: {
-  icon: typeof Save;
-  label: string;
-  loading?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled || loading}
-      className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-xs font-medium text-[var(--fg-0)] transition hover:bg-[var(--bg-2)] disabled:opacity-55 sm:min-h-9"
-    >
-      {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
-      {label}
-    </button>
   );
 }
