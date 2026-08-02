@@ -203,10 +203,12 @@ class GenerationOut(BaseOut):
     status: str
     progress_stage: str
     attempt: int
+    execution_epoch: int = 0
     error_code: str | None
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    cancel_requested_at: datetime | None = None
     is_dual_race_bonus: bool = False
     billing_free: bool = False
     billing_label: str | None = None
@@ -244,10 +246,12 @@ class CompletionOut(BaseOut):
     status: str
     progress_stage: str
     attempt: int
+    execution_epoch: int = 0
     error_code: str | None
     error_message: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    cancel_requested_at: datetime | None = None
     source: str | None = None
     action_source: str | None = None
     trace_id: str | None = None

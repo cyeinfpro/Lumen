@@ -10,41 +10,36 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import billing_values as _billing_values
+from .billing_estimates import (  # noqa: F401 - re-export for billing_core.X callers
+    completion_breakdown_from_snapshot,
+    completion_pricing_snapshot,
+    estimate_completion_breakdown,
+    estimate_completion_cost,
+    estimate_image_cost,
+    estimate_image_cost_for_tier,
+    pricing_price_micro,
+)
+from .pricing import (  # noqa: F401 - re-export for billing_core.X callers
+    CostBreakdown,
+    UsageTokens,
+)
 from .models import (
-    PricingRule,
     UserWallet,
     WalletTransaction,
     new_uuid7,
 )
-from .pricing import (
-    CostBreakdown,
-    ModelPricing,
-    UsageTokens,
-    compute_breakdown,
-    missing_pricing_buckets,
-    model_pricing_from_snapshot,
-)
-from .pricing_resolver import PricingResolver
 
 
 _IDEMPOTENCY_FINGERPRINT_KEY = "_billing_idempotency_fingerprint"
 logger = logging.getLogger(__name__)
 
-
-class BillingError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.status_code = status_code
-
-
+BillingError = _billing_values.BillingError
 MICRO_RMB = _billing_values.MICRO_RMB
 DEFAULT_IMAGE_SIZE_THRESHOLDS = _billing_values.DEFAULT_IMAGE_SIZE_THRESHOLDS
 CROCKFORD_REDEMPTION_ALPHABET = _billing_values.CROCKFORD_REDEMPTION_ALPHABET
@@ -285,213 +280,6 @@ async def _insert_tx(
     return tx
 
 
-async def pricing_price_micro(
-    db: AsyncSession,
-    *,
-    scope: str,
-    key: str,
-    unit: str,
-    variant: str = "default",
-) -> int | None:
-    return (
-        await db.execute(
-            select(PricingRule.price_micro).where(
-                PricingRule.scope == scope,
-                PricingRule.key == key,
-                PricingRule.variant == variant,
-                PricingRule.unit == unit,
-                PricingRule.enabled.is_(True),
-            )
-        )
-    ).scalar_one_or_none()
-
-
-async def estimate_image_cost(
-    db: AsyncSession,
-    *,
-    size_px: int,
-    n: int = 1,
-    thresholds: dict[str, int] | None = None,
-) -> tuple[int, str]:
-    tier = tier_for_pixels(size_px, thresholds)
-    unit = await pricing_price_micro(db, scope="image_size", key=tier, unit="per_image")
-    if unit is None or int(unit) <= 0:
-        raise BillingError(
-            "PRICING_MISSING",
-            f"missing enabled image pricing rule for {tier}",
-            503,
-        )
-    return int(unit) * max(1, int(n)), tier
-
-
-async def estimate_image_cost_for_tier(
-    db: AsyncSession,
-    *,
-    tier: str,
-    n: int = 1,
-) -> tuple[int, str]:
-    unit = await pricing_price_micro(db, scope="image_size", key=tier, unit="per_image")
-    if unit is None or int(unit) <= 0:
-        raise BillingError(
-            "PRICING_MISSING",
-            f"missing enabled image pricing rule for {tier}",
-            503,
-        )
-    return int(unit) * max(1, int(n)), tier
-
-
-async def estimate_completion_cost(
-    db: AsyncSession,
-    *,
-    model: str,
-    tokens_in: int,
-    tokens_out: int,
-    cache_read_tokens: int = 0,
-    cache_creation_tokens: int = 0,
-    cache_creation_5m_tokens: int = 0,
-    cache_creation_1h_tokens: int = 0,
-    reasoning_tokens: int = 0,
-    image_output_tokens: int = 0,
-    rate_multiplier_x10000: int = 10_000,
-    service_tier: str = "standard",
-) -> int:
-    breakdown = await estimate_completion_breakdown(
-        db,
-        model=model,
-        tokens=UsageTokens(
-            input_tokens=tokens_in,
-            output_tokens=tokens_out,
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-            cache_creation_5m_tokens=cache_creation_5m_tokens,
-            cache_creation_1h_tokens=cache_creation_1h_tokens,
-            reasoning_tokens=reasoning_tokens,
-            image_output_tokens=image_output_tokens,
-        ),
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        service_tier=service_tier,
-    )
-    return breakdown.actual_cost_micro
-
-
-async def estimate_completion_breakdown(
-    db: AsyncSession,
-    *,
-    model: str,
-    tokens: UsageTokens,
-    rate_multiplier_x10000: int = 10_000,
-    service_tier: str = "standard",
-    channel: str | None = None,
-    resolver: PricingResolver | None = None,
-) -> CostBreakdown:
-    pricing = await (resolver or PricingResolver()).resolve(db, model, channel=channel)
-    missing_buckets = missing_pricing_buckets(
-        pricing,
-        tokens,
-        service_tier=service_tier,
-    )
-    if pricing.pricing_source == "missing" or missing_buckets:
-        detail = (
-            f"; missing rates for {', '.join(missing_buckets)}"
-            if missing_buckets
-            else ""
-        )
-        raise BillingError(
-            "PRICING_MISSING",
-            f"missing enabled chat pricing rule for {model}{detail}",
-            503,
-        )
-    if int(rate_multiplier_x10000) < 0:
-        raise BillingError(
-            "PRICING_MISSING",
-            f"negative billing multiplier for {model}",
-            503,
-        )
-    return compute_breakdown(
-        pricing,
-        tokens,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        service_tier=service_tier,
-    )
-
-
-async def completion_pricing_snapshot(
-    db: AsyncSession,
-    *,
-    model: str,
-    service_tier: str = "standard",
-    channel: str | None = None,
-    resolver: PricingResolver | None = None,
-) -> dict[str, Any]:
-    pricing = await (resolver or PricingResolver()).resolve(
-        db,
-        model,
-        channel=channel,
-    )
-    probe_usage = UsageTokens(input_tokens=1, output_tokens=1)
-    missing_buckets = missing_pricing_buckets(
-        pricing,
-        probe_usage,
-        service_tier=service_tier,
-    )
-    if pricing.pricing_source == "missing" or missing_buckets:
-        detail = (
-            f"; missing rates for {', '.join(missing_buckets)}"
-            if missing_buckets
-            else ""
-        )
-        raise BillingError(
-            "PRICING_MISSING",
-            f"missing enabled chat pricing rule for {model}{detail}",
-            503,
-        )
-    return pricing.with_defaults().model_dump()
-
-
-def completion_breakdown_from_snapshot(
-    snapshot: dict[str, Any],
-    *,
-    model: str,
-    tokens: UsageTokens,
-    rate_multiplier_x10000: int = 10_000,
-    service_tier: str = "standard",
-) -> CostBreakdown:
-    try:
-        pricing: ModelPricing = model_pricing_from_snapshot(snapshot)
-    except ValueError as exc:
-        raise BillingError(
-            "PRICING_SNAPSHOT_INVALID",
-            f"invalid billing pricing snapshot for {model}",
-            500,
-        ) from exc
-    missing_buckets = missing_pricing_buckets(
-        pricing,
-        tokens,
-        service_tier=service_tier,
-    )
-    if missing_buckets:
-        raise BillingError(
-            "PRICING_SNAPSHOT_INVALID",
-            (
-                f"billing pricing snapshot for {model} is missing rates for "
-                f"{', '.join(missing_buckets)}"
-            ),
-            500,
-        )
-    if int(rate_multiplier_x10000) < 0:
-        raise BillingError(
-            "PRICING_SNAPSHOT_INVALID",
-            f"negative billing multiplier for {model}",
-            500,
-        )
-    return compute_breakdown(
-        pricing,
-        tokens,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        service_tier=service_tier,
-    )
-
-
 async def hold(
     db: AsyncSession,
     user_id: str,
@@ -556,9 +344,12 @@ async def _held_amount_for_ref(
 ) -> int:
     """Return the still-outstanding hold amount for ref_id, in µRMB.
 
-    Returns 0 if there is no hold OR if a `settle` / `release` for the same
-    ref_id has already consumed it. This protects against double settle/release
-    on the same generation, which would otherwise double-credit the user.
+    Sums ALL unconsumed holds for the ref — the same ref can be held more
+    than once, and taking only the newest hold would leave earlier holds
+    stranded in hold_micro forever. Returns 0 if there is no hold OR if a
+    `settle` / `release` for the same ref_id has already consumed it. This
+    protects against double settle/release on the same generation, which
+    would otherwise double-credit the user.
     """
     consumed = (
         await db.execute(
@@ -574,20 +365,19 @@ async def _held_amount_for_ref(
     ).scalar_one_or_none()
     if consumed is not None:
         return 0
-    tx = (
+    total = (
         await db.execute(
-            select(WalletTransaction)
+            select(func.coalesce(func.sum(WalletTransaction.amount_micro), 0))
             .where(
                 WalletTransaction.user_id == user_id,
                 WalletTransaction.kind == "hold",
                 WalletTransaction.ref_type == ref_type,
                 WalletTransaction.ref_id == ref_id,
             )
-            .order_by(WalletTransaction.created_at.desc())
-            .limit(1)
         )
-    ).scalar_one_or_none()
-    return max(0, -int(tx.amount_micro)) if tx is not None else 0
+    ).scalar_one()
+    # hold 行一律为负（amount_micro = -hold 金额），取和取反即未消费总额。
+    return max(0, -int(total))
 
 
 async def _existing_ref_consumption_tx(
@@ -609,6 +399,38 @@ async def _existing_ref_consumption_tx(
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+def _consumption_settled_cost_micro(consumed: Any) -> int:
+    """Return the cost already recorded by an existing consumption tx, 0 if none.
+
+    Only a `settle` that recorded a positive cost counts as a real settlement
+    for the double-settlement guard. A `release` only refunds the hold and
+    bills nothing, and a zero-amount settle records no cost either — both leave
+    the upstream cost unrecorded, so they must not satisfy the guard, otherwise
+    a later confirmed charge on the same ref would be silently swallowed and
+    the platform would absorb the upstream cost.
+    """
+    if getattr(consumed, "kind", None) != "settle":
+        return 0
+    meta = getattr(consumed, "meta", None)
+    if isinstance(meta, Mapping):
+        try:
+            return max(0, int(meta["actual_micro"]))
+        except (TypeError, ValueError, KeyError):
+            pass
+    # 老流水可能没有 meta：按 amount_micro 推断。settle 的
+    # amount_micro = held - actual：负数是超授权直扣、正数是结算后退回
+    # 部分 hold、零是 hold 恰等于成本——三者都真实记录过成本。零成本结算
+    # （record_zero）在无 meta 时代根本不会落库（早期 settle 直接 return
+    # None），现代零成本结算又必然写入 actual_micro=0 走上面的 meta 分支，
+    # 所以落到这里的 settle 一律视为已结算，避免同一 ref 二次计费。
+    legacy_amount = int(getattr(consumed, "amount_micro", 0) or 0)
+    if legacy_amount < 0:
+        return -legacy_amount
+    # 退款方向/零 delta 的老 settle 无法还原已记录成本，用正数哨兵让
+    # 守卫判定为已结算（守卫只关心 > 0）。
+    return 1
 
 
 async def settle(
@@ -654,10 +476,15 @@ async def settle(
     if existing is not None:
         return existing
     # The per-user wallet row lock serializes settle/release for the same ref.
-    # Once either path records a consumption transaction, later attempts return
-    # that transaction instead of mutating balances again.
+    # Once a real settlement (kind=settle with a positive recorded cost) exists,
+    # later attempts return that transaction instead of mutating balances again.
+    # A prior `release` (or a zero-amount settle) is NOT a settlement: it only
+    # refunded the hold, and the upstream cost was never recorded. Falling
+    # through here charges `actual` in full with held=0 — the same direct-debit
+    # semantics as `charge` — so a misjudged release (proven_absent is
+    # heuristic) cannot silently erase a real upstream charge from the ledger.
     consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
-    if consumed is not None:
+    if consumed is not None and _consumption_settled_cost_micro(consumed) > 0:
         return consumed
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
     before_balance = wallet.balance_micro
@@ -794,6 +621,14 @@ async def charge(
     )
     if existing is not None:
         return existing
+    # 与 settle/release 对齐的 ref 消费守卫：同一 ref 若已被真实结算
+    # （kind=settle 且记录了正成本），再走 charge 直扣就是重复扣费，返回
+    # 既有流水、不再动余额。此前只有 release（或零成本 settle）则不阻塞：
+    # release 只是退回 hold、上游成本并未记账，若上游实际扣了费，直扣路径
+    # 必须照记（纯转嫁），与 settle 对 release 的落空处理保持一致。
+    consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
+    if consumed is not None and _consumption_settled_cost_micro(consumed) > 0:
+        return consumed
     before_balance = wallet.balance_micro
     # 纯转嫁：charge 走的是「没有预授权、上游已经扣过费」的直扣路径，金额必须
     # 全额落到用户头上。这里曾有 cap_overdraw 开关：默认 True 时余额不足就把
@@ -827,6 +662,67 @@ async def charge(
     )
 
 
+def _adjust_idempotency_key(
+    user_id: str,
+    amount_micro: int,
+    *,
+    admin_id: str,
+    reason: str,
+) -> str:
+    """Derive a fallback key for adjustments submitted without a caller key.
+
+    A random key would make adjust() non-idempotent: double-clicking the admin
+    button or an HTTP retry would credit/debit the wallet twice (both directions
+    are a loss). Hashing the operation inputs lets adjust() detect a repeat
+    submission. The hash cannot tell a retry of one operation apart from a
+    second, independent adjustment with identical inputs, so adjust() rejects
+    a derived-key hit (ADJUST_REPLAYED) instead of silently returning the first
+    transaction. Callers that may legitimately submit identical adjustments
+    more than once (for example repeated compensation that reuses the same
+    reason text) MUST pass their own per-operation idempotency_key.
+    """
+    payload = json.dumps(
+        {
+            "user_id": user_id,
+            "amount_micro": amount_micro,
+            "admin_id": admin_id,
+            "reason": reason,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"adjust:{hashlib.sha256(payload).hexdigest()[:32]}"
+
+
+def _adjust_replay(
+    existing: WalletTransaction | None,
+    *,
+    caller_key: bool,
+) -> WalletTransaction | None:
+    """Resolve an idempotency hit for admin adjustments.
+
+    With a caller-supplied key the hit is a retry of the same logical operation
+    (double-click / HTTP retry / response loss): return the original
+    transaction so the retry reports the same success without touching the
+    balance again. Without a caller key the key is derived from the inputs, so
+    the hit may also be an independent second adjustment with identical amount
+    and reason — silently returning the old row would swallow real money
+    movement in both directions (compensation never credited, recovery never
+    debited), so reject it and let the caller retry with a fresh per-operation
+    key.
+    """
+    if existing is None:
+        return None
+    if caller_key:
+        return existing
+    raise BillingError(
+        "ADJUST_REPLAYED",
+        "an adjustment with identical amount and reason was already applied; "
+        "pass a fresh per-operation idempotency_key to apply another",
+        409,
+    )
+
+
 async def adjust(
     db: AsyncSession,
     user_id: str,
@@ -838,8 +734,24 @@ async def adjust(
     allow_negative: bool = False,
     min_balance_micro: int | None = None,
 ) -> WalletTransaction:
+    """Apply a signed admin adjustment to a user's wallet.
+
+    idempotency_key: optional caller-supplied per-operation key. Generate a new
+        key for each distinct adjustment (one UUID per form submission) and
+        reuse the same key when retrying that submission; a replay of the same
+        key returns the original transaction without changing the balance. When
+        omitted, a key is derived from (user_id, amount_micro, admin_id,
+        reason) and a repeat submission with identical inputs raises
+        ADJUST_REPLAYED rather than silently deduplicating, because it may be
+        an independent second adjustment that must not be swallowed.
+    """
     amount = int(amount_micro_signed)
-    key = idempotency_key or f"adjust:{new_uuid7()}"
+    key = idempotency_key or _adjust_idempotency_key(
+        user_id,
+        amount,
+        admin_id=admin_id,
+        reason=reason,
+    )
     semantics = _IdempotencySemantics(
         kind="adjust_admin",
         ref_type="admin_adjust",
@@ -849,16 +761,22 @@ async def adjust(
         legacy_transaction_amount_micro=amount,
         created_by_admin=admin_id,
     )
-    existing = _idempotent_replay(
-        await _existing_tx(db, user_id, key),
-        semantics,
+    existing = _adjust_replay(
+        _idempotent_replay(
+            await _existing_tx(db, user_id, key),
+            semantics,
+        ),
+        caller_key=idempotency_key is not None,
     )
     if existing is not None:
         return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = _idempotent_replay(
-        await _existing_tx(db, user_id, key),
-        semantics,
+    existing = _adjust_replay(
+        _idempotent_replay(
+            await _existing_tx(db, user_id, key),
+            semantics,
+        ),
+        caller_key=idempotency_key is not None,
     )
     if existing is not None:
         return existing

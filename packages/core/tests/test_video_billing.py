@@ -97,6 +97,23 @@ def test_video_billing_model_uses_mini_when_upstream_or_model_is_mini() -> None:
         )
         == "seedance-2.0-mini"
     )
+    # 回归：video-ds-2-0-mini 与 fast 正则对称（_SEEDANCE_20_FAST_RE 已覆盖
+    # video-ds-2-0-fast），mini 正则漏配会导致该上游 id 被子串判定落到标准版
+    # seedance-2.0，按 20 元/MTok 而非 mini 的 23 元/MTok 结算，平台少收。
+    assert (
+        video_billing.video_billing_model(
+            "video-ds-2.0-mini",
+            "video-ds-2.0-mini",
+        )
+        == "seedance-2.0-mini"
+    )
+    assert (
+        video_billing.video_billing_model(
+            "seedance-2.0",
+            "video-ds-2-0-mini",
+        )
+        == "seedance-2.0-mini"
+    )
 
 
 def test_video_token_upper_bound_rejects_invalid_values() -> None:

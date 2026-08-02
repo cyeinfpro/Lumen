@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from lumen_core.constants import GenerationErrorCode as EC
@@ -8,13 +10,18 @@ from lumen_core.upstream_billing import (
     LocalBillingAction,
     UpstreamCostKnowledge,
     classify_upstream_cost,
+    clear_upstream_execution_receipts,
+    clear_upstream_execution_state,
     decide_image_failure_billing,
     decide_upstream_billing,
+    has_upstream_dispatch_receipt,
     has_upstream_response_receipt,
     is_no_upstream_cost_receipt,
     mark_upstream_dispatch_started,
     mark_upstream_response_received,
     resolve_billing_action,
+    upstream_dispatch_can_replay,
+    upstream_dispatch_result_unknown,
 )
 
 
@@ -48,6 +55,80 @@ def test_upstream_response_receipt_requires_a_positive_response_marker() -> None
     )
     assert has_upstream_response_receipt(request) is True
     assert request["upstream_response_attempt"] == 1
+
+
+def test_receipts_are_scoped_to_the_current_execution_epoch() -> None:
+    request = mark_upstream_response_received(
+        {},
+        at="2026-07-30T00:00:01+00:00",
+        attempt=1,
+        execution_epoch=4,
+    )
+    old_task = SimpleNamespace(upstream_request=request, execution_epoch=4)
+    retried_task = SimpleNamespace(upstream_request=request, execution_epoch=5)
+
+    assert has_upstream_dispatch_receipt(old_task) is True
+    assert has_upstream_response_receipt(old_task) is True
+    assert has_upstream_dispatch_receipt(retried_task) is False
+    assert has_upstream_response_receipt(retried_task) is False
+
+
+def test_manual_retry_receipt_cleanup_preserves_unrelated_request_fields() -> None:
+    request = mark_upstream_response_received(
+        {"model": "image-model", "billing_retry_count": 2},
+        at="2026-07-30T00:00:01+00:00",
+        attempt=1,
+        execution_epoch=7,
+    )
+
+    cleared = clear_upstream_execution_receipts(request)
+
+    assert cleared == {"model": "image-model", "billing_retry_count": 2}
+    assert has_upstream_dispatch_receipt(cleared) is False
+    assert has_upstream_response_receipt(cleared) is False
+
+
+def test_manual_retry_execution_cleanup_removes_provider_identity() -> None:
+    request = {
+        "model": "image-model",
+        "render_quality": "high",
+        "trace_id": "trace-old",
+        "sidecar_execution": {"job_id": "job-old"},
+        "provider_idempotency_key": "provider-key-old",
+        "provider_idempotency_stable": True,
+        "provider": "provider-a",
+        "actual_provider": "provider-a",
+        "actual_route": "image_jobs",
+        "image_job_url": "https://sidecar.example/job-old",
+        "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+        "upstream_dispatch_attempt": 1,
+        "upstream_dispatch_execution_epoch": 4,
+    }
+
+    cleared = clear_upstream_execution_state(request)
+
+    assert cleared == {"model": "image-model", "render_quality": "high"}
+
+
+def test_dispatch_without_response_requires_unknown_unless_replay_is_safe() -> None:
+    request = mark_upstream_dispatch_started(
+        {},
+        at="2026-07-30T00:00:00+00:00",
+        attempt=1,
+        execution_epoch=3,
+    )
+    task = SimpleNamespace(upstream_request=request, execution_epoch=3)
+
+    assert upstream_dispatch_can_replay(task) is False
+    assert upstream_dispatch_result_unknown(task) is True
+
+    task.upstream_request = {
+        **request,
+        "provider_idempotency_key": "provider-stable-key",
+        "provider_idempotency_stable": True,
+    }
+    assert upstream_dispatch_can_replay(task) is True
+    assert upstream_dispatch_result_unknown(task) is False
 
 
 def test_billable_false_without_local_receipt_stays_unknown() -> None:

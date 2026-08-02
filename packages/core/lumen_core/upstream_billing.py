@@ -23,6 +23,51 @@ from .constants import GenerationErrorCode
 
 UPSTREAM_DISPATCH_STARTED_AT = "upstream_dispatch_started_at"
 UPSTREAM_RESPONSE_RECEIVED_AT = "upstream_response_received_at"
+UPSTREAM_DISPATCH_ATTEMPT = "upstream_dispatch_attempt"
+UPSTREAM_RESPONSE_ATTEMPT = "upstream_response_attempt"
+UPSTREAM_DISPATCH_EXECUTION_EPOCH = "upstream_dispatch_execution_epoch"
+UPSTREAM_RESPONSE_EXECUTION_EPOCH = "upstream_response_execution_epoch"
+UPSTREAM_DISPATCH_DELIVERY = "upstream_dispatch_delivery"
+UPSTREAM_DISPATCH_PROVEN_UNDELIVERED = "proven_undelivered"
+PROVIDER_IDEMPOTENCY_KEY = "provider_idempotency_key"
+PROVIDER_IDEMPOTENCY_STABLE = "provider_idempotency_stable"
+UPSTREAM_TRACE_ID = "trace_id"
+UPSTREAM_SIDECAR_EXECUTION = "sidecar_execution"
+
+_UPSTREAM_EXECUTION_RECEIPT_KEYS = frozenset(
+    {
+        UPSTREAM_DISPATCH_STARTED_AT,
+        UPSTREAM_RESPONSE_RECEIVED_AT,
+        UPSTREAM_DISPATCH_ATTEMPT,
+        UPSTREAM_RESPONSE_ATTEMPT,
+        UPSTREAM_DISPATCH_EXECUTION_EPOCH,
+        UPSTREAM_RESPONSE_EXECUTION_EPOCH,
+        UPSTREAM_DISPATCH_DELIVERY,
+    }
+)
+
+_UPSTREAM_EXECUTION_IDENTITY_KEYS = frozenset(
+    {
+        PROVIDER_IDEMPOTENCY_KEY,
+        PROVIDER_IDEMPOTENCY_STABLE,
+        UPSTREAM_TRACE_ID,
+        UPSTREAM_SIDECAR_EXECUTION,
+        "execution_epoch",
+        "provider",
+        "actual_provider",
+        "request_event_provider",
+        "actual_route",
+        "actual_endpoint",
+        "actual_source",
+        "upstream_route",
+        "provider_attempts",
+        "route_diagnostics",
+        "generation_diagnostics",
+        "upstream_duration_ms",
+        "safe_error_summary",
+    }
+)
+_UPSTREAM_EXECUTION_IDENTITY_PREFIXES = ("image_job_",)
 
 
 class UpstreamCostKnowledge(StrEnum):
@@ -113,15 +158,107 @@ def upstream_request_dict(task_or_request: object) -> dict[str, object]:
     return dict(request) if isinstance(request, dict) else {}
 
 
+def task_execution_epoch(task_or_request: object) -> int | None:
+    raw = getattr(task_or_request, "execution_epoch", None)
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalized_nonnegative_int(value: object) -> int | None:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _receipt_matches_execution(
+    task_or_request: object,
+    *,
+    marker_key: str,
+    epoch_key: str,
+    execution_epoch: int | None,
+) -> bool:
+    request = upstream_request_dict(task_or_request)
+    marker = request.get(marker_key)
+    if not isinstance(marker, str) or not marker.strip():
+        return False
+    expected_epoch = (
+        task_execution_epoch(task_or_request)
+        if execution_epoch is None
+        else _normalized_nonnegative_int(execution_epoch)
+    )
+    if expected_epoch is None:
+        return True
+    marker_epoch = _normalized_nonnegative_int(request.get(epoch_key))
+    if marker_epoch is None:
+        # Legacy receipts predate durable execution epochs. They are valid only
+        # for the initial epoch; any manual retry advances the row beyond them.
+        return expected_epoch == 0
+    return marker_epoch == expected_epoch
+
+
+def clear_upstream_execution_receipts(
+    task_or_request: object,
+) -> dict[str, object]:
+    request = upstream_request_dict(task_or_request)
+    for key in _UPSTREAM_EXECUTION_RECEIPT_KEYS:
+        request.pop(key, None)
+    return request
+
+
+def clear_upstream_execution_state(
+    task_or_request: object,
+) -> dict[str, object]:
+    """Remove receipts and provider identity before a new manual execution."""
+
+    request = clear_upstream_execution_receipts(task_or_request)
+    for key in tuple(request):
+        if key in _UPSTREAM_EXECUTION_IDENTITY_KEYS or key.startswith(
+            _UPSTREAM_EXECUTION_IDENTITY_PREFIXES
+        ):
+            request.pop(key, None)
+    return request
+
+
 def mark_upstream_dispatch_started(
     task_or_request: object,
     *,
     at: str,
     attempt: int,
+    execution_epoch: int | None = None,
 ) -> dict[str, object]:
     request = upstream_request_dict(task_or_request)
     request[UPSTREAM_DISPATCH_STARTED_AT] = at
-    request["upstream_dispatch_attempt"] = max(0, int(attempt))
+    request[UPSTREAM_DISPATCH_ATTEMPT] = max(0, int(attempt))
+    epoch = (
+        task_execution_epoch(task_or_request)
+        if execution_epoch is None
+        else _normalized_nonnegative_int(execution_epoch)
+    )
+    if epoch is not None:
+        request[UPSTREAM_DISPATCH_EXECUTION_EPOCH] = epoch
+    request.pop(UPSTREAM_DISPATCH_DELIVERY, None)
+    return request
+
+
+def mark_upstream_dispatch_proven_undelivered(
+    task_or_request: object,
+    *,
+    at: str,
+    attempt: int,
+    execution_epoch: int | None = None,
+) -> dict[str, object]:
+    request = mark_upstream_dispatch_started(
+        task_or_request,
+        at=at,
+        attempt=attempt,
+        execution_epoch=execution_epoch,
+    )
+    request[UPSTREAM_DISPATCH_DELIVERY] = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
     return request
 
 
@@ -130,20 +267,124 @@ def mark_upstream_response_received(
     *,
     at: str,
     attempt: int,
+    execution_epoch: int | None = None,
 ) -> dict[str, object]:
     request = mark_upstream_dispatch_started(
         task_or_request,
         at=at,
         attempt=attempt,
+        execution_epoch=execution_epoch,
     )
     request[UPSTREAM_RESPONSE_RECEIVED_AT] = at
-    request["upstream_response_attempt"] = max(0, int(attempt))
+    request[UPSTREAM_RESPONSE_ATTEMPT] = max(0, int(attempt))
+    epoch = (
+        task_execution_epoch(task_or_request)
+        if execution_epoch is None
+        else _normalized_nonnegative_int(execution_epoch)
+    )
+    if epoch is not None:
+        request[UPSTREAM_RESPONSE_EXECUTION_EPOCH] = epoch
     return request
 
 
-def has_upstream_response_receipt(task_or_request: object) -> bool:
-    value = upstream_request_dict(task_or_request).get(UPSTREAM_RESPONSE_RECEIVED_AT)
-    return isinstance(value, str) and bool(value.strip())
+def has_upstream_dispatch_receipt(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    return _receipt_matches_execution(
+        task_or_request,
+        marker_key=UPSTREAM_DISPATCH_STARTED_AT,
+        epoch_key=UPSTREAM_DISPATCH_EXECUTION_EPOCH,
+        execution_epoch=execution_epoch,
+    )
+
+
+def has_upstream_response_receipt(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    return _receipt_matches_execution(
+        task_or_request,
+        marker_key=UPSTREAM_RESPONSE_RECEIVED_AT,
+        epoch_key=UPSTREAM_RESPONSE_EXECUTION_EPOCH,
+        execution_epoch=execution_epoch,
+    )
+
+
+def has_proven_undelivered_dispatch(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    request = upstream_request_dict(task_or_request)
+    return bool(
+        has_upstream_dispatch_receipt(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+        and request.get(UPSTREAM_DISPATCH_DELIVERY)
+        == UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+    )
+
+
+def has_stable_provider_idempotency_key(task_or_request: object) -> bool:
+    request = upstream_request_dict(task_or_request)
+    key = request.get(PROVIDER_IDEMPOTENCY_KEY)
+    stable = request.get(PROVIDER_IDEMPOTENCY_STABLE)
+    return isinstance(key, str) and bool(key.strip()) and stable is True
+
+
+def upstream_dispatch_can_replay(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    if not has_upstream_dispatch_receipt(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ):
+        return True
+    return has_proven_undelivered_dispatch(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ) or has_stable_provider_idempotency_key(task_or_request)
+
+
+def upstream_dispatch_result_unknown(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    return bool(
+        has_upstream_dispatch_receipt(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+        and not upstream_dispatch_can_replay(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+    )
+
+
+def receipt_execution_identity(
+    task_or_request: object,
+    *,
+    response: bool = False,
+) -> tuple[int | None, int | None]:
+    request = upstream_request_dict(task_or_request)
+    attempt_key = UPSTREAM_RESPONSE_ATTEMPT if response else UPSTREAM_DISPATCH_ATTEMPT
+    epoch_key = (
+        UPSTREAM_RESPONSE_EXECUTION_EPOCH
+        if response
+        else UPSTREAM_DISPATCH_EXECUTION_EPOCH
+    )
+    return (
+        _normalized_nonnegative_int(request.get(attempt_key)),
+        _normalized_nonnegative_int(request.get(epoch_key)),
+    )
 
 
 def is_no_upstream_cost_receipt(reason: str | None) -> bool:
@@ -242,18 +483,38 @@ __all__ = [
     "IMAGE_FAILED_BEFORE_UPSTREAM_COST",
     "IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES",
     "NO_UPSTREAM_COST_RECEIPTS",
+    "PROVIDER_IDEMPOTENCY_KEY",
+    "PROVIDER_IDEMPOTENCY_STABLE",
+    "UPSTREAM_DISPATCH_ATTEMPT",
+    "UPSTREAM_DISPATCH_DELIVERY",
+    "UPSTREAM_DISPATCH_EXECUTION_EPOCH",
+    "UPSTREAM_DISPATCH_PROVEN_UNDELIVERED",
     "UPSTREAM_DISPATCH_STARTED_AT",
+    "UPSTREAM_RESPONSE_ATTEMPT",
+    "UPSTREAM_RESPONSE_EXECUTION_EPOCH",
     "UPSTREAM_RESPONSE_RECEIVED_AT",
+    "UPSTREAM_SIDECAR_EXECUTION",
+    "UPSTREAM_TRACE_ID",
     "LocalBillingAction",
     "UpstreamBillingDecision",
     "UpstreamCostKnowledge",
     "classify_upstream_cost",
+    "clear_upstream_execution_receipts",
+    "clear_upstream_execution_state",
     "decide_image_failure_billing",
     "decide_upstream_billing",
+    "has_proven_undelivered_dispatch",
+    "has_stable_provider_idempotency_key",
+    "has_upstream_dispatch_receipt",
     "has_upstream_response_receipt",
     "is_no_upstream_cost_receipt",
     "mark_upstream_dispatch_started",
+    "mark_upstream_dispatch_proven_undelivered",
     "mark_upstream_response_received",
+    "receipt_execution_identity",
     "resolve_billing_action",
+    "task_execution_epoch",
+    "upstream_dispatch_can_replay",
+    "upstream_dispatch_result_unknown",
     "upstream_request_dict",
 ]
