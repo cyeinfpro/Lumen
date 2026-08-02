@@ -25,6 +25,8 @@ import {
   requestSessionInvalidation,
   setRealtimeRuntimeStatus,
 } from "@/lib/runtimeResilience";
+import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
+import { notifyAuthSessionChanged } from "@/lib/auth/sessionChangeBus";
 import { useSSE, type SSEHandlers } from "./useSSE";
 import {
   disposeChatStoreRuntime,
@@ -86,7 +88,32 @@ type InitialSnapshotFlight = {
   controller: AbortController;
   connectionGeneration: number;
   userScope: string;
+  userId: string | null;
+  identityEpoch: number;
 };
+
+type SnapshotIdentity = {
+  userScope: string;
+  userId: string | null;
+  identityEpoch: number;
+};
+
+type RecentSnapshot = SnapshotIdentity & {
+  syncedAt: number;
+};
+
+function shouldSkipRecentSnapshot(
+  recent: RecentSnapshot,
+  identity: SnapshotIdentity,
+  now = Date.now(),
+): boolean {
+  return (
+    recent.userScope === identity.userScope &&
+    recent.userId === identity.userId &&
+    recent.identityEpoch === identity.identityEpoch &&
+    now - recent.syncedAt <= RECENT_SNAPSHOT_WINDOW_MS
+  );
+}
 
 function staleSnapshotError(): Error {
   const error = new Error("stale snapshot generation");
@@ -98,10 +125,16 @@ function assertSnapshotCurrent(
   signal: AbortSignal,
   context: SnapshotExecutionContext,
   expectedUserScope: string,
+  expectedUserId: string | null,
+  expectedIdentityEpoch: number,
 ): void {
   signal.throwIfAborted();
+  const identity = getPrivateIdentitySnapshot();
   if (
     context.userScope !== expectedUserScope ||
+    useChatStore.getState().currentUserId !== expectedUserId ||
+    identity.userId !== expectedUserId ||
+    identity.epoch !== expectedIdentityEpoch ||
     !context.isCurrent()
   ) {
     throw staleSnapshotError();
@@ -209,13 +242,21 @@ async function refreshCompletions(
   signal: AbortSignal,
   context: SnapshotExecutionContext,
   userScope: string,
+  userId: string | null,
+  identityEpoch: number,
 ): Promise<void> {
   const ids = completionIds(useChatStore.getState().messages).slice(0, 16);
   await Promise.all(
     ids.map(async (id) => {
       try {
         const completion = await getTask("completions", id);
-        assertSnapshotCurrent(signal, context, userScope);
+        assertSnapshotCurrent(
+          signal,
+          context,
+          userScope,
+          userId,
+          identityEpoch,
+        );
         applyCompletionSnapshot(completion);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
@@ -271,28 +312,50 @@ async function invalidateSnapshotQueries(
 export function useLumenRealtime(): void {
   const userId = useChatStore((state) => state.currentUserId);
   const queryClient = useQueryClient();
-  const lastSnapshot = useRef({ userScope: "", syncedAt: 0 });
+  const lastSnapshot = useRef<RecentSnapshot>({
+    userScope: "",
+    userId: null,
+    identityEpoch: -1,
+    syncedAt: 0,
+  });
   const initialSnapshotFlight = useRef<InitialSnapshotFlight | null>(null);
 
   const channels = useMemo(() => channelsFor(userId), [userId]);
   const userScope = channels.join(",");
+  const identityEpoch = getPrivateIdentitySnapshot().epoch;
+  const isRealtimeScopeCurrent = useCallback(
+    (scopeIdentity: string) => {
+      const identity = getPrivateIdentitySnapshot();
+      return (
+        scopeIdentity === userScope &&
+        useChatStore.getState().currentUserId === userId &&
+        identity.userId === userId &&
+        identity.epoch === identityEpoch
+      );
+    },
+    [identityEpoch, userId, userScope],
+  );
 
   const effectContext = useMemo<LumenRealtimeEffectContext>(
     () => ({
       applyStoreEvent(name, payload) {
+        if (!isRealtimeScopeCurrent(userScope)) return;
         useChatStore.getState().applySSEEvent(name, payload);
       },
       invalidateTasks() {
+        if (!isRealtimeScopeCurrent(userScope)) return;
         void queryClient.invalidateQueries({
           queryKey: userScopedQueryKey(userId, ["tasks"]),
         });
       },
       invalidateConversations() {
+        if (!isRealtimeScopeCurrent(userScope)) return;
         void queryClient.invalidateQueries({
           queryKey: qk.user(userId).conversationsAll(),
         });
       },
       invalidateMemorySettings() {
+        if (!isRealtimeScopeCurrent(userScope)) return;
         void queryClient.invalidateQueries({
           queryKey: userMemoryQueryKeys.settings(userId),
         });
@@ -301,6 +364,7 @@ export function useLumenRealtime(): void {
         });
       },
       invalidateConversationMemory(nextConversationId) {
+        if (!isRealtimeScopeCurrent(userScope)) return;
         void queryClient.invalidateQueries({
           queryKey: userConversationQueryKeys.usedMemories(
             userId,
@@ -309,7 +373,7 @@ export function useLumenRealtime(): void {
         });
       },
     }),
-    [queryClient, userId],
+    [isRealtimeScopeCurrent, queryClient, userId, userScope],
   );
   const router = useMemo(
     () => new EventRouter(createLumenEffectRegistry(EVENT_NAMES, effectContext)),
@@ -345,15 +409,33 @@ export function useLumenRealtime(): void {
 
   const recoverSnapshot = useCallback<SnapshotAdapter>(
     async (scopes, _reason, signal, context) => {
-      assertSnapshotCurrent(signal, context, userScope);
+      assertSnapshotCurrent(
+        signal,
+        context,
+        userScope,
+        userId,
+        identityEpoch,
+      );
       const store = useChatStore.getState();
       const results = await Promise.allSettled([
         store.hydrateActiveTasks({ signal }),
         store.pollInflightTasks({ maxChecks: 50, signal }),
-        refreshCompletions(signal, context, userScope),
+        refreshCompletions(
+          signal,
+          context,
+          userScope,
+          userId,
+          identityEpoch,
+        ),
         invalidateSnapshotQueries(queryClient, userId, scopes),
       ]);
-      assertSnapshotCurrent(signal, context, userScope);
+      assertSnapshotCurrent(
+        signal,
+        context,
+        userScope,
+        userId,
+        identityEpoch,
+      );
       const failures = results.filter(
         (result): result is PromiseRejectedResult =>
           result.status === "rejected",
@@ -365,15 +447,23 @@ export function useLumenRealtime(): void {
         );
       }
       const syncedAt = Date.now();
-      lastSnapshot.current = { userScope, syncedAt };
+      lastSnapshot.current = {
+        userScope,
+        userId,
+        identityEpoch,
+        syncedAt,
+      };
       return { syncedAt };
     },
-    [queryClient, userId, userScope],
+    [identityEpoch, queryClient, userId, userScope],
   );
 
   const { status, reconnect } = useSSE(channels, handlers, {
+    scopeIdentity: userScope,
+    isScopeCurrent: isRealtimeScopeCurrent,
     recoverSnapshot,
     onAuthInvalidated: () => {
+      notifyAuthSessionChanged();
       requestSessionInvalidation("realtime_auth_invalidated");
     },
     onOpen: (_event, connectionContext) => {
@@ -381,8 +471,11 @@ export function useLumenRealtime(): void {
       initialSnapshotFlight.current = null;
       const recent = lastSnapshot.current;
       if (
-        recent.userScope === connectionContext.userScope &&
-        Date.now() - recent.syncedAt <= RECENT_SNAPSHOT_WINDOW_MS
+        shouldSkipRecentSnapshot(recent, {
+          userScope: connectionContext.userScope,
+          userId,
+          identityEpoch,
+        })
       ) {
         return;
       }
@@ -391,6 +484,8 @@ export function useLumenRealtime(): void {
         controller,
         connectionGeneration: connectionContext.connectionGeneration,
         userScope: connectionContext.userScope,
+        userId,
+        identityEpoch,
       };
       initialSnapshotFlight.current = flight;
       void recoverSnapshot(
@@ -405,6 +500,9 @@ export function useLumenRealtime(): void {
             flight.connectionGeneration ===
               connectionContext.connectionGeneration &&
             flight.userScope === connectionContext.userScope &&
+            flight.userId === userId &&
+            flight.identityEpoch === identityEpoch &&
+            isRealtimeScopeCurrent(connectionContext.userScope) &&
             connectionContext.isCurrent(),
         },
       )
@@ -425,7 +523,7 @@ export function useLumenRealtime(): void {
       initialSnapshotFlight.current?.controller.abort();
       initialSnapshotFlight.current = null;
     },
-    [userScope],
+    [identityEpoch, userScope],
   );
 
   useEffect(() => {

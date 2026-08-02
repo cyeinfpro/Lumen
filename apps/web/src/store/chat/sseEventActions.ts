@@ -22,6 +22,11 @@ import {
   generationExplainabilityFromPayload,
   generationIdsOfMessage,
 } from "@/features/generation";
+import {
+  drainPendingCompletionImage,
+  drainReadyPendingCompletionImages,
+  reconcileCompletionImage,
+} from "./completionImageReconciliation";
 import { buildMessageListState } from "./history";
 import {
   coerceMemoryWrites,
@@ -42,8 +47,6 @@ import {
   recordString,
 } from "./payload";
 import {
-  _imageConvIds,
-  _messageConvIds,
   applyGenerationEventState,
   completionMessageLookupId,
   errorToMessage,
@@ -53,10 +56,8 @@ import {
   optionalRecord,
   queueCompletionStreamPatch,
   rememberCompletionMessage,
-  rememberGenerationForConversation,
   rememberMessageListMaterialization,
   scheduleBase64Eviction,
-  setBounded,
 } from "./runtime";
 import type {
   ChatState,
@@ -359,6 +360,8 @@ function handleGenerationAttached(context: SseEventContext): void {
 }
 
 function completionTarget(context: SseEventContext): {
+  rawMessageId: string | undefined;
+  knownMessageId: string | undefined;
   messageId: string | undefined;
   completionId: string | undefined;
 } {
@@ -368,10 +371,14 @@ function completionTarget(context: SseEventContext): {
     context.getId("completion_id") ??
     context.getId("task_id") ??
     context.getId("id");
+  const knownMessageId = completionMessageLookupId(
+    completionId,
+    context.eventNow,
+  );
   return {
-    messageId:
-      rawMessageId ??
-      completionMessageLookupId(completionId, context.eventNow),
+    rawMessageId,
+    knownMessageId,
+    messageId: rawMessageId ?? knownMessageId,
     completionId,
   };
 }
@@ -418,83 +425,27 @@ function completionImage(
   };
 }
 
-function completionImageState(
-  state: ChatState,
-  messageId: string,
-  generationId: string,
-  image: GeneratedImage,
-  eventNow: number,
-): Partial<ChatState> {
-  const existingGeneration = state.generations[generationId];
-  const baseGeneration: Generation = existingGeneration ?? {
-    id: generationId,
-    message_id: messageId,
-    action: "generate",
-    prompt: "",
-    size_requested: image.size_requested,
-    aspect_ratio: DEFAULT_PARAMS.aspect_ratio,
-    input_image_ids: [],
-    primary_input_image_id: null,
-    status: "succeeded",
-    stage: "finalizing",
-    attempt: 0,
-    started_at: eventNow,
-  };
-  const nextGeneration: Generation = {
-    ...baseGeneration,
-    image,
-    status: "succeeded",
-    stage: "finalizing",
-    finished_at: eventNow,
-  };
-  const convId = _messageConvIds.get(messageId) ?? state.currentConvId;
-  if (convId) {
-    rememberGenerationForConversation(convId, nextGeneration);
-    setBounded(_imageConvIds, image.id, convId);
-  }
-  return {
-    messages: state.messages.map((message) => {
-      if (message.role !== "assistant" || message.id !== messageId) {
-        return message;
-      }
-      const existingIds = generationIdsOfMessage(message);
-      return {
-        ...message,
-        status: "streaming",
-        generation_ids: existingIds.includes(generationId)
-          ? existingIds
-          : [...existingIds, generationId],
-        generation_id: message.generation_id ?? generationId,
-        last_delta_at: eventNow,
-      } as AssistantMessage;
-    }),
-    generations: {
-      ...state.generations,
-      [generationId]: nextGeneration,
-    },
-    imagesById: { ...state.imagesById, [image.id]: image },
-  };
-}
-
 function handleCompletionImage(
   context: SseEventContext,
-  messageId: string | undefined,
-  completionId: string | undefined,
+  target: ReturnType<typeof completionTarget>,
 ): void {
-  if (!messageId || !completionId) return;
-  const generationId = completionToolGenerationId(completionId);
-  const image = completionImage(context.payload, generationId);
-  if (!image) return;
-  context.set((state) =>
-    completionImageState(
-      state,
-      messageId,
-      generationId,
-      image,
-      context.eventNow,
-    ),
+  const completionId = target.completionId;
+  if (!completionId) return;
+  const image = completionImage(
+    context.payload,
+    completionToolGenerationId(completionId),
   );
-  scheduleBase64Eviction();
+  if (!image) return;
+  reconcileCompletionImage(
+    context.set,
+    context.get,
+    {
+      completionId,
+      rawMessageId: target.rawMessageId,
+    },
+    image,
+    context.eventNow,
+  );
 }
 
 function refreshTerminalCompletion(
@@ -516,7 +467,8 @@ function refreshTerminalCompletion(
 }
 
 function handleCompletionLifecycle(context: SseEventContext): void {
-  const { messageId, completionId } = completionTarget(context);
+  const target = completionTarget(context);
+  const { messageId, completionId } = target;
   if (!messageId && !completionId) {
     // 修复静默丢事件：两个 id 都没有的 completion 事件无法归属到任何消息，只能丢弃，
     // 但之前是无声丢弃。这属于后端 payload 契约异常，留一条日志才能定位。
@@ -526,7 +478,14 @@ function handleCompletionLifecycle(context: SseEventContext): void {
     });
     return;
   }
-  rememberCompletionMessage(completionId, messageId);
+  if (context.eventName === "completion.image") {
+    handleCompletionImage(context, target);
+    return;
+  }
+  rememberCompletionMessage(completionId, messageId, context.eventNow);
+  if (completionId) {
+    drainPendingCompletionImage(context.set, context.get, completionId);
+  }
   if (context.eventName === "completion.thinking_delta") {
     const delta =
       typeof context.payload.thinking_delta === "string"
@@ -547,10 +506,6 @@ function handleCompletionLifecycle(context: SseEventContext): void {
       "text",
       completionTextDelta(context.payload),
     );
-    return;
-  }
-  if (context.eventName === "completion.image") {
-    handleCompletionImage(context, messageId, completionId);
     return;
   }
   flushCompletionStreamPatches();
@@ -654,6 +609,7 @@ async function syncAppendedMessage(
         imagesById: built.imagesById,
       };
     });
+    drainReadyPendingCompletionImages(context.set, context.get);
   } catch (err) {
     logWarn("conv.message.appended incremental sync failed", {
       scope: "chat-sse",
@@ -681,6 +637,7 @@ function handleConversationMessageAppended(context: SseEventContext): void {
   const state = context.get();
   if (!convId || convId !== state.currentConvId) return;
   if (messageId && state.messages.some((message) => message.id === messageId)) {
+    drainReadyPendingCompletionImages(context.set, context.get);
     return;
   }
   void syncAppendedMessage(context, convId, messageId);

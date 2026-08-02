@@ -15,9 +15,11 @@ import { MobileTabBar } from "./MobileTabBar";
 import { MobileConversationCanvas } from "@/components/ui/chat/mobile/MobileConversationCanvas";
 import { MobileComposerPill } from "@/components/ui/composer/mobile/MobileComposerPill";
 import { MobileEmptyStudio } from "@/components/ui/chat/mobile/MobileEmptyStudio";
+import { ErrorState, Spinner } from "@/components/ui/primitives";
 import { TaskIsland } from "@/components/ui/tray/TaskIsland";
 import { useChatStore } from "@/store/useChatStore";
 import { useListConversationsInfiniteQuery } from "@/lib/queries";
+import { logWarn } from "@/lib/logger";
 import { cn } from "@/lib/utils";
 import { useElementBlockSize } from "@/hooks/useElementBlockSize";
 import { useDefaultConversationSelection } from "./useDefaultConversationSelection";
@@ -77,6 +79,8 @@ function nextScrollToAutoScrollGate({
 
 export function MobileStudio() {
   const messages = useChatStore((s) => s.messages);
+  const messagesLoading = useChatStore((s) => s.messagesLoading);
+  const messagesError = useChatStore((s) => s.messagesError);
   const generations = useChatStore((s) => s.generations);
   const currentConvId = useChatStore((s) => s.currentConvId);
   const setCurrentConv = useChatStore((s) => s.setCurrentConv);
@@ -168,6 +172,23 @@ export function MobileStudio() {
     loadHistoricalMessages,
     setCurrentConv,
   });
+  const handleRetryHistory = useCallback(() => {
+    const state = useChatStore.getState();
+    const conversationId = state.currentConvId;
+    if (
+      !conversationId ||
+      state.messagesLoading ||
+      state.messages.length > 0
+    ) {
+      return;
+    }
+    void state.loadHistoricalMessages(conversationId).catch((error) => {
+      logWarn("mobile_studio.load_historical_messages_failed", {
+        scope: "mobile-studio",
+        extra: { convId: conversationId, err: String(error) },
+      });
+    });
+  }, []);
 
   const stickToBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
@@ -259,6 +280,12 @@ export function MobileStudio() {
   ]);
 
   const isEmpty = messages.length === 0;
+  const initialHistoryLoading =
+    Boolean(currentConvId) && isEmpty && messagesLoading;
+  const initialHistoryError =
+    currentConvId && isEmpty ? messagesError : null;
+  const historyInteractionBlocked =
+    initialHistoryLoading || Boolean(initialHistoryError);
   const overlayGap = taskIslandHeight > 0 ? 20 : 12;
   const composerBottom =
     composerMetrics.bottom === null
@@ -275,7 +302,9 @@ export function MobileStudio() {
       className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col overflow-hidden bg-[var(--bg-0)]"
       style={
         {
-          "--mobile-composer-height": `${composerMetrics.height}px`,
+          "--mobile-composer-height": `${
+            historyInteractionBlocked ? 0 : composerMetrics.height
+          }px`,
           "--mobile-composer-bottom": composerBottom,
           "--mobile-task-island-height": `${taskIslandHeight}px`,
           "--mobile-top-chrome-height": topChromeBlockSize,
@@ -305,7 +334,31 @@ export function MobileStudio() {
             isEmpty ? "min-h-full flex flex-col justify-center" : "pt-1",
           )}
         >
-          {isEmpty ? (
+          {initialHistoryError ? (
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="flex min-h-[320px] items-center justify-center py-8"
+            >
+              <ErrorState
+                title="会话加载失败"
+                description="历史消息未能载入。为避免把新消息误发到不完整的会话，请先重试。"
+                detail={initialHistoryError}
+                onRetry={handleRetryHistory}
+                retryLabel="重新加载"
+                className="w-full"
+              />
+            </div>
+          ) : initialHistoryLoading ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex min-h-[320px] items-center justify-center gap-2 text-body-sm text-[var(--fg-2)]"
+            >
+              <Spinner size={20} />
+              正在载入历史消息…
+            </div>
+          ) : isEmpty ? (
             <MobileEmptyStudio
               onPick={(text, mode) => {
                 setText(text);
@@ -336,10 +389,12 @@ export function MobileStudio() {
       >
         <TaskIsland className="max-w-full shadow-[var(--shadow-2)]" />
       </div>
-      <MobileComposerPill
-        onSubmit={sendMessage}
-        onMetricsChange={handleComposerMetricsChange}
-      />
+      {historyInteractionBlocked ? null : (
+        <MobileComposerPill
+          onSubmit={sendMessage}
+          onMetricsChange={handleComposerMetricsChange}
+        />
+      )}
       <MobileTabBar />
     </div>
   );

@@ -181,6 +181,10 @@ export class RealtimeRuntime {
     this.bus.post({ type: "manual_reconnect" }, this.now());
   }
 
+  invalidateSession(): void {
+    this.dispatch({ type: "unauthorized" });
+  }
+
   active(): boolean {
     return this.subscribers.size > 0;
   }

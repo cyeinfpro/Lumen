@@ -38,6 +38,7 @@ import {
   getMe,
   type AuthUser,
 } from "@/lib/apiClient";
+import { invalidateSessionClientState } from "@/lib/auth/authFailureCoordinator";
 import type { SessionOut } from "@/lib/types";
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
@@ -563,6 +564,7 @@ function removeKeys(storage: Storage, keys: readonly string[]): void {
 }
 
 function clearLocalAccountState(queryClient: QueryClient) {
+  void invalidateSessionClientState();
   useChatStore.setState({
     currentUserId: null,
     currentConvId: null,
@@ -592,16 +594,6 @@ function clearLocalAccountState(queryClient: QueryClient) {
   useUiStore.setState({
     sidebarOpen: true,
     sidebarSearch: "",
-    lightbox: {
-      open: false,
-      imageId: null,
-      imageSrc: null,
-      imagePreviewSrc: null,
-      imageAlt: null,
-      gallery: [],
-      eventItems: null,
-      action: null,
-    },
     taskTray: {
       minimized: true,
     },

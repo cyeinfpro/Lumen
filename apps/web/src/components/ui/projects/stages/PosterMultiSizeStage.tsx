@@ -97,8 +97,14 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   const hasRenders = renders.length > 0;
   const readyRenderCount = renders.filter((render) => render.image_id && render.status === "ready").length;
 
+  // 失败的渲染行不占位：允许重新勾选该 aspect 并重试生成（后端重试会重建新行）
   const existingAspectSet = useMemo(
-    () => new Set(renders.map((r) => r.aspect_ratio)),
+    () =>
+      new Set(
+        renders
+          .filter((render) => render.status !== "failed")
+          .map((render) => render.aspect_ratio),
+      ),
     [renders],
   );
 

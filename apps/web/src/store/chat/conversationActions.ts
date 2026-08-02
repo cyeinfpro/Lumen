@@ -17,7 +17,10 @@ import {
   makeConversationHistoryCacheEntry,
   type ConversationHistoryCacheEntry,
 } from "./history";
-import { mergeMessagesById } from "./messageReconciliation";
+import {
+  latestPersistedMessageId,
+  mergeMessagesById,
+} from "./messageReconciliation";
 import type { ChatState, ChatStateGetter, ChatStateSetter } from "./types";
 import {
   errorToMessage,
@@ -30,6 +33,7 @@ import {
   abortHistoryRequest,
   _historyAborts,
 } from "./runtime";
+import { drainReadyPendingCompletionImages } from "./completionImageReconciliation";
 
 type HistoryResponse = Awaited<ReturnType<typeof apiListMessages>>;
 
@@ -78,9 +82,14 @@ async function fetchHistoryPage(
   ).length;
   if (newCount !== 0 || response.next_cursor !== cursor) return response;
 
+  // 停滞回退：cursor 是后端分页令牌（enc_cursor），不是 since 接受的 ISO8601
+  // 时间戳或会话内 message_id，直接传会被后端 422 invalid_since 拒绝。
+  // 以已加载的最新一条持久消息 id 为 since 基准重拉最新一页：期间新到达的
+  // 消息会补进来，next_cursor 也换成新鲜令牌解困；没有持久消息（全部为
+  // opt- 乐观占位）时 since 为 undefined，退化为无参首屏拉取。
   response = await apiListMessages(convId, {
     limit: MESSAGE_PAGE_LIMIT,
-    since: cursor,
+    since: latestPersistedMessageId(get().messages),
     signal,
     include: ["tasks"],
   });
@@ -134,6 +143,7 @@ function commitHistoryPage(
 function handleHistoryError(
   set: ChatStateSetter,
   convId: string,
+  loadMore: boolean,
   controller: AbortController,
   err: unknown,
 ): boolean {
@@ -144,11 +154,16 @@ function handleHistoryError(
     return true;
   }
   const message = errorToMessage(err);
-  set((s) =>
-    s.currentConvId === convId
-      ? { messagesLoading: false, messagesError: message }
-      : s,
-  );
+  set((s) => {
+    if (s.currentConvId !== convId) return s;
+    const fatalInitialFailure = !loadMore && s.messages.length === 0;
+    return {
+      messagesLoading: false,
+      // Pagination keeps its error local to useHistoryPaging so loaded
+      // messages and the composer never become a shell-level fatal state.
+      messagesError: fatalInitialFailure ? message : null,
+    };
+  });
   return false;
 }
 
@@ -219,10 +234,13 @@ export function createConversationActions(
           response,
           built,
         );
-        if (cacheEntry) rememberConversationHistoryCache(convId, cacheEntry);
+        if (cacheEntry) {
+          rememberConversationHistoryCache(convId, cacheEntry);
+          drainReadyPendingCompletionImages(set, get);
+        }
       } catch (err) {
         // AbortError：被新切换覆盖，静默放弃即可。
-        if (handleHistoryError(set, convId, ctl, err)) return;
+        if (handleHistoryError(set, convId, loadMore, ctl, err)) return;
         throw err;
       } finally {
         if (_historyAborts.get(convId) === ctl) _historyAborts.delete(convId);

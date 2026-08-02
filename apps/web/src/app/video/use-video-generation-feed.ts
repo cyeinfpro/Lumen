@@ -33,22 +33,16 @@ import {
   isAbortError,
   recordGenerationRefreshFailure,
 } from "./video-request-lifecycle";
-import {
-  filteredVideoHistoryItems,
-} from "./video-page-derived-state";
+import { filteredVideoHistoryItems } from "./video-page-derived-state";
 import {
   hasVideo,
   isFailedHistoryVideo,
   isTerminalVideo,
   isVideoMaterializationPending,
+  type VideoGenerationWithVideo,
+  type VideoHistoryFilter,
 } from "./video-task-model";
-import type {
-  VideoGenerationWithVideo,
-  VideoHistoryFilter,
-} from "./video-task-model";
-import {
-  prewarmVideoItem,
-} from "./video-task-ui";
+import { prewarmVideoItem } from "./video-task-ui";
 import {
   startVideoActivePolling,
   useVideoSettlingController,
@@ -59,21 +53,21 @@ import {
   isVideoFeedRuntimeCurrent,
   isVideoFeedScopeTokenCurrent,
   normalizeVideoFeedUserId,
-  resetVideoFeedRuntime,
   videoFeedChannels,
   videoFeedScopeToken,
 } from "./video-feed-scope";
-import type {
-  VideoFeedRuntime,
-} from "./video-feed-scope";
+import type { VideoFeedRuntime } from "./video-feed-scope";
 import {
-  userScopedQueryKey,
-  useUserQueryScope,
-} from "@/lib/queries/userScope";
+  type ScopedVideoItems,
+  type ScopedVideoSelection,
+  useVideoFeedRuntimeReset,
+} from "./use-video-feed-runtime-reset";
+import { userScopedQueryKey, useUserQueryScope } from "@/lib/queries/userScope";
 
 import {
   VIDEO_EVENTS,
   VIDEO_HISTORY_PAGE_SIZE,
+  VIDEO_HISTORY_STALE_MS,
   VIDEO_REFRESH_MIN_INTERVAL_MS,
   type GenerationRefreshOptions,
   type GenerationRefreshScheduleOptions,
@@ -86,16 +80,6 @@ export type {
   GenerationRefreshScheduleOptions,
   ScheduleGenerationRefresh,
 } from "./video-generation-feed-config";
-
-type ScopedVideoItems = {
-  userId: string | null;
-  value: VideoGenerationOut[];
-};
-
-type ScopedVideoSelection = {
-  userId: string | null;
-  value: string;
-};
 
 export function useVideoGenerationFeed() {
   const qc = useQueryClient();
@@ -210,7 +194,7 @@ export function useVideoGenerationFeed() {
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled: userScope.enabled && scopeReady,
     retry: false,
-    staleTime: 20_000,
+    staleTime: VIDEO_HISTORY_STALE_MS,
     gcTime: 5 * 60_000,
   });
   const historyItems = useMemo(
@@ -224,6 +208,13 @@ export function useVideoGenerationFeed() {
     () => mergeById(historyItems, items),
     [historyItems, items],
   );
+  // 整理窗口超时后的恢复重查入口。通过 ref 间接调用 refreshGenerationSafe:
+  // 该函数定义在本 hook 之后,且恢复重查需要绕过 canSchedule 门禁,
+  // 否则过期任务永远无法再被重查。
+  const settlingRecoveryRefreshRef = useRef<(id: string) => void>(() => {});
+  const handleSettlingExpired = useCallback((id: string) => {
+    settlingRecoveryRefreshRef.current(id);
+  }, []);
   const {
     version: videoSettlingVersion,
     sync: syncVideoSettling,
@@ -237,6 +228,7 @@ export function useVideoGenerationFeed() {
     scheduledRefreshTimersRef,
     pendingHistoryRefreshRef,
     scopeKey: `${userId ?? "anonymous"}:${runtime.generation}`,
+    onExpired: handleSettlingExpired,
   });
 
   const activeItems = useMemo(() => {
@@ -406,6 +398,17 @@ export function useVideoGenerationFeed() {
     [refreshGeneration, runtime, userId],
   );
 
+  useEffect(() => {
+    // 整理窗口超时后的恢复重查:绕过 canSchedule 门禁直接重查任务状态,
+    // 视频一旦落盘,syncVideoSettling 会结束整理窗口并展示视频。
+    settlingRecoveryRefreshRef.current = (id: string) => {
+      void refreshGenerationSafe(id, { forceHistorySync: true });
+    };
+    return () => {
+      settlingRecoveryRefreshRef.current = () => {};
+    };
+  }, [refreshGenerationSafe]);
+
   const abortGenerationRefresh = useCallback(
     (id: string) => {
       if (!isVideoFeedRuntimeCurrent(runtime, userId)) return;
@@ -521,7 +524,15 @@ export function useVideoGenerationFeed() {
   useEffect(() => {
     const refreshVisibleTasks = () => {
       if (document.visibilityState !== "visible") return;
-      void invalidateHistory();
+      // 聚焦/可见性恢复只刷新陈旧数据：历史列表仍在 stale 窗口内则跳过全量
+      // refetch，避免每次切回标签页都重复拉取整份列表（全局 refetchOnWindowFocus 为 false）。
+      const historyUpdatedAt = qc.getQueryState(historyQueryKey)?.dataUpdatedAt;
+      if (
+        historyUpdatedAt === undefined ||
+        Date.now() - historyUpdatedAt >= VIDEO_HISTORY_STALE_MS
+      ) {
+        void invalidateHistory();
+      }
       const ids = activeItemIdsKey.split("|").filter(Boolean);
       for (const id of ids) scheduleGenerationRefresh(id);
     };
@@ -532,7 +543,13 @@ export function useVideoGenerationFeed() {
       window.removeEventListener("focus", refreshVisibleTasks);
       document.removeEventListener("visibilitychange", refreshVisibleTasks);
     };
-  }, [activeItemIdsKey, invalidateHistory, scheduleGenerationRefresh]);
+  }, [
+    activeItemIdsKey,
+    historyQueryKey,
+    invalidateHistory,
+    qc,
+    scheduleGenerationRefresh,
+  ]);
 
   useEffect(
     () => () => {
@@ -541,33 +558,14 @@ export function useVideoGenerationFeed() {
     [runtime],
   );
 
-  useLayoutEffect(() => {
-    const previousUserId = runtime.userId;
-    const changed = resetVideoFeedRuntime(
-      runtime,
-      userId,
-      (timer) => window.clearTimeout(timer),
-    );
-    if (!changed) return;
-    if (previousUserId) {
-      void qc.cancelQueries({
-        queryKey: userScopedQueryKey(
-          previousUserId,
-          ["video"] as const,
-        ),
-      });
-    }
-    let active = true;
-    queueMicrotask(() => {
-      if (!active || !isVideoFeedRuntimeCurrent(runtime, userId)) return;
-      setScopedItems({ userId, value: [] });
-      setScopedSelection({ userId, value: "" });
-      setIsTaskPanelOpen(false);
-    });
-    return () => {
-      active = false;
-    };
-  }, [qc, runtime, userId]);
+  useVideoFeedRuntimeReset(
+    runtime,
+    userId,
+    qc,
+    setScopedItems,
+    setScopedSelection,
+    setIsTaskPanelOpen,
+  );
 
   return {
     abortGenerationRefresh,

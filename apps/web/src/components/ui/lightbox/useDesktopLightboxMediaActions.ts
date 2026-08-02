@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { useCreateShareMutation } from "@/lib/queries";
 import {
@@ -23,6 +24,8 @@ import {
 
 interface UseDesktopLightboxMediaActionsOptions {
   open: boolean;
+  ownerUserId: string | null;
+  identityEpoch: number;
   imageId: string | null;
   imageSrc: string | null;
   imageStateKey: string;
@@ -37,6 +40,8 @@ async function writeClipboardText(text: string): Promise<void> {
 
 export function useDesktopLightboxMediaActions({
   open,
+  ownerUserId,
+  identityEpoch,
   imageId,
   imageSrc,
   imageStateKey,
@@ -52,6 +57,14 @@ export function useDesktopLightboxMediaActions({
   const downloadSeqRef = useRef(0);
   const shareSeqRef = useRef(0);
   const openRef = useRef(open);
+  const identityIsCurrent = useCallback(
+    () =>
+      isPrivateIdentitySnapshotCurrent({
+        userId: ownerUserId,
+        epoch: identityEpoch,
+      }),
+    [identityEpoch, ownerUserId],
+  );
 
   useLayoutEffect(() => {
     openRef.current = open;
@@ -72,12 +85,19 @@ export function useDesktopLightboxMediaActions({
   }, [imageStateKey, open]);
 
   const handleDownload = useCallback(() => {
-    if (!imageSrc || downloadStatus === "downloading") return;
+    if (
+      !imageSrc ||
+      downloadStatus === "downloading" ||
+      !identityIsCurrent()
+    ) {
+      return;
+    }
     const operationKey = imageStateKey;
     const operationSeq = downloadSeqRef.current + 1;
     downloadSeqRef.current = operationSeq;
     const operationIsCurrent = () =>
       openRef.current &&
+      identityIsCurrent() &&
       activeImageStateKeyRef.current === operationKey &&
       downloadSeqRef.current === operationSeq;
     setDownloadStatus("downloading");
@@ -111,6 +131,7 @@ export function useDesktopLightboxMediaActions({
     imageId,
     imageSrc,
     imageStateKey,
+    identityIsCurrent,
   ]);
 
   const resetShareStatusSoon = useCallback(
@@ -118,6 +139,7 @@ export function useDesktopLightboxMediaActions({
       window.setTimeout(() => {
         if (
           openRef.current &&
+          identityIsCurrent() &&
           activeImageStateKeyRef.current === operationKey &&
           shareSeqRef.current === operationSeq
         ) {
@@ -125,16 +147,23 @@ export function useDesktopLightboxMediaActions({
         }
       }, 1600);
     },
-    [activeImageStateKeyRef],
+    [activeImageStateKeyRef, identityIsCurrent],
   );
 
   const handleShare = useCallback(() => {
-    if (!imageId || shareStatus === "creating") return;
+    if (
+      !imageId ||
+      shareStatus === "creating" ||
+      !identityIsCurrent()
+    ) {
+      return;
+    }
     const operationKey = imageStateKey;
     const operationSeq = shareSeqRef.current + 1;
     shareSeqRef.current = operationSeq;
     const operationIsCurrent = () =>
       openRef.current &&
+      identityIsCurrent() &&
       activeImageStateKeyRef.current === operationKey &&
       shareSeqRef.current === operationSeq;
     setShareStatus("creating");
@@ -157,14 +186,15 @@ export function useDesktopLightboxMediaActions({
     createShareMutation.mutateAsync,
     imageId,
     imageStateKey,
+    identityIsCurrent,
     resetShareStatusSoon,
     shareStatus,
   ]);
 
   const handleOpenOriginal = useCallback(() => {
-    if (!imageSrc) return;
+    if (!imageSrc || !identityIsCurrent()) return;
     window.open(imageSrc, "_blank", "noopener,noreferrer");
-  }, [imageSrc]);
+  }, [identityIsCurrent, imageSrc]);
 
   return {
     ...desktopActionPresentation(downloadStatus, shareStatus),

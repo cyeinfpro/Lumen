@@ -21,6 +21,11 @@ import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useIsMobile } from "@/hooks/useMediaQuery";
+import {
+  getPrivateIdentitySnapshot,
+  isPrivateIdentitySnapshotCurrent,
+  type PrivateIdentitySnapshot,
+} from "@/lib/auth/privateIdentityEpoch";
 import type {
   AccessoryPlan,
   ApparelModelLibraryItem,
@@ -59,15 +64,23 @@ export function ModelLibraryDialog({
   const descriptionId = useId();
   const closeLightbox = useUiStore((s) => s.closeLightbox);
   const setLightboxActionPending = useUiStore((s) => s.setLightboxActionPending);
+  const dialogIdentityRef = useRef<PrivateIdentitySnapshot | null>(null);
+  const selectionIdentityRef = useRef<PrivateIdentitySnapshot | null>(null);
 
   const selectItem = useSelectApparelModelLibraryItemMutation(workflow.id, {
     onSuccess: () => {
+      const identity = selectionIdentityRef.current;
+      selectionIdentityRef.current = null;
+      if (!identity || !isPrivateIdentitySnapshotCurrent(identity)) return;
       toast.success("已选入模特候选");
-      closeLightbox();
+      closeLightbox(identity);
       onClose();
     },
     onError: (err) => {
-      setLightboxActionPending(false);
+      const identity = selectionIdentityRef.current;
+      selectionIdentityRef.current = null;
+      if (!identity || !isPrivateIdentitySnapshotCurrent(identity)) return;
+      setLightboxActionPending(false, identity);
       toast.error("选择模特失败", {
         description: err instanceof Error ? err.message : "请稍后重试",
       });
@@ -80,17 +93,29 @@ export function ModelLibraryDialog({
   useEffect(() => {
     if (open) {
       wasOpenRef.current = true;
+      dialogIdentityRef.current = getPrivateIdentitySnapshot();
       return;
     }
     if (!wasOpenRef.current) return;
     wasOpenRef.current = false;
-    closeLightbox();
+    const identity = dialogIdentityRef.current;
+    dialogIdentityRef.current = null;
+    if (identity && isPrivateIdentitySnapshotCurrent(identity)) {
+      closeLightbox(identity);
+    }
   }, [closeLightbox, open]);
 
   // Browser 把 lightbox action 路由到这里：调 mutate(item.id) + 同步 pending
   const handleSelect = useCallback(
     (item: ApparelModelLibraryItem) => {
-      setLightboxActionPending(true);
+      const lightbox = useUiStore.getState().lightbox;
+      const identity = {
+        userId: lightbox.ownerUserId,
+        epoch: lightbox.identityEpoch,
+      };
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
+      selectionIdentityRef.current = identity;
+      setLightboxActionPending(true, identity);
       selectItem.mutate({
         library_item_id: item.id,
         accessory_plan: selectionAccessoryPlan,

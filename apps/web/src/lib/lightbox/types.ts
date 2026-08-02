@@ -102,6 +102,8 @@ export interface OpenLightboxDetail {
   items: LightboxItem[];
   initialId: string;
   fromRect?: DOMRect;
+  ownerUserId?: string;
+  identityEpoch?: number;
   /**
    * 派发来源标记。`store` 表示由 `useUiStore.openLightboxFromItems` 在写入 store
    * 后镜像派发（仅供 MobileLightbox 监听）；DesktopLightbox 收到此 flag 时应跳过

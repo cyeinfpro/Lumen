@@ -268,10 +268,15 @@ export function adjustAdminWallet(
   userId: string,
   amount_rmb_signed: string,
   reason: string,
+  idempotencyKey?: string,
 ): Promise<WalletTransactionOut> {
   return apiFetch<WalletTransactionOut>(`/admin/wallets/${userId}:adjust`, {
     method: "POST",
-    body: JSON.stringify({ amount_rmb_signed, reason }),
+    body: JSON.stringify({
+      amount_rmb_signed,
+      reason,
+      ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+    }),
   });
 }
 

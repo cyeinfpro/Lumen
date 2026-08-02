@@ -14,6 +14,13 @@ const hook = readFileSync(
   new URL("../features/realtime/model/useSSE.ts", import.meta.url),
   "utf8",
 );
+const subscription = readFileSync(
+  new URL(
+    "../features/realtime/model/sseSubscription.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const registry = readFileSync(
   new URL("../shared/realtime/runtimeRegistry.ts", import.meta.url),
   "utf8",
@@ -32,6 +39,11 @@ test("feature hook delegates runtime ownership and exposes control recovery", ()
   match(hook, /recoverSnapshot/);
   match(hook, /onControl/);
   doesNotMatch(hook, /new Map/);
+  doesNotMatch(hook, /function isSSEScopeCurrent/);
+  doesNotMatch(hook, /Object\.fromEntries/);
+  match(subscription, /export function isSSEScopeCurrent/);
+  match(subscription, /export function dispatchSSECallbackForScope/);
+  match(subscription, /export function createSSESubscriber/);
   match(registry, /const runtimes = new Map<string, RealtimeRuntime>\(\)/);
   doesNotMatch(hook, /class SharedSSEConnection/);
 });

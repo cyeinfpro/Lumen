@@ -8,6 +8,10 @@
 
 import { create } from "zustand";
 
+import {
+  getPrivateIdentitySnapshot,
+  type PrivateIdentitySnapshot,
+} from "@/lib/auth/privateIdentityEpoch";
 import type { Stroke } from "@/lib/inpaint/types";
 
 export interface InpaintSource {
@@ -26,6 +30,8 @@ export interface InpaintSource {
 const MAX_DRAFTS = 30;
 
 interface InpaintState {
+  ownerUserId: string | null;
+  identityEpoch: number;
   open: boolean;
   source: InpaintSource | null;
   /** 提交中：禁用关闭与重复提交 */
@@ -41,6 +47,7 @@ interface InpaintState {
   clearDraft: (imageId: string) => void;
   setMaskDraft: (imageId: string, strokes: Stroke[]) => void;
   clearMaskDraft: (imageId: string) => void;
+  resetForIdentity: (identity: PrivateIdentitySnapshot) => void;
 }
 
 // 简单 LRU：超过 cap 时移除最早 key
@@ -55,6 +62,13 @@ function trimRecord<T>(rec: Record<string, T>, cap: number): Record<string, T> {
 }
 
 export const useInpaintStore = create<InpaintState>((set, get) => ({
+  ...(() => {
+    const identity = getPrivateIdentitySnapshot();
+    return {
+      ownerUserId: identity.userId,
+      identityEpoch: identity.epoch,
+    };
+  })(),
   open: false,
   source: null,
   submitting: false,
@@ -62,7 +76,14 @@ export const useInpaintStore = create<InpaintState>((set, get) => ({
   maskDrafts: {},
   openInpaint: (source) => {
     if (get().submitting) return;
-    set({ open: true, source });
+    const identity = getPrivateIdentitySnapshot();
+    if (!identity.userId) return;
+    set({
+      ownerUserId: identity.userId,
+      identityEpoch: identity.epoch,
+      open: true,
+      source,
+    });
   },
   close: () => {
     if (get().submitting) return;
@@ -109,5 +130,15 @@ export const useInpaintStore = create<InpaintState>((set, get) => ({
       const next = { ...s.maskDrafts };
       delete next[imageId];
       return { maskDrafts: next };
+    }),
+  resetForIdentity: (identity) =>
+    set({
+      ownerUserId: identity.userId,
+      identityEpoch: identity.epoch,
+      open: false,
+      source: null,
+      submitting: false,
+      drafts: {},
+      maskDrafts: {},
     }),
 }));

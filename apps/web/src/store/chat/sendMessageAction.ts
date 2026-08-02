@@ -33,6 +33,7 @@ import {
   isResetComposerDraft,
   resolveIntent,
 } from "./composerSlice";
+import { drainPendingCompletionImage } from "./completionImageReconciliation";
 import {
   clampImageCount,
   normalizeImageParams,
@@ -52,6 +53,7 @@ import {
   invalidateConversationHistoryCache,
   isAbortRequest,
   isImageIntent,
+  markSendRequestSubmitted,
   rememberCompletionAlias,
   rememberCompletionMessage,
   rememberGenerationAlias,
@@ -106,6 +108,16 @@ function createConversationError(err: unknown): string {
   }
   if (err instanceof Error) return `新建会话失败：${err.message}`;
   return "新建会话失败";
+}
+
+function initialHistorySendError(
+  state: ChatState,
+  convId: string,
+): string | null {
+  if (state.currentConvId !== convId || state.messages.length > 0) return null;
+  if (state.messagesLoading) return "历史消息仍在加载，请稍候";
+  if (state.messagesError) return "历史消息加载失败，请先重试";
+  return null;
 }
 
 async function ensureConversation(
@@ -545,6 +557,7 @@ function replaceOptimisticMessages(
 
 function reconcileSuccessfulSend(
   set: ChatStateSetter,
+  get: ChatStateGetter,
   convId: string,
   prepared: PreparedSend,
   optimistic: OptimisticSend,
@@ -601,7 +614,10 @@ function reconcileSuccessfulSend(
       generationIds,
     ),
   );
-  if (completionId) _completionMessageAliases.delete(completionId);
+  if (completionId) {
+    _completionMessageAliases.delete(completionId);
+    drainPendingCompletionImage(set, get, completionId);
+  }
 }
 
 function isStaleSend(
@@ -655,6 +671,11 @@ export function createSendMessageAction(
       }
       const convId = await ensureConversation(set, get, controller.signal);
       if (!convId) return;
+      const historyError = initialHistorySendError(get(), convId);
+      if (historyError) {
+        set({ composerError: historyError });
+        return;
+      }
       const result = prepareSend(get().composer, options);
       if (!result.prepared) {
         if (result.error) set({ composerError: result.error });
@@ -669,6 +690,9 @@ export function createSendMessageAction(
         dependencies.createInitialComposer,
       );
       try {
+        // POST 交给后端前标记已提交：此后切会话的 abortAllSendRequests 不再
+        // abort 本请求——后端收到即可能已计费，abort 只会静默丢弃已计费发送。
+        markSendRequestSubmitted(controller);
         const output = await apiPostMessage(
           convId,
           buildPostBody(result.prepared),
@@ -680,6 +704,7 @@ export function createSendMessageAction(
         }
         reconcileSuccessfulSend(
           set,
+          get,
           convId,
           result.prepared,
           optimistic,

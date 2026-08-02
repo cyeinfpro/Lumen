@@ -12,6 +12,8 @@ export const VIDEO_EVENTS = [
 ];
 export const VIDEO_REFRESH_MIN_INTERVAL_MS = 900;
 export const VIDEO_HISTORY_PAGE_SIZE = 12;
+// 历史列表在窗口聚焦/可见性恢复时的陈旧阈值：数据未超过该时长则跳过全量 refetch。
+export const VIDEO_HISTORY_STALE_MS = 20_000;
 
 export type GenerationRefreshOptions = {
   forceHistorySync?: boolean;

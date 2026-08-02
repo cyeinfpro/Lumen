@@ -37,3 +37,9 @@ export function releaseRealtimeRuntime(
     runtimes.delete(lease.key);
   }
 }
+
+export function invalidateRealtimeRuntimes(): void {
+  for (const runtime of runtimes.values()) {
+    runtime.invalidateSession();
+  }
+}

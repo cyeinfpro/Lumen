@@ -44,6 +44,40 @@ test("safe login navigation is centralized and preserves next with replace", () 
   doesNotMatch(navigation, /location\.assign/);
 });
 
+test("video generation create takes the idempotency key per call, not module state", () => {
+  // 幂等键必须按提交操作由调用方显式传入:模块级全局会跨请求/并发/改参数重提
+  // 共享同一 key,后端指纹不同返回 409。key 的复用/释放决策在
+  // video-create-idempotency.ts(行为测试见 video-create-idempotency.test.ts)。
+  const createCall = source.indexOf("export function createVideoGeneration");
+  ok(createCall >= 0);
+  match(source, /options\.idempotency_key \?\?\s*createIdempotencyKey\(\)/);
+  // 模块级待定 key 已彻底移除,不得复活。
+  doesNotMatch(source, /pendingVideoCreateIdempotencyKey/);
+  doesNotMatch(source, /let pendingVideoCreate/);
+});
+
+test("cookie-changing auth flows notify other tabs before accepting an identity", () => {
+  const loginResponse = source.indexOf("const loginResponse");
+  const loginNotification = source.indexOf(
+    "notifyAuthSessionChanged();",
+    loginResponse,
+  );
+  const loginIdentity = source.indexOf("await getMe()", loginResponse);
+
+  ok(loginResponse >= 0);
+  ok(loginNotification > loginResponse);
+  ok(loginIdentity > loginNotification);
+  match(source, /auth\/signup[\s\S]*?notifyAuthSessionChanged/);
+  match(source, /auth\/signup\/byok[\s\S]*?notifyAuthSessionChanged/);
+  match(source, /export async function logout[\s\S]*?notifyAuthSessionChanged/);
+  const logoutRequest = source.indexOf('apiFetchNoContent("/auth/logout"');
+  const logoutNotification = source.indexOf(
+    "notifyAuthSessionChanged();",
+    logoutRequest,
+  );
+  ok(logoutNotification > logoutRequest);
+});
+
 test("apiClient preserves public endpoint exports", () => {
   for (const moduleName of [
     "tasks",
@@ -85,6 +119,7 @@ test("API facade and new modules compile with the project TypeScript config", ()
     "./auth/navigation.ts",
     "./auth/authFailureCoordinator.ts",
     "./auth/identityPolicy.ts",
+    "./auth/sessionChangeBus.ts",
   ].map((relativePath) => fileURLToPath(new URL(relativePath, import.meta.url)));
   const program = ts.createProgram({
     rootNames,
