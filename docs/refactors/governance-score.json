@@ -1,0 +1,339 @@
+{
+  "checks": {
+    "architecture_gate": {
+      "detail": "Architecture budget passed: 0 grandfathered cycles, 0 grandfathered boundary violations; 2 runtime-coupling findings.",
+      "passed": true,
+      "source": "command"
+    },
+    "architecture_layers_consumed": {
+      "detail": "check_architecture.py consumes declarative layers",
+      "passed": true,
+      "source": "source"
+    },
+    "architecture_layers_valid": {
+      "detail": "scripts/architecture-layers.toml",
+      "passed": true,
+      "source": "source"
+    },
+    "baseline_monotonic": {
+      "detail": "Baseline monotonic audit passed against merge-base 90552af95b07fd7064e38cf800c8a0f136aee7d5.",
+      "passed": true,
+      "source": "command"
+    },
+    "billing_dynamic_facade_zero": {
+      "detail": "billing dynamic facade markers absent",
+      "passed": true,
+      "source": "source"
+    },
+    "complexity_gate": {
+      "detail": "Complexity budget passed: 0 grandfathered violations; 0 grandfathered oversized files; 5 multi-dimensional findings; 0 role-ceiling violations.",
+      "passed": true,
+      "source": "command"
+    },
+    "dead_code_zero": {
+      "detail": "Dead-code retirement audit passed: 7 paths and 2 dependencies.; uv run python scripts/dead_code_audit.py",
+      "passed": true,
+      "source": "command+evidence"
+    },
+    "documentation_freshness": {
+      "detail": "uv run pytest -q tests/test_governance_score.py tests/test_facade_inventory.py tests/test_baseline_monotonic.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "facade_gate": {
+      "detail": "Runtime coupling budget passed: 2 grandfathered findings; 6 facade APIs verified.",
+      "passed": true,
+      "source": "command"
+    },
+    "facade_inventory": {
+      "detail": "Facade retirement inventory passed: 6 facades registered.",
+      "passed": true,
+      "source": "command"
+    },
+    "fault_matrix": {
+      "detail": "uv run pytest -q apps/worker/tests/test_image_job_execution_boundary.py apps/worker/tests/test_outbox_reconciliation_contracts.py tests/test_promote_release_images.py tests/test_update_state_machine.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "full_tests": {
+      "detail": "bash scripts/test.sh",
+      "passed": true,
+      "source": "evidence"
+    },
+    "known_p0_zero": {
+      "detail": "0 open P0",
+      "passed": true,
+      "source": "known-defects"
+    },
+    "known_p1_zero": {
+      "detail": "0 open P1",
+      "passed": true,
+      "source": "known-defects"
+    },
+    "manifest_gate": {
+      "detail": "  - [full-mandatory-path] planner.full_mandatory_paths: uv.lock (1 matching path(s): uv.lock)",
+      "passed": true,
+      "source": "command"
+    },
+    "migration_faults": {
+      "detail": "uv run pytest -q tests/test_update_migration_backup.py tests/test_update_state_machine.py apps/api/tests/test_alembic_env.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "migration_gate": {
+      "detail": "exit=0",
+      "passed": true,
+      "source": "command"
+    },
+    "observability_metrics": {
+      "detail": "uv run pytest -q apps/worker/tests/test_context_summary_prometheus.py apps/worker/tests/test_provider_pool_image_route.py apps/api/tests/test_core_security_infra.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "ownership_registry_complete": {
+      "detail": "14 modules registered",
+      "passed": true,
+      "source": "module-ownership"
+    },
+    "recovery_proof": {
+      "detail": "uv run pytest -q apps/worker/tests/test_image_job_execution_boundary.py apps/worker/tests/test_outbox_reconciliation_contracts.py tests/test_update_state_machine.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "release_faults": {
+      "detail": "uv run pytest -q tests/test_promote_release_images.py tests/test_release_manifest.py tests/test_update_state_machine.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "release_proof": {
+      "detail": "uv run python scripts/release_proof.py --tag \"v$(cat VERSION)\" --commit \"$(git rev-parse HEAD)\"",
+      "passed": true,
+      "source": "evidence"
+    },
+    "release_tag_main_guard": {
+      "detail": "release tag ancestry guard",
+      "passed": true,
+      "source": "source"
+    },
+    "rerun_plan_identity": {
+      "detail": "rerun results bind current plan and command set",
+      "passed": true,
+      "source": "source"
+    },
+    "runtime_gate": {
+      "detail": "Module runtime state budget passed: 13 grandfathered mutable runtime instances across 13 modules.",
+      "passed": true,
+      "source": "command"
+    },
+    "runtime_scanner_full_roots": {
+      "detail": "runtime scanner covers Core and TgBot",
+      "passed": true,
+      "source": "source"
+    },
+    "sidecar_delivery_faults": {
+      "detail": "uv run pytest -q apps/worker/tests/test_image_job_execution_boundary.py -k 'succeeded_retry_is_delivery_only or billing_never_releases'",
+      "passed": true,
+      "source": "evidence"
+    },
+    "sidecar_recovery_faults": {
+      "detail": "uv run pytest -q apps/worker/tests/test_image_job_execution_boundary.py -k 'accepted_timeout or progress_persists or typed_recovery'",
+      "passed": true,
+      "source": "evidence"
+    },
+    "signed_images": {
+      "detail": "uv run pytest -q tests/test_release_manifest.py -k 'signed or promotes_aliases_only_after_all_signed_builds'",
+      "passed": true,
+      "source": "evidence"
+    },
+    "stable_alias_before_release": {
+      "detail": "stable alias job precedes GitHub Release job",
+      "passed": true,
+      "source": "source"
+    },
+    "storage_consistency": {
+      "detail": "uv run pytest -q apps/api/tests/images/test_artifact_saga.py apps/api/tests/images/test_artifact_runtime_regressions.py apps/worker/tests/test_storage.py image-job/tests/test_app_hardening.py image-job/tests/test_cancellation_fencing.py image-job/tests/test_retention_budgets.py",
+      "passed": true,
+      "source": "evidence"
+    },
+    "supply_chain": {
+      "detail": "uv run pytest -q tests/test_release_manifest.py tests/test_lumenctl_scripts.py -k 'cosign or release_manifest'",
+      "passed": true,
+      "source": "evidence"
+    },
+    "updater_health_commit": {
+      "detail": "commit marker follows health proof",
+      "passed": true,
+      "source": "source"
+    },
+    "web_domain_boundaries": {
+      "detail": "cd apps/web && npm run check:architecture && npm test -- src/features/featureArchitecture.test.ts src/app/video/page.test.ts",
+      "passed": true,
+      "source": "evidence"
+    },
+    "web_isolation": {
+      "detail": "cd apps/web && npm test -- src/features/realtime/model/runtime.test.ts src/lib/runtimeResilience.test.ts src/app/video/page.test.ts __tests__/chat-hardening.test.mjs",
+      "passed": true,
+      "source": "evidence"
+    },
+    "web_p1_zero": {
+      "detail": "web P1 defects closed",
+      "passed": true,
+      "source": "known-defects"
+    },
+    "worktree_clean": {
+      "detail": "326 dirty path(s); commit-bound evidence requires a clean worktree",
+      "passed": false,
+      "source": "git"
+    }
+  },
+  "commit": "90552af95b07fd7064e38cf800c8a0f136aee7d5",
+  "dimensions": {
+    "ci_and_gates": {
+      "checks": [
+        "manifest_gate",
+        "rerun_plan_identity",
+        "baseline_monotonic",
+        "full_tests"
+      ],
+      "passed": 4,
+      "score": 10.0,
+      "total": 4,
+      "weight": 0.12,
+      "weighted_contribution": 1.2
+    },
+    "data_migration_storage": {
+      "checks": [
+        "migration_gate",
+        "migration_faults",
+        "storage_consistency"
+      ],
+      "passed": 3,
+      "score": 10.0,
+      "total": 3,
+      "weight": 0.08,
+      "weighted_contribution": 0.8
+    },
+    "debt_documentation": {
+      "checks": [
+        "dead_code_zero",
+        "facade_gate",
+        "facade_inventory",
+        "documentation_freshness"
+      ],
+      "passed": 4,
+      "score": 10.0,
+      "total": 4,
+      "weight": 0.07,
+      "weighted_contribution": 0.7
+    },
+    "funding_async_correctness": {
+      "checks": [
+        "known_p0_zero",
+        "known_p1_zero",
+        "sidecar_recovery_faults",
+        "sidecar_delivery_faults"
+      ],
+      "passed": 4,
+      "score": 10.0,
+      "total": 4,
+      "weight": 0.15,
+      "weighted_contribution": 1.5
+    },
+    "module_boundaries": {
+      "checks": [
+        "architecture_gate",
+        "architecture_layers_valid",
+        "architecture_layers_consumed",
+        "web_domain_boundaries",
+        "billing_dynamic_facade_zero"
+      ],
+      "passed": 5,
+      "score": 10.0,
+      "total": 5,
+      "weight": 0.12,
+      "weighted_contribution": 1.2
+    },
+    "observability_recovery": {
+      "checks": [
+        "fault_matrix",
+        "observability_metrics",
+        "recovery_proof"
+      ],
+      "passed": 3,
+      "score": 10.0,
+      "total": 3,
+      "weight": 0.08,
+      "weighted_contribution": 0.8
+    },
+    "release_update_rollback": {
+      "checks": [
+        "migration_gate",
+        "release_tag_main_guard",
+        "stable_alias_before_release",
+        "updater_health_commit",
+        "release_faults",
+        "release_proof"
+      ],
+      "passed": 6,
+      "score": 10.0,
+      "total": 6,
+      "weight": 0.1,
+      "weighted_contribution": 1.0
+    },
+    "runtime_ownership": {
+      "checks": [
+        "runtime_gate",
+        "ownership_registry_complete",
+        "runtime_scanner_full_roots"
+      ],
+      "passed": 3,
+      "score": 10.0,
+      "total": 3,
+      "weight": 0.12,
+      "weighted_contribution": 1.2
+    },
+    "security_supply_chain": {
+      "checks": [
+        "release_tag_main_guard",
+        "signed_images",
+        "supply_chain"
+      ],
+      "passed": 3,
+      "score": 10.0,
+      "total": 3,
+      "weight": 0.06,
+      "weighted_contribution": 0.6
+    },
+    "web_state_isolation": {
+      "checks": [
+        "web_p1_zero",
+        "web_isolation",
+        "web_domain_boundaries"
+      ],
+      "passed": 3,
+      "score": 10.0,
+      "total": 3,
+      "weight": 0.1,
+      "weighted_contribution": 1.0
+    }
+  },
+  "generated_at": "2026-08-02T05:01:45.913635+00:00",
+  "hard_gate_results": {
+    "full_tests": true,
+    "known_p0_zero": true,
+    "known_p1_zero": true,
+    "manifest_gate": true,
+    "migration_gate": true,
+    "ownership_registry_complete": true,
+    "release_proof": true,
+    "release_tag_main_guard": true,
+    "runtime_gate": true,
+    "updater_health_commit": true,
+    "web_isolation": true,
+    "worktree_clean": false
+  },
+  "hard_gates_passed": false,
+  "schema_version": 1,
+  "status": "not_achieved",
+  "weighted_score": 10.0
+}

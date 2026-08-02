@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -23,6 +25,31 @@ DEFAULT_EVIDENCE = ROOT / ".audit_state" / "governance-evidence.json"
 DEFAULT_JSON_OUTPUT = ROOT / "docs" / "refactors" / "governance-score.json"
 DEFAULT_MARKDOWN_OUTPUT = ROOT / "docs" / "refactors" / "governance-score.md"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+WORKTREE_STATUS_COMMAND = (
+    "git",
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+)
+WEB_TEST_SUFFIXES = frozenset(
+    {".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"}
+)
+KNOWN_DEFECT_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
+KNOWN_DEFECT_STATUSES = frozenset({"open", "closed"})
+JS_TEST_MODIFIERS = frozenset(
+    {"concurrent", "each", "failing", "fails", "only", "skip", "todo"}
+)
+JS_DISABLED_TEST_MODIFIERS = frozenset({"failing", "fails", "only", "skip", "todo"})
+PYTHON_DISABLED_TEST_MARKERS = frozenset(
+    {
+        "expected_failure",
+        "expectedfailure",
+        "skip",
+        "skipif",
+        "skipunless",
+        "xfail",
+    }
+)
 
 WEIGHTS = {
     "funding_async_correctness": 0.15,
@@ -110,6 +137,7 @@ HARD_GATES = (
     "web_isolation",
     "full_tests",
     "release_proof",
+    "worktree_clean",
 )
 
 STATIC_COMMANDS = {
@@ -135,6 +163,10 @@ STATIC_COMMANDS = {
         "run",
         "python",
         "scripts/lint_alembic_breaking.py",
+        "--base",
+        "HEAD^",
+        "--head",
+        "HEAD",
     ),
     "runtime_gate": (
         "uv",
@@ -150,6 +182,13 @@ class CheckResult:
     passed: bool
     source: str
     detail: str
+
+
+@dataclass(frozen=True)
+class _JsToken:
+    kind: str
+    value: str
+    offset: int
 
 
 Runner = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
@@ -199,31 +238,702 @@ def _command_checks(root: Path, runner: Runner) -> dict[str, CheckResult]:
     return checks
 
 
+def _fixed_commit_is_ancestor(root: Path, commit: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode in {0, 1}:
+        return result.returncode == 0
+    detail = (result.stderr or result.stdout).strip()
+    raise ValueError(
+        f"cannot verify fixed commit ancestry for {commit}: "
+        f"{detail or f'exit={result.returncode}'}"
+    )
+
+
+def _worktree_check(root: Path, runner: Runner) -> CheckResult:
+    result = runner(WORKTREE_STATUS_COMMAND, root)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return CheckResult(
+            False,
+            "git",
+            f"cannot verify worktree state: {detail or f'exit={result.returncode}'}",
+        )
+    dirty_paths = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    return CheckResult(
+        passed=not dirty_paths,
+        source="git",
+        detail=(
+            "tracked and untracked source tree matches HEAD"
+            if not dirty_paths
+            else (
+                f"{len(dirty_paths)} dirty path(s); commit-bound evidence "
+                "requires a clean worktree"
+            )
+        ),
+    )
+
+
+def _read_test_source(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read regression test {path}: {exc}") from exc
+
+
+def _split_pytest_selector(selector: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    bracket_depth = 0
+    index = 0
+    while index < len(selector):
+        char = selector[index]
+        if char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            if bracket_depth == 0:
+                raise ValueError(f"invalid pytest selector {selector!r}: unmatched ']'")
+            bracket_depth -= 1
+        elif selector.startswith("::", index) and bracket_depth == 0:
+            parts.append(selector[start:index])
+            index += 2
+            start = index
+            continue
+        index += 1
+    if bracket_depth:
+        raise ValueError(f"invalid pytest selector {selector!r}: unmatched '['")
+    parts.append(selector[start:])
+    names = [part.split("[", 1)[0] for part in parts]
+    if any(not name for name in names):
+        raise ValueError(f"invalid pytest selector {selector!r}: empty node id")
+    return names
+
+
+def _python_expression_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Call):
+        return _python_expression_name(node.func)
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _python_expression_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return None
+
+
+def _python_marker_is_disabled(node: ast.AST) -> bool:
+    for candidate in ast.walk(node):
+        name = _python_expression_name(candidate)
+        if (
+            name is not None
+            and name.rsplit(".", 1)[-1].lower() in PYTHON_DISABLED_TEST_MARKERS
+        ):
+            return True
+    return False
+
+
+def _python_scope_is_disabled(body: list[ast.stmt]) -> bool:
+    for statement in body:
+        value: ast.AST | None = None
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "pytestmark"
+            for target in statement.targets
+        ):
+            value = statement.value
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == "pytestmark"
+        ):
+            value = statement.value
+        if value is None:
+            continue
+        markers = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+        if any(_python_marker_is_disabled(marker) for marker in markers):
+            return True
+    return False
+
+
+def _python_node_is_disabled(
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    return any(_python_marker_is_disabled(item) for item in node.decorator_list)
+
+
+def _python_test_reference_exists(path: Path, selector: str) -> bool:
+    source = _read_test_source(path)
+    try:
+        body = ast.parse(source, filename=str(path)).body
+    except SyntaxError as exc:
+        location = f"line {exc.lineno}" if exc.lineno else "unknown line"
+        raise ValueError(
+            f"cannot parse Python regression test {path}: {exc.msg} ({location})"
+        ) from exc
+    if _python_scope_is_disabled(body):
+        return False
+    names = _split_pytest_selector(selector)
+    for index, part in enumerate(names):
+        node = next(
+            (
+                candidate
+                for candidate in body
+                if isinstance(
+                    candidate,
+                    (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                )
+                and candidate.name == part
+            ),
+            None,
+        )
+        if node is None:
+            return False
+        if _python_node_is_disabled(node):
+            return False
+        if index == len(names) - 1:
+            return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if not isinstance(node, ast.ClassDef):
+            return False
+        body = node.body
+        if _python_scope_is_disabled(body):
+            return False
+    return False
+
+
+def _js_parse_error(
+    path: Path,
+    source: str,
+    offset: int,
+    message: str,
+) -> ValueError:
+    line = source.count("\n", 0, offset) + 1
+    return ValueError(
+        f"cannot parse JavaScript regression test {path}: {message} at line {line}"
+    )
+
+
+def _consume_js_escape(
+    source: str,
+    index: int,
+    *,
+    path: Path,
+) -> tuple[str, int]:
+    escaped_index = index + 1
+    if escaped_index >= len(source):
+        raise _js_parse_error(path, source, index, "unterminated escape")
+    escaped = source[escaped_index]
+    if escaped in "\r\n":
+        if escaped == "\r" and source.startswith("\r\n", escaped_index):
+            return "", escaped_index + 2
+        return "", escaped_index + 1
+    simple = {
+        "0": "\0",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    if escaped in simple:
+        return simple[escaped], escaped_index + 1
+    if escaped == "x":
+        digits = source[escaped_index + 1 : escaped_index + 3]
+        if len(digits) != 2 or any(
+            char not in "0123456789abcdefABCDEF" for char in digits
+        ):
+            raise _js_parse_error(path, source, index, "invalid hexadecimal escape")
+        return chr(int(digits, 16)), escaped_index + 3
+    if escaped == "u":
+        digits_start = escaped_index + 1
+        if digits_start < len(source) and source[digits_start] == "{":
+            closing = source.find("}", digits_start + 1)
+            if closing < 0:
+                raise _js_parse_error(
+                    path, source, index, "unterminated Unicode escape"
+                )
+            digits = source[digits_start + 1 : closing]
+            if (
+                not 1 <= len(digits) <= 6
+                or any(char not in "0123456789abcdefABCDEF" for char in digits)
+                or int(digits, 16) > 0x10FFFF
+            ):
+                raise _js_parse_error(path, source, index, "invalid Unicode escape")
+            return chr(int(digits, 16)), closing + 1
+        digits = source[digits_start : digits_start + 4]
+        if len(digits) != 4 or any(
+            char not in "0123456789abcdefABCDEF" for char in digits
+        ):
+            raise _js_parse_error(path, source, index, "invalid Unicode escape")
+        return chr(int(digits, 16)), digits_start + 4
+    return escaped, escaped_index + 1
+
+
+def _consume_js_quoted_string(
+    source: str,
+    start: int,
+    *,
+    path: Path,
+) -> tuple[str, int]:
+    quote = source[start]
+    value: list[str] = []
+    index = start + 1
+    while index < len(source):
+        char = source[index]
+        if char == quote:
+            return "".join(value), index + 1
+        if char in "\r\n":
+            raise _js_parse_error(path, source, start, "unterminated string literal")
+        if char == "\\":
+            decoded, index = _consume_js_escape(source, index, path=path)
+            value.append(decoded)
+            continue
+        value.append(char)
+        index += 1
+    raise _js_parse_error(path, source, start, "unterminated string literal")
+
+
+def _js_regex_can_start(previous: _JsToken | None) -> bool:
+    if previous is None:
+        return True
+    if previous.kind in {"number", "regex", "string", "template"}:
+        return False
+    if previous.kind == "identifier":
+        return previous.value in {
+            "await",
+            "case",
+            "delete",
+            "do",
+            "else",
+            "in",
+            "instanceof",
+            "of",
+            "return",
+            "throw",
+            "typeof",
+            "void",
+            "yield",
+        }
+    return previous.value not in {")", "]", "}", "<"}
+
+
+def _consume_js_regex(
+    source: str,
+    start: int,
+    *,
+    path: Path,
+) -> int:
+    index = start + 1
+    in_character_class = False
+    while index < len(source):
+        char = source[index]
+        if char in "\r\n":
+            raise _js_parse_error(
+                path, source, start, "unterminated regular expression"
+            )
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            in_character_class = True
+        elif char == "]":
+            in_character_class = False
+        elif char == "/" and not in_character_class:
+            index += 1
+            while index < len(source) and (
+                source[index].isalnum() or source[index] in "$_"
+            ):
+                index += 1
+            return index
+        index += 1
+    raise _js_parse_error(path, source, start, "unterminated regular expression")
+
+
+def _consume_js_block_comment(
+    source: str,
+    start: int,
+    *,
+    path: Path,
+) -> int:
+    closing = source.find("*/", start + 2)
+    if closing < 0:
+        raise _js_parse_error(path, source, start, "unterminated block comment")
+    return closing + 2
+
+
+def _consume_js_template_expression(
+    source: str,
+    start: int,
+    *,
+    path: Path,
+) -> int:
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    stack = ["{"]
+    previous: _JsToken | None = None
+    index = start
+    while index < len(source):
+        char = source[index]
+        if char.isspace():
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            index = _consume_js_block_comment(source, index, path=path)
+            continue
+        if char in {"'", '"'}:
+            value, index = _consume_js_quoted_string(source, index, path=path)
+            previous = _JsToken("string", value, index)
+            continue
+        if char == "`":
+            kind, value, index = _consume_js_template(source, index, path=path)
+            previous = _JsToken(kind, value, index)
+            continue
+        if char == "/" and _js_regex_can_start(previous):
+            index = _consume_js_regex(source, index, path=path)
+            previous = _JsToken("regex", "", index)
+            continue
+        if char.isalpha() or char in "$_":
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "$_"):
+                end += 1
+            previous = _JsToken("identifier", source[index:end], index)
+            index = end
+            continue
+        if char.isdigit():
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+                end += 1
+            previous = _JsToken("number", source[index:end], index)
+            index = end
+            continue
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            expected = opening_for[char]
+            if not stack or stack[-1] != expected:
+                raise _js_parse_error(path, source, index, f"unmatched {char!r}")
+            stack.pop()
+            if not stack:
+                return index + 1
+        previous = _JsToken("punctuation", char, index)
+        index += 1
+    raise _js_parse_error(path, source, start, "unterminated template expression")
+
+
+def _consume_js_template(
+    source: str,
+    start: int,
+    *,
+    path: Path,
+) -> tuple[str, str, int]:
+    value: list[str] = []
+    dynamic = False
+    index = start + 1
+    while index < len(source):
+        char = source[index]
+        if char == "`":
+            return (
+                "dynamic_template" if dynamic else "template",
+                "" if dynamic else "".join(value),
+                index + 1,
+            )
+        if char == "\\":
+            decoded, index = _consume_js_escape(source, index, path=path)
+            if not dynamic:
+                value.append(decoded)
+            continue
+        if source.startswith("${", index):
+            dynamic = True
+            index = _consume_js_template_expression(source, index + 2, path=path)
+            continue
+        if not dynamic:
+            value.append(char)
+        index += 1
+    raise _js_parse_error(path, source, start, "unterminated template literal")
+
+
+def _tokenize_javascript(source: str, *, path: Path) -> list[_JsToken]:
+    opening_for = {")": "(", "]": "[", "}": "{"}
+    stack: list[tuple[str, int]] = []
+    tokens: list[_JsToken] = []
+    index = 0
+    if source.startswith("#!"):
+        newline = source.find("\n")
+        index = len(source) if newline < 0 else newline + 1
+    while index < len(source):
+        char = source[index]
+        if char.isspace():
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            index = _consume_js_block_comment(source, index, path=path)
+            continue
+        if char in {"'", '"'}:
+            value, end = _consume_js_quoted_string(source, index, path=path)
+            tokens.append(_JsToken("string", value, index))
+            index = end
+            continue
+        if char == "`":
+            kind, value, end = _consume_js_template(source, index, path=path)
+            tokens.append(_JsToken(kind, value, index))
+            index = end
+            continue
+        previous = tokens[-1] if tokens else None
+        if char == "/" and _js_regex_can_start(previous):
+            end = _consume_js_regex(source, index, path=path)
+            tokens.append(_JsToken("regex", source[index:end], index))
+            index = end
+            continue
+        if char.isalpha() or char in "$_":
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "$_"):
+                end += 1
+            tokens.append(_JsToken("identifier", source[index:end], index))
+            index = end
+            continue
+        if char.isdigit():
+            end = index + 1
+            while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+                end += 1
+            tokens.append(_JsToken("number", source[index:end], index))
+            index = end
+            continue
+        if char in "([{":
+            stack.append((char, index))
+        elif char in ")]}":
+            expected = opening_for[char]
+            if not stack or stack[-1][0] != expected:
+                raise _js_parse_error(path, source, index, f"unmatched {char!r}")
+            stack.pop()
+        tokens.append(_JsToken("punctuation", char, index))
+        index += 1
+    if stack:
+        opening, offset = stack[-1]
+        raise _js_parse_error(path, source, offset, f"unclosed {opening!r}")
+    return tokens
+
+
+def _after_js_call(tokens: list[_JsToken], opening_index: int) -> int | None:
+    depth = 0
+    for index in range(opening_index, len(tokens)):
+        value = tokens[index].value
+        if value == "(":
+            depth += 1
+        elif value == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _web_test_names(path: Path) -> set[str]:
+    source = _read_test_source(path)
+    tokens = _tokenize_javascript(source, path=path)
+    names: set[str] = set()
+    for index, token in enumerate(tokens):
+        if token.kind != "identifier" or token.value not in {"it", "test"}:
+            continue
+        if index > 0 and tokens[index - 1].value == ".":
+            continue
+        cursor = index + 1
+        modifiers: list[str] = []
+        while (
+            cursor + 1 < len(tokens)
+            and tokens[cursor].value == "."
+            and tokens[cursor + 1].kind == "identifier"
+            and tokens[cursor + 1].value in JS_TEST_MODIFIERS
+        ):
+            modifiers.append(tokens[cursor + 1].value)
+            cursor += 2
+        if "each" in modifiers:
+            if cursor < len(tokens) and tokens[cursor].value == "(":
+                after_data = _after_js_call(tokens, cursor)
+                if after_data is None:
+                    continue
+                cursor = after_data
+            elif cursor < len(tokens) and tokens[cursor].kind in {
+                "dynamic_template",
+                "template",
+            }:
+                cursor += 1
+            else:
+                continue
+            while (
+                cursor + 1 < len(tokens)
+                and tokens[cursor].value == "."
+                and tokens[cursor + 1].kind == "identifier"
+                and tokens[cursor + 1].value in JS_DISABLED_TEST_MODIFIERS
+            ):
+                modifiers.append(tokens[cursor + 1].value)
+                cursor += 2
+        if (
+            cursor + 1 < len(tokens)
+            and tokens[cursor].value == "("
+            and tokens[cursor + 1].kind in {"string", "template"}
+            and not JS_DISABLED_TEST_MODIFIERS.intersection(modifiers)
+        ):
+            names.add(tokens[cursor + 1].value)
+    return names
+
+
+def _web_test_reference_exists(path: Path, test_name: str) -> bool:
+    return test_name in _web_test_names(path)
+
+
+def _regression_test_reference_exists(root: Path, reference: str) -> bool:
+    relative_path, separator, selector = reference.partition("::")
+    if not separator or not relative_path or not selector:
+        raise ValueError(
+            "regression test reference must be '<relative-path>::<selector>'"
+        )
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        raise ValueError(f"regression test path must be relative: {relative_path!r}")
+    try:
+        resolved_root = root.resolve()
+        path = (resolved_root / relative).resolve()
+        path.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"regression test path escapes repository root: {relative_path!r}"
+        ) from exc
+    if not path.is_file():
+        return False
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return _python_test_reference_exists(path, selector)
+    if suffix in WEB_TEST_SUFFIXES:
+        return _web_test_reference_exists(path, selector)
+    raise ValueError(
+        f"unsupported regression test suffix {suffix or '<none>'!r} "
+        f"for {relative_path!r}"
+    )
+
+
+def _registry_string(
+    entry: dict[str, Any],
+    field: str,
+    *,
+    context: str,
+) -> str:
+    value = entry.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{context} field {field!r} must be a non-empty string")
+    return value
+
+
+def _registry_string_list(
+    entry: dict[str, Any],
+    field: str,
+    *,
+    context: str,
+    required: bool,
+) -> list[str] | None:
+    if field not in entry and not required:
+        return None
+    value = entry.get(field)
+    if not isinstance(value, list) or (required and not value):
+        requirement = "a non-empty list" if required else "a list"
+        raise ValueError(f"{context} field {field!r} must be {requirement}")
+    strings: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                f"{context} field {field}[{index}] must be a non-empty string"
+            )
+        strings.append(item)
+    return strings
+
+
 def _known_defect_checks(root: Path) -> dict[str, CheckResult]:
     payload = _load_json(root / "docs/refactors/known-defects.json")
     defects = payload.get("defects")
-    if payload.get("version") != 1 or not isinstance(defects, list):
-        raise ValueError("unsupported known-defects registry")
+    if type(payload.get("version")) is not int or payload["version"] != 1:
+        raise ValueError("known-defects registry field 'version' must be integer 1")
+    if not isinstance(defects, list):
+        raise ValueError("known-defects registry field 'defects' must be a list")
     open_by_severity: dict[str, list[str]] = {"P0": [], "P1": []}
     web_open: list[str] = []
-    for entry in defects:
+    verified_commits: dict[str, bool] = {}
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(defects):
         if not isinstance(entry, dict):
-            raise ValueError("invalid known-defects entry")
-        defect_id = str(entry.get("id", ""))
-        severity = str(entry.get("severity", ""))
-        status = str(entry.get("status", ""))
+            raise ValueError(f"known-defects entry {index} must be an object")
+        entry_context = f"known-defects entry {index}"
+        defect_id = _registry_string(entry, "id", context=entry_context)
+        context = f"known defect {defect_id}"
+        if defect_id in seen_ids:
+            raise ValueError(f"duplicate known defect id {defect_id!r}")
+        seen_ids.add(defect_id)
+        severity = _registry_string(entry, "severity", context=context)
+        if severity not in KNOWN_DEFECT_SEVERITIES:
+            allowed = ", ".join(sorted(KNOWN_DEFECT_SEVERITIES))
+            raise ValueError(f"{context} field 'severity' must be one of: {allowed}")
+        status = _registry_string(entry, "status", context=context)
+        if status not in KNOWN_DEFECT_STATUSES:
+            allowed = ", ".join(sorted(KNOWN_DEFECT_STATUSES))
+            raise ValueError(f"{context} field 'status' must be one of: {allowed}")
+        for field in ("owner", "summary"):
+            if field in entry:
+                _registry_string(entry, field, context=context)
+        _registry_string_list(
+            entry,
+            "paths",
+            context=context,
+            required=False,
+        )
+        tests = _registry_string_list(
+            entry,
+            "regression_tests",
+            context=context,
+            required=status == "closed",
+        )
+        fixed_commit = entry.get("fixed_commit")
+        if fixed_commit is not None and (
+            not isinstance(fixed_commit, str)
+            or COMMIT_RE.fullmatch(fixed_commit) is None
+        ):
+            raise ValueError(
+                f"{context} field 'fixed_commit' must be a 40-character "
+                "lowercase git commit"
+            )
         if status == "closed":
-            tests = entry.get("regression_tests")
-            fixed_commit = entry.get("fixed_commit")
-            if (
-                not isinstance(tests, list)
-                or not tests
-                or not isinstance(fixed_commit, str)
-                or COMMIT_RE.fullmatch(fixed_commit) is None
-            ):
+            if fixed_commit is None:
                 raise ValueError(
-                    f"closed defect {defect_id} lacks tests or a fixed commit"
+                    f"{context} field 'fixed_commit' is required when closed"
                 )
+            assert tests is not None
+            missing_tests: list[str] = []
+            for test in tests:
+                try:
+                    exists = _regression_test_reference_exists(root, test)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"{context} has invalid regression test {test!r}: {exc}"
+                    ) from exc
+                if not exists:
+                    missing_tests.append(test)
+            if missing_tests:
+                raise ValueError(
+                    f"{context} references missing regression tests: "
+                    f"{', '.join(missing_tests)}"
+                )
+            if fixed_commit not in verified_commits:
+                verified_commits[fixed_commit] = _fixed_commit_is_ancestor(
+                    root, fixed_commit
+                )
+            if not verified_commits[fixed_commit]:
+                raise ValueError(f"{context} fixed commit is not an ancestor of HEAD")
         elif severity in open_by_severity:
             open_by_severity[severity].append(defect_id)
         if defect_id in {"P1-05", "P1-06", "P1-07"} and status != "closed":
@@ -292,9 +1002,7 @@ def _ownership_check(root: Path) -> CheckResult:
 
 
 def _source_checks(root: Path) -> dict[str, CheckResult]:
-    architecture = (root / "scripts/check_architecture.py").read_text(
-        encoding="utf-8"
-    )
+    architecture = (root / "scripts/check_architecture.py").read_text(encoding="utf-8")
     runtime = (root / "scripts/module_runtime_state_audit.py").read_text(
         encoding="utf-8"
     )
@@ -344,8 +1052,7 @@ def _source_checks(root: Path) -> dict[str, CheckResult]:
             "rerun results bind current plan and command set",
         ),
         "release_tag_main_guard": CheckResult(
-            "git merge-base --is-ancestor" in release
-            and "origin/main" in release,
+            "git merge-base --is-ancestor" in release and "origin/main" in release,
             "source",
             "release tag ancestry guard",
         ),
@@ -377,6 +1084,7 @@ def _evidence_checks(
     path: Path,
     *,
     commit: str,
+    root: Path = ROOT,
 ) -> dict[str, CheckResult]:
     if not path.is_file():
         return {}
@@ -386,22 +1094,83 @@ def _evidence_checks(
     raw_checks = payload.get("checks")
     if not isinstance(raw_checks, dict):
         raise ValueError("governance evidence checks must be an object")
+    expected_commands = _expected_evidence_commands(root)
     checks: dict[str, CheckResult] = {}
     for name, entry in raw_checks.items():
+        if not isinstance(name, str) or name not in expected_commands:
+            raise ValueError(f"unknown governance evidence check: {name}")
         if not isinstance(entry, dict):
             raise ValueError(f"invalid governance evidence check: {name}")
+        expected_command = expected_commands[name]
+        command = entry.get("command")
+        expected_digest = hashlib.sha256(expected_command.encode("utf-8")).hexdigest()
+        actual_digest = (
+            hashlib.sha256(command.encode("utf-8")).hexdigest()
+            if isinstance(command, str)
+            else ""
+        )
         passed = (
             entry.get("status") == "passed"
             and entry.get("exit_code") == 0
-            and isinstance(entry.get("command"), str)
-            and bool(entry["command"])
+            and actual_digest == expected_digest
         )
-        checks[str(name)] = CheckResult(
+        detail = (
+            expected_command
+            if actual_digest == expected_digest
+            else f"command digest mismatch; expected sha256={expected_digest}"
+        )
+        checks[name] = CheckResult(
             passed=passed,
             source="evidence",
-            detail=str(entry.get("command") or entry.get("status") or "missing"),
+            detail=detail,
         )
     return checks
+
+
+def _expected_evidence_commands(root: Path) -> dict[str, str]:
+    path = root / "scripts" / "governance_evidence.py"
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, UnicodeError, SyntaxError) as exc:
+        raise ValueError(f"cannot load governance evidence commands: {exc}") from exc
+    raw_commands: object | None = None
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "CHECK_COMMANDS"
+            for target in statement.targets
+        ):
+            raw_commands = ast.literal_eval(statement.value)
+            break
+    if not isinstance(raw_commands, dict):
+        raise ValueError("governance evidence CHECK_COMMANDS must be a literal mapping")
+    commands: dict[str, str] = {}
+    for name, parts in raw_commands.items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(parts, (list, tuple))
+            or not parts
+            or any(not isinstance(part, str) or not part for part in parts)
+        ):
+            raise ValueError("invalid governance evidence CHECK_COMMANDS entry")
+        commands[name] = " && ".join(parts)
+    return commands
+
+
+def _merge_check_result(
+    current: CheckResult | None,
+    candidate: CheckResult,
+) -> CheckResult:
+    if current is None:
+        return candidate
+    if not current.passed:
+        return current
+    if not candidate.passed:
+        return candidate
+    return CheckResult(
+        passed=True,
+        source=f"{current.source}+{candidate.source}",
+        detail=f"{current.detail}; {candidate.detail}",
+    )
 
 
 def build_report(
@@ -417,7 +1186,13 @@ def build_report(
     checks.update(_known_defect_checks(root))
     checks["ownership_registry_complete"] = _ownership_check(root)
     checks.update(_source_checks(root))
-    checks.update(_evidence_checks(evidence_path, commit=commit))
+    for name, evidence in _evidence_checks(
+        evidence_path,
+        commit=commit,
+        root=root,
+    ).items():
+        checks[name] = _merge_check_result(checks.get(name), evidence)
+    checks["worktree_clean"] = _worktree_check(root, runner)
 
     all_check_names = {
         name for names in DIMENSION_CHECKS.values() for name in names
@@ -445,9 +1220,7 @@ def build_report(
             "weighted_contribution": round(contribution, 3),
         }
 
-    hard_gate_results = {
-        name: checks[name].passed for name in HARD_GATES
-    }
+    hard_gate_results = {name: checks[name].passed for name in HARD_GATES}
     hard_gates_passed = all(hard_gate_results.values())
     return {
         "checks": {name: asdict(result) for name, result in sorted(checks.items())},
@@ -458,9 +1231,7 @@ def build_report(
         "hard_gates_passed": hard_gates_passed,
         "schema_version": 1,
         "status": (
-            "passed"
-            if hard_gates_passed and weighted_score >= 9.0
-            else "not_achieved"
+            "passed" if hard_gates_passed and weighted_score >= 9.0 else "not_achieved"
         ),
         "weighted_score": round(weighted_score, 3),
     }
@@ -488,22 +1259,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
     lines.extend(["", "## Failed Hard Gates", ""])
     failed = [
-        name
-        for name, passed in report["hard_gate_results"].items()
-        if not passed
+        name for name, passed in report["hard_gate_results"].items() if not passed
     ]
     lines.extend(f"- `{name}`" for name in failed)
     if not failed:
         lines.append("- None")
     lines.extend(["", "## Missing Or Failed Evidence", ""])
     missing = [
-        (name, value)
-        for name, value in report["checks"].items()
-        if not value["passed"]
+        (name, value) for name, value in report["checks"].items() if not value["passed"]
     ]
     lines.extend(
-        f"- `{name}`: {value['detail']} ({value['source']})"
-        for name, value in missing
+        f"- `{name}`: {value['detail']} ({value['source']})" for name, value in missing
     )
     if not missing:
         lines.append("- None")

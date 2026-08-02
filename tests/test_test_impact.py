@@ -314,3 +314,34 @@ def test_production_build_and_governance_inputs_require_full_mandatory(
     assert plan["full_mandatory"] is True
     assert plan["full_mandatory_reasons"][0]["file"] == changed_file
     assert plan["unmatched_changed_files"] == []
+
+
+@pytest.mark.parametrize(
+    "changed_file",
+    [
+        "scripts/lint_alembic_breaking.py",
+        "tests/test_lint_alembic_breaking.py",
+        ".github/workflows/ci.yml",
+    ],
+)
+def test_alembic_linter_gate_inputs_fail_closed_and_run_regression_test(
+    changed_file: str,
+) -> None:
+    manifest = test_impact.load_manifest(ROOT / "scripts" / "test-manifest.toml")
+
+    plan = test_impact.build_plan(
+        manifest,
+        changed_files=[changed_file],
+        base="base",
+        head="head",
+        reverse_imports=[],
+    )
+
+    assert plan["full_mandatory"] is True
+    assert plan["unmatched_changed_files"] == []
+    assert "alembic-linter-regressions" in {
+        rule["name"] for rule in plan["matched_rules"]
+    }
+    assert "uv run pytest -q tests/test_lint_alembic_breaking.py" in {
+        command["command"] for command in plan["commands"]
+    }

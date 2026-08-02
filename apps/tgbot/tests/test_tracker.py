@@ -77,9 +77,7 @@ class LegacyRefreshRedis(FakeRedis):
 @pytest.mark.parametrize(
     "raw",
     [
-        {b"chat_id": b"123"},
         {b"chat_id": b"abc", b"status_message_id": b"456"},
-        {b"chat_id": b"123", b"status_message_id": b"0"},
     ],
 )
 async def test_get_removes_dirty_tracker_hashes(raw: dict[bytes, bytes]) -> None:
@@ -98,6 +96,28 @@ async def test_get_removes_dirty_tracker_hashes(raw: dict[bytes, bytes]) -> None
             tracker_mod._sent_images_key("gen-bad"),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_keeps_pending_bonus_track_without_message_id() -> None:
+    """bonus「先注册后发消息」的合法中间态：没有 status_message_id 不能当脏数据删。
+
+    缺 chat_id 仍然是脏数据（必须删）；只有 message id 缺失/为 0 时返回
+    status_message_id=None 的 track，等 _on_attached 发完消息补写。
+    """
+    for raw in (
+        {b"chat_id": b"123"},
+        {b"chat_id": b"123", b"status_message_id": b"0"},
+    ):
+        redis = FakeRedis(raw)
+        tr = tracker_mod.Tracker()
+        tr._redis = redis  # type: ignore[assignment]
+
+        result = await tr.get("gen-bonus-pending")
+
+        assert result is not None
+        assert result.status_message_id is None
+        assert redis.deleted == []
 
 
 @pytest.mark.asyncio
@@ -174,6 +194,72 @@ async def test_add_uses_fake_clock_and_retains_membership_for_48_hours() -> None
 
 
 @pytest.mark.asyncio
+async def test_add_stores_empty_message_id_for_pending_bonus() -> None:
+    """bonus 先注册后发消息：注册时 status_message_id 为空，落盘成空串。"""
+    redis = AddRedis()
+    tr = tracker_mod.Tracker(clock=lambda: 1_000.75)
+    tr._redis = redis  # type: ignore[assignment]
+
+    await tr.add(
+        "gen-bonus-1",
+        tracker_mod.TaskTrack(
+            chat_id=123,
+            status_message_id=None,
+            prompt="p",
+            user_id="user-1",
+        ),
+    )
+
+    assert (
+        "hset",
+        tracker_mod._key("gen-bonus-1"),
+        {
+            "mapping": {
+                "chat_id": "123",
+                "user_id": "user-1",
+                "status_message_id": "",
+                "prompt": "p",
+                "params": "{}",
+                "is_bonus": "0",
+                "batch_id": "",
+            }
+        },
+    ) in redis.pipe.calls
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_backfills_real_message_id() -> None:
+    redis = AddRedis()
+    tr = tracker_mod.Tracker()
+    tr._redis = redis  # type: ignore[assignment]
+
+    await tr.update_status_message("gen-bonus-1", 42)
+
+    assert (
+        "hset",
+        tracker_mod._key("gen-bonus-1"),
+        "status_message_id",
+        "42",
+        {},
+    ) in redis.pipe.calls
+    assert (
+        "expire",
+        tracker_mod._key("gen-bonus-1"),
+        tracker_mod.TRACK_RETENTION_SECONDS,
+    ) in redis.pipe.calls
+
+
+@pytest.mark.asyncio
+async def test_update_status_message_ignores_invalid_message_id() -> None:
+    redis = AddRedis()
+    tr = tracker_mod.Tracker()
+    tr._redis = redis  # type: ignore[assignment]
+
+    await tr.update_status_message("gen-bonus-1", 0)
+    assert redis.pipe.calls == []
+
+
+@pytest.mark.asyncio
 async def test_refresh_binds_legacy_tracker_and_renews_retention() -> None:
     redis = LegacyRefreshRedis(
         {
@@ -216,3 +302,35 @@ async def test_add_rejects_empty_user_id_before_writing() -> None:
                 prompt="hello",
             ),
         )
+
+
+class MarkerRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+        self.set_ex: dict[str, int] = {}
+
+    async def set(self, key: str, value: str, *, ex: int) -> None:
+        self.store[key] = value.encode()
+        self.set_ex[key] = ex
+
+    async def get(self, key: str) -> bytes | None:
+        return self.store.get(key)
+
+
+@pytest.mark.asyncio
+async def test_retry_marker_roundtrip_with_long_ttl() -> None:
+    redis = MarkerRedis()
+    tr = tracker_mod.Tracker()
+    tr._redis = redis  # type: ignore[assignment]
+
+    assert await tr.retry_source_new_gen("redo", 42, "gen-src") is None
+
+    await tr.mark_retry_submitted("redo", 42, "gen-src", "gen-new")
+
+    assert await tr.retry_source_new_gen("redo", 42, "gen-src") == "gen-new"
+    assert await tr.retry_source_new_gen("retry", 42, "gen-src") is None
+    assert await tr.retry_source_new_gen("redo", 7, "gen-src") is None
+    assert redis.set_ex[
+        f"{tracker_mod._RETRY_SOURCE_PREFIX}redo:42:gen-src"
+    ] == tracker_mod._RETRY_SOURCE_TTL_SECONDS
+    assert tracker_mod._RETRY_SOURCE_TTL_SECONDS > tracker_mod.TRACK_RETENTION_SECONDS

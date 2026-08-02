@@ -177,6 +177,11 @@ validate_resumed_update_state() {
 
 restore_uncommitted_update_state() {
     local rc=0
+    if ! guard_automatic_app_rollback_compatibility \
+            "${ROOT}/releases/${CURRENT_ID:-}" "${NEW_RELEASE:-}"; then
+        log_error "rollback：schema capability guard 拒绝恢复旧应用状态；保留现场等待前向恢复或整库回滚。"
+        return 1
+    fi
     if ! restore_update_symlink_snapshot; then
         log_error "rollback：current/previous symlink 未能完整恢复。"
         rc=1

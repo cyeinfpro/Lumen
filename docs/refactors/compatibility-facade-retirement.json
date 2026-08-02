@@ -22,7 +22,7 @@
       "status": "active"
     },
     {
-      "caller_count": 170,
+      "caller_count": 168,
       "owner": "core",
       "path": "packages/core/lumen_core/models.py",
       "retirement_condition": "All external and internal callers import model_entities or model_base directly.",

@@ -55,6 +55,25 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
     msg = await require_message(cb)
     if msg is None:
         return
+
+    # 同一任务第二次点击 redo：幂等键按 (chat, gen) 固定,服务端只会回放
+    # 第一次提交的任务、不会新建 —— 提前查标记,明确告知而不是静默返回旧任务
+    # (或重复输出误导性的「已排队 #B」)。
+    try:
+        prior_new_gen = await tracker.retry_source_new_gen(
+            "redo", msg.chat.id, gen_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Redis 不可用：宁可放行也不要卡死用户;服务端幂等键仍是第二道防线。
+        logger.warning("redo marker lookup failed gen=%s err=%r", gen_id, exc)
+        prior_new_gen = None
+    if prior_new_gen:
+        await cb.answer(
+            f"该任务已重画过(新任务 #{prior_new_gen[:8]} 已创建),不会重复创建新任务。",
+            show_alert=True,
+        )
+        return
+
     try:
         gen = await api.get_generation(msg.chat.id, gen_id)
     except ApiError as exc:
@@ -90,6 +109,11 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     new_gen = new_ids[0]
+    try:
+        await tracker.mark_retry_submitted("redo", msg.chat.id, gen_id, new_gen)
+    except Exception as exc:  # noqa: BLE001
+        # 标记写失败不阻塞提交;只是下一次重复点击会退回「回放旧任务」的旧行为。
+        logger.warning("redo marker write failed gen=%s err=%r", new_gen, exc)
     status = await msg.answer(f"⏳ 重画已排队 #{new_gen[:8]}\n\n📝 {prompt[:200]}")
     try:
         await tracker.add(

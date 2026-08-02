@@ -37,6 +37,7 @@ full_mandatory_paths = [
   "scripts/release_proof.py",
   "scripts/governance_score.py",
   "scripts/module_runtime_state_audit.py",
+  "scripts/lint_alembic_breaking.py",
   "scripts/run_test_plan.py",
   "scripts/test-manifest.toml",
   "scripts/test_manifest_lint.py",
@@ -45,6 +46,7 @@ full_mandatory_paths = [
   "tests/test_dead_code_audit.py",
   "tests/test_facade_inventory.py",
   "tests/test_governance_evidence.py",
+  "tests/test_lint_alembic_breaking.py",
   "tests/test_release_proof.py",
   "scripts/test_impact.py",
   "uv.lock",
@@ -116,6 +118,18 @@ commands = [
 ]
 gates = ["python-ruff", "web-runner-syntax"]
 risk = ["test-infrastructure"]
+resources = []
+
+[[rules]]
+name = "alembic-linter-regressions"
+paths = [
+  ".github/workflows/ci.yml",
+  "scripts/lint_alembic_breaking.py",
+  "tests/test_lint_alembic_breaking.py",
+]
+commands = ["uv run pytest -q tests/test_lint_alembic_breaking.py"]
+gates = ["python-ruff"]
+risk = ["migration", "test-infrastructure"]
 resources = []
 
 [[rules]]

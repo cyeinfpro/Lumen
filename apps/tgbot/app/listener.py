@@ -459,10 +459,9 @@ async def _dispatch(
     if not precheck_id:
         return
     if await tracker.get(precheck_id) is None:
-        # attached 把 bonus_id 注册进 tracker 之前需要 send_message；和
-        # succeeded(bonus_id) 之间有 IO 窗口。stream 内顺序保证 attached 先于
-        # bonus succeeded，但 _on_attached 自身完成前 succeeded 也可能被读到，
-        # 留小重试兜底。
+        # attached 把 bonus_id 注册进 tracker（先注册后发消息）；若注册当时
+        # 失败（Redis 抖动），succeeded(bonus_id) 会暂时查不到 track，留小
+        # 重试兜底。stream 内顺序保证 attached 先于 bonus succeeded。
         if event not in ("generation.succeeded", "generation.attached"):
             return
         found = False
@@ -524,6 +523,11 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
 
     给用户单独发一条「🎁 双引擎额外副本…」状态消息，并把 bonus_gen_id 注册
     进 tracker，这样后续 succeeded(bonus_gen_id) 能找到对应 chat。
+
+    必须先注册再发消息：旧实现 send_message 成功后才 tracker.add，两者之间
+    进程崩溃 / tracker.add 失败的话，重投（cursor 未推进）会再次走到发送——
+    用户会收到两条一模一样的「🎁」。注册先行后，重投命中上面的「已注册」
+    跳过分支，消息最多发一次。status_message_id 发完消息后补写。
     """
     parent_id = data.get("parent_generation_id") or ""
     bonus_id = data.get("generation_id") or ""
@@ -535,14 +539,12 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
     # 已经注册过（异常重投 / replay），跳过
     if await tracker.get(bonus_id) is not None:
         return
-    text = f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
-    bonus_status = await bot.send_message(chat_id=parent.chat_id, text=text)
     try:
         await tracker.add(
             bonus_id,
             TaskTrack(
                 chat_id=parent.chat_id,
-                status_message_id=bonus_status.message_id,
+                status_message_id=None,
                 prompt=parent.prompt,
                 params=parent.params,
                 is_bonus=True,
@@ -550,7 +552,20 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
             ),
         )
     except Exception as exc:  # noqa: BLE001
+        # 注册不成功绝不能先发消息：会留下「发了 🎁 但 tracker 里没有 bonus」的
+        # 悬挂态，后续 succeeded(bonus_id) 也找不到 chat。等 attached 重投再补。
         logger.warning("bonus tracker registration failed gen=%s err=%r", bonus_id, exc)
+        return
+    try:
+        text = (
+            f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
+        )
+        bonus_status = await bot.send_message(chat_id=parent.chat_id, text=text)
+        await tracker.update_status_message(bonus_id, bonus_status.message_id)
+    except Exception as exc:  # noqa: BLE001
+        # 消息已发但 message_id 没补上：重投会命中「已注册」跳过分支，不会重复
+        # 发；track 里 id 为空时 progress/终态编辑走 TelegramBadRequest 兜底。
+        logger.warning("bonus status message failed gen=%s err=%r", bonus_id, exc)
 
 
 async def _on_progress(bot: Bot, track, data: dict[str, Any]) -> None:
@@ -729,12 +744,17 @@ async def _on_succeeded(
                 downloads.append((path, mime, size, filename, image_id))
 
             if not downloads:
-                await _replace_status(
-                    bot,
-                    track,
-                    f"⚠️ 生成完成但图片下载失败，请稍后用 /tasks 取图。\n\n📝 {_truncate(track.prompt, 200)}",
+                # 全部下载失败 = 和查询失败同类的可重试错误（J-3）：delivered
+                # 保持 False → 走下方 clear_delivery + RuntimeError，由
+                # _user_worker 的 attempt 计数重投；连续失败最终由 drop 通知
+                # 收尾（告诉用户任务已完成、用 /tasks 取图，避免重复付费）。
+                # 旧实现在这里 delivered=True 并立即 mark_notified，重投直接
+                # 跳过，用户永远少拿一张已付费的图。也不能提前编辑「下载失败」
+                # 状态：重投时同文本 edit 会命中 message not modified → fallback
+                # send_message，把失败提示重复发给用户。
+                logger.warning(
+                    "succeeded all downloads failed gen=%s; will retry", gen_id
                 )
-                delivered = True
             else:
                 # 一律 sendDocument：TG 的 sendPhoto 不论大小都强制缩到 ~1280px + JPEG
                 # 重编码（协议设计），4K 图发出去会糊得不能看。Document 通道原样保留。
