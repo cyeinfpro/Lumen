@@ -106,9 +106,9 @@
       "source": "evidence"
     },
     "release_proof": {
-      "detail": "uv run python scripts/release_proof.py --tag \"v$(cat VERSION)\" --commit \"$(git rev-parse HEAD)\"",
-      "passed": true,
-      "source": "evidence"
+      "detail": "required evidence is missing",
+      "passed": false,
+      "source": "missing"
     },
     "release_tag_main_guard": {
       "detail": "release tag ancestry guard",
@@ -181,12 +181,12 @@
       "source": "known-defects"
     },
     "worktree_clean": {
-      "detail": "326 dirty path(s); commit-bound evidence requires a clean worktree",
+      "detail": "1 dirty path(s); commit-bound evidence requires a clean worktree",
       "passed": false,
       "source": "git"
     }
   },
-  "commit": "90552af95b07fd7064e38cf800c8a0f136aee7d5",
+  "commit": "1791a44fd5aad5d6fe5964a466402aa97657d29e",
   "dimensions": {
     "ci_and_gates": {
       "checks": [
@@ -274,11 +274,11 @@
         "release_faults",
         "release_proof"
       ],
-      "passed": 6,
-      "score": 10.0,
+      "passed": 5,
+      "score": 8.333,
       "total": 6,
       "weight": 0.1,
-      "weighted_contribution": 1.0
+      "weighted_contribution": 0.833
     },
     "runtime_ownership": {
       "checks": [
@@ -317,7 +317,7 @@
       "weighted_contribution": 1.0
     }
   },
-  "generated_at": "2026-08-02T05:01:45.913635+00:00",
+  "generated_at": "2026-08-02T05:43:10.777220+00:00",
   "hard_gate_results": {
     "full_tests": true,
     "known_p0_zero": true,
@@ -325,7 +325,7 @@
     "manifest_gate": true,
     "migration_gate": true,
     "ownership_registry_complete": true,
-    "release_proof": true,
+    "release_proof": false,
     "release_tag_main_guard": true,
     "runtime_gate": true,
     "updater_health_commit": true,
@@ -335,5 +335,5 @@
   "hard_gates_passed": false,
   "schema_version": 1,
   "status": "not_achieved",
-  "weighted_score": 10.0
+  "weighted_score": 9.833
 }
