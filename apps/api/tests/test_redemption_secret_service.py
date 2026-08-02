@@ -1,11 +1,94 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.services import redemption_secret
+
+
+class _ScalarResult:
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self) -> Any:
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_lock_redemption_secret_rotation_uses_transaction_and_row_locks() -> None:
+    statements: list[Any] = []
+
+    class Db:
+        async def connection(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement: Any) -> _ScalarResult:
+            statements.append(statement)
+            value = "current-secret" if len(statements) == 2 else None
+            return _ScalarResult(value)
+
+    current = await redemption_secret.lock_redemption_secret_rotation(
+        Db(),  # type: ignore[arg-type]
+    )
+
+    rendered = [
+        str(statement.compile(dialect=postgresql.dialect())).upper()
+        for statement in statements
+    ]
+    assert current == "current-secret"
+    assert "PG_ADVISORY_XACT_LOCK" in rendered[0]
+    assert "HASHTEXT" in rendered[0]
+    assert "FROM SYSTEM_SETTINGS" in rendered[1]
+    assert "FOR UPDATE" in rendered[1]
+    assert (
+        statements[1].compile(dialect=postgresql.dialect()).params["key_1"]
+        == redemption_secret.CURRENT_REDEMPTION_SECRET_KEY
+    )
+
+
+@pytest.mark.asyncio
+async def test_rotation_lock_missing_current_stays_serialized() -> None:
+    statements: list[Any] = []
+
+    class Db:
+        async def connection(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement: Any) -> _ScalarResult:
+            statements.append(statement)
+            return _ScalarResult(None)
+
+    current = await redemption_secret.lock_redemption_secret_rotation(
+        Db(),  # type: ignore[arg-type]
+    )
+
+    assert current is None
+    assert len(statements) == 2
+    advisory_sql = str(statements[0].compile(dialect=postgresql.dialect())).lower()
+    row_lock_sql = str(statements[1].compile(dialect=postgresql.dialect())).lower()
+    assert "pg_advisory_xact_lock" in advisory_sql
+    assert "for update" in row_lock_sql
+
+
+@pytest.mark.asyncio
+async def test_lock_redemption_secret_rotation_fails_closed_without_postgres() -> None:
+    class Db:
+        async def connection(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        async def execute(self, _statement: Any) -> None:
+            raise AssertionError(
+                "unsupported dialect must not attempt an unlocked read"
+            )
+
+    with pytest.raises(redemption_secret.RedemptionSecretRotationLockUnavailable):
+        await redemption_secret.lock_redemption_secret_rotation(
+            Db(),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio

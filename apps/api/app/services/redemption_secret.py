@@ -5,18 +5,54 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import SystemSetting
 
 
+CURRENT_REDEMPTION_SECRET_KEY = "billing.redemption_code_secret"
 PREVIOUS_REDEMPTION_SECRET_KEY = "billing.redemption_code_previous_secret"
 PREVIOUS_REDEMPTION_SECRET_TTL = timedelta(hours=24)
+_REDEMPTION_SECRET_ROTATION_LOCK_KEY = "lumen:redemption-secret-rotation"
 
 
 class PreviousRedemptionSecretLocked(RuntimeError):
     """Raised when another secret rotation is still inside the grace window."""
+
+
+class RedemptionSecretRotationLockUnavailable(RuntimeError):
+    """Raised when the database cannot safely serialize secret rotation."""
+
+
+async def lock_redemption_secret_rotation(db: AsyncSession) -> str | None:
+    """Serialize rotation before reading either the current or previous secret."""
+
+    connection_factory = getattr(db, "connection", None)
+    if connection_factory is None:
+        raise RedemptionSecretRotationLockUnavailable(
+            "database transaction locking is unavailable"
+        )
+    connection = await connection_factory()
+    if connection.dialect.name != "postgresql":
+        raise RedemptionSecretRotationLockUnavailable(
+            "redemption secret rotation requires PostgreSQL transaction locking"
+        )
+
+    await db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtext(_REDEMPTION_SECRET_ROTATION_LOCK_KEY)
+            )
+        )
+    )
+    return (
+        await db.execute(
+            select(SystemSetting.value)
+            .where(SystemSetting.key == CURRENT_REDEMPTION_SECRET_KEY)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
 
 
 def previous_redemption_secret_payload(

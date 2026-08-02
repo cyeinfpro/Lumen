@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.canvas_models import (
@@ -71,14 +71,20 @@ async def _repair_missing_links(
     missing = {row.id: row for row in executions if row.id not in linked_ids}
     if not missing:
         return False
+    missing_ids = tuple(missing)
     recent_generations = []
     if any(row.node_type in IMAGE_EXECUTABLE_NODE_TYPES for row in missing.values()):
         recent_generations = (
             (
                 await db.execute(
                     select(Generation)
-                    .where(Generation.user_id == user_id)
-                    .order_by(Generation.created_at.desc())
+                    .where(
+                        Generation.user_id == user_id,
+                        Generation.upstream_request["canvas_execution_id"]
+                        .as_string()
+                        .in_(missing_ids),
+                    )
+                    .order_by(Generation.created_at.asc(), Generation.id.asc())
                     .limit(200)
                 )
             )
@@ -91,8 +97,16 @@ async def _repair_missing_links(
             (
                 await db.execute(
                     select(VideoGeneration)
-                    .where(VideoGeneration.user_id == user_id)
-                    .order_by(VideoGeneration.created_at.desc())
+                    .where(
+                        VideoGeneration.user_id == user_id,
+                        VideoGeneration.upstream_request["canvas_execution_id"]
+                        .as_string()
+                        .in_(missing_ids),
+                    )
+                    .order_by(
+                        VideoGeneration.created_at.asc(),
+                        VideoGeneration.id.asc(),
+                    )
                     .limit(100)
                 )
             )
@@ -500,34 +514,64 @@ async def repair_canvas_executions(
     canvas_id: str,
     limit: int = 20,
 ) -> int:
-    executions = list(
-        (
-            await db.execute(
-                select(CanvasNodeExecution)
-                .where(
-                    CanvasNodeExecution.canvas_id == canvas_id,
-                    CanvasNodeExecution.user_id == user_id,
-                    CanvasNodeExecution.status.in_(_ACTIVE_EXECUTION_STATUSES),
-                )
-                .order_by(CanvasNodeExecution.updated_at.asc())
-                .limit(limit)
-                .with_for_update()
-            )
-        ).scalars()
-    )
-    changed = await _repair_missing_links(
-        db,
-        user_id=user_id,
-        executions=executions,
-    )
+    if limit <= 0:
+        return 0
+    page_size = min(limit, 100)
+    cursor_updated_at: datetime | None = None
+    cursor_id: str | None = None
+    changed = False
     touched = 0
-    for execution in executions:
-        if await _reconcile_execution(
-            db,
-            user_id=user_id,
-            execution=execution,
-        ):
-            touched += 1
+    while touched < limit:
+        query = select(CanvasNodeExecution).where(
+            CanvasNodeExecution.canvas_id == canvas_id,
+            CanvasNodeExecution.user_id == user_id,
+            CanvasNodeExecution.status.in_(_ACTIVE_EXECUTION_STATUSES),
+        )
+        if cursor_updated_at is not None and cursor_id is not None:
+            query = query.where(
+                or_(
+                    CanvasNodeExecution.updated_at > cursor_updated_at,
+                    and_(
+                        CanvasNodeExecution.updated_at == cursor_updated_at,
+                        CanvasNodeExecution.id > cursor_id,
+                    ),
+                )
+            )
+        executions = list(
+            (
+                await db.execute(
+                    query.order_by(
+                        CanvasNodeExecution.updated_at.asc(),
+                        CanvasNodeExecution.id.asc(),
+                    )
+                    .limit(page_size)
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        if not executions:
+            break
+        changed = (
+            await _repair_missing_links(
+                db,
+                user_id=user_id,
+                executions=executions,
+            )
+            or changed
+        )
+        for execution in executions:
+            if await _reconcile_execution(
+                db,
+                user_id=user_id,
+                execution=execution,
+            ):
+                touched += 1
+                if touched >= limit:
+                    break
+        cursor_updated_at = executions[-1].updated_at
+        cursor_id = executions[-1].id
+        if len(executions) < page_size:
+            break
     if changed or touched:
         await db.commit()
     return touched

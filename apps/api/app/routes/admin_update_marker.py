@@ -11,6 +11,11 @@ import shutil
 import subprocess
 import time
 
+from .admin_maintenance_marker_lock import (
+    MAINTENANCE_MARKER_NAMES,
+    maintenance_marker_lock,
+)
+
 
 _STALE_AFTER_SECONDS = 24 * 60 * 60
 
@@ -116,17 +121,18 @@ def read_marker(
     parse_marker: Callable[[str], UpdateMarker],
     marker_is_live_fn: Callable[[UpdateMarker], bool],
 ) -> UpdateMarker | None:
-    try:
-        marker = parse_marker(marker_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError):
+    with maintenance_marker_lock(marker_path.parent):
+        try:
+            marker = parse_marker(marker_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError):
+            return None
+        if marker_is_live_fn(marker):
+            return marker
+        try:
+            marker_path.unlink()
+        except OSError:
+            pass
         return None
-    if marker_is_live_fn(marker):
-        return marker
-    try:
-        marker_path.unlink()
-    except OSError:
-        pass
-    return None
 
 
 def _existing_marker_is_live(marker: Path) -> bool:
@@ -149,8 +155,12 @@ def _existing_marker_is_live(marker: Path) -> bool:
         parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
     ):
         return True
-    if parsed.pid and pid_is_running(parsed.pid) and not marker_is_stale(
-        parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
+    if (
+        parsed.pid
+        and pid_is_running(parsed.pid)
+        and not marker_is_stale(
+            parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
+        )
     ):
         return True
     if not raw.strip():
@@ -182,17 +192,21 @@ def write_marker(
     if unit:
         lines.append(f"unit={unit}")
     payload = ("\n".join(lines) + "\n").encode()
-    for _ in range(2):
+    with maintenance_marker_lock(marker.parent):
+        for name in MAINTENANCE_MARKER_NAMES:
+            candidate = marker.parent / name
+            if _existing_marker_is_live(candidate):
+                return False
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
         try:
             fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            if _existing_marker_is_live(marker):
-                return False
-            try:
-                marker.unlink()
-            except OSError:
-                pass
-            continue
+            return False
         try:
             try:
                 os.fchmod(fd, 0o600)
@@ -210,4 +224,3 @@ def write_marker(
             raise
         finally:
             os.close(fd)
-    return False

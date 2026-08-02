@@ -194,6 +194,9 @@ admin_billing_usage = _billing_overview_routes.admin_billing_usage
 admin_wallet_audit = _billing_overview_routes.admin_wallet_audit
 admin_list_orphan_holds = _billing_overview_routes.admin_list_orphan_holds
 admin_release_orphan_hold = _billing_overview_routes.admin_release_orphan_hold
+admin_settle_orphan_prompt_hold = (
+    _billing_overview_routes.admin_settle_orphan_prompt_hold
+)
 admin_billing_bootstrap = _billing_overview_routes.admin_billing_bootstrap
 admin_rotate_redemption_secret = _billing_overview_routes.admin_rotate_redemption_secret
 

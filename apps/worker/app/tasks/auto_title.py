@@ -209,37 +209,66 @@ async def _build_summary(session: Any, conversation_id: str) -> list[dict[str, A
     BUG-010: 原先用 .asc() 取了最早的 4 条消息生成标题，导致标题质量低。
     改为 .desc() 取最新的 4 条，reverse 后按时间正序送给 LLM。
     """
-    rows = list(
-        (
-            await session.execute(
-                select(Message)
-                .join(Conversation, Conversation.id == Message.conversation_id)
-                .where(
-                    Message.conversation_id == conversation_id,
-                    Message.deleted_at.is_(None),
-                    Conversation.deleted_at.is_(None),
-                )
-                .order_by(Message.created_at.desc())
-                .limit(_HISTORY_WINDOW)
+    page_size = max(16, _HISTORY_WINDOW * 4)
+    cursor: tuple[datetime, str] | None = None
+    selected: list[tuple[Any, str]] = []
+    while len(selected) < _HISTORY_WINDOW:
+        query = (
+            select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.deleted_at.is_(None),
+                Message.role.in_(("user", "assistant")),
+                Conversation.deleted_at.is_(None),
             )
-        ).scalars()
-    )
-    # 取最新 N 条后反转为时间正序交给 LLM
-    rows.reverse()
+        )
+        if cursor is not None:
+            created_at, message_id = cursor
+            query = query.where(
+                or_(
+                    Message.created_at < created_at,
+                    and_(
+                        Message.created_at == created_at,
+                        Message.id < message_id,
+                    ),
+                )
+            )
+        rows = list(
+            (
+                await session.execute(
+                    query.order_by(Message.created_at.desc(), Message.id.desc()).limit(
+                        page_size
+                    )
+                )
+            ).scalars()
+        )
+        if not rows:
+            break
+        for message in rows:
+            text = _extract_text(
+                message.content if isinstance(message.content, dict) else None
+            )
+            if text:
+                selected.append((message, text))
+                if len(selected) >= _HISTORY_WINDOW:
+                    break
+        cursor = (rows[-1].created_at, str(rows[-1].id))
+        if len(rows) < page_size:
+            break
+    # 取最新 N 条有效消息后反转为时间正序交给 LLM。
+    selected.reverse()
     items: list[dict[str, Any]] = []
-    for m in rows:
-        text = _extract_text(m.content if isinstance(m.content, dict) else None)
-        if not text:
-            continue
+    for message, text in selected:
         text = text[:_MAX_PROMPT_CHARS]
-        if m.role == "user":
+        if message.role == "user":
             items.append(
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": text}],
                 }
             )
-        elif m.role == "assistant":
+        elif message.role == "assistant":
             items.append(
                 {
                     "role": "assistant",

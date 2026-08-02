@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from lumen_core.constants import CompletionStatus
 
 from app.reconciliation.contracts import ReconcileContext
@@ -62,6 +63,15 @@ class _ExpiredLeaseRedis:
         return None
 
 
+class _MappedLeaseRedis:
+    def __init__(self, active_task_ids: set[str]) -> None:
+        self.active_task_ids = active_task_ids
+
+    async def get(self, key: str) -> str | None:
+        task_id = key.removeprefix("task:").removesuffix(":lease")
+        return "active-lease" if task_id in self.active_task_ids else None
+
+
 class _ScalarResult:
     def __init__(self, values: list[Any]) -> None:
         self.values = values
@@ -97,6 +107,186 @@ class _BonusSession(_NullSession):
         return _NestedTransaction()
 
 
+def _render(statement: Any) -> str:
+    return str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+
+class _PagedTaskSession(_NullSession):
+    def __init__(self, pages: list[list[Any]], lock_rows: dict[str, Any]) -> None:
+        self.pages = [_ScalarResult(page) for page in pages]
+        self.lock_rows = lock_rows
+        self.statements: list[Any] = []
+
+    async def execute(self, statement: Any) -> _ScalarResult:
+        self.statements.append(statement)
+        rendered = _render(statement)
+        if "FOR UPDATE" not in rendered:
+            return self.pages.pop(0)
+        for task_id, task in self.lock_rows.items():
+            if f"'{task_id}'" in rendered:
+                return _ScalarResult([task])
+        return _ScalarResult([])
+
+
+class _ImageFilteringBonusSession(_BonusSession):
+    def __init__(
+        self,
+        generations: list[Any],
+        images: dict[str, Any],
+    ) -> None:
+        super().__init__([])
+        self.generations = generations
+        self.images = images
+        self.candidate_query_seen = False
+
+    async def execute(self, statement: Any) -> _ScalarResult:
+        self.statements.append(statement)
+        rendered = _render(statement)
+        if not self.candidate_query_seen:
+            self.candidate_query_seen = True
+            candidates = self.generations
+            if "EXISTS (SELECT images.id" in rendered:
+                candidates = [
+                    generation
+                    for generation in candidates
+                    if generation.id in self.images
+                ]
+            if "billing_free" in rendered:
+                candidates = [
+                    generation
+                    for generation in candidates
+                    if generation.upstream_request.get("billing_free") is not True
+                ]
+            return _ScalarResult(candidates[:100])
+        for generation_id, image in self.images.items():
+            if f"'{generation_id}'" in rendered:
+                return _ScalarResult([image])
+        return _ScalarResult([])
+
+
+class _LedgerFilteringBonusSession(_BonusSession):
+    def __init__(
+        self,
+        generation: Any,
+        image: Any,
+        *,
+        transaction_kind: str,
+        actual_micro: int | None,
+        rate_multiplier_x10000: int | None = None,
+    ) -> None:
+        super().__init__([])
+        self.generation = generation
+        self.image = image
+        self.transaction_kind = transaction_kind
+        self.actual_micro = actual_micro
+        self.rate_multiplier_x10000 = rate_multiplier_x10000
+        self.candidate_query_seen = False
+
+    async def execute(self, statement: Any) -> _ScalarResult:
+        self.statements.append(statement)
+        rendered = _render(statement)
+        if not self.candidate_query_seen:
+            self.candidate_query_seen = True
+            broad_consumption_guard = (
+                "wallet_transactions.kind IN ('settle', 'release')" in rendered
+            )
+            positive_settlement_guard = (
+                "wallet_transactions.kind = 'settle'" in rendered
+                and "actual_micro" in rendered
+                and "> 0" in rendered
+            )
+            completed_zero_guard = "rate_multiplier_x10000" in rendered
+            blocked = broad_consumption_guard
+            if not blocked and self.transaction_kind == "settle":
+                blocked = (
+                    positive_settlement_guard
+                    and (self.actual_micro is None or self.actual_micro > 0)
+                ) or (
+                    completed_zero_guard
+                    and self.actual_micro == 0
+                    and self.rate_multiplier_x10000 == 0
+                )
+            return _ScalarResult([] if blocked else [self.generation])
+        return _ScalarResult([self.image])
+
+
+class _StatefulBonusSession(_BonusSession):
+    def __init__(
+        self,
+        generations: list[Any],
+        images: dict[str, Any],
+    ) -> None:
+        super().__init__([])
+        self.generations = generations
+        self.images = images
+        self.settlements: dict[str, tuple[int | None, int | None]] = {}
+        self.candidate_statements: list[Any] = []
+
+    async def execute(self, statement: Any) -> _ScalarResult:
+        self.statements.append(statement)
+        rendered = _render(statement)
+        if "FROM generations" in rendered and "FOR UPDATE" in rendered:
+            self.candidate_statements.append(statement)
+            completed_zero_guard = "rate_multiplier_x10000" in rendered
+            candidates: list[Any] = []
+            for generation in self.generations:
+                if generation.id not in self.images:
+                    continue
+                if generation.upstream_request.get("billing_free") is True:
+                    continue
+                settlement = self.settlements.get(generation.id)
+                if settlement is not None:
+                    actual_micro, rate_multiplier = settlement
+                    if actual_micro is None or actual_micro > 0:
+                        continue
+                    if (
+                        completed_zero_guard
+                        and actual_micro == 0
+                        and rate_multiplier == 0
+                    ):
+                        continue
+                candidates.append(generation)
+            return _ScalarResult(candidates[:100])
+        for generation_id, image in self.images.items():
+            if f"'{generation_id}'" in rendered:
+                return _ScalarResult([image])
+        return _ScalarResult([])
+
+
+class _StatefulBonusBilling(_RecordingBilling):
+    def __init__(self, session: _StatefulBonusSession) -> None:
+        super().__init__()
+        self.session = session
+        self.settled_generation_ids: list[str] = []
+
+    async def settle_generation(
+        self,
+        _session: Any,
+        generation: Any,
+        **kwargs: Any,
+    ) -> None:
+        if generation.id in self.session.settlements:
+            return
+        rate_multiplier = int(
+            generation.upstream_request.get(
+                "billing_rate_multiplier_x10000",
+                10_000,
+            )
+        )
+        actual_micro = 0 if rate_multiplier == 0 else 900
+        self.session.settlements[generation.id] = (
+            actual_micro,
+            rate_multiplier,
+        )
+        self.settled_generation_ids.append(generation.id)
+        self.calls.append(("settle_generation", kwargs))
+
+
 def _context(billing: _RecordingBilling) -> ReconcileContext:
     return ReconcileContext(
         redis=None,
@@ -113,6 +303,8 @@ def _task(
     status: str,
     attempt: int,
     *,
+    task_id: str = "task-1",
+    updated_at: datetime | None = None,
     dispatch_started: bool = False,
     response_received: bool = False,
     execution_epoch: int = 3,
@@ -150,7 +342,7 @@ def _task(
     if usage_epoch is not None:
         upstream_request["completion_usage_execution_epoch"] = usage_epoch
     return SimpleNamespace(
-        id="task-1",
+        id=task_id,
         user_id="user-1",
         message_id="msg-1",
         status=status,
@@ -160,7 +352,7 @@ def _task(
         error_code=None,
         error_message=None,
         finished_at=None,
-        updated_at=None,
+        updated_at=updated_at,
         upstream_request=upstream_request,
         cancel_requested_at=None,
         tokens_in=0,
@@ -348,6 +540,51 @@ async def test_stable_provider_idempotency_allows_safe_requeue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_reconciler_scans_past_more_than_one_batch_of_active_leases() -> (
+    None
+):
+    now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+    stale_at = now - timedelta(minutes=10)
+    skipped = [
+        _task(
+            "running",
+            1,
+            task_id=f"skip-{index:03d}",
+            updated_at=stale_at,
+        )
+        for index in range(101)
+    ]
+    valid = _task(
+        "running",
+        1,
+        task_id="valid-z",
+        updated_at=stale_at,
+        stable_idempotency=True,
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.now = now
+    context.redis = _MappedLeaseRedis({task.id for task in skipped})
+    context.session = _PagedTaskSession(
+        [skipped[:100], [skipped[100], valid]],
+        {valid.id: valid},
+    )
+
+    result = await GENERATION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert valid.status == "queued"
+    assert billing.calls == []
+    assert len(result.pending_outbox) == 2
+    rendered = [_render(statement) for statement in context.session.statements]
+    assert "FOR UPDATE" not in rendered[0]
+    assert "FOR UPDATE" not in rendered[1]
+    assert "generations.updated_at >" in rendered[1]
+    assert "FOR UPDATE SKIP LOCKED" in rendered[2]
+    assert "'valid-z'" in rendered[2]
+
+
+@pytest.mark.asyncio
 async def test_billing_failure_aborts_timeout_marking() -> None:
     class _ExplodingBilling(_RecordingBilling):
         def __getattr__(self, name: str):
@@ -434,6 +671,260 @@ async def test_bonus_billing_reconciler_skips_missing_image_and_continues(
         )
     ]
     assert "bonus-missing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bonus_billing_filters_more_than_100_missing_images_before_limit() -> (
+    None
+):
+    missing = [
+        SimpleNamespace(
+            id=f"bonus-missing-{index:03d}",
+            status="succeeded",
+            upstream_request={
+                "billing_policy": "dual_race_loser_settled_separately",
+                "billing_free": False,
+            },
+        )
+        for index in range(101)
+    ]
+    valid = SimpleNamespace(
+        id="bonus-valid-z",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "batch_extra_settled_separately",
+            "billing_free": False,
+        },
+    )
+    image = SimpleNamespace(width=768, height=1024)
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _ImageFilteringBonusSession(
+        [*missing, valid],
+        {valid.id: image},
+    )
+
+    result = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert billing.calls == [
+        (
+            "settle_generation",
+            {"width": 768, "height": 1024, "image_count": 1},
+        )
+    ]
+    candidate_sql = _render(context.session.statements[0])
+    assert "EXISTS (SELECT images.id" in candidate_sql
+    assert "billing_free" in candidate_sql
+    assert candidate_sql.index("EXISTS (SELECT images.id") < candidate_sql.index(
+        "LIMIT 100"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bonus_billing_filters_free_rows_before_limit() -> None:
+    free_rows = [
+        SimpleNamespace(
+            id=f"bonus-free-{index:03d}",
+            status="succeeded",
+            upstream_request={
+                "billing_policy": "dual_race_loser_settled_separately",
+                "billing_free": True,
+            },
+        )
+        for index in range(101)
+    ]
+    valid = SimpleNamespace(
+        id="bonus-billable-z",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "batch_extra_settled_separately",
+            "billing_free": False,
+        },
+    )
+    image = SimpleNamespace(width=1024, height=1024)
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _ImageFilteringBonusSession(
+        [*free_rows, valid],
+        {
+            **{
+                generation.id: SimpleNamespace(width=512, height=512)
+                for generation in free_rows
+            },
+            valid.id: image,
+        },
+    )
+
+    result = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert billing.calls == [
+        (
+            "settle_generation",
+            {"width": 1024, "height": 1024, "image_count": 1},
+        )
+    ]
+    candidate_sql = _render(context.session.statements[0])
+    assert "billing_free" in candidate_sql
+    assert candidate_sql.index("billing_free") < candidate_sql.index("LIMIT 100")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transaction_kind", "actual_micro"),
+    [
+        ("release", None),
+        ("settle", 0),
+    ],
+)
+async def test_bonus_billing_reconciles_without_positive_settlement(
+    transaction_kind: str,
+    actual_micro: int | None,
+) -> None:
+    generation = SimpleNamespace(
+        id="bonus-after-release",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "dual_race_loser_settled_separately",
+            "billing_free": False,
+        },
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _LedgerFilteringBonusSession(
+        generation,
+        SimpleNamespace(width=1280, height=720),
+        transaction_kind=transaction_kind,
+        actual_micro=actual_micro,
+    )
+
+    result = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert billing.calls == [
+        (
+            "settle_generation",
+            {"width": 1280, "height": 720, "image_count": 1},
+        )
+    ]
+    candidate_sql = _render(context.session.statements[0])
+    assert "wallet_transactions.kind = 'settle'" in candidate_sql
+    assert "actual_micro" in candidate_sql
+    assert "> 0" in candidate_sql
+    assert "wallet_transactions.kind IN ('settle', 'release')" not in candidate_sql
+
+
+@pytest.mark.asyncio
+async def test_bonus_billing_skips_completed_zero_rate_settlement() -> None:
+    generation = SimpleNamespace(
+        id="bonus-zero-rate",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "batch_extra_settled_separately",
+            "billing_free": False,
+        },
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _LedgerFilteringBonusSession(
+        generation,
+        SimpleNamespace(width=1024, height=1024),
+        transaction_kind="settle",
+        actual_micro=0,
+        rate_multiplier_x10000=0,
+    )
+
+    result = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert result.touched == 0
+    assert billing.calls == []
+    candidate_sql = _render(context.session.statements[0])
+    assert "rate_multiplier_x10000" in candidate_sql
+    assert candidate_sql.index("rate_multiplier_x10000") < candidate_sql.index(
+        "LIMIT 100"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bonus_billing_zero_rate_settlements_do_not_starve_later_debt() -> None:
+    zero_rate_rows = [
+        SimpleNamespace(
+            id=f"bonus-zero-{index:03d}",
+            status="succeeded",
+            upstream_request={
+                "billing_policy": "dual_race_loser_settled_separately",
+                "billing_free": False,
+                "billing_rate_multiplier_x10000": 0,
+            },
+        )
+        for index in range(101)
+    ]
+    owed = SimpleNamespace(
+        id="bonus-owed-z",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "batch_extra_settled_separately",
+            "billing_free": False,
+            "billing_rate_multiplier_x10000": 10_000,
+        },
+    )
+    generations = [*zero_rate_rows, owed]
+    images = {
+        generation.id: SimpleNamespace(width=1024, height=1024)
+        for generation in generations
+    }
+    session = _StatefulBonusSession(generations, images)
+    billing = _StatefulBonusBilling(session)
+    context = _context(billing)
+    context.session = session
+
+    first = await BONUS_BILLING_RECONCILER.reconcile(context)
+    second = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert first.touched == 100
+    assert second.touched == 2
+    assert billing.settled_generation_ids[:100] == [
+        generation.id for generation in zero_rate_rows[:100]
+    ]
+    assert billing.settled_generation_ids[100:] == [
+        zero_rate_rows[100].id,
+        owed.id,
+    ]
+    assert session.settlements[owed.id] == (900, 10_000)
+    assert len(session.candidate_statements) == 2
+    for statement in session.candidate_statements:
+        candidate_sql = _render(statement)
+        assert "rate_multiplier_x10000" in candidate_sql
+        assert candidate_sql.index("rate_multiplier_x10000") < candidate_sql.index(
+            "LIMIT 100"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bonus_billing_skips_positive_settlement() -> None:
+    generation = SimpleNamespace(
+        id="bonus-already-settled",
+        status="succeeded",
+        upstream_request={
+            "billing_policy": "batch_extra_settled_separately",
+            "billing_free": False,
+        },
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _LedgerFilteringBonusSession(
+        generation,
+        SimpleNamespace(width=1024, height=1024),
+        transaction_kind="settle",
+        actual_micro=900,
+    )
+
+    result = await BONUS_BILLING_RECONCILER.reconcile(context)
+
+    assert result.touched == 0
+    assert billing.calls == []
+    assert len(context.session.statements) == 1
 
 
 @pytest.mark.asyncio

@@ -181,31 +181,27 @@ async def _reconcile_aged_adoption_markers(
         markers = ()
     for marker in markers:
         try:
-            probe = await deps.probe_adoption(
-                video_id=marker.video_id,
+            async with deps.storage_lifecycle.reference_mutation_lock(
                 user_id=marker.user_id,
-                storage_key=marker.storage_key,
-                sha256=marker.sha256,
-                size_bytes=marker.size_bytes,
-            )
+                video_id=marker.video_id,
+            ):
+                probe = await deps.probe_adoption(
+                    video_id=marker.video_id,
+                    user_id=marker.user_id,
+                    storage_key=marker.storage_key,
+                    sha256=marker.sha256,
+                    size_bytes=marker.size_bytes,
+                )
+                if probe.outcome is adopted_outcome:
+                    await clear_adoption_marker(marker=marker, deps=deps)
+                elif probe.outcome is not_adopted_outcome:
+                    await deps.storage_lifecycle.discard_unadopted_upload(marker)
         except Exception:
             deps.logger.warning(
-                "aged reference video adoption probe failed video_id=%s",
+                "aged reference video adoption reconciliation failed video_id=%s",
                 marker.video_id,
                 exc_info=True,
             )
-            continue
-        if probe.outcome is adopted_outcome:
-            await clear_adoption_marker(marker=marker, deps=deps)
-        elif probe.outcome is not_adopted_outcome:
-            try:
-                await deps.storage_lifecycle.discard_unadopted_upload(marker)
-            except Exception:
-                deps.logger.warning(
-                    "aged reference video discard failed video_id=%s",
-                    marker.video_id,
-                    exc_info=True,
-                )
 
 
 def _unique_rows(*row_groups: list[Any]) -> list[Any]:

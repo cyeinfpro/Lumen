@@ -77,6 +77,27 @@ def test_try_write_pid_marker_replaces_corrupt_empty_marker(tmp_path: Path) -> N
     assert f"started_at={started_at.isoformat()}\n" in raw
 
 
+def test_try_write_pid_marker_refuses_live_update_marker(tmp_path: Path) -> None:
+    update_marker = tmp_path / ".update.running"
+    update_marker.write_text(
+        "pid=0\n"
+        "started_at=2026-08-02T00:00:00+00:00\n"
+        "unit=lumen-update-runner.service\n",
+        encoding="utf-8",
+    )
+    backup_marker = tmp_path / ".backup.running"
+
+    assert (
+        admin_backups._try_write_pid_marker(
+            backup_marker,
+            12345,
+            datetime(2026, 8, 2, 0, 1, tzinfo=timezone.utc),
+        )
+        is False
+    )
+    assert not backup_marker.exists()
+
+
 def test_open_private_append_tolerates_fchmod_eperm_for_non_owner_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -194,7 +215,7 @@ def test_timestamp_from_backup_stdout_accepts_json_and_legacy_lines() -> None:
 
     assert (
         admin_backups._timestamp_from_backup_stdout(
-            '[backup 2026-05-19T00:00:00Z] done\n'
+            "[backup 2026-05-19T00:00:00Z] done\n"
             '{"timestamp":"20260519-010203","pg_size":1,"redis_size":2}\n',
             started_at,
         )

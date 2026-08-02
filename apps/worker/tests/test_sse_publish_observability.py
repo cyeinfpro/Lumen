@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from redis.exceptions import WatchError
+from sqlalchemy.dialects import postgresql
 
 from app import db as worker_db
 from app import observability, sse_publish
@@ -626,6 +628,7 @@ class FakeDlqSession:
     def __init__(self, rows: list[SimpleNamespace]) -> None:
         self.rows = rows
         self.added: list = []
+        self.statements: list[Any] = []
 
     async def __aenter__(self):
         return self
@@ -636,7 +639,8 @@ class FakeDlqSession:
     def begin(self):
         return self
 
-    async def execute(self, _stmt):
+    async def execute(self, stmt):
+        self.statements.append(stmt)
         rows = self.rows
 
         class Result:
@@ -724,6 +728,16 @@ async def test_pg_dlq_dedupe_skips_only_exact_stable_identity(
 
     assert persisted is True
     assert session.added == []
+    sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "LIMIT" not in sql
+    assert "event_id" in sql
+    assert "user_id" in sql
+    assert "channel" in sql
 
 
 @pytest.mark.asyncio

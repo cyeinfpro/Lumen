@@ -326,6 +326,7 @@ class AdminOrphanHoldOut(BaseModel):
     tx: WalletTransactionOut
     user_id: str
     age_seconds: int
+    recovery_action: Literal["release", "settle_default", "manual_review"]
 
 
 class AdminBillingBootstrapIn(BaseModel):

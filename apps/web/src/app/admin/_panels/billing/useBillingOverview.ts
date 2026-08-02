@@ -10,8 +10,9 @@ import {
   listAdminOrphanHolds,
   releaseAdminOrphanHold,
   runAdminWalletAudit,
+  settleAdminOrphanPromptHold,
 } from "@/lib/apiClient";
-import type { AdminWalletAuditOut } from "@/lib/types";
+import type { AdminOrphanHoldOut, AdminWalletAuditOut } from "@/lib/types";
 import {
   buildBillingHealth,
   shouldShowBillingBootstrap,
@@ -80,17 +81,33 @@ export function useBillingOverview() {
     onError: (error) =>
       toast.error("对账失败", { description: errorDescription(error) }),
   });
-  const releaseHoldMutation = useMutation({
-    mutationFn: releaseAdminOrphanHold,
-    onSuccess: async () => {
-      toast.success("孤儿 hold 已释放");
+  const recoverHoldMutation = useMutation({
+    mutationFn: ({
+      txId,
+      action,
+    }: {
+      txId: string;
+      action: Exclude<
+        AdminOrphanHoldOut["recovery_action"],
+        "manual_review"
+      >;
+    }) =>
+      action === "release"
+        ? releaseAdminOrphanHold(txId)
+        : settleAdminOrphanPromptHold(txId),
+    onSuccess: async (_transaction, variables) => {
+      toast.success(
+        variables.action === "release"
+          ? "孤儿 hold 已释放"
+          : "孤儿 hold 已按预授权结算",
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ORPHAN_HOLDS_QUERY_KEY }),
         queryClient.invalidateQueries({ queryKey: OVERVIEW_QUERY_KEY }),
       ]);
     },
     onError: (error) =>
-      toast.error("释放失败", { description: errorDescription(error) }),
+      toast.error("恢复失败", { description: errorDescription(error) }),
   });
   const overview = overviewQuery.data;
 
@@ -104,13 +121,19 @@ export function useBillingOverview() {
     orphanHoldsLoading: orphanHoldsQuery.isLoading,
     bootstrapPending: bootstrapMutation.isPending,
     auditPending: auditMutation.isPending,
-    releaseHoldPending: releaseHoldMutation.isPending,
+    recoverHoldPending: recoverHoldMutation.isPending,
     showBootstrap: shouldShowBillingBootstrap(overview),
     setBootstrapRate,
     refreshOverview: () => overviewQuery.refetch(),
     bootstrap: () => bootstrapMutation.mutate(),
     audit: () => auditMutation.mutate(),
-    releaseHold: (txId: string) => releaseHoldMutation.mutate(txId),
+    recoverHold: (
+      txId: string,
+      action: Exclude<
+        AdminOrphanHoldOut["recovery_action"],
+        "manual_review"
+      >,
+    ) => recoverHoldMutation.mutate({ txId, action }),
   };
 }
 

@@ -465,14 +465,11 @@ def test_write_marker_claims_exclusively_while_live(
     started = "2026-08-02T00:00:00+00:00"
 
     assert (
-        admin_update._write_marker(
-            111, started, unit="lumen-update-runner.service"
-        )
+        admin_update._write_marker(111, started, unit="lumen-update-runner.service")
         is True
     )
     assert (
-        admin_update._write_marker(222, started, unit="other-runner.service")
-        is False
+        admin_update._write_marker(222, started, unit="other-runner.service") is False
     )
     text = (backup_root / ".update.running").read_text(encoding="utf-8")
     assert "pid=111" in text  # original claim preserved, not overwritten
@@ -494,6 +491,31 @@ def test_write_marker_replaces_stale_marker(
     assert admin_update._write_marker(333, "2026-08-02T00:00:00+00:00") is True
     text = marker.read_text(encoding="utf-8")
     assert "pid=333" in text
+
+
+def test_write_marker_refuses_live_backup_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    (backup_root / ".backup.running").write_text(
+        "pid=0\n"
+        "started_at=2026-08-02T00:00:00+00:00\n"
+        "unit=lumen-backup-runner.service\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        admin_update._write_marker(
+            333,
+            "2026-08-02T00:01:00+00:00",
+            unit="lumen-update-runner.service",
+        )
+        is False
+    )
+    assert not (backup_root / ".update.running").exists()
 
 
 def test_start_update_via_path_unit_raises_busy_when_marker_claim_fails(

@@ -80,6 +80,7 @@ class BillingCommands:
     invalidate_balance_cache: AsyncOperation
     align_pricing_group_priorities: AsyncOperation
     invalidate_pricing_cache: AsyncOperation
+    lock_redemption_secret_rotation: AsyncOperation
     update_settings: AsyncOperation
     write_audit: AsyncOperation
     request_ip_hash: SyncOperation

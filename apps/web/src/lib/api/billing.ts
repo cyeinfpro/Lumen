@@ -105,6 +105,15 @@ export function releaseAdminOrphanHold(
   );
 }
 
+export function settleAdminOrphanPromptHold(
+  txId: string,
+): Promise<WalletTransactionOut> {
+  return apiFetch<WalletTransactionOut>(
+    `/admin/billing/holds/${encodeURIComponent(txId)}:settle-default`,
+    { method: "POST" },
+  );
+}
+
 export function updateAdminPricing(
   items: PricingRuleUpsertIn[],
   opts: {

@@ -213,15 +213,20 @@ function AuditResultBanner({
 
 function OrphanHoldRow({
   item,
-  releasePending,
-  onRelease,
+  recoveryPending,
+  onRecover,
 }: {
   item: AdminOrphanHoldOut;
-  releasePending: boolean;
-  onRelease: (txId: string) => void;
+  recoveryPending: boolean;
+  onRecover: (
+    txId: string,
+    action: Exclude<AdminOrphanHoldOut["recovery_action"], "manual_review">,
+  ) => void;
 }) {
   const reference = `${item.tx.ref_type}:${item.tx.ref_id}`;
   const holdRmb = Math.abs(item.tx.amount.micro) / 1_000_000;
+  const settleDefault = item.recovery_action === "settle_default";
+  const manualReview = item.recovery_action === "manual_review";
   return (
     <div className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto]">
       <div className="min-w-0">
@@ -239,14 +244,29 @@ function OrphanHoldRow({
       <Button
         variant="outline"
         size="sm"
+        disabled={manualReview}
         onClick={() => {
-          if (window.confirm("确认强制释放这个 hold？")) {
-            onRelease(item.tx.id);
+          if (manualReview) return;
+          if (
+            window.confirm(
+              settleDefault
+                ? "确认按预授权金额结算？提示词增强已可能产生上游费用，该操作会结算同一请求引用下的全部未结算预扣。"
+                : "确认强制释放？该操作会释放同一任务引用下的全部未结算预扣，不只当前显示的这一笔。",
+            )
+          ) {
+            onRecover(
+              item.tx.id,
+              settleDefault ? "settle_default" : "release",
+            );
           }
         }}
-        loading={releasePending}
+        loading={recoveryPending}
       >
-        强制释放
+        {manualReview
+          ? "需人工核查"
+          : settleDefault
+            ? "按预授权结算"
+            : "强制释放"}
       </Button>
     </div>
   );
@@ -257,17 +277,20 @@ function ReconciliationCard({
   auditPending,
   orphanHolds,
   orphanHoldsLoading,
-  releaseHoldPending,
+  recoverHoldPending,
   onAudit,
-  onRelease,
+  onRecover,
 }: {
   auditResult: AdminWalletAuditOut | null;
   auditPending: boolean;
   orphanHolds: AdminOrphanHoldOut[];
   orphanHoldsLoading: boolean;
-  releaseHoldPending: boolean;
+  recoverHoldPending: boolean;
   onAudit: () => void;
-  onRelease: (txId: string) => void;
+  onRecover: (
+    txId: string,
+    action: Exclude<AdminOrphanHoldOut["recovery_action"], "manual_review">,
+  ) => void;
 }) {
   return (
     <Card variant="subtle" padding="lg" className="space-y-4">
@@ -294,8 +317,8 @@ function ReconciliationCard({
           <OrphanHoldRow
             key={item.tx.id}
             item={item}
-            releasePending={releaseHoldPending}
-            onRelease={onRelease}
+            recoveryPending={recoverHoldPending}
+            onRecover={onRecover}
           />
         ))}
         {!orphanHoldsLoading && orphanHolds.length === 0 && (
@@ -338,9 +361,9 @@ export function OverviewSubpanel({
         auditPending={state.auditPending}
         orphanHolds={state.orphanHolds}
         orphanHoldsLoading={state.orphanHoldsLoading}
-        releaseHoldPending={state.releaseHoldPending}
+        recoverHoldPending={state.recoverHoldPending}
         onAudit={state.audit}
-        onRelease={state.releaseHold}
+        onRecover={state.recoverHold}
       />
     </div>
   );

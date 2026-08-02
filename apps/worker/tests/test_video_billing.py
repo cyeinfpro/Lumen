@@ -560,7 +560,13 @@ async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
 
     async def release(_session, user_id: str, **kwargs):
         calls.append(("release", {"user_id": user_id, **kwargs}))
-        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+        return SimpleNamespace(
+            kind="release",
+            amount_micro=1_000,
+            balance_after=10_000,
+            hold_after=0,
+            meta=kwargs["meta"],
+        )
 
     monkeypatch.setattr(
         video_billing.worker_billing, "billing_enabled", billing_enabled
@@ -590,6 +596,68 @@ async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
     assert calls[0][1]["idempotency_key"] == "video_generation:release:video-gen-1"
     assert calls[0][1]["meta"]["billing_decision"] == "upstream_not_billable_release"
     assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 10_000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_returns_settle", [False, True])
+async def test_release_resolution_preserves_existing_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    release_returns_settle: bool,
+) -> None:
+    session = FakeSession()
+    existing_settle = SimpleNamespace(
+        kind="settle",
+        amount_micro=-420,
+        balance_after=9_580,
+        hold_after=0,
+        meta={
+            "actual_micro": 420,
+            "actual_tokens": 42_000,
+            "billing_decision": "actual_usage_settle",
+        },
+    )
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 0
+
+    async def release(*_args, **_kwargs):
+        return existing_settle if release_returns_settle else None
+
+    async def existing_ref_consumption_tx(*_args, **_kwargs):
+        if release_returns_settle:
+            raise AssertionError("direct non-release result must not be re-queried")
+        return existing_settle
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "existing_ref_consumption_tx",
+        existing_ref_consumption_tx,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "release", release)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        _pre_submit_generation(),
+        poll_result={
+            "status": "cancelled",
+            "upstream_billable": False,
+            "raw": {"reason": "pre_submit_cancel"},
+        },
+        reason="pre_submit_cancel",
+    )
+
+    assert resolution.tx is existing_settle
+    assert resolution.released is False
+    assert resolution.actual_micro == 420
+    assert resolution.actual_tokens == 42_000
+    assert resolution.decision == "actual_usage_settle"
+    assert session.info == {}
+    assert session.added == []
 
 
 @pytest.mark.asyncio
@@ -1059,7 +1127,13 @@ async def test_resolve_video_billing_release_records_proven_absent_knowledge(
 
     async def release(_session, user_id: str, **kwargs):
         calls.append(("release", {"user_id": user_id, **kwargs}))
-        return SimpleNamespace(amount_micro=1_000, balance_after=10_000, hold_after=0)
+        return SimpleNamespace(
+            kind="release",
+            amount_micro=1_000,
+            balance_after=10_000,
+            hold_after=0,
+            meta=kwargs["meta"],
+        )
 
     async def fail_settle(*_args, **_kwargs):
         raise AssertionError("proven-absent upstream cost must release, not settle")

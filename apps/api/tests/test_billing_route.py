@@ -9,15 +9,21 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException, Request, Response
+from sqlalchemy import select
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.schema import CreateTable
 
 from app.routes import billing
 from app.routes.billing_parts import composition as billing_composition
+from app.routes.billing_parts import (
+    orphan_hold_settlement as billing_orphan_settlement_routes,
+)
 from app.routes.billing_parts import overview as billing_overview_routes
 from app.routes.billing_parts import pricing as billing_pricing_routes
 from app.routes.billing_parts import redemptions as billing_redemption_routes
@@ -25,7 +31,15 @@ from app.routes.billing_parts import services as billing_services
 from app.routes.billing_parts import wallets as billing_wallet_routes
 from app.services import pricing_cache
 from lumen_core import billing as billing_core
-from lumen_core.models import Base, UserWallet, WalletTransaction
+from lumen_core.models import (
+    AuditLog,
+    Base,
+    Completion,
+    Generation,
+    UserWallet,
+    VideoGeneration,
+    WalletTransaction,
+)
 from lumen_core.schemas import (
     AdminBillingBootstrapIn,
     AdminRedemptionCodeCreateIn,
@@ -69,6 +83,137 @@ async def _wallet_session() -> AsyncIterator[AsyncSession]:
             yield session
     finally:
         await engine.dispose()
+
+
+def _create_orphan_hold_route_tables(sync_connection: Any) -> None:
+    for table in (
+        UserWallet.__table__,
+        WalletTransaction.__table__,
+        AuditLog.__table__,
+        Generation.__table__,
+        Completion.__table__,
+        VideoGeneration.__table__,
+    ):
+        ddl = str(CreateTable(table).compile(dialect=sqlite.dialect()))
+        ddl = ddl.replace("DEFAULT (ARRAY[]::varchar[])", "DEFAULT '[]'")
+        sync_connection.exec_driver_sql(ddl)
+
+
+@asynccontextmanager
+async def _orphan_hold_route_session() -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(_create_orphan_hold_route_tables)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            yield session
+    finally:
+        await engine.dispose()
+
+
+def _wallet_tx(
+    *,
+    tx_id: str,
+    user_id: str,
+    kind: str,
+    ref_type: str,
+    ref_id: str,
+    created_at: datetime,
+) -> WalletTransaction:
+    amount_micro = -1_000 if kind == "hold" else 1_000
+    return WalletTransaction(
+        id=tx_id,
+        user_id=user_id,
+        kind=kind,
+        amount_micro=amount_micro,
+        balance_after=9_000,
+        hold_after=1_000 if kind == "hold" else 0,
+        ref_type=ref_type,
+        ref_id=ref_id,
+        idempotency_key=tx_id,
+        meta={},
+        created_at=created_at,
+    )
+
+
+def _hold_task(
+    *,
+    ref_type: str,
+    task_id: str,
+    user_id: str,
+    status: str,
+    now: datetime,
+    proven_absent: bool = False,
+    billing_retry_count: int = 0,
+) -> Generation | Completion | VideoGeneration:
+    dispatch_evidence: dict[str, Any] = {}
+    if proven_absent:
+        dispatch_evidence.update(
+            {
+                "upstream_dispatch_started_at": now.isoformat(),
+                "upstream_dispatch_attempt": 1,
+                "upstream_dispatch_execution_epoch": 0,
+                "upstream_dispatch_delivery": "proven_undelivered",
+            }
+        )
+    if ref_type == "generation":
+        return Generation(
+            id=task_id,
+            message_id="message-1",
+            user_id=user_id,
+            action="generate",
+            model="test-model",
+            prompt="test prompt",
+            size_requested="1024x1024",
+            aspect_ratio="1:1",
+            input_image_ids=[],
+            upstream_request=dispatch_evidence or None,
+            status=status,
+            progress_stage="rendering",
+            attempt=0,
+            billing_retry_count=billing_retry_count,
+            idempotency_key=f"idempotency-{task_id}",
+        )
+    if ref_type == "completion":
+        if billing_retry_count > 0:
+            dispatch_evidence["billing_retry_count"] = billing_retry_count
+        return Completion(
+            id=task_id,
+            message_id="message-1",
+            user_id=user_id,
+            model="test-model",
+            input_image_ids=[],
+            upstream_request=dispatch_evidence or None,
+            text="",
+            tokens_in=0,
+            tokens_out=0,
+            status=status,
+            progress_stage="streaming",
+            attempt=0,
+            idempotency_key=f"idempotency-{task_id}",
+        )
+    if ref_type == "video_generation":
+        return VideoGeneration(
+            id=task_id,
+            user_id=user_id,
+            action="generate",
+            model="test-model",
+            prompt="test prompt",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="16:9",
+            diagnostics=(
+                {"submit_delivery_state": "proven_absent"} if proven_absent else {}
+            ),
+            status=status,
+            deadline_at=now + timedelta(hours=1),
+            idempotency_key=f"idempotency-{task_id}",
+            request_fingerprint="f" * 64,
+            est_token_upper=1_000,
+            est_cost_micro=1_000,
+        )
+    raise AssertionError(f"unsupported hold task type: {ref_type}")
 
 
 def test_openai_price_import_uses_decimal_half_up_rounding() -> None:
@@ -578,6 +723,779 @@ async def test_wallet_audit_uses_database_window_and_limits_mismatch_rows() -> N
     assert "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" in statements[0]
     assert "wallet_transactions.user_id = 'user-1'" in statements[0]
     assert "LIMIT 1" in statements[1]
+
+
+@pytest.mark.asyncio
+async def test_admin_list_orphan_holds_finds_hold_beyond_consumed_window() -> None:
+    now = datetime.now(timezone.utc)
+    base = now - timedelta(hours=3)
+    user_id = "user-orphan-window"
+    rows: list[WalletTransaction] = []
+    for index in range(5):
+        ref_id = f"consumed-{index}"
+        rows.extend(
+            [
+                _wallet_tx(
+                    tx_id=f"hold-consumed-{index}",
+                    user_id=user_id,
+                    kind="hold",
+                    ref_type="generation",
+                    ref_id=ref_id,
+                    created_at=base + timedelta(seconds=index),
+                ),
+                _wallet_tx(
+                    tx_id=f"release-consumed-{index}",
+                    user_id=user_id,
+                    kind="release",
+                    ref_type="generation",
+                    ref_id=ref_id,
+                    created_at=base + timedelta(minutes=1, seconds=index),
+                ),
+            ]
+        )
+    rows.append(
+        _wallet_tx(
+            tx_id="hold-orphan",
+            user_id=user_id,
+            kind="hold",
+            ref_type="generation",
+            ref_id="orphan-ref:retry:1",
+            created_at=base + timedelta(seconds=10),
+        )
+    )
+
+    async with _wallet_session() as db:
+        db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
+        db.add_all(rows)
+        await db.commit()
+
+        out = await billing.admin_list_orphan_holds(
+            SimpleNamespace(id="admin-1"),
+            db,
+            min_age_minutes=60,
+            limit=2,
+        )
+
+    assert [item.tx.id for item in out] == ["hold-orphan"]
+    assert out[0].recovery_action == "release"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ref_type", "status"),
+    [
+        ("generation", "queued"),
+        ("generation", "running"),
+        ("completion", "queued"),
+        ("completion", "streaming"),
+        ("video_generation", "queued"),
+        ("video_generation", "submitting"),
+        ("video_generation", "submit_unknown"),
+        ("video_generation", "submitted"),
+        ("video_generation", "running"),
+    ],
+)
+async def test_admin_release_orphan_hold_rejects_active_task(
+    monkeypatch: pytest.MonkeyPatch,
+    ref_type: str,
+    status: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-active-hold"
+    task_id = "task-active"
+    hold_ref_id = task_id if ref_type == "video_generation" else f"{task_id}:retry:1"
+
+    async def fail_release(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("active task hold must not be released")
+
+    monkeypatch.setattr(billing_core, "release", fail_release)
+
+    async with _orphan_hold_route_session() as db:
+        db.add(
+            _wallet_tx(
+                tx_id="hold-active",
+                user_id=user_id,
+                kind="hold",
+                ref_type=ref_type,
+                ref_id=hold_ref_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        db.add(
+            _hold_task(
+                ref_type=ref_type,
+                task_id=task_id,
+                user_id=user_id,
+                status=status,
+                now=now,
+                billing_retry_count=(0 if ref_type == "video_generation" else 1),
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-active",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "HOLD_TASK_ACTIVE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ref_type", "status"),
+    [
+        ("generation", "succeeded"),
+        ("generation", "failed"),
+        ("generation", "canceled"),
+        ("completion", "succeeded"),
+        ("completion", "failed"),
+        ("completion", "canceled"),
+        ("video_generation", "succeeded"),
+        ("video_generation", "failed"),
+        ("video_generation", "canceled"),
+        ("video_generation", "expired"),
+        ("external_task", None),
+    ],
+)
+async def test_admin_release_orphan_hold_rejects_without_proven_absent_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    ref_type: str,
+    status: str | None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-unsafe-hold"
+    task_id = "task-unsafe"
+    hold_ref_id = (
+        f"{task_id}:retry:1"
+        if status is not None and ref_type in {"generation", "completion"}
+        else task_id
+    )
+
+    async def fail_release(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("unsafe hold must not be released")
+
+    monkeypatch.setattr(billing_core, "release", fail_release)
+
+    async with _orphan_hold_route_session() as db:
+        db.add(
+            _wallet_tx(
+                tx_id="hold-unsafe",
+                user_id=user_id,
+                kind="hold",
+                ref_type=ref_type,
+                ref_id=hold_ref_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        if status is not None:
+            db.add(
+                _hold_task(
+                    ref_type=ref_type,
+                    task_id=task_id,
+                    user_id=user_id,
+                    status=status,
+                    now=now,
+                    billing_retry_count=(
+                        1 if ref_type in {"generation", "completion"} else 0
+                    ),
+                )
+            )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-unsafe",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "HOLD_RELEASE_NOT_PROVEN_SAFE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ref_type", "status", "expected_proof"),
+    [
+        ("generation", "failed", "upstream_dispatch:proven_undelivered"),
+        ("completion", "canceled", "upstream_dispatch:proven_undelivered"),
+        (
+            "video_generation",
+            "expired",
+            "submit_delivery_state:proven_absent",
+        ),
+    ],
+)
+async def test_admin_release_orphan_hold_is_audited_idempotent_and_attributed(
+    monkeypatch: pytest.MonkeyPatch,
+    ref_type: str,
+    status: str,
+    expected_proof: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = f"user-release-{ref_type}"
+    task_id = f"task-release-{ref_type}"
+    hold_tx_id = f"hold-release-{ref_type}"
+    hold_ref_id = (
+        f"{task_id}:retry:1" if ref_type in {"generation", "completion"} else task_id
+    )
+    audit_calls: list[dict[str, Any]] = []
+    invalidations: list[str] = []
+
+    async def write_audit(*_args: Any, **kwargs: Any) -> bool:
+        audit_calls.append(kwargs)
+        db = _args[0]
+        db.add(
+            AuditLog(
+                user_id=kwargs.get("user_id"),
+                event_type=kwargs["event_type"],
+                actor_email_hash=kwargs.get("actor_email_hash"),
+                actor_ip_hash=kwargs.get("actor_ip_hash"),
+                target_user_id=kwargs.get("target_user_id"),
+                details=kwargs.get("details") or {},
+            )
+        )
+        await db.flush()
+        return True
+
+    async def invalidate_balance_cache(target_user_id: str) -> None:
+        invalidations.append(target_user_id)
+
+    services = billing.replace_billing_queries(
+        billing.build_billing_services(),
+        tx_out=lambda tx: tx,
+    )
+    services = billing.replace_billing_commands(
+        services,
+        write_audit=write_audit,
+        invalidate_balance_cache=invalidate_balance_cache,
+        request_ip_hash=lambda _request: "ip-hash",
+    )
+    monkeypatch.setattr(
+        billing_overview_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    async with _orphan_hold_route_session() as db:
+        secondary_hold_tx_id = f"{hold_tx_id}-secondary"
+        db.add(UserWallet(user_id=user_id, balance_micro=8_000, hold_micro=2_000))
+        db.add_all(
+            [
+                _wallet_tx(
+                    tx_id=hold_tx_id,
+                    user_id=user_id,
+                    kind="hold",
+                    ref_type=ref_type,
+                    ref_id=hold_ref_id,
+                    created_at=now - timedelta(hours=2),
+                ),
+                _wallet_tx(
+                    tx_id=secondary_hold_tx_id,
+                    user_id=user_id,
+                    kind="hold",
+                    ref_type=ref_type,
+                    ref_id=hold_ref_id,
+                    created_at=now - timedelta(hours=1, minutes=59),
+                ),
+            ]
+        )
+        db.add(
+            _hold_task(
+                ref_type=ref_type,
+                task_id=task_id,
+                user_id=user_id,
+                status=status,
+                now=now,
+                proven_absent=True,
+                billing_retry_count=(
+                    1 if ref_type in {"generation", "completion"} else 0
+                ),
+            )
+        )
+        await db.commit()
+
+        first = await billing.admin_release_orphan_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            db,
+        )
+        replay = await billing.admin_release_orphan_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-2", email="other-admin@example.test"),
+            db,
+        )
+
+    assert first.id == replay.id
+    assert first.kind == "release"
+    assert first.idempotency_key == f"admin_release_hold:{hold_tx_id}"
+    assert first.created_by_admin == "admin-1"
+    assert first.amount_micro == 2_000
+    assert first.meta["release_proof"] == expected_proof
+    assert first.meta["hold_tx_ids"] == [hold_tx_id, secondary_hold_tx_id]
+    assert first.meta["aggregate_held_micro"] == 2_000
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["details"]["release_proof"] == expected_proof
+    assert audit_calls[0]["details"]["hold_tx_ids"] == [
+        hold_tx_id,
+        secondary_hold_tx_id,
+    ]
+    assert invalidations == [user_id, user_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_release_replay_repairs_missing_legacy_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-release-audit-repair"
+    hold_tx_id = "hold-release-audit-repair"
+    ref_id = "prompt-release-audit-repair"
+
+    async def invalidate_balance_cache(_target_user_id: str) -> None:
+        return None
+
+    services = billing.replace_billing_queries(
+        billing.build_billing_services(),
+        tx_out=lambda tx: tx,
+    )
+    services = billing.replace_billing_commands(
+        services,
+        invalidate_balance_cache=invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        billing_overview_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    async with _orphan_hold_route_session() as db:
+        hold = _wallet_tx(
+            tx_id=hold_tx_id,
+            user_id=user_id,
+            kind="hold",
+            ref_type="prompt_enhance",
+            ref_id=ref_id,
+            created_at=now - timedelta(hours=2),
+        )
+        release = WalletTransaction(
+            id="release-audit-repair",
+            user_id=user_id,
+            kind="release",
+            amount_micro=1_000,
+            balance_after=10_000,
+            hold_after=0,
+            ref_type="prompt_enhance",
+            ref_id=ref_id,
+            idempotency_key=f"admin_release_hold:{hold_tx_id}",
+            meta={
+                "hold_tx_id": hold_tx_id,
+                "hold_tx_ids": [hold_tx_id],
+                "hold_count": 1,
+                "aggregate_held_micro": 1_000,
+                "release_proof": "legacy-unrecorded",
+            },
+            created_at=now - timedelta(hours=1),
+        )
+        db.add(UserWallet(user_id=user_id, balance_micro=10_000, hold_micro=0))
+        db.add_all([hold, release])
+        await db.commit()
+
+        replay = await billing.admin_release_orphan_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-repair", email="repair@example.test"),
+            db,
+        )
+        audit_row = (
+            await db.execute(
+                select(AuditLog).where(
+                    AuditLog.event_type == "wallet.hold.force_release"
+                )
+            )
+        ).scalar_one()
+
+    assert replay.id == release.id
+    assert audit_row.user_id == "admin-repair"
+    assert audit_row.target_user_id == user_id
+    assert audit_row.details["release_tx_id"] == release.id
+    assert audit_row.details["audit_recovery"] is True
+    assert audit_row.details["release_proof"] == "legacy-unrecorded"
+
+
+@pytest.mark.asyncio
+async def test_admin_prompt_orphan_hold_uses_default_settlement_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-prompt-orphan-settle"
+    hold_tx_id = "hold-prompt-orphan-settle"
+    ref_id = "prompt-enhance-request-1"
+    audit_calls: list[dict[str, Any]] = []
+    invalidations: list[str] = []
+
+    async def write_audit(db: AsyncSession, **kwargs: Any) -> bool:
+        audit_calls.append(kwargs)
+        db.add(
+            AuditLog(
+                user_id=kwargs.get("user_id"),
+                event_type=kwargs["event_type"],
+                actor_email_hash=kwargs.get("actor_email_hash"),
+                actor_ip_hash=kwargs.get("actor_ip_hash"),
+                target_user_id=kwargs.get("target_user_id"),
+                details=kwargs.get("details") or {},
+            )
+        )
+        await db.flush()
+        return True
+
+    async def invalidate_balance_cache(target_user_id: str) -> None:
+        invalidations.append(target_user_id)
+
+    services = billing.replace_billing_queries(
+        billing.build_billing_services(),
+        tx_out=lambda tx: tx,
+    )
+    services = billing.replace_billing_commands(
+        services,
+        write_audit=write_audit,
+        invalidate_balance_cache=invalidate_balance_cache,
+        request_ip_hash=lambda _request: "ip-hash",
+    )
+    monkeypatch.setattr(
+        billing_orphan_settlement_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    async with _orphan_hold_route_session() as db:
+        db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
+        db.add(
+            _wallet_tx(
+                tx_id=hold_tx_id,
+                user_id=user_id,
+                kind="hold",
+                ref_type="prompt_enhance",
+                ref_id=ref_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        await db.commit()
+
+        listed = await billing.admin_list_orphan_holds(
+            SimpleNamespace(id="admin-1"),
+            db,
+            min_age_minutes=60,
+            limit=10,
+        )
+        with pytest.raises(HTTPException) as release_error:
+            await billing.admin_release_orphan_hold(
+                hold_tx_id,
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+        first = await billing.admin_settle_orphan_prompt_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            db,
+        )
+        replay = await billing.admin_settle_orphan_prompt_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-2", email="other-admin@example.test"),
+            db,
+        )
+        wallet = await db.get(UserWallet, user_id)
+        settlements = (
+            (
+                await db.execute(
+                    select(WalletTransaction).where(
+                        WalletTransaction.idempotency_key
+                        == f"admin_settle_hold:{hold_tx_id}"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert listed[0].recovery_action == "settle_default"
+    assert release_error.value.status_code == 409
+    assert release_error.value.detail["error"]["code"] == (
+        "HOLD_RELEASE_NOT_PROVEN_SAFE"
+    )
+    assert first.id == replay.id
+    assert first.kind == "settle"
+    assert first.amount_micro == 0
+    assert first.created_by_admin == "admin-1"
+    assert first.meta["actual_micro"] == 1_000
+    assert first.meta["settlement_basis"] == "aggregate_held_micro"
+    assert wallet is not None
+    assert wallet.balance_micro == 9_000
+    assert wallet.hold_micro == 0
+    assert len(settlements) == 1
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["event_type"] == "wallet.hold.force_settle"
+    assert audit_calls[0]["details"]["aggregate_held_micro"] == 1_000
+    assert invalidations == [user_id, user_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_release_orphan_hold_rejects_concurrent_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-concurrent-settle"
+    task_id = "task-concurrent-settle"
+    audit_called = False
+
+    async def settle_won(*_args: Any, **_kwargs: Any) -> WalletTransaction:
+        return _wallet_tx(
+            tx_id="settle-won",
+            user_id=user_id,
+            kind="settle",
+            ref_type="generation",
+            ref_id=f"{task_id}:retry:1",
+            created_at=now,
+        )
+
+    async def fail_audit(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal audit_called
+        audit_called = True
+        return True
+
+    services = billing.replace_billing_commands(
+        billing.build_billing_services(),
+        write_audit=fail_audit,
+    )
+    monkeypatch.setattr(
+        billing_overview_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+    monkeypatch.setattr(billing_core, "release", settle_won)
+
+    async with _orphan_hold_route_session() as db:
+        db.add(
+            _wallet_tx(
+                tx_id="hold-concurrent",
+                user_id=user_id,
+                kind="hold",
+                ref_type="generation",
+                ref_id=f"{task_id}:retry:1",
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        db.add(
+            _hold_task(
+                ref_type="generation",
+                task_id=task_id,
+                user_id=user_id,
+                status="failed",
+                now=now,
+                proven_absent=True,
+                billing_retry_count=1,
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-concurrent",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "HOLD_ALREADY_CONSUMED"
+    assert audit_called is False
+
+
+@pytest.mark.asyncio
+async def test_admin_release_orphan_hold_rolls_back_when_audit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-audit-failure"
+    task_id = "task-audit-failure"
+
+    async def fail_audit(*_args: Any, **_kwargs: Any) -> bool:
+        from app.audit import AuditPersistenceError
+
+        raise AuditPersistenceError("wallet.hold.force_release")
+
+    services = billing.replace_billing_commands(
+        billing.build_billing_services(),
+        write_audit=fail_audit,
+    )
+    monkeypatch.setattr(
+        billing_overview_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    async with _orphan_hold_route_session() as db:
+        db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
+        db.add(
+            _wallet_tx(
+                tx_id="hold-audit-failure",
+                user_id=user_id,
+                kind="hold",
+                ref_type="generation",
+                ref_id=f"{task_id}:retry:1",
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        db.add(
+            _hold_task(
+                ref_type="generation",
+                task_id=task_id,
+                user_id=user_id,
+                status="failed",
+                now=now,
+                proven_absent=True,
+                billing_retry_count=1,
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-audit-failure",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+        wallet = await db.get(UserWallet, user_id)
+        releases = (
+            (
+                await db.execute(
+                    select(WalletTransaction).where(
+                        WalletTransaction.idempotency_key
+                        == "admin_release_hold:hold-audit-failure"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"]["code"] == "AUDIT_WRITE_FAILED"
+    assert wallet is not None
+    assert wallet.balance_micro == 9_000
+    assert wallet.hold_micro == 1_000
+    assert releases == []
+
+
+@pytest.mark.asyncio
+async def test_admin_release_orphan_hold_rejects_retry_evidence_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-retry-mismatch"
+    task_id = "task-retry-mismatch"
+
+    async def fail_release(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("older retry hold must not use current retry evidence")
+
+    monkeypatch.setattr(billing_core, "release", fail_release)
+
+    async with _orphan_hold_route_session() as db:
+        db.add(
+            _wallet_tx(
+                tx_id="hold-retry-mismatch",
+                user_id=user_id,
+                kind="hold",
+                ref_type="generation",
+                ref_id=f"{task_id}:retry:1",
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        db.add(
+            _hold_task(
+                ref_type="generation",
+                task_id=task_id,
+                user_id=user_id,
+                status="failed",
+                now=now,
+                proven_absent=True,
+                billing_retry_count=2,
+            )
+        )
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-retry-mismatch",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "HOLD_RELEASE_EVIDENCE_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_admin_release_orphan_hold_rejects_confirmed_video_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-video-confirmed"
+    task_id = "task-video-confirmed"
+
+    async def fail_release(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("confirmed video submission must not be released")
+
+    monkeypatch.setattr(billing_core, "release", fail_release)
+
+    async with _orphan_hold_route_session() as db:
+        db.add(
+            _wallet_tx(
+                tx_id="hold-video-confirmed",
+                user_id=user_id,
+                kind="hold",
+                ref_type="video_generation",
+                ref_id=task_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        task = _hold_task(
+            ref_type="video_generation",
+            task_id=task_id,
+            user_id=user_id,
+            status="failed",
+            now=now,
+            proven_absent=True,
+        )
+        task.provider_task_id = "provider-confirmed-task"
+        task.upstream_response = {"submit_delivery_state": "proven_absent"}
+        db.add(task)
+        await db.commit()
+
+        with pytest.raises(HTTPException) as excinfo:
+            await billing.admin_release_orphan_hold(
+                "hold-video-confirmed",
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "HOLD_RELEASE_NOT_PROVEN_SAFE"
 
 
 @pytest.mark.asyncio
@@ -1475,6 +2393,7 @@ async def test_redeem_code_samples_clock_after_row_lock(
 async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[str] = []
     remembered: list[str | None] = []
     updated: list[list[tuple[str, str]]] = []
     audits: list[dict[str, Any]] = []
@@ -1483,26 +2402,38 @@ async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
         committed = False
 
         async def commit(self) -> None:
+            events.append("commit")
             self.committed = True
 
-    async def fake_get_setting(_db: Any, _spec: Any) -> str:
+    async def fake_lock(_db: Any) -> str:
+        events.append("lock")
         return "old-secret-value-123456"
 
+    async def fail_get_setting(_db: Any, _spec: Any) -> str:
+        raise AssertionError("persisted current secret must come from the locked read")
+
     async def fake_update_settings(_db: Any, pairs: list[tuple[str, str]]) -> None:
+        events.append("update")
         updated.append(pairs)
 
     async def fake_remember(_db: Any, old_secret: str | None) -> str:
+        events.append("remember")
         remembered.append(old_secret)
         return "2026-05-17T00:00:00+00:00"
 
     async def fake_write_audit(_db: Any, **kwargs: Any) -> bool:
+        events.append("audit")
         audits.append(kwargs)
         return True
 
     async def fake_overview(_admin: Any, _db: Any) -> Any:
+        events.append("overview")
         return "overview"
 
-    monkeypatch.setattr(billing_composition, "get_setting", fake_get_setting)
+    monkeypatch.setattr(
+        billing_composition, "lock_redemption_secret_rotation", fake_lock
+    )
+    monkeypatch.setattr(billing_composition, "get_setting", fail_get_setting)
     monkeypatch.setattr(billing_composition, "update_settings", fake_update_settings)
     monkeypatch.setattr(
         billing_services, "_generate_redemption_secret", lambda: "new-secret"
@@ -1531,6 +2462,65 @@ async def test_rotate_redemption_secret_keeps_previous_secret_for_transition(
     assert remembered == ["old-secret-value-123456"]
     assert audits[0]["details"]["revoked_unredeemed_count"] == 0
     assert audits[0]["details"]["previous_secret_valid_until"] is not None
+    assert events == ["lock", "update", "remember", "audit", "commit", "overview"]
+
+
+@pytest.mark.asyncio
+async def test_rotate_redemption_secret_rolls_back_second_serialized_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Db:
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def commit(self) -> None:
+            raise AssertionError("rejected second rotation must not commit")
+
+    async def fake_lock(_db: Any) -> str:
+        events.append("lock")
+        return "first-committed-new-secret"
+
+    async def fake_update_settings(_db: Any, _pairs: list[tuple[str, str]]) -> None:
+        events.append("update")
+
+    async def reject_active_previous(_db: Any, old_secret: str | None) -> None:
+        events.append(f"remember:{old_secret}")
+        raise billing_overview_routes.PreviousRedemptionSecretLocked("active previous")
+
+    async def fail_audit(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("rejected second rotation must not write an audit")
+
+    monkeypatch.setattr(
+        billing_composition, "lock_redemption_secret_rotation", fake_lock
+    )
+    monkeypatch.setattr(billing_composition, "update_settings", fake_update_settings)
+    monkeypatch.setattr(
+        billing_composition,
+        "remember_previous_redemption_secret",
+        reject_active_previous,
+    )
+    monkeypatch.setattr(billing_composition, "write_audit", fail_audit)
+    monkeypatch.setattr(
+        billing_services, "_generate_redemption_secret", lambda: "second-new-secret"
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await billing.admin_rotate_redemption_secret(
+            object(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-2", email="admin-2@example.test"),  # type: ignore[arg-type]
+            Db(),  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "previous_secret_locked"
+    assert events == [
+        "lock",
+        "update",
+        "remember:first-committed-new-secret",
+        "rollback",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1743,6 +2733,7 @@ async def test_admin_adjust_wallet_passes_client_idempotency_key(
     缺省时 adjust 由入参哈希派生键，会把两次参数完全相同的合法调账静默
     去重；显式键是唯一逃生门，路由层必须透传。
     """
+
     class Db:
         async def get(self, *_args: Any, **_kwargs: Any) -> Any:
             return SimpleNamespace(account_mode="wallet")

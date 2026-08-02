@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 
 from lumen_core.constants import MessageStatus, Role
 from lumen_core.models import (
@@ -54,6 +54,26 @@ def memory_run_due(run: MemoryExtractionRun, now: datetime) -> bool:
         return True
     return (
         updated_at + timedelta(seconds=memory_retry_backoff_seconds(run.attempt)) <= now
+    )
+
+
+def memory_run_due_predicate(now: datetime) -> Any:
+    model = MemoryExtractionRun
+    updated_at = func.coalesce(model.updated_at, model.created_at)
+    retry_due = or_(
+        and_(model.attempt <= 1, updated_at <= now - timedelta(seconds=30)),
+        and_(model.attempt == 2, updated_at <= now - timedelta(seconds=60)),
+        and_(model.attempt == 3, updated_at <= now - timedelta(seconds=120)),
+        and_(model.attempt == 4, updated_at <= now - timedelta(seconds=240)),
+        and_(model.attempt == 5, updated_at <= now - timedelta(seconds=480)),
+        and_(
+            model.attempt >= 6,
+            updated_at <= now - timedelta(seconds=MEMORY_RETRY_BACKOFF_MAX_S),
+        ),
+    )
+    return or_(
+        model.status == "running",
+        and_(model.status == "retryable", retry_due),
     )
 
 
@@ -150,6 +170,7 @@ class MemoryExtractionReconciler:
                     select(MemoryExtractionRun)
                     .where(
                         MemoryExtractionRun.status.in_(("retryable", "running")),
+                        memory_run_due_predicate(context.now),
                         or_(
                             MemoryExtractionRun.lease_expires_at.is_(None),
                             MemoryExtractionRun.lease_expires_at <= context.now,
