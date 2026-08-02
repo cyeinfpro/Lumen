@@ -36,6 +36,7 @@ class GenerationRunState:
     lease_lost: asyncio.Event = field(default_factory=asyncio.Event)
     reserved_provider: Any | None = None
     reserved_provider_name: str | None = None
+    image_queue_reservation_token: str | None = None
     user_api_credential_id: str | None = None
     user_runtime_provider: Any | None = None
     loaded_attempt: int = 0

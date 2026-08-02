@@ -69,6 +69,9 @@ class UsageState:
     request_sent: bool = False
     dispatch_started_recorded: bool = False
     response_receipt_recorded: bool = False
+    active_round_dispatch_started: bool = False
+    active_round_response_received: bool = False
+    active_round_dispatch_proven_undelivered: bool = False
     upstream_provider_event: dict[str, str] | None = None
     delta_counter: int = 0
     completed_response: dict[str, Any] | None = None

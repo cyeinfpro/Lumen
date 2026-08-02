@@ -33,6 +33,12 @@ from lumen_core.constants import (
     MessageStatus,
 )
 from lumen_core.models import PosterMaster, PosterRender
+from lumen_core.upstream_billing import mark_upstream_dispatch_started
+from app.artifact_commit import (
+    ArtifactAdoption,
+    ArtifactCommitNotAdopted,
+    ArtifactCommitOutcomeUnknown,
+)
 from app.background_removal.local_chroma import (
     recover_solid_background_transparency,
 )
@@ -51,6 +57,7 @@ from app.tasks.generation_parts import (
     queue_claim,
     request_options,
     retry_state,
+    runner as generation_runner,
     success as generation_success,
     workflow_service,
     workflow_hooks,
@@ -560,7 +567,7 @@ def test_run_generation_guards_finalize_storage_and_billing_boundaries() -> None
         "g.billing.settle(",
         billing_guard,
     )
-    commit = persistence_source.index("await session.commit()", settle)
+    commit = persistence_source.index("commit_with_adoption_probe(", settle)
     assert persistence_guard < attempt_fence < billing_guard
     assert billing_guard < settle < commit
     # 审计 D-2：settle 之后到 commit 之间不允许再有任何中断检查。此处抛异常会把
@@ -1787,6 +1794,336 @@ async def test_cleanup_storage_on_custom_base_exception_waits_for_delete(
     assert not local_storage.path_for(key).exists()
 
 
+@pytest.mark.asyncio
+async def test_generation_execution_scoped_keys_isolate_manual_retry_bytes(
+    tmp_path: Path,
+) -> None:
+    local_storage = LocalStorage(tmp_path)
+    services = replace(
+        generation_services,
+        artifacts=DefaultGenerationArtifacts(local_storage),
+    )
+    first_keys = generation_success.generation_artifact_keys(
+        user_id="user-1",
+        task_id="gen-crash-retry",
+        execution_epoch=4,
+        attempt=1,
+        orig_ext="png",
+    )
+    retry_keys = generation_success.generation_artifact_keys(
+        user_id="user-1",
+        task_id="gen-crash-retry",
+        execution_epoch=5,
+        attempt=1,
+        orig_ext="png",
+    )
+
+    assert await persistence.write_generation_files(
+        [(first_keys[0], b"first-attempt-bytes")],
+        services,
+    ) == [first_keys[0]]
+    assert await persistence.write_generation_files(
+        [(retry_keys[0], b"different-retry-bytes")],
+        services,
+    ) == [retry_keys[0]]
+
+    assert first_keys[0] != retry_keys[0]
+    assert local_storage.get_bytes(first_keys[0]) == b"first-attempt-bytes"
+    assert local_storage.get_bytes(retry_keys[0]) == b"different-retry-bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected_exception", "expect_cleanup", "expect_delivery"),
+    [
+        (ArtifactAdoption.ADOPTED, None, False, True),
+        (ArtifactAdoption.NOT_ADOPTED, RuntimeError, True, False),
+        (ArtifactAdoption.UNKNOWN, ArtifactCommitOutcomeUnknown, False, False),
+    ],
+)
+async def test_generation_commit_cleanup_requires_confirmed_non_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: ArtifactAdoption,
+    expected_exception: type[BaseException] | None,
+    expect_cleanup: bool,
+    expect_delivery: bool,
+) -> None:
+    deleted: list[str] = []
+    delivered: list[Any] = []
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def commit(self) -> None:
+            raise RuntimeError("commit acknowledgement lost")
+
+        async def rollback(self) -> None:
+            return None
+
+    class Artifacts:
+        async def delete_files(self, keys: list[str]) -> None:
+            deleted.extend(keys)
+
+    class Billing:
+        async def settle(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def flush_after_commit(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    class Events:
+        async def deliver(self, _redis: Any, delivery: Any) -> None:
+            delivered.append(delivery)
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def conversation_alive(*_args: Any, **_kwargs: Any) -> str:
+        return "conversation-1"
+
+    async def probe(*_args: Any, **_kwargs: Any) -> ArtifactAdoption:
+        return outcome
+
+    monkeypatch.setattr(
+        generation_success,
+        "raise_if_generation_interrupted",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "ensure_generation_attempt_current",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "ensure_generation_conversation_alive",
+        conversation_alive,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_add_image_rows",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_success_upstream_request",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_mark_generation_succeeded",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_attach_image_to_message",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_record_success_hooks",
+        noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_stage_success_event",
+        lambda *_args, **_kwargs: ("event-1", "sse", {}),
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "_probe_generation_success_adoption",
+        probe,
+    )
+
+    services = replace(
+        generation_services,
+        store=_SessionStore(Session()),
+        artifacts=Artifacts(),  # type: ignore[arg-type]
+        billing=Billing(),  # type: ignore[arg-type]
+        events=Events(),  # type: ignore[arg-type]
+    )
+    state = SimpleNamespace(
+        redis=object(),
+        task_id="gen-commit-outcome",
+        attempt=2,
+        message_id="message-1",
+        user_id="user-1",
+        lease_lost=asyncio.Event(),
+        generation=SimpleNamespace(id="gen-commit-outcome"),
+        conversation_id_for_title=None,
+        parent_upstream_request_for_bonus=None,
+    )
+    artifact = SimpleNamespace(
+        image_id="image-1",
+        key_orig="u/user-1/g/gen-commit-outcome/attempts/2/orig.png",
+        sha256="sha-1",
+        width=32,
+        height=24,
+        image_metadata={},
+    )
+    created_keys = [artifact.key_orig]
+
+    if expected_exception is None:
+        await generation_success._persist_generation_success(  # noqa: SLF001
+            state,
+            artifact,
+            created_keys,
+            services,
+        )
+    else:
+        with pytest.raises(expected_exception) as exc_info:
+            await generation_success._persist_generation_success(  # noqa: SLF001
+                state,
+                artifact,
+                created_keys,
+                services,
+            )
+        if outcome is ArtifactAdoption.NOT_ADOPTED:
+            # 上游已产出图片并计费:NOT_ADOPTED 必须带 unknown 类 error_code 抛出,
+            # 失败路径据此 settle 而不是 release(否则平台吸收上游成本)。
+            assert exc_info.value.error_code == EC.IMAGE_JOB_RESULT_UNKNOWN.value
+
+    assert bool(deleted) is expect_cleanup
+    assert bool(delivered) is expect_delivery
+
+
+@pytest.mark.asyncio
+async def test_generation_unknown_commit_defers_without_failure_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = SimpleNamespace(
+        services=object(),
+        task_id="gen-commit-unknown",
+        attempt=3,
+        task_outcome="unknown",
+    )
+    failure_called = False
+
+    async def yes(_state: Any) -> bool:
+        return True
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def unknown(*_args: Any, **_kwargs: Any) -> None:
+        raise ArtifactCommitOutcomeUnknown("commit outcome unknown")
+
+    async def fail_handler(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal failure_called
+        failure_called = True
+
+    monkeypatch.setattr(generation_runner, "_load_initial_generation", yes)
+    monkeypatch.setattr(generation_runner, "_prepare_provider_reservation", yes)
+    monkeypatch.setattr(generation_runner, "_start_generation_attempt", yes)
+    monkeypatch.setattr(
+        generation_runner,
+        "_initialize_execution_state",
+        lambda _state: None,
+    )
+    monkeypatch.setattr(generation_runner, "_prepare_upstream_request", noop_async)
+    monkeypatch.setattr(generation_runner, "_dispatch_upstream_request", noop_async)
+    monkeypatch.setattr(
+        generation_success,
+        "finalize_generation_success",
+        unknown,
+    )
+    monkeypatch.setattr(
+        generation_runner.failure,
+        "handle_generation_exception",
+        fail_handler,
+    )
+    monkeypatch.setattr(generation_runner, "_cleanup_generation_run", noop_async)
+
+    await generation_runner._run_generation_scoped(state)  # noqa: SLF001
+
+    assert state.task_outcome == "commit_unknown"
+    assert failure_called is False
+
+
+@pytest.mark.asyncio
+async def test_generation_not_adopted_commit_routes_to_unknown_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOT_ADOPTED commit 必须走 unknown 结算分支,绝不落入 failure handler 的 release。"""
+    state = SimpleNamespace(
+        services=object(),
+        redis=object(),
+        task_id="gen-commit-not-adopted",
+        attempt=2,
+        task_outcome="unknown",
+        gen_upstream_request_snapshot=mark_upstream_dispatch_started(
+            {},
+            at="2026-01-01T00:00:00+00:00",
+            attempt=2,
+            execution_epoch=0,
+        ),
+        generation=SimpleNamespace(execution_epoch=0),
+    )
+    failure_called = False
+    unknown_settled: list[Any] = []
+
+    async def yes(_state: Any) -> bool:
+        return True
+
+    async def noop_async(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def not_adopted(*_args: Any, **_kwargs: Any) -> None:
+        raise ArtifactCommitNotAdopted(
+            "generation artifact commit was not adopted",
+            error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        )
+
+    async def fail_handler(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal failure_called
+        failure_called = True
+
+    async def settle_unknown(state: Any, *_args: Any) -> None:
+        unknown_settled.append(state)
+        state.task_outcome = "failed"
+
+    async def not_cancelled(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(generation_runner, "_load_initial_generation", yes)
+    monkeypatch.setattr(generation_runner, "_prepare_provider_reservation", yes)
+    monkeypatch.setattr(generation_runner, "_start_generation_attempt", yes)
+    monkeypatch.setattr(
+        generation_runner,
+        "_initialize_execution_state",
+        lambda _state: None,
+    )
+    monkeypatch.setattr(generation_runner, "_prepare_upstream_request", noop_async)
+    monkeypatch.setattr(generation_runner, "_dispatch_upstream_request", noop_async)
+    monkeypatch.setattr(
+        generation_success,
+        "finalize_generation_success",
+        not_adopted,
+    )
+    monkeypatch.setattr(
+        generation_runner.failure,
+        "handle_generation_exception",
+        fail_handler,
+    )
+    monkeypatch.setattr(
+        generation_runner,
+        "finalize_generation_result_unknown",
+        settle_unknown,
+    )
+    monkeypatch.setattr(generation_runner, "is_cancelled", not_cancelled)
+    monkeypatch.setattr(generation_runner, "_cleanup_generation_run", noop_async)
+
+    await generation_runner._run_generation_scoped(state)  # noqa: SLF001
+
+    assert len(unknown_settled) == 1
+    assert failure_called is False
+    assert state.task_outcome == "failed"
+
+
 class _ScalarResult:
     def __init__(self, value) -> None:
         self.value = value
@@ -2266,7 +2603,7 @@ def test_run_generation_records_workflows_before_billing_and_commit() -> None:
         "g.billing.settle(",
         hooks,
     )
-    commit = persistence_source.index("await session.commit()", settle)
+    commit = persistence_source.index("commit_with_adoption_probe(", settle)
     assert hooks < settle < commit
 
 

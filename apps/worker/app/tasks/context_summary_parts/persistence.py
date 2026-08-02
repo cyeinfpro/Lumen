@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select, text as sa_text
 
 from lumen_core.context_window import compare_message_position, is_summary_usable
-from lumen_core.models import Conversation
+from lumen_core.models import Conversation, User
 
 from .common import SummaryLock
 
@@ -195,6 +195,68 @@ async def read_current_summary(
         return None
 
 
+async def lock_active_summary_context(
+    session: Any,
+    conv_id: str,
+    *,
+    user_id: str | None = None,
+    logger: logging.Logger,
+) -> Conversation | None:
+    """Lock active account and conversation in account-deletion order."""
+    resolved_user_id = user_id
+    try:
+        if not resolved_user_id:
+            resolved_user_id = (
+                await session.execute(
+                    select(Conversation.user_id).where(Conversation.id == conv_id)
+                )
+            ).scalar_one_or_none()
+        if not isinstance(resolved_user_id, str) or not resolved_user_id:
+            await session.rollback()
+            return None
+        active_user_id = (
+            await session.execute(
+                select(User.id)
+                .where(
+                    User.id == resolved_user_id,
+                    User.deleted_at.is_(None),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if active_user_id is None:
+            await session.rollback()
+            return None
+        conversation = (
+            await session.execute(
+                select(Conversation)
+                .where(Conversation.id == conv_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if (
+            conversation is None
+            or conversation.user_id != active_user_id
+            or conversation.deleted_at is not None
+        ):
+            await session.rollback()
+            return None
+        return conversation
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "context_summary.active_context_lock_failed conv=%s err=%s",
+            conv_id,
+            exc,
+        )
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
 async def cas_write_summary(
     session: Any,
     conv_id: str,
@@ -214,13 +276,11 @@ async def cas_write_summary(
         )
         return False
     try:
-        result = await session.execute(
-            select(Conversation)
-            .where(Conversation.id == conv_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+        current = await lock_active_summary_context(
+            session,
+            conv_id,
+            logger=logger,
         )
-        current = result.scalar_one_or_none()
         if current is None:
             return False
         if lock is not None and lock.lost_reason:

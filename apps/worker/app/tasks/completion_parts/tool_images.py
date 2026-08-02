@@ -308,6 +308,7 @@ async def _record_completion_tool_image_usage(
     session: Any,
     task_id: str,
     attempt_epoch: int,
+    execution_epoch: int,
     budget_micro: int,
     hooks: ToolImageUsageHooks,
 ) -> None:
@@ -316,11 +317,13 @@ async def _record_completion_tool_image_usage(
     if (
         completion is None
         or completion.attempt != attempt_epoch
+        or int(getattr(completion, "execution_epoch", 0) or 0) != execution_epoch
         or completion.status not in hooks.running_statuses
+        or getattr(completion, "cancel_requested_at", None) is not None
     ):
         raise hooks.superseded_error_type(
             f"completion tool image superseded task={task_id} "
-            f"attempt_epoch={attempt_epoch}"
+            f"execution_epoch={execution_epoch} attempt_epoch={attempt_epoch}"
         )
     upstream_request = dict(completion.upstream_request or {})
     try:
@@ -332,6 +335,8 @@ async def _record_completion_tool_image_usage(
         persisted_budget_micro = 0
     total_budget_micro = persisted_budget_micro + max(0, int(budget_micro or 0))
     upstream_request["tool_image_reserved_micro"] = total_budget_micro
+    upstream_request["completion_usage_execution_epoch"] = execution_epoch
+    upstream_request["completion_usage_attempt_epoch"] = attempt_epoch
     completion.upstream_request = upstream_request
     image_tokens = await hooks.fallback_image_tokens(
         session,

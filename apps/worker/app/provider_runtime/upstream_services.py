@@ -178,7 +178,8 @@ _RUNTIME_BINDINGS = MappingProxyType({
         provider_allows_image_endpoint provider_attempt_context
         provider_capability_error provider_endpoint_locked_error
         provider_endpoint_unavailable_error record_admin_image_call_or_raise
-        release_unused_image_reservation reserve_admin_image_call
+        release_image_reservation_best_effort release_unused_image_reservation
+        reserve_admin_image_call
         """.split()
     ),
     "references": tuple(

@@ -135,6 +135,7 @@ async def build_summary_plan(
     return SummaryPlan(
         SummaryRequest(
             conv_id=conv_id,
+            user_id=str(conv.user_id),
             boundary=boundary,
             boundary_id=boundary_key,
             boundary_dt=boundary_dt,

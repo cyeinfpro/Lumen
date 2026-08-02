@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from .runtime import video_ports
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,7 +12,6 @@ from lumen_core.constants import (
     EV_VIDEO_CANCELED,
     EV_VIDEO_FAILED,
     EV_VIDEO_PROGRESS,
-    EV_VIDEO_SUBMITTED,
     VideoGenerationStage,
     VideoGenerationStatus,
 )
@@ -22,12 +19,21 @@ from lumen_core.models import VideoGeneration
 
 from ...video_submit_cache import CachedSubmitResult
 from ...video_upstream_service import PollResult, SubmitResult, VideoSubmitRequest
+from . import submit_delivery as submit_delivery_evidence
+from .errors import submit_delivery_proven_absent
+from .runtime import video_ports
+from .submission_fence import relock_pre_submit_dispatch
+from .submit_state import (
+    SubmitPreparation as _SubmitPreparation,
+    record_submit_delivery as _record_submit_delivery,
+    submit_delivery_state as _submit_delivery_state,
+)
 
-
-@dataclass(slots=True)
-class _SubmitPreparation:
-    generation: VideoGeneration
-    cached_submit: CachedSubmitResult | None
+mark_submit_unknown = submit_delivery_evidence.mark_submit_unknown
+_persist_video_submit_receipt_impl = (
+    submit_delivery_evidence.persist_video_submit_receipt
+)
+_transition_submit_unknown_impl = submit_delivery_evidence.transition_submit_unknown
 
 
 async def run_video_generation(ctx: dict[str, Any], task_id: str) -> None:
@@ -91,6 +97,14 @@ async def handle_existing_pre_submit_state(
                 now=now,
                 reason="duplicate_worker_observed_stale_submitting",
             )
+            if generation.provider_name:
+                # The original submitter's lease expired; release its slot so
+                # exclusive providers are not blocked until finalize.
+                await video_ports()._release_provider_slot(
+                    redis,
+                    generation.provider_name,
+                    generation.id,
+                )
         await session.commit()
         await video_ports()._release_lease(redis, task_id, token)
         return True
@@ -281,6 +295,11 @@ async def restore_pre_submit_after_lease_loss(
                     },
                 )
                 generation.diagnostics = diagnostics
+                _record_submit_delivery(
+                    generation,
+                    state="proven_absent",
+                    reason="lease_lost_before_upstream",
+                )
                 should_requeue = True
             await session.commit()
     except Exception:
@@ -340,6 +359,22 @@ async def _prepare_submit_row(
     return _SubmitPreparation(
         generation=generation,
         cached_submit=cached_submit,
+    )
+
+
+async def _relock_pre_submit_dispatch(
+    session: Any,
+    *,
+    task_id: str,
+    user_id: str,
+    submission_epoch: int,
+) -> VideoGeneration | None:
+    return await relock_pre_submit_dispatch(
+        session,
+        task_id=task_id,
+        user_id=user_id,
+        submission_epoch=submission_epoch,
+        record_submit_delivery=_record_submit_delivery,
     )
 
 
@@ -434,6 +469,20 @@ async def run_video_generation_with_lease(
                 )
                 await session.commit()
 
+                fenced_generation = await _relock_pre_submit_dispatch(
+                    session,
+                    task_id=task_id,
+                    user_id=generation.user_id,
+                    submission_epoch=submission_epoch,
+                )
+                if fenced_generation is None:
+                    await video_ports()._release_provider_slot(
+                        redis,
+                        provider.name,
+                        task_id,
+                    )
+                    return
+                generation = fenced_generation
                 video_ports()._raise_if_video_lease_lost(
                     lease_lost,
                     "video submit lease lost before upstream call",
@@ -493,6 +542,7 @@ async def run_video_generation_with_lease(
             submission_epoch=submission_epoch,
             upstream_invoked=upstream_invoked,
             provider_supports_idempotency=provider_supports_idempotency,
+            lease_lost=lease_lost,
         )
         return
 
@@ -531,8 +581,14 @@ async def handle_video_submit_exception(
     submission_epoch: int | None,
     upstream_invoked: bool,
     provider_supports_idempotency: bool,
+    lease_lost: asyncio.Event | None = None,
 ) -> None:
-    if isinstance(exc, video_ports()._VideoLeaseLost):
+    if isinstance(exc, video_ports()._VideoLeaseLost) or (
+        lease_lost is not None and lease_lost.is_set()
+    ):
+        # Fence against a stale worker: the lease was lost while the failure
+        # happened, so this worker must not write SUBMIT_UNKNOWN/FAILED to the
+        # row -- a successor may already be (or about to be) driving the task.
         video_ports().logger.warning(
             "video submit lease lost; stale worker will not mutate task=%s epoch=%s",
             task_id,
@@ -565,6 +621,17 @@ async def handle_video_submit_exception(
                 submission_epoch,
                 exc_info=True,
             )
+        finally:
+            # The upstream call has returned with an ambiguous outcome; the
+            # slot's purpose (serializing submissions) is done. Holding it
+            # through SUBMIT_UNKNOWN would block exclusive providers until the
+            # finalize window (_SUBMIT_UNKNOWN_FINALIZE_AFTER_S) elapses.
+            if provider_name:
+                await video_ports()._release_provider_slot(
+                    redis,
+                    provider_name,
+                    task_id,
+                )
         return
     await video_ports()._fail_before_submit(
         redis,
@@ -572,6 +639,8 @@ async def handle_video_submit_exception(
         exc,
         provider_name=provider_name,
         submission_epoch=submission_epoch,
+        upstream_invoked=upstream_invoked,
+        provider_supports_idempotency=provider_supports_idempotency,
     )
 
 
@@ -583,82 +652,37 @@ async def persist_video_submit_receipt(
     submission_epoch: int | None,
     lease_lost: asyncio.Event,
 ) -> bool:
-    try:
-        video_ports()._raise_if_video_lease_lost(
-            lease_lost,
-            "video submit lease lost before receipt persistence",
-        )
-        async with video_ports().SessionLocal() as session:
-            filters = [VideoGeneration.id == task_id]
-            if submission_epoch is not None:
-                filters.append(VideoGeneration.submission_epoch == submission_epoch)
-            generation = (
-                await session.execute(
-                    select(VideoGeneration).where(*filters).with_for_update()
-                )
-            ).scalar_one_or_none()
-            if generation is None:
-                video_ports().logger.warning(
-                    "video submit receipt fenced out task=%s epoch=%s",
-                    task_id,
-                    submission_epoch,
-                )
-                return False
-            if generation.status in video_ports()._TERMINAL_STATUSES:
-                return False
-            generation.provider_task_id = result.provider_task_id
-            generation.upstream_response = result.raw
-            generation.status = VideoGenerationStatus.SUBMITTED.value
-            generation.progress_stage = VideoGenerationStage.RENDERING.value
-            generation.progress_pct = max(generation.progress_pct, 10)
-            generation.submitted_at = video_ports()._now()
-            generation.next_poll_at = video_ports()._now() + timedelta(
-                seconds=video_ports()._POLL_INTERVAL_S
-            )
-            diagnostics = video_ports()._generation_diagnostics(generation)
-            diagnostics["submit_receipt"] = {
-                "submission_epoch": submission_epoch,
-                "provider_task_id": result.provider_task_id,
-                "provider_idempotency_key": getattr(
-                    generation,
-                    "provider_idempotency_key",
-                    None,
-                ),
-                "persisted_at": video_ports()._now().isoformat(),
-            }
-            generation.diagnostics = diagnostics
-            await session.commit()
-            await video_ports()._publish_after_commit(
-                redis, generation, EV_VIDEO_SUBMITTED
-            )
-            return True
-    except video_ports()._VideoLeaseLost:
-        video_ports().logger.warning(
-            "video submit receipt skipped after lease loss task=%s epoch=%s",
-            task_id,
-            submission_epoch,
-        )
-        return False
-    except Exception:
-        video_ports().logger.warning(
-            "video submit persist failed task=%s",
-            task_id,
-            exc_info=True,
-        )
-        return False
+    return await _persist_video_submit_receipt_impl(
+        redis,
+        task_id,
+        result,
+        submission_epoch=submission_epoch,
+        lease_lost=lease_lost,
+        record_submit_delivery=_record_submit_delivery,
+    )
 
 
 async def mark_pre_submit_canceled(
     session: Any,
     generation: VideoGeneration,
 ) -> None:
+    delivery_state = _submit_delivery_state(generation)
+    _record_submit_delivery(
+        generation,
+        state=delivery_state,
+        reason="pre_submit_cancel_observed",
+    )
     generation.status = VideoGenerationStatus.CANCELED.value
     generation.progress_stage = VideoGenerationStage.FINISHED.value
     generation.progress_pct = 100
     generation.error_code = "canceled"
-    generation.error_message = "cancelled before upstream submission"
+    generation.error_message = (
+        "cancelled before upstream submission"
+        if delivery_state == "proven_absent"
+        else "cancelled while upstream submission outcome was unknown"
+    )
     generation.finished_at = video_ports()._now()
-    await video_ports().resolve_video_billing(
+    resolution = await video_ports().resolve_video_billing(
         session,
         generation,
         poll_result=PollResult(
@@ -668,6 +692,17 @@ async def mark_pre_submit_canceled(
         ),
         reason="pre_submit_cancel",
     )
+    generation.billed_tokens = resolution.actual_tokens
+    generation.billed_cost_micro = resolution.actual_micro
+    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics["pre_submit_billing"] = {
+        "at": video_ports()._now().isoformat(),
+        "decision": resolution.decision,
+        "actual_tokens": resolution.actual_tokens,
+        "actual_micro": resolution.actual_micro,
+        "submit_delivery_state": delivery_state,
+    }
+    generation.diagnostics = diagnostics
     video_ports()._queue_video_event(session, generation, EV_VIDEO_CANCELED)
 
 
@@ -677,6 +712,12 @@ async def mark_pre_submit_expired(
     *,
     reason: str,
 ) -> None:
+    delivery_state = _submit_delivery_state(generation)
+    _record_submit_delivery(
+        generation,
+        state=delivery_state,
+        reason="pre_submit_expiry_observed",
+    )
     diagnostics = video_ports()._generation_diagnostics(generation)
     diagnostics["pre_submit_expired_at"] = video_ports()._now().isoformat()
     generation.status = VideoGenerationStatus.EXPIRED.value
@@ -686,7 +727,7 @@ async def mark_pre_submit_expired(
     generation.error_message = "video task expired before upstream submission"
     generation.diagnostics = diagnostics
     generation.finished_at = video_ports()._now()
-    await video_ports().resolve_video_billing(
+    resolution = await video_ports().resolve_video_billing(
         session,
         generation,
         poll_result=PollResult(
@@ -697,6 +738,17 @@ async def mark_pre_submit_expired(
         ),
         reason=reason,
     )
+    generation.billed_tokens = resolution.actual_tokens
+    generation.billed_cost_micro = resolution.actual_micro
+    diagnostics = video_ports()._generation_diagnostics(generation)
+    diagnostics["pre_submit_billing"] = {
+        "at": video_ports()._now().isoformat(),
+        "decision": resolution.decision,
+        "actual_tokens": resolution.actual_tokens,
+        "actual_micro": resolution.actual_micro,
+        "submit_delivery_state": delivery_state,
+    }
+    generation.diagnostics = diagnostics
     video_ports()._queue_video_event(session, generation, EV_VIDEO_FAILED)
 
 
@@ -708,78 +760,14 @@ def transition_submit_unknown(
     reason: str,
     last_error: dict[str, Any] | None = None,
 ) -> None:
-    diagnostics = video_ports()._generation_diagnostics(generation)
-    diagnostics["submit_unknown_at"] = now.isoformat()
-    diagnostics["submit_unknown_reason"] = reason
-    diagnostics["submission_epoch"] = int(
-        getattr(generation, "submission_epoch", 0) or 0
-    )
-    diagnostics["provider_idempotency_key"] = getattr(
-        generation,
-        "provider_idempotency_key",
-        None,
-    )
-    if last_error is not None:
-        diagnostics["last_submit_error"] = last_error
-    generation.status = VideoGenerationStatus.SUBMIT_UNKNOWN.value
-    generation.progress_stage = VideoGenerationStage.SUBMITTING.value
-    generation.progress_pct = max(generation.progress_pct, 5)
-    generation.error_code = "submit_unknown"
-    generation.error_message = (
-        "video submission outcome is unknown; automatic reconciliation pending"
-    )
-    generation.next_poll_at = now + timedelta(
-        seconds=video_ports()._SUBMIT_UNKNOWN_FINALIZE_AFTER_S
-    )
-    generation.diagnostics = diagnostics
-    video_ports()._queue_video_event(
+    _transition_submit_unknown_impl(
         session,
         generation,
-        EV_VIDEO_PROGRESS,
-        submission_unknown=True,
+        now=now,
+        reason=reason,
+        last_error=last_error,
+        record_submit_delivery=_record_submit_delivery,
     )
-
-
-async def mark_submit_unknown(
-    task_id: str,
-    exc: Exception,
-    *,
-    provider_name: str | None,
-    submission_epoch: int | None,
-) -> bool:
-    async with video_ports().SessionLocal() as session:
-        filters = [VideoGeneration.id == task_id]
-        if submission_epoch is not None:
-            filters.append(VideoGeneration.submission_epoch == submission_epoch)
-        generation = (
-            await session.execute(
-                select(VideoGeneration).where(*filters).with_for_update()
-            )
-        ).scalar_one_or_none()
-        if generation is None or generation.status in video_ports()._TERMINAL_STATUSES:
-            return False
-        now = video_ports()._now()
-        error_code = video_ports()._video_exception_code(
-            exc, default="upstream_unknown"
-        )
-        error_message = video_ports()._video_exception_message(exc, phase="submit")
-        generation.provider_name = generation.provider_name or provider_name
-        video_ports()._transition_submit_unknown(
-            session,
-            generation,
-            now=now,
-            reason="ambiguous_non_idempotent_submit_error",
-            last_error={
-                "at": now.isoformat(),
-                "attempt": video_ports()._generation_attempt(generation),
-                "error_code": error_code,
-                "message": error_message[:500],
-                "retryable": False,
-                "outcome_unknown": True,
-            },
-        )
-        await session.commit()
-        return True
 
 
 async def fail_before_submit(
@@ -789,6 +777,8 @@ async def fail_before_submit(
     *,
     provider_name: str | None = None,
     submission_epoch: int | None = None,
+    upstream_invoked: bool = False,
+    provider_supports_idempotency: bool = False,
 ) -> None:
     release_provider_name = provider_name
     release_provider_slot = False
@@ -809,14 +799,27 @@ async def fail_before_submit(
                 return
             release_provider_slot = True
             release_provider_name = release_provider_name or generation.provider_name
-            if await video_ports()._schedule_submit_retry(
-                session, redis, generation, exc
-            ):
-                return
             error_code = video_ports()._video_exception_code(
                 exc,
                 default="provider_unavailable",
             )
+            if not upstream_invoked or submit_delivery_proven_absent(exc):
+                delivery_state = "proven_absent"
+            elif video_ports()._submit_outcome_unknown(exc):
+                delivery_state = "unknown"
+            else:
+                delivery_state = "confirmed"
+            _record_submit_delivery(
+                generation,
+                state=delivery_state,
+                reason="submit_exception",
+                provider_supports_idempotency=provider_supports_idempotency,
+                error_code=error_code,
+            )
+            if await video_ports()._schedule_submit_retry(
+                session, redis, generation, exc
+            ):
+                return
             error_message = video_ports()._video_exception_message(exc, phase="submit")
             video_ports().logger.warning(
                 "video submit failed task=%s attempt=%s code=%s error=%s",
@@ -960,6 +963,7 @@ __all__ = [
     "mark_submit_unknown",
     "persist_video_submit_receipt",
     "reserve_video_submit_slot",
+    "_relock_pre_submit_dispatch",
     "restore_cached_provider_identity",
     "restore_pre_submit_after_lease_loss",
     "resume_existing_provider_task",

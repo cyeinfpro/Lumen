@@ -21,7 +21,7 @@ from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .execution_boundary import SIDECAR_EXECUTION_KEY
 from .lease import is_cancelled
 from .queue import classify_inflight_lane, inflight_set_fields, redis_text
-from .retry_state import RUNNING_GENERATION_STATUSES
+from .retry_state import RUNNING_GENERATION_STATUSES, generation_execution_epoch
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
 
@@ -77,6 +77,8 @@ class ImageProgressPublisher:
                     .where(
                         Generation.id == self.state.task_id,
                         Generation.attempt == self.state.attempt,
+                        Generation.execution_epoch
+                        == generation_execution_epoch(self.state),
                         Generation.status.in_(RUNNING_GENERATION_STATUSES),
                     )
                     .with_for_update()
@@ -162,9 +164,7 @@ class ImageProgressPublisher:
         )
 
     async def _record_provider_used(self, event: dict[str, Any]) -> None:
-        provider = redis_text(
-            event.get("provider") or event.get("actual_provider")
-        )
+        provider = redis_text(event.get("provider") or event.get("actual_provider"))
         if not provider:
             return
         metadata = self._provider_metadata(event, provider)

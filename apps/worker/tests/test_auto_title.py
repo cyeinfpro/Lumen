@@ -266,6 +266,26 @@ def test_sanitize_title(raw: str, expected: str) -> None:
     assert auto_title._sanitize_title(raw) == expected
 
 
+@pytest.mark.asyncio
+async def test_build_summary_filters_deleted_messages_and_conversation() -> None:
+    statements: list[Any] = []
+
+    class _Result:
+        def scalars(self) -> list[Any]:
+            return []
+
+    class _FakeSession:
+        async def execute(self, stmt: Any) -> _Result:
+            statements.append(stmt)
+            return _Result()
+
+    assert await auto_title._build_summary(_FakeSession(), "conv-1") == []
+
+    sql = str(statements[0])
+    assert "messages.deleted_at IS NULL" in sql
+    assert "conversations.deleted_at IS NULL" in sql
+
+
 # --- reconcile_default_titles 巡检 -----------------------------------------
 
 
@@ -478,6 +498,10 @@ async def test_call_upstream_one_uses_30s_timeout_not_180s(
 async def test_auto_title_conversation_applies_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _Result:
+        def scalar_one_or_none(self) -> Conversation:
+            return Conversation(id="conv-1", user_id="user-1", title="")
+
     class _FakeSession:
         async def __aenter__(self) -> "_FakeSession":
             return self
@@ -485,10 +509,8 @@ async def test_auto_title_conversation_applies_total_timeout(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def get(self, model: Any, object_id: str) -> Any:
-            if model is Conversation:
-                return Conversation(id=object_id, user_id="user-1", title="")
-            return None
+        async def execute(self, _stmt: Any) -> _Result:
+            return _Result()
 
     async def fake_build_summary(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         return [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
@@ -515,6 +537,10 @@ async def test_auto_title_conditional_update_does_not_overwrite_user_rename(
 ) -> None:
     statements: list[Any] = []
 
+    class _ReadResult:
+        def scalar_one_or_none(self) -> Conversation:
+            return Conversation(id="conv-1", user_id="user-1", title="")
+
     class _ReadSession:
         async def __aenter__(self) -> "_ReadSession":
             return self
@@ -522,10 +548,8 @@ async def test_auto_title_conditional_update_does_not_overwrite_user_rename(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def get(self, model: Any, object_id: str) -> Any:
-            if model is Conversation:
-                return Conversation(id=object_id, user_id="user-1", title="")
-            return None
+        async def execute(self, _stmt: Any) -> _ReadResult:
+            return _ReadResult()
 
     class _UpdateResult:
         rowcount = 0
@@ -544,7 +568,7 @@ async def test_auto_title_conditional_update_does_not_overwrite_user_rename(
         async def commit(self) -> None:
             raise AssertionError("stale auto-title update must not commit")
 
-    sessions = iter((_ReadSession(), _WriteSession()))
+    sessions = iter((_ReadSession(), _ReadSession(), _WriteSession()))
 
     async def fake_build_summary(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         return [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
@@ -566,6 +590,7 @@ async def test_auto_title_conditional_update_does_not_overwrite_user_rename(
     sql = str(statements[0])
     assert "UPDATE conversations" in sql
     assert "conversations.title IS NULL" in sql
+    assert "conversations.deleted_at IS NULL" in sql
 
 
 # --- _call_upstream 失败日志包含尝试列表 ------------------------------------
@@ -614,18 +639,23 @@ async def test_maybe_enqueue_auto_title_uses_stable_cross_worker_job_id(
             return ""
 
     class _FakeSession:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
         async def __aenter__(self) -> "_FakeSession":
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def execute(self, _stmt: Any) -> _Result:
+        async def execute(self, stmt: Any) -> _Result:
+            self.statements.append(stmt)
             return _Result()
 
     with auto_title._RUNTIME.lock:  # noqa: SLF001
         auto_title._RUNTIME.cache.clear()  # noqa: SLF001
-    monkeypatch.setattr(auto_title, "SessionLocal", lambda: _FakeSession())
+    session = _FakeSession()
+    monkeypatch.setattr(auto_title, "SessionLocal", lambda: session)
     redis = _FakeRedisEnqueue()
 
     await auto_title.maybe_enqueue_auto_title(redis, "conv-direct")
@@ -634,6 +664,7 @@ async def test_maybe_enqueue_auto_title_uses_stable_cross_worker_job_id(
     assert redis.enqueue_kwargs == [
         {"_job_id": f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv-direct"}  # noqa: SLF001
     ]
+    assert "conversations.deleted_at IS NULL" in str(session.statements[0])
 
 
 @pytest.mark.asyncio
@@ -652,17 +683,22 @@ async def test_reconcile_enqueues_default_title_conversations(
             return self._rows
 
     class _FakeSession:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
         async def __aenter__(self) -> "_FakeSession":
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def execute(self, _stmt: Any) -> _Result:
+        async def execute(self, stmt: Any) -> _Result:
+            self.statements.append(stmt)
             # 模拟 PG 返回 2 个 candidate
             return _Result([("conv1",), ("conv2",)])
 
-    monkeypatch.setattr(auto_title, "SessionLocal", lambda: _FakeSession())
+    session = _FakeSession()
+    monkeypatch.setattr(auto_title, "SessionLocal", lambda: session)
 
     n = await auto_title.reconcile_default_titles({"redis": redis})
     assert n == 2
@@ -674,6 +710,100 @@ async def test_reconcile_enqueues_default_title_conversations(
         f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv1",  # noqa: SLF001
         f"{auto_title._AUTO_TITLE_JOB_PREFIX}conv2",  # noqa: SLF001
     ]
+    sql = str(session.statements[0])
+    assert "conversations.deleted_at IS NULL" in sql
+    assert "messages.deleted_at IS NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_auto_title_skips_soft_deleted_conversation_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An otherwise eligible tombstone must not read messages, dispatch, or write."""
+    statements: list[Any] = []
+
+    class _Result:
+        def scalar_one_or_none(self) -> None:
+            return None
+
+    class _DeletedConversationSession:
+        async def __aenter__(self) -> "_DeletedConversationSession":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def execute(self, stmt: Any) -> _Result:
+            statements.append(stmt)
+            return _Result()
+
+    async def must_not_build_summary(
+        *_args: Any, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
+        raise AssertionError("deleted conversation must not read messages")
+
+    async def must_not_call_provider(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("deleted conversation must not dispatch to provider")
+
+    monkeypatch.setattr(
+        auto_title,
+        "SessionLocal",
+        lambda: _DeletedConversationSession(),
+    )
+    monkeypatch.setattr(auto_title, "_build_summary", must_not_build_summary)
+    monkeypatch.setattr(auto_title, "_call_upstream", must_not_call_provider)
+
+    await auto_title.auto_title_conversation({"redis": object()}, "conv-deleted")
+
+    assert len(statements) == 1
+    statement = statements[0]
+    assert "conversations.deleted_at IS NULL" in str(statement)
+    assert statement.get_execution_options()["populate_existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_auto_title_rechecks_deletion_before_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deletion after summary construction must stop the provider call and write."""
+    deleted = False
+    reload_statements: list[Any] = []
+
+    class _Result:
+        def scalar_one_or_none(self) -> Conversation | None:
+            if deleted:
+                return None
+            return Conversation(id="conv-race", user_id="user-1", title="")
+
+    class _ReadSession:
+        async def __aenter__(self) -> "_ReadSession":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def execute(self, stmt: Any) -> _Result:
+            reload_statements.append(stmt)
+            return _Result()
+
+    async def fake_build_summary(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        nonlocal deleted
+        deleted = True
+        return [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]
+
+    async def must_not_call_provider(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("deleted race must stop provider dispatch")
+
+    monkeypatch.setattr(auto_title, "SessionLocal", lambda: _ReadSession())
+    monkeypatch.setattr(auto_title, "_build_summary", fake_build_summary)
+    monkeypatch.setattr(auto_title, "_call_upstream", must_not_call_provider)
+
+    await auto_title.auto_title_conversation({"redis": object()}, "conv-race")
+
+    assert len(reload_statements) == 2
+    for statement in reload_statements:
+        assert "conversations.deleted_at IS NULL" in str(statement)
+        assert statement.get_execution_options()["populate_existing"] is True
 
 
 @pytest.mark.asyncio

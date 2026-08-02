@@ -15,6 +15,7 @@ from .common import SummaryCoverage, SummarySegment
 class SummaryFallbackRuntime:
     message_to_line: Callable[..., str]
     call_upstream: Callable[..., Awaitable[str | None]]
+    before_upstream: Callable[[], Awaitable[bool]] | None
     compose_input: Callable[[str | None, Sequence[str]], str]
     plan_segments: Callable[[Sequence[str], int], list[SummarySegment]]
     bound_segments: Callable[
@@ -76,6 +77,8 @@ async def segment_and_summarize(
         request.previous_summary,
         request.input_budget,
     ):
+        if not await _can_call_upstream(request):
+            return None
         result = await request.runtime.call_upstream(
             request.runtime.compose_input(request.previous_summary, lines),
             request.target_tokens,
@@ -87,6 +90,11 @@ async def segment_and_summarize(
             request.coverage.covered_message_count = len(request.messages)
         return result
     return await _summarize_segments(request, lines)
+
+
+async def _can_call_upstream(request: _SummaryFallbackRequest) -> bool:
+    before_upstream = request.runtime.before_upstream
+    return before_upstream is None or await before_upstream()
 
 
 def _fits_input_budget(
@@ -119,6 +127,8 @@ async def _summarize_segments(
     current_summary = request.previous_summary
     last_committable_summary: str | None = None
     for idx, segment in enumerate(segments, start=1):
+        if not await _can_call_upstream(request):
+            return None
         current_summary = await runtime.call_upstream(
             runtime.compose_input(current_summary, segment.lines),
             request.target_tokens,

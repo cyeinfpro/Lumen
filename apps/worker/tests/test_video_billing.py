@@ -41,6 +41,16 @@ def _generation() -> VideoGeneration:
     )
 
 
+def _pre_submit_generation() -> VideoGeneration:
+    generation = _generation()
+    generation.provider_task_id = None
+    generation.attempt = 0
+    generation.submission_epoch = 0
+    generation.submit_started_at = None
+    generation.diagnostics = {}
+    return generation
+
+
 @pytest.mark.asyncio
 async def test_resolve_video_billing_settles_success_with_actual_usage(
     monkeypatch: pytest.MonkeyPatch,
@@ -564,7 +574,7 @@ async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
 
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
-        _generation(),
+        _pre_submit_generation(),
         poll_result={
             "status": "cancelled",
             "upstream_billable": False,
@@ -580,6 +590,73 @@ async def test_resolve_video_billing_releases_for_pre_submit_no_cost_receipt(
     assert calls[0][1]["idempotency_key"] == "video_generation:release:video-gen-1"
     assert calls[0][1]["meta"]["billing_decision"] == "upstream_not_billable_release"
     assert session.info["lumen_post_commit_balance_cache"] == {"user-1": 10_000}
+
+
+@pytest.mark.asyncio
+async def test_pre_submit_cancel_receipt_with_unknown_delivery_settles_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = FakeSession()
+    calls: list[tuple[str, dict[str, object]]] = []
+    generation = _pre_submit_generation()
+    generation.attempt = 1
+    generation.submission_epoch = 1
+    generation.submit_started_at = datetime.now(timezone.utc)
+    generation.provider_idempotency_key = f"video:{generation.id}"
+    generation.diagnostics = {
+        "submit_delivery_state": "unknown",
+        "submit_delivery_history": [
+            {
+                "state": "unknown",
+                "reason": "submit_exception",
+                "submission_epoch": 1,
+            }
+        ],
+    }
+
+    async def held_amount_for_ref(*_args, **_kwargs) -> int:
+        return 1_500
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(_session, user_id: str, **kwargs):
+        calls.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(amount_micro=-1_500, balance_after=0, hold_after=0)
+
+    async def fail_release(*_args, **_kwargs):
+        raise AssertionError("unknown delivery must not release")
+
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        video_billing.worker_billing,
+        "allow_negative_balance",
+        allow_negative_balance,
+    )
+    monkeypatch.setattr(video_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(video_billing.billing_core, "release", fail_release)
+
+    resolution = await video_billing.resolve_video_billing(
+        session,  # type: ignore[arg-type]
+        generation,
+        poll_result={
+            "status": "cancelled",
+            "upstream_billable": False,
+            "raw": {"reason": "pre_submit_cancel"},
+        },
+        reason="pre_submit_cancel",
+    )
+
+    assert resolution.released is False
+    assert resolution.decision == "upstream_not_billable_untrusted_default_charge"
+    assert resolution.actual_micro == 1_500
+    assert calls[0][0] == "settle"
+    assert calls[0][1]["meta"]["submit_delivery_state"] == "unknown"
+    assert calls[0][1]["meta"]["upstream_cost_knowledge"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -995,9 +1072,24 @@ async def test_resolve_video_billing_release_records_proven_absent_knowledge(
     monkeypatch.setattr(video_billing.billing_core, "release", release)
     monkeypatch.setattr(video_billing.billing_core, "settle", fail_settle)
 
+    generation = _generation()
+    generation.provider_task_id = None
+    generation.attempt = 1
+    generation.submission_epoch = 1
+    generation.diagnostics = {
+        "submit_delivery_state": "proven_absent",
+        "submit_delivery_history": [
+            {
+                "state": "proven_absent",
+                "reason": "submit_exception",
+                "submission_epoch": 1,
+            }
+        ],
+    }
+
     resolution = await video_billing.resolve_video_billing(
         session,  # type: ignore[arg-type]
-        _generation(),
+        generation,
         poll_result={
             "status": "failed",
             "upstream_billable": False,

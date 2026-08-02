@@ -234,6 +234,13 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
                     submit_unknown_cutoff=submit_unknown_cutoff,
                 )
             )
+            if (
+                row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value
+                and row.provider_name
+            ):
+                # The submitter is gone (no active lease); release its slot now
+                # instead of holding it until finalize or the slot TTL.
+                release_slots.append((row.provider_name, row.id))
         await session.commit()
         await video_ports().worker_flush_balance_cache(session)
     for task_id in cached_recoveries:

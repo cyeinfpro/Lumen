@@ -111,6 +111,7 @@ def held_amount_breakdown(
     held: int,
     *,
     rate_multiplier: int,
+    pricing_source: str = "held_amount_fallback",
 ) -> CostBreakdown:
     return CostBreakdown(
         input_cost_micro=held,
@@ -124,7 +125,7 @@ def held_amount_breakdown(
         rate_multiplier_x10000=rate_multiplier,
         total_cost_micro=held,
         actual_cost_micro=held,
-        pricing_source="held_amount_fallback",
+        pricing_source=pricing_source,
     )
 
 
@@ -176,21 +177,58 @@ async def resolve_completion_breakdown(
         billing_ref_id,
     )
     if held <= 0:
-        if pricing_error is not None:
-            session.add(
-                deps.audit(
-                    event_type="billing.unresolved_after_upstream",
-                    user_id=completion.user_id,
-                    details={
-                        "scope": "chat_model",
-                        "model": completion.model,
-                        "completion_id": completion.id,
-                        "usage": usage.model_dump(),
-                        "error": pricing_error.message,
-                    },
+        # 与 generation 侧同一语义:被先前 release 消费的 hold 不是真实结算,
+        # 定价缺失时按被退回的金额补记,不能吞掉已发生的上游成本;从未建 hold
+        # 或已有真实 settle 则保留对账记录。
+        consumed = await deps.existing_ref_consumption_tx(
+            session,
+            completion.user_id,
+            "completion",
+            billing_ref_id,
+        )
+        released = (
+            max(0, int(getattr(consumed, "amount_micro", 0) or 0))
+            if consumed is not None and consumed.kind == "release"
+            else 0
+        )
+        if released <= 0:
+            if pricing_error is not None:
+                session.add(
+                    deps.audit(
+                        event_type="billing.unresolved_after_upstream",
+                        user_id=completion.user_id,
+                        details={
+                            "scope": "chat_model",
+                            "model": completion.model,
+                            "completion_id": completion.id,
+                            "usage": usage.model_dump(),
+                            "error": pricing_error.message,
+                        },
+                    )
                 )
+            return None
+        held = released
+        session.add(
+            deps.audit(
+                event_type="billing.pricing.released_hold_fallback_after_upstream",
+                user_id=completion.user_id,
+                details={
+                    "scope": "chat_model",
+                    "model": completion.model,
+                    "completion_id": completion.id,
+                    "usage": usage.model_dump(),
+                    "actual_micro": held,
+                    "error": (
+                        pricing_error.message if pricing_error is not None else None
+                    ),
+                },
             )
-        return None
+        )
+        return held_amount_breakdown(
+            held,
+            rate_multiplier=rate_multiplier,
+            pricing_source="released_hold_fallback",
+        )
     session.add(
         deps.audit(
             event_type="billing.pricing.hold_fallback_after_upstream",

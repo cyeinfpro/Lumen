@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,7 +19,11 @@ import pytest
 from redis.exceptions import WatchError
 
 from app import account_limiter
-from app.upstream_parts.image_execution import ImageRequestContext
+from app import provider_pool
+from app.upstream_parts.image_execution import (
+    ImageExecutionRequest,
+    ImageRequestContext,
+)
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 
 
@@ -948,6 +953,231 @@ async def test_upstream_quota_claim_releases_when_request_never_started() -> Non
     assert reservation.state == "released"
 
     assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_chain_releases_all_reservations() -> None:
+    """失败尝试链必须释放全部预留，否则每次 submit 重试都会永久占用配额。
+
+    回归 L501：before_attempt 的 claim 每重试一次就预留一个新槽位，若失败不
+    释放，5 次重试 = 5 个当日配额永久消失（直到 UTC 零点），账号会被自己失败
+    的请求饿死。
+    """
+    redis = FakeRedis()
+
+    class Pool:
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    provider = SimpleNamespace(
+        name="acc1",
+        image_rate_limit="2/min",
+        image_daily_quota=80,
+    )
+    request_context = ImageRequestContext.create(
+        trace_id="trace-1",
+        quota_task_id="task-1",
+        quota_attempt_epoch=1,
+    )
+    claim, release_failed = (
+        TEST_UPSTREAM_SERVICES.providers.image_request_attempt_claim(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="image_jobs:generations",
+            request_context=request_context,
+        )
+    )
+    await claim(1)
+    await claim(2)
+    day_key = (
+        f"lumen:acct:acc1:image:daily:"
+        f"{account_limiter._today_utc_key(time.time())}"
+    )
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 2
+    assert await redis.get(day_key) == "2"
+
+    await release_failed()
+
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
+    assert await redis.get(day_key) is None
+
+
+@pytest.mark.asyncio
+async def test_successful_attempt_chain_keeps_last_reservation() -> None:
+    """成功链保留最后一次尝试的预留作为入账记录，释放更早的失败尝试。"""
+    redis = FakeRedis()
+
+    class Pool:
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    provider = SimpleNamespace(
+        name="acc1",
+        image_rate_limit="2/min",
+        image_daily_quota=80,
+    )
+    request_context = ImageRequestContext.create(
+        trace_id="trace-1",
+        quota_task_id="task-1",
+        quota_attempt_epoch=1,
+    )
+    claim, release_failed = (
+        TEST_UPSTREAM_SERVICES.providers.image_request_attempt_claim(  # noqa: SLF001
+            Pool(),
+            provider,
+            route="image_jobs:generations",
+            request_context=request_context,
+        )
+    )
+    await claim(1)
+    await claim(2)
+    day_key = (
+        f"lumen:acct:acc1:image:daily:"
+        f"{account_limiter._today_utc_key(time.time())}"
+    )
+    await release_failed(keep_last=True)
+
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
+    assert await redis.get(day_key) == "1"
+
+
+def _quota_request() -> ImageExecutionRequest:
+    return ImageExecutionRequest(
+        action="generate",
+        prompt="test",
+        size="1024x1024",
+        images=None,
+        mask=None,
+        n=1,
+        quality="high",
+        output_format=None,
+        output_compression=None,
+        background=None,
+        moderation=None,
+        model=None,
+        progress_callback=None,
+        provider_override=None,
+        user_id=None,
+        request_context=ImageRequestContext.create(
+            trace_id="trace-1",
+            quota_task_id="task-1",
+            quota_attempt_epoch=1,
+        ),
+        upstream_runtime=TEST_UPSTREAM_RUNTIME,
+    )
+
+
+def _quota_pool(redis: FakeRedis) -> Any:
+    provider = provider_pool.ResolvedProvider(
+        name="acc1",
+        base_url="https://acc1.example",
+        api_key="sk-acc1",
+        image_rate_limit="2/min",
+        image_daily_quota=80,
+    )
+
+    class Pool:
+        async def select(self, **kwargs: Any) -> list[Any]:
+            _ = kwargs
+            return [provider]
+
+        def get_redis(self) -> FakeRedis:
+            return redis
+
+    return Pool()
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_failure_releases_all_attempt_reservations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """端到端回归 L501：失败尝试链结束时配额全部释放。
+
+    修复前 before_attempt 的预留永不释放：一次 submit 内部重试 2 次 + 失败
+    = 2 个当日配额永久消失（直到 UTC 零点），账号会被自己失败的请求饿死。
+    """
+    redis = FakeRedis()
+    pool = _quota_pool(redis)
+    day_key = (
+        f"lumen:acct:acc1:image:daily:"
+        f"{account_limiter._today_utc_key(time.time())}"
+    )
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def fake_direct_once(
+        _request: ImageExecutionRequest,
+        **kwargs: Any,
+    ) -> list[tuple[str, str | None]]:
+        before_attempt = kwargs.get("before_attempt")
+        if before_attempt is not None:
+            # 模拟 post_with_retry 的内部重试：每次尝试前都预留一个槽位。
+            await before_attempt(1)
+            await before_attempt(2)
+        raise TEST_UPSTREAM_SERVICES.infrastructure.UpstreamError(
+            "upstream 500",
+            status_code=500,
+            error_code="upstream_error",
+        )
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_once", fake_direct_once
+    )
+
+    with pytest.raises(TEST_UPSTREAM_SERVICES.infrastructure.UpstreamError):
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_with_failover(
+            _quota_request()
+        )
+
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 0
+    assert await redis.get(day_key) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_retry_success_keeps_single_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """端到端：内部重试成功后只保留最后一次成功的预留作为入账记录。"""
+    redis = FakeRedis()
+    pool = _quota_pool(redis)
+    day_key = (
+        f"lumen:acct:acc1:image:daily:"
+        f"{account_limiter._today_utc_key(time.time())}"
+    )
+
+    async def fake_get_pool() -> Any:
+        return pool
+
+    async def fake_direct_once(
+        _request: ImageExecutionRequest,
+        **kwargs: Any,
+    ) -> list[tuple[str, str | None]]:
+        before_attempt = kwargs.get("before_attempt")
+        if before_attempt is None:
+            raise AssertionError("before_attempt must be wired")
+        # 模拟 post_with_retry：第一次尝试失败（可重试）后内部重试成功。
+        await before_attempt(1)
+        await before_attempt(2)
+        return [("BBBB", None)]
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool, "get_pool", fake_get_pool
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.direct, "direct_generate_image_once", fake_direct_once
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_with_failover(
+        _quota_request()
+    )
+
+    assert result == [("BBBB", None)]
+    assert await redis.zcard("lumen:acct:acc1:image:ts") == 1
+    assert await redis.get(day_key) == "1"
 
 
 # --- pytest-asyncio 兼容 ----------------------------------------------------

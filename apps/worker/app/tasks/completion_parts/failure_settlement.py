@@ -14,6 +14,14 @@ from lumen_core.constants import (
     MessageStatus,
 )
 
+from ...reconciliation.task_domains import (
+    CompletionDispatchResultUnknown,
+    completion_cancel_requires_unknown_settlement,
+    ensure_completion_execution_current,
+    settle_completion_cancel_unknown,
+    settle_completion_result_unknown,
+)
+from .contracts import CompletionCommand, CompletionOutcome, CompletionServices
 from .execution import CompletionExecution
 
 
@@ -30,6 +38,7 @@ async def _cancel_completion_row(
                 state.ports.persistence.Completion.status.in_(
                     state.ports.retry._RUNNING_COMPLETION_STATUSES
                 ),
+                state.ports.persistence.Completion.cancel_requested_at.is_not(None),
             )
             .values(
                 status=CompletionStatus.CANCELED.value,
@@ -190,6 +199,7 @@ async def _mark_retry_queued(
                 state.ports.persistence.Completion.status.in_(
                     state.ports.retry._RUNNING_COMPLETION_STATUSES
                 ),
+                state.ports.persistence.Completion.cancel_requested_at.is_(None),
             )
             .values(
                 status=CompletionStatus.QUEUED.value,
@@ -316,6 +326,7 @@ async def _settle_terminal_failure(
                 state.ports.persistence.Completion.status.in_(
                     state.ports.retry._RUNNING_COMPLETION_STATUSES
                 ),
+                state.ports.persistence.Completion.cancel_requested_at.is_(None),
             )
             .values(
                 status=CompletionStatus.FAILED.value,
@@ -404,6 +415,24 @@ async def handle_completion_failure(
     state: CompletionExecution,
     exc: BaseException,
 ) -> None:
+    if isinstance(exc, CompletionDispatchResultUnknown):
+        await settle_completion_result_unknown(state)
+        return
+    try:
+        await state.ports.retry._raise_if_completion_cancelled(
+            state.request.redis,
+            state.request.task_id,
+            "cancelled while settling completion failure",
+        )
+    except state.ports.retry._TaskCancelled:
+        if state.usage.usage_totals is None or state.usage.tool_tracker is None:
+            state.settlement.task_outcome = "cancelled"
+            return
+        if await completion_cancel_requires_unknown_settlement(state):
+            await settle_completion_cancel_unknown(state)
+        else:
+            await settle_cancelled_completion(state)
+        return
     if state.streaming.has_partial or state.streaming.tool_loop_truncated:
         state.usage.usage_totals.finish_round(
             output_text=state.streaming.accumulated_text[
@@ -498,6 +527,75 @@ async def handle_completion_failure(
         err_code=err_code,
         err_msg=err_msg,
     )
+
+
+async def handle_completion_run_failure(
+    command: CompletionCommand,
+    state: CompletionExecution,
+    services: CompletionServices,
+    failure: BaseException,
+) -> None:
+    """Settle a failure from the top-level completion execution lifecycle."""
+
+    if isinstance(failure, CompletionDispatchResultUnknown):
+        try:
+            await settle_completion_result_unknown(state)
+        except state.ports.retry._CompletionEpochSuperseded as stale:
+            state.ports.events.logger.info(
+                "completion result_unknown superseded task=%s err=%s",
+                command.task_id,
+                stale,
+            )
+            services.events.record_outcome(state, CompletionOutcome.SUPERSEDED)
+    elif services.lease_retry.is_lease_lost(failure):
+        state.ports.events.logger.warning(
+            "completion lease lost task=%s attempt=%s err=%s",
+            command.task_id,
+            state.preparation.attempt,
+            failure,
+        )
+        services.events.record_outcome(state, CompletionOutcome.LEASE_LOST)
+    elif services.lease_retry.is_superseded(failure):
+        state.ports.events.logger.info(
+            "completion worker superseded task=%s err=%s",
+            command.task_id,
+            failure,
+        )
+        services.events.record_outcome(state, CompletionOutcome.SUPERSEDED)
+    elif services.lease_retry.is_cancelled(failure):
+        try:
+            await ensure_completion_execution_current(state)
+        except state.ports.retry._CompletionEpochSuperseded as stale:
+            state.ports.events.logger.info(
+                "completion cancel settlement superseded task=%s err=%s",
+                command.task_id,
+                stale,
+            )
+            services.events.record_outcome(state, CompletionOutcome.SUPERSEDED)
+        else:
+            state.ports.events.logger.info(
+                "completion cancelled by user task=%s reason=%s",
+                command.task_id,
+                failure,
+            )
+            if await completion_cancel_requires_unknown_settlement(state):
+                await settle_completion_cancel_unknown(state)
+            else:
+                await services.billing.settle_cancelled(state)
+    elif isinstance(failure, Exception):
+        try:
+            await ensure_completion_execution_current(state)
+        except state.ports.retry._CompletionEpochSuperseded as stale:
+            state.ports.events.logger.info(
+                "completion failure settlement superseded task=%s err=%s",
+                command.task_id,
+                stale,
+            )
+            services.events.record_outcome(state, CompletionOutcome.SUPERSEDED)
+        else:
+            await services.billing.settle_failure(state, failure)
+    else:
+        raise failure
 
 
 __all__ = [

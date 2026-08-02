@@ -67,6 +67,7 @@ class SummaryServiceDependencies:
     renew_lock: Callable[..., Awaitable[None]]
     read_summary: Callable[..., Awaitable[dict[str, Any] | None]]
     write_summary: Callable[..., Awaitable[bool]]
+    lock_active_context: Callable[..., Awaitable[bool]]
     release_transaction: Callable[..., Awaitable[None]]
     delete_partial: Callable[..., Awaitable[None]]
     publish_event: Callable[..., Awaitable[None]]
@@ -164,6 +165,23 @@ async def generate_summary_result(
     image_upstream_runtime: Any,
     deps: SummaryServiceDependencies,
 ) -> SummaryGenerationResult | None:
+    async def can_dispatch_upstream() -> bool:
+        active = await deps.lock_active_context(
+            session,
+            request.conv_id,
+            user_id=request.user_id,
+        )
+        if not active:
+            deps.logger.info(
+                "context_summary.dispatch_fenced_out conv=%s",
+                request.conv_id,
+            )
+            return False
+        await deps.release_transaction(session)
+        return True
+
+    if not await can_dispatch_upstream():
+        return None
     loaded = await attach_summary_image_captions(session, request, deps)
     coverage = SummaryCoverage()
     summary_text: str | None = None
@@ -183,6 +201,7 @@ async def generate_summary_result(
             execution=SegmentSummaryExecution(
                 coverage=coverage,
                 image_upstream_runtime=image_upstream_runtime,
+                before_upstream=can_dispatch_upstream,
             ),
         )
     normalize_summary_coverage(summary_text, coverage, loaded)
@@ -501,7 +520,6 @@ async def run_locked_context_summary(
 ) -> dict[str, Any] | None:
     renew_task: asyncio.Task[None] | None = None
     try:
-        await deps.release_transaction(session)
         timing = SummaryTiming(utc_now(), time.monotonic())
 
         async def progress(current_segment: int, total_segments: int) -> None:

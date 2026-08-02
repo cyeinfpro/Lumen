@@ -43,6 +43,7 @@ from .retry_state import (
     bounded_next_attempt,
     ensure_generation_updated,
     generation_attempt_update,
+    generation_execution_trace_id,
 )
 from .run_state import GenerationRunState
 from .runner_phase_services import ClaimGenerationServices
@@ -141,6 +142,12 @@ def generation_cannot_start(generation: Any) -> bool:
             generation.status,
         )
         return True
+    if getattr(generation, "cancel_requested_at", None) is not None:
+        logger.info(
+            "generation cancellation already requested task_id=%s",
+            generation.id,
+        )
+        return True
     if generation.status == GenerationStatus.RUNNING.value:
         logger.info("generation already running task_id=%s", generation.id)
         return True
@@ -181,9 +188,12 @@ def load_generation_fields(
         else None
     )
     state.sidecar_execution = ImageJobExecutionHandle.from_mapping(raw_execution)
-    state.trace_id = generation_trace_id(
-        state.task_id,
-        state.gen_upstream_request_snapshot,
+    state.trace_id = generation_execution_trace_id(
+        generation_trace_id(
+            state.task_id,
+            state.gen_upstream_request_snapshot,
+        ),
+        generation.execution_epoch,
     )
     state.stage_timer.set_ms(
         "queue_wait",
@@ -223,6 +233,7 @@ async def cancel_queued_generation(
             state.task_id,
             state.generation.attempt,
             statuses=(GenerationStatus.QUEUED.value,),
+            allow_cancel_requested=True,
         ).values(
             status=GenerationStatus.CANCELED.value,
             progress_stage=GenerationStage.FINALIZING,

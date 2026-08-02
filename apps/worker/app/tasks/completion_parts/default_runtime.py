@@ -7,6 +7,7 @@ from __future__ import annotations
 # ruff: noqa: F403, F405
 from .default_runtime_parts.composition import *
 
+from ...task_cancellation import force_next_cancellation_check
 from .default_runtime_parts import (
     composition,
     context_adapter,
@@ -294,6 +295,7 @@ def _build_completion_tool_image_service(
         dependencies=tool_runtime.ToolImageServiceDependencies(
             default_write_files=_write_generation_files,
             default_cleanup_on_error=_cleanup_storage_on_error,
+            default_delete_files=_delete_storage_files,
             reserve_budget=_ensure_completion_tool_image_wallet_budget,
             format_and_meta=_image_format_and_meta,
             sha256=_sha256,
@@ -348,6 +350,7 @@ async def _raise_if_completion_cancelled(
     task_id: str,
     reason: str,
 ) -> None:
+    force_next_cancellation_check(task_id)
     await lease_runtime.raise_if_cancelled(
         redis,
         task_id,

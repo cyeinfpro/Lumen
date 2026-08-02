@@ -121,9 +121,12 @@ local expected_provider = ARGV[3]
 local task_id = ARGV[4]
 local active_member = ARGV[5]
 
-local owns_reservation = reservation_token ~= '' and redis.call('GET', reservation_key) == reservation_token
-local owns_lease = lease_token ~= '' and redis.call('GET', task_lease_key) == lease_token
-if not owns_reservation and not owns_lease then
+local current_reservation = redis.call('GET', reservation_key)
+if current_reservation then
+  if reservation_token == '' or current_reservation ~= reservation_token then
+    return 0
+  end
+elseif lease_token == '' or redis.call('GET', task_lease_key) ~= lease_token then
   return 0
 end
 if redis.call('GET', task_provider_key) ~= expected_provider then
@@ -154,6 +157,23 @@ def _image_queue_reservation_token_ttl(*, services: RunGenerationDeps) -> int:
         int(LEASE_TTL_S * 4),
         int(max_runtime + LEASE_TTL_S * 2),
     )
+
+
+async def image_queue_reservation_token(
+    redis: Any,
+    task_id: str,
+) -> str | None:
+    try:
+        return redis_text(
+            await redis.get(_image_queue_reservation_token_key(task_id))
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "image queue reservation token read failed task=%s",
+            task_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _reserve_provider_slot(
@@ -346,18 +366,6 @@ async def release_image_queue_slot(
     if not provider_name:
         return
 
-    if reservation_token is None:
-        try:
-            reservation_token = redis_text(
-                await redis.get(_image_queue_reservation_token_key(task_id))
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "image queue reservation token read failed task=%s provider=%s",
-                task_id,
-                provider_name,
-                exc_info=True,
-            )
     if reservation_token or lease_token:
         released = False
         try:
@@ -506,13 +514,15 @@ async def _release_image_queue_slot_fenced(
             current_lease = redis_text(await pipe.get(task_lease_key))
             current_provider = redis_text(await pipe.get(task_provider_key))
             current_reservation = redis_text(await pipe.get(reservation_key))
-            owns_reservation = bool(
-                reservation_token and current_reservation == reservation_token
+            owns_slot = (
+                bool(
+                    reservation_token
+                    and current_reservation == reservation_token
+                )
+                if current_reservation
+                else bool(lease_token and current_lease == lease_token)
             )
-            owns_lease = bool(lease_token and current_lease == lease_token)
-            if (
-                not owns_reservation and not owns_lease
-            ) or current_provider != provider_name:
+            if not owns_slot or current_provider != provider_name:
                 return False
             legacy_owner = redis_text(await pipe.get(legacy_provider_lock_key))
             pipe.multi()
@@ -546,19 +556,29 @@ async def _release_image_queue_slot_fenced(
     return False
 
 
-def _release_slot_fencing_keyword(release_fn: Any) -> str | None:
+def _release_slot_fencing_kwargs(
+    release_fn: Any,
+    *,
+    lease_token: str,
+    reservation_token: str | None,
+) -> dict[str, str]:
     """Keep older adapters that predate token-aware release working."""
     try:
-        parameters = inspect.signature(release_fn).parameters.values()
+        parameters = inspect.signature(release_fn).parameters
     except (TypeError, ValueError):
-        return "lease_token"
-    if any(parameter.name == "lease_token" for parameter in parameters):
-        return "lease_token"
-    if any(parameter.name == "reservation_token" for parameter in parameters):
-        return "reservation_token"
-    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
-        return "lease_token"
-    return None
+        return {"lease_token": lease_token}
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    result: dict[str, str] = {}
+    if accepts_kwargs or "lease_token" in parameters:
+        result["lease_token"] = lease_token
+    if reservation_token and (
+        accepts_kwargs or "reservation_token" in parameters
+    ):
+        result["reservation_token"] = reservation_token
+    return result
 
 
 async def release_generation_runtime_resources(
@@ -567,6 +587,7 @@ async def release_generation_runtime_resources(
     task_id: str,
     lease_token: str,
     provider_name: str | None,
+    reservation_token: str | None = None,
     weighted_permit: WeightedPermit | None = None,
     clear_avoided_providers: bool,
     services: RunGenerationDeps,
@@ -578,9 +599,13 @@ async def release_generation_runtime_resources(
             "provider_name": provider_name,
             "services": services,
         }
-        fencing_keyword = _release_slot_fencing_keyword(release_fn)
-        if fencing_keyword:
-            release_kwargs[fencing_keyword] = lease_token
+        release_kwargs.update(
+            _release_slot_fencing_kwargs(
+                release_fn,
+                lease_token=lease_token,
+                reservation_token=reservation_token,
+            )
+        )
         await release_fn(redis, **release_kwargs)
     except Exception:  # noqa: BLE001
         logger.warning(
@@ -637,6 +662,7 @@ class GenerationResourceLease:
     lease_token: str
     provider_name: str | None
     clear_avoided_providers: bool
+    reservation_token: str | None = None
     weighted_permit: WeightedPermit | None = None
     release_resources: Any | None = None
     _closed: bool = False
@@ -653,6 +679,7 @@ class GenerationResourceLease:
             task_id=self.task_id,
             lease_token=self.lease_token,
             provider_name=self.provider_name,
+            reservation_token=self.reservation_token,
             weighted_permit=self.weighted_permit,
             clear_avoided_providers=self.clear_avoided_providers,
             services=self.services,
@@ -666,6 +693,7 @@ __all__ = [
     "RESERVE_DUAL_RACE_SLOT_LUA",
     "RESERVE_IMAGE_SLOT_LUA",
     "dual_race_sentinel_name",
+    "image_queue_reservation_token",
     "release_generation_runtime_resources",
     "release_image_queue_slot",
     "reserve_image_queue_slot",

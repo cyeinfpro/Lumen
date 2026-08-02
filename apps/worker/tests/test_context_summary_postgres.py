@@ -55,6 +55,16 @@ async def test_postgres_concurrent_cas_refreshes_stale_identity_map() -> None:
             await connection.execute(
                 text(
                     """
+                    CREATE TABLE users (
+                        id varchar(36) PRIMARY KEY,
+                        deleted_at timestamptz
+                    )
+                    """
+                )
+            )
+            await connection.execute(
+                text(
+                    """
                     CREATE TABLE conversations (
                         id varchar(36) PRIMARY KEY,
                         user_id varchar(36) NOT NULL,
@@ -77,6 +87,10 @@ async def test_postgres_concurrent_cas_refreshes_stale_identity_map() -> None:
             )
 
         async with session_factory() as session:
+            await session.execute(
+                text("INSERT INTO users (id) VALUES (:user_id)"),
+                {"user_id": "user-1"},
+            )
             session.add(
                 Conversation(
                     id=conv_id,

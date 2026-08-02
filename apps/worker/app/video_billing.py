@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from lumen_core import billing as billing_core
 from lumen_core.models import AuditLog, VideoGeneration, WalletTransaction
 from lumen_core.upstream_billing import (
     LocalBillingAction,
+    NO_UPSTREAM_COST_RECEIPTS,
     UpstreamCostKnowledge,
     decide_upstream_billing,
 )
@@ -27,6 +29,14 @@ from . import billing as worker_billing
 
 logger = logging.getLogger(__name__)
 _DEFAULTABLE_VIDEO_BILLING_ERRORS = frozenset({"video_pricing_missing"})
+_SUBMIT_DELIVERY_STATES = frozenset({"proven_absent", "unknown", "confirmed"})
+_SUBMIT_DELIVERY_PRECEDENCE = MappingProxyType(
+    {
+        "proven_absent": 0,
+        "unknown": 1,
+        "confirmed": 2,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +91,35 @@ def _generation_billing_model(generation: VideoGeneration) -> str:
     raw = request.get("billing_model")
     model = raw if isinstance(raw, str) and raw.strip() else generation.model
     return video_billing_model(model, _generation_upstream_model(generation))
+
+
+def _submit_delivery_state(generation: VideoGeneration) -> str:
+    if generation.provider_task_id:
+        return "confirmed"
+    diagnostics = (
+        dict(generation.diagnostics) if isinstance(generation.diagnostics, dict) else {}
+    )
+    states: list[str] = []
+    aggregate = diagnostics.get("submit_delivery_state")
+    if aggregate in _SUBMIT_DELIVERY_STATES:
+        states.append(str(aggregate))
+    history = diagnostics.get("submit_delivery_history")
+    if isinstance(history, list):
+        for item in history:
+            state = item.get("state") if isinstance(item, dict) else None
+            if state in _SUBMIT_DELIVERY_STATES:
+                states.append(str(state))
+    if isinstance(diagnostics.get("submit_receipt"), dict):
+        states.append("confirmed")
+    if states:
+        return max(states, key=_SUBMIT_DELIVERY_PRECEDENCE.__getitem__)
+    if (
+        int(getattr(generation, "attempt", 0) or 0) <= 0
+        and int(getattr(generation, "submission_epoch", 0) or 0) <= 0
+        and getattr(generation, "submit_started_at", None) is None
+    ):
+        return "proven_absent"
+    return "unknown"
 
 
 def _default_video_charge_micro(generation: VideoGeneration, held: int) -> int:
@@ -192,10 +231,22 @@ async def resolve_video_billing(
     billable_evidence = upstream_billable
     if succeeded and billable_evidence is None:
         billable_evidence = True
+    receipt_reasons = _no_upstream_cost_receipts(poll_result, reason)
+    has_no_cost_receipt = any(
+        isinstance(receipt, str) and receipt.strip() in NO_UPSTREAM_COST_RECEIPTS
+        for receipt in receipt_reasons
+    )
+    if (
+        not succeeded
+        and has_no_cost_receipt
+        and _submit_delivery_state(generation) != "proven_absent"
+    ):
+        billable_evidence = None
+        receipt_reasons = ()
     decided = decide_upstream_billing(
         upstream_billable=billable_evidence,
         actual_cost_known=usage_tokens is not None,
-        receipt_reasons=_no_upstream_cost_receipts(poll_result, reason),
+        receipt_reasons=receipt_reasons,
     )
     if decided.action is LocalBillingAction.RELEASE:
         return await _release_video_hold(
@@ -367,6 +418,7 @@ def _billing_meta(
         "pricing_variant": pricing_variant or _generation_pricing_variant(generation),
         "billing_decision": decision,
         "reason": reason,
+        "submit_delivery_state": _submit_delivery_state(generation),
     }
     if knowledge is not None:
         # 把决策表的输入（可知性）一并落库，对账时可以回放这次判断。

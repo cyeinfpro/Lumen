@@ -29,6 +29,12 @@ class ProviderSelector(Protocol):
     async def __call__(self, **kwargs: object) -> list[object]: ...
 
 
+class ReleaseFailedSelector(Protocol):
+    """释放失败尝试配额预留的显式签名(契约:禁止 Callable[..., ...] 隐式签名)。"""
+
+    async def __call__(self, *, keep_last: bool = False) -> None: ...
+
+
 def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
     return resolve_image_upstream_services(runtime)
 
@@ -492,10 +498,29 @@ def _image_request_attempt_claim(
     route: str,
     request_context: ImageRequestContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
-) -> Callable[[int], Awaitable[None]]:
+) -> tuple[
+    Callable[[int], Awaitable[None]],
+    ReleaseFailedSelector,
+]:
+    """Return (claim, release_failed) for one attempt chain.
+
+    ``claim`` 在每次上游尝试发送前预留一个配额槽位。预留即入账（ZADD + 当日
+    INCR），所以成功路径不需要再调 record_image_call——最后一次成功的预留留在
+    Redis 里就是调用记录。失败路径必须把预留槽位放回去：可重试的失败（5xx、
+    连接错等）不消耗 OAuth 账号配额，若不释放，每次 submit/endpoint/provider
+    重试都会永久多占一个当日配额（ZSET 2 天 TTL / 当日计数器到 UTC 零点才清），
+    账号会被自己失败的请求提前耗尽当日额度。
+
+    ``release_failed`` 由调用方在尝试链结束时调用：
+    - keep_last=True   链上最后一次尝试成功——保留它作为入账记录，释放更早的
+      失败尝试预留（客户端内部重试成功时，前几次尝试并未消耗账号配额）；
+    - keep_last=False  整条链失败——释放全部预留。调用方只有在失败明确未产生
+      上游成本（非 result-unknown / upstream_cost_incurred）时才应调用。
+    """
     context = ensure_image_request_context(request_context)
     runtime = runtime or context.upstream_runtime
     services = _runtime_services(runtime)
+    reservations: list[Any] = []
 
     async def claim(attempt: int) -> None:
         reservation = await services.providers.reserve_admin_image_call(
@@ -506,19 +531,37 @@ def _image_request_attempt_claim(
         )
         if reservation is not None:
             reservation.state = "started"
+        reservations.append(reservation)
 
-    return claim
+    async def release_failed(*, keep_last: bool = False) -> None:
+        candidates = reservations[:-1] if keep_last else list(reservations)
+        for reservation in candidates:
+            await _release_image_reservation_best_effort(
+                pool,
+                reservation,
+                runtime=runtime,
+            )
+
+    return claim, release_failed
 
 
-async def _release_unused_image_reservation(
+async def _release_image_reservation_best_effort(
     pool: Any,
     reservation: Any | None,
     *,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> None:
-    services = _runtime_services(runtime)
-    if reservation is None or reservation.state != "reserved":
+    """Best-effort 释放一次配额预留，不检查 state。
+
+    与 ``_release_unused_image_reservation`` 的区别：后者只放行 state ==
+    "reserved"（请求从未开始），本函数用于失败尝试——调用方已经知道这次调用
+    没有产生上游成本（或需要释放更早的失败尝试），因此不需要 state 门禁。
+    Redis 不可用时记日志降级，不向上抛（释放失败只是多占一个临时配额，不能
+    让一次已经失败的请求再叠加一个失败）。
+    """
+    if reservation is None:
         return
+    services = _runtime_services(runtime)
     from .. import account_limiter
 
     try:
@@ -530,13 +573,28 @@ async def _release_unused_image_reservation(
         )
     except account_limiter.AccountLimiterUnavailable:
         services.infrastructure.logger.exception(
-            "unused image quota reservation release failed provider=%s member=%s",
+            "failed image quota reservation release failed provider=%s member=%s",
             reservation.provider_name,
             reservation.member,
         )
         return
     if released:
         reservation.state = "released"
+
+
+async def _release_unused_image_reservation(
+    pool: Any,
+    reservation: Any | None,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> None:
+    if reservation is None or reservation.state != "reserved":
+        return
+    await _release_image_reservation_best_effort(
+        pool,
+        reservation,
+        runtime=runtime,
+    )
 
 
 @asynccontextmanager
@@ -638,6 +696,7 @@ __all__ = [
     "_provider_has_image_quota",
     "_provider_pool_redis",
     "_record_admin_image_call_or_raise",
+    "_release_image_reservation_best_effort",
     "_release_unused_image_reservation",
     "_reserve_admin_image_call",
 ]

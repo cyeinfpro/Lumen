@@ -31,6 +31,10 @@ from .image_execution import (
     ImageRequestContext,
     ensure_image_request_context,
 )
+from .image_job_failover import (
+    image_job_submit_unknown_error as _submit_unknown_error,
+    submit_failure_result_unknown,
+)
 from .image_job_recovery import (
     emit_image_job_execution as _emit_image_job_execution,
     execution_after_cancel as _execution_after_cancel,
@@ -159,15 +163,8 @@ def _build_responses_image_body(
 ) -> dict[str, Any]:
     """Build the JSON body posted to ``/v1/responses`` for image generation.
 
-    image_urls vs images：
-    - image_urls 优先（http URL 或 data URL，已是上游 image_url 字段值）：调用方先把 reference
-      push 到 image-job sidecar 拿短 URL，body 缩到几百字节。这是新优化路径。
-    - images（bytes）作为 fallback：旧路径，base64 内联到 body（4-7MB），用于无 sidecar 测试环境。
-    - 两者都不传 + action=edit：edit 没参考图，上游会按文生图处理（语义降级）。
-
-    Extracted from ``_responses_image_stream`` so the image-job sidecar path can
-    reuse the exact same request shape — keeping prompt-cache prefixes aligned
-    between the direct-stream route and the async sidecar route.
+    image_urls 优先（先 push 到 sidecar 拿短 URL），images（bytes）作 fallback；
+    与直接流路径共用同一请求形状，prompt-cache 前缀保持一致。
     """
     services = _runtime_services(request.upstream_runtime)
     return services.requests.build_responses_image_body(
@@ -210,10 +207,8 @@ def _image_job_error(
     except (TypeError, ValueError):
         status = status_code
     upstream_body = job.get("upstream_body")
-    # Sidecar tags every failed job with an error_class describing whether the
-    # failure was a transport problem, an upstream HTTP error, a missing image,
-    # etc. Lumen's failover layer reads this to decide whether to switch the
-    # endpoint kind on the same provider or jump straight to the next provider.
+    # Sidecar tags every failed job with an error_class (transport/http/missing
+    # image/...); the failover layer uses it to switch endpoint or provider.
     error_class = job.get("error_class")
     if isinstance(upstream_body, dict):
         exc = services.core.parse_error(upstream_body, status)
@@ -304,6 +299,12 @@ def _map_image_job_client_error(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> Exception:
     services = _runtime_services(runtime)
+    if submit_failure_result_unknown(exc):
+        # 提交结果未知 = 可能已扣费：落进 IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES，
+        # 禁止 failover（换 endpoint 换幂等键 = 第二笔上游成本），按 hold 结算。
+        # 必须在 payload 分支之前判断：5xx 带响应体 = sidecar 已应答（请求已
+        # 送达并可能被转发计费），同样是结果未知，不能降级成普通可重试错误。
+        return _submit_unknown_error(exc, method=method, url=url, runtime=runtime)
     if exc.status_code is not None and exc.status_code >= 400 and exc.payload:
         mapped = services.core.parse_error(exc.payload, exc.status_code)
         return services.core.with_error_context(

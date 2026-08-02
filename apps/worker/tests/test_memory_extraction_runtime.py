@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 import pytest
@@ -115,6 +116,7 @@ async def test_prepare_memory_extraction_reads_runtime_from_arq_context(
         explicit_only: bool,
         scope_hint: str | None,
         image_upstream_runtime: ImageUpstreamRuntime | None,
+        fence: Callable[[], Awaitable[bool]] | None = None,
     ) -> list[ExtractedMemory]:
         assert explicit_only is False
         assert scope_hint is None
@@ -124,6 +126,8 @@ async def test_prepare_memory_extraction_reads_runtime_from_arq_context(
     async def embedding_literal(
         _ctx: dict[str, Any] | None,
         content: str,
+        *,
+        fence: Callable[[], Awaitable[bool]] | None = None,
     ) -> str:
         assert content == candidate.content
         return "[1.0]"

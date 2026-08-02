@@ -19,26 +19,56 @@ from lumen_core.models import Generation, Image, Message
 
 
 class _FakeSession:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        deleted: bool = False,
+        delete_after_commit: int | None = None,
+    ) -> None:
         self.added: list[Any] = []
         self.message = SimpleNamespace(content={})
+        self.user = SimpleNamespace(
+            id="user-1",
+            deleted_at=object() if deleted else None,
+        )
+        self.parent_generation = SimpleNamespace(
+            id="parent-gen",
+            user_id="user-1",
+            execution_epoch=3,
+            attempt=1,
+        )
         self.committed = False
+        self.commit_count = 0
+        self.delete_after_commit = delete_after_commit
         self.operations: list[str] = []
+        self.lock_order: list[str] = []
 
     def add(self, row: Any) -> None:
         self.added.append(row)
 
-    async def get(self, model: Any, key: str) -> Any:
+    async def execute(self, _statement: Any) -> Any:
+        self.lock_order.append("user")
+        return SimpleNamespace(scalar_one_or_none=lambda: self.user)
+
+    async def get(self, model: Any, key: str, **_kwargs: Any) -> Any:
         if model is Message and key == "msg-1":
             return self.message
+        if model is Generation and key == "parent-gen":
+            self.lock_order.append("parent")
+            return self.parent_generation
+        if model is Generation:
+            self.lock_order.append("bonus")
         for row in self.added:
             if isinstance(row, model) and getattr(row, "id", None) == key:
                 return row
         return None
 
     async def commit(self) -> None:
+        self.commit_count += 1
         self.operations.append("commit")
         self.committed = True
+        if self.delete_after_commit == self.commit_count:
+            self.user.deleted_at = object()
 
 
 class _FakeStore:
@@ -53,16 +83,20 @@ class _FakeStore:
 class _FakeArtifacts:
     def __init__(self, *, fail_on_write: bool = False) -> None:
         self.fail_on_write = fail_on_write
+        self.write_calls = 0
+        self.deleted_keys: list[list[str]] = []
 
     async def write_files(
         self,
         files: list[tuple[str, bytes]],
     ) -> list[str]:
+        self.write_calls += 1
         if self.fail_on_write:
             raise AssertionError("echoed reference must not be written")
         return [key for key, _data in files]
 
-    async def delete_files(self, _keys: list[str]) -> None:
+    async def delete_files(self, keys: list[str]) -> None:
+        self.deleted_keys.append(list(keys))
         return None
 
     @asynccontextmanager
@@ -148,6 +182,8 @@ def _bonus_context(deps: object, b64_result: str) -> persistence.BonusGeneration
         user_id="user-1",
         channel="task:parent-gen",
         parent_task_id="parent-gen",
+        execution_epoch=3,
+        attempt=1,
         parent_idempotency_key="idem-parent",
         parent_upstream_request={},
         message_id="msg-1",
@@ -176,8 +212,7 @@ def _bonus_context(deps: object, b64_result: str) -> persistence.BonusGeneration
 
 
 @pytest.mark.asyncio
-async def test_dual_race_bonus_is_billable_and_settled_after_commit(
-) -> None:
+async def test_dual_race_bonus_is_billable_and_settled_after_commit() -> None:
     session = _FakeSession()
     deps, billing, events = _deps(session)
 
@@ -218,10 +253,7 @@ async def test_dual_race_bonus_is_billable_and_settled_after_commit(
     assert image_row.metadata_jsonb["billing_label"] == "billable"
     event_by_name = dict(events.events)
     assert event_by_name[EV_GEN_ATTACHED]["billing_label"] == "billable"
-    assert (
-        event_by_name[EV_GEN_SUCCEEDED]["images"][0]["billing_free"]
-        is False
-    )
+    assert event_by_name[EV_GEN_SUCCEEDED]["images"][0]["billing_free"] is False
 
 
 @pytest.mark.asyncio
@@ -233,16 +265,13 @@ async def test_dual_race_bonus_settle_failure_keeps_committed_image() -> None:
         _bonus_context(deps, _png_b64())
     )
 
-    assert ok is True
+    # 结算失败不再被吞掉：向调用方返回 False 以便重试，事件不发布；
+    # 行已落盘（SUCCEEDED 但无 settle 流水），对账仍可兜底重扣。
+    assert ok is False
     assert session.committed is True
     bonus_row = next(row for row in session.added if isinstance(row, Generation))
-    assert [call["generation_id"] for call in billing.settle_calls] == [
-        bonus_row.id
-    ]
-    assert {event_name for event_name, _data in events.events} == {
-        EV_GEN_ATTACHED,
-        EV_GEN_SUCCEEDED,
-    }
+    assert [call["generation_id"] for call in billing.settle_calls] == [bonus_row.id]
+    assert events.events == []
 
 
 @pytest.mark.asyncio
@@ -262,6 +291,87 @@ async def test_bonus_image_echoing_reference_is_rejected_for_any_action() -> Non
     assert billing.settle_calls == []
     assert session.added == []
     assert session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_bonus_fence_blocks_artifacts_rows_attachments_events_and_billing_after_delete() -> (
+    None
+):
+    session = _FakeSession(deleted=True)
+    deps, billing, events = _deps(session)
+    artifacts = deps.artifacts
+
+    ok = await persistence.handle_dual_race_bonus_image(
+        _bonus_context(deps, _png_b64())
+    )
+
+    assert ok is False
+    assert artifacts.write_calls == 0
+    assert artifacts.deleted_keys == []
+    assert session.added == []
+    assert session.message.content == {}
+    assert billing.settle_calls == []
+    assert events.events == []
+    assert session.lock_order == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_bonus_persistence_fence_cleans_artifacts_after_delete_before_rows() -> (
+    None
+):
+    session = _FakeSession()
+    deps, billing, events = _deps(session)
+    artifacts = deps.artifacts
+    real_write_files = artifacts.write_files
+
+    async def write_then_delete(
+        files: list[tuple[str, bytes]],
+    ) -> list[str]:
+        keys = await real_write_files(files)
+        session.user.deleted_at = object()
+        return keys
+
+    artifacts.write_files = write_then_delete  # type: ignore[method-assign]
+
+    ok = await persistence.handle_dual_race_bonus_image(
+        _bonus_context(deps, _png_b64())
+    )
+
+    assert ok is False
+    assert artifacts.write_calls == 1
+    assert len(artifacts.deleted_keys) == 1
+    assert len(artifacts.deleted_keys[0]) == 4
+    assert session.added == []
+    assert session.message.content == {}
+    assert billing.settle_calls == []
+    assert events.events == []
+    assert session.lock_order == ["user", "parent", "user"]
+
+
+@pytest.mark.asyncio
+async def test_bonus_settlement_and_delivery_fences_block_after_delete_commit() -> None:
+    session = _FakeSession(delete_after_commit=1)
+    deps, billing, events = _deps(session)
+    artifacts = deps.artifacts
+
+    ok = await persistence.handle_dual_race_bonus_image(
+        _bonus_context(deps, _png_b64())
+    )
+
+    assert ok is False
+    assert artifacts.write_calls == 1
+    assert session.user.deleted_at is not None
+    assert len([row for row in session.added if isinstance(row, Generation)]) == 1
+    assert len([row for row in session.added if isinstance(row, Image)]) == 1
+    assert billing.settle_calls == []
+    assert events.events == []
+    assert session.lock_order == [
+        "user",
+        "parent",
+        "user",
+        "parent",
+        "user",
+    ]
 
 
 def test_batch_extra_images_are_not_charged_on_parent_settle() -> None:

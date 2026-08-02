@@ -5,8 +5,10 @@ import inspect
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from app.upstream_clients.image_job_client import ImageJobClientError
 from app.upstream_parts import upstream_impl as upstream
 from app.upstream_parts import (
     direct_failover,
@@ -272,3 +274,186 @@ async def test_unknown_image_job_status_is_bad_response() -> None:
     exc = await _finish_job_with_status("weird")
 
     assert exc.error_code == TEST_UPSTREAM_SERVICES.infrastructure.EC.BAD_RESPONSE.value
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_timeout_is_result_unknown_and_blocks_failover() -> None:
+    """image-job 提交读超时后结果不可知：禁止 endpoint/provider failover。
+
+    请求可能已被 sidecar 接受并创建作业；换 endpoint 会带新幂等键（body 变了）
+    创建第二个上游作业，第二笔成本无处转嫁。必须按 IMAGE_JOB_RESULT_UNKNOWN
+    走结算（纯转嫁）而不是当普通网络错重跑。
+    """
+    exc = ImageJobClientError(
+        "image job submit failed: read timed out",
+        operation="submit",
+        transient=True,
+    )
+    exc.__cause__ = httpx.ReadTimeout("read timed out")
+    mapped = image_jobs._map_image_job_client_error(
+        exc,
+        method="POST",
+        url="https://jobs.example/v1/image-jobs",
+        runtime=TEST_UPSTREAM_RUNTIME,
+    )
+
+    assert (
+        mapped.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert mapped.payload["upstream_result_unknown"] is True
+    assert (
+        image_job_failover._upstream_cost_already_incurred(
+            mapped,
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+        is True
+    )
+    assert not TEST_UPSTREAM_SERVICES.image_jobs.should_continue_image_job_failover(
+        mapped,
+        retriable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_connect_error_stays_failover_safe() -> None:
+    """connect 类错误证明请求从未到达 sidecar：保持可 failover，不误伤。
+
+    与 runner 层 proven-undelivered 白名单（ConnectError/ConnectTimeout/
+    PoolTimeout）保持一致：连接都建不起来，必然没有创建作业。
+    """
+    exc = ImageJobClientError(
+        "image job submit failed: connection refused",
+        operation="submit",
+        transient=True,
+    )
+    exc.__cause__ = httpx.ConnectError("connection refused")
+    mapped = image_jobs._map_image_job_client_error(
+        exc,
+        method="POST",
+        url="https://jobs.example/v1/image-jobs",
+        runtime=TEST_UPSTREAM_RUNTIME,
+    )
+
+    assert (
+        mapped.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value
+    )
+    assert (
+        image_job_failover._upstream_cost_already_incurred(
+            mapped,
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+        is False
+    )
+    assert TEST_UPSTREAM_SERVICES.image_jobs.should_continue_image_job_failover(
+        mapped,
+        retriable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_2xx_without_job_id_is_cost_incurred() -> None:
+    """sidecar 已 2xx 接受（作业已创建）但响应畸形拿不到 job_id：成本必然发生。"""
+    exc = ImageJobClientError(
+        "image job submit returned no job_id",
+        operation="submit",
+        status_code=200,
+        payload={"job_id": ""},
+    )
+    mapped = image_jobs._map_image_job_client_error(
+        exc,
+        method="POST",
+        url="https://jobs.example/v1/image-jobs",
+        runtime=TEST_UPSTREAM_RUNTIME,
+    )
+
+    assert (
+        mapped.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert mapped.payload["upstream_result_unknown"] is True
+    assert (
+        image_job_failover._upstream_cost_already_incurred(
+            mapped,
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_5xx_with_payload_blocks_failover() -> None:
+    """5xx 带响应体的提交失败 = 结果未知：禁止 endpoint/provider failover。
+
+    sidecar 已应答（请求已送达并可能被转发让上游计费），响应本身是「已有应答」
+    而不是「请求未送达」；换 endpoint 会带新幂等键重投，等于在同一家供应商上
+    再买一次，第二笔成本无处转嫁。必须落进 IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+    按 hold 结算，不能降级成普通可重试的 5xx。
+    """
+    exc = ImageJobClientError(
+        "image job submit rejected",
+        operation="submit",
+        status_code=500,
+        payload={"error": {"message": "upstream exploded"}},
+        transient=True,
+    )
+    mapped = image_jobs._map_image_job_client_error(
+        exc,
+        method="POST",
+        url="https://jobs.example/v1/image-jobs",
+        runtime=TEST_UPSTREAM_RUNTIME,
+    )
+
+    assert (
+        mapped.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert mapped.payload["upstream_result_unknown"] is True
+    assert (
+        image_job_failover._upstream_cost_already_incurred(
+            mapped,
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+        is True
+    )
+    assert not TEST_UPSTREAM_SERVICES.image_jobs.should_continue_image_job_failover(
+        mapped,
+        retriable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_job_submit_4xx_with_payload_stays_failover_safe() -> None:
+    """4xx / 429 带响应体 = sidecar 显式拒绝：可证明未扣费，保持可 failover。"""
+    for status_code in (400, 429):
+        exc = ImageJobClientError(
+            "image job submit rejected",
+            operation="submit",
+            status_code=status_code,
+            payload={"error": {"message": "rejected"}},
+            transient=status_code not in {400},
+        )
+        mapped = image_jobs._map_image_job_client_error(
+            exc,
+            method="POST",
+            url="https://jobs.example/v1/image-jobs",
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+
+        assert (
+            mapped.error_code
+            != TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+        )
+        assert mapped.payload.get("upstream_result_unknown") is not True
+        assert (
+            image_job_failover._upstream_cost_already_incurred(
+                mapped,
+                runtime=TEST_UPSTREAM_RUNTIME,
+            )
+            is False
+        )
+        assert TEST_UPSTREAM_SERVICES.image_jobs.should_continue_image_job_failover(
+            mapped,
+            retriable=True,
+        )

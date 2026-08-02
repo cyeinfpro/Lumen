@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+import httpx
+
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
@@ -52,16 +54,82 @@ def _sidecar_execution_accepted(exc: BaseException) -> bool:
     )
 
 
+def submit_failure_result_unknown(exc: BaseException) -> bool:
+    """image-job 提交失败是否「结果未知」（可能已扣费）。
+
+    换 endpoint 时 body 变、幂等键跟着变，sidecar 无法去重，重跑就是第二笔
+    上游成本。只有 connect 类错误能证明请求从未到达 sidecar（与 runner 层
+    proven-undelivered 白名单一致）；读超时/连接重置发生在请求发出之后，
+    可能已被 sidecar 接受并创建作业，一律按未知处理。5xx 同理：sidecar 已
+    应答（无论是否带响应体，请求都可能已被转发并让真实上游计费），结果
+    不可知；只有 4xx / 408 / 425 / 429 这类显式拒绝能证明未产生上游成本。
+    """
+    if getattr(exc, "operation", None) != "submit":
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None and 200 <= status_code < 300:
+        # 2xx 已接受并创建作业，只是响应畸形拿不到 job_id：成本必然发生。
+        return True
+    if status_code is not None and status_code < 500:
+        # 非 5xx 显式拒绝（4xx / 408 / 425 / 429）：sidecar 明确没有接受请求，
+        # 可证明未产生上游成本，允许 failover 重投（与上游 4xx 决策一致）。
+        return False
+    if not getattr(exc, "transient", False):
+        return False
+    return not isinstance(
+        exc.__cause__,
+        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+    )
+
+
+def image_job_submit_unknown_error(
+    exc: BaseException,
+    *,
+    method: str,
+    url: str,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    """把提交结果未知的失败转成 IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES 一员。
+
+    与 direct 路径把读超时映射成 DIRECT_IMAGE_RESULT_UNKNOWN 一致：后续的
+    endpoint/provider failover、is_retriable、计费决策全部自动继承「禁止重跑、
+    按 hold 结算」语义，不需要每一层单独判断。
+    """
+    services = _runtime_services(runtime)
+    return services.infrastructure.UpstreamError(
+        (
+            "image job submit result is unknown; the request may already "
+            "have been accepted and billed upstream"
+        ),
+        status_code=getattr(exc, "status_code", None) or 0,
+        error_code=services.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        payload={
+            "path": "image-jobs",
+            "method": method,
+            "url": url,
+            "operation": getattr(exc, "operation", "submit"),
+            "upstream_result_unknown": True,
+        },
+    )
+
+
 def _upstream_cost_already_incurred(
     exc: BaseException,
     *,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> bool:
-    """这次失败是否发生在上游 2xx 之后（钱已经花出去了）。
+    """这次失败是否（或可能）已经产生上游成本。
 
     命中后**任何**形式的重跑都必须停：换 endpoint 是同一家供应商的第二次调用，
     换 provider 是另一家的第一次调用——两者都会新增一笔上游成本，而这次生成只
     hold 了一份钱，多出来的部分无处转嫁，只能由平台吸收。
+
+    覆盖两类失败：
+    - 失败点在上游 2xx 之后（结果确定不可知：超时/uncertain/no_image）；
+    - image-job 提交阶段网络错（读超时/连接重置）：请求可能已被 sidecar 接受并
+      创建作业，换 endpoint 会带新幂等键创建第二个作业，同样禁止重跑
+      （见 ``image_job_submit_unknown_error`` 的 IMAGE_JOB_RESULT_UNKNOWN 映射，
+      与 lumen_core.upstream_billing 的 IMAGE_UPSTREAM_RESULT_UNKNOWN 对齐）。
     """
     services = _runtime_services(runtime)
     return (
@@ -350,6 +418,16 @@ async def _run_image_job_endpoint(
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
     started = time.monotonic()
+    # 每次 submit 尝试前预留账号配额槽位；失败/重试必须释放（见 claim 的
+    # docstring），否则每次 submit 重试都会永久占用一个账号当日配额。
+    claim, release_failed_attempts = (
+        services.providers.image_request_attempt_claim(
+            pool,
+            provider,
+            route=f"image_jobs:{endpoint}",
+            request_context=request.request_context,
+        )
+    )
     try:
         result = await services.image_jobs.image_job_run_once(
             request.with_provider(provider),
@@ -358,12 +436,7 @@ async def _run_image_job_endpoint(
             base_url=plan.base_url,
             proxy=services.core.provider_proxy(provider),
             image_edit_input_transport=provider.image_edit_input_transport,
-            before_attempt=services.providers.image_request_attempt_claim(
-                pool,
-                provider,
-                route=f"image_jobs:{endpoint}",
-                request_context=request.request_context,
-            ),
+            before_attempt=claim,
         )
     except (
         asyncio.CancelledError,
@@ -371,6 +444,10 @@ async def _run_image_job_endpoint(
     ):
         raise
     except Exception as exc:  # noqa: BLE001
+        if not _upstream_cost_already_incurred(exc, runtime=runtime):
+            # 失败未产生上游成本（非 result-unknown）：释放本次尝试链的全部
+            # 预留。结果未知类失败（可能已在上游创建作业/扣费）保留预留。
+            await release_failed_attempts()
         if not services.providers.is_byok_provider(provider):
             pool.record_endpoint_failure(provider.name, endpoint)
         failure = _classify_image_job_attempt(
@@ -388,6 +465,8 @@ async def _run_image_job_endpoint(
             exc,
         )
         return failure
+    # 成功：保留最后一次尝试的预留作为入账记录，释放链上更早的失败尝试。
+    await release_failed_attempts(keep_last=True)
     latency_ms = (time.monotonic() - started) * 1000.0
     await _emit_image_job_success(
         request,

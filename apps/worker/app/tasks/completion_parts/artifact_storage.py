@@ -25,6 +25,13 @@ async def write_completion_image_files(files: list[tuple[str, bytes]]) -> list[s
     return created_keys
 
 
+async def delete_completion_image_files(keys: list[str]) -> None:
+    await asyncio.gather(
+        *(asyncio.to_thread(storage.delete, key) for key in dict.fromkeys(keys)),
+        return_exceptions=True,
+    )
+
+
 @asynccontextmanager
 async def cleanup_completion_image_files_on_error(
     keys: list[str],
@@ -32,8 +39,5 @@ async def cleanup_completion_image_files_on_error(
     try:
         yield
     except BaseException:
-        await asyncio.gather(
-            *(asyncio.to_thread(storage.delete, key) for key in keys),
-            return_exceptions=True,
-        )
+        await delete_completion_image_files(keys)
         raise

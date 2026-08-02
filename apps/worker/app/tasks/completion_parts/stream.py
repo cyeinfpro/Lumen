@@ -13,6 +13,7 @@ from lumen_core.chat_tools import ToolStatus
 from lumen_core.constants import GenerationErrorCode as EC
 
 from ...provider_runtime.errors import UpstreamCancelled, UpstreamError
+from ...task_cancellation import scoped_cancellation_requested
 from .tool_state import CompletionToolTracker as _CompletionToolTracker
 
 
@@ -128,23 +129,32 @@ async def _is_cancelled(
     task_id: str,
     *,
     hooks: CancellationCheckHooks,
+    force_db: bool = False,
 ) -> bool:
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
             value = await redis.get(f"task:{task_id}:cancel")
-            return bool(value)
+            return await scoped_cancellation_requested(
+                task_id,
+                redis_signal=bool(value),
+                force_db=force_db,
+            )
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < 2:
                 await asyncio.sleep(0.05 * (attempt + 1))
     hooks.cancel_check_errors_total.inc()
     hooks.logger.warning(
-        "completion cancel check failed closed task=%s err=%s",
+        "completion cancel notification read failed task=%s err=%s",
         task_id,
         last_exc,
     )
-    return True
+    return await scoped_cancellation_requested(
+        task_id,
+        redis_signal=None,
+        force_db=force_db,
+    )
 
 
 async def _raise_if_completion_cancelled(

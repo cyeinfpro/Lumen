@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,39 +16,30 @@ from .contracts import (
 )
 
 
-async def settle_generation(
+@dataclass(frozen=True)
+class _GenerationCost:
+    """settle_generation 的成本解析结果(定价/档位/回退来源)。"""
+
+    cost: int
+    tier: str | None
+    tier_source: str
+    zero_rate: bool
+    pricing_error: Any | None
+    billable_image_count: int
+    rate_multiplier: int
+    billing_ref_id: str
+
+
+async def _resolve_generation_cost(
     session: AsyncSession,
     generation: Generation,
     *,
     width: int,
     height: int,
-    image_count: int = 1,
+    image_count: int,
+    billing_ref_id: str,
     deps: GenerationDependencies,
-) -> None:
-    billing_ref_id = deps.generation_billing_ref_id(generation)
-    if not await deps.wallet_billing_applies(
-        session,
-        user_id=generation.user_id,
-        ref_type="generation",
-        ref_id=billing_ref_id,
-    ):
-        return
-    if not await deps.billing_enabled():
-        return
-    idempotency_key = f"settle:{billing_ref_id}"
-    existing = await deps.existing_wallet_tx(
-        session,
-        generation.user_id,
-        idempotency_key,
-    )
-    if existing is not None:
-        deps.add_replay_audit(
-            session,
-            user_id=generation.user_id,
-            tx=existing,
-            replay_source="precheck",
-        )
-        return
+) -> _GenerationCost:
     requested_tier = deps.generation_billing_tier(generation)
     billable_image_count = max(1, int(image_count or 1))
     rate_multiplier = await deps.generation_rate_multiplier_x10000(
@@ -97,39 +89,152 @@ async def settle_generation(
             billing_ref_id,
         )
         if held <= 0:
+            # 与 settle_unknown_upstream_hold 同一语义:被先前 release 消费的
+            # hold 不是真实结算,定价缺失时按被退回的金额补记,不能吞掉已发生
+            # 的上游成本;从未建 hold 或已有真实 settle 则保留对账记录。
+            consumed = await deps.existing_ref_consumption_tx(
+                session,
+                generation.user_id,
+                "generation",
+                billing_ref_id,
+            )
+            released = (
+                max(0, int(getattr(consumed, "amount_micro", 0) or 0))
+                if consumed is not None and consumed.kind == "release"
+                else 0
+            )
+            if released <= 0:
+                session.add(
+                    deps.audit(
+                        event_type="billing.unresolved_after_upstream",
+                        user_id=generation.user_id,
+                        details={
+                            "scope": "image_size",
+                            "generation_id": generation.id,
+                            "width": width,
+                            "height": height,
+                            "image_count": billable_image_count,
+                            "error": (
+                                pricing_error.message if pricing_error else None
+                            ),
+                        },
+                    )
+                )
+                return _GenerationCost(
+                    cost=0,
+                    tier=tier,
+                    tier_source="unresolved",
+                    zero_rate=zero_rate,
+                    pricing_error=pricing_error,
+                    billable_image_count=billable_image_count,
+                    rate_multiplier=rate_multiplier,
+                    billing_ref_id=billing_ref_id,
+                )
+            cost = released
+            tier_source = "released_hold_fallback"
             session.add(
                 deps.audit(
-                    event_type="billing.unresolved_after_upstream",
+                    event_type=(
+                        "billing.pricing.released_hold_fallback_after_upstream"
+                    ),
                     user_id=generation.user_id,
                     details={
                         "scope": "image_size",
+                        "tier": tier,
                         "generation_id": generation.id,
                         "width": width,
                         "height": height,
                         "image_count": billable_image_count,
-                        "error": pricing_error.message if pricing_error else None,
+                        "actual_micro": cost,
+                        "error": (
+                            pricing_error.message if pricing_error else None
+                        ),
                     },
                 )
             )
-            return
-        cost = held
-        tier_source = "held_amount_fallback"
-        session.add(
-            deps.audit(
-                event_type="billing.pricing.hold_fallback_after_upstream",
-                user_id=generation.user_id,
-                details={
-                    "scope": "image_size",
-                    "tier": tier,
-                    "generation_id": generation.id,
-                    "width": width,
-                    "height": height,
-                    "image_count": billable_image_count,
-                    "actual_micro": cost,
-                    "error": pricing_error.message if pricing_error else None,
-                },
+        else:
+            cost = held
+            tier_source = "held_amount_fallback"
+            session.add(
+                deps.audit(
+                    event_type="billing.pricing.hold_fallback_after_upstream",
+                    user_id=generation.user_id,
+                    details={
+                        "scope": "image_size",
+                        "tier": tier,
+                        "generation_id": generation.id,
+                        "width": width,
+                        "height": height,
+                        "image_count": billable_image_count,
+                        "actual_micro": cost,
+                        "error": (
+                            pricing_error.message if pricing_error else None
+                        ),
+                    },
+                )
             )
+    return _GenerationCost(
+        cost=cost,
+        tier=tier,
+        tier_source=tier_source,
+        zero_rate=zero_rate,
+        pricing_error=pricing_error,
+        billable_image_count=billable_image_count,
+        rate_multiplier=rate_multiplier,
+        billing_ref_id=billing_ref_id,
+    )
+
+
+async def settle_generation(
+    session: AsyncSession,
+    generation: Generation,
+    *,
+    width: int,
+    height: int,
+    image_count: int = 1,
+    deps: GenerationDependencies,
+) -> None:
+    billing_ref_id = deps.generation_billing_ref_id(generation)
+    if not await deps.wallet_billing_applies(
+        session,
+        user_id=generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+    ):
+        return
+    if not await deps.billing_enabled():
+        return
+    idempotency_key = f"settle:{billing_ref_id}"
+    existing = await deps.existing_wallet_tx(
+        session,
+        generation.user_id,
+        idempotency_key,
+    )
+    if existing is not None:
+        deps.add_replay_audit(
+            session,
+            user_id=generation.user_id,
+            tx=existing,
+            replay_source="precheck",
         )
+        return
+    resolved = await _resolve_generation_cost(
+        session,
+        generation,
+        width=width,
+        height=height,
+        image_count=image_count,
+        billing_ref_id=billing_ref_id,
+        deps=deps,
+    )
+    if resolved.tier_source == "unresolved":
+        return
+    cost = resolved.cost
+    tier = resolved.tier
+    tier_source = resolved.tier_source
+    zero_rate = resolved.zero_rate
+    billable_image_count = resolved.billable_image_count
+    rate_multiplier = resolved.rate_multiplier
     tx = await deps.billing_core.settle(
         session,
         generation.user_id,
@@ -302,19 +407,50 @@ async def settle_unknown_upstream_hold(
         settlement.ref_id,
     )
     if held <= 0:
+        # 核心 settle 的 held=0 直扣语义:先 release 只是退回 hold、不算真实
+        # 结算(见 billing_core.billing.settle 的注释)。若该 ref 的 hold 已被
+        # 先前的 release 消费,而此后上游确认/可能已扣费,必须按被退回的金额
+        # 补记,否则上游成本由平台全额吸收。已存在真实 settle 或从未建过 hold
+        # 时没有可补记的金额,保留对账记录。
+        consumed = await deps.existing_ref_consumption_tx(
+            session,
+            user_id,
+            settlement.ref_type,
+            settlement.ref_id,
+        )
+        released = (
+            max(0, int(getattr(consumed, "amount_micro", 0) or 0))
+            if consumed is not None and consumed.kind == "release"
+            else 0
+        )
+        if released <= 0:
+            session.add(
+                deps.audit(
+                    event_type="billing.unresolved_after_upstream",
+                    user_id=user_id,
+                    details={
+                        "scope": settlement.no_hold_scope,
+                        "reason": settlement.reason,
+                        "knowledge": settlement.knowledge,
+                        **settlement.no_hold_extra,
+                    },
+                )
+            )
+            return
+        held = released
         session.add(
             deps.audit(
-                event_type="billing.unresolved_after_upstream",
+                event_type="billing.pricing.released_hold_fallback_after_upstream",
                 user_id=user_id,
                 details={
                     "scope": settlement.no_hold_scope,
                     "reason": settlement.reason,
                     "knowledge": settlement.knowledge,
+                    "actual_micro": held,
                     **settlement.no_hold_extra,
                 },
             )
         )
-        return
     tx = await deps.billing_core.settle(
         session,
         user_id,
