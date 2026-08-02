@@ -15,6 +15,41 @@ logger = logging.getLogger(__name__)
 DUAL_RACE_SENTINEL_PREFIX = "__dr:"
 IMAGE_QUEUE_ACTIVE_KEY = "generation:image_queue:active"
 IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
+_IMAGE_QUEUE_RESERVATION_PREFIX = "generation:image_queue:reservation:"
+_CLEAR_TERMINAL_SENTINEL_LUA = """
+local current_provider = redis.call('GET', KEYS[2])
+if current_provider and current_provider ~= ARGV[1] then
+  return 0
+end
+redis.call('ZREM', KEYS[1], ARGV[1])
+if current_provider == ARGV[1] then
+  redis.call('DEL', KEYS[2])
+end
+redis.call('DEL', KEYS[3])
+redis.call('DEL', KEYS[4])
+return 1
+"""
+
+
+async def _clear_terminal_sentinel(
+    redis: Any,
+    *,
+    sentinel_name: str,
+    task_id: str,
+) -> bool:
+    eval_fn = getattr(redis, "eval", None)
+    if not callable(eval_fn):
+        return False
+    result = await eval_fn(
+        _CLEAR_TERMINAL_SENTINEL_LUA,
+        4,
+        IMAGE_QUEUE_ACTIVE_KEY,
+        f"{IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}",
+        f"task:{task_id}:lease",
+        f"{_IMAGE_QUEUE_RESERVATION_PREFIX}{task_id}",
+        sentinel_name,
+    )
+    return int(result or 0) == 1
 
 
 async def cleanup_terminal_sentinels(
@@ -40,33 +75,36 @@ async def cleanup_terminal_sentinels(
         GenerationStatus.FAILED.value,
         GenerationStatus.CANCELED.value,
     }
-    async with session_factory() as session:
-        rows = list(
-            (
-                await session.execute(
-                    select(Generation.id, Generation.status).where(
-                        Generation.id.in_([task_id for _, task_id in sentinel_task_ids])
-                    )
-                )
-            ).all()
-        )
-    status_by_id = {row.id: row.status for row in rows}
     cleared = 0
     for sentinel_name, task_id in sentinel_task_ids:
-        status = status_by_id.get(task_id)
-        if status not in terminal:
-            continue
-        try:
-            await redis.zrem(IMAGE_QUEUE_ACTIVE_KEY, sentinel_name)
-            await redis.delete(f"{IMAGE_QUEUE_TASK_PROVIDER_PREFIX}{task_id}")
-            await redis.delete(f"task:{task_id}:lease")
-        except Exception:  # noqa: BLE001
-            log.warning(
-                "reconcile clear sentinel failed task=%s",
-                task_id,
-                exc_info=True,
-            )
-            continue
+        async with session_factory() as session:
+            generation = (
+                await session.execute(
+                    select(Generation).where(Generation.id == task_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            status = getattr(generation, "status", None)
+            if status not in terminal:
+                continue
+            try:
+                removed = await _clear_terminal_sentinel(
+                    redis,
+                    sentinel_name=sentinel_name,
+                    task_id=task_id,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "reconcile clear sentinel failed task=%s",
+                    task_id,
+                    exc_info=True,
+                )
+                continue
+            if not removed:
+                log.info(
+                    "reconcile kept sentinel after ownership changed task=%s",
+                    task_id,
+                )
+                continue
         cleared += 1
         log.info(
             "reconcile cleared terminal sentinel task=%s status=%s",

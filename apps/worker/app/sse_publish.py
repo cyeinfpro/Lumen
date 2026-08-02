@@ -670,6 +670,7 @@ async def _persist_sse_dlq(
     稳定身份 event_id + user_id + channel 去重，不能用 ts_ms 推断事件相同。
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
 
     from .db import SessionLocal
 
@@ -681,6 +682,16 @@ async def _persist_sse_dlq(
     user_id = str(raw_user_id) if raw_user_id not in (None, "") else None
     raw_channel = payload.get("channel")
     channel = str(raw_channel) if raw_channel not in (None, "") else None
+    dedupe_id = (
+        str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"lumen:sse-dlq:{event_name}:{event_id}:{user_id}:{channel}",
+            )
+        )
+        if event_id is not None and user_id is not None and channel is not None
+        else None
+    )
 
     try:
         async with SessionLocal() as session, session.begin():
@@ -691,9 +702,12 @@ async def _persist_sse_dlq(
                     .where(
                         OutboxDeadLetter.outbox_id.is_(None),
                         OutboxDeadLetter.event_type == f"sse.{event_name}",
+                        OutboxDeadLetter.payload["envelope"]["event_id"].as_string()
+                        == event_id,
+                        OutboxDeadLetter.payload["user_id"].as_string() == user_id,
+                        OutboxDeadLetter.payload["channel"].as_string() == channel,
                     )
                     .order_by(OutboxDeadLetter.id.desc())
-                    .limit(200)
                 )
                 rows = (await session.execute(stmt)).scalars().all()
                 duplicate = False
@@ -724,16 +738,30 @@ async def _persist_sse_dlq(
                     )
                     return True
 
-            session.add(
-                OutboxDeadLetter(
-                    outbox_id=None,
-                    event_type=f"sse.{event_name}",
-                    payload=payload,
-                    error_class=error_class,
-                    error_message=error_message,
-                )
+            row_kwargs: dict[str, Any] = {
+                "outbox_id": None,
+                "event_type": f"sse.{event_name}",
+                "payload": payload,
+                "error_class": error_class,
+                "error_message": error_message,
+            }
+            if dedupe_id is not None:
+                row_kwargs["id"] = dedupe_id
+            session.add(OutboxDeadLetter(**row_kwargs))
+            return True
+    except IntegrityError:
+        if dedupe_id is not None:
+            logger.info(
+                "publish_event: PG DLQ concurrent dedup hit event=%s event_id=%s "
+                "user_id=%s channel=%s",
+                event_name,
+                event_id,
+                user_id,
+                channel,
             )
             return True
+        logger.error("publish_event: PG DLQ persist failed event=%s", event_name)
+        return False
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "publish_event: PG DLQ persist failed event=%s err=%s", event_name, exc

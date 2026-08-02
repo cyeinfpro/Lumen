@@ -879,11 +879,15 @@ async def test_hold_rechecks_idempotency_after_wallet_lock(
     async def fake_get_wallet(*_args, **_kwargs):
         return wallet
 
+    async def fake_ref_consumption(*_args: Any) -> None:
+        return None
+
     async def fail_insert(*_args, **_kwargs):
         raise AssertionError("duplicate idempotency path must not insert a tx")
 
     monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
     monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
     monkeypatch.setattr(billing, "_insert_tx", fail_insert)
 
     result = await billing.hold(
@@ -900,6 +904,100 @@ async def test_hold_rechecks_idempotency_after_wallet_lock(
     assert wallet.balance_micro == 1_000
     assert wallet.hold_micro == 0
     assert wallet.version == 0
+
+
+@pytest.mark.asyncio
+async def test_hold_exact_key_rejects_after_reference_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing_tx = SimpleNamespace(
+        id="hold-existing",
+        kind="hold",
+        amount_micro=-500,
+        ref_type="generation",
+        ref_id="gen-1",
+        meta={"hold_delta": 500},
+        created_by_admin=None,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> Any:
+        return existing_tx
+
+    wallet = SimpleNamespace(balance_micro=500, hold_micro=0, version=2)
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_ref_consumption(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(id="settle-existing", kind="settle")
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(
+        billing,
+        "_existing_ref_consumption_tx",
+        fake_ref_consumption,
+    )
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.hold(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            500,
+            ref_type="generation",
+            ref_id="gen-1",
+            idempotency_key="hold:gen-1",
+        )
+
+    assert exc.value.code == "REF_ALREADY_CONSUMED"
+    assert wallet.balance_micro == 500
+    assert wallet.hold_micro == 0
+    assert wallet.version == 2
+
+
+@pytest.mark.asyncio
+async def test_hold_rejects_reference_consumed_before_new_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = SimpleNamespace(balance_micro=1_000, hold_micro=0, version=4)
+    consumed_tx = SimpleNamespace(id="settle-existing", kind="settle")
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_ref_consumption(*_args: Any) -> Any:
+        return consumed_tx
+
+    async def fail_insert(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("consumed reference must not create another hold")
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(
+        billing,
+        "_existing_ref_consumption_tx",
+        fake_ref_consumption,
+    )
+    monkeypatch.setattr(billing, "_insert_tx", fail_insert)
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.hold(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            500,
+            ref_type="generation",
+            ref_id="gen-1",
+            idempotency_key="hold:gen-1:new-attempt",
+        )
+
+    assert exc.value.code == "REF_ALREADY_CONSUMED"
+    assert exc.value.status_code == 409
+    assert wallet.balance_micro == 1_000
+    assert wallet.hold_micro == 0
+    assert wallet.version == 4
 
 
 @pytest.mark.asyncio
@@ -971,9 +1069,44 @@ async def test_hold_rejects_nonpositive_amount(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
+async def test_settle_exact_idempotency_replay_returns_transaction(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
+    existing_tx = SimpleNamespace(
+        id="settle-existing",
+        kind="settle",
+        amount_micro=-100,
+        ref_type="generation",
+        ref_id="gen-1",
+        meta={"reported_actual_micro": 100},
+        created_by_admin=None,
+    )
+
+    async def fake_existing_tx(*_args: Any) -> Any:
+        return existing_tx
+
+    async def fail_get_wallet(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("exact settle replay must return before wallet locking")
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fail_get_wallet)
+
+    result = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-1",
+        actual_micro=100,
+        idempotency_key="settle:gen-1",
+    )
+
+    assert result is existing_tx
+
+
+@pytest.mark.asyncio
+async def test_settle_different_key_after_positive_settlement_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     wallet = SimpleNamespace(
         balance_micro=0, hold_micro=0, lifetime_spend_micro=100, version=4
     )
@@ -990,8 +1123,8 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
     async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
         return wallet
 
-    async def fake_held_amount(*_args: Any) -> int:
-        return 0
+    async def fail_held_amount(*_args: Any) -> int:
+        raise AssertionError("positive prior settle must stop before hold lookup")
 
     async def fake_ref_consumption(*_args: Any) -> Any:
         return consumed_tx
@@ -1001,7 +1134,7 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
 
     monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
     monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
-    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fail_held_amount)
     monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
     monkeypatch.setattr(billing, "_insert_tx", fail_insert)
 
@@ -1014,7 +1147,7 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
         idempotency_key="settle:gen-1:retry",
     )
 
-    assert result is consumed_tx
+    assert result is None
     assert wallet.balance_micro == 0
     assert wallet.version == 4
 
@@ -1565,11 +1698,11 @@ async def test_release_recomputes_held_amount_after_wallet_lock(
 
 
 @pytest.mark.asyncio
-async def test_release_returns_existing_ref_consumption_when_hold_is_gone(
+async def test_release_after_settle_returns_none(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     wallet = SimpleNamespace(balance_micro=1_000, hold_micro=0, version=3)
-    consumed_tx = SimpleNamespace(id="release-existing")
+    consumed_tx = SimpleNamespace(id="settle-existing", kind="settle")
 
     async def fake_existing_tx(*_args: Any) -> None:
         return None
@@ -1600,9 +1733,65 @@ async def test_release_returns_existing_ref_consumption_when_hold_is_gone(
         idempotency_key="release:gen-1:retry",
     )
 
-    assert result is consumed_tx
+    assert result is None
     assert wallet.balance_micro == 1_000
     assert wallet.version == 3
+
+
+@pytest.mark.asyncio
+async def test_release_exact_replay_ignores_winning_admin_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wallet = SimpleNamespace(balance_micro=500, hold_micro=500, version=0)
+    inserts: list[Any] = []
+
+    async def fake_existing_tx(_db: Any, _user_id: str, key: str) -> Any:
+        return next(
+            (tx for tx in inserts if tx.idempotency_key == key),
+            None,
+        )
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 500
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        tx = SimpleNamespace(**kwargs)
+        inserts.append(tx)
+        return tx
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    first = await billing.release(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-1",
+        idempotency_key="admin_release_hold:hold-1",
+        meta={"reason": "admin orphan hold release"},
+        created_by_admin="admin-1",
+    )
+    replay = await billing.release(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-1",
+        idempotency_key="admin_release_hold:hold-1",
+        meta={"reason": "admin orphan hold release"},
+        created_by_admin="admin-2",
+    )
+
+    assert replay is first
+    assert first.created_by_admin == "admin-1"
+    assert wallet.balance_micro == 1_000
+    assert wallet.hold_micro == 0
+    assert wallet.version == 1
+    assert len(inserts) == 1
 
 
 @pytest.mark.asyncio

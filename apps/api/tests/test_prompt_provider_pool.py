@@ -1091,6 +1091,295 @@ async def test_prompt_enhance_settles_default_hold_when_charge_fails(
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_audit_failure_never_falls_back_to_default_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.audit import AuditPersistenceError
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse({"type": "response.output_text.delta", "delta": "better"}),
+                    _sse(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp-1",
+                                "model": "gpt-5.5",
+                                "usage": {
+                                    "input_tokens": 12,
+                                    "output_tokens": 5,
+                                },
+                            },
+                        }
+                    ),
+                ],
+            ),
+        ]
+    )
+    calls: dict[str, Any] = {}
+
+    class Db:
+        async def rollback(self) -> None:
+            calls["rolled_back"] = True
+
+    async def fail_charge(
+        _billing: prompts._EnhanceBillingContext,
+        _capture: prompts._EnhanceUsageCapture,
+    ) -> None:
+        raise AuditPersistenceError("billing.pricing.fallback_used")
+
+    async def settle_default(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    async def release_hold(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["released"] = reason
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", fail_charge)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-audit-failure",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == [
+        'data: {"text": "better"}\n\n',
+        'data: {"error": "billing_failed"}\n\n',
+    ]
+    assert calls == {"rolled_back": True}
+    assert billing.settle_outcome.attempted is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_false_transactional_audit_stops_before_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.audit import AuditPersistenceError
+    from app.routes import prompts
+    from lumen_core.pricing import CostBreakdown
+
+    calls: dict[str, Any] = {}
+
+    class Db:
+        async def commit(self) -> None:
+            calls["committed"] = True
+
+    async def estimate_breakdown(*_args: Any, **_kwargs: Any) -> CostBreakdown:
+        return CostBreakdown(
+            input_cost_micro=20,
+            output_cost_micro=0,
+            cache_read_cost_micro=0,
+            cache_creation_cost_micro=0,
+            image_output_cost_micro=0,
+            reasoning_cost_micro=0,
+            long_context_applied=False,
+            priority_tier_applied=False,
+            rate_multiplier_x10000=10_000,
+            total_cost_micro=20,
+            actual_cost_micro=20,
+            pricing_source="fallback",
+        )
+
+    async def fail_if_settled(*_args: Any, **_kwargs: Any) -> None:
+        calls["settled"] = True
+
+    async def false_audit(*_args: Any, **_kwargs: Any) -> bool:
+        calls["audit"] = True
+        return False
+
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(prompts.billing_core, "settle", fail_if_settled)
+    monkeypatch.setattr(prompts, "write_audit", false_audit)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-false-audit",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    capture = prompts._EnhanceUsageCapture(
+        provider_name="primary",
+        model="gpt-5.5",
+        response_id="resp-1",
+        usage={"input_tokens": 12, "output_tokens": 5},
+    )
+
+    with pytest.raises(AuditPersistenceError):
+        await prompts._charge_prompt_enhance(billing, capture)
+
+    assert calls == {"audit": True}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_default_settlement_retries_transient_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.routes import prompts
+
+    calls: dict[str, Any] = {"settle": 0, "rollback": 0, "commit": 0}
+
+    class Db:
+        async def rollback(self) -> None:
+            calls["rollback"] += 1
+
+        async def commit(self) -> None:
+            calls["commit"] += 1
+
+    async def flaky_settle(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        calls["settle"] += 1
+        if calls["settle"] < 3:
+            raise RuntimeError("transient db failure")
+        return SimpleNamespace(id="settle-1")
+
+    async def invalidate(_user_id: str) -> None:
+        calls["invalidated"] = True
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def no_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(prompts.billing_core, "settle", flaky_settle)
+    monkeypatch.setattr(prompts, "invalidate_balance_cache", invalidate)
+    monkeypatch.setattr(prompts._prompt_billing.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        prompts._prompt_billing,
+        "_audit_default_settlement",
+        no_audit,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-retry-settle",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+
+    await prompts._settle_prompt_enhance_default_hold(
+        billing,
+        reason="charge_failed",
+    )
+
+    assert calls == {
+        "settle": 3,
+        "rollback": 2,
+        "commit": 1,
+        "invalidated": True,
+    }
+    assert billing.settle_outcome.attempted is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_default_settlement_audit_failure_never_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.audit import AuditPersistenceError
+    from app.routes import prompts
+
+    calls: dict[str, int] = {"settle": 0, "audit": 0, "rollback": 0, "commit": 0}
+
+    class Db:
+        async def rollback(self) -> None:
+            calls["rollback"] += 1
+
+        async def commit(self) -> None:
+            calls["commit"] += 1
+
+    async def settle(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        calls["settle"] += 1
+        return SimpleNamespace(
+            id=f"settle-{calls['settle']}",
+            amount_micro=0,
+            balance_after=9_000,
+        )
+
+    async def fail_audit(*_args: Any, **_kwargs: Any) -> None:
+        calls["audit"] += 1
+        raise AuditPersistenceError("wallet.charge.completion")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(prompts.billing_core, "settle", settle)
+    monkeypatch.setattr(
+        prompts._prompt_billing,
+        "_audit_default_settlement",
+        fail_audit,
+    )
+    monkeypatch.setattr(prompts._prompt_billing.asyncio, "sleep", no_sleep)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-default-audit-failure",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+
+    await prompts._settle_prompt_enhance_default_hold(
+        billing,
+        reason="charge_failed",
+    )
+
+    assert calls == {
+        "settle": 3,
+        "audit": 3,
+        "rollback": 3,
+        "commit": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_settles_default_hold_when_success_has_no_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1129,7 +1418,9 @@ async def test_prompt_enhance_settles_default_hold_when_success_has_no_usage(
         calls["settle_reason"] = reason
 
     async def estimate_breakdown(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("missing usage must settle the default hold before pricing")
+        raise AssertionError(
+            "missing usage must settle the default hold before pricing"
+        )
 
     monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
     monkeypatch.setattr(

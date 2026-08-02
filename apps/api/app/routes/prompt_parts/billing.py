@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
+from lumen_core.model_entities.billing_operations import AuditLog
 from lumen_core.pricing import UsageTokens, parse_usage
 
+from ...audit import AuditPersistenceError
 from ...task_billing import EnhanceBillingContext, EnhanceUsageCapture
+
+_DEFAULT_SETTLE_ATTEMPTS = 3
+_DEFAULT_SETTLE_RETRY_BASE_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,25 @@ class BillingRuntime:
     write_audit: Callable[..., Awaitable[Any]]
     hash_email: Callable[[str | None], str | None]
     logger: Any
+
+
+async def _write_required_audit(
+    billing: EnhanceBillingContext,
+    *,
+    runtime: BillingRuntime,
+    event_type: str,
+    details: dict[str, Any],
+) -> None:
+    written = await runtime.write_audit(
+        billing.db,
+        event_type=event_type,
+        user_id=billing.user_id,
+        actor_email_hash=runtime.hash_email(billing.user_email),
+        details=details,
+        autocommit=False,
+    )
+    if written is not True:
+        raise AuditPersistenceError(event_type)
 
 
 async def prepare_prompt_enhance_billing(
@@ -99,9 +125,7 @@ async def prepare_prompt_enhance_billing(
                 meta={
                     "route": "prompts.enhance",
                     "model": runtime.attempts[0].model,
-                    "service_tier": (
-                        runtime.attempts[0].service_tier or "standard"
-                    ),
+                    "service_tier": (runtime.attempts[0].service_tier or "standard"),
                     "estimated_cost_micro": preview,
                     "preauth_micro": hold_amount,
                     "pricing_snapshots": pricing_snapshots,
@@ -223,11 +247,10 @@ async def _audit_held_amount_fallback(
     error: str,
     runtime: BillingRuntime,
 ) -> None:
-    await runtime.write_audit(
-        billing.db,
+    await _write_required_audit(
+        billing,
+        runtime=runtime,
         event_type="billing.pricing.hold_fallback_after_upstream",
-        user_id=billing.user_id,
-        actor_email_hash=runtime.hash_email(billing.user_email),
         details={
             "scope": "chat_model",
             "model": model,
@@ -236,7 +259,6 @@ async def _audit_held_amount_fallback(
             "actual_micro": billing.hold_amount_micro,
             "error": error,
         },
-        autocommit=False,
     )
 
 
@@ -306,17 +328,15 @@ async def _audit_fallback_pricing(
 ) -> None:
     if breakdown.pricing_source != "fallback":
         return
-    await runtime.write_audit(
-        billing.db,
+    await _write_required_audit(
+        billing,
+        runtime=runtime,
         event_type="billing.pricing.fallback_used",
-        user_id=billing.user_id,
-        actor_email_hash=runtime.hash_email(billing.user_email),
         details={
             "model": model,
             "prompt_enhance_id": ref_id,
             "usage": usage.model_dump(),
         },
-        autocommit=False,
     )
 
 
@@ -394,11 +414,10 @@ async def _audit_charge(
 ) -> None:
     if transaction is None:
         return
-    await runtime.write_audit(
-        billing.db,
+    await _write_required_audit(
+        billing,
+        runtime=runtime,
         event_type="wallet.charge.completion",
-        user_id=billing.user_id,
-        actor_email_hash=runtime.hash_email(billing.user_email),
         details={
             "completion_id": ref_id,
             "prompt_enhance_id": ref_id,
@@ -411,15 +430,13 @@ async def _audit_charge(
             "amount_micro": transaction.amount_micro,
             "balance_after": transaction.balance_after,
         },
-        autocommit=False,
     )
     if cost != 0 or billing.rate_multiplier_x10000 != 0:
         return
-    await runtime.write_audit(
-        billing.db,
+    await _write_required_audit(
+        billing,
+        runtime=runtime,
         event_type="wallet.charge.zero_rate",
-        user_id=billing.user_id,
-        actor_email_hash=runtime.hash_email(billing.user_email),
         details={
             "prompt_enhance_id": ref_id,
             "response_id": response_id,
@@ -428,7 +445,48 @@ async def _audit_charge(
             "ref_id": ref_id,
             "rate_multiplier_x10000": 0,
         },
-        autocommit=False,
+    )
+
+
+async def _audit_default_settlement(
+    billing: EnhanceBillingContext,
+    transaction: Any,
+    *,
+    reason: str,
+    model: str | None,
+    runtime: BillingRuntime,
+) -> None:
+    if transaction is None:
+        return
+    existing = (
+        await billing.db.execute(
+            select(AuditLog.id)
+            .where(
+                AuditLog.event_type == "wallet.charge.completion",
+                AuditLog.user_id == billing.user_id,
+                AuditLog.details["settle_tx_id"].as_string() == str(transaction.id),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return
+    await _write_required_audit(
+        billing,
+        runtime=runtime,
+        event_type="wallet.charge.completion",
+        details={
+            "completion_id": billing.request_id,
+            "prompt_enhance_id": billing.request_id,
+            "route": "prompts.enhance",
+            "model": model,
+            "reason": reason,
+            "settle_source": "unknown_upstream_hold",
+            "settle_tx_id": transaction.id,
+            "cost_micro": billing.hold_amount_micro,
+            "amount_micro": transaction.amount_micro,
+            "balance_after": transaction.balance_after,
+        },
     )
 
 
@@ -524,29 +582,61 @@ async def settle_prompt_enhance_default_hold(
         return
     # 结算尝试标记:链外孤儿兜底释放据此跳过(见 EnhanceSettleOutcome)。
     billing.settle_outcome.attempted = True
-    try:
+    for attempt in range(1, _DEFAULT_SETTLE_ATTEMPTS + 1):
         model = runtime.attempts[0].model if runtime.attempts else None
-        await _settle_or_charge(
-            billing,
-            cost=billing.hold_amount_micro,
-            ref_id=billing.request_id,
-            transaction_meta={
-                "route": "prompts.enhance",
-                "model": model,
-                "reason": reason,
-                "settle_source": "unknown_upstream_hold",
-            },
-        )
-        await billing.db.commit()
-        await runtime.invalidate_balance_cache(billing.user_id)
-    except Exception:
-        # 结算落库失败:attempted 已置位,兜底不会 fail-open 释放,hold 保留在
-        # 钱包中由管理端孤儿扫描对账;日志带上 request_id 便于人工追回。
-        runtime.logger.exception(
-            "prompt enhance billing default settle failed request_id=%s hold_micro=%d",
-            billing.request_id,
-            billing.hold_amount_micro,
-        )
+        try:
+            transaction = await _settle_or_charge(
+                billing,
+                cost=billing.hold_amount_micro,
+                ref_id=billing.request_id,
+                transaction_meta={
+                    "route": "prompts.enhance",
+                    "model": model,
+                    "reason": reason,
+                    "settle_source": "unknown_upstream_hold",
+                },
+            )
+            await _audit_default_settlement(
+                billing,
+                transaction,
+                reason=reason,
+                model=model,
+                runtime=runtime,
+            )
+            await billing.db.commit()
+            await runtime.invalidate_balance_cache(billing.user_id)
+            return
+        except Exception:  # noqa: BLE001
+            rollback = getattr(billing.db, "rollback", None)
+            if callable(rollback):
+                try:
+                    await rollback()
+                except Exception:  # noqa: BLE001
+                    runtime.logger.exception(
+                        "prompt enhance default settle rollback failed request_id=%s",
+                        billing.request_id,
+                    )
+            if attempt >= _DEFAULT_SETTLE_ATTEMPTS:
+                # 结算落库失败:attempted 已置位,兜底不会 fail-open 释放。hold
+                # 保留在钱包中，由管理端按预授权金额结算恢复。
+                runtime.logger.exception(
+                    "prompt enhance billing default settle failed "
+                    "request_id=%s hold_micro=%d attempts=%d",
+                    billing.request_id,
+                    billing.hold_amount_micro,
+                    attempt,
+                )
+                return
+            runtime.logger.warning(
+                "prompt enhance billing default settle retry "
+                "request_id=%s attempt=%d/%d",
+                billing.request_id,
+                attempt,
+                _DEFAULT_SETTLE_ATTEMPTS,
+            )
+            await asyncio.sleep(
+                _DEFAULT_SETTLE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            )
 
 
 async def release_prompt_enhance_hold(

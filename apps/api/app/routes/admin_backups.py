@@ -34,6 +34,10 @@ from .admin_backup_fs import (
     chmod_tolerate_eperm as _chmod_tolerate_eperm,
     open_private_append as _open_private_append,
 )
+from .admin_maintenance_marker_lock import (
+    MAINTENANCE_MARKER_NAMES,
+    maintenance_marker_lock,
+)
 
 router = APIRouter(prefix="/admin/backups", tags=["admin"])
 
@@ -134,7 +138,7 @@ def _marker_is_stale(started_at: str | None) -> bool:
     return age.total_seconds() > _MAINTENANCE_MARKER_STALE_AFTER_SECONDS
 
 
-def _read_pid_marker(path: Path) -> bool:
+def _read_pid_marker_unlocked(path: Path) -> bool:
     try:
         raw = path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
@@ -166,6 +170,11 @@ def _read_pid_marker(path: Path) -> bool:
     return False
 
 
+def _read_pid_marker(path: Path) -> bool:
+    with maintenance_marker_lock(path.parent):
+        return _read_pid_marker_unlocked(path)
+
+
 def _try_write_pid_marker(
     path: Path,
     pid: int,
@@ -184,17 +193,14 @@ def _try_write_pid_marker(
     if unit:
         lines.append(f"unit={unit}")
     payload = ("\n".join(lines) + "\n").encode()
-    for _ in range(2):
+    with maintenance_marker_lock(path.parent):
+        for name in MAINTENANCE_MARKER_NAMES:
+            if _read_pid_marker_unlocked(path.parent / name):
+                return False
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            if _read_pid_marker(path):
-                return False
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            continue
+            return False
         try:
             try:
                 os.fchmod(fd, 0o600)
@@ -210,7 +216,6 @@ def _try_write_pid_marker(
             raise
         finally:
             os.close(fd)
-    return False
 
 
 def _unlink_marker(path: Path) -> None:
@@ -327,6 +332,7 @@ _backup_pair_for_timestamp = _backup_catalog.backup_pair_for_timestamp
 @router.get("", response_model=BackupListOut)
 async def list_backups(_admin: AdminUser) -> BackupListOut:
     return _backup_catalog.list_backup_items(_backup_root())
+
 
 # ---- Trigger backup now ----
 

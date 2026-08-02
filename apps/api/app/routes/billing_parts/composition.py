@@ -7,7 +7,10 @@ from typing import Any
 
 from ...runtime_settings import get_setting, update_settings
 from ...services.pricing_cache import invalidate_pricing_cache
-from ...services.redemption_secret import remember_previous_redemption_secret
+from ...services.redemption_secret import (
+    lock_redemption_secret_rotation,
+    remember_previous_redemption_secret,
+)
 from ...audit import request_ip_hash, write_audit
 from ...redis_client import get_redis
 from .contracts import BillingCommands, BillingQueries, BillingServices
@@ -81,6 +84,7 @@ def build_billing_services() -> BillingServices:
             invalidate_balance_cache=services._invalidate_balance_cache,
             align_pricing_group_priorities=services._align_pricing_group_priorities,
             invalidate_pricing_cache=invalidate_pricing_cache,
+            lock_redemption_secret_rotation=lock_redemption_secret_rotation,
             update_settings=update_settings,
             write_audit=write_audit,
             request_ip_hash=request_ip_hash,

@@ -73,6 +73,7 @@ class _IdempotencySemantics:
     legacy_transaction_amount_micro: int | None = None
     legacy_amount_meta_key: str | None = None
     created_by_admin: str | None = None
+    admin_attribution_is_semantic: bool = True
 
 
 def _idempotency_fingerprint(semantics: _IdempotencySemantics) -> str:
@@ -83,7 +84,11 @@ def _idempotency_fingerprint(semantics: _IdempotencySemantics) -> str:
         "ref_id": semantics.ref_id,
         "amount_micro": semantics.amount_micro,
         "meta": dict(semantics.request_meta),
-        "created_by_admin": semantics.created_by_admin,
+        "created_by_admin": (
+            semantics.created_by_admin
+            if semantics.admin_attribution_is_semantic
+            else None
+        ),
     }
     encoded = json.dumps(
         payload,
@@ -114,10 +119,15 @@ def _legacy_idempotency_matches(
         ("kind", semantics.kind),
         ("ref_type", semantics.ref_type),
         ("ref_id", semantics.ref_id),
-        ("created_by_admin", semantics.created_by_admin),
     ):
         if hasattr(existing, attribute) and getattr(existing, attribute) != expected:
             return False
+    if (
+        semantics.admin_attribution_is_semantic
+        and hasattr(existing, "created_by_admin")
+        and existing.created_by_admin != semantics.created_by_admin
+    ):
+        return False
     if (
         semantics.legacy_transaction_amount_micro is not None
         and hasattr(existing, "amount_micro")
@@ -306,13 +316,19 @@ async def hold(
         await _existing_tx(db, user_id, idempotency_key),
         semantics,
     )
-    if existing is not None:
-        return existing
     wallet = _require_wallet(await get_wallet(db, user_id, lock=True))
-    existing = _idempotent_replay(
+    locked_existing = _idempotent_replay(
         await _existing_tx(db, user_id, idempotency_key),
         semantics,
     )
+    existing = locked_existing or existing
+    consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
+    if consumed is not None:
+        raise BillingError(
+            "REF_ALREADY_CONSUMED",
+            "billing reference was already settled or released",
+            409,
+        )
     if existing is not None:
         return existing
     if not allow_negative and wallet.balance_micro < amount:
@@ -367,8 +383,7 @@ async def _held_amount_for_ref(
         return 0
     total = (
         await db.execute(
-            select(func.coalesce(func.sum(WalletTransaction.amount_micro), 0))
-            .where(
+            select(func.coalesce(func.sum(WalletTransaction.amount_micro), 0)).where(
                 WalletTransaction.user_id == user_id,
                 WalletTransaction.kind == "hold",
                 WalletTransaction.ref_type == ref_type,
@@ -444,6 +459,7 @@ async def settle(
     allow_negative: bool = False,
     record_zero: bool = False,
     meta: dict[str, Any] | None = None,
+    created_by_admin: str | None = None,
 ) -> WalletTransaction | None:
     raw_actual = int(actual_micro)
     if raw_actual < 0:
@@ -461,6 +477,8 @@ async def settle(
         amount_micro=raw_actual,
         request_meta=meta or {},
         legacy_amount_meta_key="reported_actual_micro",
+        created_by_admin=created_by_admin,
+        admin_attribution_is_semantic=False,
     )
     existing = _idempotent_replay(
         await _existing_tx(db, user_id, idempotency_key),
@@ -477,7 +495,9 @@ async def settle(
         return existing
     # The per-user wallet row lock serializes settle/release for the same ref.
     # Once a real settlement (kind=settle with a positive recorded cost) exists,
-    # later attempts return that transaction instead of mutating balances again.
+    # a different idempotency key is a ref-level no-op. Only the exact-key replay
+    # above returns a transaction; returning an unrelated settle here would make
+    # callers report it as the operation they just requested.
     # A prior `release` (or a zero-amount settle) is NOT a settlement: it only
     # refunded the hold, and the upstream cost was never recorded. Falling
     # through here charges `actual` in full with held=0 — the same direct-debit
@@ -485,7 +505,7 @@ async def settle(
     # heuristic) cannot silently erase a real upstream charge from the ledger.
     consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
     if consumed is not None and _consumption_settled_cost_micro(consumed) > 0:
-        return consumed
+        return None
     held = await _held_amount_for_ref(db, user_id, ref_type, ref_id)
     before_balance = wallet.balance_micro
     # Once the upstream cost exists, settlement must record it in full. The
@@ -523,6 +543,7 @@ async def settle(
             },
             semantics,
         ),
+        created_by_admin=created_by_admin,
     )
 
 
@@ -534,6 +555,7 @@ async def release(
     ref_id: str,
     idempotency_key: str,
     meta: dict[str, Any] | None = None,
+    created_by_admin: str | None = None,
 ) -> WalletTransaction | None:
     semantics = _IdempotencySemantics(
         kind="release",
@@ -541,6 +563,8 @@ async def release(
         ref_id=ref_id,
         amount_micro=None,
         request_meta=meta or {},
+        created_by_admin=created_by_admin,
+        admin_attribution_is_semantic=False,
     )
     existing = _idempotent_replay(
         await _existing_tx(db, user_id, idempotency_key),
@@ -561,7 +585,10 @@ async def release(
     if held <= 0:
         consumed = await _existing_ref_consumption_tx(db, user_id, ref_type, ref_id)
         if consumed is not None:
-            return consumed
+            # Exact-key replay was handled above. A different settle/release
+            # consumed this reference, so do not return that unrelated row as
+            # though this release request had succeeded.
+            return None
         return None
     wallet.balance_micro += held
     wallet.hold_micro = max(0, wallet.hold_micro - held)
@@ -579,6 +606,7 @@ async def release(
             {**(meta or {}), "released_micro": held, "hold_delta": -held},
             semantics,
         ),
+        created_by_admin=created_by_admin,
     )
 
 

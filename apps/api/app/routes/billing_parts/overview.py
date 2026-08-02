@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lumen_core import billing as billing_core
 from lumen_core.models import (
@@ -43,11 +44,26 @@ from ...observability import (
     wallet_hold_micro,
     wallet_orphan_holds,
 )
-from ...services.redemption_secret import PreviousRedemptionSecretLocked
+from ...services.redemption_secret import (
+    PreviousRedemptionSecretLocked,
+    RedemptionSecretRotationLockUnavailable,
+)
 from .composition import build_billing_services
+from .orphan_hold_recovery import (
+    ensure_admin_recovery_audit,
+    load_hold_group,
+    recovery_action,
+    replay_hold_group,
+)
+from .orphan_hold_settlement import (
+    admin_settle_orphan_prompt_hold as admin_settle_orphan_prompt_hold,
+)
+from .orphan_hold_settlement import router as orphan_hold_settlement_router
+from .orphan_hold_safety import ensure_hold_task_is_terminal
 
 
 router = APIRouter()
+router.include_router(orphan_hold_settlement_router)
 
 
 @router.get("/admin/billing/audit", response_model=list[AdminBillingAuditEventOut])
@@ -281,6 +297,17 @@ async def admin_list_orphan_holds(
     queries = services.queries
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=min_age_minutes)
+    consumed = aliased(WalletTransaction)
+    has_consumption = (
+        select(consumed.id)
+        .where(
+            consumed.user_id == WalletTransaction.user_id,
+            consumed.ref_type == WalletTransaction.ref_type,
+            consumed.ref_id == WalletTransaction.ref_id,
+            consumed.kind.in_(("settle", "release")),
+        )
+        .exists()
+    )
     holds = (
         (
             await db.execute(
@@ -288,11 +315,14 @@ async def admin_list_orphan_holds(
                 .where(
                     WalletTransaction.kind == "hold",
                     WalletTransaction.created_at <= cutoff,
+                    WalletTransaction.ref_type.is_not(None),
+                    WalletTransaction.ref_id.is_not(None),
+                    ~has_consumption,
                 )
                 .order_by(
                     WalletTransaction.created_at.asc(), WalletTransaction.id.asc()
                 )
-                .limit(limit * 2)
+                .limit(limit)
             )
         )
         .scalars()
@@ -300,22 +330,6 @@ async def admin_list_orphan_holds(
     )
     out: list[AdminOrphanHoldOut] = []
     for hold in holds:
-        if not hold.ref_type or not hold.ref_id:
-            continue
-        consumed = (
-            await db.execute(
-                select(WalletTransaction.id)
-                .where(
-                    WalletTransaction.user_id == hold.user_id,
-                    WalletTransaction.ref_type == hold.ref_type,
-                    WalletTransaction.ref_id == hold.ref_id,
-                    WalletTransaction.kind.in_(("settle", "release")),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if consumed is not None:
-            continue
         created = hold.created_at
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
@@ -324,10 +338,9 @@ async def admin_list_orphan_holds(
                 tx=queries.tx_out(hold),
                 user_id=hold.user_id,
                 age_seconds=max(0, int((now - created).total_seconds())),
+                recovery_action=recovery_action(hold.ref_type),
             )
         )
-        if len(out) >= limit:
-            break
     wallet_orphan_holds.set(len(out))
     return out
 
@@ -351,6 +364,62 @@ async def admin_release_orphan_hold(
         raise queries.http("not_found", "hold transaction not found", 404)
     if not hold.ref_type or not hold.ref_id:
         raise queries.http("invalid_hold", "hold transaction has no reference", 422)
+    target_user_id = str(hold.user_id)
+    release_key = f"admin_release_hold:{tx_id}"
+    existing_release = (
+        await db.execute(
+            select(WalletTransaction)
+            .where(
+                WalletTransaction.user_id == hold.user_id,
+                WalletTransaction.idempotency_key == release_key,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if existing_release is not None:
+        if (
+            existing_release.kind != "release"
+            or existing_release.ref_type != hold.ref_type
+            or existing_release.ref_id != hold.ref_id
+        ):
+            raise queries.http(
+                "IDEMPOTENCY_CONFLICT",
+                "admin release idempotency key has conflicting billing semantics",
+                409,
+            )
+        group = replay_hold_group(existing_release, hold)
+        meta = existing_release.meta if isinstance(existing_release.meta, dict) else {}
+        await ensure_admin_recovery_audit(
+            db,
+            commands=commands,
+            http=queries.http,
+            request=request,
+            admin=admin,
+            target_user_id=hold.user_id,
+            event_type="wallet.hold.force_release",
+            transaction=existing_release,
+            transaction_detail_key="release_tx_id",
+            details={
+                "hold_tx_id": tx_id,
+                "hold_tx_ids": group.tx_ids,
+                "hold_count": group.count,
+                "aggregate_held_micro": group.aggregate_held_micro,
+                "ref_type": hold.ref_type,
+                "ref_id": hold.ref_id,
+                "release_proof": meta.get("release_proof"),
+            },
+            already_committed=True,
+        )
+        out = queries.tx_out(existing_release)
+        await db.commit()
+        await commands.invalidate_balance_cache(target_user_id)
+        return out
+    if recovery_action(hold.ref_type) != "release":
+        raise queries.http(
+            "HOLD_RELEASE_NOT_PROVEN_SAFE",
+            "this hold cannot be safely released; use its recommended recovery action",
+            409,
+        )
     consumed = (
         await db.execute(
             select(WalletTransaction.id)
@@ -367,29 +436,79 @@ async def admin_release_orphan_hold(
         raise queries.http(
             "HOLD_ALREADY_CONSUMED", "hold was already settled or released", 409
         )
+    group = await load_hold_group(db, hold)
+    release_proof = await ensure_hold_task_is_terminal(
+        db,
+        hold,
+        http=queries.http,
+    )
     tx = await billing_core.release(
         db,
-        hold.user_id,
+        target_user_id,
         ref_type=hold.ref_type,
         ref_id=hold.ref_id,
-        idempotency_key=f"admin_release_hold:{tx_id}",
-        meta={"reason": "admin orphan hold release", "hold_tx_id": tx_id},
+        idempotency_key=release_key,
+        meta={
+            "reason": "admin orphan hold release",
+            "hold_tx_id": tx_id,
+            "hold_tx_ids": group.tx_ids,
+            "hold_count": group.count,
+            "aggregate_held_micro": group.aggregate_held_micro,
+            "release_proof": release_proof,
+        },
+        created_by_admin=admin.id,
     )
     if tx is None:
+        raced_consumption = (
+            await db.execute(
+                select(WalletTransaction.id).where(
+                    WalletTransaction.user_id == hold.user_id,
+                    WalletTransaction.ref_type == hold.ref_type,
+                    WalletTransaction.ref_id == hold.ref_id,
+                    WalletTransaction.kind.in_(("settle", "release")),
+                )
+            )
+        ).scalar_one_or_none()
+        await db.rollback()
+        if raced_consumption is not None:
+            raise queries.http(
+                "HOLD_ALREADY_CONSUMED",
+                "hold was concurrently settled or released",
+                409,
+            )
         raise queries.http("HOLD_NOT_ACTIVE", "hold is no longer active", 409)
-    await commands.write_audit(
+    if tx.kind != "release" or tx.idempotency_key != release_key:
+        await db.rollback()
+        raise queries.http(
+            "HOLD_ALREADY_CONSUMED",
+            "hold was concurrently settled or released",
+            409,
+        )
+    await ensure_admin_recovery_audit(
         db,
-        event_type="wallet.hold.force_release",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=commands.request_ip_hash(request),
+        commands=commands,
+        http=queries.http,
+        request=request,
+        admin=admin,
         target_user_id=hold.user_id,
-        details={"hold_tx_id": tx_id, "release_tx_id": tx.id},
-        autocommit=False,
+        event_type="wallet.hold.force_release",
+        transaction=tx,
+        transaction_detail_key="release_tx_id",
+        details={
+            "hold_tx_id": tx_id,
+            "hold_tx_ids": group.tx_ids,
+            "hold_count": group.count,
+            "aggregate_held_micro": group.aggregate_held_micro,
+            "ref_type": hold.ref_type,
+            "ref_id": hold.ref_id,
+            "release_proof": release_proof,
+        },
+        already_committed=False,
     )
+    out = queries.tx_out(tx)
     await db.commit()
-    await commands.invalidate_balance_cache(hold.user_id)
-    return queries.tx_out(tx)
+    await commands.invalidate_balance_cache(target_user_id)
+    return out
 
 
 @router.post(
@@ -536,7 +655,17 @@ async def admin_rotate_redemption_secret(
         raise queries.http(
             "invalid_request", "redemption secret setting is unsupported", 500
         )
-    old_secret = await queries.get_setting(db, secret_spec)
+    try:
+        old_secret = await commands.lock_redemption_secret_rotation(db)
+    except RedemptionSecretRotationLockUnavailable as exc:
+        await db.rollback()
+        raise queries.http(
+            "redemption_secret_rotation_unavailable",
+            "database transaction locking is unavailable for secret rotation",
+            503,
+        ) from exc
+    if not old_secret:
+        old_secret = await queries.get_setting(db, secret_spec)
     new_secret = queries.generate_redemption_secret()
     await commands.update_settings(db, [("billing.redemption_code_secret", new_secret)])
     transition_expires_at = None
@@ -546,6 +675,7 @@ async def admin_rotate_redemption_secret(
                 db, old_secret
             )
         except PreviousRedemptionSecretLocked as exc:
+            await db.rollback()
             raise queries.http(
                 "previous_secret_locked",
                 "another rotation is still inside the 24h transition window",

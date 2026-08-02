@@ -484,6 +484,7 @@ export interface AdminOrphanHoldOut {
   tx: WalletTransactionOut;
   user_id: string;
   age_seconds: number;
+  recovery_action: "release" | "settle_default" | "manual_review";
 }
 
 export interface AdminBillingBootstrapIn {

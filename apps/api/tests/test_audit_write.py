@@ -1,7 +1,7 @@
 """write_audit(autocommit=False) 事务隔离回归测试。
 
-回归目标：审计行 flush 失败不得污染调用方事务 —— 否则调用方后续
-commit 抛 PendingRollbackError，其未提交改动一并丢失（P2）。
+回归目标：审计行 flush 失败必须 fail closed，同时不得污染调用方事务。
+调用方捕获专用异常后可以继续 commit，也可以显式 rollback 并复用 session。
 """
 
 from __future__ import annotations
@@ -10,13 +10,13 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.audit import write_audit
+from app.audit import AuditPersistenceError, write_audit
 from lumen_core.models import AuditLog
 
 
 @pytest.mark.asyncio
-async def test_audit_flush_failure_keeps_caller_transaction_usable() -> None:
-    """审计行 flush 失败（外键违规）只回滚审计行，调用方 commit 不受影响。"""
+async def test_audit_flush_failure_raises_but_caller_can_handle_and_commit() -> None:
+    """失败审计行回滚到 savepoint，调用方捕获异常后仍可提交原事务。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -41,15 +41,16 @@ async def test_audit_flush_failure_keeps_caller_transaction_usable() -> None:
             )
             session.add(caller_row)
 
-            ok = await write_audit(
-                session,
-                event_type="audit.bad",
-                user_id="missing-user",  # 外键违规 → flush 失败
-                autocommit=False,
-            )
-            assert ok is False
+            with pytest.raises(AuditPersistenceError) as exc_info:
+                await write_audit(
+                    session,
+                    event_type="audit.bad",
+                    user_id="missing-user",  # 外键违规 → flush 失败
+                    autocommit=False,
+                )
+            assert exc_info.value.event_type == "audit.bad"
 
-            # 修复前：此处抛 PendingRollbackError；修复后：正常提交
+            # savepoint 已回滚，处理异常后 commit 不会触发 PendingRollbackError。
             await session.commit()
 
             rows = (await session.execute(select(AuditLog))).scalars().all()
@@ -60,8 +61,8 @@ async def test_audit_flush_failure_keeps_caller_transaction_usable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_audit_flush_failure_keeps_audit_row_out_of_commit() -> None:
-    """失败审计行不随调用方 commit 落库，且日志计数带 mode=session。"""
+async def test_audit_flush_failure_allows_explicit_rollback_and_session_reuse() -> None:
+    """调用方可显式回滚外层事务，随后复用 session 提交新事务。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -75,20 +76,40 @@ async def test_audit_flush_failure_keeps_audit_row_out_of_commit() -> None:
             lambda c: AuditLog.metadata.create_all(c, tables=[AuditLog.__table__])
         )
         await conn.exec_driver_sql("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY)")
+        await conn.exec_driver_sql("INSERT INTO users (id) VALUES ('real-user')")
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
-            ok = await write_audit(
-                session,
-                event_type="audit.bad",
-                user_id="missing-user",
-                autocommit=False,
+            session.add(
+                AuditLog(
+                    user_id="real-user",
+                    event_type="caller.before.rollback",
+                    details={},
+                )
             )
-            assert ok is False
+
+            with pytest.raises(AuditPersistenceError):
+                await write_audit(
+                    session,
+                    event_type="audit.bad",
+                    user_id="missing-user",
+                    autocommit=False,
+                )
+
+            await session.rollback()
+            session.add(
+                AuditLog(
+                    user_id="real-user",
+                    event_type="caller.after.rollback",
+                    details={},
+                )
+            )
             await session.commit()
+
             rows = (await session.execute(select(AuditLog))).scalars().all()
-            assert rows == []
+            assert [row.event_type for row in rows] == ["caller.after.rollback"]
+            assert all(row.user_id == "real-user" for row in rows)
     finally:
         await engine.dispose()
 

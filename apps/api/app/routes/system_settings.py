@@ -31,6 +31,8 @@ from ..services.provider_config import (
 )
 from ..services.redemption_secret import (
     PreviousRedemptionSecretLocked,
+    RedemptionSecretRotationLockUnavailable,
+    lock_redemption_secret_rotation,
     remember_previous_redemption_secret,
 )
 
@@ -201,11 +203,19 @@ async def put_settings_endpoint(
         )
 
     secret_spec = get_spec("billing.redemption_code_secret")
-    old_secret = (
-        await get_setting(db, secret_spec)
-        if secret_spec is not None and "billing.redemption_code_secret" in pair_map
-        else None
-    )
+    old_secret = None
+    if "billing.redemption_code_secret" in pair_map:
+        try:
+            old_secret = await lock_redemption_secret_rotation(db)
+        except RedemptionSecretRotationLockUnavailable as exc:
+            await db.rollback()
+            raise _http(
+                "redemption_secret_rotation_unavailable",
+                "database transaction locking is unavailable for secret rotation",
+                503,
+            ) from exc
+        if not old_secret and secret_spec is not None:
+            old_secret = await get_setting(db, secret_spec)
 
     try:
         await update_settings(db, pairs)

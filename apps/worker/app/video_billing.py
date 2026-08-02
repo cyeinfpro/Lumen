@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -363,30 +364,67 @@ async def _release_video_hold(
             knowledge=UpstreamCostKnowledge.PROVEN_ABSENT,
         ),
     )
-    if tx is not None:
-        worker_billing._record_balance_cache_refresh(  # noqa: SLF001
+    if tx is None:
+        tx = await worker_billing.existing_ref_consumption_tx(
             session,
+            generation.user_id,
+            "video_generation",
+            generation.id,
+        )
+    if tx is None or getattr(tx, "kind", None) != "release":
+        tx_meta = getattr(tx, "meta", None)
+        existing_meta = tx_meta if isinstance(tx_meta, Mapping) else {}
+        existing_decision = existing_meta.get("billing_decision")
+        resolved_decision = (
+            existing_decision.strip()
+            if isinstance(existing_decision, str) and existing_decision.strip()
+            else decision
+        )
+        resolved_tokens = actual_tokens
+        raw_tokens = existing_meta.get("actual_tokens")
+        if raw_tokens is not None and not isinstance(raw_tokens, bool):
+            try:
+                parsed_tokens = int(raw_tokens)
+            except (TypeError, ValueError, OverflowError):
+                pass
+            else:
+                if parsed_tokens >= 0:
+                    resolved_tokens = parsed_tokens
+        settled_micro = (
+            billing_core._consumption_settled_cost_micro(tx)  # noqa: SLF001
+            if tx is not None and getattr(tx, "kind", None) == "settle"
+            else 0
+        )
+        return VideoBillingResolution(
+            decision=resolved_decision,
+            actual_micro=settled_micro,
+            actual_tokens=resolved_tokens,
+            released=False,
+            tx=tx,
+        )
+    worker_billing._record_balance_cache_refresh(  # noqa: SLF001
+        session,
+        user_id=generation.user_id,
+        balance_after=tx.balance_after,
+    )
+    session.add(
+        AuditLog(
             user_id=generation.user_id,
-            balance_after=tx.balance_after,
+            event_type="wallet.release.video",
+            details={
+                "video_generation_id": generation.id,
+                "reason": reason,
+                "decision": decision,
+                "actual_tokens": actual_tokens,
+                "amount_micro": tx.amount_micro,
+                "balance_after": tx.balance_after,
+                "hold_after": tx.hold_after,
+                "provider_name": generation.provider_name,
+                "provider_task_id": generation.provider_task_id,
+                "pricing_variant": pricing_variant,
+            },
         )
-        session.add(
-            AuditLog(
-                user_id=generation.user_id,
-                event_type="wallet.release.video",
-                details={
-                    "video_generation_id": generation.id,
-                    "reason": reason,
-                    "decision": decision,
-                    "actual_tokens": actual_tokens,
-                    "amount_micro": tx.amount_micro,
-                    "balance_after": tx.balance_after,
-                    "hold_after": tx.hold_after,
-                    "provider_name": generation.provider_name,
-                    "provider_task_id": generation.provider_task_id,
-                    "pricing_variant": pricing_variant,
-                },
-            )
-        )
+    )
     return VideoBillingResolution(
         decision=decision,
         actual_micro=0,

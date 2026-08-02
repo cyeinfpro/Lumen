@@ -427,6 +427,7 @@ class FakeMemoryReconSession:
         self.messages = messages
         self.outbox_events: list[OutboxEvent] = []
         self.select_skip_locked: list[bool] = []
+        self.statements: list[Any] = []
         self.commits = 0
 
     async def __aenter__(self):
@@ -440,6 +441,7 @@ class FakeMemoryReconSession:
 
     async def execute(self, statement):
         text = str(statement)
+        self.statements.append(statement)
         arg = getattr(statement, "_for_update_arg", None)
         if (
             getattr(statement, "is_update", False)
@@ -1119,6 +1121,12 @@ async def test_memory_reconciler_skips_pending_and_retryable_before_backoff(
     assert waiting.status == "retryable"
     assert session.outbox_events == []
     assert redis.enqueue_args == []
+    candidate_sql = str(session.statements[0])
+    assert "memory_extraction_runs.attempt <= " in candidate_sql
+    assert "memory_extraction_runs.attempt >= " in candidate_sql
+    assert candidate_sql.index("memory_extraction_runs.attempt") < candidate_sql.index(
+        "LIMIT"
+    )
 
 
 @pytest.mark.asyncio
@@ -1809,7 +1817,7 @@ async def test_reconcile_requeues_stale_generation_with_string_status(monkeypatc
     assert redis.enqueued == [("run_generation", "gen-1")]
     assert generation.status == GenerationStatus.QUEUED.value
     assert isinstance(generation.status, str)
-    assert fake_session.select_skip_locked == [True, True, True]
+    assert fake_session.select_skip_locked == [False, True, False, True]
     published_outbox_id = published[0]["data"].pop("outbox_id")
     assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [

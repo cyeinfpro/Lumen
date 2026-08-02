@@ -21,6 +21,14 @@ from .ratelimit import client_ip
 logger = logging.getLogger(__name__)
 
 
+class AuditPersistenceError(RuntimeError):
+    """Raised when an audit row cannot join a caller-managed transaction."""
+
+    def __init__(self, event_type: str) -> None:
+        self.event_type = event_type
+        super().__init__(f"audit persistence failed for event_type={event_type!r}")
+
+
 def hash_email(value: str | None) -> str | None:
     if not value:
         return None
@@ -57,14 +65,15 @@ async def write_audit(
     """Write audit rows without relying on implicit session type checks.
 
     `autocommit=True` uses an isolated transaction so audit failures do not
-    poison the caller's transaction. `autocommit=False` writes through the
-    supplied session inside a savepoint（flush 失败只回滚审计行，不污染调用方
-    事务），并保留 commit/rollback 给调用方。
+    poison the caller's transaction and reports success as a best-effort
+    boolean. `autocommit=False` writes through the supplied session inside a
+    savepoint（flush 失败只回滚审计行，不污染调用方事务），并保留
+    commit/rollback 给调用方。
 
-    Returns ``True`` if the audit row was persisted (or, for ``autocommit``,
-    successfully handed off), ``False`` otherwise. Existing call sites that
-    ignore the return value remain unaffected; security-critical callers can
-    inspect the result to alert when audit logging is failing.
+    Caller-transaction writes return ``True`` on success and raise
+    :class:`AuditPersistenceError` after savepoint rollback on failure. This
+    fail-closed contract prevents callers that ignore the boolean result from
+    committing business changes without their audit row.
     """
     if autocommit:
         return await write_audit_isolated(
@@ -102,7 +111,7 @@ async def write_audit(
             event_type,
             exc,
         )
-        return False
+        raise AuditPersistenceError(event_type) from exc
 
 
 async def write_audit_isolated(
@@ -146,6 +155,7 @@ async def write_audit_isolated(
 
 
 __all__ = [
+    "AuditPersistenceError",
     "write_audit",
     "write_audit_isolated",
     "hash_email",

@@ -541,6 +541,7 @@ async def test_write_audit_uses_isolated_transaction(
 
     async def fake_isolated(**kwargs):
         calls.append(kwargs)
+        return False
 
     class PoisonSession:
         def add(self, _row):
@@ -548,12 +549,13 @@ async def test_write_audit_uses_isolated_transaction(
 
     monkeypatch.setattr(audit, "write_audit_isolated", fake_isolated)
 
-    await audit.write_audit(
+    result = await audit.write_audit(
         PoisonSession(),
         event_type="event",
         user_id="user-1",  # type: ignore[arg-type]
     )
 
+    assert result is False
     assert calls == [
         {
             "event_type": "event",
@@ -630,15 +632,26 @@ async def test_write_audit_failure_increments_counter(
         async def flush(self):
             raise RuntimeError("db unavailable")
 
+        def begin_nested(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc: object):
+            return None
+
     counter = Counter()
     monkeypatch.setattr(audit, "audit_write_failures_total", counter)
 
-    await audit.write_audit(
-        FailingSession(),  # type: ignore[arg-type]
-        event_type="event",
-        autocommit=False,
-    )
+    with pytest.raises(audit.AuditPersistenceError) as exc_info:
+        await audit.write_audit(
+            FailingSession(),  # type: ignore[arg-type]
+            event_type="event",
+            autocommit=False,
+        )
 
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert counter.mode == "session"
     assert counter.count == 1
 

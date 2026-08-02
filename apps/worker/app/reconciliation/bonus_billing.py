@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from lumen_core.constants import GenerationStatus
 from lumen_core.models import Generation, Image, WalletTransaction
@@ -20,13 +20,27 @@ class BonusBillingReconciler:
     name = "bonus_billing"
 
     async def reconcile(self, context: ReconcileContext) -> ReconcileResult:
-        consumed = exists(
+        settlement_actual_micro = WalletTransaction.meta["actual_micro"].as_integer()
+        settlement_rate_multiplier = WalletTransaction.meta[
+            "rate_multiplier_x10000"
+        ].as_integer()
+        completed_settlement = exists(
             select(WalletTransaction.id).where(
                 WalletTransaction.user_id == Generation.user_id,
                 WalletTransaction.ref_type == "generation",
                 WalletTransaction.ref_id == Generation.id,
-                WalletTransaction.kind.in_(("settle", "release")),
+                WalletTransaction.kind == "settle",
+                or_(
+                    func.coalesce(settlement_actual_micro, 1) > 0,
+                    and_(
+                        settlement_actual_micro == 0,
+                        settlement_rate_multiplier == 0,
+                    ),
+                ),
             )
+        )
+        has_image = exists(
+            select(Image.id).where(Image.owner_generation_id == Generation.id)
         )
         rows = list(
             (
@@ -37,7 +51,12 @@ class BonusBillingReconciler:
                         Generation.upstream_request["billing_policy"]
                         .as_string()
                         .in_(BONUS_BILLING_POLICIES),
-                        ~consumed,
+                        func.coalesce(
+                            Generation.upstream_request["billing_free"].as_boolean(),
+                            False,
+                        ).is_(False),
+                        ~completed_settlement,
+                        has_image,
                     )
                     .order_by(Generation.finished_at.asc(), Generation.id.asc())
                     .limit(100)

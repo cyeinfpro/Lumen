@@ -759,6 +759,126 @@ async def test_get_repair_links_video_by_execution_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_repair_scans_past_old_unrepairable_rows_and_task_window() -> None:
+    async with _session() as db:
+        canvas = await create_canvas(
+            db,
+            user_id="user-1",
+            body=CanvasCreateIn(title="深分页补偿", graph=_graph()),
+        )
+        version = await create_named_version(
+            db,
+            user_id="user-1",
+            canvas_id=canvas.id,
+            name="运行快照",
+        )
+        run = CanvasRun(
+            canvas_id=canvas.id,
+            version_id=version.id,
+            user_id="user-1",
+            kind="all",
+            status="queued",
+            target_node_ids=[],
+            idempotency_key="deep-repair-run",
+            request_fingerprint="r" * 64,
+        )
+        db.add(run)
+        await db.flush()
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        executions: list[CanvasNodeExecution] = []
+        for index in range(21):
+            execution = CanvasNodeExecution(
+                canvas_id=canvas.id,
+                run_id=run.id,
+                user_id="user-1",
+                node_id=f"video-{index}",
+                node_type="video_generate",
+                node_schema_version=1,
+                sequence=index,
+                attempt=0,
+                attempt_epoch=0,
+                status="queued",
+                definition_hash=f"{index:064x}",
+                input_hash=f"{index + 100:064x}",
+                execution_fingerprint=f"{index + 200:064x}",
+                submission_idempotency_key=f"deep-repair-execution-{index}",
+                request_fingerprint=f"{index + 300:064x}",
+                config_snapshot_jsonb={},
+                input_snapshot_jsonb={},
+                processor_version="test",
+                selection_base_revision=0,
+                created_at=base + timedelta(seconds=index),
+                updated_at=base + timedelta(seconds=index),
+            )
+            executions.append(execution)
+            db.add(execution)
+        await db.flush()
+        target = executions[-1]
+        target_video = VideoGeneration(
+            user_id="user-1",
+            action="t2v",
+            model="video-model",
+            prompt="需要从旧窗口找回",
+            duration_s=5,
+            resolution="720p",
+            aspect_ratio="16:9",
+            upstream_request={"canvas_execution_id": target.id},
+            status="queued",
+            progress_stage="queued",
+            progress_pct=0,
+            deadline_at=base + timedelta(hours=1),
+            idempotency_key="deep-repair-target-video",
+            request_fingerprint="t" * 64,
+            est_token_upper=0,
+            est_cost_micro=0,
+            created_at=base,
+            updated_at=base,
+        )
+        db.add(target_video)
+        for index in range(101):
+            db.add(
+                VideoGeneration(
+                    user_id="user-1",
+                    action="t2v",
+                    model="video-model",
+                    prompt=f"无关任务 {index}",
+                    duration_s=5,
+                    resolution="720p",
+                    aspect_ratio="16:9",
+                    upstream_request={"canvas_execution_id": "unrelated"},
+                    status="queued",
+                    progress_stage="queued",
+                    progress_pct=0,
+                    deadline_at=base + timedelta(hours=2),
+                    idempotency_key=f"deep-repair-distractor-{index}",
+                    request_fingerprint=f"{index + 1000:064x}",
+                    est_token_upper=0,
+                    est_cost_micro=0,
+                    created_at=base + timedelta(minutes=1, seconds=index),
+                    updated_at=base + timedelta(minutes=1, seconds=index),
+                )
+            )
+        await db.commit()
+
+        await repair_canvas_executions(
+            db,
+            user_id="user-1",
+            canvas_id=canvas.id,
+            limit=20,
+        )
+
+        link = (
+            await db.execute(
+                select(CanvasExecutionTask).where(
+                    CanvasExecutionTask.execution_id == target.id
+                )
+            )
+        ).scalar_one()
+        assert link.task_kind == "video_generation"
+        assert link.video_generation_id == target_video.id
+
+
+@pytest.mark.asyncio
 async def test_canvas_projection_includes_video_task_progress_details() -> None:
     async with _session() as db:
         canvas = await create_canvas(

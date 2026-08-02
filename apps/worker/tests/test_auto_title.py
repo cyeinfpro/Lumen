@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -284,6 +286,64 @@ async def test_build_summary_filters_deleted_messages_and_conversation() -> None
     sql = str(statements[0])
     assert "messages.deleted_at IS NULL" in sql
     assert "conversations.deleted_at IS NULL" in sql
+    assert "messages.role IN" in sql
+
+
+@pytest.mark.asyncio
+async def test_build_summary_scans_past_empty_placeholder_window() -> None:
+    now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+    placeholders = [
+        SimpleNamespace(
+            id=f"empty-{index:02d}",
+            role="assistant",
+            content={},
+            created_at=now - timedelta(seconds=index),
+        )
+        for index in range(16)
+    ]
+    useful = [
+        SimpleNamespace(
+            id="useful-assistant",
+            role="assistant",
+            content={"text": "可以这样处理"},
+            created_at=now - timedelta(minutes=2),
+        ),
+        SimpleNamespace(
+            id="useful-user",
+            role="user",
+            content={"text": "如何修复空标题"},
+            created_at=now - timedelta(minutes=3),
+        ),
+    ]
+    statements: list[Any] = []
+    pages = [placeholders, useful]
+
+    class _Result:
+        def __init__(self, rows: list[Any]) -> None:
+            self.rows = rows
+
+        def scalars(self) -> list[Any]:
+            return self.rows
+
+    class _Session:
+        async def execute(self, statement: Any) -> _Result:
+            statements.append(statement)
+            return _Result(pages.pop(0))
+
+    summary = await auto_title._build_summary(_Session(), "conv-1")
+
+    assert summary == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "如何修复空标题"}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "可以这样处理"}],
+        },
+    ]
+    assert len(statements) == 2
+    assert "messages.created_at <" in str(statements[1])
 
 
 # --- reconcile_default_titles 巡检 -----------------------------------------

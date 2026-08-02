@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from lumen_core.providers import ProviderDefinition
 
+from ...audit import AuditPersistenceError
 from ...task_billing import EnhanceBillingContext, EnhanceUsageCapture
 from .upstream import EnhanceAttempt, EnhanceProviderError
 
@@ -178,6 +179,15 @@ async def _success_chunk(
         return "data: [DONE]\n\n"
     try:
         await runtime.charge(billing, capture)
+    except AuditPersistenceError:
+        # 审计与钱包变更必须同事务。审计失败时回滚待提交结算，且不得走
+        # 默认金额降级结算，否则会在缺失审计的同时提交一笔不同金额。
+        billing.settle_outcome.attempted = True
+        rollback = getattr(billing.db, "rollback", None)
+        if callable(rollback):
+            await rollback()
+        logger.exception("prompt enhance billing audit failed")
+        return _error_chunk("billing_failed")
     except Exception:
         # 内容已完整交付、上游必然已计费:计费失败不得 fail-open 释放 hold,
         # 改为按默认金额(hold)结算,差额交给对账而不是由平台吸收。
@@ -223,13 +233,13 @@ async def _stream_candidates(
         ):
             yield chunk
         if candidate.succeeded:
-            yield await _success_chunk(billing, capture, runtime=runtime)
+            success_chunk = await _success_chunk(billing, capture, runtime=runtime)
             state.settled = True
+            yield success_chunk
             return
         state.last_error = _candidate_error(candidate)
         state.upstream_cost_possible = (
-            state.upstream_cost_possible
-            or _candidate_upstream_cost_possible(candidate)
+            state.upstream_cost_possible or _candidate_upstream_cost_possible(candidate)
         )
         _log_provider_failure(
             candidate,
@@ -292,7 +302,17 @@ async def stream_enhance(
         # aclose() may be triggered by async-generator GC finalization after
         # the request session is already closed; settle/release via a detached
         # fresh-session task so the hold is never orphaned.
-        if not state.settled:
+        if (
+            not state.settled
+            and billing is not None
+            and billing.settle_outcome.attempted
+        ):
+            logger.warning(
+                "prompt enhance cancellation recovery skipped after billing "
+                "finalization attempt request_id=%s",
+                billing.request_id,
+            )
+        elif not state.settled:
             if state.dispatched or state.upstream_cost_possible:
                 await runtime.settle_default_after_cancel(
                     billing, reason="stream_cancelled"
