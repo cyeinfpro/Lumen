@@ -14,7 +14,6 @@ import type { VideoGenerationOut } from "@/lib/types";
 
 import type { GenerationRefreshRequest } from "./video-request-lifecycle";
 import {
-  createVideoSettlingCheckpoint,
   ensureVideoSettlingCheckpoint,
   isActiveVideo,
   isVideoMaterializationPending,
@@ -39,6 +38,9 @@ type VideoActivePollingTimerApi = {
 
 export const VIDEO_ACTIVE_POLL_INITIAL_DELAY_MS = 800;
 export const VIDEO_ACTIVE_POLL_INTERVAL_MS = 2500;
+// 整理窗口超时后恢复重查的节奏:快速轮询停止后,任务仍要继续跟进,
+// 避免 succeeded 但 video 为空的任务永久卡在"整理中"。
+export const VIDEO_SETTLING_RECOVERY_INTERVAL_MS = 30_000;
 
 export function startVideoActivePolling(
   ids: readonly string[],
@@ -71,6 +73,7 @@ export function useVideoSettlingController({
   scheduledRefreshTimersRef,
   pendingHistoryRefreshRef,
   scopeKey,
+  onExpired,
 }: {
   effectiveItems: VideoGenerationOut[];
   generationRefreshRequestsRef: MutableRefObject<
@@ -79,11 +82,13 @@ export function useVideoSettlingController({
   scheduledRefreshTimersRef: MutableRefObject<Map<string, number>>;
   pendingHistoryRefreshRef: MutableRefObject<Set<string>>;
   scopeKey: string;
+  onExpired: (id: string) => void;
 }): VideoSettlingController {
   const checkpointsRef = useRef<Map<string, VideoSettlingCheckpoint>>(
     new Map(),
   );
   const expiryTimersRef = useRef<Map<string, number>>(new Map());
+  const recoveryIntervalsRef = useRef<Map<string, number>>(new Map());
   const disabledRef = useRef<Set<string>>(new Set());
   const [version, setVersion] = useState(0);
 
@@ -103,9 +108,25 @@ export function useVideoSettlingController({
       generationRefreshRequestsRef.current.get(id)?.controller.abort();
       pendingHistoryRefreshRef.current.delete(id);
       setVersion((value) => value + 1);
+      // 整理窗口超时:主动把任务交还给 feed 重查状态,并以较慢节奏持续
+      // 恢复重查,直到视频落盘或任务不再处于素材化等待——succeeded 但
+      // video 为空的任务不能永久停留在"整理中"。窗口被 ensure 重新开启
+      // 期间该定时器只空转,到期后会再次触发 onExpired。
+      onExpired(id);
+      if (!recoveryIntervalsRef.current.has(id)) {
+        recoveryIntervalsRef.current.set(
+          id,
+          window.setInterval(() => {
+            const current = checkpointsRef.current.get(id);
+            if (!current || current.phase !== "expired") return;
+            onExpired(id);
+          }, VIDEO_SETTLING_RECOVERY_INTERVAL_MS),
+        );
+      }
     },
     [
       generationRefreshRequestsRef,
+      onExpired,
       pendingHistoryRefreshRef,
       scheduledRefreshTimersRef,
     ],
@@ -115,6 +136,9 @@ export function useVideoSettlingController({
     const timer = expiryTimersRef.current.get(id);
     if (timer != null) window.clearTimeout(timer);
     expiryTimersRef.current.delete(id);
+    const recoveryInterval = recoveryIntervalsRef.current.get(id);
+    if (recoveryInterval != null) window.clearInterval(recoveryInterval);
+    recoveryIntervalsRef.current.delete(id);
     if (checkpointsRef.current.delete(id)) {
       setVersion((value) => value + 1);
     }
@@ -124,8 +148,11 @@ export function useVideoSettlingController({
     (id: string) => {
       const nowMs = Date.now();
       const current = checkpointsRef.current.get(id);
+      // 已过期的 checkpoint 意味着上一个整理窗口结束时视频仍未落盘:
+      // 重新开启窗口,让恢复重查(以及任何一次 sync)继续跟进任务,
+      // 而不是把任务永久留在"整理中"。
       const checkpoint = ensureVideoSettlingCheckpoint(
-        current ?? createVideoSettlingCheckpoint(nowMs),
+        current?.phase === "expired" ? undefined : current,
         nowMs,
       );
       const changed =
@@ -169,7 +196,11 @@ export function useVideoSettlingController({
     for (const timer of expiryTimersRef.current.values()) {
       window.clearTimeout(timer);
     }
+    for (const interval of recoveryIntervalsRef.current.values()) {
+      window.clearInterval(interval);
+    }
     expiryTimersRef.current.clear();
+    recoveryIntervalsRef.current.clear();
     checkpointsRef.current.clear();
     disabledRef.current.clear();
     queueMicrotask(() => {
@@ -189,7 +220,11 @@ export function useVideoSettlingController({
       for (const timer of expiryTimersRef.current.values()) {
         window.clearTimeout(timer);
       }
+      for (const interval of recoveryIntervalsRef.current.values()) {
+        window.clearInterval(interval);
+      }
       expiryTimersRef.current.clear();
+      recoveryIntervalsRef.current.clear();
       checkpointsRef.current.clear();
       disabledRef.current.clear();
     },

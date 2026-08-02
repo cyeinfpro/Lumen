@@ -272,13 +272,24 @@ export function useSidebarController({
 
   const selectConversation = useCallback(
     async (conversation: ConversationSummary) => {
-      if (conversation.id === currentConversationId) {
+      const liveChatState = useChatStore.getState();
+      const liveConversationId = liveChatState.currentConvId;
+      const shouldRetryFailedHistory =
+        conversation.id === liveConversationId &&
+        Boolean(liveChatState.messagesError);
+
+      if (
+        conversation.id === liveConversationId &&
+        !shouldRetryFailedHistory
+      ) {
         onNavigate?.();
         if (shouldCloseMobileSidebar(embedded)) setSidebarOpen(false);
         return;
       }
 
-      setCurrentConversation(conversation.id);
+      if (conversation.id !== liveConversationId) {
+        setCurrentConversation(conversation.id);
+      }
       try {
         await loadHistoricalMessages(conversation.id);
         onNavigate?.();
@@ -291,7 +302,6 @@ export function useSidebarController({
       }
     },
     [
-      currentConversationId,
       embedded,
       loadHistoricalMessages,
       onNavigate,
@@ -318,13 +328,15 @@ export function useSidebarController({
     (conversation: ConversationSummary) => {
       deleteMutation.mutate(conversation.id, {
         onSuccess: () => {
-          if (currentConversationId === conversation.id) {
+          if (
+            useChatStore.getState().currentConvId === conversation.id
+          ) {
             setCurrentConversation(null);
           }
         },
       });
     },
-    [currentConversationId, deleteMutation, setCurrentConversation],
+    [deleteMutation, setCurrentConversation],
   );
 
   const toggleArchiveMenu = useCallback(() => {

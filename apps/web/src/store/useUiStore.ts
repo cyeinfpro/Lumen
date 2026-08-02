@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import {
+  getPrivateIdentitySnapshot,
+  isPrivateIdentitySnapshotCurrent,
+  type PrivateIdentitySnapshot,
+} from "@/lib/auth/privateIdentityEpoch";
+import {
   OPEN_EVENT,
   type LightboxItem,
   type OpenLightboxDetail,
@@ -30,6 +35,8 @@ export interface LightboxAction {
 }
 
 interface UiLightboxState {
+  ownerUserId: string | null;
+  identityEpoch: number;
   open: boolean;
   imageId: string | null;
   imageSrc: string | null;
@@ -42,8 +49,12 @@ interface UiLightboxState {
   action: LightboxAction | null;
 }
 
-function createClosedLightbox(): UiLightboxState {
+function createClosedLightbox(
+  identity = getPrivateIdentitySnapshot(),
+): UiLightboxState {
   return {
+    ownerUserId: identity.userId,
+    identityEpoch: identity.epoch,
     open: false,
     imageId: null,
     imageSrc: null,
@@ -83,8 +94,12 @@ interface UiState {
     action?: LightboxAction | null,
   ) => void;
   /** 在 lightbox 打开期间临时切换 action 的 pending 状态。 */
-  setLightboxActionPending: (pending: boolean) => void;
-  closeLightbox: () => void;
+  setLightboxActionPending: (
+    pending: boolean,
+    identity?: PrivateIdentitySnapshot,
+  ) => void;
+  closeLightbox: (identity?: PrivateIdentitySnapshot) => void;
+  resetPrivateUiForIdentity: (identity: PrivateIdentitySnapshot) => void;
   taskTray: {
     minimized: boolean;
   };
@@ -92,6 +107,16 @@ interface UiState {
   setTaskTrayMinimized: (minimized: boolean) => void;
   toggleTaskTray: () => void;
   setTaskIslandMounted: (mounted: boolean) => void;
+}
+
+function lightboxMatchesIdentity(
+  lightbox: UiLightboxState,
+  identity: PrivateIdentitySnapshot,
+): boolean {
+  return (
+    lightbox.ownerUserId === identity.userId &&
+    lightbox.identityEpoch === identity.epoch
+  );
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -108,9 +133,13 @@ export const useUiStore = create<UiState>((set) => ({
   canvasEnabled: false,
   setCanvasEnabled: (enabled) => set({ canvasEnabled: enabled }),
   lightbox: createClosedLightbox(),
-  openLightbox: (id, src, alt, previewSrc) =>
+  openLightbox: (id, src, alt, previewSrc) => {
+    const identity = getPrivateIdentitySnapshot();
+    if (!identity.userId) return;
     set({
       lightbox: {
+        ownerUserId: identity.userId,
+        identityEpoch: identity.epoch,
         open: true,
         imageId: id,
         imageSrc: src,
@@ -120,12 +149,17 @@ export const useUiStore = create<UiState>((set) => ({
         eventItems: null,
         action: null,
       },
-    }),
+    });
+  },
   openLightboxFromItems: (items, initialId, action) => {
     if (items.length === 0) return;
+    const identity = getPrivateIdentitySnapshot();
+    if (!identity.userId) return;
     const target = items.find((item) => item.id === initialId) ?? items[0];
     set({
       lightbox: {
+        ownerUserId: identity.userId,
+        identityEpoch: identity.epoch,
         open: true,
         imageId: target.id,
         imageSrc: target.url,
@@ -143,12 +177,25 @@ export const useUiStore = create<UiState>((set) => ({
         items,
         initialId: target.id,
         source: "store",
+        ownerUserId: identity.userId,
+        identityEpoch: identity.epoch,
       };
       window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail }));
     }
   },
-  setLightboxActionPending: (pending) =>
+  setLightboxActionPending: (pending, expectedIdentity) =>
     set((state) => {
+      const identity =
+        expectedIdentity ?? {
+          userId: state.lightbox.ownerUserId,
+          epoch: state.lightbox.identityEpoch,
+        };
+      if (
+        !isPrivateIdentitySnapshotCurrent(identity) ||
+        !lightboxMatchesIdentity(state.lightbox, identity)
+      ) {
+        return state;
+      }
       if (!state.lightbox.action) return state;
       return {
         lightbox: {
@@ -157,7 +204,28 @@ export const useUiStore = create<UiState>((set) => ({
         },
       };
     }),
-  closeLightbox: () => set({ lightbox: createClosedLightbox() }),
+  closeLightbox: (expectedIdentity) =>
+    set((state) => {
+      const identity =
+        expectedIdentity ?? {
+          userId: state.lightbox.ownerUserId,
+          epoch: state.lightbox.identityEpoch,
+        };
+      if (
+        !isPrivateIdentitySnapshotCurrent(identity) ||
+        !lightboxMatchesIdentity(state.lightbox, identity)
+      ) {
+        return state;
+      }
+      return { lightbox: createClosedLightbox(identity) };
+    }),
+  resetPrivateUiForIdentity: (identity) =>
+    set({
+      sidebarOpen: true,
+      sidebarSearch: "",
+      lightbox: createClosedLightbox(identity),
+      taskTray: { minimized: true },
+    }),
   taskTray: {
     minimized: true,
   },

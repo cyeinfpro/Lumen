@@ -6,6 +6,8 @@
 //   1. 按需 mount：state 为空时整棵子树不渲染。
 //   2. 单一状态源：内部 state 为准；URL ?img=<id> 只做前向 replace + 反向
 //      同步（渲染期 diff，不用 effect setState），不用 router.back。
+//      state 为空时 URL 出现 ?img（深链直达 / 前进后退）→ 从 chat store
+//      取图单图重开，实现完整深链闭环。
 //   3. 手势层复用 LightboxGestures：左右滑切、下拉关闭、上拉参数、
 //      pinch-zoom、双击缩放、放大后拖拽。
 //   4. 展示层走 `previewUrl`（display2048）避免 4K 原图 decode 卡死；
@@ -27,34 +29,37 @@ import { flushSync } from "react-dom";
 
 import { useChatStore } from "@/store/useChatStore";
 import { useUiStore } from "@/store/useUiStore";
+import { imageResultToLightboxItem } from "@/lib/imageResultLightbox";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
+import {
+  getPrivateIdentitySnapshot,
+  isPrivateIdentitySnapshotCurrent,
+} from "@/lib/auth/privateIdentityEpoch";
 import { useInpaintStore } from "@/store/useInpaintStore";
 import { useLightboxGestures } from "./LightboxGestures";
 import {
   MobileLightboxView,
   type ImgStatus,
-  type ThumbnailItem,
-  type VisibleSlide,
 } from "./MobileLightboxView";
 import {
-  displayUrlForItem,
-  isImageDecoded,
+  mobileLightboxThumbnailItems,
+  mobileLightboxVisibleSlides,
+} from "./mobileLightboxCollections";
+import {
+  currentMobileLightboxIdentity,
+  mobileLightboxOpenIdentity,
+  mobileLightboxOpenStateMatchesIdentity,
+  type MobileLightboxOpenState,
+} from "./mobileLightboxIdentity";
+import {
   preloadImage,
   preloadLightboxItem,
 } from "./mobileLightboxMedia";
+import { useMobileLightboxChrome } from "./useMobileLightboxChrome";
 import { useMobileLightboxDialog } from "./useMobileLightboxDialog";
 import { useMobileLightboxMediaActions } from "./useMobileLightboxMediaActions";
-import {
-  CLOSE_EVENT,
-  OPEN_EVENT,
-  type LightboxItem,
-  type OpenLightboxDetail,
-} from "./types";
-
-interface OpenState {
-  items: LightboxItem[];
-  currentId: string;
-}
+import { useMobileLightboxSwitch } from "./useMobileLightboxSwitch";
+import { type LightboxItem } from "./types";
 
 type MotionPlayback = {
   stop: () => void;
@@ -64,10 +69,7 @@ type MotionPlayback = {
 const _subscribeNoop = () => () => {};
 const _getClientSnapshot = () => true;
 const _getServerSnapshot = () => false;
-const CHROME_HIDE_MS = 2600;
-const CHROME_ACTIVITY_THROTTLE_MS = 320;
 const PRELOAD_NEIGHBOR_RADIUS = 2;
-const THUMB_WINDOW_SIZE = 17;
 const EMPTY_LIGHTBOX_ITEMS: LightboxItem[] = [];
 
 export function MobileLightbox() {
@@ -76,7 +78,7 @@ export function MobileLightbox() {
   // MobileLightbox 自身仍以本地 OpenState 作为 source of truth，因此这里只读 action。
   const lightboxAction = useUiStore((s) => s.lightbox.action);
 
-  const [state, setState] = useState<OpenState | null>(null);
+  const [state, setState] = useState<MobileLightboxOpenState | null>(null);
   const [paramsOpen, setParamsOpen] = useState(false);
   const [imgStatus, setImgStatus] = useState<ImgStatus>("loading");
   const [useFallback, setUseFallback] = useState(false);
@@ -88,6 +90,7 @@ export function MobileLightbox() {
   const total = items.length;
   const isFirst = idx <= 0;
   const isLast = idx < 0 || idx === total - 1;
+  const mediaIdentity = currentMobileLightboxIdentity(state);
   const {
     downloadStatus,
     actionNotice,
@@ -97,6 +100,8 @@ export function MobileLightbox() {
     handleShare,
   } = useMobileLightboxMediaActions({
     current,
+    ownerUserId: mediaIdentity.userId,
+    identityEpoch: mediaIdentity.epoch,
     downloadAnchorRef,
   });
   const dragX = useMotionValue(0);
@@ -112,23 +117,14 @@ export function MobileLightbox() {
   );
   const urlImg = mounted ? (searchParams?.get("img") ?? null) : null;
   const [prevUrlImg, setPrevUrlImg] = useState<string | null>(null);
-  const [chromeVisible, setChromeVisible] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [boundaryHint, setBoundaryHint] = useState<"first" | "last" | null>(
-    null,
-  );
   const [fallbackItemIds, setFallbackItemIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const chromeTimerRef = useRef<number | null>(null);
-  const chromeVisibleRef = useRef(true);
-  const imgStatusRef = useRef<ImgStatus>("loading");
-  const paramsOpenRef = useRef(false);
-  const lastChromeActivityRef = useRef(0);
-  const boundaryTimerRef = useRef<number | null>(null);
   const activeThumbRef = useRef<HTMLButtonElement | null>(null);
   const switchSeqRef = useRef(0);
   const preloadAbortRef = useRef<AbortController | null>(null);
+  const neighborPreloadAbortRef = useRef<AbortController | null>(null);
   const swipeAnimationRef = useRef<MotionPlayback | null>(null);
 
   const resetMotion = useCallback(() => {
@@ -139,9 +135,35 @@ export function MobileLightbox() {
     setZoomLevel(1);
   }, [dragX, dragY, scale, haloOpacity]);
 
+  const {
+    chromeVisible,
+    setChromeVisible,
+    boundaryHint,
+    setBoundaryHint,
+    clearChromeTimer,
+    clearBoundaryTimer,
+    showBoundaryHint,
+    scheduleChromeHide,
+    handlePointerActivity,
+    resetZoom,
+    handleCloseParams: showChromeAfterClosingParams,
+  } = useMobileLightboxChrome({
+    openCurrentId: state?.currentId ?? null,
+    imgStatus,
+    paramsOpen,
+    resetMotion,
+  });
+
   const stopSwipeAnimation = useCallback(() => {
     swipeAnimationRef.current?.stop();
     swipeAnimationRef.current = null;
+  }, []);
+
+  const abortPreloads = useCallback(() => {
+    preloadAbortRef.current?.abort();
+    preloadAbortRef.current = null;
+    neighborPreloadAbortRef.current?.abort();
+    neighborPreloadAbortRef.current = null;
   }, []);
 
   const markItemFallback = useCallback((id: string) => {
@@ -156,75 +178,6 @@ export function MobileLightbox() {
   useMotionValueEvent(scale, "change", (latest) => {
     setZoomLevel(latest);
   });
-
-  useEffect(() => {
-    chromeVisibleRef.current = chromeVisible;
-  }, [chromeVisible]);
-
-  useEffect(() => {
-    imgStatusRef.current = imgStatus;
-  }, [imgStatus]);
-
-  useEffect(() => {
-    paramsOpenRef.current = paramsOpen;
-  }, [paramsOpen]);
-
-  const clearChromeTimer = useCallback(() => {
-    if (chromeTimerRef.current !== null) {
-      window.clearTimeout(chromeTimerRef.current);
-      chromeTimerRef.current = null;
-    }
-  }, []);
-
-  const clearBoundaryTimer = useCallback(() => {
-    if (boundaryTimerRef.current !== null) {
-      window.clearTimeout(boundaryTimerRef.current);
-      boundaryTimerRef.current = null;
-    }
-  }, []);
-
-  const showBoundaryHint = useCallback(
-    (edge: "first" | "last") => {
-      clearBoundaryTimer();
-      setBoundaryHint(edge);
-      setChromeVisible(true);
-      boundaryTimerRef.current = window.setTimeout(() => {
-        setBoundaryHint(null);
-        boundaryTimerRef.current = null;
-      }, 1100);
-    },
-    [clearBoundaryTimer],
-  );
-
-  const scheduleChromeHide = useCallback(() => {
-    clearChromeTimer();
-    if (paramsOpenRef.current || imgStatusRef.current !== "loaded") return;
-    chromeTimerRef.current = window.setTimeout(() => {
-      chromeVisibleRef.current = false;
-      setChromeVisible(false);
-      chromeTimerRef.current = null;
-    }, CHROME_HIDE_MS);
-  }, [clearChromeTimer]);
-
-  const handlePointerActivity = useCallback(() => {
-    const now = performance.now();
-    const shouldReschedule =
-      now - lastChromeActivityRef.current >= CHROME_ACTIVITY_THROTTLE_MS;
-    if (!chromeVisibleRef.current) {
-      chromeVisibleRef.current = true;
-      setChromeVisible(true);
-    } else if (!shouldReschedule) {
-      return;
-    }
-    lastChromeActivityRef.current = now;
-    scheduleChromeHide();
-  }, [scheduleChromeHide]);
-
-  const resetZoom = useCallback(() => {
-    resetMotion();
-    setChromeVisible(true);
-    scheduleChromeHide();
-  }, [resetMotion, scheduleChromeHide]);
 
   // —— URL 写入：单向 replace ?img=<id>；id=null 删除 ?img ——
   const replaceUrlWithImg = useCallback((id: string | null) => {
@@ -241,146 +194,48 @@ export function MobileLightbox() {
     replaceRef.current = replaceUrlWithImg;
   }, [replaceUrlWithImg]);
 
-  const switchToItem = useCallback(
-    (nextItem: LightboxItem, options: { replaceUrl?: boolean } = {}) => {
-      const replaceUrl = options.replaceUrl !== false;
-      const seq = switchSeqRef.current + 1;
-      switchSeqRef.current = seq;
-      stopSwipeAnimation();
-      preloadAbortRef.current?.abort();
-      const preloadAbort = new AbortController();
-      preloadAbortRef.current = preloadAbort;
-      const knownFallback = fallbackItemIds.has(nextItem.id);
-      const nextDisplayUrl = displayUrlForItem(nextItem, knownFallback);
-      resetMotion();
-      setParamsOpen(false);
-      setChromeVisible(true);
-      resetMediaActions();
-      setBoundaryHint(null);
-      setUseFallback(knownFallback);
-      setImgStatus(isImageDecoded(nextDisplayUrl) ? "loaded" : "loading");
-      setState((prev) => (prev ? { ...prev, currentId: nextItem.id } : prev));
-      if (replaceUrl) {
-        replaceRef.current(nextItem.id);
-      }
+  const { switchToItem } = useMobileLightboxSwitch({
+    state,
+    setState,
+    switchSeqRef,
+    preloadAbortRef,
+    fallbackItemIds,
+    setFallbackItemIds,
+    stopSwipeAnimation,
+    abortPreloads,
+    resetMotion,
+    setParamsOpen,
+    setChromeVisible,
+    resetMediaActions,
+    setBoundaryHint,
+    setUseFallback,
+    setImgStatus,
+    markItemFallback,
+    replaceRef,
+    clearBoundaryTimer,
+    clearChromeTimer,
+  });
 
-      void (async () => {
-        let useOriginalFallback = knownFallback;
-        try {
-          if (knownFallback) {
-            await preloadImage(nextItem.url, preloadAbort.signal);
-          } else {
-            useOriginalFallback = await preloadLightboxItem(
-              nextItem,
-              preloadAbort.signal,
-            );
-          }
-        } catch {
-          if (preloadAbort.signal.aborted) return;
-          if (preloadAbortRef.current === preloadAbort) {
-            preloadAbortRef.current = null;
-          }
-          return;
-        }
-        if (switchSeqRef.current !== seq) return;
-        if (preloadAbortRef.current === preloadAbort) {
-          preloadAbortRef.current = null;
-        }
-        if (useOriginalFallback) {
-          markItemFallback(nextItem.id);
-          setUseFallback(true);
-        }
-        setImgStatus("loaded");
-      })();
-    },
-    [
-      fallbackItemIds,
-      markItemFallback,
-      resetMediaActions,
-      resetMotion,
-      stopSwipeAnimation,
-    ],
+  // 深链重开用的图数据：state 为空且 URL 带 ?img 时订阅目标图，
+  // 数据到达（首屏 history 加载完 / 生成完成）→ 组件重渲染 → 下面 effect 重跑 → 开灯箱。
+  // 未命中时 selector 恒定返回 undefined，避免随 store 全量 churn 重渲染。
+  const deepLinkImage = useChatStore((s) =>
+    urlImg && !state ? s.imagesById[urlImg] : undefined,
+  );
+  const deepLinkGeneration = useChatStore((s) =>
+    deepLinkImage ? s.generations[deepLinkImage.from_generation_id] : undefined,
   );
 
-  // —— event listener：按依赖更新，避免 handler 读旧状态 ——
-  useEffect(() => {
-    const onOpen = (e: Event) => {
-      const ce = e as CustomEvent<OpenLightboxDetail>;
-      const detail = ce.detail;
-      if (!detail || !detail.items || detail.items.length === 0) return;
-      const initialId =
-        detail.items.find((x) => x.id === detail.initialId)?.id ??
-        detail.items[0].id;
-      const initialItem =
-        detail.items.find((x) => x.id === initialId) ?? detail.items[0];
-      const knownFallback = fallbackItemIds.has(initialId);
-      switchSeqRef.current += 1;
-      stopSwipeAnimation();
-      preloadAbortRef.current?.abort();
-      preloadAbortRef.current = null;
-      setState({ items: detail.items, currentId: initialId });
-      setParamsOpen(false);
-      setChromeVisible(true);
-      resetMotion();
-      setImgStatus(
-        isImageDecoded(displayUrlForItem(initialItem, knownFallback))
-          ? "loaded"
-          : "loading",
-      );
-      setUseFallback(knownFallback);
-      resetMediaActions();
-      setBoundaryHint(null);
-      replaceRef.current(initialId);
-    };
-    const onCloseEvt = () => {
-      switchSeqRef.current += 1;
-      stopSwipeAnimation();
-      preloadAbortRef.current?.abort();
-      preloadAbortRef.current = null;
-      setState(null);
-      setParamsOpen(false);
-      setChromeVisible(true);
-      clearChromeTimer();
-      resetMotion();
-      setImgStatus("loading");
-      setUseFallback(false);
-      resetMediaActions();
-      setBoundaryHint(null);
-      replaceRef.current(null);
-      useUiStore.getState().closeLightbox();
-    };
-    window.addEventListener(OPEN_EVENT, onOpen as EventListener);
-    window.addEventListener(CLOSE_EVENT, onCloseEvt);
-    return () => {
-      window.removeEventListener(OPEN_EVENT, onOpen as EventListener);
-      window.removeEventListener(CLOSE_EVENT, onCloseEvt);
-    };
-  }, [
-    clearChromeTimer,
-    fallbackItemIds,
-    resetMediaActions,
-    resetMotion,
-    stopSwipeAnimation,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      clearBoundaryTimer();
-      stopSwipeAnimation();
-      preloadAbortRef.current?.abort();
-      preloadAbortRef.current = null;
-    };
-  }, [
-    clearBoundaryTimer,
-    stopSwipeAnimation,
-  ]);
-
   // —— URL → state 反向同步：只在客户端 effect 同步，避免 SSR/渲染期 setState ——
+  // state 为空时 URL 出现 ?img（深链直达、前进后退回到带 ?img 的条目）也视为开灯箱
+  // 意图：从 chat store 取该图，以单图重开（与 CanvasNodesPreview 的单图打开一致）。
   useEffect(() => {
     if (urlImg === prevUrlImg) return;
     let canceled = false;
+    const identity = state ? mobileLightboxOpenIdentity(state) : null;
     queueMicrotask(() => {
       if (canceled) return;
+      if (identity && !isPrivateIdentitySnapshotCurrent(identity)) return;
       if (state?.currentId === urlImg) {
         setPrevUrlImg(urlImg);
         return;
@@ -394,6 +249,38 @@ export function MobileLightbox() {
         }
         setPrevUrlImg(state.currentId);
         replaceRef.current(state.currentId);
+        return;
+      }
+      if (urlImg && !state) {
+        // 深链重开：灯箱关闭时 ?img 出现。数据未就绪则保持 pending
+        // （不推进 prevUrlImg），deepLinkImage/deepLinkGeneration 就绪后
+        // effect 因依赖变化重跑，这里再打开。
+        const image = deepLinkImage;
+        const generation = deepLinkGeneration;
+        if (!image || !generation) return;
+        const currentIdentity = getPrivateIdentitySnapshot();
+        if (!currentIdentity.userId) return;
+        const item = imageResultToLightboxItem(generation, image, {
+          createdAt: generation.finished_at ?? generation.started_at,
+        });
+        switchSeqRef.current += 1;
+        stopSwipeAnimation();
+        abortPreloads();
+        clearBoundaryTimer();
+        setState({
+          ownerUserId: currentIdentity.userId,
+          identityEpoch: currentIdentity.epoch,
+          items: [item],
+          currentId: urlImg,
+        });
+        setPrevUrlImg(urlImg);
+        setParamsOpen(false);
+        setChromeVisible(true);
+        resetMotion();
+        setImgStatus("loading");
+        setUseFallback(false);
+        resetMediaActions();
+        setBoundaryHint(null);
         return;
       }
       setPrevUrlImg(urlImg);
@@ -419,10 +306,17 @@ export function MobileLightbox() {
       canceled = true;
     };
   }, [
+    abortPreloads,
+    clearBoundaryTimer,
+    deepLinkGeneration,
+    deepLinkImage,
     prevUrlImg,
     resetMediaActions,
     resetMotion,
+    setBoundaryHint,
+    setChromeVisible,
     state,
+    stopSwipeAnimation,
     switchToItem,
     urlImg,
   ]);
@@ -431,6 +325,8 @@ export function MobileLightbox() {
   const goto = useCallback(
     (delta: 1 | -1) => {
       if (!state) return;
+      if (!isPrivateIdentitySnapshotCurrent(mobileLightboxOpenIdentity(state)))
+        return;
       const idx = state.items.findIndex((x) => x.id === state.currentId);
       if (idx < 0) return;
       const next = idx + delta;
@@ -447,6 +343,8 @@ export function MobileLightbox() {
   const commitSwipe = useCallback(
     (delta: 1 | -1): boolean => {
       if (!state || swipeAnimationRef.current) return false;
+      const identity = mobileLightboxOpenIdentity(state);
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return false;
       const idx = state.items.findIndex((x) => x.id === state.currentId);
       if (idx < 0) return false;
       const next = idx + delta;
@@ -477,6 +375,7 @@ export function MobileLightbox() {
       swipeAnimationRef.current = controls;
       void controls.then(() => {
         if (
+          !isPrivateIdentitySnapshotCurrent(identity) ||
           switchSeqRef.current !== seq ||
           swipeAnimationRef.current !== controls
         ) {
@@ -493,10 +392,11 @@ export function MobileLightbox() {
   );
 
   const close = useCallback(() => {
+    const identity = state ? mobileLightboxOpenIdentity(state) : null;
     switchSeqRef.current += 1;
     stopSwipeAnimation();
-    preloadAbortRef.current?.abort();
-    preloadAbortRef.current = null;
+    abortPreloads();
+    clearBoundaryTimer();
     setState(null);
     setParamsOpen(false);
     setChromeVisible(true);
@@ -510,20 +410,26 @@ export function MobileLightbox() {
     // 同步清空 store：openLightboxFromItems 写入了 open=true / action，
     // 仅清本地 state 会让 MobileTabBar（订阅 lightbox.open）持续隐藏，
     // 下次开 lightbox 还会带出旧 action。store setState 幂等，无回环风险。
-    useUiStore.getState().closeLightbox();
+    if (identity && isPrivateIdentitySnapshotCurrent(identity)) {
+      useUiStore.getState().closeLightbox(identity);
+    }
   }, [
+    abortPreloads,
+    clearBoundaryTimer,
     clearChromeTimer,
     resetMediaActions,
     resetMotion,
+    setBoundaryHint,
+    setChromeVisible,
+    state,
     stopSwipeAnimation,
   ]);
 
   const isOpen = state !== null;
   const handleCloseParams = useCallback(() => {
     setParamsOpen(false);
-    setChromeVisible(true);
-    scheduleChromeHide();
-  }, [scheduleChromeHide]);
+    showChromeAfterClosingParams();
+  }, [showChromeAfterClosingParams]);
   const {
     dialogRootRef,
     closeButtonRef,
@@ -536,31 +442,10 @@ export function MobileLightbox() {
     onCloseParams: handleCloseParams,
   });
 
-  const openCurrentId = state?.currentId ?? null;
-  useEffect(() => {
-    if (!openCurrentId) {
-      clearChromeTimer();
-      return;
-    }
-    let canceled = false;
-    queueMicrotask(() => {
-      if (!canceled) setChromeVisible(true);
-    });
-    scheduleChromeHide();
-    return () => {
-      canceled = true;
-      clearChromeTimer();
-    };
-  }, [
-    clearChromeTimer,
-    imgStatus,
-    openCurrentId,
-    paramsOpen,
-    scheduleChromeHide,
-  ]);
-
   const handleIterate = useCallback(() => {
     if (!state) return;
+    if (!isPrivateIdentitySnapshotCurrent(mobileLightboxOpenIdentity(state)))
+      return;
     const id = state.currentId;
     const img = useChatStore.getState().imagesById[id];
     if (!img) return;
@@ -571,6 +456,8 @@ export function MobileLightbox() {
 
   const handleUpscale = useCallback(() => {
     if (!state) return;
+    if (!isPrivateIdentitySnapshotCurrent(mobileLightboxOpenIdentity(state)))
+      return;
     const id = state.currentId;
     close();
     void useChatStore.getState().upscaleImage(id);
@@ -579,6 +466,8 @@ export function MobileLightbox() {
 
   const handleReroll = useCallback(() => {
     if (!state) return;
+    if (!isPrivateIdentitySnapshotCurrent(mobileLightboxOpenIdentity(state)))
+      return;
     const id = state.currentId;
     close();
     void useChatStore.getState().rerollImage(id);
@@ -587,6 +476,8 @@ export function MobileLightbox() {
 
   const handleInpaint = useCallback(() => {
     if (!state) return;
+    if (!isPrivateIdentitySnapshotCurrent(mobileLightboxOpenIdentity(state)))
+      return;
     const id = state.currentId;
     const img = useChatStore.getState().imagesById[id];
     if (!img) return;
@@ -600,9 +491,13 @@ export function MobileLightbox() {
   }, [state, close]);
 
   useEffect(() => {
-    if (!current || idx < 0) return;
+    if (!current || idx < 0 || !state) return;
+    const identity = mobileLightboxOpenIdentity(state);
+    if (!isPrivateIdentitySnapshotCurrent(identity)) return;
     const seq = switchSeqRef.current;
     const controller = new AbortController();
+    neighborPreloadAbortRef.current?.abort();
+    neighborPreloadAbortRef.current = controller;
     let disposed = false;
     const preloadTargets: LightboxItem[] = [];
     for (
@@ -616,14 +511,18 @@ export function MobileLightbox() {
     preloadTargets.forEach((item) => {
       const isActive = item.id === current.id;
       const knownFallback = fallbackItemIds.has(item.id);
-      const signal = isActive ? controller.signal : undefined;
       const warm = knownFallback
-        ? preloadImage(item.url, signal).then(() => true)
-        : preloadLightboxItem(item, signal);
+        ? preloadImage(item.url, controller.signal).then(() => true)
+        : preloadLightboxItem(item, controller.signal);
 
       void warm
         .then((usedFallback) => {
-          if (disposed) return;
+          if (
+            disposed ||
+            !isPrivateIdentitySnapshotCurrent(identity)
+          ) {
+            return;
+          }
           if (usedFallback) markItemFallback(item.id);
           if (!isActive || switchSeqRef.current !== seq) return;
           if (usedFallback) setUseFallback(true);
@@ -645,8 +544,11 @@ export function MobileLightbox() {
     return () => {
       disposed = true;
       controller.abort();
+      if (neighborPreloadAbortRef.current === controller) {
+        neighborPreloadAbortRef.current = null;
+      }
     };
-  }, [current, fallbackItemIds, idx, items, markItemFallback]);
+  }, [current, fallbackItemIds, idx, items, markItemFallback, state]);
 
   useEffect(() => {
     if (!current?.id || total <= 1) return;
@@ -660,27 +562,34 @@ export function MobileLightbox() {
     return () => cancelAnimationFrame(raf);
   }, [current?.id, total]);
 
-  const thumbItems = useMemo<ThumbnailItem[]>(() => {
-    if (idx < 0 || total <= THUMB_WINDOW_SIZE) {
-      return items.map((item, itemIdx) => ({ item, itemIdx }));
-    }
-    const radius = Math.floor(THUMB_WINDOW_SIZE / 2);
-    let start = Math.max(0, idx - radius);
-    const end = Math.min(total, start + THUMB_WINDOW_SIZE);
-    start = Math.max(0, end - THUMB_WINDOW_SIZE);
-    return items
-      .slice(start, end)
-      .map((item, offset) => ({ item, itemIdx: start + offset }));
-  }, [idx, items, total]);
-
-  const visibleSlides = useMemo<VisibleSlide[]>(() => {
-    if (!current || idx < 0) return [];
-    const slides: Array<{ item: LightboxItem; offset: -1 | 0 | 1 }> = [];
-    if (idx > 0) slides.push({ item: items[idx - 1], offset: -1 });
-    slides.push({ item: current, offset: 0 });
-    if (idx < total - 1) slides.push({ item: items[idx + 1], offset: 1 });
-    return slides;
-  }, [current, idx, items, total]);
+  const thumbItems = useMemo(
+    () => mobileLightboxThumbnailItems(items, idx, total),
+    [idx, items, total],
+  );
+  const visibleSlides = useMemo(
+    () => mobileLightboxVisibleSlides(items, current, idx, total),
+    [current, idx, items, total],
+  );
+  const guardedLightboxAction = useMemo(() => {
+    if (!lightboxAction || !state) return null;
+    const identity = mobileLightboxOpenIdentity(state);
+    return {
+      ...lightboxAction,
+      onClick: (item: LightboxItem) => {
+        const currentLightbox = useUiStore.getState().lightbox;
+        if (
+          !isPrivateIdentitySnapshotCurrent(identity) ||
+          !mobileLightboxOpenStateMatchesIdentity(state, identity) ||
+          currentLightbox.ownerUserId !== identity.userId ||
+          currentLightbox.identityEpoch !== identity.epoch ||
+          state.currentId !== item.id
+        ) {
+          return;
+        }
+        lightboxAction.onClick(item);
+      },
+    };
+  }, [lightboxAction, state]);
 
   useLightboxGestures(
     gestureTargetRef,
@@ -749,7 +658,7 @@ export function MobileLightbox() {
       downloadStatus={downloadStatus}
       actionNotice={actionNotice}
       boundaryHint={boundaryHint}
-      lightboxAction={lightboxAction}
+      lightboxAction={guardedLightboxAction}
       visibleSlides={visibleSlides}
       thumbItems={thumbItems}
       gestureTargetRef={gestureTargetRef}

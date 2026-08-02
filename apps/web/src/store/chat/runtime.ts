@@ -31,6 +31,7 @@ import {
   mergeCompletionStreamPatch,
   type PendingCompletionStreamPatch,
 } from "./completionStreamPatches";
+import { clearPendingCompletionImages } from "./completionImageBuffer";
 import { buildBase64EvictionPatch } from "./base64Eviction";
 import { DEFAULT_PARAMS } from "./imageParams";
 import { optionalRecord as parseOptionalRecord, optionalString, recommendedActionsFromUnknown, ssePayloadRecord as parseSsePayloadRecord } from "./payload";
@@ -461,7 +462,10 @@ function releaseImageBase64(img: GeneratedImage): GeneratedImage {
 
 // 每个会话独立的历史消息请求 abort 控制器；Map<convId, AbortController> 避免并发请求互相 abort。
 const _historyAborts = new Map<string, AbortController>();
-const _sendMessageAborts = new Set<AbortController>();
+// 发送请求统一 abort 用；submitted 标记 POST 是否已交给后端。已提交的请求
+// 后端可能已计费，切会话时不能 abort，否则会静默丢弃一笔已计费发送。
+type TrackedSendRequest = { controller: AbortController; submitted: boolean };
+const _sendMessageAborts = new Set<TrackedSendRequest>();
 const _userSessionFence = createRequestFence();
 const _conversationMutationFence = createRequestFence();
 let _base64EvictionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -511,15 +515,29 @@ function abortAllHistoryRequests(): void {
 }
 
 function trackSendRequest(ctl: AbortController): () => void {
-  _sendMessageAborts.add(ctl);
+  const record: TrackedSendRequest = { controller: ctl, submitted: false };
+  _sendMessageAborts.add(record);
   return () => {
-    _sendMessageAborts.delete(ctl);
+    _sendMessageAborts.delete(record);
   };
 }
 
+// POST 发出前一刻调用：此后 abort 已无意义——后端收到即可能已计费，
+// abort 只会丢掉响应、让 catch 里 removeOptimisticSend 静默清掉本地状态。
+function markSendRequestSubmitted(ctl: AbortController): void {
+  for (const record of _sendMessageAborts) {
+    if (record.controller === ctl) {
+      record.submitted = true;
+      return;
+    }
+  }
+}
+
 function abortAllSendRequests(): void {
-  for (const ctl of _sendMessageAborts) {
-    ctl.abort();
+  for (const record of _sendMessageAborts) {
+    // 只 abort 尚未提交到后端的请求；已提交的发送保留在途状态，让 POST
+    // 自然完成并由 isStaleSend / 还原逻辑接管，避免静默丢弃已计费发送。
+    if (!record.submitted) record.controller.abort();
   }
   _sendMessageAborts.clear();
 }
@@ -758,6 +776,7 @@ function clearConversationIndexes(): void {
   _generationIdAliases.clear();
   _completionMessageAliases.clear();
   _conversationHistoryCache.clear();
+  clearPendingCompletionImages();
 }
 
 function clearUserScopedRuntime(): void {
@@ -868,6 +887,7 @@ export {
   abortHistoryRequest,
   abortAllHistoryRequests,
   trackSendRequest,
+  markSendRequestSubmitted,
   abortAllSendRequests,
   setBounded,
   rememberConversationHistoryCache,

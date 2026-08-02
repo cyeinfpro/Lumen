@@ -4,6 +4,7 @@ import type { BackendCompletion } from "../../lib/apiClient";
 import type {
   AssistantMessage,
   Message,
+  UserMessage,
 } from "../../lib/types";
 
 const {
@@ -66,6 +67,31 @@ test("message merge deduplicates and keeps chronological order", () => {
     [
       ["assistant-0", "streaming"],
       ["assistant-1", "failed"],
+    ],
+  );
+});
+
+test("merge keeps optimistic user/assistant pair order on created_at tie", () => {
+  const user: UserMessage = {
+    id: "opt-user-1111",
+    role: "user",
+    text: "hello",
+    attachments: [],
+    intent: "chat",
+    image_params: { aspect_ratio: "1:1", size_mode: "auto" },
+    created_at: 5,
+  };
+  const reply = assistant({
+    id: "opt-asst-2222",
+    parent_user_message_id: user.id,
+    created_at: 5,
+  });
+  const merged = mergeMessagesById([], [reply, user]);
+  assert.deepEqual(
+    merged.map((message: Message) => [message.id, message.role]),
+    [
+      [user.id, "user"],
+      [reply.id, "assistant"],
     ],
   );
 });

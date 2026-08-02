@@ -12,6 +12,16 @@ function source(relativePath) {
   return fs.readFileSync(path.join(webRoot, relativePath), "utf8");
 }
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 const jsxRuntime = {
   Fragment: Symbol.for("react.fragment"),
   jsx(type, props, key) {
@@ -40,9 +50,11 @@ function looseMock() {
 function createReactHarness({ captureEffects = false } = {}) {
   const memoCalls = [];
   const refs = [];
+  const refValues = [];
   const cleanups = [];
   const stateValues = [];
   let stateCursor = 0;
+  let refCursor = 0;
   let onStateChange = null;
 
   const react = {
@@ -57,9 +69,12 @@ function createReactHarness({ captureEffects = false } = {}) {
       return factory();
     },
     useRef(value) {
-      const ref = { current: value };
-      refs.push(ref);
-      return ref;
+      const index = refCursor++;
+      if (!(index in refValues)) {
+        refValues[index] = { current: value };
+        refs.push(refValues[index]);
+      }
+      return refValues[index];
     },
     useState(initial) {
       const index = stateCursor++;
@@ -79,6 +94,10 @@ function createReactHarness({ captureEffects = false } = {}) {
       const cleanup = effect();
       if (typeof cleanup === "function") cleanups.push(cleanup);
     },
+    useLayoutEffect(effect) {
+      const cleanup = effect();
+      if (typeof cleanup === "function") cleanups.push(cleanup);
+    },
   };
 
   return {
@@ -88,6 +107,7 @@ function createReactHarness({ captureEffects = false } = {}) {
     cleanups,
     startRender() {
       stateCursor = 0;
+      refCursor = 0;
     },
     setStateObserver(observer) {
       onStateChange = observer;
@@ -241,6 +261,8 @@ function baseChatMocks(harness, extra = {}) {
 test("inpaint submit acquires a synchronous lock before mask export awaits", async () => {
   const harness = createReactHarness();
   const inpaint = {
+    ownerUserId: "user-a",
+    identityEpoch: 1,
     open: true,
     source: { imageId: "image-1", src: "data:image/png;base64,x", width: 10, height: 10 },
     submitting: false,
@@ -267,6 +289,7 @@ test("inpaint submit acquires a synchronous lock before mask export awaits", asy
   const chat = {
     submitInpaintTask: async () => {
       submitCalls += 1;
+      return { status: "submitted" };
     },
   };
   const mocks = {
@@ -296,6 +319,10 @@ test("inpaint submit acquires a synchronous lock before mask export awaits", asy
     "./MaskBoard": { MaskBoard: "MaskBoard" },
     "@/hooks/useBodyScrollLock": { useBodyScrollLock() {} },
     "@/lib/logger": { logError() {} },
+    "@/lib/auth/privateIdentityEpoch": {
+      isPrivateIdentitySnapshotCurrent: ({ userId, epoch }) =>
+        userId === "user-a" && epoch === 1,
+    },
     "@/lib/promptLimits": { MAX_PROMPT_CHARS: 10_000 },
     "@/lib/sizing": { nearestAspectRatio: () => "1:1" },
     "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
@@ -674,6 +701,192 @@ test("lightbox delayed taps are canceled by effect cleanup", () => {
   } finally {
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
+    } else {
+      delete globalThis.window;
+    }
+  }
+});
+
+test("mobile lightbox media actions drop stale identity side effects", async () => {
+  const harness = createReactHarness();
+  const response = createDeferred();
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  let anchorClicks = 0;
+  let currentIdentity = { userId: "user-a", epoch: 31 };
+  globalThis.fetch = () => {
+    fetchCalls += 1;
+    return response.promise;
+  };
+
+  try {
+    const { useMobileLightboxMediaActions } = loadModule(
+      "src/components/ui/lightbox/useMobileLightboxMediaActions.ts",
+      {
+        react: harness.react,
+        "@/lib/auth/privateIdentityEpoch": {
+          isPrivateIdentitySnapshotCurrent: ({ userId, epoch }) =>
+            userId === currentIdentity.userId &&
+            epoch === currentIdentity.epoch,
+        },
+        "@/lib/clipboard": {
+          copyTextToClipboard: async () => undefined,
+        },
+        "@/lib/queries": {
+          useCreateShareMutation: () => ({
+            isPending: false,
+            mutateAsync: async () => ({ url: "https://example.test/share" }),
+          }),
+        },
+      },
+    );
+    harness.startRender();
+    const actions = useMobileLightboxMediaActions({
+      current: {
+        id: "image-a",
+        url: "/api/images/image-a/binary",
+      },
+      ownerUserId: "user-a",
+      identityEpoch: 31,
+      downloadAnchorRef: {
+        current: {
+          removeAttribute() {},
+          click() {
+            anchorClicks += 1;
+          },
+        },
+      },
+    });
+
+    actions.handleDownload();
+    assert.equal(fetchCalls, 1);
+    currentIdentity = { userId: "user-b", epoch: 32 };
+    response.resolve(
+      new Response(new Blob(["image"], { type: "image/png" }), {
+        status: 200,
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(anchorClicks, 0);
+    actions.handleDownload();
+    assert.equal(fetchCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("mobile lightbox media actions drop image A after a same-identity swipe to B", async () => {
+  const harness = createReactHarness();
+  const imageA = createDeferred();
+  const imageB = createDeferred();
+  const originalFetch = globalThis.fetch;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const downloads = [];
+  const stateChanges = [];
+  const responses = [imageA.promise, imageB.promise];
+  let fetchCalls = 0;
+  globalThis.fetch = () => {
+    fetchCalls += 1;
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  };
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout() {},
+      setTimeout() {
+        return 1;
+      },
+    },
+  });
+
+  try {
+    const { useMobileLightboxMediaActions } = loadModule(
+      "src/components/ui/lightbox/useMobileLightboxMediaActions.ts",
+      {
+        react: harness.react,
+        "@/lib/auth/privateIdentityEpoch": {
+          isPrivateIdentitySnapshotCurrent: ({ userId, epoch }) =>
+            userId === "user-a" && epoch === 31,
+        },
+        "@/lib/clipboard": {
+          copyTextToClipboard: async () => undefined,
+        },
+        "@/lib/queries": {
+          useCreateShareMutation: () => ({
+            isPending: false,
+            mutateAsync: async () => ({ url: "https://example.test/share" }),
+          }),
+        },
+      },
+    );
+    harness.setStateObserver((next) => {
+      stateChanges.push(next);
+    });
+    const anchor = {
+      href: "",
+      download: "",
+      removeAttribute() {},
+      click() {
+        downloads.push({ href: this.href, download: this.download });
+      },
+    };
+    function MobileActionsHarness({ current }) {
+      harness.startRender();
+      return useMobileLightboxMediaActions({
+        current,
+        ownerUserId: "user-a",
+        identityEpoch: 31,
+        downloadAnchorRef: { current: anchor },
+      });
+    }
+
+    const imageAActions = MobileActionsHarness({
+      current: {
+        id: "image-a",
+        url: "/api/images/image-a/binary",
+      },
+    });
+    imageAActions.handleDownload();
+    assert.equal(fetchCalls, 1);
+    imageAActions.resetMediaActions();
+    const imageBActions = MobileActionsHarness({
+      current: {
+        id: "image-b",
+        url: "/api/images/image-b/binary",
+      },
+    });
+    stateChanges.length = 0;
+    imageA.resolve(
+      new Response(new Blob(["image-a"], { type: "image/png" }), {
+        status: 200,
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(downloads, []);
+    assert.deepEqual(stateChanges, []);
+
+    imageBActions.handleDownload();
+    assert.equal(fetchCalls, 2);
+    imageB.resolve(
+      new Response(new Blob(["image-b"], { type: "image/png" }), {
+        status: 200,
+      }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(downloads.length, 1);
+    assert.match(downloads[0].download, /^lumen-image-b\.png$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
     } else {
       delete globalThis.window;
     }

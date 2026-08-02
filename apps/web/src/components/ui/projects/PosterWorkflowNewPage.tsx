@@ -174,6 +174,7 @@ function getPosterFormState({
   copy,
   createPending,
   style,
+  submitting,
   title,
   uploadPending,
 }: {
@@ -181,6 +182,7 @@ function getPosterFormState({
   copy: string;
   createPending: boolean;
   style: PosterStyleItem | null;
+  submitting: boolean;
   title: string;
   uploadPending: boolean;
 }) {
@@ -196,6 +198,7 @@ function getPosterFormState({
       !style ||
       !aspects.length ||
       createPending ||
+      submitting ||
       uploadPending,
   };
 }
@@ -216,6 +219,7 @@ export function PosterWorkflowNewPage() {
   const [primaryColor, setPrimaryColor] = useState<string>("");
   const [fontFamily, setFontFamily] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState<Record<BrandImageKind, boolean>>({
     logo: false,
     product: false,
@@ -241,6 +245,8 @@ export function PosterWorkflowNewPage() {
     logo: null,
     product: null,
   });
+  // 同步提交锁：防双击 / 重入（与 ApparelWorkflowNewPage 一致）
+  const submittingRef = useRef(false);
   useEffect(() => {
     const uploadControllers = uploadControllerRef.current;
     const brandUrls = brandUrlRef.current;
@@ -276,6 +282,7 @@ export function PosterWorkflowNewPage() {
 
   const onPickBrandImage = useCallback(
     async (kind: BrandImageKind, file: File) => {
+      if (submittingRef.current || create.isPending) return;
       const validationError = brandImageValidationError(file);
       if (validationError) {
         toast.error(validationError);
@@ -336,7 +343,7 @@ export function PosterWorkflowNewPage() {
         setUploadProgress((current) => ({ ...current, [kind]: 0 }));
       }
     },
-    [],
+    [create.isPending],
   );
 
   const removeBrandImage = (kind: BrandImageKind) => {
@@ -358,13 +365,15 @@ export function PosterWorkflowNewPage() {
         copy,
         createPending: create.isPending,
         style,
+        submitting,
         title,
         uploadPending,
       }),
-    [aspects, copy, create.isPending, style, title, uploadPending],
+    [aspects, copy, create.isPending, style, submitting, title, uploadPending],
   );
 
-  const onCreate = () => {
+  const onCreate = async () => {
+    if (submittingRef.current || create.isPending) return;
     setError(null);
     if (!copyTrimmed) {
       setError("请输入海报文案");
@@ -378,19 +387,28 @@ export function PosterWorkflowNewPage() {
       setError("至少选择一个目标尺寸");
       return;
     }
-    create.mutate({
-      copy_text: copyTrimmed,
-      style_id: style.id,
-      target_aspects: aspects as PosterAspectRatio[],
-      brand_assets: {
-        logo_image_id: logo?.id || null,
-        product_image_id: product?.id || null,
-        primary_color: primaryColor.trim() || null,
-        font_family: fontFamily.trim() || null,
-      },
-      quality_mode: qualityMode,
-      title: derivedTitle,
-    });
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await create.mutateAsync({
+        copy_text: copyTrimmed,
+        style_id: style.id,
+        target_aspects: aspects as PosterAspectRatio[],
+        brand_assets: {
+          logo_image_id: logo?.id || null,
+          product_image_id: product?.id || null,
+          primary_color: primaryColor.trim() || null,
+          font_family: fontFamily.trim() || null,
+        },
+        quality_mode: qualityMode,
+        title: derivedTitle,
+      });
+    } catch {
+      // 失败提示由 mutation onError 的 toast 承担，锁在 finally 释放以便重试
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -635,7 +653,7 @@ export function PosterWorkflowNewPage() {
               ) : null}
 
               <PosterCreateButton
-                pending={create.isPending}
+                pending={submitting || create.isPending}
                 disabled={ctaDisabled}
                 onClick={onCreate}
               />
@@ -664,7 +682,7 @@ export function PosterWorkflowNewPage() {
 
       <PosterCreateButton
         mobile
-        pending={create.isPending}
+        pending={submitting || create.isPending}
         disabled={ctaDisabled}
         onClick={onCreate}
       />

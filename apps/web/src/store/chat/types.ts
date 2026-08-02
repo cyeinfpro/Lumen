@@ -46,6 +46,10 @@ export type PollInflightOptions = {
   maxChecks?: number;
 };
 
+export type InpaintSubmissionResult =
+  | { status: "submitted" }
+  | { status: "cancelled" };
+
 export interface ChatState {
   currentUserId: string | null;
   currentConvId: string | null;
@@ -116,7 +120,7 @@ export interface ChatState {
     maskBlob: Blob;
     maskPreviewDataUrl: string;
     prompt: string;
-  }) => Promise<void>;
+  }) => Promise<InpaintSubmissionResult>;
 
   appendUserMessage: (message: UserMessage) => void;
   appendAssistantMessage: (message: AssistantMessage) => void;

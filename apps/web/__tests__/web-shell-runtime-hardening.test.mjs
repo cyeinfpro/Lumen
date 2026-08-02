@@ -99,12 +99,15 @@ test("collapsed desktop sidebar is removed from focus navigation", () => {
 
 test("SSE replay truncation triggers typed snapshot recovery before reconnect", () => {
   const useSSE = source("src/features/realtime/model/useSSE.ts");
+  const subscription = source(
+    "src/features/realtime/model/sseSubscription.ts",
+  );
   const contracts = source("src/features/realtime/model/contracts.ts");
   const runtime = source("src/features/realtime/model/runtime.ts");
   const machine = source("src/features/realtime/model/connectionMachine.ts");
 
   match(contracts, /"replay_truncated"/);
-  match(useSSE, /recoverSnapshot\?: SnapshotAdapter/);
+  match(subscription, /recoverSnapshot\?: SnapshotAdapter/);
   match(runtime, /this\.handleControl\(parsed\.event, recoveryId\)/);
   match(runtime, /this\.recover\(effect\.reason, recoveryId\)/);
   match(machine, /\{ kind: "recoverSnapshot", reason \}/);

@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
+import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
 import { nearestAspectRatio } from "@/lib/sizing";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
@@ -29,6 +30,8 @@ export function InpaintModal() {
 }
 
 function InpaintModalInner() {
+  const ownerUserId = useInpaintStore((state) => state.ownerUserId);
+  const identityEpoch = useInpaintStore((state) => state.identityEpoch);
   const source = useInpaintStore((state) => state.source);
   const close = useInpaintStore((state) => state.close);
   const submitting = useInpaintStore((state) => state.submitting);
@@ -51,6 +54,8 @@ function InpaintModalInner() {
     : null;
 
   const lifecycle = useInpaintModalLifecycle({
+    ownerUserId,
+    identityEpoch,
     source,
     currentImageId,
     initialDraft,
@@ -78,8 +83,30 @@ function InpaintModalInner() {
     promptValid &&
     !promptOverHardLimit &&
     !!source;
+  const handleSubmitSuccess = useCallback(() => {
+    const identity = {
+      userId: ownerUserId,
+      epoch: identityEpoch,
+    };
+    if (!isPrivateIdentitySnapshotCurrent(identity)) return;
+    useInpaintStore.setState((state) => {
+      if (
+        state.ownerUserId !== identity.userId ||
+        state.identityEpoch !== identity.epoch
+      ) {
+        return state;
+      }
+      return {
+        open: false,
+        source: null,
+        submitting: false,
+      };
+    });
+  }, [identityEpoch, ownerUserId]);
 
   const handleSubmit = useInpaintSubmission({
+    ownerUserId,
+    identityEpoch,
     boardRef,
     source,
     promptText: lifecycle.promptText,
@@ -90,10 +117,7 @@ function InpaintModalInner() {
     submitInpaintTask,
     clearDraft,
     clearMaskDraft,
-    onSubmitSuccess: useCallback(
-      () => useInpaintStore.setState({ open: false, source: null }),
-      [],
-    ),
+    onSubmitSuccess: handleSubmitSuccess,
   });
 
   const onRootKeyDown = useCallback(

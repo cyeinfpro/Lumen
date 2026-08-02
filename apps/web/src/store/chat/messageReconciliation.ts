@@ -21,6 +21,13 @@ export function shouldAcceptTaskSnapshot(
 
 function compareMessages(a: Message, b: Message): number {
   if (a.created_at !== b.created_at) return a.created_at - b.created_at;
+  // 乐观 user/assistant 对共享同一 created_at,而 "opt-asst-" 按 id 排序会
+  // 排在 "opt-user-" 前面,导致配对倒序渲染;assistant 按父消息 id 排序,
+  // 保证配对永远以 user 开头。
+  const aKey = a.role === "assistant" ? a.parent_user_message_id : a.id;
+  const bKey = b.role === "assistant" ? b.parent_user_message_id : b.id;
+  if (aKey !== bKey) return aKey.localeCompare(bKey);
+  if (a.role !== b.role) return a.role === "user" ? -1 : 1;
   return a.id.localeCompare(b.id);
 }
 

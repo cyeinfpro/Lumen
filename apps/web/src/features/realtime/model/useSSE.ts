@@ -8,43 +8,34 @@ import {
   useRef,
   useState,
 } from "react";
-import type { RealtimeControlEvent } from "./contracts";
-import type {
-  SnapshotAdapter,
-  SnapshotExecutionContext,
-} from "./replayCoordinator";
-import type {
-  RealtimeRuntime,
-  RealtimeStatus,
-} from "./runtime";
+import type { SnapshotAdapter } from "./replayCoordinator";
+import type { RealtimeRuntime } from "./runtime";
+import {
+  createSSESubscriber,
+  dispatchSSECallbackForScope,
+  recoverSSESnapshotForScope,
+  type SSECallbackInvocation,
+  type SSEHandlers,
+  type SSEStatus,
+  type UseSSEOptions,
+} from "./sseSubscription";
 import {
   acquireRealtimeRuntime,
   releaseRealtimeRuntime,
   type RealtimeRuntimeLease,
 } from "@/shared/realtime/runtimeRegistry";
 
-export type SSEHandler = (data: unknown, id: string) => void;
-export interface SSEHandlers {
-  [eventName: string]: SSEHandler;
-}
-export type SSEStatus = RealtimeStatus;
-
-export interface UseSSEOptions {
-  onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
-  onError?: (event: Event) => void;
-  onControl?: (event: RealtimeControlEvent) => void;
-  onAuthInvalidated?: () => void;
-  recoverSnapshot?: SnapshotAdapter;
-  hiddenCloseDelayMs?: number;
-  maxRetryCount?: number;
-}
-
-const DEFAULT_MAX_RETRY_COUNT = Number.POSITIVE_INFINITY;
-
-export function getSSEBackoffBaseDelay(attempt: number): number {
-  const boundedAttempt = Math.min(5, Math.max(0, Math.trunc(attempt)));
-  return Math.min(30_000, 1000 * 2 ** boundedAttempt);
-}
+export {
+  dispatchSSEEventForScope,
+  getSSEBackoffBaseDelay,
+  isSSEScopeCurrent,
+} from "./sseSubscription";
+export type {
+  SSEHandler,
+  SSEHandlers,
+  SSEStatus,
+  UseSSEOptions,
+} from "./sseSubscription";
 
 function initialStatus(): SSEStatus {
   if (typeof document === "undefined") return "closed";
@@ -58,44 +49,58 @@ export function useSSE(
 ): { status: SSEStatus; reconnect: () => void } {
   const [status, setStatus] = useState<SSEStatus>(initialStatus);
   const runtimeRef = useRef<RealtimeRuntime | null>(null);
-  // 修复闭包陈旧：改用 useEffectEvent 取代「passive effect 里回写 ref」。
-  // ref 要等 passive effect 冲刷才更新，这中间到达的 SSE 事件会命中上一轮渲染的
-  // handlers/options；effect event 在 commit 阶段同步换实现，不存在这个窗口。
-  const dispatchHandler = useEffectEvent(
-    (name: string, data: unknown, id: string) => {
-      handlers[name]?.(data, id);
-    },
-  );
-  const emitOpen = useEffectEvent(
-    (event: Event, context: SnapshotExecutionContext) =>
-      options.onOpen?.(event, context),
-  );
-  const emitError = useEffectEvent((event: Event) => options.onError?.(event));
-  const emitControl = useEffectEvent((event: RealtimeControlEvent) =>
-    options.onControl?.(event),
-  );
-  const emitAuthInvalidated = useEffectEvent(() =>
-    options.onAuthInvalidated?.(),
-  );
-  const emitRecoverSnapshot = useEffectEvent<SnapshotAdapter>(
-    (scopes, reason, signal, context) => {
-      const recover = options.recoverSnapshot;
-      return recover
-        ? recover(scopes, reason, signal, context)
-        : Promise.reject(new Error("snapshot adapter unavailable"));
-    },
-  );
-
   const channelKey = useMemo(() => [...channels].sort().join(","), [channels]);
   const eventKey = useMemo(
     () => Object.keys(handlers).sort().join(","),
     [handlers],
   );
+  const scopeIdentity = options.scopeIdentity ?? channelKey;
   const hasRecoveryAdapter = typeof options.recoverSnapshot === "function";
+  // useEffectEvent keeps handlers fresh at commit time. The subscription scope
+  // remains an explicit argument so an old runtime cannot call a new user's
+  // handler before the old passive-effect cleanup runs.
+  const emitScopedCallback = useEffectEvent(
+    (subscribedScope: string, invocation: SSECallbackInvocation) =>
+      dispatchSSECallbackForScope(
+        subscribedScope,
+        scopeIdentity,
+        options.isScopeCurrent,
+        {
+          handlers,
+          onOpen: options.onOpen,
+          onError: options.onError,
+          onControl: options.onControl,
+          onAuthInvalidated: options.onAuthInvalidated,
+          setStatus,
+        },
+        invocation,
+      ),
+  );
+  const emitRecoverSnapshot = useEffectEvent(
+    (
+      subscribedScope: string,
+      ...args: Parameters<SnapshotAdapter>
+    ): ReturnType<SnapshotAdapter> =>
+      recoverSSESnapshotForScope(
+        subscribedScope,
+        scopeIdentity,
+        options.isScopeCurrent,
+        options.recoverSnapshot,
+        ...args,
+      ),
+  );
 
   useEffect(() => {
+    const subscribedScope = scopeIdentity;
     if (!channelKey || typeof window === "undefined") {
-      const timer = setTimeout(() => setStatus("closed"), 0);
+      const timer = setTimeout(
+        () =>
+          emitScopedCallback(subscribedScope, {
+            kind: "status",
+            status: "closed",
+          }),
+        0,
+      );
       return () => clearTimeout(timer);
     }
     const lease: RealtimeRuntimeLease = acquireRealtimeRuntime(
@@ -103,25 +108,18 @@ export function useSSE(
     );
     const { runtime } = lease;
     runtimeRef.current = runtime;
-    const unsubscribe = runtime.subscribe({
-      handlers: Object.fromEntries(
-        eventKey
-          .split(",")
-          .filter(Boolean)
-          .map((name) => [
-            name,
-            (data: unknown, id: string) => dispatchHandler(name, data, id),
-          ]),
-      ),
-      onOpen: emitOpen,
-      onError: emitError,
-      onControl: emitControl,
-      onAuthInvalidated: emitAuthInvalidated,
-      recoverSnapshot: hasRecoveryAdapter ? emitRecoverSnapshot : undefined,
-      hiddenCloseDelayMs: options.hiddenCloseDelayMs,
-      maxRetryCount: options.maxRetryCount ?? DEFAULT_MAX_RETRY_COUNT,
-      setStatus,
-    });
+    const unsubscribe = runtime.subscribe(
+      createSSESubscriber({
+        subscribedScope,
+        eventNames: eventKey.split(",").filter(Boolean),
+        emit: emitScopedCallback,
+        recoverSnapshot: hasRecoveryAdapter
+          ? emitRecoverSnapshot
+          : undefined,
+        hiddenCloseDelayMs: options.hiddenCloseDelayMs,
+        maxRetryCount: options.maxRetryCount,
+      }),
+    );
     const onVisibility = () =>
       runtime.visibility(document.visibilityState === "visible");
     const onOnline = () => runtime.online(true);
@@ -143,6 +141,7 @@ export function useSSE(
     hasRecoveryAdapter,
     options.hiddenCloseDelayMs,
     options.maxRetryCount,
+    scopeIdentity,
   ]);
 
   const reconnect = useCallback(() => runtimeRef.current?.reconnect(), []);

@@ -4,19 +4,22 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 
 import {
+  AUTH_USER_QUERY_KEY,
   clearPreviousUserQueryCache,
   prepareUserIdentityRevalidation,
-  AUTH_USER_QUERY_KEY,
-} from "@/components/QueryProvider";
+} from "@/lib/queries/userScope";
 import { ApiError, type AuthUser } from "@/lib/apiClient";
 import { resumeSessionClientState } from "@/lib/api/http";
 import { invalidateSessionClientState } from "@/lib/auth/authFailureCoordinator";
 import { isPublicPath } from "@/lib/auth/publicPaths";
+import { subscribeToAuthSessionChanges } from "@/lib/auth/sessionChangeBus";
 import {
   registerRuntimeRecovery,
   registerSessionInvalidation,
+  setSessionRuntimeStatus,
   type SessionRuntimeStatus,
 } from "@/lib/runtimeResilience";
+import { invalidateRealtimeRuntimes } from "@/shared/realtime/runtimeRegistry";
 import { useChatStore } from "@/store/useChatStore";
 
 const IDENTITY_REVALIDATION_RETRY_DELAYS_MS = [
@@ -42,6 +45,7 @@ type IdentityRevalidationState = {
   retainedUserId: string | null;
   handledError: unknown;
   terminal: boolean;
+  requiresFreshIdentity: boolean;
 };
 
 type IdentityQuery = {
@@ -115,7 +119,7 @@ function canStartIdentityRevalidation(input: {
   isPublicAuthPath: boolean;
 }): boolean {
   const { state, force, isFetching, isPublicAuthPath } = input;
-  if (state.terminal || state.request || isFetching) return false;
+  if (state.terminal || state.request || (!force && isFetching)) return false;
   if (
     isCurrentPathPublic(isPublicAuthPath) ||
     !canAttemptIdentityRevalidation()
@@ -131,6 +135,21 @@ function retainedIdentityUserId(
   queryUserId: string | undefined,
 ): string | null {
   return currentUserId ?? state.retainedUserId ?? queryUserId ?? null;
+}
+
+function shouldIgnoreIdentityFailure(input: {
+  state: IdentityRevalidationState;
+  error: unknown;
+  generation?: number;
+  request?: Promise<IdentityRefetchResult>;
+}): boolean {
+  const { state, error, generation, request } = input;
+  if (generation !== undefined && state.generation !== generation) return true;
+  if (request && state.request !== request) return true;
+  return Boolean(
+    !request &&
+      (state.handledError === error || state.requiresFreshIdentity),
+  );
 }
 
 function removeAuthUserQuery(queryClient: QueryClient): void {
@@ -172,6 +191,7 @@ export function useIdentityRevalidation({
     retainedUserId: null,
     handledError: null,
     terminal: false,
+    requiresFreshIdentity: false,
   });
   const runRef = useRef<(force?: boolean) => void>(() => undefined);
 
@@ -192,6 +212,7 @@ export function useIdentityRevalidation({
       state.retryAttempt = 0;
       state.handledError = null;
       state.terminal = terminal;
+      state.requiresFreshIdentity = false;
       if (clearRetainedUser) state.retainedUserId = null;
       clearRetryTimer();
     },
@@ -199,11 +220,14 @@ export function useIdentityRevalidation({
   );
 
   const enterFailClosed = useCallback(
-    (userId: string | null) => {
+    (userId: string | null, error: unknown) => {
       const state = stateRef.current;
       state.retainedUserId ??= userId;
       useChatStore.getState().setCurrentUser(null);
       prepareUserIdentityRevalidation(queryClient, state.retainedUserId);
+      if (!isRetryableIdentityError(error)) {
+        void invalidateSessionClientState();
+      }
       setIsolated(true);
     },
     [queryClient],
@@ -226,6 +250,27 @@ export function useIdentityRevalidation({
     setIdentityStatus("unauthorized");
   }, [queryClient, queryData?.id, resetRecovery]);
 
+  const beginInvalidatedSessionRevalidation = useCallback(() => {
+    if (isCurrentPathPublic(isPublicAuthPath)) return;
+    const state = stateRef.current;
+    const currentUserId =
+      useChatStore.getState().currentUserId ??
+      state.retainedUserId ??
+      queryData?.id ??
+      null;
+    state.retainedUserId ??= currentUserId;
+    resetRecovery(false, false);
+    state.requiresFreshIdentity = true;
+    invalidateRealtimeRuntimes();
+    useChatStore.getState().setCurrentUser(null);
+    prepareUserIdentityRevalidation(queryClient, state.retainedUserId);
+    void invalidateSessionClientState();
+    setSessionRuntimeStatus("revalidating");
+    setIsolated(true);
+    setIdentityStatus("revalidating");
+    runRef.current(true);
+  }, [isPublicAuthPath, queryClient, queryData?.id, resetRecovery]);
+
   const acceptIdentity = useCallback(
     (
       user: AuthUser,
@@ -236,6 +281,7 @@ export function useIdentityRevalidation({
       if (generation !== undefined && state.generation !== generation) return;
       if (request && state.request !== request) return;
       if (isCurrentPathPublic(isPublicAuthPath)) return;
+      if (state.requiresFreshIdentity && generation === undefined) return;
 
       const currentUserId = useChatStore.getState().currentUserId;
       if (currentUserId && currentUserId !== user.id) {
@@ -251,6 +297,7 @@ export function useIdentityRevalidation({
       state.retainedUserId = null;
       state.handledError = null;
       state.terminal = false;
+      state.requiresFreshIdentity = false;
       clearRetryTimer();
       void resumeSessionClientState(user.id);
       useChatStore.getState().setCurrentUser(user.id);
@@ -307,14 +354,25 @@ export function useIdentityRevalidation({
       request?: Promise<IdentityRefetchResult>,
     ) => {
       const state = stateRef.current;
-      if (generation !== undefined && state.generation !== generation) return;
-      if (request && state.request !== request) return;
-      if (!request && state.handledError === error) return;
+      if (
+        shouldIgnoreIdentityFailure({
+          state,
+          error,
+          generation,
+          request,
+        })
+      ) {
+        return;
+      }
 
       state.request = null;
       state.handledError = error;
       const currentUserId = useChatStore.getState().currentUserId;
-      state.retainedUserId ??= currentUserId ?? queryData?.id ?? null;
+      state.retainedUserId ??= retainedIdentityUserId(
+        state,
+        currentUserId,
+        queryData?.id,
+      );
 
       if (isCurrentPathPublic(isPublicAuthPath)) {
         resetRecovery(true, true);
@@ -345,7 +403,7 @@ export function useIdentityRevalidation({
         return;
       }
 
-      enterFailClosed(state.retainedUserId);
+      enterFailClosed(state.retainedUserId, error);
       setIdentityStatus("degraded");
       if (isRetryableIdentityError(error)) scheduleRetry();
     },
@@ -444,10 +502,15 @@ export function useIdentityRevalidation({
   useEffect(
     () =>
       registerSessionInvalidation(() => {
-        invalidateIdentity();
+        beginInvalidatedSessionRevalidation();
       }),
-    [invalidateIdentity],
+    [beginInvalidatedSessionRevalidation],
   );
+
+  useEffect(() => {
+    if (isPublicAuthPath) return;
+    return subscribeToAuthSessionChanges(beginInvalidatedSessionRevalidation);
+  }, [beginInvalidatedSessionRevalidation, isPublicAuthPath]);
 
   useEffect(() => {
     if (isPublicAuthPath) return;
@@ -474,6 +537,7 @@ export function useIdentityRevalidation({
     resetRecovery(true, true);
     useChatStore.getState().setCurrentUser(null);
     removeAuthUserQuery(queryClient);
+    void invalidateSessionClientState();
   }, [isPublicAuthPath, queryClient, resetRecovery]);
 
   useLayoutEffect(() => {
@@ -488,7 +552,8 @@ export function useIdentityRevalidation({
       !queryData ||
       queryError ||
       state.request ||
-      state.terminal
+      state.terminal ||
+      state.requiresFreshIdentity
     ) {
       return;
     }

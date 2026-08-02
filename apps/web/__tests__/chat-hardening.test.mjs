@@ -216,7 +216,13 @@ test("chat reconciliation preserves terminal states and retry drafts", () => {
   );
   match(
     generationActions,
-    /isResetComposerDraft\(cur, temporaryComposer\) \|\|\s*isTemporaryInpaintDraft/,
+    /current\.params === transientComposer\.params[\s\S]*?isResetComposerDraft\(current, temporaryComposer\)/,
+  );
+  match(generationActions, /cur === transientComposer/);
+  match(generationActions, /cur === resetComposer/);
+  match(
+    generationActions,
+    /if \(ownsTemporaryComposer \|\| ownsResetComposer\)/,
   );
   match(composer, /export function isResetComposerDraft\(/);
   match(composer, /export function isRetryComposerDraft\(/);

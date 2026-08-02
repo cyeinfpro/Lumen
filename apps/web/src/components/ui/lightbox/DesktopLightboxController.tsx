@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 
+import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
 import { useChatStore } from "@/store/useChatStore";
 import { useInpaintStore } from "@/store/useInpaintStore";
 import { useUiStore } from "@/store/useUiStore";
@@ -19,7 +20,6 @@ import {
 } from "./DesktopLightboxView";
 import { useDesktopLightboxKeyboard } from "./desktopLightboxKeyboard";
 import {
-  EMPTY_DESKTOP_GALLERY,
   EMPTY_GENERATIONS,
   ZOOM_STEP,
   buildCurrentLightboxItem,
@@ -30,25 +30,18 @@ import {
   labelForViewMode,
   preloadImage,
   resolveImagePresentation,
-  toDesktopGalleryItem,
   type DesktopGalleryItem,
-  type DesktopImageMeta,
   type ImageTransientState,
 } from "./desktopLightboxModel";
 import { useDesktopLightboxMediaActions } from "./useDesktopLightboxMediaActions";
 import { useDesktopLightboxDialog } from "./useDesktopLightboxDialog";
-import { useDesktopLightboxViewport } from "./useDesktopLightboxViewport";
 import {
-  CLOSE_EVENT,
-  OPEN_EVENT,
-  type LightboxItem,
-  type OpenLightboxDetail,
-} from "./types";
-
-function posterSource(meta: DesktopImageMeta | null): string | null {
-  if (!meta) return null;
-  return meta.thumb_url ?? meta.preview_url ?? null;
-}
+  useDesktopLightboxGallery,
+  useDesktopLightboxWindowEvents,
+  lightboxIdentity,
+  posterSource,
+} from "./useDesktopLightboxEventGallery";
+import { useDesktopLightboxViewport } from "./useDesktopLightboxViewport";
 
 export function DesktopLightbox() {
   const lightbox = useUiStore((state) => state.lightbox);
@@ -64,12 +57,6 @@ export function DesktopLightbox() {
       : false,
   );
 
-  const [eventGallery, setEventGallery] = useState<
-    DesktopGalleryItem[] | null
-  >(null);
-  const [eventItems, setEventItems] = useState<LightboxItem[] | null>(
-    null,
-  );
   const imageStateKey = `${lightbox.imageId ?? ""}\n${lightbox.imageSrc ?? ""}\n${lightbox.imagePreviewSrc ?? ""}`;
   const activeImageStateKeyRef = useRef(imageStateKey);
   useLayoutEffect(() => {
@@ -138,98 +125,64 @@ export function DesktopLightbox() {
   );
   const switchSeqRef = useRef(0);
   const preloadAbortRef = useRef<AbortController | null>(null);
+  const edgeHintTimerRef = useRef<number | null>(null);
+  const clearEdgeHintTimer = useCallback(() => {
+    if (edgeHintTimerRef.current !== null) {
+      window.clearTimeout(edgeHintTimerRef.current);
+      edgeHintTimerRef.current = null;
+    }
+  }, []);
 
   const generations = useChatStore((state) =>
     lightbox.open ? state.generations : EMPTY_GENERATIONS,
   );
-  const chatGallery = useMemo<DesktopGalleryItem[]>(() => {
-    if (!lightbox.open) return EMPTY_DESKTOP_GALLERY;
-    const items = Object.values(generations).filter(
-      (generation) =>
-        generation.status === "succeeded" && generation.image,
-    );
-    items.sort((left, right) => left.started_at - right.started_at);
-    return items.map((generation) => ({
-      image: generation.image!,
-      prompt: generation.prompt,
-      started_at: generation.started_at,
-    }));
-  }, [generations, lightbox.open]);
-  const gallery = useMemo(() => {
-    if (
-      storeEventItems?.some(
-        (entry) => entry.id === lightbox.imageId,
-      )
-    ) {
-      return storeEventItems.map(toDesktopGalleryItem);
-    }
-    if (
-      eventGallery?.some(
-        (entry) => entry.image.id === lightbox.imageId,
-      )
-    ) {
-      return eventGallery;
-    }
-    return chatGallery;
-  }, [
-    chatGallery,
-    eventGallery,
-    lightbox.imageId,
+  const {
+    eventItems,
+    gallery,
+    setEventGallery,
+    setEventItems,
+    clearEventGallery,
+  } = useDesktopLightboxGallery({
+    open: lightbox.open,
+    imageId: lightbox.imageId,
     storeEventItems,
-  ]);
+    generations,
+  });
 
   const handleClose = useCallback(() => {
+    const identity = lightboxIdentity(lightbox);
     hideActiveImageLayer();
     switchSeqRef.current += 1;
     preloadAbortRef.current?.abort();
     preloadAbortRef.current = null;
-    setEventGallery(null);
-    setEventItems(null);
+    clearEdgeHintTimer();
+    clearEventGallery();
     hideDetails();
     setPendingImageId(null);
-    closeLightbox();
-  }, [closeLightbox, hideActiveImageLayer, hideDetails]);
+    if (isPrivateIdentitySnapshotCurrent(identity)) {
+      closeLightbox(identity);
+    }
+  }, [
+    clearEdgeHintTimer,
+    clearEventGallery,
+    closeLightbox,
+    hideActiveImageLayer,
+    hideDetails,
+    lightbox,
+  ]);
 
-  useEffect(() => {
-    const onOpen = (event: Event) => {
-      const detail = (
-        event as CustomEvent<OpenLightboxDetail>
-      ).detail;
-      if (!detail?.items?.length) return;
-      const nextGallery = detail.items.map(toDesktopGalleryItem);
-      const target =
-        nextGallery.find(
-          (entry) => entry.image.id === detail.initialId,
-        ) ?? nextGallery[0];
-      if (!target) return;
-
-      switchSeqRef.current += 1;
-      preloadAbortRef.current?.abort();
-      preloadAbortRef.current = null;
-      setEventGallery(nextGallery);
-      setEventItems(detail.items);
-      setSlideDir(1);
-      setEdgeHint(null);
-      setPendingImageId(null);
-      if (detail.source === "store") return;
-      openLightbox(
-        target.image.id,
-        target.image.data_url,
-        target.prompt,
-        target.image.preview_url ?? target.image.thumb_url,
-      );
-    };
-    const onClose = () => handleClose();
-    window.addEventListener(OPEN_EVENT, onOpen as EventListener);
-    window.addEventListener(CLOSE_EVENT, onClose);
-    return () => {
-      window.removeEventListener(
-        OPEN_EVENT,
-        onOpen as EventListener,
-      );
-      window.removeEventListener(CLOSE_EVENT, onClose);
-    };
-  }, [handleClose, openLightbox]);
+  useDesktopLightboxWindowEvents({
+    clearEdgeHintTimer,
+    handleClose,
+    openLightbox,
+    preloadAbortRef,
+    setEdgeHint,
+    setEventGallery,
+    setEventItems,
+    setPendingImageId,
+    setSlideDir,
+    switchSeqRef,
+  });
 
   const currentImageMeta = useMemo(
     () => findCurrentImageMeta(gallery, lightbox.imageId),
@@ -261,6 +214,8 @@ export function DesktopLightbox() {
     handleOpenOriginal,
   } = useDesktopLightboxMediaActions({
     open: lightbox.open,
+    ownerUserId: lightbox.ownerUserId,
+    identityEpoch: lightbox.identityEpoch,
     imageId: lightbox.imageId,
     imageSrc: lightbox.imageSrc,
     imageStateKey,
@@ -270,29 +225,49 @@ export function DesktopLightbox() {
   });
 
   const handleIterate = useCallback(() => {
+    if (
+      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
+    ) {
+      return;
+    }
     const imageId = lightbox.imageId;
     if (!imageId) return;
     const image = useChatStore.getState().imagesById[imageId];
     if (!image) return;
     handleClose();
     useChatStore.getState().promoteImageToReference(imageId);
-  }, [handleClose, lightbox.imageId]);
+  }, [handleClose, lightbox]);
 
   const handleUpscale = useCallback(() => {
+    if (
+      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
+    ) {
+      return;
+    }
     const imageId = lightbox.imageId;
     if (!imageId) return;
     handleClose();
     void useChatStore.getState().upscaleImage(imageId);
-  }, [handleClose, lightbox.imageId]);
+  }, [handleClose, lightbox]);
 
   const handleReroll = useCallback(() => {
+    if (
+      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
+    ) {
+      return;
+    }
     const imageId = lightbox.imageId;
     if (!imageId) return;
     handleClose();
     void useChatStore.getState().rerollImage(imageId);
-  }, [handleClose, lightbox.imageId]);
+  }, [handleClose, lightbox]);
 
   const handleInpaint = useCallback(() => {
+    if (
+      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
+    ) {
+      return;
+    }
     const imageId = lightbox.imageId;
     if (!imageId) return;
     const image = useChatStore.getState().imagesById[imageId];
@@ -305,18 +280,28 @@ export function DesktopLightbox() {
       width: image.width,
       height: image.height,
     });
-  }, [handleClose, lightbox.imageAlt, lightbox.imageId]);
+  }, [handleClose, lightbox]);
 
   const showEdgeHint = useCallback(
     (edge: "first" | "last") => {
+      const identity = lightboxIdentity(lightbox);
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
+      clearEdgeHintTimer();
       setEdgeHint(edge);
-      window.setTimeout(() => setEdgeHint(null), 1200);
+      edgeHintTimerRef.current = window.setTimeout(() => {
+        if (isPrivateIdentitySnapshotCurrent(identity)) {
+          setEdgeHint(null);
+        }
+        edgeHintTimerRef.current = null;
+      }, 1200);
     },
-    [],
+    [clearEdgeHintTimer, lightbox],
   );
 
   const switchToGalleryItem = useCallback(
     (target: DesktopGalleryItem, direction: 1 | -1) => {
+      const identity = lightboxIdentity(lightbox);
+      if (!isPrivateIdentitySnapshotCurrent(identity)) return;
       const sourceImageKey = imageStateKey;
       const sequence = switchSeqRef.current + 1;
       switchSeqRef.current = sequence;
@@ -350,6 +335,7 @@ export function DesktopLightbox() {
             if (preloadAbort.signal.aborted) return;
           }
         }
+        if (!isPrivateIdentitySnapshotCurrent(identity)) return;
         if (switchSeqRef.current !== sequence) return;
         if (activeImageStateKeyRef.current !== sourceImageKey) return;
         if (preloadAbortRef.current === preloadAbort) {
@@ -377,7 +363,7 @@ export function DesktopLightbox() {
     [
       eventItems,
       imageStateKey,
-      lightbox.action,
+      lightbox,
       openLightbox,
       openLightboxFromItems,
       storeEventItems,
@@ -470,6 +456,7 @@ export function DesktopLightbox() {
     switchSeqRef.current += 1;
     preloadAbortRef.current?.abort();
     preloadAbortRef.current = null;
+    clearEdgeHintTimer();
     let canceled = false;
     queueMicrotask(() => {
       if (canceled) return;
@@ -479,7 +466,14 @@ export function DesktopLightbox() {
     return () => {
       canceled = true;
     };
-  }, [imageStateKey]);
+  }, [clearEdgeHintTimer, imageStateKey]);
+
+  useEffect(
+    () => () => {
+      clearEdgeHintTimer();
+    },
+    [clearEdgeHintTimer],
+  );
 
   const handleBackdropMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -512,6 +506,8 @@ export function DesktopLightbox() {
   );
 
   const handleInjectedAction = useCallback(() => {
+    const identity = lightboxIdentity(lightbox);
+    if (!isPrivateIdentitySnapshotCurrent(identity)) return;
     const action = lightbox.action;
     const imageId = lightbox.imageId;
     if (!action || !imageId) return;
@@ -519,7 +515,7 @@ export function DesktopLightbox() {
       (item) => item.id === imageId,
     );
     if (current) action.onClick(current);
-  }, [lightbox.action, lightbox.eventItems, lightbox.imageId]);
+  }, [lightbox]);
 
   const injectedAction =
     lightbox.action && lightbox.imageId

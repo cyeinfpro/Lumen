@@ -37,6 +37,10 @@ export function createConversation(...args) {
 export function postMessage(...args) {
   return globalThis.__conversationsStub.postMessage(...args);
 }
+export function listMessages(...args) {
+  return globalThis.__conversationsStub.listMessages?.(...args)
+    ?? Promise.resolve({ items: [], next_cursor: null });
+}
 `;
 
 registerHooks({
@@ -56,27 +60,52 @@ type PostMessageStub = (
   body: unknown,
   opts: { signal?: AbortSignal },
 ) => Promise<unknown>;
+type CreateConversationStub = (
+  body: unknown,
+  opts: { signal?: AbortSignal },
+) => Promise<{ id: string }>;
 
 const stubHost = globalThis as typeof globalThis & {
-  __conversationsStub?: { postMessage: PostMessageStub };
+  __conversationsStub?: {
+    createConversation?: CreateConversationStub;
+    postMessage: PostMessageStub;
+    listMessages?: () => Promise<unknown>;
+  };
 };
 
-const [{ createSendMessageAction }, runtime, { createComposerState }] =
+const [
+  { createSendMessageAction },
+  runtime,
+  { createComposerState },
+  { applySseEventPayload },
+] =
   await Promise.all([
     import(new URL("./sendMessageAction.ts", import.meta.url).href),
     import(new URL("./runtime.ts", import.meta.url).href),
     import(new URL("./composerSlice.ts", import.meta.url).href),
+    import(new URL("./sseEventActions.ts", import.meta.url).href),
   ]);
 
-function createHarness() {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function createHarness(overrides: Partial<ChatState> = {}) {
   let state = {
     currentUserId: "user-1",
     currentConvId: "conv-1",
     messages: [],
+    messagesLoading: false,
+    messagesError: null,
     generations: {},
     imagesById: {},
     composerError: null,
     composer: { ...createComposerState(null), text: "画一只猫" },
+    ...overrides,
   } as unknown as ChatState;
   const set: ChatStateSetter = (partial) => {
     const next = typeof partial === "function" ? partial(state) : partial;
@@ -87,7 +116,7 @@ function createHarness() {
   const sendMessage = createSendMessageAction(set, get, {
     createInitialComposer: () => createComposerState(null),
   });
-  return { get, sendMessage };
+  return { get, set, sendMessage };
 }
 
 function backendUserMessage() {
@@ -257,4 +286,197 @@ test("a chat send without a completion id is reported, not silently accepted", a
     ),
     [],
   );
+});
+
+test("store blocks sends while existing conversation history is unavailable", async () => {
+  let posts = 0;
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      posts += 1;
+      throw new Error("must not post");
+    },
+  };
+
+  for (const historyState of [
+    { messagesLoading: true, messagesError: null },
+    { messagesLoading: false, messagesError: "history unavailable" },
+  ]) {
+    const harness = createHarness(historyState);
+    await harness.sendMessage({ intentOverride: "chat" });
+
+    assert.equal(posts, 0);
+    assert.deepEqual(harness.get().messages, []);
+    assert.equal(harness.get().composer.text, "画一只猫");
+    assert.match(harness.get().composerError ?? "", /历史消息/);
+  }
+});
+
+test("load-more errors do not block sending with loaded messages", async () => {
+  let posts = 0;
+  const existingMessage = {
+    id: "existing-user",
+    role: "user",
+    text: "Earlier message",
+    created_at: 1,
+  } as ChatState["messages"][number];
+  const harness = createHarness({
+    messages: [existingMessage],
+    messagesError: "older messages unavailable",
+  });
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      posts += 1;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "comp-1",
+      };
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.equal(posts, 1);
+  assert.equal(harness.get().messages.length, 3);
+});
+
+test("a truly new conversation can still be created and sent", async () => {
+  let creates = 0;
+  let postedConversationId = "";
+  const harness = createHarness({ currentConvId: null });
+  stubHost.__conversationsStub = {
+    createConversation: async () => {
+      creates += 1;
+      return { id: "conv-new" };
+    },
+    postMessage: async (convId) => {
+      postedConversationId = convId;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "comp-1",
+      };
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.equal(creates, 1);
+  assert.equal(postedConversationId, "conv-new");
+  assert.equal(harness.get().currentConvId, "conv-new");
+  assert.equal(harness.get().messages.length, 2);
+});
+
+test("completion image arriving before the POST response drains onto the real assistant", async () => {
+  runtime.clearUserScopedRuntime();
+  const response = deferred<unknown>();
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async () => response.promise,
+  };
+
+  const pendingSend = harness.sendMessage({ intentOverride: "chat" });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  applySseEventPayload(
+    harness.set,
+    harness.get,
+    "completion.queued",
+    {
+      completion_id: "comp-race",
+      message_id: "real-asst-1",
+    },
+    10,
+  );
+  applySseEventPayload(
+    harness.set,
+    harness.get,
+    "completion.image",
+    {
+      completion_id: "comp-race",
+      message_id: "real-asst-1",
+      images: [{ image_id: "image-race", actual_size: "1024x1024" }],
+    },
+    11,
+  );
+
+  response.resolve({
+    user_message: backendUserMessage(),
+    assistant_message: backendAssistantMessage(),
+    completion_id: "comp-race",
+  });
+  await pendingSend;
+
+  const assistant = harness
+    .get()
+    .messages.find(
+      (message): message is import("../../lib/types").AssistantMessage =>
+        message.role === "assistant",
+    );
+  const generationId = "completion-tool-comp-race";
+  assert.deepEqual(assistant?.generation_ids, [generationId]);
+  assert.equal(
+    harness.get().generations[generationId]?.image?.id,
+    "image-race",
+  );
+});
+
+test("abortAllSendRequests leaves an already-submitted send in flight", async () => {
+  runtime.clearUserScopedRuntime();
+  const harness = createHarness();
+  const response = deferred<unknown>();
+  let postSignal: AbortSignal | undefined;
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, _body, opts) => {
+      postSignal = opts?.signal;
+      return response.promise;
+    },
+  };
+
+  const pendingSend = harness.sendMessage({ intentOverride: "chat" });
+  await Promise.resolve();
+  await Promise.resolve();
+  // 请求已交给后端 stub（模拟 setCurrentConv 切换会话时的 abortAllSendRequests）。
+  assert.ok(postSignal, "postMessage must have been dispatched");
+  runtime.abortAllSendRequests();
+  // 已提交(可能已计费)的发送不能被 abort：保留在途状态直至自然完成。
+  assert.equal(postSignal.aborted, false);
+
+  response.resolve({
+    user_message: backendUserMessage(),
+    assistant_message: backendAssistantMessage(),
+    completion_id: "comp-1",
+  });
+  await pendingSend;
+  assert.equal(harness.get().messages.length, 2);
+  assert.equal(harness.get().messages[1]?.id, "real-asst-1");
+  assert.equal(harness.get().composerError, null);
+});
+
+test("abortAllSendRequests aborts a send that has not reached the backend", async () => {
+  runtime.clearUserScopedRuntime();
+  const harness = createHarness();
+  let posts = 0;
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      posts += 1;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "comp-1",
+      };
+    },
+  };
+
+  const pendingSend = harness.sendMessage({ intentOverride: "chat" });
+  // sendMessage 尚未执行到 POST（首个 await 在 ensureConversation 处），
+  // 此时 abort 无副作用：后端未收到请求，也不会计费。
+  runtime.abortAllSendRequests();
+  await pendingSend;
+
+  assert.equal(posts, 0);
+  assert.deepEqual(harness.get().messages, []);
+  assert.equal(harness.get().composer.text, "画一只猫");
+  assert.equal(harness.get().composerError, null);
 });

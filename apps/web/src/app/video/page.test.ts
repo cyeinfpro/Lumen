@@ -702,6 +702,19 @@ test("video materialization settling is bounded and wired into active polling", 
   doesNotMatch(generationFeedSource, /\[refreshGenerationSafe, videoSettling\]/);
 });
 
+test("settling expiry wires a recovery refresh so pending tasks cannot stay stuck", () => {
+  match(settlingControllerSource, /VIDEO_SETTLING_RECOVERY_INTERVAL_MS = 30_000/);
+  match(settlingControllerSource, /onExpired\(id\)/);
+  match(
+    settlingControllerSource,
+    /current\?\.phase === "expired" \? undefined : current/,
+  );
+  match(
+    generationFeedSource,
+    /void refreshGenerationSafe\(id, \{ forceHistorySync: true \}\)/,
+  );
+});
+
 test("active video polling keeps the 800ms start and 2.5s cadence", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const timerApi = {
@@ -1068,6 +1081,11 @@ test("terminal video refresh failures preserve force sync and retry", () => {
 });
 
 test("video feed scopes private state and runtime ownership by user id", () => {
+  // 账号切换重置逻辑拆分在 use-video-feed-runtime-reset.ts,两个源都要覆盖。
+  const feedRuntimeResetSource = readFileSync(
+    new URL("./use-video-feed-runtime-reset.ts", import.meta.url),
+    "utf8",
+  );
   match(generationFeedSource, /const userScope = useUserQueryScope\(\)/);
   match(
     generationFeedSource,
@@ -1077,10 +1095,10 @@ test("video feed scopes private state and runtime ownership by user id", () => {
     generationFeedSource,
     /userScopedQueryKey\(userId, \["video", "generations"\] as const\)/,
   );
-  match(generationFeedSource, /resetVideoFeedRuntime\(/);
-  match(generationFeedSource, /setScopedItems\(\{ userId, value: \[\] \}\)/);
+  match(feedRuntimeResetSource, /resetVideoFeedRuntime\(/);
+  match(feedRuntimeResetSource, /setScopedItems\(\{ userId, value: \[\] \}\)/);
   match(
-    generationFeedSource,
+    feedRuntimeResetSource,
     /setScopedSelection\(\{ userId, value: "" \}\)/,
   );
   match(generationFeedSource, /videoFeedChannels\(runtime, userId, activeItems\)/);

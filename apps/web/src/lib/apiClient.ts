@@ -6,6 +6,7 @@ import {
   invalidateSessionClientState,
   resumeSessionClientState,
 } from "./api/http";
+import { notifyAuthSessionChanged } from "./auth/sessionChangeBus";
 import { downloadClient } from "./api/downloadClient";
 import type { NoContent } from "./api/http";
 import type { BackendMessage } from "./api/conversations";
@@ -156,6 +157,7 @@ export async function login(
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
+  notifyAuthSessionChanged();
   try {
     return await acceptAuthenticatedSession(await getMe());
   } catch (err) {
@@ -179,7 +181,10 @@ export function signup(
   return apiFetch<AuthUser>("/auth/signup", {
     method: "POST",
     body: JSON.stringify(body),
-  }).then(acceptAuthenticatedSession);
+  }).then((user) => {
+    notifyAuthSessionChanged();
+    return acceptAuthenticatedSession(user);
+  });
 }
 
 export function listPublicApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
@@ -205,13 +210,18 @@ export function signupByok(
   return apiFetch<AuthUser>("/auth/signup/byok", {
     method: "POST",
     body: JSON.stringify({ email, password, display_name, verification_token }),
-  }).then(acceptAuthenticatedSession);
+  }).then((user) => {
+    notifyAuthSessionChanged();
+    return acceptAuthenticatedSession(user);
+  });
 }
 
 export async function logout(): Promise<NoContent> {
   await invalidateSessionClientState();
   try {
-    return await apiFetchNoContent("/auth/logout", { method: "POST" });
+    const result = await apiFetchNoContent("/auth/logout", { method: "POST" });
+    notifyAuthSessionChanged();
+    return result;
   } finally {
     await invalidateSessionClientState();
   }
@@ -223,15 +233,21 @@ export function getMe(): Promise<AuthUser> {
 
 // —— 视频生成 ——
 
+/**
+ * 创建视频生成任务。幂等键按提交操作由调用方显式传入(options.idempotency_key):
+ * 歧义失败(网络中断/超时,服务端可能已建任务并预扣)后重提同一操作沿用同一 key,
+ * 服务端按 (user, idempotency_key) + request fingerprint 回放已建任务;参数修改后
+ * 重提必须换新 key(指纹不同,旧 key 会 409)。调用方见 video-create-idempotency.ts。
+ */
 export function createVideoGeneration(
   body: Omit<VideoCreateIn, "idempotency_key"> & { idempotency_key?: string },
+  options: { idempotency_key?: string } = {},
 ): Promise<VideoGenerationOut> {
+  const idempotencyKey =
+    body.idempotency_key ?? options.idempotency_key ?? createIdempotencyKey();
   return apiFetch<VideoGenerationOut>("/videos/generations", {
     method: "POST",
-    body: JSON.stringify({
-      ...body,
-      idempotency_key: body.idempotency_key ?? createIdempotencyKey(),
-    }),
+    body: JSON.stringify({ ...body, idempotency_key: idempotencyKey }),
   });
 }
 

@@ -9,6 +9,7 @@ import {
 } from "react";
 
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
 import type { InpaintSource } from "@/store/useInpaintStore";
 
 import type { Stroke } from "./types";
@@ -22,6 +23,8 @@ interface DraftSnapshot {
 }
 
 interface UseInpaintModalLifecycleOptions {
+  ownerUserId: string | null;
+  identityEpoch: number;
   source: InpaintSource | null;
   currentImageId: string | null;
   initialDraft: string;
@@ -37,6 +40,8 @@ interface UseInpaintModalLifecycleOptions {
 }
 
 export function useInpaintModalLifecycle({
+  ownerUserId,
+  identityEpoch,
   source,
   currentImageId,
   initialDraft,
@@ -62,6 +67,14 @@ export function useInpaintModalLifecycle({
     null,
   );
   const submittingRef = useRef(submitting);
+  const identityIsCurrent = useCallback(
+    () =>
+      isPrivateIdentitySnapshotCurrent({
+        userId: ownerUserId,
+        epoch: identityEpoch,
+      }),
+    [identityEpoch, ownerUserId],
+  );
 
   useBodyScrollLock(true);
 
@@ -72,18 +85,26 @@ export function useInpaintModalLifecycle({
   // source 直接切换时，modal 不会重 mount；从 store 读取最新草稿并重置本地统计。
   useEffect(() => {
     if (previousImageIdRef.current === currentImageId) return;
+    if (!identityIsCurrent()) return;
     previousImageIdRef.current = currentImageId;
     const snapshot = getDraftSnapshot();
-    setPrompt(currentImageId ? snapshot.drafts[currentImageId] ?? "" : "");
-    setHasStroke(
-      currentImageId
-        ? (snapshot.maskDrafts[currentImageId]?.length ?? 0) > 0
-        : false,
-    );
-    setCoverage(0);
-    setWarning(null);
-    setConfirmingClose(false);
-  }, [currentImageId, getDraftSnapshot]);
+    let canceled = false;
+    queueMicrotask(() => {
+      if (canceled || !identityIsCurrent()) return;
+      setPrompt(currentImageId ? snapshot.drafts[currentImageId] ?? "" : "");
+      setHasStroke(
+        currentImageId
+          ? (snapshot.maskDrafts[currentImageId]?.length ?? 0) > 0
+          : false,
+      );
+      setCoverage(0);
+      setWarning(null);
+      setConfirmingClose(false);
+    });
+    return () => {
+      canceled = true;
+    };
+  }, [currentImageId, getDraftSnapshot, identityIsCurrent]);
 
   useEffect(() => {
     return () => {
@@ -161,20 +182,26 @@ export function useInpaintModalLifecycle({
 
   const handleStrokesChange = useCallback(
     (strokes: Stroke[]) => {
-      if (!currentImageId) return;
+      if (!currentImageId || !identityIsCurrent()) return;
       if (strokes.length === 0) clearMaskDraft(currentImageId);
       else setMaskDraft(currentImageId, strokes);
     },
-    [clearMaskDraft, currentImageId, setMaskDraft],
+    [
+      clearMaskDraft,
+      currentImageId,
+      identityIsCurrent,
+      setMaskDraft,
+    ],
   );
 
   useEffect(() => {
     if (!source) return;
     const timer = setTimeout(() => {
+      if (!identityIsCurrent()) return;
       setDraft(source.imageId, prompt);
     }, 350);
     return () => clearTimeout(timer);
-  }, [prompt, setDraft, source]);
+  }, [identityIsCurrent, prompt, setDraft, source]);
 
   useEffect(() => {
     if (!warning) return;
@@ -184,7 +211,7 @@ export function useInpaintModalLifecycle({
 
   const dirty = hasStroke || prompt.trim().length > 0;
   const handleClose = useCallback(() => {
-    if (submittingRef.current) return;
+    if (submittingRef.current || !identityIsCurrent()) return;
     if (!dirty) {
       close();
       return;
@@ -216,6 +243,7 @@ export function useInpaintModalLifecycle({
     close,
     confirmingClose,
     dirty,
+    identityIsCurrent,
     source,
   ]);
 

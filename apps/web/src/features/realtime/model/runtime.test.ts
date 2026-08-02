@@ -536,3 +536,21 @@ test("auth invalidation invokes explicit callbacks in every tab", () => {
   unsubscribeLeader();
   unsubscribeFollower();
 });
+
+test("explicit session invalidation closes the local stream without retrying", () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const statuses: RealtimeStatus[] = [];
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe(subscriber(statuses, async () => ({})));
+  clock.tick(50);
+
+  instance.invalidateSession();
+  clock.tick(60_000);
+
+  equal(transport.opens[0]?.closed, true);
+  equal(transport.opens.length, 1);
+  equal(statuses.at(-1), "error");
+  unsubscribe();
+});

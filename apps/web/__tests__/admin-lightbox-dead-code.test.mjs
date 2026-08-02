@@ -63,6 +63,12 @@ test("desktop lightbox scopes transient and async state to the active image", ()
   const controller = read(
     "src/components/ui/lightbox/DesktopLightboxController.tsx",
   );
+  const mobile = read(
+    "src/components/ui/lightbox/MobileLightbox.tsx",
+  );
+  const mobileMediaActions = read(
+    "src/components/ui/lightbox/useMobileLightboxMediaActions.ts",
+  );
   const mediaActions = read(
     "src/components/ui/lightbox/useDesktopLightboxMediaActions.ts",
   );
@@ -85,6 +91,32 @@ test("desktop lightbox scopes transient and async state to the active image", ()
   assert.match(
     mediaActions,
     /activeImageStateKeyRef\.current === operationKey[\s\S]*?operationSeq/,
+  );
+  assert.match(
+    mediaActions,
+    /operationIsCurrent[\s\S]*?identityIsCurrent\(\)/,
+  );
+  assert.match(
+    controller,
+    /handleInjectedAction[\s\S]*?isPrivateIdentitySnapshotCurrent\(identity\)/,
+  );
+  assert.match(
+    controller,
+    /switchToGalleryItem[\s\S]*?isPrivateIdentitySnapshotCurrent\(identity\)/,
+  );
+  assert.match(mobile, /neighborPreloadAbortRef/);
+  assert.match(mobile, /preloadImage\(item\.url, controller\.signal\)/);
+  assert.match(
+    mobile,
+    /guardedLightboxAction[\s\S]*?currentLightbox\.identityEpoch !== identity\.epoch/,
+  );
+  assert.match(
+    mobileMediaActions,
+    /runMobileDownload[\s\S]*?identityIsCurrent/,
+  );
+  assert.match(
+    mobileMediaActions,
+    /runMobileShare[\s\S]*?identityIsCurrent/,
   );
 });
 

@@ -142,26 +142,20 @@ function serverApiBase(): string {
 }
 
 async function shareApiHeaders(): Promise<HeadersInit> {
-  const out: Record<string, string> = {
-    Accept: "application/json",
-  };
-  const incoming = await headers();
-  for (const name of [
-    "forwarded",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
-  ]) {
-    const value = incoming.get(name);
-    if (value) out[name] = value;
-  }
-  return out;
+  // 不透传客户端的 forwarded / x-forwarded-* 头:这些值可被任意伪造,
+  // 原样转发会让客户端控制后端限流 IP(require_client_ip 信任代理对端时
+  // 直接按伪造值取桶)与来源解析;且公开分享接口的响应 URL 均为相对路径,
+  // 不依赖这些头构造,直接丢弃即可。
+  return { Accept: "application/json" };
 }
 
 async function requestOrigin(): Promise<string> {
+  // 用请求自身的 Host(由部署代理规范化)做 metadata 图源域名;
+  // x-forwarded-host 是客户端可控输入,不再参与 URL 构造,避免 OG 图源
+  // 被指向任意域名。x-forwarded-proto 仅作 TLS 终结代理后的 scheme 提示。
   const incoming = await headers();
   const proto = incoming.get("x-forwarded-proto") ?? "https";
-  const host = incoming.get("x-forwarded-host") ?? incoming.get("host");
+  const host = incoming.get("host");
   return host ? `${proto}://${host}` : "";
 }
 

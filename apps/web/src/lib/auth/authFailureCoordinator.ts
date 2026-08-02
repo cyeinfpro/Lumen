@@ -1,6 +1,7 @@
 import { isPublicPath } from "./publicPaths";
 import { replaceWithLogin } from "./navigation";
 import { clearPrivateClientState } from "./privateStateCleanup";
+import { notifyAuthSessionChanged } from "./sessionChangeBus";
 
 let redirecting = false;
 let cleanupFlight: Promise<void> | null = null;
@@ -13,6 +14,7 @@ export function invalidateSessionClientState(): Promise<void> {
 }
 
 export function coordinateUnauthorized(): void {
+  notifyAuthSessionChanged();
   const cleanup = invalidateSessionClientState();
   if (typeof window === "undefined" || redirecting) return;
   if (isPublicPath(window.location.pathname)) return;
