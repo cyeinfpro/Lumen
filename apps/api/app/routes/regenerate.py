@@ -13,15 +13,13 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.constants import (
-    CompletionStatus,
-    GenerationStatus,
     Intent,
     MessageStatus,
     Role,
@@ -43,11 +41,22 @@ from lumen_core.runtime_settings import get_spec
 
 from ..billing_cache_state import invalidate_balance_cache
 from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ..services.generation_queue import release_generation_queue_state
+from ..services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    lock_active_user,
+)
+from ..services.generation_queue import (
+    release_generation_queue_state,
+)
+from ..services.regenerate_task_cleanup import (
+    cancel_regenerate_target_active_tasks as _cancel_regenerate_target_active_tasks_service,
+    post_commit_regenerate_cancel_cleanup as _post_commit_regenerate_cancel_cleanup_service,
+)
 from . import regenerate_options as _regenerate_options
 from .messages import (
     DEFAULT_IMAGE_OUTPUT_FORMAT as _DEFAULT_IMAGE_OUTPUT_FORMAT,
@@ -108,20 +117,6 @@ async def _regenerate_wallet_exists(db: AsyncSession, user_id: str) -> bool:
     return wallet is not None
 
 
-def _cleanup_string_list(cleanup: dict[str, Any], key: str) -> list[str]:
-    values = cleanup.get(key)
-    if not isinstance(values, list):
-        return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        if not isinstance(value, str) or not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
-
-
 async def _cancel_regenerate_target_active_tasks(
     db: AsyncSession,
     *,
@@ -129,114 +124,19 @@ async def _cancel_regenerate_target_active_tasks(
     user_id: str,
     canceled_at: datetime,
     account_mode: str,
+    queue_redis: Any | None = None,
 ) -> dict[str, Any]:
-    generations = list(
-        (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == user_id,
-                    Generation.message_id == target_msg_id,
-                    Generation.status.in_(
-                        [
-                            GenerationStatus.QUEUED.value,
-                            GenerationStatus.RUNNING.value,
-                        ]
-                    ),
-                )
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
+    return await _cancel_regenerate_target_active_tasks_service(
+        db,
+        target_msg_id=target_msg_id,
+        user_id=user_id,
+        canceled_at=canceled_at,
+        account_mode=account_mode,
+        queue_redis=queue_redis,
+        release_hold=_release_regenerate_cancel_hold,
+        wallet_exists=_regenerate_wallet_exists,
+        logger=logger,
     )
-    completions = list(
-        (
-            await db.execute(
-                select(Completion)
-                .where(
-                    Completion.user_id == user_id,
-                    Completion.message_id == target_msg_id,
-                    Completion.status.in_(
-                        [
-                            CompletionStatus.QUEUED.value,
-                            CompletionStatus.STREAMING.value,
-                        ]
-                    ),
-                )
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    queued_generation_ids: list[str] = []
-    running_generation_ids: list[str] = []
-    streaming_completion_ids: list[str] = []
-    holds_released = 0
-    should_release_queued_holds = account_mode == "wallet"
-    if not should_release_queued_holds and (
-        any(
-            generation.status == GenerationStatus.QUEUED.value
-            for generation in generations
-        )
-        or any(
-            completion.status == CompletionStatus.QUEUED.value
-            for completion in completions
-        )
-    ):
-        should_release_queued_holds = await _regenerate_wallet_exists(db, user_id)
-
-    # Active predecessors stay active until their worker observes the cancel
-    # signal, so their wallet hold cannot be released ahead of upstream work.
-    for generation in generations:
-        if generation.status == GenerationStatus.QUEUED.value:
-            queued_generation_ids.append(generation.id)
-            generation.status = GenerationStatus.CANCELED.value
-            generation.progress_stage = "finalizing"
-            generation.finished_at = canceled_at
-            generation.error_code = "cancelled"
-            generation.error_message = "regenerate cancelled old assistant"
-            if should_release_queued_holds:
-                holds_released += int(
-                    await _release_regenerate_cancel_hold(
-                        db,
-                        user_id=user_id,
-                        ref_type="generation",
-                        ref_id=billing_core.generation_billing_ref_id(generation),
-                    )
-                )
-        elif generation.status == GenerationStatus.RUNNING.value:
-            running_generation_ids.append(generation.id)
-
-    for completion in completions:
-        if completion.status == CompletionStatus.QUEUED.value:
-            completion.status = CompletionStatus.CANCELED.value
-            completion.progress_stage = "finalizing"
-            completion.finished_at = canceled_at
-            completion.error_code = "cancelled"
-            completion.error_message = "regenerate cancelled old assistant"
-            if should_release_queued_holds:
-                holds_released += int(
-                    await _release_regenerate_cancel_hold(
-                        db,
-                        user_id=user_id,
-                        ref_type="completion",
-                        ref_id=billing_core.completion_billing_ref_id(completion),
-                    )
-                )
-        elif completion.status == CompletionStatus.STREAMING.value:
-            streaming_completion_ids.append(completion.id)
-
-    return {
-        "generations_canceled": len(generations),
-        "completions_canceled": len(completions),
-        "holds_released": holds_released,
-        "queued_generation_ids": queued_generation_ids,
-        "running_generation_ids": running_generation_ids,
-        "streaming_completion_ids": streaming_completion_ids,
-    }
 
 
 async def _post_commit_regenerate_cancel_cleanup(
@@ -245,38 +145,14 @@ async def _post_commit_regenerate_cancel_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    queued_generation_ids = _cleanup_string_list(cleanup, "queued_generation_ids")
-    active_task_ids = [
-        *_cleanup_string_list(cleanup, "running_generation_ids"),
-        *_cleanup_string_list(cleanup, "streaming_completion_ids"),
-    ]
-    for task_id in queued_generation_ids:
-        try:
-            await _release_generation_queue_state(redis, task_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "regenerate image_queue release failed gen=%s err=%s",
-                task_id,
-                exc,
-            )
-    for task_id in active_task_ids:
-        try:
-            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "regenerate cancel signal failed task=%s err=%s",
-                task_id,
-                exc,
-            )
-    if int(cleanup.get("holds_released") or 0) > 0:
-        try:
-            await invalidate_balance_cache(user_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "regenerate balance cache invalidation failed user=%s err=%s",
-                user_id,
-                exc,
-            )
+    await _post_commit_regenerate_cancel_cleanup_service(
+        redis,
+        user_id=user_id,
+        cleanup=cleanup,
+        release_queue_state=_release_generation_queue_state,
+        invalidate_balance=invalidate_balance_cache,
+        logger=logger,
+    )
 
 
 _INTENT_BY_STR = MappingProxyType(
@@ -287,6 +163,8 @@ _INTENT_BY_STR = MappingProxyType(
         "image_to_image": Intent.IMAGE_TO_IMAGE,
     }
 )
+
+
 async def _default_image_output_format(db: AsyncSession) -> str:
     spec = get_spec("image.output_format")
     if spec is not None:
@@ -641,6 +519,7 @@ async def regenerate_message(
     body: RegenerateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> RegenerateOut:
     redis = get_redis()
     await MESSAGES_LIMITER.check(redis, f"rl:msg:{user.id}")
@@ -676,6 +555,14 @@ async def regenerate_message(
     text = user_content.get("text") or ""
 
     # ---- transactional: cancel old assistant + sub-tasks, then create new ---
+    try:
+        session_id = durable_session_id(request)
+        if session_id:
+            await lock_active_user(db, user.id, session_id=session_id)
+        else:
+            await lock_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     now = datetime.now(timezone.utc)
     cleanup = await _cancel_regenerate_target_active_tasks(
         db,
@@ -683,6 +570,7 @@ async def regenerate_message(
         user_id=user.id,
         canceled_at=now,
         account_mode=getattr(user, "account_mode", "wallet"),
+        queue_redis=redis,
     )
 
     # Mark old assistant message canceled (don't delete — keep history).

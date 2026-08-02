@@ -1725,6 +1725,72 @@ async def test_admin_adjust_wallet_rejects_negative_balance_cap(
     assert seen_min_balance == [-billing.MAX_ADMIN_NEGATIVE_BALANCE_MICRO]
 
 
+@pytest.mark.asyncio
+async def test_admin_adjust_wallet_passes_client_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户端每次表单提交生成的 per-operation 幂等键必须原样透传给 adjust。
+
+    缺省时 adjust 由入参哈希派生键，会把两次参数完全相同的合法调账静默
+    去重；显式键是唯一逃生门，路由层必须透传。
+    """
+    class Db:
+        async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            return SimpleNamespace(account_mode="wallet")
+
+        async def commit(self) -> None:
+            return None
+
+    seen: list[tuple[int, str | None]] = []
+
+    async def adjust(_db: Any, _user_id: str, amount: int, **_kwargs: Any) -> Any:
+        seen.append((amount, _kwargs.get("idempotency_key")))
+        return SimpleNamespace(id="tx-1")
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    def tx_out(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(id="tx-1")
+
+    async def write_audit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def invalidate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(billing.billing_core, "adjust", adjust)
+    monkeypatch.setattr(billing_services, "_allow_negative_balance", allow_negative)
+    monkeypatch.setattr(billing_services, "_tx_out", tx_out)
+    monkeypatch.setattr(billing_composition, "write_audit", write_audit)
+    monkeypatch.setattr(billing_services, "_invalidate_balance_cache", invalidate)
+
+    await billing.admin_adjust_wallet(
+        "user-1",
+        AdminWalletAdjustIn(
+            amount_rmb_signed="5",
+            reason="客服补偿",
+            idempotency_key="op-1",
+        ),
+        _request(method="POST"),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        Db(),  # type: ignore[arg-type]
+    )
+
+    assert seen == [(billing_core.rmb_to_micro("5"), "op-1")]
+
+    # 未传 key 时后端收到 None，走输入派生键兜底。
+    seen.clear()
+    await billing.admin_adjust_wallet(
+        "user-1",
+        AdminWalletAdjustIn(amount_rmb_signed="5", reason="客服补偿"),
+        _request(method="POST"),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        Db(),  # type: ignore[arg-type]
+    )
+    assert seen == [(billing_core.rmb_to_micro("5"), None)]
+
+
 class _AccountModeDb:
     """只为 set_account_mode 提供 User 行锁查询与提交语义的最小 session。"""
 

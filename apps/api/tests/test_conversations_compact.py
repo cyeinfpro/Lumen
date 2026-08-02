@@ -342,6 +342,140 @@ async def test_compact_uses_worker_queue_when_no_adapter_is_installed(
     }
 
 
+# ---------- 1b. failed job on 24h job_key: force retry ----------
+
+
+@pytest.mark.asyncio
+async def test_force_retries_failed_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A worker failure leaves a "failed" marker on the 24h job_key. force=True
+    # must bypass it and enqueue a fresh job instead of replaying the failure.
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis()
+    job_id = compaction_service.manual_compact_job_id(
+        user_id="user-1",
+        conv_id="conv-1",
+        boundary_id="msg-latest",
+        extra_instruction=None,
+        target_tokens=1200,
+        input_budget=80_000,
+        summary_timeout_s=120.0,
+        model="gpt-5.4",
+    )
+    job_key = conversations._manual_compact_job_key(
+        user_id="user-1",
+        conv_id="conv-1",
+        job_id=job_id,
+    )
+    redis.kv[job_key] = json.dumps(
+        {
+            "status": "failed",
+            "job_id": job_id,
+            "reason": "upstream_error",
+        }
+    )
+    enqueued: list[tuple[Any, ...]] = []
+
+    class Pool:
+        async def enqueue_job(self, name: str, *args: Any) -> None:
+            enqueued.append((name, *args))
+            # mimic a successful worker run so the waiting path returns a summary
+            redis.kv[job_key] = json.dumps(
+                {
+                    "status": "succeeded",
+                    "job_id": job_id,
+                    "response": {
+                        "status": "ok",
+                        "compacted": True,
+                        "summary": {"tokens": 321},
+                    },
+                }
+            )
+
+    async def fake_pool() -> Pool:
+        return Pool()
+
+    previous = compaction_service.install_context_summary_adapter(None)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+    monkeypatch.setattr(conversations, "get_arq_pool", fake_pool)
+    try:
+        out = await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(force=True),
+        )
+    finally:
+        compaction_service.restore_context_summary_adapter(previous)
+
+    assert len(enqueued) == 1
+    assert enqueued[0][0] == "manual_compact_conversation"
+    assert out == {
+        "status": "ok",
+        "compacted": True,
+        "summary": {"tokens": 321},
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_job_sticks_without_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without force the failed 24h job_key is replayed as-is and must not
+    # enqueue a second job.
+    db = _Db(conv=_conv(), latest_message=_message())
+    redis = _Redis()
+    job_id = compaction_service.manual_compact_job_id(
+        user_id="user-1",
+        conv_id="conv-1",
+        boundary_id="msg-latest",
+        extra_instruction=None,
+        target_tokens=1200,
+        input_budget=80_000,
+        summary_timeout_s=120.0,
+        model="gpt-5.4",
+    )
+    job_key = conversations._manual_compact_job_key(
+        user_id="user-1",
+        conv_id="conv-1",
+        job_id=job_id,
+    )
+    redis.kv[job_key] = json.dumps(
+        {
+            "status": "failed",
+            "job_id": job_id,
+            "reason": "upstream_error",
+        }
+    )
+
+    async def fake_pool() -> None:
+        raise AssertionError("failed job without force must not enqueue")
+
+    previous = compaction_service.install_context_summary_adapter(None)
+    monkeypatch.setattr(conversations, "get_redis", lambda: redis)
+    monkeypatch.setattr(conversations, "get_arq_pool", fake_pool)
+    try:
+        out = await conversations.compact_conversation(
+            "conv-1",
+            _request(),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+            conversations.ManualCompactIn(
+                background=True,
+                # force=False still runs the budget gate; a huge safety margin
+                # forces would_exceed_budget True so the flow reaches enqueue.
+                safety_margin=conversations.CONTEXT_INPUT_TOKEN_BUDGET + 1,
+            ),
+        )
+    finally:
+        compaction_service.restore_context_summary_adapter(previous)
+
+    assert out["status"] == "failed"
+    assert out["reason"] == "upstream_error"
+
+
 # ---------- 2. cross-user 404 ----------
 
 

@@ -58,7 +58,8 @@ async def write_audit(
 
     `autocommit=True` uses an isolated transaction so audit failures do not
     poison the caller's transaction. `autocommit=False` writes through the
-    supplied session and leaves commit/rollback to the caller.
+    supplied session inside a savepoint（flush 失败只回滚审计行，不污染调用方
+    事务），并保留 commit/rollback 给调用方。
 
     Returns ``True`` if the audit row was persisted (or, for ``autocommit``,
     successfully handed off), ``False`` otherwise. Existing call sites that
@@ -77,16 +78,20 @@ async def write_audit(
         )
 
     try:
-        row = AuditLog(
-            user_id=user_id,
-            event_type=event_type,
-            actor_email_hash=actor_email_hash or hash_email(actor_email),
-            actor_ip_hash=actor_ip_hash,
-            target_user_id=target_user_id,
-            details=details or {},
-        )
-        session.add(row)
-        await session.flush()
+        # savepoint 内 flush：失败时只回滚审计行，不污染调用方事务。
+        # 直接 flush 失败会把 session 事务置为 DEACTIVE，调用方后续
+        # commit 抛 PendingRollbackError，且其未提交改动一并丢失。
+        async with session.begin_nested():
+            row = AuditLog(
+                user_id=user_id,
+                event_type=event_type,
+                actor_email_hash=actor_email_hash or hash_email(actor_email),
+                actor_ip_hash=actor_ip_hash,
+                target_user_id=target_user_id,
+                details=details or {},
+            )
+            session.add(row)
+            await session.flush()
         return True
     except Exception as exc:  # noqa: BLE001
         audit_write_failures_total.labels(mode="session").inc()

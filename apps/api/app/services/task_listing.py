@@ -41,6 +41,7 @@ class TaskListRequest:
 class TaskListingRuntime:
     apply_cursor: Callable[..., Any]
     apply_date_filter: Callable[..., Any]
+    apply_item_filters: Callable[..., Any]
     build_item: Callable[..., TaskItemOut]
     encode_cursor: Callable[[datetime, str, str], str]
     json_dict: Callable[[Any], dict[str, Any]]
@@ -113,6 +114,7 @@ def _query_statements(
     error_code: str | None,
     date_filter: str | None,
     cursor: TaskCursor,
+    request: TaskListRequest,
 ) -> tuple[Select, Select]:  # type: ignore[type-arg]
     gen_stmt: Select = select(Generation).where(  # type: ignore[assignment]
         Generation.user_id == user_id
@@ -126,6 +128,11 @@ def _query_statements(
         comp_stmt = comp_stmt.where(Completion.error_code == error_code)
     gen_stmt = runtime.apply_date_filter(gen_stmt, Generation, date_filter)
     comp_stmt = runtime.apply_date_filter(comp_stmt, Completion, date_filter)
+    # 可精确求值的 item 过滤条件在 SQL 层下推(runtime.apply_item_filters):
+    # 零匹配 filter 首轮即返回空集,深挖循环立刻终止,不会把整个用户任务表
+    # 逐批拉完;推导值(source 回退等)仍由内存 _item_matches 兜底过滤。
+    gen_stmt = runtime.apply_item_filters(gen_stmt, Generation, request)
+    comp_stmt = runtime.apply_item_filters(comp_stmt, Completion, request)
     return (
         runtime.apply_cursor(
             gen_stmt,
@@ -381,6 +388,66 @@ def _sortable_items(
     return [item for item in items if item is not None]
 
 
+def _task_key(
+    runtime: TaskListingRuntime,
+    sort_at: datetime,
+    kind: str,
+    task_id: str,
+) -> tuple[datetime, int, str]:
+    """Merged descending sort key of a task, used to compare window positions."""
+    return (sort_at, runtime.kind_rank(kind), task_id)
+
+
+def _tail_above_page_key(
+    runtime: TaskListingRuntime,
+    rows: list[Generation] | list[Completion],
+    kind: Literal["generation", "completion"],
+    last_page_key: tuple[datetime, int, str] | None,
+) -> bool:
+    """Whether a full per-table batch may still hide matches above the page tail.
+
+    Batches are cut by (sort_expr, id) inside each table; when the tail of a
+    full batch still sorts above the last page item in the merged order, rows
+    deeper in that stream could hold matches that a cursor at the page tail
+    would silently skip on the next page.
+    """
+    if not rows:
+        return False
+    tail = rows[-1]
+    tail_key = (runtime.sort_at(tail), runtime.kind_rank(kind), tail.id)
+    return last_page_key is None or tail_key > last_page_key
+
+
+async def _deeper_batch(
+    db: AsyncSession,
+    runtime: TaskListingRuntime,
+    request: TaskListRequest,
+    *,
+    rows: list[Generation] | list[Completion],
+    kind: Literal["generation", "completion"],
+    query_limit: int,
+) -> tuple[list[Generation], list[Completion]]:
+    """Fetch the next batch of one table, strictly below its current tail."""
+    tail = rows[-1]
+    gen_stmt, comp_stmt = _query_statements(
+        runtime,
+        user_id=request.user_id,
+        status=request.status,
+        error_code=request.error_code,
+        date_filter=request.date_filter,
+        cursor=(runtime.sort_at(tail), kind, tail.id),
+        request=request,
+    )
+    return await _task_rows(
+        db,
+        runtime,
+        gen_stmt=gen_stmt,
+        comp_stmt=comp_stmt,
+        kind=kind,
+        query_limit=query_limit,
+    )
+
+
 async def build_task_list(
     db: AsyncSession,
     runtime: TaskListingRuntime,
@@ -394,6 +461,7 @@ async def build_task_list(
         error_code=request.error_code,
         date_filter=request.date_filter,
         cursor=request.cursor,
+        request=request,
     )
     generations, completions = await _task_rows(
         db,
@@ -403,31 +471,84 @@ async def build_task_list(
         kind=request.kind,
         query_limit=query_limit,
     )
-    message_meta = await _message_meta(db, runtime, generations, completions)
-    defaults = await _conversation_defaults(db, runtime, message_meta)
-    images, variant_kinds = await _generation_media(db, generations)
-    queue_positions = await _queue_positions(db, runtime, request.user_id)
-    sortable = _sortable_items(
-        runtime,
-        generations,
-        completions,
-        message_meta=message_meta,
-        conversation_defaults=defaults,
-        images=images,
-        variant_kinds=variant_kinds,
-        queue_positions=queue_positions,
-        source=request.source,
-        conversation_id=request.conversation_id,
-        project_id=request.project_id,
-        retryable=request.retryable,
+    # A per-table batch is "full" when the query returned a whole batch: more
+    # rows may still exist deeper in that stream.  Matching happens in memory
+    # (`_item_matches`), so with sparse filters the first batches can hold
+    # fewer than `limit` matches even though more exist below; deciding
+    # `next_cursor` from the match count alone would silently drop them.
+    # Exact item filters are pushed down to SQL (see `_query_statements`), so a
+    # zero-match filter makes both batches empty here and the loop exits after
+    # one round instead of draining the user's tables one batch at a time.
+    gen_full = (
+        request.kind in {"all", "generation"} and len(generations) >= query_limit
     )
-    sortable.sort(
-        key=lambda pair: (pair[0], runtime.kind_rank(pair[1]), pair[2]),
-        reverse=True,
+    comp_full = (
+        request.kind in {"all", "completion"} and len(completions) >= query_limit
     )
-    page = sortable[: request.limit]
+
+    sortable: list[tuple[datetime, str, str, TaskItemOut]] = []
+    page: list[tuple[datetime, str, str, TaskItemOut]] = []
+    queue_positions: dict[str, int] = {}
+    queue_positions_fetched = False
+    while True:
+        message_meta = await _message_meta(db, runtime, generations, completions)
+        defaults = await _conversation_defaults(db, runtime, message_meta)
+        images, variant_kinds = await _generation_media(db, generations)
+        if not queue_positions_fetched:
+            queue_positions = await _queue_positions(db, runtime, request.user_id)
+            queue_positions_fetched = True
+        sortable = _sortable_items(
+            runtime,
+            generations,
+            completions,
+            message_meta=message_meta,
+            conversation_defaults=defaults,
+            images=images,
+            variant_kinds=variant_kinds,
+            queue_positions=queue_positions,
+            source=request.source,
+            conversation_id=request.conversation_id,
+            project_id=request.project_id,
+            retryable=request.retryable,
+        )
+        sortable.sort(
+            key=lambda pair: (pair[0], runtime.kind_rank(pair[1]), pair[2]),
+            reverse=True,
+        )
+        page = sortable[: request.limit]
+        last_key = _task_key(runtime, *page[-1][:3]) if page else None
+        need_gens = gen_full and _tail_above_page_key(
+            runtime, generations, "generation", last_key
+        )
+        need_comps = comp_full and _tail_above_page_key(
+            runtime, completions, "completion", last_key
+        )
+        if not need_gens and not need_comps:
+            break
+        if need_gens:
+            extra_gens, _extra_comps = await _deeper_batch(
+                db,
+                runtime,
+                request,
+                rows=generations,
+                kind="generation",
+                query_limit=query_limit,
+            )
+            generations.extend(extra_gens)
+            gen_full = len(extra_gens) >= query_limit
+        if need_comps:
+            extra_comps, _extra_gens = await _deeper_batch(
+                db,
+                runtime,
+                request,
+                rows=completions,
+                kind="completion",
+                query_limit=query_limit,
+            )
+            completions.extend(extra_comps)
+            comp_full = len(extra_comps) >= query_limit
     next_cursor = None
-    if len(sortable) > request.limit and page:
+    if page and (len(sortable) > request.limit or gen_full or comp_full):
         sort_at, item_kind, task_id, _item = page[-1]
         next_cursor = runtime.encode_cursor(sort_at, item_kind, task_id)
     return TaskListOut(

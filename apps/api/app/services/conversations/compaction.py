@@ -369,6 +369,7 @@ async def enqueue_manual_compact_job(
     model: str,
     redis: Any,
     cooldown_seconds: int,
+    force: bool = False,
     get_arq_pool_fn: Callable[[], Awaitable[Any]] = get_arq_pool,
 ) -> dict[str, Any]:
     job_id = manual_compact_job_id(
@@ -390,7 +391,10 @@ async def enqueue_manual_compact_job(
     cooldown_key = manual_compact_cooldown_key(user_id=user_id, conv_id=conv_id)
     existing = await _safe_redis_get(redis, job_key, "manual compact job status read")
     payload = compact_payload_from_job(existing, job_id=job_id)
-    if payload is not None:
+    # force=True must be able to retry a previous failure: a failed job would
+    # otherwise stick on the 24h job_key and block re-enqueue. queued/running
+    # still dedupe, and a succeeded job replays its cached response.
+    if payload is not None and not (force and payload.get("status") == "failed"):
         return payload
     active = await _safe_redis_get(redis, active_key, "manual compact active read")
     active_job_id = active.get("job_id") if isinstance(active, dict) else None
@@ -557,6 +561,7 @@ async def _compact_via_worker_queue(
     model: str,
     redis: Any,
     request: Request,
+    force: bool = False,
     get_arq_pool_fn: Callable[[], Awaitable[Any]],
 ) -> dict[str, Any]:
     pending = await enqueue_manual_compact_job(
@@ -570,6 +575,7 @@ async def _compact_via_worker_queue(
         model=model,
         redis=redis,
         cooldown_seconds=0,
+        force=force,
         get_arq_pool_fn=get_arq_pool_fn,
     )
     return await _wait_for_compact_job(
@@ -653,6 +659,7 @@ async def compact_conversation(
             model=model,
             redis=redis,
             cooldown_seconds=cooldown_seconds,
+            force=body.force,
             get_arq_pool_fn=get_arq_pool_fn,
         )
     await check_manual_compact_cooldown(
@@ -674,6 +681,7 @@ async def compact_conversation(
             model=model,
             redis=redis,
             request=request,
+            force=body.force,
             get_arq_pool_fn=get_arq_pool_fn,
         )
     runtime_settings = {

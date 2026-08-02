@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from PIL import Image as PILImage
 
 from app.canvas_services import asset_ref_service
@@ -180,9 +180,12 @@ async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> No
         def __init__(self) -> None:
             self.calls = 0
 
-        async def execute(self, _stmt):
+        async def execute(self, statement):
             self.calls += 1
-            if self.calls % 2 == 1:
+            sql = str(statement)
+            if "FROM image_variants" in sql:
+                return _RowsResult(values=["u/user-1/uploads/img-1.display2048.webp"])
+            if "FROM images" in sql:
                 return _RowsResult(
                     rows=[
                         (
@@ -192,10 +195,21 @@ async def test_sweep_orphan_image_files_dry_run_and_delete(tmp_path: Path) -> No
                                     "storage_key": "u/user-1/uploads/img-1.ref.webp"
                                 }
                             },
+                            {},
                         )
                     ]
                 )
-            return _RowsResult(values=["u/user-1/uploads/img-1.display2048.webp"])
+            if "FROM videos" in sql:
+                return _RowsResult(
+                    rows=[
+                        (
+                            "u/user-1/vref/video-1/original.mp4",
+                            None,
+                            {},
+                        )
+                    ]
+                )
+            return _RowsResult()
 
     db = _SweepDb()
     dry_run = await sweep_orphan_image_files(
@@ -469,6 +483,11 @@ async def test_reference_image_binary_serves_video_reference_variant(
 ) -> None:
     old = settings.storage_root
     settings.storage_root = str(tmp_path)
+
+    async def no_rate_limit(_request: Request) -> None:
+        return None
+
+    monkeypatch.setattr(images, "_check_reference_image_rate_limit", no_rate_limit)
     ref_key = "u/user-1/uploads/image-1.video_ref_2048_jpg.jpg"
     ref_path = tmp_path / ref_key
     ref_path.parent.mkdir(parents=True)
@@ -515,9 +534,15 @@ async def test_reference_image_binary_serves_video_reference_variant(
 @pytest.mark.asyncio
 async def test_reference_image_binary_serves_volcano_asset_variant(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     old = settings.storage_root
     settings.storage_root = str(tmp_path)
+
+    async def no_rate_limit(_request: Request) -> None:
+        return None
+
+    monkeypatch.setattr(images, "_check_reference_image_rate_limit", no_rate_limit)
     ref_key = "u/user-1/uploads/image-1.volcano_asset_img_v1.jpg"
     ref_path = tmp_path / ref_key
     ref_path.parent.mkdir(parents=True)
@@ -574,6 +599,33 @@ async def test_reference_image_binary_serves_volcano_asset_variant(
     )
     assert named.status_code == 200
     assert named.headers["content-type"].startswith("image/jpeg")
+
+
+@pytest.mark.asyncio
+async def test_reference_image_binary_rate_limits_before_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未认证 reference 端点必须走 per-IP 限流，超限在触达 DB 前拒绝。"""
+
+    called = False
+
+    async def rejecting_limit(_request: Request) -> None:
+        nonlocal called
+        called = True
+        raise HTTPException(status_code=429, detail={"error": {"code": "rate_limit"}})
+
+    monkeypatch.setattr(images, "_check_reference_image_rate_limit", rejecting_limit)
+    with pytest.raises(HTTPException) as exc:
+        await images.reference_image_binary(
+            "image-1",
+            _request("GET"),
+            _Db(None),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
+            token="x" * 16,
+            variant=VIDEO_REFERENCE_IMAGE_KIND,
+        )
+    assert exc.value.status_code == 429
+    assert called
 
 
 @pytest.mark.asyncio
@@ -650,7 +702,72 @@ async def test_get_image_by_key_sets_cache_headers(
 
     assert response.headers["content-length"] == str(len(b"image-bytes"))
     assert response.headers["etag"] == '"abc123"'
-    assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_owner_protected_image_binary_and_variant_responses_do_not_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    original_path = tmp_path / "u" / "user-1" / "img.png"
+    variant_path = tmp_path / "u" / "user-1" / "img.thumb256.jpg"
+    original_path.parent.mkdir(parents=True)
+    original_path.write_bytes(b"original")
+    variant_path.write_bytes(b"thumbnail")
+
+    image = SimpleNamespace(
+        id="img-1",
+        storage_key="u/user-1/img.png",
+        user_id="user-1",
+        deleted_at=None,
+        mime="image/png",
+        sha256="abc123",
+    )
+    variant = SimpleNamespace(
+        image_id="img-1",
+        kind="thumb256",
+        storage_key="u/user-1/img.thumb256.jpg",
+    )
+
+    class _SequencedDb:
+        def __init__(self, results: list[Any]) -> None:
+            self.results = results
+
+        async def execute(self, _statement: Any) -> _ScalarResult:
+            return _ScalarResult(self.results.pop(0))
+
+    async def visible(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(images, "_ensure_image_visible_to_user", visible)
+    user = SimpleNamespace(id="user-1")
+    binary_response = await images.get_image_binary(
+        "img-1",
+        _request("GET"),
+        user,
+        _Db(image),  # type: ignore[arg-type]
+    )
+    variant_response = await images.get_image_variant(
+        "img-1",
+        "thumb256",
+        _request("GET"),
+        user,
+        _SequencedDb([image, variant]),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+    conditional_response = await images.get_image_binary(
+        "img-1",
+        _request_with_headers({"if-none-match": '"abc123"'}),
+        user,
+        _Db(image),  # type: ignore[arg-type]
+    )
+
+    for response in (binary_response, variant_response):
+        assert response.headers["cache-control"] == "no-store"
+    assert conditional_response.status_code == 304
+    assert conditional_response.headers["cache-control"] == "no-store"
 
 
 def _request_with_headers(headers: dict[str, str]) -> Request:

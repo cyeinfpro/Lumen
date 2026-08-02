@@ -26,11 +26,19 @@ def _clear_local_cooldown():
 
 
 class _SetFailRedis:
-    """Redis that lets INCR/EXPIRE pass but blows up on SET (cooldown write)."""
+    """Redis that lets the fail-counter INCR+EXPIRE script pass but blows up on
+    SET (cooldown write)."""
 
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
         self.exists_calls: list[str] = []
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> int:
+        # Mirrors proxy_pool._FAIL_INCR_EXPIRE_LUA: INCR the counter, EXPIRE is
+        # a no-op for the fake.
+        key = keys_and_args[0]
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
 
     async def incr(self, key: str) -> int:
         self.counters[key] = self.counters.get(key, 0) + 1
@@ -53,6 +61,9 @@ class _SetFailRedis:
 
 class _AllFailRedis:
     """Redis that fails on every command (full outage)."""
+
+    async def eval(self, *_a, **_kw):
+        raise RuntimeError("redis down")
 
     async def incr(self, *_a, **_kw):
         raise RuntimeError("redis down")

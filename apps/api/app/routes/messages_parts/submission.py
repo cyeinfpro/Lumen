@@ -29,6 +29,10 @@ from ...services.message_request import (
     validate_attachment_ids,
     validate_mask_image,
 )
+from ...services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ async def submit_user_message(
     db: AsyncSession,
     *,
     runtime: SubmissionRuntime,
+    session_id: str | None = None,
 ) -> PostMessageOut:
     redis = runtime.get_redis()
     await runtime.messages_limiter.check(redis, f"rl:msg:{user.id}")
@@ -174,26 +179,30 @@ async def submit_user_message(
         chat_params=chat_params,
         account_mode=account_mode,
     )
-    transaction = await persist_message_request(
-        db,
-        runtime.message_transaction_runtime(),
-        PersistMessageRequestCommand(
-            user=user,
-            conversation=conv,
-            conversation_id=conv_id,
-            body=body,
-            intent=intent,
-            user_content=user_content,
-            image_params=image_params,
-            chat_params=chat_params,
-            assistant_context=assistant_context,
-            attachment_ids=attachment_ids,
-            mask_image_id=mask_image_id,
-            request_metadata=request_metadata,
-            account_mode=account_mode,
-            now=now,
-        ),
-    )
+    try:
+        transaction = await persist_message_request(
+            db,
+            runtime.message_transaction_runtime(),
+            PersistMessageRequestCommand(
+                user=user,
+                conversation=conv,
+                conversation_id=conv_id,
+                body=body,
+                intent=intent,
+                user_content=user_content,
+                image_params=image_params,
+                chat_params=chat_params,
+                assistant_context=assistant_context,
+                attachment_ids=attachment_ids,
+                mask_image_id=mask_image_id,
+                request_metadata=request_metadata,
+                account_mode=account_mode,
+                now=now,
+                session_id=session_id,
+            ),
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     if transaction.idempotent_response is not None:
         return transaction.idempotent_response
     user_msg = transaction.user_message

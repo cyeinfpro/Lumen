@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.constants import (
@@ -19,7 +19,9 @@ from lumen_core.constants import (
 )
 from lumen_core.model_entities import (
     Completion,
+    Conversation,
     Generation,
+    Message,
 )
 from lumen_core.schema_models import (
     ActiveTasksOut,
@@ -27,7 +29,6 @@ from lumen_core.schema_models import (
     GenerationOut,
     TaskItemOut,
     TaskListOut,
-    TaskRecommendedActionOut,
 )
 
 from ..db import get_db
@@ -36,6 +37,9 @@ from ..services.task_listing import (
     TaskListingRuntime,
     TaskListRequest,
     build_task_list,
+)
+from .task_listing_parts.actions import (
+    task_recommended_actions as _task_recommended_actions,
 )
 
 router = APIRouter()
@@ -49,6 +53,10 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
 
 _TASK_CURSOR_VERSION = 1
 _TASK_KIND_RANK = MappingProxyType({"completion": 0, "generation": 1})
+
+# _task_source 的回退派生值(依赖 project_id / message content / conversation
+# default_params,无法在 SQL 层精确表达);这些值不进 JSON 下推,仍走内存过滤。
+_DERIVED_SOURCES = frozenset({"project", "telegram", "chat"})
 
 _TERMINAL_ERROR_CODES = frozenset(
     {
@@ -269,103 +277,6 @@ def _task_retryable(kind: str, status: str, error_code: str | None) -> bool:
     return error_code not in _TERMINAL_ERROR_CODES
 
 
-def _task_recommended_actions(
-    *,
-    kind: str,
-    status: str,
-    error_code: str | None,
-    retryable: bool,
-) -> list[TaskRecommendedActionOut]:
-    if status == "canceled":
-        return [
-            TaskRecommendedActionOut(id="retry", label="重新开始", kind="retry"),
-        ]
-    if status != "failed":
-        return []
-
-    code = (error_code or "").strip()
-    actions: list[TaskRecommendedActionOut] = []
-    if retryable:
-        actions.append(TaskRecommendedActionOut(id="retry", label="重试", kind="retry"))
-
-    if code in {"INSUFFICIENT_BALANCE", "insufficient_credits"}:
-        actions.extend(
-            [
-                TaskRecommendedActionOut(
-                    id="open_wallet",
-                    label="去充值",
-                    kind="link",
-                    href="/me/wallet",
-                ),
-                TaskRecommendedActionOut(
-                    id="reduce_cost",
-                    label="降低质量/数量",
-                    kind="adjust",
-                ),
-            ]
-        )
-    elif code in {
-        "NO_ACTIVE_API_KEY",
-        "no_active_api_key",
-        "authentication_error",
-        "permission_error",
-        "unauthorized",
-        "invalid_api_key",
-        "upstream_auth_error",
-    }:
-        actions.append(
-            TaskRecommendedActionOut(
-                id="open_api_key",
-                label="检查 API Key",
-                kind="link",
-                href="/settings/api-key",
-            )
-        )
-    elif code in {
-        "invalid_request_error",
-        "invalid_request",
-        "invalid_param",
-        "invalid_value",
-        "validation_error",
-        "prompt_too_long",
-        "upstream_context_too_long",
-    }:
-        actions.append(
-            TaskRecommendedActionOut(id="edit_input", label="调整输入", kind="adjust")
-        )
-    elif code in {
-        "bad_reference_image",
-        "reference_missing",
-        "missing_input_images",
-        "reference_image_too_large",
-        "no_mask_capable_provider",
-    }:
-        actions.append(
-            TaskRecommendedActionOut(
-                id="fix_reference",
-                label="检查参考图/Mask",
-                kind="adjust",
-            )
-        )
-    elif code in {
-        "moderation_blocked",
-        "content_policy_violation",
-        "safety_violation",
-    }:
-        actions.append(
-            TaskRecommendedActionOut(
-                id="edit_prompt", label="调整提示词", kind="adjust"
-            )
-        )
-    elif not retryable:
-        actions.append(
-            TaskRecommendedActionOut(
-                id="view_details", label="查看详情", kind="details"
-            )
-        )
-    return actions[:3]
-
-
 def _task_project_meta(
     task: Generation | Completion,
     message_content: dict[str, Any] | None,
@@ -557,10 +468,152 @@ def _variant_thumb_url(image_id: str, kinds: set[str]) -> str:
     return f"/api/images/{image_id}/binary"
 
 
+def _json_text_empty(expr: Any) -> Any:
+    """JSON 文本提取的"缺失或空串"判定,与 _string_value 口径一致。"""
+    return or_(expr.is_(None), expr == "")
+
+
+def _json_text_present(expr: Any) -> Any:
+    return and_(expr.is_not(None), expr != "")
+
+
+def _task_has_project_id(model: Any) -> Any:
+    """任务带非空 project_id 的 SQL 条件:upstream_request.workflow_run_id 或
+    message content.workflow_run_id 非空(与 _task_project_meta 口径一致)。"""
+    return or_(
+        _json_text_present(model.upstream_request["workflow_run_id"].as_string()),
+        model.message_id.in_(
+            select(Message.id).where(
+                _json_text_present(Message.content["workflow_run_id"].as_string())
+            )
+        ),
+    )
+
+
+def _derived_source_precondition(model: Any, source: str) -> Any | None:
+    """派生源(source=project/telegram)的必要条件预筛。
+
+    派生回退(_task_source)要求显式 source 缺失;显式 source 恰好等于该值时
+    _task_source 优先返回显式值、同样命中过滤,因此附带显式相等分支。该预筛
+    不比精确匹配更严:任何命中行都能通过,内存 _item_matches 继续兜底;
+    零匹配时首轮即空,深挖循环立即退出。
+    """
+    explicit = model.upstream_request["source"].as_string()
+    no_explicit = _json_text_empty(explicit)
+    if source == "project":
+        return or_(explicit == source, and_(no_explicit, _task_has_project_id(model)))
+    if source == "telegram":
+        # 派生顺序 project 优先于 telegram:telegram 回退要求无 project_id,
+        # 且消息所在会话 default_params["telegram"] 为 true。CAST 成文本后
+        # PG 的 JSON true 是 "true",sqlite 测试方言是 "1",两分支互补。
+        telegram_flag = cast(
+            Conversation.default_params["telegram"].as_string(), String
+        )
+        telegram_conversation = model.message_id.in_(
+            select(Message.id).where(
+                Message.conversation_id.in_(
+                    select(Conversation.id).where(
+                        or_(
+                            telegram_flag == "true",
+                            telegram_flag == "1",
+                        )
+                    )
+                )
+            )
+        )
+        return or_(
+            explicit == source,
+            and_(no_explicit, ~_task_has_project_id(model), telegram_conversation),
+        )
+    return None  # chat: 派生默认值,最宽,无需预筛
+
+
+def _apply_task_item_filters(
+    stmt: Any,
+    model: Any,
+    request: TaskListRequest,
+) -> Any:
+    """把可精确求值的 item 过滤条件下推到 SQL,零匹配时首轮即空。
+
+    build_task_list 的深挖循环靠"批尾仍在页尾之上"判定是否继续拉深;纯内存
+    过滤的 filter 零匹配时无法提前知道没有结果,会把用户两张任务表逐批扫完
+    (全表分页扫描)。这里把 conversation_id / retryable / 显式 source /
+    project_id 转成 SQL 条件,零匹配直接返回空集,循环首轮即退出。
+    下推条件只做精确(或更宽松)的预筛 —— 内存 _item_matches 继续兜底,
+    不会漏行;无法精确表达的派生值(source 的 project/telegram/chat 回退、
+    conversation_default_params)保留在内存过滤。
+
+    派生源(source=project/telegram)同样下推"必要不充分"预筛(_derived_source_
+    precondition):零匹配派生源 filter 不再把两张任务表逐批扫完。
+    """
+    if request.conversation_id:
+        stmt = stmt.where(
+            model.message_id.in_(
+                select(Message.id).where(
+                    Message.conversation_id == request.conversation_id
+                )
+            )
+        )
+    if request.retryable is not None:
+        # 与 _task_retryable 同一口径: canceled 可重试;failed 且 error_code
+        # 不在终态码集合可重试。
+        if request.retryable:
+            condition = or_(
+                model.status == "canceled",
+                and_(
+                    model.status == "failed",
+                    or_(
+                        model.error_code.is_(None),
+                        model.error_code.not_in(_TERMINAL_ERROR_CODES),
+                    ),
+                ),
+            )
+        else:
+            condition = and_(
+                model.status != "canceled",
+                or_(
+                    model.status != "failed",
+                    and_(
+                        model.error_code.is_not(None),
+                        model.error_code.in_(_TERMINAL_ERROR_CODES),
+                    ),
+                ),
+            )
+        stmt = stmt.where(condition)
+    if request.source and request.source not in _DERIVED_SOURCES:
+        # 显式 source 存在 upstream_request JSON 里;回退派生值不进这里。
+        stmt = stmt.where(
+            model.upstream_request["source"].as_string() == request.source
+        )
+    if request.source in _DERIVED_SOURCES:
+        # 派生源的"必要不充分"预筛:零匹配时首轮即空,但只放宽不收紧,
+        # 命中行由内存 _item_matches 精确过滤。
+        precondition = _derived_source_precondition(model, request.source)
+        if precondition is not None:
+            stmt = stmt.where(precondition)
+    if request.project_id:
+        # project_id 来自 upstream_request.workflow_run_id 或 message
+        # content.workflow_run_id(与 _task_project_meta 一致)。
+        stmt = stmt.where(
+            or_(
+                model.upstream_request["workflow_run_id"].as_string()
+                == request.project_id,
+                model.message_id.in_(
+                    select(Message.id).where(
+                        Message.content["workflow_run_id"].as_string()
+                        == request.project_id
+                    )
+                ),
+            )
+        )
+    return stmt
+
+
 def _task_listing_runtime() -> TaskListingRuntime:
     return TaskListingRuntime(
         apply_cursor=_apply_task_cursor,
         apply_date_filter=_apply_task_date_filter,
+        apply_item_filters=_apply_task_item_filters,
         build_item=_build_task_item,
         encode_cursor=_encode_task_cursor,
         json_dict=_json_dict,

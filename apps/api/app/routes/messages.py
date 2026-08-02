@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any, Awaitable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core  # noqa: F401
@@ -59,7 +59,7 @@ from ..byok_service import (  # noqa: F401
     retention_policy_from_settings,
 )
 from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..intent import resolve_intent
 from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
@@ -506,6 +506,8 @@ async def submit_user_message(
     body: PostMessageIn,
     user: User,
     db: AsyncSession,
+    *,
+    session_id: str | None = None,
 ) -> PostMessageOut:
     """Submit a message from HTTP or the Telegram authenticated adapter."""
     return await _submission.submit_user_message(
@@ -514,6 +516,7 @@ async def submit_user_message(
         user,
         db,
         runtime=_submission_runtime(),
+        session_id=session_id,
     )
 
 
@@ -527,8 +530,15 @@ async def post_message(
     body: PostMessageIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> PostMessageOut:
-    return await submit_user_message(conv_id, body, user, db)
+    return await submit_user_message(
+        conv_id,
+        body,
+        user,
+        db,
+        session_id=durable_session_id(request),
+    )
 
 
 def _silent_generation_request_hash(body: SilentGenerationIn) -> str:
@@ -601,6 +611,7 @@ async def create_silent_generation(
     body: SilentGenerationIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> SilentGenerationOut:
     return await _silent.create_silent_generation(
         conv_id,
@@ -608,6 +619,7 @@ async def create_silent_generation(
         user,
         db,
         runtime=_silent_generation_runtime(),
+        session_id=durable_session_id(request),
     )
 
 

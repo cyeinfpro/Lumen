@@ -65,8 +65,12 @@ class _Db:
         self.responses = responses if responses is not None else []
         self.statements: list[Any] = []
         self.added: list[Any] = []
+        self.deleted: list[Any] = []
         self.flushed = False
         self.committed = False
+
+    async def delete(self, row: Any) -> None:
+        self.deleted.append(row)
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
@@ -680,6 +684,139 @@ async def test_create_poster_masters_allows_retry_after_failed_master_batch(
     assert master_step.image_ids == []
     assert master_step.output_json == {}
     assert run.current_step == "master_generation"
+    assert run.status == "running"
+    assert conv.last_activity_at is not None
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_create_poster_renders_allows_retry_after_failed_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """failed 的 render 行不占位：重新生成该 aspect 时删掉旧 failed 行并派发新任务，
+    而不是落入 409 renders_already_exist 死区；ready 行保持跳过语义。"""
+    run = SimpleNamespace(
+        id="run-poster",
+        user_id="user-1",
+        conversation_id="conv-1",
+        type=poster.POSTER_WORKFLOW_TYPE,
+        status="needs_review",
+        current_step="multi_size_generation",
+        quality_mode="premium",
+        product_image_ids=[],
+        metadata_jsonb={"style_summary": {"tone": "clean"}, "brand_assets": {}},
+    )
+    master = SimpleNamespace(
+        id="master-1",
+        image_id="master-image",
+        status="selected",
+    )
+    copy_step = SimpleNamespace(output_json={"main_title": "Sale"})
+    approval_step = SimpleNamespace(
+        input_json={},
+        output_json={
+            "selected_master_id": "master-1",
+            "selected_master_image_id": "master-image",
+        },
+    )
+    multi_step = SimpleNamespace(
+        status="waiting_input",
+        input_json={},
+        output_json={},
+        task_ids=[],
+        image_ids=[],
+    )
+    conv = SimpleNamespace(id="conv-1", last_activity_at=None)
+    ready_render = SimpleNamespace(
+        id="r-ready",
+        workflow_run_id="run-poster",
+        aspect_ratio="1:1",
+        status="ready",
+        image_id="img-1:1",
+        task_ids=["g-ready"],
+    )
+    failed_render = SimpleNamespace(
+        id="r-failed",
+        workflow_run_id="run-poster",
+        aspect_ratio="9:16",
+        status="failed",
+        image_id=None,
+        task_ids=["g-failed"],
+    )
+    create_calls: list[dict[str, Any]] = []
+
+    async def fake_get_run(
+        db: Any, *, user_id: str, run_id: str, lock: bool = False
+    ) -> Any:
+        assert user_id == "user-1"
+        assert run_id == "run-poster"
+        return run
+
+    async def fake_sync_poster(db: Any, current_run: Any) -> None:
+        assert current_run is run
+
+    async def fake_selected_master(db: Any, run_id: str) -> Any:
+        assert run_id == "run-poster"
+        return master
+
+    async def fake_step(db: Any, run_id: str, step_key: str) -> Any:
+        assert run_id == "run-poster"
+        return {
+            "copy_analysis": copy_step,
+            "master_approval": approval_step,
+            "multi_size_generation": multi_step,
+        }[step_key]
+
+    async def fake_conversation(db: Any, *, user_id: str, conversation_id: str) -> Any:
+        assert user_id == "user-1"
+        assert conversation_id == "conv-1"
+        return conv
+
+    async def fake_create_task(
+        *args: Any, **kwargs: Any
+    ) -> tuple[Any, None, list[str]]:
+        create_calls.append(kwargs)
+        return SimpleNamespace(), None, ["retry-gen"]
+
+    async def fake_publish(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_build_run_out(db: Any, current_run: Any) -> Any:
+        return current_run
+
+    monkeypatch.setattr(poster, "_get_run", fake_get_run)
+    monkeypatch.setattr(poster, "sync_poster_workflow_outputs", fake_sync_poster)
+    monkeypatch.setattr(poster, "_poster_selected_master", fake_selected_master)
+    monkeypatch.setattr(poster, "_step", fake_step)
+    monkeypatch.setattr(poster, "_get_owned_conversation", fake_conversation)
+    monkeypatch.setattr(poster, "_create_poster_workflow_task", fake_create_task)
+    monkeypatch.setattr(poster, "_publish_bundles", fake_publish)
+    monkeypatch.setattr(poster, "_build_run_out", fake_build_run_out)
+
+    db = _Db(responses=[[ready_render, failed_render]])
+    out = await poster.create_poster_renders(
+        "run-poster",
+        PosterRendersCreateIn(aspects=["1:1", "9:16"]),
+        SimpleNamespace(id="user-1"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is run
+    # 只清理 failed 旧行，ready 行保持不动
+    assert db.deleted == [failed_render]
+    assert len(create_calls) == 1
+    task_request = create_calls[0]["request"]
+    assert task_request.workflow_meta["workflow_target_aspect"] == "9:16"
+    assert task_request.attachment_ids == ["master-image"]
+    # 新 render 行已提交（重新生成）
+    assert any(
+        row.aspect_ratio == "9:16" and row.status == "generating" for row in db.added
+    )
+    assert multi_step.status == "running"
+    assert multi_step.input_json["active_aspects"] == ["9:16"]
+    assert multi_step.input_json["expected_render_count"] == 1
+    assert multi_step.task_ids == ["retry-gen"]
+    assert run.current_step == "multi_size_generation"
     assert run.status == "running"
     assert conv.last_activity_at is not None
     assert db.committed is True

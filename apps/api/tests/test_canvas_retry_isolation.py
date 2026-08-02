@@ -25,6 +25,8 @@ class _Db:
 
     async def execute(self, _statement: Any) -> _ScalarResult:
         self.execute_calls += 1
+        if "from users" in str(_statement).lower():
+            return _ScalarResult("user-1")
         return _ScalarResult(self.row)
 
 
@@ -56,7 +58,7 @@ async def test_canvas_image_retry_is_rejected_before_mutation() -> None:
     assert exc_info.value.detail["error"]["code"] == "canvas_retry_requires_canvas"
     assert "回画布重新运行节点" in exc_info.value.detail["error"]["message"]
     assert generation.status == "failed"
-    assert db.execute_calls == 1
+    assert db.execute_calls == 2
 
 
 @pytest.mark.asyncio

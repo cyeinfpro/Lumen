@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -48,7 +49,7 @@ class TriggerRuntime:
     shared_env_path: Callable[[Path | None], Path]
     mask_proxy_url: Callable[[str], str]
     version_from_update_tag: Callable[[str], str | None]
-    write_marker: Callable[..., None]
+    write_marker: Callable[..., bool]
     runner_unit_available: Callable[[], bool]
     runner_trigger_only_mode: Callable[[], bool]
     start_update_via_path_unit: Callable[..., tuple[int, str] | None]
@@ -153,6 +154,27 @@ def _idempotency_key(
     )
 
 
+def _kill_launched_script(proc: subprocess.Popen[bytes]) -> None:
+    """Abort a freshly-spawned update.sh after losing the marker claim.
+
+    The script runs in its own session (start_new_session=True), so
+    SIGTERM to the group reaches update.sh as well as its bash wrapper;
+    escalate to SIGKILL if it does not exit within 5s.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 async def _launch(
     request: Any,
     admin: Any,
@@ -214,55 +236,70 @@ async def _launch(
             log_fh=log_fh,
             runtime=runtime,
         )
-        if await asyncio.to_thread(runtime.runner_unit_available):
-            outcome = await asyncio.to_thread(
-                runtime.start_update_via_path_unit,
-                env=env,
-                log_fh=log_fh,
-                started_at=started_at,
-            )
-            if outcome is not None:
-                pid, unit = outcome
-            elif runtime.runner_trigger_only_mode():
-                raise runtime.http_error(
-                    "update_runner_not_started",
-                    "已写入一键更新触发文件，但宿主机 lumen-update-runner.service 未开始执行；"
-                    "请确认 lumen-update.path 已安装并启用，且监听的数据目录与当前 LUMEN_DATA_ROOT 一致。",
-                    503,
+        try:
+            if await asyncio.to_thread(runtime.runner_unit_available):
+                outcome = await asyncio.to_thread(
+                    runtime.start_update_via_path_unit,
+                    env=env,
+                    log_fh=log_fh,
+                    started_at=started_at,
                 )
-        if unit is None and runtime.systemd_run_available():
-            outcome = runtime.start_update_systemd_unit(
-                script=script,
-                env=env,
-                log_fh=log_fh,
-                started_at=started_at,
-            )
-            if outcome is not None:
-                pid, unit = outcome
-        if unit is None:
-            log_fh.write(
-                "\n[fallback] launching update.sh as a detached subprocess; "
-                "restart of lumen-api will be the last step. To use a transient "
-                "systemd unit instead, grant 'sudo -n systemd-run' or run "
-                "'loginctl enable-linger <runtime-user>'.\n"
-            )
-            log_fh.flush()
-            proc = subprocess.Popen(
-                ["/usr/bin/env", "bash", str(script)],
-                cwd=str(script.parent.parent),
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                close_fds=True,
-                env=env,
-            )
-            pid = proc.pid
-            runtime.write_marker(pid, started_at.isoformat())
-        if unit is not None or pid:
-            launched = True
-            release_reason = "launched"
-        return pid, unit, proc, started_at
+                if outcome is not None:
+                    pid, unit = outcome
+                elif runtime.runner_trigger_only_mode():
+                    raise runtime.http_error(
+                        "update_runner_not_started",
+                        "已写入一键更新触发文件，但宿主机 lumen-update-runner.service 未开始执行；"
+                        "请确认 lumen-update.path 已安装并启用，且监听的数据目录与当前 LUMEN_DATA_ROOT 一致。",
+                        503,
+                    )
+            if unit is None and runtime.systemd_run_available():
+                outcome = runtime.start_update_systemd_unit(
+                    script=script,
+                    env=env,
+                    log_fh=log_fh,
+                    started_at=started_at,
+                )
+                if outcome is not None:
+                    pid, unit = outcome
+            if unit is None:
+                log_fh.write(
+                    "\n[fallback] launching update.sh as a detached subprocess; "
+                    "restart of lumen-api will be the last step. To use a transient "
+                    "systemd unit instead, grant 'sudo -n systemd-run' or run "
+                    "'loginctl enable-linger <runtime-user>'.\n"
+                )
+                log_fh.flush()
+                proc = subprocess.Popen(
+                    ["/usr/bin/env", "bash", str(script)],
+                    cwd=str(script.parent.parent),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                    env=env,
+                )
+                pid = proc.pid
+                if not runtime.write_marker(pid, started_at.isoformat()):
+                    _kill_launched_script(proc)
+                    raise runtime.http_error(
+                        "update_running",
+                        "Lumen update is already running; wait for it to finish first",
+                        409,
+                    )
+            if unit is not None or pid:
+                launched = True
+                release_reason = "launched"
+            return pid, unit, proc, started_at
+        except Exception as exc:
+            if exc.__class__.__name__ != "UpdateMarkerBusy":
+                raise
+            raise runtime.http_error(
+                "update_running",
+                "Lumen update is already running; wait for it to finish first",
+                409,
+            ) from exc
     finally:
         log_fh.close()
         await lock_service.release(lock, succeeded=launched, reason=release_reason)

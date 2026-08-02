@@ -122,6 +122,9 @@ class _WorkflowRedis:
     async def set(self, key: str, value: str, *, ex: int) -> None:
         self.calls.append(("set", key, value, ex))
 
+    async def get(self, _key: str) -> None:
+        return None
+
 
 def test_model_candidates_mvp_requires_three_candidates() -> None:
     body = ModelCandidatesCreateIn(
@@ -530,6 +533,7 @@ async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -
         run=run,  # type: ignore[arg-type]
         deleted_at=datetime.now(timezone.utc),
         cancel_message="workflow deleted",
+        queue_redis=_WorkflowRedis(),
     )
 
     assert out == {
@@ -538,8 +542,12 @@ async def test_soft_delete_workflow_generated_images_uses_explicit_image_ids() -
         "completions_canceled": 0,
         "holds_released": 0,
         "queued_generation_ids": [],
+        "queued_generation_execution_epochs": {},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": [],
         "streaming_completion_ids": [],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
     }
     rendered = str(db.statements[-1].compile(dialect=postgresql.dialect()))
     assert "UPDATE images" in rendered
@@ -559,6 +567,7 @@ async def test_soft_delete_workflow_generated_images_skips_already_deleted_run()
         run=SimpleNamespace(id="run-1", user_id="user-1", deleted_at=deleted_at),  # type: ignore[arg-type]
         deleted_at=deleted_at,
         cancel_message="workflow deleted",
+        queue_redis=_WorkflowRedis(),
     )
 
     assert out == {
@@ -567,8 +576,12 @@ async def test_soft_delete_workflow_generated_images_skips_already_deleted_run()
         "completions_canceled": 0,
         "holds_released": 0,
         "queued_generation_ids": [],
+        "queued_generation_execution_epochs": {},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": [],
         "streaming_completion_ids": [],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
     }
     assert db.statements == []
     assert db.release_calls == []
@@ -664,14 +677,19 @@ async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
         run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
         deleted_at=datetime.now(timezone.utc),
         cancel_message="workflow deleted",
+        queue_redis=_WorkflowRedis(),
     )
 
     assert out["generations_canceled"] == 2
     assert out["completions_canceled"] == 2
     assert out["holds_released"] == 2
     assert out["queued_generation_ids"] == ["gen-queued"]
+    assert out["queued_generation_execution_epochs"] == {"gen-queued": 0}
+    assert out["queued_generation_queue_tokens"] == {}
     assert out["running_generation_ids"] == ["gen-running"]
     assert out["streaming_completion_ids"] == ["comp-streaming"]
+    assert out["deferred_generation_ids"] == []
+    assert out["deferred_completion_ids"] == []
     assert [call["ref_id"] for call in db.release_calls] == [
         "gen-queued:retry:1",
         "comp-queued:retry:1",
@@ -682,6 +700,76 @@ async def test_soft_delete_workflow_generated_images_releases_active_task_holds(
     assert gen_running.status == GenerationStatus.RUNNING.value
     assert comp_queued.status == CompletionStatus.CANCELED.value
     assert comp_streaming.status == CompletionStatus.STREAMING.value
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_workflow_defers_receipt_bearing_queued_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    step = SimpleNamespace(
+        step_key="showcase_generation",
+        image_ids=[],
+        task_ids=["gen-retry", "comp-retry"],
+    )
+    gen = SimpleNamespace(
+        id="gen-retry",
+        status=GenerationStatus.QUEUED.value,
+        execution_epoch=7,
+        cancel_requested_at=None,
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 7,
+        },
+    )
+    comp = SimpleNamespace(
+        id="comp-retry",
+        status=CompletionStatus.QUEUED.value,
+        execution_epoch=8,
+        cancel_requested_at=None,
+        tokens_out=64,
+        upstream_request={"completion_usage_execution_epoch": 8},
+    )
+    db = _WorkflowDeleteDb(
+        responses=[
+            [step],
+            [],
+            [gen],
+            [],
+            [gen],
+            [comp],
+            [],
+        ],
+    )
+    released: list[str] = []
+
+    async def release_soft_deleted_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        workflow_runtime,
+        "_release_soft_deleted_task_hold",
+        release_soft_deleted_task_hold,
+    )
+
+    out = await workflow_runtime._soft_delete_workflow_generated_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        run=SimpleNamespace(id="run-1", user_id="user-1"),  # type: ignore[arg-type]
+        deleted_at=datetime.now(timezone.utc),
+        cancel_message="workflow deleted",
+        queue_redis=_WorkflowRedis(),
+    )
+
+    assert out["holds_released"] == 0
+    assert out["queued_generation_ids"] == []
+    assert out["deferred_generation_ids"] == ["gen-retry"]
+    assert out["deferred_completion_ids"] == ["comp-retry"]
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert comp.status == CompletionStatus.QUEUED.value
+    assert gen.cancel_requested_at is not None
+    assert comp.cancel_requested_at is not None
+    assert released == []
 
 
 @pytest.mark.asyncio
@@ -729,6 +817,7 @@ async def test_soft_delete_workflow_generated_images_skips_holds_for_byok(
         deleted_at=datetime.now(timezone.utc),
         cancel_message="workflow deleted",
         account_mode="byok",
+        queue_redis=_WorkflowRedis(),
     )
 
     assert out["holds_released"] == 0
@@ -750,9 +839,15 @@ async def test_post_commit_workflow_generated_cleanup_runs_after_commit(
         invalidated.append((user_id, db.committed))
 
     async def release_workflow_generation_queue_state(
-        _redis: _WorkflowRedis, task_id: str
-    ) -> None:
-        queue_released.append((task_id, db.committed))
+        _redis: _WorkflowRedis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-9"
+        queue_released.append((f"{task_id}:{expected_execution_epoch}", db.committed))
+        return True
 
     monkeypatch.setattr(workflow_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(
@@ -772,16 +867,30 @@ async def test_post_commit_workflow_generated_cleanup_runs_after_commit(
         cleanup={
             "holds_released": 2,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 9},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 9,
+                    "provider_name": "provider-9",
+                    "lease_token": "worker:execution:9:attempt:1",
+                    "reservation_token": "reservation-9",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-streaming"],
+            "deferred_generation_ids": ["gen-deferred"],
+            "deferred_completion_ids": ["comp-deferred"],
         },
     )
 
     assert invalidated == [("user-1", True)]
-    assert queue_released == [("gen-queued", True)]
+    assert queue_released == [("gen-queued:9", True)]
     assert redis.calls == [
         ("set", "task:gen-running:cancel", "1", 3600),
         ("set", "task:comp-streaming:cancel", "1", 3600),
+        ("set", "task:gen-deferred:cancel", "1", 3600),
+        ("set", "task:comp-deferred:cancel", "1", 3600),
     ]
 
 
@@ -796,9 +905,15 @@ async def test_post_commit_workflow_generated_cleanup_keeps_cancel_when_cache_fa
         raise RuntimeError("cache unavailable")
 
     async def release_workflow_generation_queue_state(
-        _redis: _WorkflowRedis, task_id: str
-    ) -> None:
-        queue_released.append(task_id)
+        _redis: _WorkflowRedis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-10"
+        queue_released.append(f"{task_id}:{expected_execution_epoch}")
+        return True
 
     monkeypatch.setattr(workflow_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(
@@ -817,12 +932,22 @@ async def test_post_commit_workflow_generated_cleanup_keeps_cancel_when_cache_fa
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 10},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 10,
+                    "provider_name": "provider-10",
+                    "lease_token": "worker:execution:10:attempt:1",
+                    "reservation_token": "reservation-10",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-streaming"],
         },
     )
 
-    assert queue_released == ["gen-queued"]
+    assert queue_released == ["gen-queued:10"]
     assert redis.calls == [
         ("set", "task:gen-running:cancel", "1", 3600),
         ("set", "task:comp-streaming:cancel", "1", 3600),
@@ -1787,6 +1912,32 @@ async def test_attach_workflow_assets_masks_invalid_image_ids() -> None:
 
     assert getattr(excinfo.value, "status_code", None) == 404
     assert excinfo.value.detail["error"]["code"] == "image_not_found"
+    assert "details" not in excinfo.value.detail["error"]
+
+
+@pytest.mark.asyncio
+async def test_attach_workflow_assets_rejects_unknown_source_step_key() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        type=workflow_runtime.WORKFLOW_TYPE,
+        title="Project",
+        metadata_jsonb={},
+    )
+    image = SimpleNamespace(id="img-1", metadata_jsonb={})
+    db = _Db([], responses=[[image], []])
+
+    with pytest.raises(Exception) as excinfo:
+        await workflow_runtime._attach_workflow_assets(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            run=run,  # type: ignore[arg-type]
+            user_id="user-1",
+            image_ids=["img-1"],
+            asset_type="project_asset",
+            source_step_key="no-such-step",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "invalid_source_step"
     assert "details" not in excinfo.value.detail["error"]
 
 

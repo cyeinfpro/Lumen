@@ -44,6 +44,7 @@ from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import (
     ensure_enabled_provider_proxies,
     ensure_enabled_video_provider_proxies,
+    lock_providers_config as _lock_providers_config,
     parse_provider_config as _parse_config,
     parse_provider_items as _parse_items,
     read_providers as _read_providers,
@@ -336,14 +337,35 @@ def _stored_provider_secrets(
     return old_keys, old_proxy_passwords
 
 
+def _proxy_endpoint_identity(p: dict[str, Any]) -> tuple[str, str, str]:
+    """host+port+username 组成稳定端点身份，供重命名回退匹配使用。"""
+    return (
+        str(p.get("host") or "").strip(),
+        str(p.get("port") or ""),
+        str(p.get("username") or "").strip() or "",
+    )
+
+
 def _provider_proxy_rows(
     body: ProvidersUpdateIn,
     old_proxy_passwords: dict[str, str],
+    old_proxy_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    # 重命名回退：新 name 匹配不到旧密码时，按端点身份（host+port+username）
+    # 匹配，避免换名后静默丢掉已存密码（与 admin_proxies PUT 语义一致）
+    old_by_endpoint: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for old in old_proxy_rows:
+        old_by_endpoint.setdefault(_proxy_endpoint_identity(old), old)
     rows: list[dict[str, Any]] = []
     for proxy_input in body.proxies:
         name = proxy_input.name.strip()
         password = proxy_input.password.strip() or old_proxy_passwords.get(name, "")
+        if not password:
+            fallback = old_by_endpoint.get(
+                _proxy_endpoint_identity(proxy_input.model_dump())
+            )
+            if fallback and isinstance(fallback.get("password"), str):
+                password = fallback["password"]
         rows.append(
             {
                 "name": name,
@@ -464,6 +486,10 @@ async def update_providers(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProvidersOut:
+    # 共享行并发写保护：与 /admin/proxies 写同一行 DB，先拿事务级咨询锁
+    # 再做读-改-写，避免并发保存互相覆盖（丢失更新）。
+    await _lock_providers_config(db)
+
     # 清空场景
     if not body.items:
         existing = (
@@ -488,7 +514,10 @@ async def update_providers(
     _validate_provider_update_names(body)
     old_raw, _ = await _read_providers(db)
     old_keys, old_proxy_passwords = _stored_provider_secrets(old_raw)
-    proxy_rows = _provider_proxy_rows(body, old_proxy_passwords)
+    _old_items, old_proxy_rows = _parse_config(old_raw or "")
+    proxy_rows = _provider_proxy_rows(
+        body, old_proxy_passwords, old_proxy_rows
+    )
     provider_rows = _provider_rows(
         body,
         old_keys=old_keys,
@@ -532,6 +561,9 @@ async def patch_provider_enabled(
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProviderItemOut:
+    # 与 /admin/proxies、PUT /admin/providers 共享同一行 DB，读-改-写前先拿
+    # 事务级咨询锁，避免并发保存互相覆盖（丢失更新）。
+    await _lock_providers_config(db)
     raw, _source = await _read_providers(db)
     if not raw:
         raise _http("not_found", "provider not found", 404)

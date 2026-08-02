@@ -19,6 +19,10 @@ async def _pump_source(
         async for chunk in source:
             await queue.put(("chunk", chunk))
         await queue.put(("done", None))
+    except asyncio.CancelledError:
+        # Do not forward CancelledError into the queue: the consumer is being
+        # torn down and the task should end in a properly cancelled state.
+        raise
     except BaseException as exc:  # noqa: BLE001
         await queue.put(("error", exc))
 
@@ -31,6 +35,21 @@ async def _cancel_pump(pump_task: asyncio.Task[None]) -> None:
         return
     except Exception:
         logger.exception("prompt enhance keepalive pump failed during cancellation")
+
+
+async def _close_source(source: AsyncIterator[str]) -> None:
+    """Explicitly terminate the source generator during teardown.
+
+    The pump cancellation unwinds the source chain in the common case, but
+    closing here guarantees the failover release runs deterministically
+    (and while the request session is still open) instead of depending on
+    async-generator GC finalization, which can happen after the session has
+    been closed and would make the release fail.
+    """
+    try:
+        await source.aclose()
+    except Exception:  # noqa: BLE001
+        logger.exception("prompt enhance keepalive source close failed")
 
 
 async def _next_item(
@@ -82,3 +101,4 @@ async def stream_with_keepalive(
     finally:
         if not pump_task.done():
             await _cancel_pump(pump_task)
+        await _close_source(source)

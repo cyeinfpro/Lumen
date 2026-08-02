@@ -37,7 +37,20 @@ from lumen_core.schemas import (
 from ...billing_cache_state import invalidate_balance_cache  # noqa: F401
 from ...db import affected_rows
 from ...redis_client import get_redis  # noqa: F401
-from ...services.generation_queue import release_generation_queue_state
+from ...services.active_task_cleanup import (
+    cancel_completion_rows,
+    cancel_generation_rows,
+    post_commit_best_effort_cleanup,
+)
+from ...services.generation_queue import (
+    GenerationQueueReleaseToken,
+    capture_generation_queue_state,
+    completion_cancel_requires_durable_settlement,
+    current_execution_epoch,
+    generation_cancel_requires_durable_settlement,
+    queued_generation_cleanup_entries,
+    release_generation_queue_state,
+)
 from ..domain.apparel_library import (
     normalize_age_segment as _normalize_age_segment,
 )  # noqa: F401
@@ -86,6 +99,7 @@ POSTER_WORKFLOW_STEPS = (
     "multi_size_generation",
     "delivery",
 )
+_QUEUE_REDIS_UNSET = object()
 _WORKFLOW_ASSET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_:-]{0,63}$")
 logger = logging.getLogger("app.routes.workflows")
 
@@ -256,6 +270,25 @@ async def _step(db: AsyncSession, run_id: str, step_key: str) -> WorkflowStep:
     ).scalar_one_or_none()
     if row is None:
         raise _http("workflow_corrupt", f"missing workflow step: {step_key}", 500)
+    return row
+
+
+async def _asset_step(db: AsyncSession, run_id: str, step_key: str) -> WorkflowStep:
+    """Step lookup for asset attachment, where source_step_key is client input.
+
+    A missing step here is invalid input (422) rather than workflow corruption
+    (500), because the key comes from the HTTP request body.
+    """
+    row = (
+        await db.execute(
+            select(WorkflowStep).where(
+                WorkflowStep.workflow_run_id == run_id,
+                WorkflowStep.step_key == step_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise _http("invalid_source_step", f"unknown workflow step: {step_key}", 422)
     return row
 
 
@@ -439,13 +472,28 @@ def _empty_workflow_generated_cleanup() -> dict[str, Any]:
         "completions_canceled": 0,
         "holds_released": 0,
         "queued_generation_ids": [],
+        "queued_generation_execution_epochs": {},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": [],
         "streaming_completion_ids": [],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
     }
 
 
-async def _release_workflow_generation_queue_state(redis: Any, task_id: str) -> None:
-    await release_generation_queue_state(redis, task_id)
+async def _release_workflow_generation_queue_state(
+    redis: Any,
+    task_id: str,
+    *,
+    expected_execution_epoch: int,
+    ownership_token: GenerationQueueReleaseToken,
+) -> bool:
+    return await release_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=expected_execution_epoch,
+        ownership_token=ownership_token,
+    )
 
 
 async def _post_commit_workflow_generated_cleanup(
@@ -453,79 +501,82 @@ async def _post_commit_workflow_generated_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    queued_generation_ids = _cleanup_string_list(cleanup, "queued_generation_ids")
+    queued_generation_entries = queued_generation_cleanup_entries(cleanup)
     running_generation_ids = _cleanup_string_list(cleanup, "running_generation_ids")
     streaming_completion_ids = _cleanup_string_list(cleanup, "streaming_completion_ids")
+    deferred_generation_ids = _cleanup_string_list(
+        cleanup,
+        "deferred_generation_ids",
+    )
+    deferred_completion_ids = _cleanup_string_list(
+        cleanup,
+        "deferred_completion_ids",
+    )
     released_holds = cleanup.get("holds_released")
-    if (
-        not queued_generation_ids
-        and not running_generation_ids
-        and not streaming_completion_ids
-    ):
-        if isinstance(released_holds, int) and released_holds > 0:
-            try:
-                await invalidate_balance_cache(user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "workflow delete balance cache invalidation failed user=%s err=%s",
-                    user_id,
-                    exc,
-                )
-        return
-
-    redis = get_redis()
-    for task_id in queued_generation_ids:
-        try:
-            await _release_workflow_generation_queue_state(redis, task_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "workflow delete image_queue release failed task=%s err=%s",
-                task_id,
-                exc,
-            )
-    for task_id in [*running_generation_ids, *streaming_completion_ids]:
-        try:
-            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "workflow delete cancel signal failed task=%s err=%s",
-                task_id,
-                exc,
-            )
-    if isinstance(released_holds, int) and released_holds > 0:
-        try:
-            await invalidate_balance_cache(user_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "workflow delete balance cache invalidation failed user=%s err=%s",
-                user_id,
-                exc,
-            )
+    cancel_ids = [
+        *running_generation_ids,
+        *streaming_completion_ids,
+        *deferred_generation_ids,
+        *deferred_completion_ids,
+    ]
+    redis = get_redis() if queued_generation_entries or cancel_ids else None
+    await post_commit_best_effort_cleanup(
+        redis,
+        user_id=user_id,
+        queued_entries=queued_generation_entries,
+        cancel_ids=cancel_ids,
+        invalidate_balance_required=(
+            isinstance(released_holds, int) and released_holds > 0
+        ),
+        release_queue_state=_release_workflow_generation_queue_state,
+        invalidate_balance=invalidate_balance_cache,
+        logger=logger,
+        queue_failure_message=(
+            "workflow delete image_queue release failed task=%s err=%s"
+        ),
+        cancel_failure_message=("workflow delete cancel signal failed task=%s err=%s"),
+        balance_failure_message=(
+            "workflow delete balance cache invalidation failed user=%s err=%s"
+        ),
+    )
 
 
-def _cancel_workflow_generation_rows(
+async def _cancel_workflow_generation_rows(
     generation_rows: Iterable[Generation],
     *,
     deleted_at: datetime,
     cancel_message: str,
-) -> tuple[list[Generation], list[str], list[str]]:
-    queued_rows: list[Generation] = []
-    queued_ids: list[str] = []
-    running_ids: list[str] = []
-    for generation in generation_rows:
-        # Running rows retain their hold until the worker confirms that the
-        # upstream awaitable stopped; only queued rows finalize here.
-        if generation.status == GenerationStatus.QUEUED.value:
-            queued_rows.append(generation)
-            queued_ids.append(generation.id)
-            generation.status = GenerationStatus.CANCELED.value
-            generation.progress_stage = "finalizing"
-            generation.finished_at = deleted_at
-            generation.error_code = "cancelled"
-            generation.error_message = cancel_message
-        elif generation.status == GenerationStatus.RUNNING.value:
-            running_ids.append(generation.id)
-    return queued_rows, queued_ids, running_ids
+    queue_redis: Any,
+) -> tuple[
+    list[Generation],
+    list[str],
+    dict[str, int],
+    dict[str, Any],
+    list[str],
+    list[str],
+]:
+    cleanup = await cancel_generation_rows(
+        list(generation_rows),
+        canceled_at=deleted_at,
+        cancel_message=cancel_message,
+        queue_redis=queue_redis,
+        capture_queue_ownership=True,
+        logger=logger,
+        snapshot_failure_message=(
+            "workflow delete image_queue ownership snapshot failed task=%s err=%s"
+        ),
+        requires_durable_settlement=(generation_cancel_requires_durable_settlement),
+        execution_epoch_for=current_execution_epoch,
+        capture_queue_state=capture_generation_queue_state,
+    )
+    return (
+        cleanup.queued_rows,
+        cleanup.queued_ids,
+        cleanup.queued_execution_epochs,
+        cleanup.queued_queue_tokens,
+        cleanup.deferred_ids,
+        cleanup.running_ids,
+    )
 
 
 async def _soft_delete_workflow_generated_images(
@@ -535,6 +586,7 @@ async def _soft_delete_workflow_generated_images(
     deleted_at: datetime,
     cancel_message: str,
     account_mode: str = "wallet",
+    queue_redis: Any = _QUEUE_REDIS_UNSET,
 ) -> dict[str, Any]:
     """Soft-delete images produced by a workflow and cancel its active tasks.
 
@@ -543,6 +595,8 @@ async def _soft_delete_workflow_generated_images(
     """
     if getattr(run, "deleted_at", None) is not None:
         return _empty_workflow_generated_cleanup()
+    if queue_redis is _QUEUE_REDIS_UNSET:
+        queue_redis = get_redis()
 
     steps, candidates = await _workflow_steps_and_candidates(db, run)
     task_ids = _workflow_direct_task_ids(steps, candidates)
@@ -559,6 +613,9 @@ async def _soft_delete_workflow_generated_images(
     canceled_generation_rows: list[Generation] = []
     queued_generation_rows: list[Generation] = []
     queued_generation_ids: list[str] = []
+    queued_generation_execution_epochs: dict[str, int] = {}
+    queued_generation_queue_tokens: dict[str, Any] = {}
+    deferred_generation_ids: list[str] = []
     running_generation_ids: list[str] = []
     if generation_ids:
         canceled_generation_rows = list(
@@ -584,17 +641,22 @@ async def _soft_delete_workflow_generated_images(
         (
             queued_generation_rows,
             queued_generation_ids,
+            queued_generation_execution_epochs,
+            queued_generation_queue_tokens,
+            deferred_generation_ids,
             running_generation_ids,
-        ) = _cancel_workflow_generation_rows(
+        ) = await _cancel_workflow_generation_rows(
             canceled_generation_rows,
             deleted_at=deleted_at,
             cancel_message=cancel_message,
+            queue_redis=queue_redis,
         )
         canceled_generations = len(canceled_generation_rows)
 
     canceled_completions = 0
     canceled_completion_rows: list[Completion] = []
     queued_completion_rows: list[Completion] = []
+    deferred_completion_ids: list[str] = []
     streaming_completion_ids: list[str] = []
     if task_ids:
         canceled_completion_rows = list(
@@ -617,16 +679,15 @@ async def _soft_delete_workflow_generated_images(
             .scalars()
             .all()
         )
-        for completion in canceled_completion_rows:
-            if completion.status == CompletionStatus.QUEUED.value:
-                queued_completion_rows.append(completion)
-                completion.status = CompletionStatus.CANCELED.value
-                completion.progress_stage = "finalizing"
-                completion.finished_at = deleted_at
-                completion.error_code = "cancelled"
-                completion.error_message = cancel_message
-            elif completion.status == CompletionStatus.STREAMING.value:
-                streaming_completion_ids.append(completion.id)
+        completion_cleanup = await cancel_completion_rows(
+            canceled_completion_rows,
+            canceled_at=deleted_at,
+            cancel_message=cancel_message,
+            requires_durable_settlement=(completion_cancel_requires_durable_settlement),
+        )
+        queued_completion_rows = completion_cleanup.queued_rows
+        deferred_completion_ids = completion_cleanup.deferred_ids
+        streaming_completion_ids = completion_cleanup.streaming_ids
         canceled_completions = len(canceled_completion_rows)
 
     released_holds = 0
@@ -691,8 +752,12 @@ async def _soft_delete_workflow_generated_images(
             "completions_canceled": canceled_completions,
             "holds_released": released_holds,
             "queued_generation_ids": queued_generation_ids,
+            "queued_generation_execution_epochs": (queued_generation_execution_epochs),
+            "queued_generation_queue_tokens": queued_generation_queue_tokens,
             "running_generation_ids": running_generation_ids,
             "streaming_completion_ids": streaming_completion_ids,
+            "deferred_generation_ids": deferred_generation_ids,
+            "deferred_completion_ids": deferred_completion_ids,
         }
     )
     return cleanup
@@ -718,7 +783,7 @@ async def _attach_workflow_assets(
         source_step_key=source_step_key,
         label=label,
         added_at=added_at,
-        step_loader=_step,
+        step_loader=_asset_step,
     )
 
 

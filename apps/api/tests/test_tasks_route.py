@@ -1,17 +1,32 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+import dataclasses
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateTable
 
 from app.routes import tasks
+from app.services.task_listing import TaskListRequest, build_task_list
 from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
     GenerationStage,
     GenerationStatus,
+)
+from lumen_core.model_entities import (
+    Completion,
+    Conversation,
+    Generation,
+    Image,
+    ImageVariant,
+    Message,
 )
 
 
@@ -38,6 +53,8 @@ class _Db:
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
+        if "from users" in str(statement).lower():
+            return _Result("user-1")
         return self.results.pop(0) if self.results else _Result()
 
     def add(self, value: Any) -> None:
@@ -78,6 +95,10 @@ class _Redis:
         if self.fail_delete:
             raise RuntimeError("redis delete failed")
 
+    async def eval(self, script: str, numkeys: int, *args: Any) -> int:
+        self.calls.append(("eval", script, numkeys, *args))
+        return 1
+
 
 def _user() -> SimpleNamespace:
     return SimpleNamespace(id="user-1", account_mode="wallet")
@@ -107,11 +128,13 @@ def _retry_candidate(**overrides: Any) -> SimpleNamespace:
         "status": GenerationStatus.CANCELED.value,
         "progress_stage": GenerationStage.FINALIZING.value,
         "attempt": 1,
+        "execution_epoch": 0,
         "billing_retry_count": 0,
         "error_code": "cancelled",
         "error_message": "cancelled by user",
         "started_at": None,
         "finished_at": datetime.now(timezone.utc),
+        "cancel_requested_at": datetime.now(timezone.utc),
         "size_requested": "2048x2048",
         "upstream_request": {},
     }
@@ -349,6 +372,523 @@ async def test_list_tasks_preserves_cross_kind_sort_order() -> None:
     ]
 
 
+def _paged_task_rows(n: int, prefix: str, *, base: datetime) -> list[Any]:
+    """n 条 created_at 递增的任务,按最新在前排序,便于 _Db 逐页返回。"""
+    rows = []
+    for i in range(n):
+        created = base + timedelta(seconds=n - i)
+        rows.append(
+            _task_record(
+                id=f"{prefix}-{n - i:03d}",
+                message_id=f"msg-{prefix}-{n - i:03d}",
+                created_at=created,
+                finished_at=created,
+                upstream_request={"source": "X"},
+            )
+        )
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_sparse_source_filter_paginates_past_initial_batch() -> None:
+    """稀疏 source 筛选时,初始 3x 窗口内匹配数 <= limit 也必须给游标继续翻页。
+
+    修复前: 每表只抓 query_limit 行后在内存过滤,匹配稀疏时首页不足 limit 条
+    即返回 next_cursor=None,窗口之外的匹配任务被静默丢弃。
+    """
+    base = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    gens = _paged_task_rows(200, "gen", base=base)
+    matched_ids: set[str] = set()
+    for gen in gens:
+        if int(gen.id.split("-")[1]) % 10 != 1:
+            gen.upstream_request = {"source": "Y"}
+        else:
+            matched_ids.add(gen.id)
+
+    collected: list[str] = []
+    cursor: str | None = None
+    for page_no in range(5):
+        start = page_no * 60
+        db = _Db(
+            [
+                _Result(gens[start : start + 60]),
+                _Result([]),  # message meta
+                _Result([]),  # image meta
+                _Result([]),  # queue positions
+            ]
+        )
+        output = await tasks.list_tasks(
+            user=_user(),  # type: ignore[arg-type]
+            db=db,  # type: ignore[arg-type]
+            query=tasks.TaskListQuery(
+                kind="generation", limit=20, source="X", cursor=cursor
+            ),
+        )
+        assert all(item.source == "X" for item in output.items)
+        collected.extend(item.id for item in output.items)
+        cursor = output.next_cursor
+        if cursor is None:
+            break
+    # 修复前: 首页 6 条后 next_cursor=None,其余 14 条匹配永远不可见
+    assert len(collected) == 20
+    assert set(collected) == matched_ids
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_does_not_skip_generation_matches_below_page_tail() -> None:
+    """kind=all 时,generation 表尾部仍有匹配但页尾落在 completion 上时,必须
+    继续拉深 generation 窗口,否则下一页游标会越过这些匹配行。
+
+    修复前: 每表各自抓 top-query_limit,两表流不对齐时,游标(取页尾行)会落在
+    较浅表上,较深表中排序在游标之上的未抓取匹配被永久跳过。
+    """
+    base_gen = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    base_comp = datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc)
+    gens = _paged_task_rows(200, "gen", base=base_gen)
+    matched_gen_ids: set[str] = set()
+    for gen in gens:
+        if int(gen.id.split("-")[1]) % 10 != 1:
+            gen.upstream_request = {"source": "Y"}
+        else:
+            matched_gen_ids.add(gen.id)
+    comps = _paged_task_rows(60, "comp", base=base_comp)
+
+    # 首页: 首轮(gen, comp, msg, image, queue 共 5 次查询)后,generation 窗口
+    # 尾部仍高于页尾(completion),需 3 轮深挖(每轮 gen_chunk, msg, image)。
+    db = _Db(
+        [
+            _Result(gens[0:60]),
+            _Result(comps),
+            _Result([]),
+            _Result([]),
+            _Result([]),
+            _Result(gens[60:120]),
+            _Result([]),
+            _Result([]),
+            _Result(gens[120:180]),
+            _Result([]),
+            _Result([]),
+            _Result(gens[180:200]),
+            _Result([]),
+            _Result([]),
+        ]
+    )
+    output = await tasks.list_tasks(
+        user=_user(),  # type: ignore[arg-type]
+        db=db,  # type: ignore[arg-type]
+        query=tasks.TaskListQuery(kind="all", limit=20, source="X"),
+    )
+    collected = [item.id for item in output.items]
+    # 修复前: 首页只有 6 个匹配 generation + 14 个 completion,其余 14 个匹配
+    # generation 排序在下一页游标(t_comp, completion, ...)之上,永远不可见
+    assert set(collected) == matched_gen_ids
+    assert output.next_cursor is not None
+    cursor = output.next_cursor
+
+    for window in (comps[0:60], comps[20:60], comps[40:60]):
+        db = _Db(
+            [
+                _Result([]),  # generation 已耗尽
+                _Result(window),
+                _Result([]),  # message meta
+                _Result([]),  # queue positions
+            ]
+        )
+        output = await tasks.list_tasks(
+            user=_user(),  # type: ignore[arg-type]
+            db=db,  # type: ignore[arg-type]
+            query=tasks.TaskListQuery(
+                kind="all", limit=20, source="X", cursor=cursor
+            ),
+        )
+        collected.extend(item.id for item in output.items)
+        cursor = output.next_cursor
+        if cursor is None:
+            break
+    assert set(collected) == matched_gen_ids | {comp.id for comp in comps}
+
+
+def _apply_task_item_filters_pusher() -> Any:
+    return tasks._task_listing_runtime().apply_item_filters  # noqa: SLF001
+
+
+def test_apply_task_item_filters_pushes_exact_conditions_into_sql() -> None:
+    """精确 item 过滤条件必须进 SQL,零匹配由数据库直接返回空集。
+
+    深挖循环(修复的 pagination 逻辑)对零匹配 filter 会把用户整张任务表逐批
+    拉完;conversation_id / retryable / 显式 source / project_id 下推后,
+    零匹配首轮即空、循环立即退出。
+    """
+    apply_item_filters = _apply_task_item_filters_pusher()
+    request = TaskListRequest(
+        user_id="user-1",
+        status=None,
+        kind="generation",
+        source="X",
+        conversation_id="conv-1",
+        project_id="proj-1",
+        retryable=True,
+        date_filter=None,
+        cursor=None,
+        error_code=None,
+        limit=20,
+    )
+    stmt = apply_item_filters(
+        select(Generation).where(Generation.user_id == "user-1"),
+        Generation,
+        request,
+    )
+    compiled = str(
+        stmt.compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "json_extract" in compiled  # source / project_id JSON 下推
+    assert "messages.id" in compiled  # conversation / project 消息子查询
+    assert "'failed'" in compiled  # retryable 状态谓词
+    assert "'canceled'" in compiled
+
+    request_false = dataclasses.replace(request, retryable=False)
+    compiled_false = str(
+        apply_item_filters(
+            select(Generation).where(Generation.user_id == "user-1"),
+            Generation,
+            request_false,
+        ).compile(
+            dialect=sqlite.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "error_code IN" in compiled_false
+
+
+class _CountingSession:
+    """真实 sqlite 会话包装:统计 build_task_list 实际执行的语句数。"""
+
+    def __init__(self, inner: AsyncSession) -> None:
+        self.inner = inner
+        self.calls = 0
+
+    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return await self.inner.execute(statement, *args, **kwargs)
+
+    def add(self, value: Any) -> None:
+        self.inner.add(value)
+
+    async def commit(self) -> None:
+        await self.inner.commit()
+
+
+def _seed_task_database(
+    session: AsyncSession,
+    *,
+    user_id: str = "user-1",
+    source: str = "Y",
+    count: int = 400,
+) -> None:
+    """真实 sqlite 内存库:写入 conversations / messages / generations。"""
+    session.add(
+        Conversation(id="conv-1", user_id=user_id, title="t", default_params={})
+    )
+    base = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    for i in range(count):
+        message_id = f"msg-{i:03d}"
+        session.add(
+            Message(id=message_id, conversation_id="conv-1", role="user", content={})
+        )
+        session.add(
+            Generation(
+                id=f"gen-{i:03d}",
+                message_id=message_id,
+                user_id=user_id,
+                action="generate",
+                model="test-model",
+                prompt="test prompt",
+                size_requested="1024x1024",
+                aspect_ratio="1:1",
+                input_image_ids=[],
+                status=GenerationStatus.SUCCEEDED.value,
+                progress_stage="finalized",
+                attempt=0,
+                idempotency_key=f"key-{i:03d}",
+                created_at=base + timedelta(seconds=count - i),
+                upstream_request={"source": source},
+            )
+        )
+
+
+_TASK_LISTING_TABLES = [
+    Conversation.__table__,
+    Message.__table__,
+    Generation.__table__,
+    Completion.__table__,
+    Image.__table__,
+    ImageVariant.__table__,
+]
+
+
+def _create_sqlite_tables(sync_connection: Any) -> None:
+    """SQLite 测试库建表:逐表 DDL 编译并替换 PG 专属 ARRAY[] 默认值。"""
+    for table in _TASK_LISTING_TABLES:
+        ddl = str(CreateTable(table).compile(dialect=sqlite.dialect()))
+        ddl = ddl.replace("DEFAULT (ARRAY[]::varchar[])", "DEFAULT '[]'")
+        sync_connection.execute(text(ddl))
+
+
+async def _zero_match_output(
+    *,
+    source: str | None = None,
+    conversation_id: str | None = None,
+    retryable: bool | None = None,
+) -> tuple[Any, int]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_create_sqlite_tables)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            _seed_task_database(session, count=400)
+            await session.commit()
+            counting = _CountingSession(session)
+            output = await build_task_list(
+                counting,
+                tasks._task_listing_runtime(),  # noqa: SLF001
+                TaskListRequest(
+                    user_id="user-1",
+                    status=None,
+                    kind="generation",
+                    source=source,
+                    conversation_id=conversation_id,
+                    project_id=None,
+                    date_filter=None,
+                    cursor=None,
+                    error_code=None,
+                    retryable=retryable,
+                    limit=20,
+                ),
+            )
+            return output, counting.calls
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_zero_match_source_returns_empty_without_full_scan() -> None:
+    """零匹配 source filter 首轮即返回空页,不能深挖分页扫完整张任务表。
+
+    修复前: 用户有 400 行(> query_limit),source="X" 零匹配时深挖循环在
+    page 为空(无页尾 key)的判定下会把 400 行按批全拉一遍(全表分页扫描);
+    修复后显式 source 下推到 SQL,首轮查询即空,循环立即退出。
+    """
+    output, calls = await _zero_match_output(source="X")
+    assert output.items == []
+    assert output.next_cursor is None
+    # 修复前此场景约 7 轮深挖(29+ 条语句);下推后仅首轮 2 条语句即退出
+    assert calls <= 4
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_zero_match_conversation_returns_empty() -> None:
+    """零匹配 conversation_id 同样首轮即空(消息 EXISTS 子查询下推)。"""
+    output, calls = await _zero_match_output(conversation_id="conv-missing")
+    assert output.items == []
+    assert output.next_cursor is None
+    assert calls <= 4
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_zero_match_retryable_returns_empty() -> None:
+    """retryable=True 零匹配(全部 succeeded)时首轮即空。"""
+    output, calls = await _zero_match_output(retryable=True)
+    assert output.items == []
+    assert output.next_cursor is None
+    assert calls <= 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("derived_source", ["project", "telegram"])
+async def test_list_tasks_zero_match_derived_source_returns_empty_without_full_scan(
+    derived_source: str,
+) -> None:
+    """派生源 source=project/telegram 零匹配(种子库全为显式 source)时,
+    派生源预筛进 SQL 后首轮即空,深挖循环立即退出,不再把 400 行任务表
+    逐批扫完。"""
+    output, calls = await _zero_match_output(source=derived_source)
+    assert output.items == []
+    assert output.next_cursor is None
+    assert calls <= 4
+
+
+def test_apply_task_item_filters_pushes_derived_source_preconditions_into_sql() -> None:
+    """派生源预筛必须进 SQL(不能只靠内存过滤):project 要求 workflow_run_id
+    非空,telegram 要求会话 default_params.telegram=true,零匹配派生源 filter
+    才能首轮即空。"""
+    apply_item_filters = _apply_task_item_filters_pusher()
+    request = TaskListRequest(
+        user_id="user-1",
+        status=None,
+        kind="generation",
+        source="telegram",
+        conversation_id=None,
+        project_id=None,
+        date_filter=None,
+        cursor=None,
+        error_code=None,
+        retryable=None,
+        limit=20,
+    )
+    compiled = str(
+        apply_item_filters(
+            select(Generation).where(Generation.user_id == "user-1"),
+            Generation,
+            request,
+        ).compile(
+            dialect=sqlite.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert "json_extract" in compiled
+    assert "workflow_run_id" in compiled
+    assert "conversations" in compiled  # telegram 会话 default_params 子查询
+
+
+def _seed_derived_task_database(session: AsyncSession) -> None:
+    """派生源正例种子:显式 source / project(请求臂与消息臂)/ telegram / chat。"""
+    session.add(
+        Conversation(id="conv-1", user_id="user-1", title="t", default_params={})
+    )
+    session.add(
+        Conversation(
+            id="conv-tg",
+            user_id="user-1",
+            title="tg",
+            default_params={"telegram": True},
+        )
+    )
+    base = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    specs = [
+        ("msg-plain", "conv-1", {}, {"source": "Y"}),  # 显式 source,非派生源
+        ("msg-proj-req", "conv-1", {}, {"workflow_run_id": "proj-1"}),  # project(请求臂)
+        ("msg-proj-msg", "conv-1", {"workflow_run_id": "proj-2"}, {}),  # project(消息臂)
+        ("msg-tg", "conv-tg", {}, {}),  # 派生 telegram
+        ("msg-chat", "conv-1", {}, {}),  # 派生 chat
+        ("msg-explicit-project", "conv-1", {}, {"source": "project"}),  # 显式 project
+    ]
+    for i, (message_id, conv_id, content, upstream) in enumerate(specs):
+        session.add(
+            Message(
+                id=message_id,
+                conversation_id=conv_id,
+                role="user",
+                content=content,
+            )
+        )
+        session.add(
+            Generation(
+                id=f"gen-{i:02d}",
+                message_id=message_id,
+                user_id="user-1",
+                action="generate",
+                model="test-model",
+                prompt="test prompt",
+                size_requested="1024x1024",
+                aspect_ratio="1:1",
+                input_image_ids=[],
+                status=GenerationStatus.SUCCEEDED.value,
+                progress_stage="finalized",
+                attempt=0,
+                idempotency_key=f"key-{i:02d}",
+                created_at=base + timedelta(seconds=len(specs) - i),
+                upstream_request=upstream,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_derived_source_filters_keep_matches() -> None:
+    """派生源预筛不能漏行:project(请求臂/消息臂/显式)/ telegram / chat
+    各 filter 应原样返回命中任务。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_create_sqlite_tables)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            _seed_derived_task_database(session)
+            await session.commit()
+            counting = _CountingSession(session)
+
+            async def list_ids(*, source: str) -> list[str]:
+                output = await build_task_list(
+                    counting,
+                    tasks._task_listing_runtime(),  # noqa: SLF001
+                    TaskListRequest(
+                        user_id="user-1",
+                        status=None,
+                        kind="generation",
+                        source=source,
+                        conversation_id=None,
+                        project_id=None,
+                        date_filter=None,
+                        cursor=None,
+                        error_code=None,
+                        retryable=None,
+                        limit=20,
+                    ),
+                )
+                return [item.id for item in output.items]
+
+            assert await list_ids(source="project") == [
+                "gen-01",
+                "gen-02",
+                "gen-05",
+            ]
+            assert await list_ids(source="telegram") == ["gen-03"]
+            assert await list_ids(source="chat") == ["gen-04"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_conversation_filter_keeps_matches() -> None:
+    """conversation_id 下推不能漏行:有匹配的会话应原样返回全部任务。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_create_sqlite_tables)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            _seed_task_database(session, count=5)
+            await session.commit()
+            counting = _CountingSession(session)
+            output = await build_task_list(
+                counting,
+                tasks._task_listing_runtime(),  # noqa: SLF001
+                TaskListRequest(
+                    user_id="user-1",
+                    status=None,
+                    kind="generation",
+                    source=None,
+                    conversation_id="conv-1",
+                    project_id=None,
+                    date_filter=None,
+                    cursor=None,
+                    error_code=None,
+                    retryable=None,
+                    limit=20,
+                ),
+            )
+        assert [item.id for item in output.items] == [
+            "gen-000",
+            "gen-001",
+            "gen-002",
+            "gen-003",
+            "gen-004",
+        ]
+        assert output.next_cursor is None
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("kind", "status", "error_code", "expected"),
     [
@@ -534,6 +1074,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
         status=GenerationStatus.FAILED.value,
         progress_stage=GenerationStage.FINALIZING.value,
         attempt=2,
+        execution_epoch=4,
         error_code="upstream_timeout",
         error_message="timeout",
         started_at=old_time,
@@ -542,7 +1083,23 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
         prompt="render a wide hero image",
         size_requested="3840x2160",
         aspect_ratio="16:9",
-        upstream_request=upstream_request,
+        upstream_request={
+            **upstream_request,
+            "trace_id": "trace-old",
+            "sidecar_execution": {"job_id": "job-old"},
+            "provider_idempotency_key": "provider-key-old",
+            "provider_idempotency_stable": True,
+            "provider": "provider-old",
+            "actual_provider": "provider-old",
+            "actual_route": "image_jobs",
+            "image_job_url": "https://sidecar.example/job-old",
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 4,
+            "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+            "upstream_response_attempt": 2,
+            "upstream_response_execution_epoch": 4,
+        },
     )
     db = _Db([_Result(gen)])
 
@@ -556,6 +1113,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     assert gen.status == GenerationStatus.QUEUED.value
     assert gen.progress_stage == GenerationStage.QUEUED.value
     assert gen.attempt == 0
+    assert gen.execution_epoch == 5
     assert gen.billing_retry_count == 1
     assert gen.error_code is None
     assert gen.error_message is None
@@ -565,7 +1123,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
     assert gen.prompt == "render a wide hero image"
     assert gen.size_requested == "3840x2160"
     assert gen.aspect_ratio == "16:9"
-    assert gen.upstream_request is upstream_request
+    assert gen.upstream_request == upstream_request
 
     assert db.committed is True
     assert redis.calls == [("delete", "task:gen-1:cancel")]
@@ -576,6 +1134,7 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
                 "task_id": "gen-1",
                 "user_id": "user-1",
                 "kind": "generation",
+                "execution_epoch": 5,
                 "outbox_id": "outbox-1",
             },
             "assistant-1",
@@ -634,6 +1193,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
         status=GenerationStatus.CANCELED.value,
         progress_stage=GenerationStage.FINALIZING.value,
         attempt=1,
+        execution_epoch=8,
         billing_retry_count=0,
         error_code="cancelled",
         error_message="cancelled by user",
@@ -665,6 +1225,7 @@ async def test_retry_generation_holds_new_retry_billing_ref_before_queueing(
                 "generation_id": "gen-1",
                 "reason": "generation retry",
                 "retry_count": 1,
+                "execution_epoch": 9,
             },
         }
     ]
@@ -778,15 +1339,18 @@ async def test_retry_generation_hold_falls_back_to_user_rate_multiplier(
 
 
 @pytest.mark.asyncio
-async def test_retry_generation_fails_if_prior_cancel_signal_cannot_be_cleared(
+async def test_retry_generation_ignores_cancel_notification_cleanup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_publish_queued(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("retry must not enqueue while stale cancel may remain")
+    published: list[dict[str, Any]] = []
+
+    async def publish_queued(payload: dict[str, Any], _message_id: str) -> None:
+        published.append(payload)
 
     redis = _Redis(fail_delete=True)
     monkeypatch.setattr(tasks, "get_redis", lambda: redis)
-    monkeypatch.setattr(tasks, "_publish_queued", fail_publish_queued)
+    monkeypatch.setattr(tasks, "_publish_queued", publish_queued)
+    monkeypatch.setattr(tasks, "_billing_enabled", _billing_disabled)
     gen = SimpleNamespace(
         id="gen-1",
         user_id="user-1",
@@ -798,34 +1362,42 @@ async def test_retry_generation_fails_if_prior_cancel_signal_cannot_be_cleared(
         error_message="cancelled by user",
         started_at=None,
         finished_at=datetime.now(timezone.utc),
+        cancel_requested_at=datetime.now(timezone.utc),
     )
     db = _Db([_Result(gen)])
 
-    with pytest.raises(Exception) as exc_info:
-        await tasks.retry_generation(
-            "gen-1",
-            _user(),  # type: ignore[arg-type]
-            db,  # type: ignore[arg-type]
-        )
+    out = await tasks.retry_generation(
+        "gen-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
 
-    assert getattr(exc_info.value, "status_code", None) == 503
-    assert gen.status == GenerationStatus.CANCELED.value
-    assert db.added == []
-    assert db.committed is False
+    assert out == {"status": GenerationStatus.QUEUED.value}
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert gen.cancel_requested_at is None
+    assert db.committed is True
     assert redis.calls == [("delete", "task:gen-1:cancel")]
+    assert published and published[0]["kind"] == "generation"
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_generation_keeps_row_active_until_worker_stops(
+async def test_cancel_running_generation_persists_intent_before_worker_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    redis = _Redis({"generation:image_queue:task_provider:gen-1": b"provider-a"})
+    redis = _Redis(
+        {
+            "generation:image_queue:task_provider:gen-1": b"provider-a",
+            "task:gen-1:lease": b"worker:execution:0:attempt:0",
+            "generation:image_queue:reservation:gen-1": b"reservation-0",
+        }
+    )
     monkeypatch.setattr(tasks, "get_redis", lambda: redis)
     gen = SimpleNamespace(
         id="gen-1",
         user_id="user-1",
         status=GenerationStatus.RUNNING.value,
         finished_at=None,
+        cancel_requested_at=None,
     )
     db = _Db([_Result(gen)])
 
@@ -835,15 +1407,11 @@ async def test_cancel_running_generation_keeps_row_active_until_worker_stops(
         db,  # type: ignore[arg-type]
     )
 
-    assert out == {"status": GenerationStatus.RUNNING.value}
+    assert out == {"status": "canceling", "cancel_requested": True}
     assert gen.status == GenerationStatus.RUNNING.value
     assert gen.finished_at is None
-    # Why no commit on the RUNNING branch: there is no field mutation on
-    # `gen` (status stays RUNNING, finished_at stays None). The SELECT FOR
-    # UPDATE row lock is released by the FastAPI session context manager at
-    # request exit, so an explicit commit here would just be a wasted
-    # round-trip. See cancel_generation() comment.
-    assert db.committed is False
+    assert gen.cancel_requested_at is not None
+    assert db.committed is True
     assert redis.calls == [("set", "task:gen-1:cancel", "1", 3600)]
 
 
@@ -857,6 +1425,7 @@ async def test_cancel_streaming_completion_returns_canceling_state(
         id="comp-1",
         user_id="user-1",
         status=CompletionStatus.STREAMING.value,
+        cancel_requested_at=None,
     )
     db = _Db([_Result(comp)])
 
@@ -868,7 +1437,8 @@ async def test_cancel_streaming_completion_returns_canceling_state(
 
     assert out == {"status": "canceling", "cancel_requested": True}
     assert comp.status == CompletionStatus.STREAMING.value
-    assert db.committed is False
+    assert comp.cancel_requested_at is not None
+    assert db.committed is True
     assert redis.calls == [("set", "task:comp-1:cancel", "1", 3600)]
 
 
@@ -898,7 +1468,13 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
         )
         return "sse-1"
 
-    redis = _Redis({"generation:image_queue:task_provider:gen-1": b"provider-a"})
+    redis = _Redis(
+        {
+            "generation:image_queue:task_provider:gen-1": b"provider-a",
+            "task:gen-1:lease": b"worker:execution:0:attempt:0",
+            "generation:image_queue:reservation:gen-1": b"reservation-0",
+        }
+    )
 
     async def release_queued_task_hold(
         db: _Db,
@@ -929,6 +1505,8 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
         message_id="msg-1",
         status=GenerationStatus.QUEUED.value,
         finished_at=None,
+        execution_epoch=0,
+        upstream_request={},
     )
     db = _Db([_Result(gen)])
 
@@ -950,13 +1528,20 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
         )
     ]
     assert invalidated == [("release-before-commit", False), ("user-1", True)]
-    assert redis.calls == [
+    assert redis.calls[:3] == [
         ("get", "generation:image_queue:task_provider:gen-1"),
-        ("zrem", "generation:image_queue:active", "gen-1"),
-        ("zrem", "generation:image_queue:provider_active:provider-a", "gen-1"),
-        ("delete", "generation:image_queue:task_provider:gen-1"),
-        ("delete", "task:gen-1:lease"),
+        ("get", "task:gen-1:lease"),
+        ("get", "generation:image_queue:reservation:gen-1"),
     ]
+    assert redis.calls[3][0] == "eval"
+    assert redis.calls[3][2] == 5
+    assert redis.calls[3][3:8] == (
+        "generation:image_queue:provider_active:provider-a",
+        "generation:image_queue:active",
+        "generation:image_queue:task_provider:gen-1",
+        "task:gen-1:lease",
+        "generation:image_queue:reservation:gen-1",
+    )
     assert published == [
         {
             "user_id": "user-1",
@@ -977,6 +1562,50 @@ async def test_cancel_queued_generation_marks_terminal_and_clears_queue_state(
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_generation_with_current_dispatch_receipt_defers_billing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+    redis = _Redis()
+
+    async def release_queued_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: redis)
+    monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
+    gen = SimpleNamespace(
+        id="gen-1",
+        user_id="user-1",
+        message_id="msg-1",
+        status=GenerationStatus.QUEUED.value,
+        finished_at=None,
+        cancel_requested_at=None,
+        execution_epoch=4,
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 4,
+        },
+    )
+    db = _Db([_Result(gen)])
+
+    out = await tasks.cancel_generation(
+        "gen-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": "canceling", "cancel_requested": True}
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert gen.finished_at is None
+    assert gen.cancel_requested_at is not None
+    assert released == []
+    assert db.committed is True
+    assert redis.calls == [("set", "task:gen-1:cancel", "1", 3600)]
 
 
 @pytest.mark.asyncio
@@ -1128,6 +1757,50 @@ async def test_cancel_queued_completion_releases_wallet_hold_after_commit(
 
 
 @pytest.mark.asyncio
+async def test_cancel_queued_completion_with_current_usage_defers_actual_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+    redis = _Redis()
+
+    async def release_queued_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: redis)
+    monkeypatch.setattr(tasks, "_release_queued_task_hold", release_queued_task_hold)
+    comp = SimpleNamespace(
+        id="comp-1",
+        user_id="user-1",
+        status=CompletionStatus.QUEUED.value,
+        progress_stage=CompletionStage.QUEUED.value,
+        finished_at=None,
+        cancel_requested_at=None,
+        execution_epoch=7,
+        tokens_in=120,
+        upstream_request={
+            "billing_retry_count": 2,
+            "completion_usage_execution_epoch": 7,
+        },
+    )
+    db = _Db([_Result(comp)])
+
+    out = await tasks.cancel_completion(
+        "comp-1",
+        _user(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"status": "canceling", "cancel_requested": True}
+    assert comp.status == CompletionStatus.QUEUED.value
+    assert comp.finished_at is None
+    assert comp.cancel_requested_at is not None
+    assert released == []
+    assert db.committed is True
+    assert redis.calls == [("set", "task:comp-1:cancel", "1", 3600)]
+
+
+@pytest.mark.asyncio
 async def test_cancel_queued_completion_skips_wallet_release_for_byok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1223,11 +1896,30 @@ async def test_retry_completion_records_new_billing_retry_count(
         status=CompletionStatus.FAILED.value,
         progress_stage=CompletionStage.FINALIZING.value,
         attempt=2,
+        execution_epoch=3,
         error_code="upstream_timeout",
         error_message="timeout",
         started_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
         finished_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
-        upstream_request={"web_search": True},
+        text="old partial output",
+        tokens_in=101,
+        tokens_out=202,
+        cache_read_tokens=11,
+        cache_creation_tokens=12,
+        cache_creation_5m_tokens=13,
+        cache_creation_1h_tokens=14,
+        reasoning_tokens=15,
+        image_output_tokens=16,
+        upstream_request={
+            "web_search": True,
+            "tool_image_reserved_micro": 900,
+            "completion_usage_execution_epoch": 3,
+            "completion_usage_attempt_epoch": 2,
+            "trace_id": "trace-old",
+            "provider": "provider-old",
+            "context": {"compressed": True},
+            "memory": {"used_memory_ids": ["memory-old"]},
+        },
     )
     db = _Db([_Result(comp)])
 
@@ -1241,10 +1933,20 @@ async def test_retry_completion_records_new_billing_retry_count(
     assert comp.status == CompletionStatus.QUEUED.value
     assert comp.progress_stage == CompletionStage.QUEUED.value
     assert comp.attempt == 0
+    assert comp.execution_epoch == 4
     assert comp.error_code is None
     assert comp.error_message is None
     assert comp.started_at is None
     assert comp.finished_at is None
+    assert comp.text == ""
+    assert comp.tokens_in == 0
+    assert comp.tokens_out == 0
+    assert comp.cache_read_tokens == 0
+    assert comp.cache_creation_tokens == 0
+    assert comp.cache_creation_5m_tokens == 0
+    assert comp.cache_creation_1h_tokens == 0
+    assert comp.reasoning_tokens == 0
+    assert comp.image_output_tokens == 0
     assert comp.upstream_request == {
         "web_search": True,
         "billing_retry_count": 1,
@@ -1257,6 +1959,7 @@ async def test_retry_completion_records_new_billing_retry_count(
                 "task_id": "comp-1",
                 "user_id": "user-1",
                 "kind": "completion",
+                "execution_epoch": 4,
                 "outbox_id": "outbox-1",
             },
             "assistant-1",
@@ -1289,6 +1992,7 @@ async def test_retry_completion_holds_new_retry_billing_ref(
         status=CompletionStatus.CANCELED.value,
         progress_stage=CompletionStage.FINALIZING.value,
         attempt=1,
+        execution_epoch=6,
         error_code="cancelled",
         error_message="cancelled",
         started_at=datetime(2026, 4, 28, tzinfo=timezone.utc),
@@ -1326,8 +2030,56 @@ async def test_retry_completion_holds_new_retry_billing_ref(
                 "reason": "completion retry",
                 "billing_retry_count": 1,
                 "previous_billing_retry_count": 0,
+                "execution_epoch": 7,
             },
         }
     ]
     assert invalidated == [("user-1", True)]
     assert published
+
+
+@pytest.mark.asyncio
+async def test_concurrent_generation_retry_advances_execution_epoch_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = asyncio.Lock()
+    gen = _retry_candidate(execution_epoch=11)
+
+    class LockedDb(_Db):
+        async def execute(self, statement: Any) -> _Result:
+            async with lock:
+                self.statements.append(statement)
+                return _Result(gen)
+
+    async def noop_publish(_payload: dict[str, Any], _message_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(tasks, "get_redis", lambda: _Redis())
+    monkeypatch.setattr(tasks, "_publish_queued", noop_publish)
+    monkeypatch.setattr(tasks, "_billing_enabled", _billing_disabled)
+
+    first, second = await asyncio.gather(
+        tasks.retry_generation(
+            "gen-1",
+            _user(),  # type: ignore[arg-type]
+            LockedDb([]),  # type: ignore[arg-type]
+        ),
+        tasks.retry_generation(
+            "gen-1",
+            _user(),  # type: ignore[arg-type]
+            LockedDb([]),  # type: ignore[arg-type]
+        ),
+        return_exceptions=True,
+    )
+
+    results = (first, second)
+    assert (
+        sum(result == {"status": GenerationStatus.QUEUED.value} for result in results)
+        == 1
+    )
+    conflicts = [
+        result for result in results if isinstance(result, tasks.HTTPException)
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0].status_code == 409
+    assert gen.execution_epoch == 12

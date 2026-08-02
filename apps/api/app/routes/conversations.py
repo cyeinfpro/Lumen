@@ -15,7 +15,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import and_, desc, or_, select, update
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
@@ -24,14 +24,9 @@ from lumen_core.byok_retention import (
     is_user_visible as byok_retention_is_user_visible,
     user_visible_filter as byok_retention_user_visible_filter,
 )
-from lumen_core.constants import CompletionStatus, GenerationStatus
 from lumen_core.context_window import estimate_message_tokens
 from lumen_core.models import (
-    Completion,
     Conversation,
-    Generation,
-    Image,
-    Message,
     SystemPrompt,
 )
 from lumen_core.schemas import ConversationOut, ConversationPatchIn
@@ -40,13 +35,23 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
-from ..db import affected_rows, get_db
-from ..deps import CurrentUser, verify_csrf
+from ..db import get_db
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..redis_client import get_redis
+from ..services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    lock_active_user,
+)
 from ..services.conversation_cleanup import (
     cancel_conversation_memory_extractions as _cancel_conversation_memory_extractions,
     conversation_wallet_exists as _conversation_wallet_exists,
     release_conversation_generation_queue_state as _release_conversation_generation_queue_state,
+)
+from ..services.conversation_deletion_tasks import (
+    cancel_conversation_active_tasks as _cancel_conversation_active_tasks_service,
+    post_commit_conversation_task_cleanup as _post_commit_conversation_task_cleanup_service,
+    soft_delete_conversation_generated_images as _soft_delete_conversation_generated_images,
 )
 from ..services.conversations.compaction import (
     CIRCUIT_BREAKER_KEY,
@@ -232,34 +237,6 @@ async def _get_owned_conv_for_update(
     return conv
 
 
-async def _soft_delete_conversation_generated_images(
-    db: AsyncSession,
-    *,
-    conv_id: str,
-    user_id: str,
-    deleted_at: datetime,
-) -> int:
-    generation_ids = (
-        select(Generation.id)
-        .join(Message, Message.id == Generation.message_id)
-        .where(
-            Message.conversation_id == conv_id,
-            Generation.user_id == user_id,
-        )
-    )
-    result = await db.execute(
-        update(Image)
-        .where(
-            Image.user_id == user_id,
-            Image.deleted_at.is_(None),
-            Image.owner_generation_id.in_(generation_ids),
-        )
-        .values(deleted_at=deleted_at)
-        .execution_options(synchronize_session=False)
-    )
-    return affected_rows(result)
-
-
 async def _release_conversation_task_hold(
     db: AsyncSession,
     *,
@@ -289,107 +266,19 @@ async def _cancel_conversation_active_tasks(
     user_id: str,
     canceled_at: datetime,
     account_mode: str = "wallet",
+    queue_redis: Any | None = None,
 ) -> dict[str, Any]:
-    message_ids = select(Message.id).where(Message.conversation_id == conv_id)
-    generations = list(
-        (
-            await db.execute(
-                select(Generation)
-                .where(
-                    Generation.user_id == user_id,
-                    Generation.message_id.in_(message_ids),
-                    Generation.status.in_(
-                        [GenerationStatus.QUEUED.value, GenerationStatus.RUNNING.value]
-                    ),
-                )
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
+    return await _cancel_conversation_active_tasks_service(
+        db,
+        conv_id=conv_id,
+        user_id=user_id,
+        canceled_at=canceled_at,
+        account_mode=account_mode,
+        queue_redis=queue_redis,
+        release_hold=_release_conversation_task_hold,
+        wallet_exists=_conversation_wallet_exists,
+        logger=logger,
     )
-    completions = list(
-        (
-            await db.execute(
-                select(Completion)
-                .where(
-                    Completion.user_id == user_id,
-                    Completion.message_id.in_(message_ids),
-                    Completion.status.in_(
-                        [
-                            CompletionStatus.QUEUED.value,
-                            CompletionStatus.STREAMING.value,
-                        ]
-                    ),
-                )
-                .with_for_update()
-            )
-        )
-        .scalars()
-        .all()
-    )
-    queued_generations: list[str] = []
-    running_generations: list[str] = []
-    streaming_completions: list[str] = []
-    active_generation_ids = [generation.id for generation in generations]
-    active_completion_ids = [completion.id for completion in completions]
-    holds_released = 0
-    release_queued_holds = account_mode == "wallet"
-    if not release_queued_holds and (
-        any(g.status == GenerationStatus.QUEUED.value for g in generations)
-        or any(c.status == CompletionStatus.QUEUED.value for c in completions)
-    ):
-        release_queued_holds = await _conversation_wallet_exists(db, user_id)
-
-    for generation in generations:
-        if generation.status == GenerationStatus.QUEUED.value:
-            queued_generations.append(generation.id)
-            generation.status = GenerationStatus.CANCELED.value
-            generation.progress_stage = "finalizing"
-            generation.finished_at = canceled_at
-            generation.error_code = "cancelled"
-            generation.error_message = "conversation deleted"
-            if release_queued_holds:
-                holds_released += int(
-                    await _release_conversation_task_hold(
-                        db,
-                        user_id=user_id,
-                        ref_type="generation",
-                        ref_id=billing_core.generation_billing_ref_id(generation),
-                        reason="conversation deleted",
-                    )
-                )
-        elif generation.status == GenerationStatus.RUNNING.value:
-            running_generations.append(generation.id)
-    for completion in completions:
-        if completion.status == CompletionStatus.QUEUED.value:
-            completion.status = CompletionStatus.CANCELED.value
-            completion.progress_stage = "finalizing"
-            completion.finished_at = canceled_at
-            completion.error_code = "cancelled"
-            completion.error_message = "conversation deleted"
-            if release_queued_holds:
-                holds_released += int(
-                    await _release_conversation_task_hold(
-                        db,
-                        user_id=user_id,
-                        ref_type="completion",
-                        ref_id=billing_core.completion_billing_ref_id(completion),
-                        reason="conversation deleted",
-                    )
-                )
-        elif completion.status == CompletionStatus.STREAMING.value:
-            streaming_completions.append(completion.id)
-    return {
-        "generations_canceled": len(generations),
-        "completions_canceled": len(completions),
-        "holds_released": holds_released,
-        "active_generation_ids": active_generation_ids,
-        "active_completion_ids": active_completion_ids,
-        "queued_generation_ids": queued_generations,
-        "running_generation_ids": running_generations,
-        "streaming_completion_ids": streaming_completions,
-    }
 
 
 async def _post_commit_conversation_task_cleanup(
@@ -397,52 +286,14 @@ async def _post_commit_conversation_task_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    queued_ids = [
-        task_id
-        for task_id in cleanup.get("queued_generation_ids", [])
-        if isinstance(task_id, str)
-    ]
-    cancel_ids = [
-        task_id
-        for task_id in [
-            *cleanup.get("running_generation_ids", []),
-            *cleanup.get("streaming_completion_ids", []),
-        ]
-        if isinstance(task_id, str)
-    ]
-    if not queued_ids and not cancel_ids:
-        if cleanup.get("holds_released", 0) > 0:
-            try:
-                await invalidate_balance_cache(user_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "conversation deletion balance cache invalidation failed "
-                    "user=%s err=%s",
-                    user_id,
-                    exc,
-                )
-        return
-    try:
-        redis = get_redis()
-        for task_id in queued_ids:
-            await _release_conversation_generation_queue_state(redis, task_id)
-        for task_id in cancel_ids:
-            await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "conversation deletion cancel signal write failed user=%s err=%s",
-            user_id,
-            exc,
-        )
-    if cleanup.get("holds_released", 0) > 0:
-        try:
-            await invalidate_balance_cache(user_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "conversation deletion balance cache invalidation failed user=%s err=%s",
-                user_id,
-                exc,
-            )
+    await _post_commit_conversation_task_cleanup_service(
+        user_id=user_id,
+        cleanup=cleanup,
+        get_redis=get_redis,
+        release_queue_state=_release_conversation_generation_queue_state,
+        invalidate_balance=invalidate_balance_cache,
+        logger=logger,
+    )
 
 
 class ConversationCreateIn(BaseModel):
@@ -519,6 +370,7 @@ async def create_conversation(
     body: ConversationCreateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> ConversationOut:
     if body.title and len(body.title) > 500:
         raise HTTPException(
@@ -549,6 +401,14 @@ async def create_conversation(
                     }
                 },
             )
+    try:
+        session_id = durable_session_id(request)
+        if session_id:
+            await lock_active_user(db, user.id, session_id=session_id)
+        else:
+            await lock_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     conversation = Conversation(
         user_id=user.id,
         title=body.title or "",
@@ -652,6 +512,7 @@ async def delete_conversation(
         user_id=user.id,
         canceled_at=now,
         account_mode=getattr(user, "account_mode", "wallet"),
+        queue_redis=get_redis(),
     )
     memory_extractions_canceled = await _cancel_conversation_memory_extractions(
         db,

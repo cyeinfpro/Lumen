@@ -19,6 +19,7 @@ from ...redis_client import get_redis
 from ..adapters.filesystem_store import FileSystemArtifactStore
 from ..adapters.sqlalchemy_repository import SQLAlchemyImageRepository
 from .reconcile_policy import ImageArtifactReconciler, ReconcileLeaseLost
+from .storage_maintenance import sweep_orphan_image_files
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,12 @@ logger = logging.getLogger(__name__)
 _RECONCILE_LEASE_KEY = "lock:image-artifact-reconciler"
 _RECONCILE_LEASE_TTL_SECONDS = 300
 _RECONCILE_LEASE_RENEW_SECONDS = 90.0
+_ORPHAN_SWEEP_CURSOR_KEY = "cursor:image-orphan-sweep:v1"
+_ORPHAN_SWEEP_MAX_FILES = 500
+_ORPHAN_SWEEP_MAX_ENTRIES = 5_000
+_ORPHAN_SWEEP_MAX_BYTES = 10 * 1024 * 1024 * 1024
+_ORPHAN_SWEEP_MAX_SECONDS = 2.0
+_ORPHAN_SWEEP_MINIMUM_AGE_SECONDS = 3600.0
 _RENEW_LEASE_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('EXPIRE', KEYS[1], ARGV[2])
@@ -170,6 +177,52 @@ async def _release_reconcile_lease(redis: Any, token: str) -> None:
     )
 
 
+def _redis_cursor(value: Any) -> str | None:
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) and value else None
+
+
+async def _run_orphan_image_sweep(
+    redis: Any,
+    lease_guard: ReconcileLeaseGuard,
+) -> None:
+    await lease_guard.assert_owned()
+    cursor = _redis_cursor(await redis.get(_ORPHAN_SWEEP_CURSOR_KEY))
+    async with SessionLocal() as db:
+        result = await sweep_orphan_image_files(
+            db,
+            storage_root=settings.storage_root,
+            dry_run=False,
+            cursor=cursor,
+            max_files=_ORPHAN_SWEEP_MAX_FILES,
+            max_entries=_ORPHAN_SWEEP_MAX_ENTRIES,
+            max_bytes=_ORPHAN_SWEEP_MAX_BYTES,
+            max_seconds=_ORPHAN_SWEEP_MAX_SECONDS,
+            minimum_age_seconds=_ORPHAN_SWEEP_MINIMUM_AGE_SECONDS,
+            assert_owned=lease_guard.assert_owned,
+        )
+
+    await lease_guard.assert_owned()
+    budget_exhausted = bool(result.get("budget_exhausted"))
+    next_cursor = _redis_cursor(result.get("next_cursor"))
+    if next_cursor is not None:
+        await redis.set(_ORPHAN_SWEEP_CURSOR_KEY, next_cursor)
+    else:
+        await redis.delete(_ORPHAN_SWEEP_CURSOR_KEY)
+
+    logger.info(
+        "image orphan sweep scanned=%d deleted=%d failed=%d "
+        "budget_exhausted=%s cursor=%s next_cursor=%s",
+        int(result.get("scanned") or 0),
+        int(result.get("deleted") or 0),
+        len(result.get("failed") or ()),
+        budget_exhausted,
+        cursor,
+        next_cursor,
+    )
+
+
 @asynccontextmanager
 async def _reconcile_lease(
     redis: Any,
@@ -274,6 +327,12 @@ async def run_image_artifact_reconciler_once() -> int:
                 quarantined_rows,
                 stats.deferred,
             )
+        try:
+            await _run_orphan_image_sweep(redis, lease_guard)
+        except ReconcileLeaseLost:
+            logger.warning("image orphan sweep stopped after reconcile lease loss")
+        except Exception:
+            logger.exception("image orphan sweep iteration failed")
         return repaired
 
 

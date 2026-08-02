@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import and_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -74,15 +75,28 @@ async def add_allowed_email(
         raise deps.http_error("already_exists", "email already allowed", 409)
     allowed = AllowedEmail(email=email, invited_by=admin.id)
     db.add(allowed)
-    await db.flush()
-    await deps.write_admin_audit(
-        db,
-        request,
-        admin,
-        event_type="admin.allowed_email.add",
-        details={"email_hash": deps.hash_email(email), "id": allowed.id},
-    )
-    await db.commit()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # Race: the pre-check above is not atomic; a concurrent duplicate
+        # insert trips the unique constraint. Report the same 409 instead of
+        # leaking a 500.
+        await db.rollback()
+        raise deps.http_error("already_exists", "email already allowed", 409) from exc
+    try:
+        await deps.write_admin_audit(
+            db,
+            request,
+            admin,
+            event_type="admin.allowed_email.add",
+            details={"email_hash": deps.hash_email(email), "id": allowed.id},
+        )
+        await db.commit()
+    except IntegrityError:
+        # Audit/commit 阶段的完整性失败与重复邮箱无关,不做 409 误分类,
+        # 交由全局兜底处理。
+        await db.rollback()
+        raise
     await db.refresh(allowed)
     return AllowedEmailOut(
         id=allowed.id,

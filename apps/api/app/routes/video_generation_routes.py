@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Literal, cast
 
 from fastapi import Request, Response
@@ -19,6 +20,7 @@ from lumen_core.constants import (
 )
 from lumen_core.model_entities import (
     OutboxEvent,
+    User,
     Video,
     VideoGeneration,
 )
@@ -27,6 +29,15 @@ from lumen_core.schema_models import (
     VideoGenerationOut,
     VideoGenerationsOut,
     VideoReferenceMediaIn,
+)
+
+from ..images.application.deleted_media_references import (
+    active_video_generation_reference_id,
+)
+from ..services.video_storage_lifecycle import (
+    VIDEO_STORAGE_CLEANUP_METADATA_KEY,
+    VideoStorageLifecycle,
+    record_video_storage_cleanup,
 )
 
 
@@ -38,11 +49,128 @@ class GenerationRouteDependencies:
     encode_cursor: Callable[[VideoGeneration], str]
     terminal_statuses: frozenset[str]
     invalidate_balance_cache: Callable[[str], Awaitable[None]]
+    allow_negative_balance: Callable[[AsyncSession], Awaitable[bool]]
     reject_canvas_retry: Callable[[VideoGeneration], None]
     create_record: Callable[..., Awaitable[VideoGenerationOut]]
     ensure_not_canvas_referenced: Callable[..., Awaitable[None]]
+    storage_lifecycle: VideoStorageLifecycle
     logger: Any
     list_limit_max: int
+
+
+_SUBMIT_DELIVERY_STATES = frozenset({"proven_absent", "unknown", "confirmed"})
+SUBMIT_DELIVERY_PRECEDENCE = MappingProxyType(
+    {
+        "proven_absent": 0,
+        "unknown": 1,
+        "confirmed": 2,
+    }
+)
+# Keep the old private name for callers that imported it before the contract
+# was made immutable.
+_SUBMIT_DELIVERY_PRECEDENCE = SUBMIT_DELIVERY_PRECEDENCE
+
+
+def _video_submit_delivery_state(generation: VideoGeneration) -> str:
+    if generation.provider_task_id:
+        return "confirmed"
+    raw_diagnostics = getattr(generation, "diagnostics", None)
+    diagnostics = dict(raw_diagnostics) if isinstance(raw_diagnostics, dict) else {}
+    states: list[str] = []
+    aggregate = diagnostics.get("submit_delivery_state")
+    if aggregate in _SUBMIT_DELIVERY_STATES:
+        states.append(str(aggregate))
+    history = diagnostics.get("submit_delivery_history")
+    if isinstance(history, list):
+        for item in history:
+            state = item.get("state") if isinstance(item, dict) else None
+            if state in _SUBMIT_DELIVERY_STATES:
+                states.append(str(state))
+    if isinstance(diagnostics.get("submit_receipt"), dict):
+        states.append("confirmed")
+    if states:
+        return max(states, key=SUBMIT_DELIVERY_PRECEDENCE.__getitem__)
+    if (
+        int(getattr(generation, "attempt", 0) or 0) <= 0
+        and int(getattr(generation, "submission_epoch", 0) or 0) <= 0
+        and getattr(generation, "submit_started_at", None) is None
+    ):
+        return "proven_absent"
+    return "unknown"
+
+
+async def _locked_owned_video(
+    db: AsyncSession,
+    *,
+    video_id: str,
+    user_id: str,
+) -> Video | None:
+    return (
+        await db.execute(
+            select(Video)
+            .where(
+                Video.id == video_id,
+                Video.user_id == user_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+def _mark_video_storage_cleanup_pending(
+    video: Video,
+    *,
+    deleted_at: datetime,
+) -> None:
+    metadata = dict(video.metadata_jsonb or {})
+    previous = metadata.get(VIDEO_STORAGE_CLEANUP_METADATA_KEY)
+    previous_cleanup = previous if isinstance(previous, dict) else {}
+    remaining_artifacts = previous_cleanup.get("remaining_artifact_count")
+    remaining_bytes = previous_cleanup.get("remaining_bytes")
+    metadata[VIDEO_STORAGE_CLEANUP_METADATA_KEY] = {
+        "state": "pending",
+        "attempted_at": deleted_at.isoformat(),
+        "remaining_artifact_count": (
+            max(1, int(remaining_artifacts))
+            if isinstance(remaining_artifacts, int)
+            else 1
+        ),
+        "remaining_bytes": (
+            max(0, int(remaining_bytes))
+            if isinstance(remaining_bytes, int)
+            else max(0, int(video.size_bytes or 0))
+        ),
+    }
+    video.metadata_jsonb = metadata
+
+
+def _clear_video_storage_cleanup_pending(video: Video) -> None:
+    metadata = dict(video.metadata_jsonb or {})
+    metadata.pop(VIDEO_STORAGE_CLEANUP_METADATA_KEY, None)
+    video.metadata_jsonb = metadata
+
+
+async def _reject_active_video_reference(
+    db: AsyncSession,
+    *,
+    video: Video,
+    deps: GenerationRouteDependencies,
+    restore_soft_delete: bool,
+) -> None:
+    generation_id = await active_video_generation_reference_id(db, video=video)
+    if generation_id is None:
+        return
+    if restore_soft_delete and video.deleted_at is not None:
+        video.deleted_at = None
+        _clear_video_storage_cleanup_pending(video)
+        await db.commit()
+    raise deps.http_error(
+        "video_generation_reference_active",
+        "video is retained by an active generation",
+        409,
+        video_generation_id=generation_id,
+    )
 
 
 async def list_video_generations(
@@ -164,32 +292,97 @@ async def cancel_video_generation(
             row.status == VideoGenerationStatus.QUEUED.value
             and not row.provider_task_id
         ):
+            delivery_state = _video_submit_delivery_state(row)
             row.status = VideoGenerationStatus.CANCELED.value
             row.progress_stage = VideoGenerationStage.FINISHED.value
             row.progress_pct = 100
             row.error_code = "canceled"
-            row.error_message = "cancelled before upstream submission"
-            row.finished_at = now
-            transaction = await billing_core.release(
-                db,
-                user.id,
-                ref_type="video_generation",
-                ref_id=row.id,
-                idempotency_key=f"video_generation:release:{row.id}",
-                meta={
-                    "model": row.model,
-                    "action": row.action,
-                    "provider_name": row.provider_name,
-                    "billing_decision": "pre_submit_cancel_release",
-                },
+            row.error_message = (
+                "cancelled before upstream submission"
+                if delivery_state == "proven_absent"
+                else "cancelled while upstream submission outcome was unknown"
             )
+            row.finished_at = now
+            diagnostics = (
+                dict(row.diagnostics) if isinstance(row.diagnostics, dict) else {}
+            )
+            if delivery_state == "proven_absent":
+                transaction = await billing_core.release(
+                    db,
+                    user.id,
+                    ref_type="video_generation",
+                    ref_id=row.id,
+                    idempotency_key=f"video_generation:release:{row.id}",
+                    meta={
+                        "model": row.model,
+                        "action": row.action,
+                        "provider_name": row.provider_name,
+                        "billing_decision": "pre_submit_cancel_release",
+                        "submit_delivery_state": delivery_state,
+                    },
+                )
+                billing_decision = "pre_submit_cancel_release"
+                actual_micro = 0
+            else:
+                held = await billing_core._held_amount_for_ref(  # noqa: SLF001
+                    db,
+                    user.id,
+                    "video_generation",
+                    row.id,
+                )
+                actual_micro = max(
+                    int(held),
+                    int(getattr(row, "est_cost_micro", 0) or 0),
+                )
+                billing_decision = "cancel_submit_delivery_unknown_default_charge"
+                transaction = await billing_core.settle(
+                    db,
+                    user.id,
+                    ref_type="video_generation",
+                    ref_id=row.id,
+                    actual_micro=actual_micro,
+                    idempotency_key=f"video_generation:settle:{row.id}",
+                    allow_negative=await deps.allow_negative_balance(db),
+                    record_zero=actual_micro == 0,
+                    meta={
+                        "model": row.model,
+                        "action": row.action,
+                        "provider_name": row.provider_name,
+                        "provider_task_id": row.provider_task_id,
+                        "provider_idempotency_key": getattr(
+                            row,
+                            "provider_idempotency_key",
+                            None,
+                        ),
+                        "billing_decision": billing_decision,
+                        "submit_delivery_state": delivery_state,
+                        "upstream_cost_knowledge": "unknown",
+                    },
+                )
             if transaction is None:
                 await db.rollback()
                 raise deps.http_error(
-                    "video_hold_release_missing",
-                    "video hold release transaction was not created",
+                    (
+                        "video_hold_release_missing"
+                        if delivery_state == "proven_absent"
+                        else "video_hold_settle_missing"
+                    ),
+                    (
+                        "video hold release transaction was not created"
+                        if delivery_state == "proven_absent"
+                        else "video hold settlement transaction was not created"
+                    ),
                     409,
                 )
+            row.billed_cost_micro = actual_micro
+            row.billed_tokens = None
+            diagnostics["cancel_billing"] = {
+                "at": now.isoformat(),
+                "decision": billing_decision,
+                "actual_micro": actual_micro,
+                "submit_delivery_state": delivery_state,
+            }
+            row.diagnostics = diagnostics
             balance_changed = True
             db.add(
                 OutboxEvent(
@@ -287,11 +480,7 @@ async def retry_video_generation(
                         if isinstance(item.get("video_id"), str)
                         else None
                     ),
-                    url=(
-                        item.get("url")
-                        if isinstance(item.get("url"), str)
-                        else None
-                    ),
+                    url=(item.get("url") if isinstance(item.get("url"), str) else None),
                     label=(
                         item.get("label")
                         if isinstance(item.get("label"), str)
@@ -368,18 +557,64 @@ async def delete_video(
     db: AsyncSession,
     deps: GenerationRouteDependencies,
 ) -> Response:
-    video = (
-        await db.execute(
-            select(Video).where(
-                Video.id == video_id,
-                Video.user_id == user.id,
-                Video.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
+    await db.execute(select(User.id).where(User.id == user.id).with_for_update())
+    video = await _locked_owned_video(
+        db,
+        video_id=video_id,
+        user_id=user.id,
+    )
     if video is None:
         raise deps.http_error("not_found", "video not found", 404)
-    await deps.ensure_not_canvas_referenced(db, video_id=video.id)
-    video.deleted_at = datetime.now(timezone.utc)
+    if video.deleted_at is None:
+        await deps.ensure_not_canvas_referenced(db, video_id=video.id)
+        await _reject_active_video_reference(
+            db,
+            video=video,
+            deps=deps,
+            restore_soft_delete=False,
+        )
+        deleted_at = datetime.now(timezone.utc)
+        video.deleted_at = deleted_at
+        _mark_video_storage_cleanup_pending(video, deleted_at=deleted_at)
+        await db.commit()
+
+        await db.execute(select(User.id).where(User.id == user.id).with_for_update())
+        video = await _locked_owned_video(
+            db,
+            video_id=video_id,
+            user_id=user.id,
+        )
+        if video is None:
+            raise deps.http_error("not_found", "video not found", 404)
+        if video.deleted_at is None:
+            deps.logger.info(
+                "video cleanup skipped after concurrent restore video_id=%s",
+                video.id,
+            )
+            return Response(status_code=204)
+
+    await _reject_active_video_reference(
+        db,
+        video=video,
+        deps=deps,
+        restore_soft_delete=True,
+    )
+    cleanup = await deps.storage_lifecycle.cleanup(video)
+    record_video_storage_cleanup(video, cleanup)
     await db.commit()
+    if not cleanup.complete:
+        deps.logger.warning(
+            "video storage cleanup pending video_id=%s remaining=%s bytes=%s errors=%s",
+            video.id,
+            cleanup.remaining.artifact_count,
+            cleanup.remaining.bytes_on_disk,
+            cleanup.errors,
+        )
+        raise deps.http_error(
+            "video_storage_cleanup_pending",
+            "video cleanup is incomplete; retry deletion",
+            503,
+            remaining_artifacts=cleanup.remaining.artifact_count,
+            remaining_bytes=cleanup.remaining.bytes_on_disk,
+        )
     return Response(status_code=204)

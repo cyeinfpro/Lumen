@@ -492,6 +492,21 @@ async def test_get_current_user_rejects_soft_deleted_user(
 
 
 @pytest.mark.asyncio
+async def test_is_active_session_rechecks_durable_revocation_expiry_and_user_state() -> (
+    None
+):
+    db = _Db(results=["session-1", None])
+
+    assert await deps.is_active_session(db, "session-1") is True
+    assert await deps.is_active_session(db, "session-1") is False
+
+    sql = str(db.results_seen[0]).upper()
+    assert "AUTH_SESSIONS.REVOKED_AT IS NULL" in sql
+    assert "AUTH_SESSIONS.EXPIRES_AT >" in sql
+    assert "USERS.DELETED_AT IS NULL" in sql
+
+
+@pytest.mark.asyncio
 async def test_login_runs_dummy_verify_when_user_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

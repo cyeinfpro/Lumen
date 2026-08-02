@@ -45,6 +45,7 @@ from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..services.admin_model_cache import admin_model_cache_from_request
 from ..services.provider_config import (
+    lock_providers_config as _lock_providers_config,
     parse_provider_config as _parse_config,
     read_providers as _read_providers,
 )
@@ -123,6 +124,19 @@ async def _load_full_config(db: AsyncSession) -> dict:
     if "proxies" not in data:
         data["proxies"] = []
     return data
+
+
+def _endpoint_identity(p: dict) -> tuple[str, str, str]:
+    """host+port+username 组成稳定端点身份，供重命名回退匹配使用。
+
+    密码/私钥按 name 保留；name 变了（重命名）时回退到端点身份，
+    避免换名后静默丢掉已存密码/私钥。
+    """
+    return (
+        str(p.get("host") or "").strip(),
+        str(p.get("port") or ""),
+        str(p.get("username") or "").strip() or "",
+    )
 
 
 def _decode_health(raw: dict) -> dict[str, object]:
@@ -270,13 +284,19 @@ async def update_proxies(
     敏感字段保留：password 留空 → 用旧值；private_key_path 留空 → 用旧值。
     其它字段（host/port/username/enabled）以请求里的为准。
     """
+    # 共享行并发写保护：providers items 与 proxies 写同一行 DB，先拿
+    # 事务级咨询锁再做读-改-写，避免并发保存互相覆盖（丢失更新）。
+    await _lock_providers_config(db)
     config = await _load_full_config(db)
 
     # 旧 proxies map：用 name 索引，便于保留 password / private_key
     old_by_name: dict[str, dict] = {}
+    # name 匹配不到时（重命名）按端点身份回退的索引；同身份只取第一个
+    old_by_endpoint: dict[tuple[str, str, str], dict] = {}
     for p in config.get("proxies") or []:
         if isinstance(p, dict) and isinstance(p.get("name"), str):
             old_by_name[p["name"]] = p
+            old_by_endpoint.setdefault(_endpoint_identity(p), p)
 
     # 名称去重
     seen_names: set[str] = set()
@@ -288,12 +308,15 @@ async def update_proxies(
             raise _http("duplicate_proxy", f"代理名称重复：{n}", 422)
         seen_names.add(n)
 
-    # 构造新 proxies；保留旧 password / private_key_path 当请求侧留空
+    # 构造新 proxies；保留旧 password / private_key_path 当请求侧留空。
+    # 重命名（新 name 匹配不到）时回退到端点身份匹配，仍保留旧凭据。
     new_proxies: list[dict] = []
     for it in body.items:
         d = it.model_dump()
         d["name"] = it.name.strip()
-        old = old_by_name.get(d["name"]) or {}
+        old = old_by_name.get(d["name"]) or old_by_endpoint.get(
+            _endpoint_identity(d)
+        ) or {}
         if not (d.get("password") or "").strip() and old.get("password"):
             d["password"] = old["password"]
         if not d.get("private_key_path") and old.get("private_key_path"):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -333,3 +334,61 @@ async def test_redis_capacity_is_shared_across_runtime_instances() -> None:
     assert await second.try_acquire(owner_token="owner-2") is None
     await lease.release()
     assert await second.try_acquire(owner_token="owner-2") is not None
+
+
+@pytest.mark.asyncio
+async def test_hold_interrupts_guard_body_when_lease_lost() -> None:
+    class Redis:
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool,
+            ex: int,
+        ) -> bool:
+            del key, value, nx, ex
+            return True
+
+        async def eval(self, _script: str, _keys: int, *_args: Any) -> int:
+            # The slot expired or was taken over: renew must report lost.
+            return 0
+
+    capacity = RedisCapacityLease(Redis(), limit=1, ttl_seconds=1)
+    with pytest.raises(asyncio.CancelledError):
+        async with capacity.hold():
+            await asyncio.sleep(30)
+
+
+@pytest.mark.asyncio
+async def test_hold_survives_transient_renewal_error() -> None:
+    calls = 0
+
+    class Redis:
+        async def set(
+            self,
+            key: str,
+            value: str,
+            *,
+            nx: bool,
+            ex: int,
+        ) -> bool:
+            del key, value, nx, ex
+            return True
+
+        async def eval(self, _script: str, _keys: int, *_args: Any) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("redis down")
+            return 1
+
+    capacity = RedisCapacityLease(Redis(), limit=1, ttl_seconds=1)
+    entered = False
+    async with capacity.hold():
+        entered = True
+        # Span two renewal intervals: the first renew fails transiently, the
+        # guarded body must still run to completion instead of being aborted.
+        await asyncio.sleep(2.2)
+    assert entered
+    assert calls >= 2

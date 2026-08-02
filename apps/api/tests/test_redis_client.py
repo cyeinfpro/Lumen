@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+
+import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 import app.redis_client as redis_client
+from app.redis_client import ReconnectingRedis
 
 
 class FakeRedis:
@@ -64,3 +70,68 @@ def test_close_redis_closes_current_loop_client(monkeypatch) -> None:
     assert client is created[0]
     assert client.closed is True
     assert redis_client._redis_state.client is None
+
+
+def _make_flaky_execute(fail_times: int, error: Exception, result: object = "ok"):
+    """替身 super().execute_command:前 fail_times 次抛错,之后返回固定值。"""
+    calls: list[tuple] = []
+
+    async def fake_execute(self, *args, **options):  # type: ignore[no-untyped-def]
+        calls.append(args)
+        if len(calls) <= fail_times:
+            raise error
+        return result
+
+    return fake_execute, calls
+
+
+def test_execute_command_retries_idempotent_command(monkeypatch) -> None:
+    fake, calls = _make_flaky_execute(1, RedisConnectionError("boom"))
+    monkeypatch.setattr(redis_client.redis.Redis, "execute_command", fake)
+
+    async def run():
+        client = ReconnectingRedis()
+        return await client.execute_command("GET", "k")
+
+    result = asyncio.run(run())
+    assert result == "ok"
+    assert [c[0] for c in calls] == ["GET", "GET"]
+
+
+def test_execute_command_gives_up_after_retries_exhausted(monkeypatch) -> None:
+    fake, calls = _make_flaky_execute(10, RedisConnectionError("boom"))
+    monkeypatch.setattr(redis_client.redis.Redis, "execute_command", fake)
+
+    async def run():
+        client = ReconnectingRedis()
+        return await client.execute_command("GET", "k")
+
+    with pytest.raises(RedisConnectionError):
+        asyncio.run(run())
+    # 1 次原发 + 3 次重试,与 _REDIS_RETRY_DELAYS 长度一致
+    assert len(calls) == len(redis_client._REDIS_RETRY_DELAYS) + 1
+
+
+@pytest.mark.parametrize(
+    ("error", "command"),
+    [
+        (RedisConnectionError("boom"), "INCR"),
+        (RedisTimeoutError("boom"), "INCR"),
+        (RedisTimeoutError("boom"), "SET"),
+        (RedisConnectionError("boom"), "PUBLISH"),
+        (RedisTimeoutError("boom"), "EVAL"),
+    ],
+)
+def test_execute_command_does_not_retry_non_idempotent_command(
+    monkeypatch, error, command
+) -> None:
+    fake, calls = _make_flaky_execute(3, error)
+    monkeypatch.setattr(redis_client.redis.Redis, "execute_command", fake)
+
+    async def run():
+        client = ReconnectingRedis()
+        return await client.execute_command(command, "k")
+
+    with pytest.raises(type(error)):
+        asyncio.run(run())
+    assert len(calls) == 1

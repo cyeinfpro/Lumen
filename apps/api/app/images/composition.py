@@ -57,7 +57,9 @@ def compose_image_routes(
         lease_ttl_seconds=settings.image_upload_lease_ttl_seconds,
         degraded_policy=degraded_policy,
     )
-    processing_executor = IsolatedImageProcessingExecutor()
+    processing_executor = IsolatedImageProcessingExecutor(
+        result_timeout_seconds=settings.image_processing_result_timeout_s
+    )
     return ImageRouteComposition(
         upload_command_service=UploadCommandService(
             artifacts=artifacts,

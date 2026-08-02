@@ -45,6 +45,21 @@ _COOLDOWN_PREFIX = "lumen:proxy:cooldown:"
 _RR_KEY = "lumen:proxy:rr:idx"
 _FAIL_TTL_SECONDS = 300
 
+# INCR + EXPIRE 必须原子执行：若分两条命令且 INCR 成功后 EXPIRE 失败（断连/超时），
+# 失败计数键会无 TTL 地永久存在，计数跨天累积直至误触冷却。
+_FAIL_INCR_EXPIRE_LUA = """
+local n = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+return n
+"""
+
+# HSET + EXPIRE 同样合并为原子脚本，避免 health 键在 EXPIRE 失败后残留陈旧延迟数据。
+_HEALTH_SET_EXPIRE_LUA = """
+redis.call('HSET', KEYS[1], 'last_latency_ms', ARGV[1], 'last_tested_at', ARGV[2], 'last_target', ARGV[3])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+"""
+
 # In-process cooldown fallback: if Redis SET/DEL/EXISTS fail (transient outage,
 # timeout) we still want this worker not to immediately re-pick the proxy that
 # just failed. Entries are best-effort and never replace the Redis cooldown —
@@ -151,16 +166,16 @@ async def get_health(redis: Any, name: str) -> dict[str, Any]:
 
 async def set_health(redis: Any, name: str, *, latency_ms: float, target: str) -> None:
     try:
-        await redis.hset(
-            health_key(name),
-            mapping={
-                "last_latency_ms": f"{latency_ms:.1f}",
-                "last_tested_at": datetime.now(timezone.utc).isoformat(),
-                "last_target": target,
-            },
-        )
         # 24h 过期，避免长期不再测的旧数据干扰 strategy=latency 选择
-        await redis.expire(health_key(name), 86400)
+        await redis.eval(
+            _HEALTH_SET_EXPIRE_LUA,
+            1,
+            health_key(name),
+            f"{latency_ms:.1f}",
+            datetime.now(timezone.utc).isoformat(),
+            target,
+            86400,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("set_health failed name=%s err=%s", name, exc)
 
@@ -181,8 +196,14 @@ async def report_failure(
         return False
     triggered = False
     try:
-        n = int(await redis.incr(fail_key(name)))
-        await redis.expire(fail_key(name), _FAIL_TTL_SECONDS)
+        n = int(
+            await redis.eval(
+                _FAIL_INCR_EXPIRE_LUA,
+                1,
+                fail_key(name),
+                _FAIL_TTL_SECONDS,
+            )
+        )
         if n >= failure_threshold:
             try:
                 await redis.set(cooldown_key(name), b"1", ex=cooldown_seconds)

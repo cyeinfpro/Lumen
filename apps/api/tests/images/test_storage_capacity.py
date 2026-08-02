@@ -373,8 +373,8 @@ class _ResizeUploadService(UploadCommandService):
             estimate=SimpleNamespace(output_reserve_bytes=120),
         )
 
-    async def _process_and_persist(self, _state: Any, **kwargs: Any) -> Any:
-        self.processing_reservation = kwargs["storage_reservation_bytes"]
+    async def _process_and_persist(self, _state: Any, *, context: Any) -> Any:
+        self.processing_reservation = context.storage_reservation_bytes
         return object(), object(), object()
 
     async def _publish_and_mark_ready(self, _state: Any, **_kwargs: Any) -> str:

@@ -33,6 +33,11 @@ from ...idempotency.advisory import lock_user_key
 from ...images.domain.variants import (
     VIDEO_REFERENCE_VARIANT as VIDEO_REFERENCE_IMAGE_KIND,
 )
+from ...services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    lock_active_user,
+)
 from ...video_reference_videos import VIDEO_REFERENCE_VIDEO_KIND
 from ..video_publish import publish_video_queued
 from .errors import video_http_error
@@ -48,6 +53,7 @@ from .reference_media import (
     reference_public_base_url,
     validate_provider_reference_media,
 )
+from .reference_snapshots import lock_user_reference_media
 
 
 AsyncCallback = Callable[..., Awaitable[Any]]
@@ -125,6 +131,7 @@ async def _render_idempotent_replay(
 @dataclass(frozen=True, slots=True)
 class VideoSubmissionContext:
     request: Request | None = None
+    session_id: str | None = None
     input_image_snapshot: tuple[str | None, str | None, str | None] | None = None
     reference_media_snapshot: list[dict[str, Any]] | None = None
     workflow_metadata: dict[str, Any] | None = None
@@ -140,6 +147,7 @@ class VideoSubmissionServices:
     reference_snapshot_loader: AsyncCallback = reference_media_snapshots
     reference_validator: SyncCallback = validate_provider_reference_media
     allow_negative_loader: AsyncCallback = allow_negative_balance
+    wallet_loader: AsyncCallback = billing_core.get_wallet
     generation_renderer: AsyncCallback = generation_out
     balance_invalidator: AsyncCallback = invalidate_video_balance_cache
     queued_publisher: AsyncCallback = publish_video_queued
@@ -160,6 +168,16 @@ class _VideoSubmissionPlan:
     pricing_variant: str
     cost: VideoCostEstimate
     variant_diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoBillingAdmission:
+    provider: Any
+    upstream_model: str
+    billing_model: str
+    pricing_variant: str
+    cost: VideoCostEstimate
+    allow_negative: bool
 
 
 def _validate_provider_aspect_ratio(provider_kind: str, body: VideoCreateIn) -> None:
@@ -238,6 +256,97 @@ def _reference_variant_diagnostics(
     }
 
 
+def _reference_media_for_admission(
+    body: VideoCreateIn,
+    fallback_snapshots: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if fallback_snapshots is not None:
+        return [dict(item) for item in fallback_snapshots if isinstance(item, dict)]
+    return [
+        item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
+        for item in body.reference_media
+    ]
+
+
+async def _prepare_video_billing_admission(
+    db: AsyncSession,
+    body: VideoCreateIn,
+    *,
+    reference_media_snapshot: list[dict[str, Any]] | None,
+    services: VideoSubmissionServices,
+) -> _VideoBillingAdmission:
+    provider, estimates = await services.require_ready(db, body)
+    reference_media = _reference_media_for_admission(
+        body,
+        reference_media_snapshot,
+    )
+    services.reference_validator(provider.kind, reference_media)
+    _validate_provider_aspect_ratio(provider.kind, body)
+    upstream_model = provider.upstream_model_for(body.model, body.action)
+    billing_model = video_billing_model(body.model, upstream_model)
+    pricing_variant = video_pricing_variant(
+        body.action,
+        reference_media,
+        resolution=body.resolution,
+    )
+    try:
+        cost = await estimate_video_cost(
+            db,
+            model=billing_model,
+            action=body.action,
+            resolution=body.resolution,
+            duration_s=body.duration_s,
+            generate_audio=body.generate_audio,
+            estimates=estimates,
+            pricing_variant=pricing_variant,
+        )
+    except VideoBillingError as exc:
+        raise video_http_error(exc.code, exc.message, exc.status_code) from exc
+    if cost.hold_micro <= 0:
+        raise video_http_error(
+            "video_hold_invalid",
+            "video hold amount must be positive",
+            422,
+        )
+    return _VideoBillingAdmission(
+        provider=provider,
+        upstream_model=upstream_model,
+        billing_model=billing_model,
+        pricing_variant=pricing_variant,
+        cost=cost,
+        allow_negative=await services.allow_negative_loader(db),
+    )
+
+
+async def _ensure_video_wallet_admission(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    admission: _VideoBillingAdmission,
+    services: VideoSubmissionServices,
+) -> None:
+    wallet = await services.wallet_loader(
+        db,
+        user_id,
+        lock=False,
+    )
+    if wallet is None:
+        raise video_http_error(
+            "WALLET_UNAVAILABLE",
+            "wallet could not be initialized",
+            503,
+        )
+    balance_micro = int(getattr(wallet, "balance_micro", 0) or 0)
+    if not admission.allow_negative and balance_micro < admission.cost.hold_micro:
+        raise video_http_error(
+            "INSUFFICIENT_BALANCE",
+            "insufficient wallet balance",
+            402,
+            required_micro=admission.cost.hold_micro,
+            balance_micro=balance_micro,
+        )
+
+
 async def _prepare_video_submission(
     db: AsyncSession,
     body: VideoCreateIn,
@@ -246,11 +355,11 @@ async def _prepare_video_submission(
     request: Request | None,
     input_image_snapshot: tuple[str | None, str | None, str | None] | None,
     reference_media_snapshot: list[dict[str, Any]] | None,
+    admission: _VideoBillingAdmission,
     services: VideoSubmissionServices,
 ) -> _VideoSubmissionPlan:
-    provider, estimates = await services.require_ready(db, body)
-    requires_public_media = provider_requires_public_media(provider)
-    prefers_public_media_url = provider_prefers_public_media_url(provider)
+    requires_public_media = provider_requires_public_media(admission.provider)
+    prefers_public_media_url = provider_prefers_public_media_url(admission.provider)
     reference_public_base = await services.public_base_loader(
         request,
         db,
@@ -281,36 +390,9 @@ async def _prepare_video_submission(
         reference_public_base_url=reference_public_base,
         required_public_media=requires_public_media,
     )
-    services.reference_validator(provider.kind, reference_snapshots)
-    _validate_provider_aspect_ratio(provider.kind, body)
-    upstream_model = provider.upstream_model_for(body.model, body.action)
-    billing_model = video_billing_model(body.model, upstream_model)
-    pricing_variant = video_pricing_variant(
-        body.action,
-        reference_snapshots,
-        resolution=body.resolution,
-    )
-    try:
-        cost = await estimate_video_cost(
-            db,
-            model=billing_model,
-            action=body.action,
-            resolution=body.resolution,
-            duration_s=body.duration_s,
-            generate_audio=body.generate_audio,
-            estimates=estimates,
-            pricing_variant=pricing_variant,
-        )
-    except VideoBillingError as exc:
-        raise video_http_error(exc.code, exc.message, exc.status_code) from exc
-    if cost.hold_micro <= 0:
-        raise video_http_error(
-            "video_hold_invalid",
-            "video hold amount must be positive",
-            422,
-        )
+    services.reference_validator(admission.provider.kind, reference_snapshots)
     return _VideoSubmissionPlan(
-        provider=provider,
+        provider=admission.provider,
         input_storage_key=input_storage_key,
         input_sha256=input_sha256,
         input_image_url=input_image_url,
@@ -318,10 +400,10 @@ async def _prepare_video_submission(
         reference_public_base=reference_public_base,
         requires_public_media=requires_public_media,
         prefers_public_media_url=prefers_public_media_url,
-        upstream_model=upstream_model,
-        billing_model=billing_model,
-        pricing_variant=pricing_variant,
-        cost=cost,
+        upstream_model=admission.upstream_model,
+        billing_model=admission.billing_model,
+        pricing_variant=admission.pricing_variant,
+        cost=admission.cost,
         variant_diagnostics=_reference_variant_diagnostics(
             input_image_url,
             reference_snapshots,
@@ -332,6 +414,7 @@ async def _prepare_video_submission(
 def _build_video_generation(
     body: VideoCreateIn,
     *,
+    generation_id: str,
     user_id: str,
     request_fingerprint_value: str,
     workflow_metadata: dict[str, Any] | None,
@@ -351,7 +434,7 @@ def _build_video_generation(
     if workflow_metadata:
         upstream_request.update(workflow_metadata)
     return VideoGeneration(
-        id=new_uuid7(),
+        id=generation_id,
         user_id=user_id,
         action=body.action,
         model=body.model,
@@ -437,6 +520,33 @@ async def create_video_generation_record(
             generation_renderer=services.generation_renderer,
         )
 
+    if context.session_id:
+        try:
+            await lock_active_user(
+                db,
+                user.id,
+                session_id=context.session_id,
+            )
+        except ActiveUserFenceError as exc:
+            raise active_user_fence_http_error(exc) from exc
+
+    await lock_user_reference_media(
+        db,
+        user_id=user.id,
+        http_error=video_http_error,
+    )
+    admission = await _prepare_video_billing_admission(
+        db,
+        body,
+        reference_media_snapshot=context.reference_media_snapshot,
+        services=services,
+    )
+    await _ensure_video_wallet_admission(
+        db,
+        user_id=user.id,
+        admission=admission,
+        services=services,
+    )
     plan = await _prepare_video_submission(
         db,
         body,
@@ -444,10 +554,13 @@ async def create_video_generation_record(
         request=context.request,
         input_image_snapshot=context.input_image_snapshot,
         reference_media_snapshot=context.reference_media_snapshot,
+        admission=admission,
         services=services,
     )
+    generation_id = new_uuid7()
     generation = _build_video_generation(
         body,
+        generation_id=generation_id,
         user_id=user.id,
         request_fingerprint_value=request_fingerprint_value,
         workflow_metadata=context.workflow_metadata,
@@ -458,24 +571,24 @@ async def create_video_generation_record(
         await billing_core.hold(
             db,
             user.id,
-            plan.cost.hold_micro,
+            admission.cost.hold_micro,
             ref_type="video_generation",
-            ref_id=generation.id,
-            idempotency_key=f"video_generation:hold:{generation.id}",
-            allow_negative=await services.allow_negative_loader(db),
+            ref_id=generation_id,
+            idempotency_key=f"video_generation:hold:{generation_id}",
+            allow_negative=admission.allow_negative,
             meta={
                 "model": body.model,
-                "billing_model": plan.billing_model,
+                "billing_model": admission.billing_model,
                 "requested_model": body.model,
                 "action": body.action,
                 "resolution": body.resolution,
                 "duration_s": body.duration_s,
-                "estimated_tokens": plan.cost.estimated_tokens,
-                "unit_price_micro": plan.cost.unit_price_micro,
-                "provider_name": plan.provider.name,
-                "upstream_model": plan.upstream_model,
+                "estimated_tokens": admission.cost.estimated_tokens,
+                "unit_price_micro": admission.cost.unit_price_micro,
+                "provider_name": admission.provider.name,
+                "upstream_model": admission.upstream_model,
                 "reference_media_count": len(plan.reference_snapshots),
-                "pricing_variant": plan.pricing_variant,
+                "pricing_variant": admission.pricing_variant,
             },
         )
         payload = {
@@ -526,6 +639,10 @@ async def create_video_generation_record(
             "idempotency_key conflict",
             409,
         ) from exc
+    except Exception:
+        if not context.defer_commit:
+            await db.rollback()
+        raise
     if not context.defer_commit:
         await db.refresh(generation)
         await services.balance_invalidator(user.id)

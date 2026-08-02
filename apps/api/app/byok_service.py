@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -60,7 +61,6 @@ from lumen_core.url_security import (
 
 from .config import settings
 from .proxy_pool import resolve_provider_proxy_url
-from .runtime_settings import get_setting  # type: ignore[attr-defined]
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
@@ -106,62 +106,126 @@ async def normalize_base_url(raw: str) -> str:
     )
 
 
-async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
-    async def _int(key: str, default: int) -> int:
+_BYOK_SETTINGS_ALL_KEYS = (
+    "byok.mode_enabled",
+    "auth.byok_signup_enabled",
+    "auth.byok_signup_bypasses_allowlist",
+    "byok.validation_model",
+    "byok.validation_timeout_ms",
+    "byok.pending_token_ttl_seconds",
+    "byok.retention_hide_enabled",
+    "byok.retention_delete_enabled",
+    "byok.retention_hide_days",
+    "byok.retention_delete_days",
+)
+
+# Security-critical BYOK keys must never be served from the per-process TTL
+# cache below: cache invalidation is process-local, so after an admin patch
+# the other workers would keep enforcing a stale value for up to the TTL.
+# These keys are always re-read from the DB (one batched SELECT) and merged
+# over the cached copy on every call.
+_BYOK_SECURITY_KEYS = (
+    "byok.mode_enabled",
+    "auth.byok_signup_enabled",
+    "auth.byok_signup_bypasses_allowlist",
+    "byok.pending_token_ttl_seconds",
+)
+
+
+async def _read_raw_byok_settings(
+    db: AsyncSession,
+    keys: tuple[str, ...],
+) -> dict[str, str | None]:
+    """Batch-read BYOK setting keys (DB first, env fallback, like get_setting)."""
+    rows = (
+        await db.execute(
+            select(SystemSetting.key, SystemSetting.value).where(
+                SystemSetting.key.in_(keys)
+            )
+        )
+    ).all()
+    db_map = {key: value for key, value in rows}
+    raw: dict[str, str | None] = {}
+    for key in keys:
         spec = get_spec(key)
         if spec is None:
-            return default
-        raw = await get_setting(db, spec)
-        try:
-            return int(raw) if raw is not None else default
-        except ValueError:
-            return default
+            raw[key] = None
+            continue
+        value = db_map.get(key)
+        if value is None or value == "":
+            env_val = os.environ.get(spec.env_fallback)
+            value = env_val if env_val is not None and env_val != "" else None
+        raw[key] = value
+    return raw
 
-    async def _str(key: str, default: str) -> str:
-        spec = get_spec(key)
-        if spec is None:
-            return default
-        raw = await get_setting(db, spec)
-        return str(raw).strip() if raw else default
 
+def _int_setting(raw: dict[str, str | None], key: str, default: int) -> int:
+    value = raw.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _str_setting(raw: dict[str, str | None], key: str, default: str) -> str:
+    value = raw.get(key)
+    if not value:
+        return default
+    return str(value).strip()
+
+
+def _byok_settings_out_from_raw(raw: dict[str, str | None]) -> ByokSettingsOut:
     return ByokSettingsOut(
-        mode_enabled=bool(await _int("byok.mode_enabled", 0)),
-        byok_signup_enabled=bool(await _int("auth.byok_signup_enabled", 0)),
+        mode_enabled=bool(_int_setting(raw, "byok.mode_enabled", 0)),
+        byok_signup_enabled=bool(_int_setting(raw, "auth.byok_signup_enabled", 0)),
         byok_signup_bypasses_allowlist=bool(
-            await _int("auth.byok_signup_bypasses_allowlist", 0)
+            _int_setting(raw, "auth.byok_signup_bypasses_allowlist", 0)
         ),
         # Deprecated safety rail: BYOK users must use their own verified key.
         # Keep the response field for old clients, but never allow admin-pool
         # fallback semantics to be enabled by a stale DB/env value.
         fallback_to_admin_provider=False,
-        validation_model=await _str(
-            "byok.validation_model", BYOK_DEFAULT_VALIDATION_MODEL
+        validation_model=_str_setting(
+            raw, "byok.validation_model", BYOK_DEFAULT_VALIDATION_MODEL
         ),
-        validation_timeout_ms=await _int(
-            "byok.validation_timeout_ms", BYOK_DEFAULT_VALIDATION_TIMEOUT_MS
+        validation_timeout_ms=_int_setting(
+            raw, "byok.validation_timeout_ms", BYOK_DEFAULT_VALIDATION_TIMEOUT_MS
         ),
-        pending_token_ttl_seconds=await _int(
+        pending_token_ttl_seconds=_int_setting(
+            raw,
             "byok.pending_token_ttl_seconds",
             BYOK_DEFAULT_PENDING_TOKEN_TTL_SECONDS,
         ),
         retention_hide_enabled=bool(
-            await _int("byok.retention_hide_enabled", int(BYOK_DEFAULT_HIDE_ENABLED))
+            _int_setting(
+                raw, "byok.retention_hide_enabled", int(BYOK_DEFAULT_HIDE_ENABLED)
+            )
         ),
         retention_delete_enabled=bool(
-            await _int(
+            _int_setting(
+                raw,
                 "byok.retention_delete_enabled",
                 int(BYOK_DEFAULT_DELETE_ENABLED),
             )
         ),
-        retention_hide_days=await _int(
+        retention_hide_days=_int_setting(
+            raw,
             "byok.retention_hide_days",
             BYOK_DEFAULT_HIDE_DAYS,
         ),
-        retention_delete_days=await _int(
+        retention_delete_days=_int_setting(
+            raw,
             "byok.retention_delete_days",
             BYOK_DEFAULT_DELETE_DAYS,
         ),
     )
+
+
+async def read_byok_settings(db: AsyncSession) -> ByokSettingsOut:
+    raw = await _read_raw_byok_settings(db, _BYOK_SETTINGS_ALL_KEYS)
+    return _byok_settings_out_from_raw(raw)
 
 
 def retention_policy_from_settings(
@@ -194,12 +258,15 @@ def retention_policy_from_settings(
 # explicitly so changes propagate within one round-trip per process.
 # This cache intentionally crosses request boundaries — settings are
 # global and not user-scoped, so leaking values across users is fine.
+# Security-critical keys (_BYOK_SECURITY_KEYS) bypass this cache and are
+# re-read from the DB on every call, since process-local invalidation
+# cannot reach the other workers.
 _BYOK_SETTINGS_TTL_SECONDS = 30.0
 
 
 @dataclass
 class _ByokSettingsCacheState:
-    value: tuple[float, ByokSettingsOut] | None = None
+    value: tuple[float, dict[str, str | None]] | None = None
 
 
 _byok_settings_cache_state = _ByokSettingsCacheState()
@@ -210,14 +277,20 @@ async def read_byok_settings_cached(db: AsyncSession) -> ByokSettingsOut:
 
     Use this on hot read paths (POST /messages). For write paths or when
     consistency matters within the same request, prefer read_byok_settings.
+    Security-critical keys (see _BYOK_SECURITY_KEYS) are always re-read
+    from the DB, so an admin toggle applies immediately on every worker
+    process instead of lingering for the TTL.
     """
     now = time.monotonic()
     cached = _byok_settings_cache_state.value
     if cached is not None and now - cached[0] < _BYOK_SETTINGS_TTL_SECONDS:
-        return cached[1]
-    fresh = await read_byok_settings(db)
-    _byok_settings_cache_state.value = (now, fresh)
-    return fresh
+        base_raw = cached[1]
+    else:
+        base_raw = await _read_raw_byok_settings(db, _BYOK_SETTINGS_ALL_KEYS)
+        _byok_settings_cache_state.value = (now, base_raw)
+    fresh = await _read_raw_byok_settings(db, _BYOK_SECURITY_KEYS)
+    base_raw.update(fresh)
+    return _byok_settings_out_from_raw(base_raw)
 
 
 def invalidate_byok_settings_cache() -> None:

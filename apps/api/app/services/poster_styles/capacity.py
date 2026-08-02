@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
+
+
+logger = logging.getLogger(__name__)
 
 
 _RELEASE_SCRIPT = """
@@ -124,6 +128,7 @@ class RedisCapacityLease:
     @asynccontextmanager
     async def hold(self) -> AsyncIterator[None]:
         lease = await self.acquire()
+        holder_task = asyncio.current_task()
         stopped = asyncio.Event()
 
         async def renew_loop() -> None:
@@ -133,7 +138,25 @@ class RedisCapacityLease:
                     await asyncio.wait_for(stopped.wait(), timeout=interval)
                     break
                 except TimeoutError:
-                    if not await lease.renew():
+                    try:
+                        renewed = await lease.renew()
+                    except Exception:
+                        # A transient Redis error does not mean the slot is
+                        # gone; keep renewing so a short outage does not
+                        # abort in-flight work.
+                        logger.warning("capacity lease renewal failed; retrying")
+                        continue
+                    if not renewed:
+                        # The slot is no longer ours: another worker may now
+                        # hold it. Interrupt the guarded body (semaphore
+                        # semantics) instead of silently running past the
+                        # lease and breaching the concurrency limit.
+                        stopped.set()
+                        logger.warning(
+                            "capacity lease lost; interrupting guarded work"
+                        )
+                        if holder_task is not None:
+                            holder_task.cancel()
                         break
 
         renew_task = asyncio.create_task(

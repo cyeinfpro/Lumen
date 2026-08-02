@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI, Request
 
 from app.routes import admin_backups, admin_release, admin_update
+from app.routes.admin_update_marker import UpdateMarkerBusy
 from app.services import update_check
 from app.services.update_check import GitHubReleasesClient, UpdateCheckService
 
@@ -447,6 +448,80 @@ def test_write_marker_tolerates_chmod_eperm_on_squashed_mount(
     text = marker.read_text(encoding="utf-8")
     assert "pid=12345" in text
     assert "unit=lumen-update-runner.service" in text
+
+
+def test_write_marker_claims_exclusively_while_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The marker is the local cross-process lock when Redis is down.
+
+    Two concurrent triggers must not both claim it: once a live marker
+    exists, a second claim fails instead of overwriting it, so only one
+    update.sh / rollback script can start.
+    """
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    started = "2026-08-02T00:00:00+00:00"
+
+    assert (
+        admin_update._write_marker(
+            111, started, unit="lumen-update-runner.service"
+        )
+        is True
+    )
+    assert (
+        admin_update._write_marker(222, started, unit="other-runner.service")
+        is False
+    )
+    text = (backup_root / ".update.running").read_text(encoding="utf-8")
+    assert "pid=111" in text  # original claim preserved, not overwritten
+
+
+def test_write_marker_replaces_stale_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    marker = backup_root / ".update.running"
+    marker.write_text(
+        "pid=4000000\nstarted_at=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    assert admin_update._write_marker(333, "2026-08-02T00:00:00+00:00") is True
+    text = marker.read_text(encoding="utf-8")
+    assert "pid=333" in text
+
+
+def test_start_update_via_path_unit_raises_busy_when_marker_claim_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A lost marker claim must abort the launch, not fall through."""
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_update, "_write_marker", lambda *_a, **_k: False)
+    monkeypatch.setattr(admin_update, "_unit_is_running", lambda unit: True)
+
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        with pytest.raises(UpdateMarkerBusy):
+            admin_update._start_update_via_path_unit(
+                env={
+                    "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                    "LUMEN_UPDATE_CHANNEL": "stable",
+                    "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-126",
+                },
+                log_fh=log_fh,
+                started_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+            )
+
+    assert not (backup_root / ".update.trigger").exists()
+    assert not (backup_root / ".update.request.json").exists()
 
 
 def test_read_marker_drops_stale_pid_only_marker(

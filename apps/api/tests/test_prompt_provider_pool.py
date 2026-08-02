@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from fastapi import FastAPI
@@ -313,9 +313,12 @@ async def test_video_prompt_enhance_content_does_not_echo_large_data_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
+    from app.routes.prompt_parts import enhance_content
     from lumen_core.schemas import VideoReferenceMediaIn
 
-    monkeypatch.setattr(prompts, "_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES", 64)
+    # 预算常量在 enhance_content 模块命名空间中被 build_video_enhance_content
+    # 读取(prompts 只是 re-export),必须在该模块上打补丁。
+    monkeypatch.setattr(enhance_content, "PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES", 64)
     huge_url = "data:image/png;base64," + "a" * 128
     body = prompts.VideoEnhanceIn.model_construct(
         text="",
@@ -798,6 +801,55 @@ async def test_prompt_enhance_keepalive_wraps_slow_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_keepalive_teardown_closes_source() -> None:
+    """Cancellation or explicit close of the keepalive wrapper must terminate
+    the source generator deterministically instead of leaving it to async
+    generator GC finalization (which can run after the request session is
+    closed and makes the billing hold release fail)."""
+    from app.routes import prompts
+
+    events: list[str] = []
+
+    async def slow_stream():
+        try:
+            yield 'data: {"text": "ready"}\n\n'
+            await asyncio.sleep(60)
+        finally:
+            events.append("source.closed")
+
+    # Consumer cancelled while suspended inside the generator chain.
+    stream = prompts._stream_with_keepalive(  # noqa: SLF001
+        slow_stream(),
+        interval_seconds=10,
+    )
+
+    async def consume():
+        assert await anext(stream) == ": keep-alive\n\n"
+        assert await anext(stream) == 'data: {"text": "ready"}\n\n'
+        await anext(stream)  # blocks on the queue while the source sleeps
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    await asyncio.sleep(0.05)
+    assert events == ["source.closed"]
+
+    # Wrapper closed explicitly mid-stream (as GC finalization does when the
+    # response is dropped without cancellation).
+    events.clear()
+    stream = prompts._stream_with_keepalive(  # noqa: SLF001
+        slow_stream(),
+        interval_seconds=10,
+    )
+    assert await anext(stream) == ": keep-alive\n\n"
+    await stream.aclose()
+    await asyncio.sleep(0.05)
+    assert events == ["source.closed"]
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_charges_completed_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -953,7 +1005,7 @@ async def test_prompt_enhance_charge_uses_completion_wallet_kind(
 
 
 @pytest.mark.asyncio
-async def test_prompt_enhance_releases_hold_when_charge_fails(
+async def test_prompt_enhance_settles_default_hold_when_charge_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
@@ -990,15 +1042,23 @@ async def test_prompt_enhance_releases_hold_when_charge_fails(
     ) -> None:
         raise RuntimeError("db commit failed")
 
+    async def settle_default(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settle_reason"] = reason
+
     async def release_hold(
         _billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
     ) -> None:
-        calls["release_reason"] = reason
+        calls["released"] = reason
 
     monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
     monkeypatch.setattr(prompts, "_charge_prompt_enhance", fail_charge)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
     monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
 
     billing = prompts._EnhanceBillingContext(
@@ -1025,11 +1085,13 @@ async def test_prompt_enhance_releases_hold_when_charge_fails(
         'data: {"text": "better"}\n\n',
         'data: {"error": "billing_failed"}\n\n',
     ]
-    assert calls["release_reason"] == "charge_failed"
+    # 内容已交付、上游必然已计费:计费失败改为默认金额结算,不得 fail-open 释放
+    assert calls["settle_reason"] == "charge_failed"
+    assert "released" not in calls
 
 
 @pytest.mark.asyncio
-async def test_prompt_enhance_releases_hold_when_success_has_no_usage(
+async def test_prompt_enhance_settles_default_hold_when_success_has_no_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
@@ -1056,19 +1118,25 @@ async def test_prompt_enhance_releases_hold_when_success_has_no_usage(
     )
     calls: dict[str, Any] = {}
 
-    async def release_hold(
+    async def settle_default(
         billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
+        runtime: prompts._prompt_billing.BillingRuntime,
     ) -> None:
-        calls["release_user"] = billing.user_id if billing is not None else None
-        calls["release_reason"] = reason
+        assert isinstance(runtime, prompts._prompt_billing.BillingRuntime)
+        calls["settle_user"] = billing.user_id if billing is not None else None
+        calls["settle_reason"] = reason
 
     async def estimate_breakdown(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("missing usage must release the hold before pricing")
+        raise AssertionError("missing usage must settle the default hold before pricing")
 
     monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
-    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(
+        prompts._prompt_billing,
+        "settle_prompt_enhance_default_hold",
+        settle_default,
+    )
     monkeypatch.setattr(
         prompts.billing_core,
         "estimate_completion_breakdown",
@@ -1096,11 +1164,12 @@ async def test_prompt_enhance_releases_hold_when_success_has_no_usage(
     ]
 
     assert chunks == ['data: {"text": "better"}\n\n', "data: [DONE]\n\n"]
-    assert calls == {"release_user": "user-1", "release_reason": "missing_usage"}
+    # 内容已完整交付、上游必然已计费:用量缺失按默认金额结算,不得 fail-open 释放
+    assert calls == {"settle_user": "user-1", "settle_reason": "missing_usage"}
 
 
 @pytest.mark.asyncio
-async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
+async def test_prompt_enhance_settles_default_hold_when_stream_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
@@ -1113,25 +1182,30 @@ async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
         _provider: ProviderDefinition,
         _attempt: prompts._EnhanceAttempt,
         _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
     ):
+        # 模拟真实 upstream:POST 发出后先回调 dispatch,再产出内容
+        if on_dispatched is not None:
+            on_dispatched()
         yield 'data: {"text": "partial"}\n\n'
         raise asyncio.CancelledError()
 
-    async def release_after_cancel(
+    async def settle_after_cancel(
         billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
         runtime: prompts._PromptRuntime,
     ) -> None:
         assert isinstance(runtime, prompts._PromptRuntime)
-        calls["release_user"] = billing.user_id if billing is not None else None
-        calls["release_reason"] = reason
+        calls["settle_user"] = billing.user_id if billing is not None else None
+        calls["settle_reason"] = reason
 
     monkeypatch.setattr(prompts, "_stream_enhance_one", cancelled_stream)
     monkeypatch.setattr(
         prompts,
-        "_release_prompt_enhance_hold_after_cancel",
-        release_after_cancel,
+        "_settle_prompt_enhance_hold_after_cancel",
+        settle_after_cancel,
     )
 
     billing = prompts._EnhanceBillingContext(
@@ -1155,11 +1229,100 @@ async def test_prompt_enhance_releases_hold_when_stream_is_cancelled(
     with pytest.raises(asyncio.CancelledError):
         await anext(stream)
 
-    assert calls == {"release_user": "user-1", "release_reason": "stream_cancelled"}
+    # 已产出内容后断流:上游已按 token 计费,按默认金额结算而非 fail-open 释放
+    assert calls == {"settle_user": "user-1", "settle_reason": "stream_cancelled"}
 
 
 @pytest.mark.asyncio
-async def test_prompt_enhance_releases_hold_when_stream_is_closed(
+async def test_prompt_enhance_releases_hold_when_cancelled_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST 发出前(阻塞在代理解析 await)客户端取消:请求从未送达上游,
+    可证明未扣费 → 释放 hold,不得按默认金额结算。
+
+    回归:曾因 state.started 在候选生成器启动前即置位,取消分支据此按 hold
+    全额结算;修复后 dispatch 由 upstream 在 POST 真正发出时回调上报。
+    """
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def stalled_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 模拟阻塞在 resolve_provider_proxy_url(发送前第一个 await):
+        # 永不回调 dispatch,POST 从未发出。
+        del on_dispatched
+        await asyncio.sleep(60)
+        yield "unreachable"  # pragma: no cover - async generator marker
+
+    async def release_after_cancel(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> None:
+        assert isinstance(runtime, prompts._PromptRuntime)
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    async def settle_after_cancel(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", stalled_stream)
+    monkeypatch.setattr(
+        prompts,
+        "_release_prompt_enhance_hold_after_cancel",
+        release_after_cancel,
+    )
+    monkeypatch.setattr(
+        prompts,
+        "_settle_prompt_enhance_hold_after_cancel",
+        settle_after_cancel,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    stream = prompts._stream_enhance("cat", [provider], billing)
+
+    # 首个 anext 启动生成器,阻塞在代理解析 await;取消该读取任务 = 客户端断流
+    reader = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0.01)
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reader
+
+    # POST 从未发出:释放 hold,不得按默认金额结算
+    assert calls == {"release_user": "user-1", "release_reason": "stream_cancelled"}
+    assert "settled" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_settles_default_hold_when_stream_is_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import prompts
@@ -1172,20 +1335,25 @@ async def test_prompt_enhance_releases_hold_when_stream_is_closed(
         _provider: ProviderDefinition,
         _attempt: prompts._EnhanceAttempt,
         _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
     ):
+        # 模拟真实 upstream:POST 发出后先回调 dispatch,再产出内容
+        if on_dispatched is not None:
+            on_dispatched()
         yield 'data: {"text": "partial"}\n\n'
         await asyncio.sleep(60)
 
-    async def release_hold(
+    async def settle_default(
         billing: prompts._EnhanceBillingContext | None,
         *,
         reason: str,
     ) -> None:
-        calls["release_user"] = billing.user_id if billing is not None else None
-        calls["release_reason"] = reason
+        calls["settle_user"] = billing.user_id if billing is not None else None
+        calls["settle_reason"] = reason
 
     monkeypatch.setattr(prompts, "_stream_enhance_one", slow_stream)
-    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
 
     billing = prompts._EnhanceBillingContext(
         db=object(),  # type: ignore[arg-type]
@@ -1207,7 +1375,631 @@ async def test_prompt_enhance_releases_hold_when_stream_is_closed(
     assert await anext(stream) == 'data: {"text": "partial"}\n\n'
     await stream.aclose()
 
-    assert calls == {"release_user": "user-1", "release_reason": "stream_cancelled"}
+    # 已产出内容后关闭:上游已按 token 计费,按默认金额结算而非 fail-open 释放
+    assert calls == {"settle_user": "user-1", "settle_reason": "stream_cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_settles_default_hold_after_provider_error_post_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已产出内容后上游失败(流式读超时)→ 按默认金额结算,不得 release。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def failing_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 模拟真实 upstream:POST 发出后先回调 dispatch,再产出内容
+        if on_dispatched is not None:
+            on_dispatched()
+        yield 'data: {"text": "partial"}\n\n'
+        raise prompts._EnhanceProviderError("timeout", retryable=True)
+
+    async def settle_default(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settle_user"] = billing.user_id if billing is not None else None
+        calls["settle_reason"] = reason
+
+    async def release_hold(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["released"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", failing_stream)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == [
+        'data: {"text": "partial"}\n\n',
+        'data: {"error": "timeout"}\n\n',
+    ]
+    assert calls == {
+        "settle_user": "user-1",
+        "settle_reason": "provider_error_after_emit",
+    }
+    assert "released" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_when_all_candidates_fail_pre_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全部候选在连接层失败(请求从未送达,可证明未扣费)→ no_success 仍 release。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def connect_failed_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 连接层失败:POST 从未发出,不回调 dispatch
+        del on_dispatched
+        raise prompts._EnhanceProviderError(
+            "ConnectError", retryable=True, no_upstream_cost=True
+        )
+        yield  # pragma: no cover - async generator marker
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    async def settle_default(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", connect_failed_stream)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"error": "upstream_error"}\n\n']
+    assert calls == {"release_user": "user-1", "release_reason": "no_success"}
+    assert "settled" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_settles_default_hold_when_candidates_fail_post_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全部候选在读超时/处理中失败(请求已送达,结果不可知)→ no_success 按默认结算。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def read_timeout_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 读超时 = POST 已发出:先回调 dispatch,再抛读超时错误
+        if on_dispatched is not None:
+            on_dispatched()
+        raise prompts._EnhanceProviderError("timeout", retryable=True)
+        yield  # pragma: no cover - async generator marker
+
+    async def settle_default(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settle_user"] = billing.user_id if billing is not None else None
+        calls["settle_reason"] = reason
+
+    async def release_hold(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["released"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", read_timeout_stream)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"error": "timeout"}\n\n']
+    assert calls == {"settle_user": "user-1", "settle_reason": "no_success"}
+    assert "released" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_releases_hold_on_upstream_rejection_before_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上游非 2xx 显式拒绝(未产出内容,可证明未扣费)→ 仍 release。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def rejected_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        del on_dispatched
+        raise prompts._EnhanceProviderError(
+            "upstream http 404", retryable=False, no_upstream_cost=True
+        )
+        yield  # pragma: no cover - async generator marker
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+
+    async def settle_default(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", rejected_stream)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"error": "upstream_error"}\n\n']
+    assert calls == {"release_user": "user-1", "release_reason": "provider_error"}
+    assert "settled" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_guarded_response_releases_orphan_hold_on_unstarted_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首字节窗口断连(响应从未迭代 body)→ 链外守卫兜底释放孤儿 hold。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+    body_iterated = False
+
+    def schedule_release(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> asyncio.Task[None] | None:
+        assert isinstance(runtime, prompts._PromptRuntime)
+        calls["release_user"] = billing.user_id if billing is not None else None
+        calls["release_reason"] = reason
+        return None
+
+    async def slow_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        del on_dispatched
+        nonlocal body_iterated
+        body_iterated = True
+        yield 'data: {"text": "partial"}\n\n'
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", slow_stream)
+    monkeypatch.setattr(
+        prompts,
+        "_schedule_prompt_enhance_hold_release",
+        schedule_release,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    runtime = prompts._PromptRuntime()
+    response = prompts._GuardedEnhanceStreamingResponse(
+        prompts._stream_with_keepalive(
+            prompts._stream_enhance("cat", [provider], billing, runtime=runtime)
+        ),
+        media_type="text/event-stream",
+        on_teardown=prompts._schedule_orphan_hold_release(billing, runtime),
+    )
+
+    async def disconnected_send(_message: dict[str, Any]) -> None:
+        raise RuntimeError("client disconnected")
+
+    # 模拟客户端在首字节发送前断开:send(start) 抛异常,body 从未被迭代
+    with pytest.raises(RuntimeError, match="client disconnected"):
+        await response.stream_response(disconnected_send)
+
+    assert body_iterated is False
+    assert calls == {"release_user": "user-1", "release_reason": "stream_orphaned"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_guarded_response_completes_without_orphan_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正常流完成路径:链内 charge/settle 已消费 hold,兜底 release 不触发额外释放。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    def schedule_release(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> asyncio.Task[None] | None:
+        calls["orphan_release"] = reason
+        return None
+
+    async def fast_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 模拟真实 upstream:POST 发出后先回调 dispatch,再产出内容
+        if on_dispatched is not None:
+            on_dispatched()
+        yield 'data: {"text": "hi"}\n\n'
+
+    async def charge_hold(
+        billing: prompts._EnhanceBillingContext,
+        capture: prompts._EnhanceUsageCapture,
+    ) -> None:
+        calls["charged"] = billing.user_id
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", fast_stream)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", charge_hold)
+    monkeypatch.setattr(
+        prompts,
+        "_schedule_prompt_enhance_hold_release",
+        schedule_release,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    runtime = prompts._PromptRuntime()
+    response = prompts._GuardedEnhanceStreamingResponse(
+        prompts._stream_with_keepalive(
+            prompts._stream_enhance("cat", [provider], billing, runtime=runtime)
+        ),
+        media_type="text/event-stream",
+        on_teardown=prompts._schedule_orphan_hold_release(billing, runtime),
+    )
+
+    received: list[str] = []
+
+    async def collect_send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body":
+            received.append(message["body"])
+
+    await response.stream_response(collect_send)
+
+    assert calls["charged"] == "user-1"
+    # 正常耗尽:failover 链内已 charge/settle,守卫不再调度 fresh-session 兜底任务
+    assert "orphan_release" not in calls
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_orphan_release_skipped_after_settle_attempted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """结算已调度/执行(settle_outcome.attempted)后,孤儿兜底释放必须跳过:
+    结算失败时 hold 留在钱包中由管理端孤儿扫描对账,不得 fail-open 退款。"""
+    from app.routes import prompts
+
+    calls: dict[str, Any] = {}
+
+    def schedule_release(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> asyncio.Task[None] | None:
+        calls["orphan_release"] = reason
+        return None
+
+    monkeypatch.setattr(
+        prompts,
+        "_schedule_prompt_enhance_hold_release",
+        schedule_release,
+    )
+
+    def make_billing() -> prompts._EnhanceBillingContext:
+        return prompts._EnhanceBillingContext(
+            db=object(),  # type: ignore[arg-type]
+            user_id="user-1",
+            user_email="u@example.com",
+            request_id="enhance-1",
+            rate_multiplier_x10000=10_000,
+            cache_aware=True,
+            allow_negative=False,
+            hold_amount_micro=10_000,
+        )
+
+    # 结算已被调度/执行:兜底跳过,hold 只由 settle 消费
+    billing = make_billing()
+    runtime = prompts._PromptRuntime()
+    billing.settle_outcome.attempted = True
+    prompts._schedule_orphan_hold_release(billing, runtime)()  # noqa: SLF001
+    assert "orphan_release" not in calls
+
+    # 真正的孤儿 hold(从未结算):仍兜底释放
+    orphan = make_billing()
+    prompts._schedule_orphan_hold_release(orphan, runtime)()  # noqa: SLF001
+    assert calls == {"orphan_release": "stream_orphaned"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_settle_schedule_marks_attempted_before_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """断流路径:detached 结算任务调度前同步置位 settle_outcome.attempted,
+    链外孤儿兜底释放先于 detached settle 执行时也能看到并跳过,hold 不会被
+    竞态中的 release 先行退款。"""
+    from app.routes import prompts
+
+    calls: dict[str, Any] = {}
+
+    async def fake_settle_detached(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(
+        prompts,
+        "_settle_prompt_enhance_default_hold_detached",
+        fake_settle_detached,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    runtime = prompts._PromptRuntime()
+    task = prompts._schedule_prompt_enhance_default_settle(  # noqa: SLF001
+        billing,
+        reason="stream_cancelled",
+        runtime=runtime,
+    )
+    assert task is not None
+    # 标记在建任务之前同步置位:响应 teardown 先于 detached settle 执行时
+    # 也能看到,从而跳过孤儿释放。
+    assert billing.settle_outcome.attempted is True
+    await task
+    assert calls == {"settled": "stream_cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_settle_failure_leaves_hold_for_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已 emit 内容后上游失败,默认结算落库失败:attempted 置位,兜底孤儿释放
+    跳过,hold 保留在钱包中由管理端孤儿扫描对账,不得 fail-open 退款。"""
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    calls: dict[str, Any] = {}
+
+    async def failing_stream(
+        _text: str,
+        _provider: ProviderDefinition,
+        _attempt: prompts._EnhanceAttempt,
+        _capture: prompts._EnhanceUsageCapture | None = None,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
+    ):
+        # 模拟真实 upstream:POST 发出后先回调 dispatch,再产出内容
+        if on_dispatched is not None:
+            on_dispatched()
+        yield 'data: {"text": "partial"}\n\n'
+        raise prompts._EnhanceProviderError("timeout", retryable=True)
+
+    async def failing_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("db commit failed")
+
+    def schedule_release(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+        runtime: prompts._PromptRuntime,
+    ) -> asyncio.Task[None] | None:
+        calls["orphan_release"] = reason
+        return None
+
+    monkeypatch.setattr(prompts, "_stream_enhance_one", failing_stream)
+    monkeypatch.setattr(prompts.billing_core, "settle", failing_settle)
+    monkeypatch.setattr(
+        prompts,
+        "_schedule_prompt_enhance_hold_release",
+        schedule_release,
+    )
+
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    runtime = prompts._PromptRuntime()
+    response = prompts._GuardedEnhanceStreamingResponse(
+        prompts._stream_with_keepalive(
+            prompts._stream_enhance("cat", [provider], billing, runtime=runtime)
+        ),
+        media_type="text/event-stream",
+        on_teardown=prompts._schedule_orphan_hold_release(billing, runtime),
+    )
+
+    received: list[bytes] = []
+
+    async def collect_send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body":
+            received.append(message["body"])
+
+    await response.stream_response(collect_send)
+
+    body = b"".join(received).decode("utf-8")
+    assert 'data: {"text": "partial"}' in body
+    assert 'data: {"error": "timeout"}' in body
+    # 结算尝试已标记;无论响应兜底是否触发,孤儿释放都不得执行,hold 留待对账
+    assert billing.settle_outcome.attempted is True
+    assert "orphan_release" not in calls
 
 
 @pytest.mark.asyncio

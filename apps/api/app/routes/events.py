@@ -15,7 +15,7 @@ from lumen_core.constants import EVENTS_REPLAY_MAX_SCAN, EVENTS_STREAM_PREFIX
 
 from ..config import settings
 from ..db import get_db
-from ..deps import CurrentUser
+from ..deps import CurrentUser, is_active_session
 from ..realtime import (
     ACQUIRE_SSE_SLOT_LUA,
     MAX_SSE_CHANNELS,
@@ -61,6 +61,8 @@ logger = logging.getLogger(__name__)
 
 _REPLAY_BATCH_SIZE = 500
 _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
+_SSE_SESSION_REVALIDATION_INTERVAL_SECONDS = 15
+_SSE_LIVENESS_EVENTS = frozenset({"keepalive", "idle"})
 
 # Compatibility exports for the existing route contract tests. New application
 # code imports these capabilities through app.realtime's public index.
@@ -233,13 +235,49 @@ async def _event_stream_state(
     )
 
 
-async def _event_stream(state: EventStreamState) -> AsyncIterator[dict]:
-    async for event in stream_events(
+async def _session_is_active(db: AsyncSession, session_id: str) -> bool:
+    try:
+        return await is_active_session(db, session_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "sse session revalidation failed session_id=%s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def _event_stream(
+    state: EventStreamState,
+    *,
+    db: AsyncSession | None = None,
+    session_id: str | None = None,
+) -> AsyncIterator[dict]:
+    next_session_check = 0.0
+    source = stream_events(
         state,
         replay_events=_replay_connection_events,
         release_slot=_release_sse_connection_slot,
-    ):
-        yield event
+    )
+    try:
+        async for event in source:
+            if db is not None and session_id:
+                now = time.monotonic()
+                # The periodic check keeps idle connections bounded, but every
+                # non-liveness frame must pass a fresh durable session check.
+                if (
+                    event.get("event") not in _SSE_LIVENESS_EVENTS
+                    or now >= next_session_check
+                ):
+                    if not await _session_is_active(db, session_id):
+                        yield {"event": "auth_invalidated", "data": "{}"}
+                        return
+                    next_session_check = (
+                        now + _SSE_SESSION_REVALIDATION_INTERVAL_SECONDS
+                    )
+            yield event
+    finally:
+        await source.aclose()
 
 
 @router.get("/events")
@@ -257,4 +295,5 @@ async def events(
         channels,
         last_event_id_query,
     )
-    return EventSourceResponse(_event_stream(state))
+    session_id = getattr(getattr(request, "state", None), "session_id", None)
+    return EventSourceResponse(_event_stream(state, db=db, session_id=session_id))

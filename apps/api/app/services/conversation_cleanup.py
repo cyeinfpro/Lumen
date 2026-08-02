@@ -12,7 +12,10 @@ from lumen_core import billing as billing_core
 from lumen_core.models import MemoryExtractionRun
 
 from ..db import affected_rows
-from .generation_queue import release_generation_queue_state
+from .generation_queue import (
+    GenerationQueueReleaseToken,
+    release_generation_queue_state,
+)
 
 
 async def conversation_wallet_exists(db: AsyncSession, user_id: str) -> bool:
@@ -50,8 +53,16 @@ async def cancel_conversation_memory_extractions(
 async def release_conversation_generation_queue_state(
     redis: Any,
     task_id: str,
-) -> None:
-    await release_generation_queue_state(redis, task_id)
+    *,
+    expected_execution_epoch: int,
+    ownership_token: GenerationQueueReleaseToken,
+) -> bool:
+    return await release_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=expected_execution_epoch,
+        ownership_token=ownership_token,
+    )
 
 
 __all__ = [

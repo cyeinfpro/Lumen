@@ -18,6 +18,8 @@ from lumen_core.schemas import (
     PostMessageOut,
 )
 
+from .active_user import lock_active_user
+
 
 AsyncCallable = Callable[..., Awaitable[Any]]
 HttpErrorFactory = Callable[[str, str, int], Exception]
@@ -73,6 +75,7 @@ class PersistMessageRequestCommand:
     request_metadata: dict[str, Any]
     account_mode: str
     now: datetime
+    session_id: str | None = None
 
 
 def is_chat_intent(intent: Intent) -> bool:
@@ -259,6 +262,15 @@ async def persist_message_request(
     )
     reembed_ids: list[str] = []
     try:
+        # Hold the identity fence across every message/task/outbox/hold write.
+        if command.session_id:
+            await lock_active_user(
+                db,
+                user.id,
+                session_id=command.session_id,
+            )
+        else:
+            await lock_active_user(db, user.id)
         db.add(user_message)
         await db.flush()
         if is_chat_intent(intent):

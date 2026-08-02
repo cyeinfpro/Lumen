@@ -38,6 +38,8 @@ class _Db:
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
+        if "from users" in str(statement).lower():
+            return _Result("user-1")
         return self.results.pop(0) if self.results else _Result()
 
     def add(self, value: Any) -> None:
@@ -349,9 +351,13 @@ async def test_regenerate_publishes_appended_event_for_new_assistant(
     redis = object()
     monkeypatch.setattr(regenerate.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(regenerate, "get_redis", lambda: redis)
-    monkeypatch.setattr(regenerate, "_create_assistant_task", fake_create_assistant_task)
+    monkeypatch.setattr(
+        regenerate, "_create_assistant_task", fake_create_assistant_task
+    )
     monkeypatch.setattr(regenerate, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(regenerate, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        regenerate, "_publish_assistant_task", fake_publish_assistant_task
+    )
 
     target = _target()
     db = _Db(
@@ -420,9 +426,13 @@ async def test_regenerate_uses_current_image_output_format_setting(
 
     monkeypatch.setattr(regenerate.MESSAGES_LIMITER, "check", no_rate_limit)
     monkeypatch.setattr(regenerate, "get_redis", lambda: object())
-    monkeypatch.setattr(regenerate, "_create_assistant_task", fake_create_assistant_task)
+    monkeypatch.setattr(
+        regenerate, "_create_assistant_task", fake_create_assistant_task
+    )
     monkeypatch.setattr(regenerate, "_publish_message_appended", fake_publish_appended)
-    monkeypatch.setattr(regenerate, "_publish_assistant_task", fake_publish_assistant_task)
+    monkeypatch.setattr(
+        regenerate, "_publish_assistant_task", fake_publish_assistant_task
+    )
     monkeypatch.setattr(regenerate, "get_setting", fake_get_setting)
 
     gen = Generation(
@@ -547,8 +557,12 @@ async def test_cancel_regenerate_target_active_tasks_releases_holds(
         "completions_canceled": 2,
         "holds_released": 2,
         "queued_generation_ids": ["gen-queued"],
+        "queued_generation_execution_epochs": {"gen-queued": 0},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": ["gen-running"],
         "streaming_completion_ids": ["comp-streaming"],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
     }
     assert [call["ref_id"] for call in released] == [
         "gen-queued:retry:1",
@@ -559,6 +573,61 @@ async def test_cancel_regenerate_target_active_tasks_releases_holds(
     assert gen_running.status == GenerationStatus.RUNNING.value
     assert comp_queued.status == CompletionStatus.CANCELED.value
     assert comp_streaming.status == CompletionStatus.STREAMING.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_regenerate_target_defers_receipt_bearing_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(
+        id="gen-retry",
+        status=GenerationStatus.QUEUED.value,
+        execution_epoch=3,
+        cancel_requested_at=None,
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 3,
+        },
+    )
+    comp = SimpleNamespace(
+        id="comp-retry",
+        status=CompletionStatus.QUEUED.value,
+        execution_epoch=4,
+        cancel_requested_at=None,
+        tokens_in=88,
+        upstream_request={"completion_usage_execution_epoch": 4},
+    )
+    db = _ActiveTaskDb([[gen], [comp]])
+    released: list[str] = []
+
+    async def release_regenerate_cancel_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        regenerate,
+        "_release_regenerate_cancel_hold",
+        release_regenerate_cancel_hold,
+    )
+
+    cleanup = await regenerate._cancel_regenerate_target_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        target_msg_id="assistant-old",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+        account_mode="wallet",
+    )
+
+    assert cleanup["holds_released"] == 0
+    assert cleanup["queued_generation_ids"] == []
+    assert cleanup["deferred_generation_ids"] == ["gen-retry"]
+    assert cleanup["deferred_completion_ids"] == ["comp-retry"]
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert comp.status == CompletionStatus.QUEUED.value
+    assert gen.cancel_requested_at is not None
+    assert comp.cancel_requested_at is not None
+    assert released == []
 
 
 @pytest.mark.asyncio
@@ -624,10 +693,20 @@ async def test_post_commit_regenerate_cancel_cleanup_runs_after_commit(
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append((user_id, db.committed))
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append((task_id, db.committed))
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-5"
+        queue_released.append((f"{task_id}:{expected_execution_epoch}", db.committed))
+        return True
 
-    monkeypatch.setattr(regenerate, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        regenerate, "invalidate_balance_cache", invalidate_balance_cache
+    )
     monkeypatch.setattr(
         regenerate,
         "_release_generation_queue_state",
@@ -641,16 +720,30 @@ async def test_post_commit_regenerate_cancel_cleanup_runs_after_commit(
         cleanup={
             "holds_released": 2,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 5},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 5,
+                    "provider_name": "provider-5",
+                    "lease_token": "worker:execution:5:attempt:1",
+                    "reservation_token": "reservation-5",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-streaming"],
+            "deferred_generation_ids": ["gen-deferred"],
+            "deferred_completion_ids": ["comp-deferred"],
         },
     )
 
     assert invalidated == [("user-1", True)]
-    assert queue_released == [("gen-queued", True)]
+    assert queue_released == [("gen-queued:5", True)]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-streaming:cancel", "1", 3600),
+        ("task:gen-deferred:cancel", "1", 3600),
+        ("task:comp-deferred:cancel", "1", 3600),
     ]
 
 
@@ -668,10 +761,20 @@ async def test_post_commit_regenerate_cancel_cleanup_keeps_cancel_when_cache_fai
     async def invalidate_balance_cache(_user_id: str) -> None:
         raise RuntimeError("cache unavailable")
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append(task_id)
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-6"
+        queue_released.append(f"{task_id}:{expected_execution_epoch}")
+        return True
 
-    monkeypatch.setattr(regenerate, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(
+        regenerate, "invalidate_balance_cache", invalidate_balance_cache
+    )
     monkeypatch.setattr(
         regenerate,
         "_release_generation_queue_state",
@@ -684,12 +787,22 @@ async def test_post_commit_regenerate_cancel_cleanup_keeps_cancel_when_cache_fai
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 6},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 6,
+                    "provider_name": "provider-6",
+                    "lease_token": "worker:execution:6:attempt:1",
+                    "reservation_token": "reservation-6",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-streaming"],
         },
     )
 
-    assert queue_released == ["gen-queued"]
+    assert queue_released == ["gen-queued:6"]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-streaming:cancel", "1", 3600),

@@ -257,13 +257,13 @@ def _read_marker() -> UpdateMarker | None:
     )
 
 
-def _write_marker(pid: int, started_at: str, unit: str | None = None) -> None:
-    _update_marker.write_marker(
+def _write_marker(pid: int, started_at: str, unit: str | None = None) -> bool:
+    """Atomically claim the update marker; False means another op is running."""
+    return _update_marker.write_marker(
         _update_marker_path(),
         pid=pid,
         started_at=started_at,
         unit=unit,
-        chmod=chmod_tolerate_eperm,
     )
 
 

@@ -280,6 +280,99 @@ class _LeaseRedis:
 
 
 @pytest.mark.asyncio
+async def test_automatic_orphan_sweep_persists_and_clears_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CursorRedis:
+        def __init__(self) -> None:
+            self.cursor: str | bytes | None = b"u/user-1/uploads/start.webp"
+            self.set_calls: list[tuple[str, str]] = []
+            self.delete_calls: list[str] = []
+
+        async def get(self, key: str) -> str | bytes | None:
+            assert key == reconcile_runtime._ORPHAN_SWEEP_CURSOR_KEY
+            return self.cursor
+
+        async def set(self, key: str, value: str) -> bool:
+            self.set_calls.append((key, value))
+            self.cursor = value
+            return True
+
+        async def delete(self, key: str) -> int:
+            self.delete_calls.append(key)
+            self.cursor = None
+            return 1
+
+    class _Session:
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _Guard:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def assert_owned(self) -> None:
+            self.calls += 1
+
+    redis = _CursorRedis()
+    guard = _Guard()
+    sweep_calls: list[dict[str, Any]] = []
+    results = iter(
+        [
+            {
+                "scanned": 2,
+                "deleted": 1,
+                "failed": [],
+                "budget_exhausted": True,
+                "next_cursor": "u/user-1/uploads/next.webp",
+            },
+            {
+                "scanned": 1,
+                "deleted": 0,
+                "failed": ["u/user-1/uploads/failed.webp"],
+                "budget_exhausted": True,
+                "next_cursor": None,
+            },
+        ]
+    )
+
+    async def sweep(_db: Any, **kwargs: Any) -> dict[str, Any]:
+        sweep_calls.append(kwargs)
+        await kwargs["assert_owned"]()
+        return next(results)
+
+    monkeypatch.setattr(reconcile_runtime, "SessionLocal", _Session)
+    monkeypatch.setattr(reconcile_runtime, "sweep_orphan_image_files", sweep)
+
+    await reconcile_runtime._run_orphan_image_sweep(redis, guard)  # type: ignore[arg-type]
+    await reconcile_runtime._run_orphan_image_sweep(redis, guard)  # type: ignore[arg-type]
+
+    assert [call["cursor"] for call in sweep_calls] == [
+        "u/user-1/uploads/start.webp",
+        "u/user-1/uploads/next.webp",
+    ]
+    for call in sweep_calls:
+        assert call["dry_run"] is False
+        assert call["max_files"] == 500
+        assert call["max_entries"] == 5_000
+        assert call["max_bytes"] == 10 * 1024 * 1024 * 1024
+        assert call["max_seconds"] == 2.0
+        assert call["minimum_age_seconds"] == 3600.0
+        assert call["assert_owned"].__self__ is guard
+    assert redis.set_calls == [
+        (
+            reconcile_runtime._ORPHAN_SWEEP_CURSOR_KEY,
+            "u/user-1/uploads/next.webp",
+        )
+    ]
+    assert redis.delete_calls == [reconcile_runtime._ORPHAN_SWEEP_CURSOR_KEY]
+    assert guard.calls == 6
+
+
+@pytest.mark.asyncio
 async def test_only_one_reconciler_runs_across_competing_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -316,6 +409,11 @@ async def test_only_one_reconciler_runs_across_competing_workers(
         "_next_reconcile_fence",
         lambda: asyncio.sleep(0, result=1),
     )
+    monkeypatch.setattr(
+        reconcile_runtime,
+        "_run_orphan_image_sweep",
+        lambda *_args: asyncio.sleep(0),
+    )
 
     first = asyncio.create_task(reconcile_runtime.run_image_artifact_reconciler_once())
     await entered.wait()
@@ -326,6 +424,49 @@ async def test_only_one_reconciler_runs_across_competing_workers(
     assert second_result == 0
     assert first_result == 1
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_lease_loss_preserves_repaired_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = _LeaseRedis()
+
+    class _Reconciler:
+        async def run_once(self, *, lease_guard: Any) -> Any:
+            assert lease_guard is not None
+            return SimpleNamespace(
+                marked_ready=2,
+                marked_failed=1,
+                rebuilt_reference=1,
+                deleted_staged=0,
+                deferred=0,
+                scanned=4,
+            )
+
+    async def lose_lease(_redis: Any, _lease_guard: Any) -> None:
+        raise reconcile_runtime.ReconcileLeaseLost("lease lost during orphan sweep")
+
+    monkeypatch.setattr(reconcile_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        reconcile_runtime,
+        "build_image_artifact_reconciler",
+        _Reconciler,
+    )
+    monkeypatch.setattr(
+        reconcile_runtime,
+        "_next_reconcile_fence",
+        lambda: asyncio.sleep(0, result=1),
+    )
+    monkeypatch.setattr(
+        reconcile_runtime,
+        "_run_orphan_image_sweep",
+        lose_lease,
+    )
+
+    result = await reconcile_runtime.run_image_artifact_reconciler_once()
+
+    assert result == 4
 
 
 @pytest.mark.asyncio

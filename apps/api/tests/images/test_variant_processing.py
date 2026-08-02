@@ -10,6 +10,7 @@ import pytest
 from PIL import Image as PILImage
 
 from app.images.ports.image_processing import ImageVariantProcessingRequest
+from app.images.processing import isolated as isolated_module
 from app.images.processing.isolated import IsolatedImageProcessingExecutor
 from app.images.processing.service import ProcessingError
 from app.images.processing.variants import render_image_variant
@@ -158,6 +159,60 @@ async def test_isolated_executor_cancellation_terminates_child_process(
     finally:
         await executor.aclose()
 
+    assert not process.is_alive()
+    assert executor._active == set()  # noqa: SLF001
+    assert not output.exists()
+
+
+def test_isolated_executor_result_timeout_constructor_override() -> None:
+    """构造参数覆盖模块默认超时;缺省时仍读模块常量(monkeypatch 兼容)。"""
+    assert (
+        IsolatedImageProcessingExecutor(result_timeout_seconds=90.5)
+        ._result_timeout_seconds  # noqa: SLF001
+        == 90.5
+    )
+    assert (
+        IsolatedImageProcessingExecutor()._result_timeout_seconds  # noqa: SLF001
+        == isolated_module._PROCESS_RESULT_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_isolated_executor_result_timeout_releases_child_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(isolated_module, "_PROCESS_RESULT_TIMEOUT_SECONDS", 0.25)
+    source = tmp_path / "blocked-source"
+    output = tmp_path / "timeout.webp"
+    os.mkfifo(source)
+    executor = IsolatedImageProcessingExecutor()
+    task = asyncio.create_task(
+        executor.render_variant(
+            ImageVariantProcessingRequest(
+                source_path=source,
+                output_path=output,
+                variant="display_webp",
+                max_pixels=1_000_000,
+                max_side=64,
+            )
+        )
+    )
+
+    async def wait_for_child() -> None:
+        while not executor._active:  # noqa: SLF001
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_for_child(), timeout=2)
+        process = next(iter(executor._active))  # noqa: SLF001
+        with pytest.raises(ProcessingError) as exc_info:
+            await asyncio.wait_for(task, timeout=5)
+    finally:
+        await executor.aclose()
+
+    assert exc_info.value.code == "image_processing_timeout"
+    assert exc_info.value.status_code == 503
     assert not process.is_alive()
     assert executor._active == set()  # noqa: SLF001
     assert not output.exists()

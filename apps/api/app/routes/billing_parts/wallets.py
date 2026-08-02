@@ -16,6 +16,7 @@ from lumen_core.models import (
     UserApiCredential,
     UserWallet,
     WalletTransaction,
+    new_uuid7,
 )
 from lumen_core.schemas import (
     AdminRedemptionUsageOut,
@@ -266,6 +267,7 @@ async def admin_adjust_wallet(
             amount,
             admin_id=admin.id,
             reason=body.reason,
+            idempotency_key=body.idempotency_key,
             allow_negative=allow_negative,
             min_balance_micro=min_balance_micro,
         )
@@ -438,12 +440,18 @@ async def admin_set_account_mode(
             )
         if body.on_residual_balance == "zero" and wallet.balance_micro > 0:
             try:
+                # 每次实际执行的清零都是一次独立操作：reason 与金额都固定
+                # (reason="account mode changed to byok")，若用派生幂等键，
+                # 同一用户两次切换到 byok 且余额恰好相同时，第二次清零会命中
+                # 第一次的流水被静默去重，余额无法归零。每个切换事务生成一个
+                # 唯一键；防双击由 before == body.mode 的提前返回保证。
                 await billing_core.adjust(
                     db,
                     user_id,
                     -wallet.balance_micro,
                     admin_id=admin.id,
                     reason="account mode changed to byok",
+                    idempotency_key=f"mode-change-zero:{new_uuid7()}",
                 )
             except billing_core.BillingError as exc:
                 raise queries.billing_http(exc)

@@ -15,15 +15,38 @@ from .config import settings
 
 _REDIS_RETRY_DELAYS = (0.05, 0.2, 0.5)
 
+# 响应丢失后重发仍安全的命令:只读命令,以及 DELETE/UNLINK 这类第二次执行
+# 不改变任何状态的严格幂等命令。写命令(INCR/SET NX/PUBLISH/EVAL 等)若在
+# 响应丢失时盲目重试,服务端已执行的命令会被再执行一次,造成计数翻倍、锁
+# 误判、消息重复。
+_REDIS_RETRY_SAFE_COMMANDS = frozenset(
+    {
+        "GET", "MGET", "GETRANGE", "STRLEN",
+        "EXISTS", "TTL", "PTTL", "TYPE", "KEYS", "DBSIZE",
+        "HGET", "HMGET", "HGETALL", "HLEN", "HSTRLEN", "HEXISTS",
+        "SCARD", "SMEMBERS", "SISMEMBER", "SINTER", "SUNION", "SDIFF",
+        "LRANGE", "LLEN", "LINDEX",
+        "ZRANGE", "ZCARD", "ZSCORE", "ZCOUNT",
+        "SCAN", "HSCAN", "SSCAN", "ZSCAN",
+        "DELETE", "UNLINK", "PING", "ECHO", "TIME", "INFO", "DUMP", "OBJECT",
+    }
+)
+
 
 class ReconnectingRedis(redis.Redis):
     async def execute_command(self, *args, **options):  # type: ignore[no-untyped-def]
+        command = args[0]
+        if isinstance(command, bytes):
+            command = command.decode("ascii")
+        retry_safe = command in _REDIS_RETRY_SAFE_COMMANDS
         attempts = len(_REDIS_RETRY_DELAYS) + 1
         for attempt in range(attempts):
             try:
                 return await super().execute_command(*args, **options)
             except (RedisConnectionError, RedisTimeoutError):
-                if attempt == attempts - 1:
+                if attempt == attempts - 1 or not retry_safe:
+                    # 错误可能发生在响应阶段,命令已被服务端执行;非幂等命令
+                    # 不能重发,直接抛错,由调用方自行兜底。
                     raise
                 await self.connection_pool.disconnect(inuse_connections=False)
                 await asyncio.sleep(_REDIS_RETRY_DELAYS[attempt])
@@ -62,11 +85,13 @@ def _current_loop() -> asyncio.AbstractEventLoop | None:
 
 
 def _new_redis() -> ReconnectingRedis:
+    # 不能开 retry_on_timeout:它会让 redis-py 对任意命令(含 INCR/SET NX)
+    # 在响应超时后盲目重发一次,与 execute_command 里修复的重复执行问题同类。
+    # 重连重试统一由 execute_command 的幂等命令白名单控制。
     return ReconnectingRedis.from_url(
         settings.redis_url,
         decode_responses=True,
         health_check_interval=30,
-        retry_on_timeout=True,
         socket_keepalive=True,
     )
 

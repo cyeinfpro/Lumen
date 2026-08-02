@@ -56,7 +56,7 @@ from ...byok_service import read_byok_settings_cached, retention_policy_from_set
 from ...canvas_services import asset_ref_service
 from ...config import settings
 from ...db import get_db
-from ...deps import CurrentUser, verify_csrf
+from ...deps import CurrentUser, durable_session_id, verify_csrf
 from ...ratelimit import (
     PUBLIC_IMAGE_LIMITER,
     UPLOADS_LIMITER,
@@ -64,11 +64,17 @@ from ...ratelimit import (
     require_client_ip,
 )
 from ...redis_client import get_redis
+from ...services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    ensure_active_user,
+)
 from ..composition import (
     create_image_route_lifespan,
     get_upload_command_service,
     get_variant_service,
 )
+from ._file_delivery import OWNER_PROTECTED_MEDIA_CACHE_CONTROL
 from ..domain.artifact import ArtifactStatus
 from ..domain.variants import (
     ALLOWED_VARIANTS,
@@ -231,6 +237,16 @@ async def _check_signed_image_rate_limit(request: Request) -> None:
     )
 
 
+async def _check_reference_image_rate_limit(request: Request) -> None:
+    """Public unauthenticated video-reference image route: reject when client
+    IP is unknown so anonymous clients can't share one bucket and DoS the
+    rest. 每请求消耗一个令牌，同时约束按需变体渲染频率与二进制流输出。"""
+    redis = get_redis()
+    await PUBLIC_IMAGE_LIMITER.check(
+        redis, f"rl:image-ref:{require_client_ip(request)}"
+    )
+
+
 def _unlink_file_if_exists(path: Path) -> None:
     route_storage.unlink_file_if_exists(path, logger=logger)
 
@@ -281,7 +297,16 @@ async def upload_image(
     purpose: str | None = Form(default=None),
     reference_width: int | None = Form(default=None),
     reference_height: int | None = Form(default=None),
+    request: Request = None,
 ) -> ImageOut:
+    session_id = durable_session_id(request)
+    try:
+        if session_id:
+            await ensure_active_user(db, user.id, session_id=session_id)
+        else:
+            await ensure_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     return await upload_image_impl(
         user,
         db,
@@ -293,6 +318,7 @@ async def upload_image(
         ensure_storage_free_space=_ensure_storage_free_space,
         upload_command_service=upload_command_service,
         image_out=_image_out,
+        session_id=session_id,
     )
 
 
@@ -344,7 +370,7 @@ async def get_image_binary(
         path,
         media_type=img.mime,
         etag=f'"{img.sha256}"',
-        cache_control="private, max-age=31536000, immutable",
+        cache_control=OWNER_PROTECTED_MEDIA_CACHE_CONTROL,
         storage_key=img.storage_key,
         request=request,
     )
@@ -402,7 +428,7 @@ async def get_image_variant(
         path,
         media_type=media_type,
         etag=f'"{variant.image_id}-{variant.kind}"',
-        cache_control="private, max-age=31536000, immutable",
+        cache_control=OWNER_PROTECTED_MEDIA_CACHE_CONTROL,
         storage_key=variant.storage_key,
         request=request,
     )
@@ -477,6 +503,12 @@ async def get_image_signed_impl(
     # exposed via at least one non-revoked, non-expired Share so that
     # private images that were never publicly shared cannot be served by
     # this endpoint even with a valid signature.
+    #
+    # The join to the share's primary image only enforces ownership. It must
+    # NOT gate on the primary's deleted_at: in a multi-image share the primary
+    # can be soft-deleted while other members stay alive, and the requested
+    # image's own liveness was already checked by the lookup above — a dead
+    # primary must not block the remaining share members.
     now = datetime.now(timezone.utc)
     share_primary = aliased(Image)
     share_hit = (
@@ -485,7 +517,6 @@ async def get_image_signed_impl(
             .join(share_primary, share_primary.id == Share.image_id)
             .where(
                 share_primary.user_id == img.user_id,
-                share_primary.deleted_at.is_(None),
                 or_(
                     Share.image_id == img.id,
                     Share.image_ids.contains([img.id]),
@@ -552,6 +583,7 @@ async def reference_image_binary(
         token=token,
         variant=variant,
         variant_service=variant_service,
+        check_reference_image_rate_limit=_check_reference_image_rate_limit,
     )
 
 
@@ -563,7 +595,11 @@ async def reference_image_binary_impl(
     token: str,
     variant: str | None,
     variant_service: CreateVariantService,
+    check_reference_image_rate_limit: Any,
 ) -> Response:
+    # 未认证端点：先消耗 per-IP 限流令牌，约束按需变体渲染频率与二进制流
+    # 输出，再触达 DB / 渲染管线。
+    await check_reference_image_rate_limit(request)
     img = (
         await db.execute(
             select(Image).where(
@@ -655,6 +691,7 @@ async def reference_image_binary_named(
         token=token,
         variant=variant,
         variant_service=variant_service,
+        check_reference_image_rate_limit=_check_reference_image_rate_limit,
     )
 
 
@@ -703,7 +740,7 @@ async def get_image_by_key_impl(
         path,
         media_type=img.mime,
         etag=f'"{img.sha256}"',
-        cache_control="private, max-age=31536000, immutable",
+        cache_control=OWNER_PROTECTED_MEDIA_CACHE_CONTROL,
         storage_key=img.storage_key,
         request=request,
     )
@@ -733,6 +770,13 @@ async def delete_image_impl(
     *,
     write_audit_event: Any,
 ) -> dict[str, bool]:
+    """软删图片。
+
+    分享语义(刻意行为,勿改):删除分享中的图片**不会**撤销分享 row,也不会
+    收回整组分享——该图片自身经签名/分享通道立即 404,分享集合内其余存活
+    成员仍可访问(见 get_image_signed_impl 的 share 校验注释);需要整体收回
+    分享由 shares 路由的 revoke 完成。
+    """
     img = (
         await db.execute(
             select(Image).where(
