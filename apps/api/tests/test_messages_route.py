@@ -40,6 +40,9 @@ class _Result:
         return self.value
 
 
+_NO_CONVERSATION_OVERRIDE = object()
+
+
 class _Savepoint:
     """write_audit(autocommit=False) 的 savepoint 契约 stub。"""
 
@@ -61,12 +64,26 @@ class _Db:
         self.committed = False
         self.rolled_back = False
         self._id_seq = 0
+        self._conversation: Any | None = None
+        self.locked_conversation_override: Any = _NO_CONVERSATION_OVERRIDE
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
-        if "from users" in str(statement).lower():
+        rendered = str(statement).lower()
+        if "from users" in rendered:
             return _Result("user-1")
-        return self.results.pop(0) if self.results else _Result()
+        if (
+            "from conversations" in rendered
+            and getattr(statement, "_for_update_arg", None) is not None
+        ):
+            if self.locked_conversation_override is not _NO_CONVERSATION_OVERRIDE:
+                return _Result(self.locked_conversation_override)
+            if self._conversation is not None:
+                return _Result(self._conversation)
+        result = self.results.pop(0) if self.results else _Result()
+        if "from conversations" in rendered and result.value is not None:
+            self._conversation = result.value
+        return result
 
     def add(self, value: Any) -> None:
         self.added.append(value)
@@ -1609,6 +1626,34 @@ async def test_post_message_publishes_appended_events_after_commit(
         }
     ]
     assert assistant_published == [out.assistant_message.id]
+
+
+@pytest.mark.asyncio
+async def test_post_message_rejects_conversation_deleted_before_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+
+    db = _Db([_Result(_conv()), _Result(None), _Result(None)])
+    db.locked_conversation_override = None
+
+    with pytest.raises(Exception) as excinfo:
+        await messages.post_message(
+            "conv-1",
+            PostMessageIn(idempotency_key="deleted-race", text="hello"),
+            _wallet_user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 404
+    assert excinfo.value.detail["error"]["code"] == "not_found"
+    assert db.added == []
+    assert db.committed is False
+    assert db.rolled_back is True
 
 
 @pytest.mark.asyncio

@@ -42,7 +42,7 @@ async def ranked_prompt_memories(
 
     query_vec = None
     ranked: list[tuple[float, UserMemory]] = []
-    if len((user_text or "").strip()) >= 5:
+    if candidates and len((user_text or "").strip()) >= 5:
         query_vec = await embedding_vector(None, user_text)
         for memory in candidates:
             memory_vec = parse_embedding_literal(

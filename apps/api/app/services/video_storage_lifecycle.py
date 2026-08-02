@@ -30,6 +30,16 @@ from .video_storage_accounting import (
     video_reference_quota_contribution,
     video_reference_variant_quota_bytes,
 )
+from .video_storage_cleanup import (
+    VIDEO_CLEANUP_QUARANTINE_DIRECTORY,
+    VIDEO_REFERENCE_LOCK_DIRECTORY,
+    VIDEO_REFERENCE_LOCK_TIMEOUT_SECONDS,
+    VIDEO_STORAGE_MAX_SCAN_DEPTH,
+    VIDEO_STORAGE_MAX_SCAN_ENTRIES,
+    VideoDetachedCleanup,
+    VideoReferenceStorageLockTimeout,
+    VideoStorageCleanupManager,
+)
 
 VIDEO_UPLOAD_ADOPTION_MARKER_DIRECTORY = ".lumen-video-upload-reconciliation"
 VIDEO_UPLOAD_ADOPTION_MIN_AGE_SECONDS = 3600.0
@@ -38,10 +48,14 @@ _MAX_ADOPTION_MARKER_SCAN_MULTIPLIER = 8
 
 __all__ = (
     "VIDEO_STORAGE_CLEANUP_METADATA_KEY",
+    "VIDEO_CLEANUP_QUARANTINE_DIRECTORY",
+    "VIDEO_REFERENCE_LOCK_DIRECTORY",
     "VIDEO_UPLOAD_ADOPTION_MARKER_DIRECTORY",
     "VIDEO_UPLOAD_ADOPTION_MIN_AGE_SECONDS",
     "VideoArtifactCleanupResult",
     "VideoArtifactInspection",
+    "VideoDetachedCleanup",
+    "VideoReferenceStorageLockTimeout",
     "VideoStorageLifecycle",
     "VideoUploadAdoptionMarker",
     "clear_video_storage_cleanup_state",
@@ -191,6 +205,10 @@ class VideoStorageLifecycle:
         self._directory_flags = (
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         )
+        self._cleanup_manager = VideoStorageCleanupManager(
+            self.storage_root,
+            self._directory_flags,
+        )
 
     async def inspect(self, video: Any) -> VideoArtifactInspection:
         descriptor = _VideoDescriptor.from_video(video)
@@ -211,8 +229,60 @@ class VideoStorageLifecycle:
         return await asyncio.to_thread(inspect_all)
 
     async def cleanup(self, video: Any) -> VideoArtifactCleanupResult:
+        token = secrets.token_urlsafe(18)
         descriptor = _VideoDescriptor.from_video(video)
-        return await asyncio.to_thread(self._cleanup_sync, descriptor)
+        async with self.reference_mutation_lock(
+            user_id=descriptor.user_id,
+            video_id=descriptor.video_id,
+        ):
+            detached = self.detach_cleanup(video, token=token)
+        return await self.cleanup_detached(detached)
+
+    def reference_mutation_lock(
+        self,
+        *,
+        user_id: str,
+        video_id: str,
+        timeout_seconds: float = VIDEO_REFERENCE_LOCK_TIMEOUT_SECONDS,
+    ) -> object:
+        return self._cleanup_manager.reference_mutation_lock(
+            user_id=user_id,
+            video_id=video_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def detach_cleanup(self, video: Any, *, token: str) -> VideoDetachedCleanup:
+        descriptor = _VideoDescriptor.from_video(video)
+        plan = _artifact_plan(descriptor)
+        return self._cleanup_manager.detach_cleanup(
+            user_id=descriptor.user_id,
+            video_id=descriptor.video_id,
+            root_parts=plan.root_parts,
+            token=token,
+            issues=plan.issues,
+        )
+
+    def detached_cleanup(
+        self,
+        *,
+        user_id: str,
+        video_id: str,
+        token: str,
+    ) -> VideoDetachedCleanup:
+        return self._cleanup_manager.detached_cleanup(
+            user_id=user_id,
+            video_id=video_id,
+            token=token,
+        )
+
+    async def cleanup_detached(
+        self,
+        detached: VideoDetachedCleanup,
+    ) -> VideoArtifactCleanupResult:
+        return await self._cleanup_manager.cleanup_detached(
+            detached,
+            unlink_entry=self._unlink_entry,
+        )
 
     async def record_upload_adoption_pending(
         self,
@@ -662,7 +732,14 @@ class VideoStorageLifecycle:
         relative_parts: tuple[str, ...],
         primary_relative_parts: tuple[str, ...],
         issues: list[str],
+        scanned: list[int] | None = None,
+        depth: int = 0,
     ) -> tuple[int, int, bool, int]:
+        if scanned is None:
+            scanned = [0]
+        if depth > VIDEO_STORAGE_MAX_SCAN_DEPTH:
+            _append_issue(issues, "artifact_scan_depth_limit")
+            return 0, 0, False, 0
         artifact_count = 0
         bytes_on_disk = 0
         primary_present = False
@@ -677,6 +754,10 @@ class VideoStorageLifecycle:
             return 0, 0, False, 0
         with entries:
             for entry in entries:
+                if scanned[0] >= VIDEO_STORAGE_MAX_SCAN_ENTRIES:
+                    _append_issue(issues, "artifact_scan_entry_limit")
+                    break
+                scanned[0] += 1
                 child_relative = (*relative_parts, entry.name)
                 try:
                     info = os.stat(
@@ -714,6 +795,8 @@ class VideoStorageLifecycle:
                                 relative_parts=child_relative,
                                 primary_relative_parts=primary_relative_parts,
                                 issues=issues,
+                                scanned=scanned,
+                                depth=depth + 1,
                             )
                         )
                     finally:
@@ -794,105 +877,3 @@ class VideoStorageLifecycle:
 
     def _unlink_entry(self, name: str, *, directory_fd: int) -> None:
         os.unlink(name, dir_fd=directory_fd)
-
-    def _delete_directory_contents(
-        self,
-        directory_fd: int,
-        *,
-        relative_parts: tuple[str, ...],
-        errors: list[str],
-    ) -> None:
-        try:
-            entries = os.scandir(directory_fd)
-        except OSError as exc:
-            _append_issue(
-                errors,
-                f"artifact_scan_failed:{'/'.join(relative_parts)}:{exc.errno or errno.EIO}",
-            )
-            return
-        with entries:
-            for entry in entries:
-                child_relative = (*relative_parts, entry.name)
-                try:
-                    info = os.stat(
-                        entry.name,
-                        dir_fd=directory_fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    _append_issue(
-                        errors,
-                        f"artifact_stat_failed:{'/'.join(child_relative)}:{exc.errno or errno.EIO}",
-                    )
-                    continue
-                if stat.S_ISDIR(info.st_mode):
-                    try:
-                        child_fd = os.open(
-                            entry.name,
-                            self._directory_flags,
-                            dir_fd=directory_fd,
-                        )
-                    except FileNotFoundError:
-                        continue
-                    except OSError as exc:
-                        _append_issue(
-                            errors,
-                            f"unsafe_artifact_directory:{'/'.join(child_relative)}:{exc.errno or errno.EIO}",
-                        )
-                        continue
-                    try:
-                        self._delete_directory_contents(
-                            child_fd,
-                            relative_parts=child_relative,
-                            errors=errors,
-                        )
-                    finally:
-                        os.close(child_fd)
-                    continue
-                if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
-                    _append_issue(
-                        errors,
-                        f"unsafe_artifact_type:{'/'.join(child_relative)}",
-                    )
-                    continue
-                try:
-                    self._unlink_entry(entry.name, directory_fd=directory_fd)
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    _append_issue(
-                        errors,
-                        f"artifact_unlink_failed:{'/'.join(child_relative)}:{exc.errno or errno.EIO}",
-                    )
-
-    def _cleanup_sync(self, descriptor: _VideoDescriptor) -> VideoArtifactCleanupResult:
-        plan = _artifact_plan(descriptor)
-        before = self._inspection_for_plan(plan)
-        errors: list[str] = []
-        if plan.root_parts:
-            open_issues: list[str] = []
-            directory_fd = self._open_owned_root(plan, open_issues)
-            errors.extend(open_issues)
-            if directory_fd is not None:
-                try:
-                    self._delete_directory_contents(
-                        directory_fd,
-                        relative_parts=(),
-                        errors=errors,
-                    )
-                finally:
-                    os.close(directory_fd)
-        remaining = self._inspection_for_plan(plan)
-        all_errors = list(dict.fromkeys((*plan.issues, *errors, *remaining.issues)))
-        complete = not remaining.retained and not all_errors
-        return VideoArtifactCleanupResult(
-            complete=complete,
-            deleted_artifacts=max(
-                0,
-                before.artifact_count - remaining.artifact_count,
-            ),
-            remaining=remaining,
-            errors=tuple(all_errors[:VIDEO_STORAGE_MAX_ISSUES]),
-        )

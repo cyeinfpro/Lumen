@@ -7,6 +7,7 @@ import io
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -463,6 +464,259 @@ async def test_concurrent_video_uploads_share_global_byte_lease(
 
 
 @pytest.mark.asyncio
+async def test_reference_upload_storage_phases_run_between_short_transactions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-short-upload-transactions"
+    deleted_payload = _payload(96, b"d")
+    upload_payload = _payload(128, b"u")
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    storage_root = Path(videos.settings.storage_root)
+    deleted = _video(
+        video_id="video-pending-cleanup",
+        user_id=user_id,
+        payload=deleted_payload,
+    )
+    deleted.deleted_at = datetime.now(timezone.utc)
+    deleted_path = storage_root / deleted.storage_key
+    deleted_path.parent.mkdir(parents=True)
+    deleted_path.write_bytes(deleted_payload)
+    events: list[str] = []
+
+    async with _database(tmp_path) as factory:
+        async with factory() as setup:
+            await _seed_user(setup, user_id=user_id)
+            setup.add(deleted)
+            await setup.commit()
+
+        async with factory() as primary:
+
+            class TrackingDb:
+                def __init__(self, session: AsyncSession) -> None:
+                    self.session = session
+                    self.commits = 0
+                    self.rollbacks = 0
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self.session, name)
+
+                def add(self, value: Any) -> None:
+                    self.session.add(value)
+
+                def in_transaction(self) -> Any:
+                    return self.session.in_transaction()
+
+                async def execute(self, statement: Any) -> Any:
+                    return await self.session.execute(statement)
+
+                async def commit(self) -> None:
+                    self.commits += 1
+                    events.append(f"db-commit-{self.commits}")
+                    await self.session.commit()
+
+                async def rollback(self) -> None:
+                    self.rollbacks += 1
+                    events.append(f"db-rollback-{self.rollbacks}")
+                    await self.session.rollback()
+
+            tracked_db = TrackingDb(primary)
+            real_lifecycle = VideoStorageLifecycle(storage_root)
+
+            class Lifecycle:
+                @staticmethod
+                def _outside_transaction(label: str) -> None:
+                    assert not primary.in_transaction()
+                    events.append(label)
+
+                async def aged_upload_adoption_markers(
+                    self,
+                    **kwargs: Any,
+                ) -> Any:
+                    self._outside_transaction("aged-markers")
+                    return await real_lifecycle.aged_upload_adoption_markers(**kwargs)
+
+                async def cleanup(self, row: Any) -> Any:
+                    self._outside_transaction("cleanup")
+                    return await real_lifecycle.cleanup(row)
+
+                def reference_mutation_lock(self, **kwargs: Any) -> Any:
+                    self._outside_transaction("storage-lock")
+                    return real_lifecycle.reference_mutation_lock(**kwargs)
+
+                def detach_cleanup(self, row: Any, *, token: str) -> Any:
+                    self._outside_transaction("detach")
+                    return real_lifecycle.detach_cleanup(row, token=token)
+
+                def detached_cleanup(self, **kwargs: Any) -> Any:
+                    self._outside_transaction("detached-lookup")
+                    return real_lifecycle.detached_cleanup(**kwargs)
+
+                async def cleanup_detached(self, detached: Any) -> Any:
+                    self._outside_transaction("cleanup")
+                    return await real_lifecycle.cleanup_detached(detached)
+
+                async def inspect_many(self, rows: Any) -> Any:
+                    self._outside_transaction("inspect")
+                    return await real_lifecycle.inspect_many(rows)
+
+                async def record_upload_adoption_pending(
+                    self,
+                    **kwargs: Any,
+                ) -> Any:
+                    self._outside_transaction("marker")
+                    return await real_lifecycle.record_upload_adoption_pending(**kwargs)
+
+                async def clear_upload_adoption_marker(self, marker: Any) -> None:
+                    self._outside_transaction("clear-marker")
+                    await real_lifecycle.clear_upload_adoption_marker(marker)
+
+                async def discard_unadopted_upload(self, marker: Any) -> bool:
+                    self._outside_transaction("discard-marker")
+                    return await real_lifecycle.discard_unadopted_upload(marker)
+
+            class Capacity:
+                @asynccontextmanager
+                async def reserve(
+                    self,
+                    _bytes_required: int,
+                ) -> AsyncIterator[None]:
+                    assert not primary.in_transaction()
+                    events.append("capacity")
+                    yield
+
+            real_write = videos._write_new_file_atomic  # noqa: SLF001
+
+            def write(path: Path, source: Any) -> None:
+                assert not primary.in_transaction()
+                events.append("write")
+                real_write(path, source)
+
+            deps = replace(
+                videos._upload_dependencies(),  # noqa: SLF001
+                storage_capacity=Capacity(),  # type: ignore[arg-type]
+                storage_lifecycle=Lifecycle(),  # type: ignore[arg-type]
+                write_new_file_atomic=write,
+            )
+            result = await video_upload_routes.upload_reference_video(
+                user=SimpleNamespace(id=user_id),
+                db=tracked_db,  # type: ignore[arg-type]
+                file=_upload(upload_payload),
+                deps=deps,
+            )
+
+    assert result.created is True
+    assert events == [
+        "db-commit-1",
+        "aged-markers",
+        "storage-lock",
+        "db-commit-2",
+        "detach",
+        "cleanup",
+        "db-commit-3",
+        "db-rollback-1",
+        "inspect",
+        "storage-lock",
+        "capacity",
+        "write",
+        "marker",
+        "db-commit-4",
+        "clear-marker",
+    ]
+    assert not deleted_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reference_upload_relocks_and_rechecks_quota_after_write_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-upload-cas-quota"
+    upload_payload = _payload(128, b"u")
+    competing_payload = _payload(64, b"c")
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    write_calls = 0
+
+    async with _database(tmp_path) as factory:
+        monkeypatch.setattr(videos, "SessionLocal", factory)
+        async with factory() as setup:
+            await _seed_user(setup, user_id=user_id)
+
+        async with factory() as primary:
+            real_write_reserved = video_upload_routes._write_reserved  # noqa: SLF001
+
+            async def write_then_insert_competing_row(**kwargs: Any) -> None:
+                nonlocal write_calls
+                write_calls += 1
+                assert not primary.in_transaction()
+                await real_write_reserved(**kwargs)
+                async with factory() as competitor:
+                    competitor.add(
+                        _video(
+                            video_id="video-competing-quota",
+                            user_id=user_id,
+                            payload=competing_payload,
+                        )
+                    )
+                    await competitor.commit()
+
+            monkeypatch.setattr(
+                video_upload_routes,
+                "_write_reserved",
+                write_then_insert_competing_row,
+            )
+            deps = replace(
+                videos._upload_dependencies(),  # noqa: SLF001
+                max_count=1,
+            )
+
+            with pytest.raises(HTTPException) as exc_info:
+                await video_upload_routes.upload_reference_video(
+                    user=SimpleNamespace(id=user_id),
+                    db=primary,
+                    file=_upload(upload_payload),
+                    deps=deps,
+                )
+
+            assert exc_info.value.status_code == 429
+            assert (
+                exc_info.value.detail["error"]["code"]
+                == "reference_video_quota_exceeded"
+            )
+            assert write_calls == 1
+
+        async with factory() as observer:
+            rows = (
+                (await observer.execute(select(Video).where(Video.user_id == user_id)))
+                .scalars()
+                .all()
+            )
+
+    assert [row.id for row in rows] == ["video-competing-quota"]
+    assert not any(
+        path.is_file()
+        for path in Path(videos.settings.storage_root).glob(f"u/{user_id}/vref/**/*")
+    )
+    markers = await VideoStorageLifecycle(
+        videos.settings.storage_root
+    ).aged_upload_adoption_markers(
+        user_id=user_id,
+        minimum_age_seconds=0,
+    )
+    assert markers == ()
+
+
+@pytest.mark.asyncio
 async def test_upload_delete_reupload_reuses_one_row_and_one_artifact_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -705,6 +959,171 @@ async def test_reference_created_after_tombstone_restores_video_before_cleanup(
             assert video.deleted_at is None
             assert VIDEO_STORAGE_CLEANUP_METADATA_KEY not in video.metadata_jsonb
             assert artifact.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_delete_cleanup_result_is_ignored_after_concurrent_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _payload(700, b"d")
+    restored_payload = _payload(700, b"r")
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    artifact = (
+        Path(videos.settings.storage_root)
+        / "u/user-restore/vref/video-restore/original.mp4"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(payload)
+
+    async def allow_delete(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        videos.asset_ref_service,
+        "ensure_asset_not_canvas_referenced",
+        allow_delete,
+    )
+
+    async with _database(tmp_path) as factory:
+        real_cleanup_detached = VideoStorageLifecycle.cleanup_detached
+
+        async def restore_during_cleanup(
+            self: VideoStorageLifecycle,
+            detached: Any,
+        ) -> VideoArtifactCleanupResult:
+            assert not session.in_transaction()
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(restored_payload)
+            async with factory() as restoring:
+                current = await restoring.get(Video, "video-restore")
+                assert current is not None
+                current.deleted_at = None
+                metadata = dict(current.metadata_jsonb or {})
+                metadata.pop(VIDEO_STORAGE_CLEANUP_METADATA_KEY, None)
+                metadata.pop("reference_inventory_cleanup_claim", None)
+                current.metadata_jsonb = metadata
+                await restoring.commit()
+            return await real_cleanup_detached(self, detached)
+
+        monkeypatch.setattr(
+            VideoStorageLifecycle,
+            "cleanup_detached",
+            restore_during_cleanup,
+        )
+        async with factory() as session:
+            await _seed_user(session, user_id="user-restore")
+            video = _video(
+                video_id="video-restore",
+                user_id="user-restore",
+                payload=payload,
+            )
+            session.add(video)
+            await session.commit()
+
+            response = await videos.delete_video(
+                video.id,
+                SimpleNamespace(id=video.user_id),
+                session,
+            )
+
+            assert response.status_code == 204
+            await session.refresh(video)
+            assert video.deleted_at is None
+            assert VIDEO_STORAGE_CLEANUP_METADATA_KEY not in video.metadata_jsonb
+            assert "reference_inventory_cleanup_claim" not in video.metadata_jsonb
+            assert artifact.read_bytes() == restored_payload
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delete_reuses_live_cleanup_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_calls = 0
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    artifact = (
+        Path(videos.settings.storage_root)
+        / "u/user-delete-claim/vref/video-delete-claim/original.mp4"
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(_payload(128))
+
+    async def allow_delete(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def blocking_cleanup(
+        _self: VideoStorageLifecycle,
+        _detached: Any,
+    ) -> VideoArtifactCleanupResult:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        await release_cleanup.wait()
+        return VideoArtifactCleanupResult(
+            complete=True,
+            deleted_artifacts=0,
+            remaining=VideoArtifactInspection(
+                artifact_count=0,
+                bytes_on_disk=0,
+                primary_present=False,
+                primary_size_bytes=0,
+            ),
+        )
+
+    monkeypatch.setattr(
+        videos.asset_ref_service,
+        "ensure_asset_not_canvas_referenced",
+        allow_delete,
+    )
+    monkeypatch.setattr(VideoStorageLifecycle, "cleanup_detached", blocking_cleanup)
+
+    async with _database(tmp_path) as factory:
+        async with factory() as setup:
+            await _seed_user(setup, user_id="user-delete-claim")
+            setup.add(
+                _video(
+                    video_id="video-delete-claim",
+                    user_id="user-delete-claim",
+                    payload=_payload(128),
+                )
+            )
+            await setup.commit()
+
+        async with factory() as first, factory() as second:
+            first_task = asyncio.create_task(
+                videos.delete_video(
+                    "video-delete-claim",
+                    SimpleNamespace(id="user-delete-claim"),
+                    first,
+                )
+            )
+            await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+
+            repeated = await videos.delete_video(
+                "video-delete-claim",
+                SimpleNamespace(id="user-delete-claim"),
+                second,
+            )
+            assert repeated.status_code == 204
+            assert cleanup_calls == 1
+
+            release_cleanup.set()
+            completed = await first_task
+            assert completed.status_code == 204
+            assert cleanup_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1180,30 +1599,31 @@ async def test_cleanup_failure_stays_counted_then_recovers_idempotently(
         "_unlink_entry",
         fail_poster_once,
     )
-    real_cleanup = VideoStorageLifecycle.cleanup
+    real_cleanup_detached = VideoStorageLifecycle.cleanup_detached
     cleanup_calls = 0
 
     async with _database(tmp_path) as factory:
 
         async def assert_durable_tombstone(
             self: VideoStorageLifecycle,
-            row: Video,
+            detached: Any,
         ) -> Any:
             nonlocal cleanup_calls
             cleanup_calls += 1
+            assert not session.in_transaction()
             async with factory() as observer:
-                persisted = await observer.get(Video, row.id)
+                persisted = await observer.get(Video, "video-clean")
                 assert persisted is not None
                 assert persisted.deleted_at is not None
                 state = persisted.metadata_jsonb[VIDEO_STORAGE_CLEANUP_METADATA_KEY][
                     "state"
                 ]
                 assert state == ("pending" if cleanup_calls <= 2 else "complete")
-            return await real_cleanup(self, row)
+            return await real_cleanup_detached(self, detached)
 
         monkeypatch.setattr(
             VideoStorageLifecycle,
-            "cleanup",
+            "cleanup_detached",
             assert_durable_tombstone,
         )
         async with factory() as session:
@@ -1259,8 +1679,19 @@ async def test_cleanup_failure_stays_counted_then_recovers_idempotently(
             )
             assert count == 1
             assert accounted_bytes == len(b"poster")
-            assert (artifact_root / "poster.jpg").is_file()
-            assert sum(path.is_file() for path in artifact_root.iterdir()) == 1
+            quarantine_token = video.metadata_jsonb[
+                VIDEO_STORAGE_CLEANUP_METADATA_KEY
+            ]["quarantine_token"]
+            quarantine_root = (
+                storage_root
+                / ".lumen-video-cleanup"
+                / "user-clean"
+                / "video-clean"
+                / quarantine_token
+            )
+            assert not artifact_root.exists()
+            assert (quarantine_root / "poster.jpg").is_file()
+            assert sum(path.is_file() for path in quarantine_root.iterdir()) == 1
 
             response = await videos.delete_video(
                 video.id,
@@ -1270,7 +1701,7 @@ async def test_cleanup_failure_stays_counted_then_recovers_idempotently(
             assert response.status_code == 204
             await session.refresh(video)
             assert video.deleted_at is not None
-            assert not any(path.is_file() for path in artifact_root.iterdir())
+            assert not quarantine_root.exists()
 
             repeated = await videos.delete_video(
                 video.id,
@@ -1453,19 +1884,58 @@ async def test_reference_variant_reserves_max_output_before_render(
         user_id="user-transcode",
         payload=_payload(128),
     )
+    old_payload = b"old-reference-variant"
+    old_key = f"u/{video.user_id}/vref/{video.id}/old-reference.mp4"
+    old_path = tmp_path / old_key
+    old_path.parent.mkdir(parents=True)
+    old_path.write_bytes(old_payload)
+    video.metadata_jsonb = {
+        "upstream_reference_video_variant": {
+            "kind": video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND,
+            "storage_key": old_key,
+            "size_bytes": len(old_payload),
+            "sha256": hashlib.sha256(old_payload).hexdigest(),
+        }
+    }
     source = tmp_path / video.storage_key
-    source.parent.mkdir(parents=True)
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(_payload(128))
     order: list[str] = []
     reserved: list[int] = []
 
     class Result:
-        def scalar_one_or_none(self) -> Video:
-            return video
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+        def scalar_one(self) -> Any:
+            return self.value
 
     class Db:
-        async def execute(self, _statement: Any) -> Result:
-            return Result()
+        def __init__(self) -> None:
+            self.transaction_open = False
+            self.statements: list[Any] = []
+            self.commits = 0
+
+        async def execute(self, statement: Any) -> Result:
+            self.transaction_open = True
+            self.statements.append(statement)
+            return Result(0 if "sum(" in str(statement).lower() else video)
+
+        async def commit(self) -> None:
+            self.commits += 1
+            self.transaction_open = False
+            order.append(f"db-commit-{self.commits}")
+
+        async def rollback(self) -> None:
+            self.transaction_open = False
+
+        def in_transaction(self) -> bool:
+            return self.transaction_open
+
+    db = Db()
 
     class TranscodeCapacity:
         @asynccontextmanager
@@ -1482,6 +1952,7 @@ async def test_reference_variant_reserves_max_output_before_render(
             yield
 
     async def render(source_path: Path, destination: Path) -> Any:
+        assert not db.in_transaction()
         assert source_path == source
         order.append("render")
         destination.write_bytes(b"variant")
@@ -1501,17 +1972,155 @@ async def test_reference_variant_reserves_max_output_before_render(
         render,
     )
 
+    async def stale_existing_variant(
+        _storage_root: str,
+        _variant: dict[str, Any],
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        video_reference_videos,
+        "_variant_file_matches",
+        stale_existing_variant,
+    )
+    real_install = video_reference_videos._install_staged_variant
+
+    def install(*args: Any, **kwargs: Any) -> None:
+        assert not db.in_transaction()
+        order.append("install")
+        real_install(*args, **kwargs)
+
+    monkeypatch.setattr(
+        video_reference_videos,
+        "_install_staged_variant",
+        install,
+    )
+
     variant = await video_reference_videos.ensure_video_reference_video_variant(
-        Db(),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
         video,
         storage_root=str(tmp_path),
         storage_capacity=StorageCapacity(),  # type: ignore[arg-type]
         transcode_capacity=TranscodeCapacity(),  # type: ignore[arg-type]
     )
 
-    assert order == ["transcode-capacity", "storage-capacity", "render"]
+    assert order == [
+        "db-commit-1",
+        "transcode-capacity",
+        "storage-capacity",
+        "render",
+        "install",
+        "db-commit-2",
+    ]
     assert reserved == [2 * video_reference_videos.VIDEO_REFERENCE_VIDEO_MAX_BYTES]
     assert variant["size_bytes"] == 7
+    assert not old_path.exists()
+    locked_video_statements = [
+        statement
+        for statement in db.statements
+        if "FROM videos" in str(statement) and "FOR UPDATE" in str(statement)
+    ]
+    assert len(locked_video_statements) == 1
+    quota_statement = next(
+        statement for statement in db.statements if "sum(" in str(statement).lower()
+    )
+    assert "FOR UPDATE" not in str(quota_statement)
+
+
+@pytest.mark.asyncio
+async def test_reference_variant_concurrent_winner_survives_loser_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = video_reference_videos._ReferenceSourceSnapshot(  # noqa: SLF001
+        id="video-winner",
+        user_id="user-winner",
+        storage_key="u/user-winner/v/generation/final.mp4",
+        sha256="a" * 64,
+        metadata_jsonb={},
+    )
+    winner_payload = b"winner"
+    loser_payload = b"loser"
+    winner_key = "u/user-winner/v/generation/winner.mp4"
+    loser_key = "u/user-winner/v/generation/loser.mp4"
+    winner_path = tmp_path / winner_key
+    loser_path = tmp_path / loser_key
+    winner_path.parent.mkdir(parents=True)
+    winner_path.write_bytes(winner_payload)
+    loser_path.write_bytes(loser_payload)
+    winner = {
+        "kind": video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND,
+        "storage_key": winner_key,
+        "size_bytes": len(winner_payload),
+        "sha256": hashlib.sha256(winner_payload).hexdigest(),
+    }
+    current = SimpleNamespace(
+        id=source.id,
+        user_id=source.user_id,
+        storage_key=source.storage_key,
+        sha256=source.sha256,
+        deleted_at=None,
+        metadata_jsonb={"upstream_reference_video_variant": winner},
+    )
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.transaction_open = False
+            self.statements: list[Any] = []
+
+        async def execute(self, statement: Any) -> Result:
+            self.transaction_open = True
+            self.statements.append(statement)
+            return Result(current)
+
+        async def commit(self) -> None:
+            self.transaction_open = False
+
+        async def rollback(self) -> None:
+            self.transaction_open = False
+
+        def in_transaction(self) -> bool:
+            return self.transaction_open
+
+    db = Db()
+    real_file_matches = video_reference_videos._file_matches
+
+    def file_matches(*args: Any, **kwargs: Any) -> bool:
+        assert not db.in_transaction()
+        return real_file_matches(*args, **kwargs)
+
+    monkeypatch.setattr(video_reference_videos, "_file_matches", file_matches)
+    result, adopted = await video_reference_videos._adopt_reference_variant(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        source=source,
+        variant={
+            "kind": video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND,
+            "storage_key": loser_key,
+            "size_bytes": len(loser_payload),
+            "sha256": hashlib.sha256(loser_payload).hexdigest(),
+        },
+        destination=loser_path,
+        observed_existing=None,
+        storage_root=str(tmp_path),
+    )
+    await video_reference_videos._discard_installed_variant(  # noqa: SLF001
+        loser_path,
+        size_bytes=len(loser_payload),
+        sha256=hashlib.sha256(loser_payload).hexdigest(),
+    )
+
+    assert adopted is False
+    assert result == winner
+    assert winner_path.read_bytes() == winner_payload
+    assert not loser_path.exists()
+    assert not any("sum(" in str(statement).lower() for statement in db.statements)
 
 
 @pytest.mark.asyncio
@@ -1804,7 +2413,7 @@ async def test_upload_quota_counts_generated_reference_variants(
 
 
 @pytest.mark.asyncio
-async def test_seedance_variant_quota_is_checked_after_user_lock_before_install(
+async def test_seedance_variant_quota_race_removes_unadopted_install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1823,6 +2432,8 @@ async def test_seedance_variant_quota_is_checked_after_user_lock_before_install(
     )
     retained.size_bytes = VIDEO_REFERENCE_STORAGE_QUOTA_BYTES - 5
     source_path = tmp_path / source.storage_key
+    variant_directory = source_path.parent
+    source_id = source.id
     source_path.parent.mkdir(parents=True)
     source_path.write_bytes(source_payload)
 
@@ -1875,11 +2486,15 @@ async def test_seedance_variant_quota_is_checked_after_user_lock_before_install(
 
             assert exc_info.value.code == "reference_video_quota_exceeded"
             assert exc_info.value.status_code == 429
-            destination = tmp_path / video_reference_videos.video_reference_video_key(
-                source
+            assert not list(
+                variant_directory.glob(
+                    f"{source_id}."
+                    f"{video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND}.*.mp4"
+                )
             )
-            assert not destination.exists()
-            assert "upstream_reference_video_variant" not in source.metadata_jsonb
+            persisted = await session.get(Video, source_id)
+            assert persisted is not None
+            assert "upstream_reference_video_variant" not in persisted.metadata_jsonb
 
 
 @pytest.mark.asyncio

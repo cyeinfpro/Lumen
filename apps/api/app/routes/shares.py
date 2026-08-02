@@ -654,13 +654,19 @@ async def get_public_share_image(
         raise _http("not_found", "share not found", 404)
     img = images[0]
 
-    opened, size = _open_storage_file_safe(img.storage_key)
+    storage_key = img.storage_key
+    media_type = img.mime
+    etag = _image_etag(img)
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
+    opened, size = _open_storage_file_safe(storage_key)
 
     return _share_image_response(
         opened,
         size,
-        media_type=img.mime,
-        etag=_image_etag(img),
+        media_type=media_type,
+        etag=etag,
     )
 
 
@@ -702,13 +708,18 @@ async def get_public_share_image_variant_by_id(
     if not await _public_image_is_visible(db, img):
         raise _http("not_found", "image not found", 404)
 
-    opened, size = _open_storage_file_safe(variant.storage_key)
+    storage_key = variant.storage_key
+    etag = f'"{variant.image_id}-{variant.kind}"'
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
+    opened, size = _open_storage_file_safe(storage_key)
 
     return _share_image_response(
         opened,
         size,
         media_type=VARIANT_MEDIA_TYPE[kind],
-        etag=f'"{variant.image_id}-{variant.kind}"',
+        etag=etag,
     )
 
 
@@ -757,11 +768,17 @@ async def get_public_share_image_by_id(
     if img.user_id != primary_img.user_id:
         raise _http("not_found", "image not found", 404)
 
-    opened, size = _open_storage_file_safe(img.storage_key)
+    storage_key = img.storage_key
+    media_type = img.mime
+    etag = _image_etag(img)
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
+    opened, size = _open_storage_file_safe(storage_key)
 
     return _share_image_response(
         opened,
         size,
-        media_type=img.mime,
-        etag=_image_etag(img),
+        media_type=media_type,
+        etag=etag,
     )

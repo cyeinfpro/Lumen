@@ -246,14 +246,14 @@ async def _write_bonus_files(
             ):
                 return None
             await _lock_current_bonus_parent(session, context)
-            return await context.services.artifacts.write_files(
-                [
-                    (artifact.key_orig, artifact.raw_image),
-                    (artifact.key_display, artifact.display_bytes),
-                    (artifact.key_preview, artifact.preview_bytes),
-                    (artifact.key_thumb, artifact.thumb_bytes),
-                ]
-            )
+        return await context.services.artifacts.write_files(
+            [
+                (artifact.key_orig, artifact.raw_image),
+                (artifact.key_display, artifact.display_bytes),
+                (artifact.key_preview, artifact.preview_bytes),
+                (artifact.key_thumb, artifact.thumb_bytes),
+            ]
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s storage write failed parent=%s err=%r",
@@ -399,7 +399,7 @@ async def _deliver_bonus_events(
             boundary="event_delivery",
         ):
             return False
-        await context.services.events.deliver_many(context.redis, deliveries)
+    await context.services.events.deliver_many(context.redis, deliveries)
     return True
 
 

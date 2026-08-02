@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ from lumen_core.storage_capacity import (
     ResilientStorageCapacity,
     StorageCapacityExceeded,
     StorageCapacityLimits,
+    StorageCapacityUnavailable,
 )
 from app.images.application.upload import (
     UploadCommandError,
@@ -128,6 +130,32 @@ async def test_redis_storage_capacity_resizes_one_owned_lease(
 
     await other.release()
     await lease.release()
+
+
+@pytest.mark.asyncio
+async def test_redis_storage_capacity_has_bounded_command_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        storage_capacity_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=1_000),
+    )
+
+    class _BlockedRedis:
+        async def eval(self, *_args: Any) -> Any:
+            await asyncio.Event().wait()
+
+    capacity = RedisStorageCapacity(
+        _BlockedRedis(),
+        tmp_path,
+        StorageCapacityLimits(minimum_free_bytes=100, lease_ttl_seconds=10),
+        operation_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(StorageCapacityUnavailable):
+        await asyncio.wait_for(capacity.reserve(100), timeout=0.2)
 
 
 @pytest.mark.asyncio

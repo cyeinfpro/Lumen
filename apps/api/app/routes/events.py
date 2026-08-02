@@ -1,12 +1,10 @@
 """Authenticated SSE transport and realtime runtime composition."""
 
 from __future__ import annotations
-
 from collections.abc import AsyncIterator
 import logging
 import time
 from typing import Annotated, Any
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -14,7 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from lumen_core.constants import EVENTS_REPLAY_MAX_SCAN, EVENTS_STREAM_PREFIX
 
 from ..config import settings
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..deps import CurrentUser, is_active_session
 from ..realtime import (
     ACQUIRE_SSE_SLOT_LUA,
@@ -55,10 +53,8 @@ from ..redis_client import get_redis
 
 
 __all__ = ["MAX_SSE_CHANNELS", "time"]
-
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
 _REPLAY_BATCH_SIZE = 500
 _REPLAY_MAX_EVENTS = EVENTS_REPLAY_MAX_SCAN
 _SSE_SESSION_REVALIDATION_INTERVAL_SECONDS = 15
@@ -235,9 +231,10 @@ async def _event_stream_state(
     )
 
 
-async def _session_is_active(db: AsyncSession, session_id: str) -> bool:
+async def _session_is_active(session_id: str) -> bool:
     try:
-        return await is_active_session(db, session_id)
+        async with SessionLocal() as session:
+            return await is_active_session(session, session_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "sse session revalidation failed session_id=%s",
@@ -253,6 +250,7 @@ async def _event_stream(
     db: AsyncSession | None = None,
     session_id: str | None = None,
 ) -> AsyncIterator[dict]:
+    _ = db  # Compatibility argument; request sessions must never back the stream.
     next_session_check = 0.0
     source = stream_events(
         state,
@@ -261,7 +259,7 @@ async def _event_stream(
     )
     try:
         async for event in source:
-            if db is not None and session_id:
+            if session_id:
                 now = time.monotonic()
                 # The periodic check keeps idle connections bounded, but every
                 # non-liveness frame must pass a fresh durable session check.
@@ -269,7 +267,7 @@ async def _event_stream(
                     event.get("event") not in _SSE_LIVENESS_EVENTS
                     or now >= next_session_check
                 ):
-                    if not await _session_is_active(db, session_id):
+                    if not await _session_is_active(session_id):
                         yield {"event": "auth_invalidated", "data": "{}"}
                         return
                     next_session_check = (
@@ -296,4 +294,7 @@ async def events(
         last_event_id_query,
     )
     session_id = getattr(getattr(request, "state", None), "session_id", None)
-    return EventSourceResponse(_event_stream(state, db=db, session_id=session_id))
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
+    return EventSourceResponse(_event_stream(state, session_id=session_id))

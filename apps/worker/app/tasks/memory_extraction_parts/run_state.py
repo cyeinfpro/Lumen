@@ -35,6 +35,34 @@ from .contracts import (
     write_payload,
 )
 
+MEMORY_FINALIZATION_ROW_LIMIT = 512
+
+
+async def active_memories_for_finalization(
+    session: Any,
+    *,
+    user_id: str,
+) -> list[UserMemory]:
+    return list(
+        (
+            await session.execute(
+                select(UserMemory)
+                .where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.disabled.is_(False),
+                    UserMemory.superseded_by.is_(None),
+                )
+                .order_by(
+                    UserMemory.updated_at.desc(),
+                    UserMemory.id.desc(),
+                )
+                .limit(MEMORY_FINALIZATION_ROW_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
 
 @dataclass(frozen=True)
 class MemoryExtractionStateDependencies:
@@ -695,18 +723,9 @@ async def finalize_memory_extraction(
         )
         default_scope = await dependencies.default_scope(session, user.id)
         scope_id = conversation.active_scope_id or default_scope.id
-        existing = (
-            (
-                await session.execute(
-                    select(UserMemory).where(
-                        UserMemory.user_id == user.id,
-                        UserMemory.disabled.is_(False),
-                        UserMemory.superseded_by.is_(None),
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        existing = await active_memories_for_finalization(
+            session,
+            user_id=user.id,
         )
         writes: list[dict[str, Any]] = []
         undo_requests: list[UndoTokenRequest] = []

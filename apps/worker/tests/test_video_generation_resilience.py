@@ -482,16 +482,35 @@ async def test_submitted_task_rejects_provider_credential_snapshot_drift(
 
 
 def test_video_submit_caches_receipt_before_post_submit_lease_check() -> None:
-    source = inspect.getsource(video_generation._run_video_generation_with_lease)
+    source = inspect.getsource(video_submission._submit_fresh_video)
 
+    reserve_idx = source.index("_reserve_video_submit_slot")
+    media_idx = source.index("_input_image_bytes")
+    transition_idx = source.index("_relock_pre_submit_transition")
+    fence_idx = source.index("_relock_pre_submit_dispatch")
     submit_idx = source.index("result = await adapter.submit")
+    unlock_idx = source.index("await session.commit()", fence_idx)
     cache_idx = source.index("await _store_submit_result", submit_idx)
     lease_check_idx = source.index(
         '"video submit lease lost after upstream call"',
         submit_idx,
     )
 
+    assert reserve_idx < transition_idx
+    assert media_idx < transition_idx
+    assert transition_idx < fence_idx < unlock_idx < submit_idx
     assert submit_idx < cache_idx < lease_check_idx
+
+
+def test_video_submit_preparation_releases_row_lock_before_redis() -> None:
+    source = inspect.getsource(video_submission._prepare_submit_row)
+
+    lock_idx = source.index(".with_for_update(skip_locked=True)")
+    unlock_idx = source.index("await session.commit()", lock_idx)
+    resume_idx = source.index("_resume_existing_provider_task", unlock_idx)
+    cache_idx = source.index("_load_submit_result", unlock_idx)
+
+    assert lock_idx < unlock_idx < resume_idx < cache_idx
 
 
 def test_video_submit_retry_queues_durable_regression_event_before_commit() -> None:
@@ -513,8 +532,12 @@ def test_video_poll_deadline_continues_polling_submitted_tasks() -> None:
     assert (
         "generation.cancel_requested_at is not None or deadline_expired" not in source
     )
-    assert "if generation.cancel_requested_at is not None:" in source
+    assert "cancel_requested = generation.cancel_requested_at is not None" in source
+    assert "if cancel_requested:" in source
     assert "if deadline_expired:" in source
+    unlock_idx = source.index("await session.commit()")
+    cancel_idx = source.index("await video_ports()._try_provider_cancel")
+    assert unlock_idx < cancel_idx
 
 
 def test_video_poll_renews_lease_and_threads_loss_fence() -> None:
@@ -1290,19 +1313,27 @@ async def test_cancel_commit_after_submitting_fences_adapter_and_receipt(
     assert "submit_receipt" not in generation.diagnostics
     assert generation.diagnostics["submit_delivery_state"] == "proven_absent"
     assert released_slots == [("provider-1", generation.id)]
-    assert len(session.statements) == 2
-    user_fence_sql = str(
+    assert len(session.statements) == 3
+    transition_sql = str(
         session.statements[0].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
-    fence_sql = str(
+    user_fence_sql = str(
         session.statements[1].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
+    fence_sql = str(
+        session.statements[2].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "video_generations.id = 'video-1'" in transition_sql
+    assert "video_generations.user_id = 'user-1'" in transition_sql
     assert "users.id = 'user-1'" in user_fence_sql
     assert "video_generations.id = 'video-1'" in fence_sql
     assert "video_generations.submission_epoch = 1" in fence_sql
@@ -1436,7 +1467,7 @@ async def test_submit_then_cancel_persists_receipt_and_enqueues_poll_without_rec
     class Session:
         def __init__(self) -> None:
             self.commits = 0
-            self.rows = iter((active_user, generation, generation))
+            self.rows = iter((generation, active_user, generation, generation))
 
         async def __aenter__(self) -> Session:
             return self
@@ -1529,11 +1560,13 @@ async def test_submit_then_cancel_persists_receipt_and_enqueues_poll_without_rec
     assert adapter_calls == 1
     assert cache_calls == 1
     assert generation.cancel_requested_at is now
+    assert generation.provider_name == "provider-1"
+    assert generation.provider_kind == "volcano"
     assert generation.status == "submitted"
     assert generation.provider_task_id == "provider-task-1"
     assert generation.diagnostics["submit_delivery_state"] == "confirmed"
     assert polls == [(generation.id, None)]
-    assert session.commits == 2
+    assert session.commits == 3
 
 
 @pytest.mark.asyncio
@@ -1593,7 +1626,7 @@ async def test_deleted_user_fence_cancels_before_provider_submit_and_settles_hol
     class Session:
         def __init__(self) -> None:
             self.commits = 0
-            self.rows = iter((deleted_user, generation))
+            self.rows = iter((generation, deleted_user, generation))
             self.statements: list[object] = []
 
         async def __aenter__(self) -> Session:
@@ -1699,19 +1732,27 @@ async def test_deleted_user_fence_cancels_before_provider_submit_and_settles_hol
     assert events == ["video.canceled"]
     assert released_slots == [("provider-1", generation.id)]
     assert session.commits == 2
-    assert len(session.statements) == 2
-    user_fence_sql = str(
+    assert len(session.statements) == 3
+    transition_sql = str(
         session.statements[0].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
-    task_fence_sql = str(
+    user_fence_sql = str(
         session.statements[1].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
+    task_fence_sql = str(
+        session.statements[2].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "video_generations.id = 'video-1'" in transition_sql
+    assert "video_generations.user_id = 'user-1'" in transition_sql
     assert "users.id = 'user-1'" in user_fence_sql
     assert "video_generations.id = 'video-1'" in task_fence_sql
     assert "video_generations.submission_epoch = 1" in task_fence_sql
@@ -2038,9 +2079,9 @@ async def test_stale_not_adopted_worker_cannot_delete_takeover_artifact(
         (fence_b, worker_b_created, video_key),
     ) = await asyncio.gather(worker_a(), worker_b())
 
-    assert fence_a.artifact_attempt_id == fence_b.artifact_attempt_id
+    assert fence_a.artifact_attempt_id != fence_b.artifact_attempt_id
     assert fence_a.owner_token != fence_b.owner_token
-    assert worker_b_created is False
+    assert worker_b_created is True
     assert worker_a_lease_lost.is_set() is False
     assert cleanup_result is False
     assert durable_generation.status == "succeeded"
@@ -2264,12 +2305,12 @@ async def test_finalization_cancel_during_download_or_storage_never_settles_succ
     assert billing_poll.usage_total_tokens == 42
     assert billing_poll.upstream_billable is True
     assert billing_poll.raw["reason"] == "cancel_requested_during_finalization"
-    expected_deleted = (
-        []
-        if cancel_phase == "download"
-        else ["u/user-1/v/video-1/final/attempt-current/output.mp4"]
-    )
-    assert deleted_keys == expected_deleted
+    if cancel_phase == "download":
+        assert deleted_keys == []
+    else:
+        assert len(deleted_keys) == 1
+        assert deleted_keys[0].startswith("u/user-1/v/video-1/final/")
+        assert deleted_keys[0].endswith("/output.mp4")
     assert events == ["video.canceled"]
 
 

@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 
 
 DEFAULT_MIN_STORAGE_FREE_BYTES = 512 * 1024 * 1024
+DEFAULT_REDIS_STORAGE_OPERATION_TIMEOUT_SECONDS = 5.0
 
 _REDIS_RESERVE_LUA = """
 local leases = KEYS[1]
@@ -206,22 +207,48 @@ class RedisStorageCapacity:
         limits: StorageCapacityLimits,
         *,
         namespace: str = "lumen:image-storage:capacity",
+        operation_timeout_seconds: float = (
+            DEFAULT_REDIS_STORAGE_OPERATION_TIMEOUT_SECONDS
+        ),
     ) -> None:
+        if operation_timeout_seconds <= 0:
+            raise ValueError("Redis storage operation timeout must be positive")
         self.redis = redis
         self.root = Path(root).resolve()
         self.limits = limits
+        self.operation_timeout_seconds = float(operation_timeout_seconds)
         self.leases_key = f"{namespace}:leases"
         self.weights_key = f"{namespace}:weights"
 
+    async def _run_bounded(self, value: Any) -> Any:
+        try:
+            async with asyncio.timeout(self.operation_timeout_seconds):
+                return await _resolve(value)
+        except asyncio.CancelledError:
+            raise
+        except StorageCapacityUnavailable:
+            raise
+        except Exception as exc:
+            raise StorageCapacityUnavailable(
+                "Redis storage capacity coordination is unavailable"
+            ) from exc
+
+    async def _available_bytes(self) -> int:
+        return int(
+            await self._run_bounded(
+                asyncio.to_thread(
+                    available_storage_bytes,
+                    self.root,
+                    minimum_free_bytes=self.limits.minimum_free_bytes,
+                )
+            )
+        )
+
     async def reserve(self, bytes_required: int) -> _RedisStorageCapacityLease:
         requested = max(0, int(bytes_required))
-        available = await asyncio.to_thread(
-            available_storage_bytes,
-            self.root,
-            minimum_free_bytes=self.limits.minimum_free_bytes,
-        )
+        available = await self._available_bytes()
         lease_id = uuid.uuid4().hex
-        result = await _resolve(
+        result = await self._run_bounded(
             self.redis.eval(
                 _REDIS_RESERVE_LUA,
                 2,
@@ -238,7 +265,7 @@ class RedisStorageCapacity:
         return _RedisStorageCapacityLease(self, lease_id)
 
     async def _renew(self, lease_id: str) -> bool:
-        result = await _resolve(
+        result = await self._run_bounded(
             self.redis.eval(
                 _REDIS_RENEW_LUA,
                 2,
@@ -252,12 +279,8 @@ class RedisStorageCapacity:
 
     async def _resize(self, lease_id: str, bytes_required: int) -> bool:
         requested = max(0, int(bytes_required))
-        available = await asyncio.to_thread(
-            available_storage_bytes,
-            self.root,
-            minimum_free_bytes=self.limits.minimum_free_bytes,
-        )
-        result = await _resolve(
+        available = await self._available_bytes()
+        result = await self._run_bounded(
             self.redis.eval(
                 _REDIS_RESIZE_LUA,
                 2,
@@ -275,7 +298,7 @@ class RedisStorageCapacity:
         return status == 1
 
     async def _release(self, lease_id: str) -> None:
-        await _resolve(
+        await self._run_bounded(
             self.redis.eval(
                 _REDIS_RELEASE_LUA,
                 2,

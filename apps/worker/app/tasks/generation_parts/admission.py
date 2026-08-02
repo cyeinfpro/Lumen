@@ -23,8 +23,12 @@ local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
 for _, task_id in ipairs(expired) do
   local payload = redis.call('HGET', KEYS[1], task_id)
   if payload then
-    local total = tonumber(string.match(payload, '^(%d+)|')) or 0
-    local external = tonumber(string.match(payload, '^%d+|(%d+)|')) or 0
+    -- payload 格式: "{attempt}|{revision}|{total}|{external}|{user_id}|{owner}"
+    -- 字段 1/2 是 attempt/revision,总量与外部量是字段 3/4——取错字段会把计数
+    -- 减成 attempt/revision 的值,残留的 total/external 永远清不掉,最终耗尽
+    -- 预算把后续任务全部挡在队列外(卡死任务的 permit 计数残留事故)。
+    local total = tonumber(string.match(payload, '^%d+|%d+|(%d+)|')) or 0
+    local external = tonumber(string.match(payload, '^%d+|%d+|%d+|(%d+)|')) or 0
     local user_id = string.match(payload, '^%d+|%d+|%d+|%d+|([^|]+)|')
     redis.call('DECRBY', KEYS[3], total)
     redis.call('DECRBY', KEYS[4], external)
@@ -52,9 +56,13 @@ or external_used + external > tonumber(ARGV[10])
 or user_used + total > tonumber(ARGV[11]) then
   return 0
 end
-redis.call('SET', KEYS[3], tostring(global_used + total))
-redis.call('SET', KEYS[4], tostring(external_used + external))
+-- 计数 key 带兜底 TTL:permit 过期清理依赖每次 RESERVE 触发;若任务卡死且
+-- permit 续期(expiry 永不到期),计数会无限残留把后续任务挡在队列外。
+-- TTL 保证最坏情况下计数也会自愈(与 permit 自身的最长续期窗口匹配)。
+redis.call('SET', KEYS[3], tostring(global_used + total), 'EX', 86400)
+redis.call('SET', KEYS[4], tostring(external_used + external), 'EX', 86400)
 redis.call('HINCRBY', KEYS[5], ARGV[4], total)
+redis.call('EXPIRE', KEYS[5], 86400)
 redis.call(
   'HSET',
   KEYS[1],

@@ -6,15 +6,15 @@ from . import workflow_hooks
 
 
 def _load_model_library_tagger() -> workflow_hooks.ModelLibraryTagger:
-    from ..model_library_tagging import auto_tag_model_image
+    from ..model_library_tagging import auto_tag_image_record
 
-    return auto_tag_model_image
+    return auto_tag_image_record
 
 
 def _load_poster_style_tagger() -> workflow_hooks.PosterStyleTagger:
-    from ..poster_style_tagging import auto_tag_poster_style_image
+    from ..poster_style_tagging import auto_tag_poster_style_image_record
 
-    return auto_tag_poster_style_image
+    return auto_tag_poster_style_image_record
 
 
 def _services() -> workflow_hooks.WorkflowHookServices:
@@ -49,6 +49,22 @@ async def record_poster_style_library_generate_image(
 ) -> None:
     await workflow_hooks.maybe_record_poster_style_library_generate_image(
         session=session,
+        user_id=user_id,
+        generation=generation,
+        image_id=image_id,
+        services=_services(),
+    )
+
+
+async def auto_tag_generated_workflow_image(
+    *,
+    session_factory: Any,
+    user_id: str,
+    generation: Any,
+    image_id: str,
+) -> None:
+    await workflow_hooks.maybe_auto_tag_generated_workflow_image(
+        session_factory=session_factory,
         user_id=user_id,
         generation=generation,
         image_id=image_id,

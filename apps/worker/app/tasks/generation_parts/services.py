@@ -260,6 +260,15 @@ class GenerationCredentialService(Protocol):
 
 
 class GenerationWorkflowService(Protocol):
+    async def auto_tag_generated_workflow_image(
+        self,
+        *,
+        session_factory: Any,
+        user_id: str,
+        generation: Generation,
+        image_id: str,
+    ) -> None: ...
+
     async def record_model_library_generate_image(
         self,
         *,

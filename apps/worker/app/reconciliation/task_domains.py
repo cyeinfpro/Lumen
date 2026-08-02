@@ -33,7 +33,7 @@ from lumen_core.upstream_billing import (
 )
 
 from .contracts import LeaseState, ReconcileContext, ReconcileResult
-from .lease import read_lease_state
+from .lease import read_lease_states
 from .metrics import reconciliation_rows_total
 
 RECON_STUCK_AFTER = timedelta(minutes=5)
@@ -59,6 +59,7 @@ _COMPLETION_USAGE_FIELDS = (
     "reasoning_tokens",
     "image_output_tokens",
 )
+RECON_BATCH_LIMIT = 100
 
 
 class CompletionDispatchResultUnknown(RuntimeError):
@@ -883,9 +884,17 @@ class TaskDomainReconciler:
                     self.spec.model.updated_at < cutoff,
                 ),
             )
+            .limit(RECON_BATCH_LIMIT)
             .with_for_update(skip_locked=True)
         )
         rows = list((await context.session.execute(query)).scalars())
+        lease_states = await read_lease_states(
+            context.redis,
+            rows,
+            kind=self.name,
+            unknowns=context.lease_unknowns,
+            now=context.now,
+        )
         result = ReconcileResult()
         for task in rows:
             cancel_requested = (
@@ -893,14 +902,7 @@ class TaskDomainReconciler:
                 and getattr(task, "cancel_requested_at", None) is not None
             )
             if cancel_requested:
-                lease_state = await read_lease_state(
-                    context.redis,
-                    task.id,
-                    kind=self.name,
-                    unknowns=context.lease_unknowns,
-                    heartbeat_at=task.updated_at,
-                    now=context.now,
-                )
+                lease_state = lease_states[str(task.id)]
                 if lease_state is not LeaseState.EXPIRED:
                     reconciliation_rows_total.labels(
                         domain=self.name,
@@ -920,14 +922,7 @@ class TaskDomainReconciler:
                     action="ineligible",
                 ).inc()
                 continue
-            lease_state = await read_lease_state(
-                context.redis,
-                task.id,
-                kind=self.name,
-                unknowns=context.lease_unknowns,
-                heartbeat_at=task.updated_at,
-                now=context.now,
-            )
+            lease_state = lease_states[str(task.id)]
             if lease_state is not LeaseState.EXPIRED:
                 reconciliation_rows_total.labels(
                     domain=self.name,

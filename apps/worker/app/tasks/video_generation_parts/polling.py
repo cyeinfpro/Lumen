@@ -169,6 +169,28 @@ async def _handle_poll_execution_error(
         )
 
 
+async def _persist_poll_preflight_diagnostics(
+    task_id: str,
+    provider_task_id: str,
+    diagnostics: dict[str, Any],
+) -> None:
+    async with video_ports().SessionLocal() as session:
+        current = (
+            await session.execute(
+                select(VideoGeneration)
+                .where(
+                    VideoGeneration.id == task_id,
+                    VideoGeneration.provider_task_id == provider_task_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if current is None or current.status in video_ports()._TERMINAL_STATUSES:
+            return
+        current.diagnostics = dict(diagnostics)
+        await session.commit()
+
+
 async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
     redis = ctx["redis"]
     token = f"video-poll:{video_ports().new_uuid7()}"
@@ -201,44 +223,57 @@ async def run_video_poll(ctx: dict[str, Any], task_id: str) -> None:
             ):
                 return
             if not generation.provider_task_id:
-                await video_ports()._enqueue_submit(
-                    redis,
-                    task_id,
-                    defer_s=video_ports()._POLL_INTERVAL_S,
-                )
-                return
+                provider_task_id = None
+                generation_snapshot = None
+                cancel_requested = False
+                deadline_expired = False
+            else:
+                provider_task_id = generation.provider_task_id
+                generation_snapshot = generation
+                cancel_requested = generation.cancel_requested_at is not None
+                deadline_expired = generation.deadline_at <= video_ports()._now()
             video_ports()._raise_if_video_lease_lost(
                 lease_lost,
                 "video poll lease lost before provider resolution",
             )
-            provider = await video_ports()._provider_for_generation(generation)
-            adapter = video_ports().adapter_for_provider(provider)
-            provider_task_id = generation.provider_task_id
-            deadline_expired = generation.deadline_at <= video_ports()._now()
-            should_commit_poll_state = False
-            if generation.cancel_requested_at is not None:
-                await video_ports()._try_provider_cancel(
-                    adapter,
-                    generation,
-                    lease_lost=lease_lost,
-                )
-                should_commit_poll_state = True
-            if deadline_expired:
-                diagnostics = video_ports()._generation_diagnostics(generation)
-                diagnostics.setdefault(
-                    "deadline_expired_at",
-                    video_ports()._now().isoformat(),
-                )
-                diagnostics["deadline_expired_polling_continues"] = True
-                generation.diagnostics = diagnostics
-                should_commit_poll_state = True
-            if should_commit_poll_state:
-                video_ports()._raise_if_video_lease_lost(
-                    lease_lost,
-                    "video poll lease lost before state commit",
-                )
-                await session.commit()
+            await session.commit()
 
+        if provider_task_id is None or generation_snapshot is None:
+            await video_ports()._enqueue_submit(
+                redis,
+                task_id,
+                defer_s=video_ports()._POLL_INTERVAL_S,
+            )
+            return
+
+        generation = generation_snapshot
+        provider = await video_ports()._provider_for_generation(generation)
+        adapter = video_ports().adapter_for_provider(provider)
+        should_persist_preflight = cancel_requested or deadline_expired
+        if cancel_requested:
+            await video_ports()._try_provider_cancel(
+                adapter,
+                generation,
+                lease_lost=lease_lost,
+            )
+        if deadline_expired:
+            diagnostics = video_ports()._generation_diagnostics(generation)
+            diagnostics.setdefault(
+                "deadline_expired_at",
+                video_ports()._now().isoformat(),
+            )
+            diagnostics["deadline_expired_polling_continues"] = True
+            generation.diagnostics = diagnostics
+        if should_persist_preflight:
+            video_ports()._raise_if_video_lease_lost(
+                lease_lost,
+                "video poll lease lost before state commit",
+            )
+            await _persist_poll_preflight_diagnostics(
+                task_id,
+                provider_task_id,
+                video_ports()._generation_diagnostics(generation),
+            )
         poll = await adapter.poll(provider_task_id)
         video_ports()._raise_if_video_lease_lost(
             lease_lost,

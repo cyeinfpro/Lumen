@@ -656,6 +656,9 @@ async def enhance_prompt(
             },
         )
     billing = await _prepare_prompt_enhance_billing(db, user)
+    commit = getattr(db, "commit", None)
+    if callable(commit):
+        await commit()
 
     return _GuardedEnhanceStreamingResponse(
         _stream_with_keepalive(
@@ -711,8 +714,13 @@ async def enhance_video_prompt(
         user_id=user.id,
     )
     if token_changed:
-        await db.commit()
+        commit = getattr(db, "commit", None)
+        if callable(commit):
+            await commit()
     billing = await _prepare_prompt_enhance_billing(db, user)
+    commit = getattr(db, "commit", None)
+    if callable(commit):
+        await commit()
 
     return _GuardedEnhanceStreamingResponse(
         _stream_with_keepalive(

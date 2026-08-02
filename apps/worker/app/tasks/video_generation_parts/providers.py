@@ -226,6 +226,9 @@ async def input_image_bytes(
         if image is not None:
             mime = image.mime
             key = key or image.storage_key
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            await commit()
     if not key:
         raise RuntimeError("i2v input image storage key missing")
     return await video_ports().storage.aget_bytes(key), mime

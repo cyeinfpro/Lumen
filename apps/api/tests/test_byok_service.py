@@ -159,8 +159,9 @@ async def test_validate_api_key_with_supplier_calls_responses_endpoint(
     monkeypatch.setattr(byok_service.httpx, "AsyncClient", fake_client)
 
     outcome = await byok_service.validate_api_key_with_supplier(
-        object(),  # type: ignore[arg-type]
-        _supplier(base_url="https://upstream.example/v1"),
+        byok_service.SupplierValidationTarget.from_supplier(
+            _supplier(base_url="https://upstream.example/v1")
+        ),
         "  sk-user-token  ",
         timeout_ms=20_000,
     )
@@ -204,8 +205,7 @@ async def test_validate_api_key_with_supplier_classifies_http_errors(
     )
 
     outcome = await byok_service.validate_api_key_with_supplier(
-        object(),  # type: ignore[arg-type]
-        _supplier(),
+        byok_service.SupplierValidationTarget.from_supplier(_supplier()),
         "sk-user",
     )
 
@@ -226,8 +226,7 @@ async def test_validate_api_key_with_supplier_rejects_wrong_answer(
     )
 
     outcome = await byok_service.validate_api_key_with_supplier(
-        object(),  # type: ignore[arg-type]
-        _supplier(),
+        byok_service.SupplierValidationTarget.from_supplier(_supplier()),
         "sk-user",
     )
 
@@ -245,8 +244,7 @@ async def test_validate_api_key_with_supplier_rejects_blank_key_before_http(
     monkeypatch.setattr(byok_service.httpx, "AsyncClient", fail_client)
 
     outcome = await byok_service.validate_api_key_with_supplier(
-        object(),  # type: ignore[arg-type]
-        _supplier(),
+        byok_service.SupplierValidationTarget.from_supplier(_supplier()),
         "   ",
     )
 

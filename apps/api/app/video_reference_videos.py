@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import math
 import os
 import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import event, or_, select
+from sqlalchemy import and_, case, event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.capacity_leases import CapacityLeaseLost
@@ -26,6 +25,7 @@ from lumen_core.storage_capacity import (
     StorageCapacityUnavailable,
 )
 
+from . import video_reference_probe as reference_probe
 from .services.video_storage_capacity import (
     VideoReferenceStorageQuotaExceeded,
     VideoStorageCapacityManager,
@@ -37,40 +37,55 @@ from .services.video_storage_capacity import (
 )
 from .services.video_storage_lifecycle import (
     VIDEO_STORAGE_CLEANUP_METADATA_KEY,
-    video_reference_declared_quota_contribution,
     video_reference_variant_quota_bytes,
 )
 
-
-VIDEO_REFERENCE_VIDEO_KIND = "video_ref_seedance_r2v_mp4"
-VIDEO_REFERENCE_VIDEO_MIME = "video/mp4"
-VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT = 2_086_876
-VIDEO_REFERENCE_VIDEO_MAX_SIDE = 1920
-VIDEO_REFERENCE_VIDEO_MAX_BYTES = 50 * 1024 * 1024
-VIDEO_REFERENCE_VIDEO_TARGET_FPS = 30
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXELS = 16_777_216
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_SIDE = 4096
-VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS = 2_000
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS = 15_000
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_FPS = 60.0
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXEL_RATE = 300_000_000.0
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DECODE_PIXELS = 4_000_000_000.0
-VIDEO_REFERENCE_VIDEO_FFPROBE_TIMEOUT_SECONDS = 15
-VIDEO_REFERENCE_VIDEO_FFMPEG_TIMEOUT_SECONDS = 120
-VIDEO_REFERENCE_VIDEO_FFMPEG_MAX_ALLOC_BYTES = 256 * 1024 * 1024
-_VIDEO_REFERENCE_VIDEO_DURATION_TOLERANCE_MS = 500
-_VIDEO_REFERENCE_VIDEO_PROBE_OUTPUT_MAX_BYTES = 64 * 1024
+_STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS = 30.0
 _VIDEO_REFERENCE_VIDEO_HASH_CHUNK_BYTES = 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
-
-class VideoReferenceVideoError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.status_code = status_code
+VIDEO_REFERENCE_VIDEO_FFMPEG_MAX_ALLOC_BYTES = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_FFMPEG_MAX_ALLOC_BYTES
+)
+VIDEO_REFERENCE_VIDEO_FFMPEG_TIMEOUT_SECONDS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_FFMPEG_TIMEOUT_SECONDS
+)
+VIDEO_REFERENCE_VIDEO_KIND = reference_probe.VIDEO_REFERENCE_VIDEO_KIND
+VIDEO_REFERENCE_VIDEO_MAX_BYTES = reference_probe.VIDEO_REFERENCE_VIDEO_MAX_BYTES
+VIDEO_REFERENCE_VIDEO_MAX_SIDE = reference_probe.VIDEO_REFERENCE_VIDEO_MAX_SIDE
+VIDEO_REFERENCE_VIDEO_MIME = reference_probe.VIDEO_REFERENCE_VIDEO_MIME
+VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT = reference_probe.VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DECODE_PIXELS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DECODE_PIXELS
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_FPS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_FPS
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXEL_RATE = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXEL_RATE
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXELS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXELS
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_SIDE = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MAX_SIDE
+)
+VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS = (
+    reference_probe.VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS
+)
+VIDEO_REFERENCE_VIDEO_TARGET_FPS = reference_probe.VIDEO_REFERENCE_VIDEO_TARGET_FPS
+VideoReferenceVideoError = reference_probe.VideoReferenceVideoError
+_fit_even_dimensions = reference_probe._fit_even_dimensions
+_float_or_none = reference_probe._float_or_none
+_fps = reference_probe._fps
+_int_or_zero = reference_probe._int_or_zero
+_probe_video = reference_probe._probe_video
+_validate_output_video = reference_probe._validate_output_video
+_validate_source_video = reference_probe._validate_source_video
 
 
 @dataclass(frozen=True)
@@ -136,279 +151,6 @@ def _mkdir_parents_durable(path: Path) -> None:
                 raise
         else:
             _fsync_directory(directory.parent)
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _int_or_zero(value: Any) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
-
-
-def _fps(value: Any) -> float | None:
-    if not isinstance(value, str) or "/" not in value:
-        return _float_or_none(value)
-    left, right = value.split("/", 1)
-    try:
-        denominator = float(right)
-        if denominator == 0:
-            return None
-        return float(left) / denominator
-    except (TypeError, ValueError):
-        return None
-
-
-def _fit_even_dimensions(
-    width: int,
-    height: int,
-    *,
-    max_pixels: int = VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,
-    max_side: int = VIDEO_REFERENCE_VIDEO_MAX_SIDE,
-) -> tuple[int, int]:
-    if width <= 0 or height <= 0:
-        raise VideoReferenceVideoError(
-            "invalid_video", "reference video has invalid dimensions", 400
-        )
-    scale = min(
-        1.0,
-        max_side / max(width, height),
-        math.sqrt(max_pixels / (width * height)),
-    )
-    target_width = max(2, int(width * scale) // 2 * 2)
-    target_height = max(2, int(height * scale) // 2 * 2)
-    while target_width * target_height > max_pixels:
-        if target_width >= target_height and target_width > 2:
-            target_width -= 2
-        elif target_height > 2:
-            target_height -= 2
-        else:
-            break
-    return target_width, target_height
-
-
-def _probe_video(ffprobe: str, path: Path) -> dict[str, Any]:
-    try:
-        proc = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-print_format",
-                "json",
-                "-show_entries",
-                (
-                    "stream=codec_type,codec_name,width,height,duration,"
-                    "avg_frame_rate,r_frame_rate:format=duration,size"
-                ),
-                "-show_streams",
-                "-show_format",
-                str(path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=VIDEO_REFERENCE_VIDEO_FFPROBE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise VideoReferenceVideoError(
-            "invalid_video",
-            "reference video inspection timed out",
-            422,
-        ) from exc
-    except OSError as exc:
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "reference video inspection could not start",
-            503,
-        ) from exc
-    if proc.returncode != 0:
-        logger.info(
-            "reference video ffprobe rejected media stderr=%r",
-            proc.stderr.decode("utf-8", "replace")[-500:],
-        )
-        raise VideoReferenceVideoError(
-            "invalid_video",
-            "reference video could not be inspected",
-            400,
-        )
-    if len(proc.stdout) > _VIDEO_REFERENCE_VIDEO_PROBE_OUTPUT_MAX_BYTES:
-        raise VideoReferenceVideoError(
-            "invalid_video",
-            "reference video metadata is too large",
-            422,
-        )
-    try:
-        raw = json.loads(proc.stdout.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise VideoReferenceVideoError(
-            "invalid_video", "invalid ffprobe output", 400
-        ) from exc
-    raw_streams = raw.get("streams") if isinstance(raw, dict) else None
-    streams = raw_streams if isinstance(raw_streams, list) else []
-    video_stream = next(
-        (
-            item
-            for item in streams
-            if isinstance(item, dict) and item.get("codec_type") == "video"
-        ),
-        None,
-    )
-    if not isinstance(video_stream, dict):
-        raise VideoReferenceVideoError(
-            "invalid_video", "reference video has no video stream", 400
-        )
-    audio_stream = next(
-        (
-            item
-            for item in streams
-            if isinstance(item, dict) and item.get("codec_type") == "audio"
-        ),
-        None,
-    )
-    duration = _float_or_none(video_stream.get("duration")) or _float_or_none(
-        (raw.get("format") or {}).get("duration") if isinstance(raw, dict) else None
-    )
-    audio_codec = (
-        str(audio_stream.get("codec_name") or "")
-        if isinstance(audio_stream, dict)
-        else ""
-    )
-    return {
-        "width": _int_or_zero(video_stream.get("width")),
-        "height": _int_or_zero(video_stream.get("height")),
-        "duration_ms": int(duration * 1000) if duration is not None else 0,
-        "fps": _fps(
-            video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate")
-        ),
-        "has_audio": audio_stream is not None,
-        "video_codec": str(video_stream.get("codec_name") or ""),
-        "audio_codec": audio_codec,
-        "size_bytes": max(
-            _int_or_zero(
-                (raw.get("format") or {}).get("size") if isinstance(raw, dict) else None
-            ),
-            path.stat().st_size,
-        ),
-    }
-
-
-def _validate_source_video(metadata: dict[str, Any]) -> None:
-    width = _int_or_zero(metadata.get("width"))
-    height = _int_or_zero(metadata.get("height"))
-    pixels = width * height
-    if (
-        width <= 0
-        or height <= 0
-        or max(width, height) > VIDEO_REFERENCE_VIDEO_SOURCE_MAX_SIDE
-        or pixels > VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXELS
-    ):
-        raise VideoReferenceVideoError(
-            "too_many_video_pixels",
-            "reference video exceeds the safe source resolution limit",
-            413,
-        )
-    duration_ms = _int_or_zero(metadata.get("duration_ms"))
-    if not (
-        VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS
-        <= duration_ms
-        <= VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS
-    ):
-        raise VideoReferenceVideoError(
-            "invalid_video_duration",
-            "reference video duration must be between 2 and 15 seconds",
-            422,
-        )
-    fps = _float_or_none(metadata.get("fps"))
-    if fps is None or fps <= 0 or fps > VIDEO_REFERENCE_VIDEO_SOURCE_MAX_FPS:
-        raise VideoReferenceVideoError(
-            "invalid_video_fps",
-            "reference video frame rate is invalid or exceeds the safe limit",
-            422,
-        )
-    pixel_rate = pixels * fps
-    decoded_pixels = pixel_rate * (duration_ms / 1000)
-    if (
-        pixel_rate > VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXEL_RATE
-        or decoded_pixels > VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DECODE_PIXELS
-    ):
-        raise VideoReferenceVideoError(
-            "video_decode_budget_exceeded",
-            "reference video exceeds the safe decode workload limit",
-            413,
-        )
-
-
-def _validate_output_video(
-    metadata: dict[str, Any],
-    *,
-    expected_width: int,
-    expected_height: int,
-    expected_duration_ms: int,
-) -> None:
-    width = _int_or_zero(metadata.get("width"))
-    height = _int_or_zero(metadata.get("height"))
-    if (
-        width != expected_width
-        or height != expected_height
-        or width * height > VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT
-        or max(width, height) > VIDEO_REFERENCE_VIDEO_MAX_SIDE
-    ):
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video has invalid dimensions",
-            503,
-        )
-    duration_ms = _int_or_zero(metadata.get("duration_ms"))
-    if not (
-        VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS
-        <= duration_ms
-        <= (
-            VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS
-            + _VIDEO_REFERENCE_VIDEO_DURATION_TOLERANCE_MS
-        )
-    ) or abs(duration_ms - expected_duration_ms) > (
-        _VIDEO_REFERENCE_VIDEO_DURATION_TOLERANCE_MS
-    ):
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video has invalid duration",
-            503,
-        )
-    fps = _float_or_none(metadata.get("fps"))
-    if fps is None or fps <= 0 or fps > VIDEO_REFERENCE_VIDEO_TARGET_FPS + 0.5:
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video has invalid frame rate",
-            503,
-        )
-    if metadata.get("video_codec") != "h264":
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video must use H.264",
-            503,
-        )
-    if metadata.get("has_audio") and metadata.get("audio_codec") != "aac":
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video audio must use AAC",
-            503,
-        )
-    size_bytes = _int_or_zero(metadata.get("size_bytes"))
-    if size_bytes <= 0 or size_bytes > VIDEO_REFERENCE_VIDEO_MAX_BYTES:
-        raise VideoReferenceVideoError(
-            "video_reference_transcode_failed",
-            "transcoded reference video exceeds the output size limit",
-            503,
-        )
 
 
 def _sha256_file(path: Path) -> str:
@@ -654,9 +396,13 @@ def make_video_reference_mp4(
 
 
 async def _wait_for_started_task(task: asyncio.Future[Any]) -> Any:
+    deadline = time.monotonic() + _STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("video reference operation confirmation timed out")
         try:
-            return await asyncio.shield(task)
+            return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
@@ -675,13 +421,15 @@ async def _render_reference_variant(
     )
     try:
         return await asyncio.shield(task)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancellation:
         try:
             await _wait_for_started_task(task)
         except BaseException:
-            pass
+            task.add_done_callback(
+                lambda _done: destination.unlink(missing_ok=True)
+            )
         await asyncio.to_thread(destination.unlink, missing_ok=True)
-        raise
+        raise cancellation
 
 
 def video_reference_variant_metadata(video: Video) -> dict[str, Any] | None:
@@ -700,49 +448,238 @@ def video_reference_variant_metadata(video: Video) -> dict[str, Any] | None:
     return raw
 
 
-def _result_rows(result: Any) -> list[Any]:
-    scalars = getattr(result, "scalars", None)
-    if callable(scalars):
-        return list(scalars().all())
-    value = result.scalar_one_or_none()
-    return [] if value is None else [value]
+@dataclass(frozen=True)
+class _ReferenceSourceSnapshot:
+    id: str
+    user_id: str
+    storage_key: str
+    sha256: str
+    metadata_jsonb: dict[str, Any]
+
+    @classmethod
+    def from_video(cls, video: Video) -> _ReferenceSourceSnapshot:
+        return cls(
+            str(video.id),
+            str(video.user_id),
+            str(video.storage_key),
+            str(video.sha256),
+            metadata_jsonb=dict(video.metadata_jsonb or {}),
+        )
 
 
-async def _locked_reference_storage_usage(
-    db: AsyncSession,
-    *,
-    user_id: str,
-) -> int:
+async def _reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
     cleanup_state = Video.metadata_jsonb[VIDEO_STORAGE_CLEANUP_METADATA_KEY][
         "state"
     ].as_string()
-    upstream_variant_key = Video.metadata_jsonb["upstream_reference_video_variant"][
-        "storage_key"
-    ].as_string()
-    volcano_variant_key = Video.metadata_jsonb["volcano_asset_video_variant"][
-        "storage_key"
-    ].as_string()
-    rows = _result_rows(
+    cleanup_complete = and_(Video.deleted_at.is_not(None), cleanup_state == "complete")
+    primary_bytes = case(
+        (Video.storage_key.like(f"u/{user_id}/vref/%"), Video.size_bytes),
+        else_=0,
+    )
+    upstream_bytes = func.coalesce(
+        Video.metadata_jsonb["upstream_reference_video_variant"][
+            "size_bytes"
+        ].as_integer(),
+        0,
+    )
+    volcano_bytes = func.coalesce(
+        Video.metadata_jsonb["volcano_asset_video_variant"]["size_bytes"].as_integer(),
+        0,
+    )
+    contribution = case(
+        (cleanup_complete, 0),
+        else_=primary_bytes + upstream_bytes + volcano_bytes,
+    )
+    raw = (
+        await db.execute(
+            select(func.coalesce(func.sum(contribution), 0)).where(
+                Video.user_id == user_id
+            )
+        )
+    ).scalar_one()
+    return max(0, int(raw or 0))
+
+
+async def _snapshot_reference_source(
+    db: AsyncSession,
+    *,
+    video_id: str,
+) -> _ReferenceSourceSnapshot:
+    source = (
         await db.execute(
             select(Video)
-            .where(
-                Video.user_id == user_id,
-                or_(
-                    Video.storage_key.like(f"u/{user_id}/vref/%"),
-                    upstream_variant_key.is_not(None),
-                    volcano_variant_key.is_not(None),
-                ),
-                or_(
-                    Video.deleted_at.is_(None),
-                    cleanup_state.is_(None),
-                    cleanup_state != "complete",
-                ),
-            )
-            .with_for_update()
+            .where(Video.id == video_id, Video.deleted_at.is_(None))
             .execution_options(populate_existing=True)
         )
+    ).scalar_one_or_none()
+    if source is None:
+        await db.rollback()
+        raise VideoReferenceVideoError("not_found", "video was deleted", 404)
+    snapshot = _ReferenceSourceSnapshot.from_video(source)
+    await db.commit()
+    return snapshot
+
+
+async def _variant_file_matches(
+    storage_root: str,
+    variant: dict[str, Any],
+) -> bool:
+    return await asyncio.to_thread(
+        _file_matches,
+        _storage_path(storage_root, str(variant["storage_key"])),
+        size_bytes=int(variant.get("size_bytes") or 0),
+        sha256=str(variant["sha256"]),
     )
-    return sum(video_reference_declared_quota_contribution(row)[1] for row in rows)
+
+
+def _variant_payload(
+    rendered: VideoReferenceMp4,
+    *,
+    storage_key: str,
+) -> dict[str, Any]:
+    return {
+        "kind": VIDEO_REFERENCE_VIDEO_KIND,
+        "storage_key": storage_key,
+        "mime": VIDEO_REFERENCE_VIDEO_MIME,
+        "width": rendered.width,
+        "height": rendered.height,
+        "duration_ms": rendered.duration_ms,
+        "fps": rendered.fps,
+        "has_audio": rendered.has_audio,
+        "size_bytes": rendered.size_bytes,
+        "sha256": rendered.sha256,
+        "pixel_limit": VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,
+        "max_side": VIDEO_REFERENCE_VIDEO_MAX_SIDE,
+        "max_bytes": VIDEO_REFERENCE_VIDEO_MAX_BYTES,
+        "target_fps": VIDEO_REFERENCE_VIDEO_TARGET_FPS,
+    }
+
+
+async def _discard_installed_variant(
+    path: Path,
+    *,
+    size_bytes: int,
+    sha256: str,
+) -> None:
+    if await asyncio.to_thread(
+        _file_matches,
+        path,
+        size_bytes=size_bytes,
+        sha256=sha256,
+    ):
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+async def _discard_replaced_variant_best_effort(
+    *,
+    storage_root: str,
+    replaced: dict[str, Any] | None,
+    replacement_key: str,
+) -> None:
+    if not isinstance(replaced, dict):
+        return
+    storage_key = replaced.get("storage_key")
+    if (
+        not isinstance(storage_key, str)
+        or not storage_key
+        or storage_key == replacement_key
+    ):
+        return
+    try:
+        size_bytes = int(replaced.get("size_bytes") or 0)
+        sha256 = str(replaced["sha256"])
+        await _discard_installed_variant(
+            _storage_path(storage_root, storage_key),
+            size_bytes=size_bytes,
+            sha256=sha256,
+        )
+    except Exception:
+        logger.warning(
+            "replaced reference video variant cleanup failed key=%s",
+            storage_key,
+            exc_info=True,
+        )
+
+
+async def _adopt_reference_variant(
+    db: AsyncSession,
+    *,
+    source: _ReferenceSourceSnapshot,
+    variant: dict[str, Any],
+    destination: Path,
+    observed_existing: dict[str, Any] | None,
+    storage_root: str,
+) -> tuple[dict[str, Any], bool]:
+    observed = observed_existing
+    for _attempt in range(3):
+        try:
+            await db.execute(
+                select(User.id).where(User.id == source.user_id).with_for_update()
+            )
+            current = (
+                await db.execute(
+                    select(Video)
+                    .where(
+                        Video.id == source.id,
+                        Video.user_id == source.user_id,
+                        Video.storage_key == source.storage_key,
+                        Video.sha256 == source.sha256,
+                        Video.deleted_at.is_(None),
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if current is None:
+                raise VideoReferenceVideoError(
+                    "video_reference_changed",
+                    "video changed or was deleted during reference preparation",
+                    409,
+                )
+            existing = video_reference_variant_metadata(current)
+            if existing is not None and existing != observed:
+                candidate = dict(existing)
+                await db.commit()
+                if await _variant_file_matches(storage_root, candidate):
+                    return candidate, False
+                observed = candidate
+                continue
+            current_bytes = await _reference_storage_usage(
+                db,
+                user_id=source.user_id,
+            )
+            enforce_video_reference_storage_quota(
+                current_bytes=current_bytes,
+                replaced_bytes=video_reference_variant_quota_bytes(
+                    current,
+                    "upstream_reference_video_variant",
+                ),
+                added_bytes=int(variant["size_bytes"]),
+            )
+            _discard_orphaned_variant_on_rollback(
+                db,
+                destination,
+                size_bytes=int(variant["size_bytes"]),
+                sha256=str(variant["sha256"]),
+            )
+            metadata = dict(current.metadata_jsonb or {})
+            metadata["upstream_reference_video_variant"] = variant
+            current.metadata_jsonb = metadata
+            await db.commit()
+            await _discard_replaced_variant_best_effort(
+                storage_root=storage_root,
+                replaced=existing,
+                replacement_key=str(variant["storage_key"]),
+            )
+            return variant, True
+        except BaseException:
+            await db.rollback()
+            raise
+    raise VideoReferenceVideoError(
+        "video_reference_changed",
+        "reference video variant changed concurrently; retry",
+        409,
+    )
 
 
 async def ensure_video_reference_video_variant(
@@ -753,98 +690,34 @@ async def ensure_video_reference_video_variant(
     storage_capacity: VideoStorageCapacityManager | None = None,
     transcode_capacity: VideoTranscodeCapacityManager | None = None,
 ) -> dict[str, Any]:
-    source_video = (
-        await db.execute(
-            select(Video)
-            .where(
-                Video.id == video.id,
-                Video.deleted_at.is_(None),
-            )
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-    if source_video is None:
-        raise VideoReferenceVideoError("not_found", "video was deleted", 404)
-    video = source_video
-
-    existing = video_reference_variant_metadata(video)
-    if existing is not None and _file_matches(
-        _storage_path(storage_root, str(existing["storage_key"])),
-        size_bytes=int(existing.get("size_bytes") or 0),
-        sha256=str(existing["sha256"]),
-    ):
+    source = await _snapshot_reference_source(db, video_id=str(video.id))
+    existing_raw = source.metadata_jsonb.get("upstream_reference_video_variant")
+    existing = dict(existing_raw) if isinstance(existing_raw, dict) else None
+    if existing is not None and await _variant_file_matches(storage_root, existing):
         return existing
-
-    source_video_id = str(video.id)
-    source_user_id = str(video.user_id)
-    source_storage_key = str(video.storage_key)
-    source_sha256 = str(video.sha256)
-    source_path = _storage_path(storage_root, video.storage_key)
-    key = video_reference_video_key(video)
-    destination = _storage_path(storage_root, key)
-    staged = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.stage")
+    source_path = _storage_path(storage_root, source.storage_key)
+    staged = source_path.with_name(
+        f".{source.id}.{VIDEO_REFERENCE_VIDEO_KIND}.{secrets.token_hex(8)}.stage"
+    )
+    destination: Path | None = None
+    rendered: VideoReferenceMp4 | None = None
     installed = False
+    adopted = False
     try:
         async with (
             transcode_capacity or build_video_transcode_capacity_manager()
-        ).hold(user_id=str(video.user_id)):
+        ).hold(user_id=source.user_id):
             async with (
                 storage_capacity or build_video_storage_capacity_manager()
             ).reserve(2 * VIDEO_REFERENCE_VIDEO_MAX_BYTES):
                 rendered = await _render_reference_variant(source_path, staged)
-                await db.execute(
-                    select(User.id).where(User.id == source_user_id).with_for_update()
-                )
-                current_video = (
-                    await db.execute(
-                        select(Video)
-                        .where(
-                            Video.id == source_video_id,
-                            Video.user_id == source_user_id,
-                            Video.storage_key == source_storage_key,
-                            Video.sha256 == source_sha256,
-                            Video.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
+                key = str(
+                    Path(source.storage_key).with_name(
+                        f"{source.id}.{VIDEO_REFERENCE_VIDEO_KIND}."
+                        f"{secrets.token_hex(12)}.mp4"
                     )
-                ).scalar_one_or_none()
-                if current_video is None:
-                    raise VideoReferenceVideoError(
-                        "video_reference_changed",
-                        "video changed or was deleted during reference preparation",
-                        409,
-                    )
-                video = current_video
-                existing = video_reference_variant_metadata(video)
-                if existing is not None and _file_matches(
-                    _storage_path(
-                        storage_root,
-                        str(existing["storage_key"]),
-                    ),
-                    size_bytes=int(existing.get("size_bytes") or 0),
-                    sha256=str(existing["sha256"]),
-                ):
-                    return existing
-                current_bytes = await _locked_reference_storage_usage(
-                    db,
-                    user_id=source_user_id,
                 )
-                replaced_bytes = video_reference_variant_quota_bytes(
-                    video,
-                    "upstream_reference_video_variant",
-                )
-                enforce_video_reference_storage_quota(
-                    current_bytes=current_bytes,
-                    replaced_bytes=replaced_bytes,
-                    added_bytes=rendered.size_bytes,
-                )
-                _discard_orphaned_variant_on_rollback(
-                    db,
-                    destination,
-                    size_bytes=rendered.size_bytes,
-                    sha256=rendered.sha256,
-                )
+                destination = _storage_path(storage_root, key)
                 install_task = asyncio.ensure_future(
                     asyncio.to_thread(
                         _install_staged_variant,
@@ -856,31 +729,32 @@ async def ensure_video_reference_video_variant(
                 )
                 try:
                     await asyncio.shield(install_task)
-                except asyncio.CancelledError:
-                    await _wait_for_started_task(install_task)
-                    raise
+                except asyncio.CancelledError as cancellation:
+                    try:
+                        await _wait_for_started_task(install_task)
+                    except BaseException:
+                        install_task.add_done_callback(
+                            lambda _done: destination.unlink(missing_ok=True)
+                        )
+                    raise cancellation
                 installed = True
-
-                variant = {
-                    "kind": VIDEO_REFERENCE_VIDEO_KIND,
-                    "storage_key": key,
-                    "mime": VIDEO_REFERENCE_VIDEO_MIME,
-                    "width": rendered.width,
-                    "height": rendered.height,
-                    "duration_ms": rendered.duration_ms,
-                    "fps": rendered.fps,
-                    "has_audio": rendered.has_audio,
-                    "size_bytes": rendered.size_bytes,
-                    "sha256": rendered.sha256,
-                    "pixel_limit": VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT,
-                    "max_side": VIDEO_REFERENCE_VIDEO_MAX_SIDE,
-                    "max_bytes": VIDEO_REFERENCE_VIDEO_MAX_BYTES,
-                    "target_fps": VIDEO_REFERENCE_VIDEO_TARGET_FPS,
-                }
-                metadata = dict(video.metadata_jsonb or {})
-                metadata["upstream_reference_video_variant"] = variant
-                video.metadata_jsonb = metadata
-                return variant
+                variant = _variant_payload(rendered, storage_key=key)
+                result, adopted = await _adopt_reference_variant(
+                    db,
+                    source=source,
+                    variant=variant,
+                    destination=destination,
+                    observed_existing=existing,
+                    storage_root=storage_root,
+                )
+                if not adopted:
+                    await _discard_installed_variant(
+                        destination,
+                        size_bytes=rendered.size_bytes,
+                        sha256=rendered.sha256,
+                    )
+                    installed = False
+                return result
     except VideoTranscodeCapacityUnavailable as exc:
         raise VideoReferenceVideoError(
             "video_reference_transcode_capacity",
@@ -894,12 +768,6 @@ async def ensure_video_reference_video_variant(
             507,
         ) from exc
     except (StorageCapacityUnavailable, CapacityLeaseLost) as exc:
-        if installed and _file_matches(
-            destination,
-            size_bytes=rendered.size_bytes,
-            sha256=rendered.sha256,
-        ):
-            await asyncio.to_thread(destination.unlink, missing_ok=True)
         raise VideoReferenceVideoError(
             "storage_capacity_unavailable",
             "reference video storage capacity is temporarily unavailable",
@@ -913,3 +781,14 @@ async def ensure_video_reference_video_variant(
         ) from exc
     finally:
         await asyncio.to_thread(staged.unlink, missing_ok=True)
+        if (
+            installed
+            and not adopted
+            and destination is not None
+            and rendered is not None
+        ):
+            await _discard_installed_variant(
+                destination,
+                size_bytes=rendered.size_bytes,
+                sha256=rendered.sha256,
+            )

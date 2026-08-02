@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from lumen_core.capacity_leases import (
     CapacityLeaseLost,
@@ -21,6 +23,7 @@ from .storage import LocalStorage, StorageDiskFullError
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_STORAGE_OPERATION_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -36,10 +39,21 @@ class StorageWriteOperation:
     write: Callable[[], bool]
 
 
-async def _wait_for_started_task(task: asyncio.Future[object]) -> object:
+async def wait_for_started_task(
+    task: asyncio.Future[object],
+    *,
+    timeout_seconds: float,
+) -> object:
+    deadline = time.monotonic() + max(0.001, timeout_seconds)
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("storage operation confirmation timed out")
         try:
-            return await asyncio.shield(task)
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=remaining,
+            )
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
@@ -67,12 +81,27 @@ class StorageWriteCoordinator:
         storage: LocalStorage,
         capacity: StorageCapacityPort,
         lease_ttl_seconds: float,
+        operation_timeout_seconds: float = DEFAULT_STORAGE_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
         if lease_ttl_seconds <= 0:
             raise ValueError("storage write lease TTL must be positive")
         self.storage = storage
         self.capacity = capacity
         self.lease_ttl_seconds = lease_ttl_seconds
+        self.operation_timeout_seconds = max(0.001, operation_timeout_seconds)
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def track_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.add(task)
+
+        def consume(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            try:
+                done.result()
+            except BaseException:
+                pass
+
+        task.add_done_callback(consume)
 
     @staticmethod
     def _reservation_bytes(
@@ -81,17 +110,14 @@ class StorageWriteCoordinator:
         # LocalStorage writes a temporary file before publishing the final path.
         return 2 * sum(max(0, operation.size_bytes) for operation in operations)
 
-    async def _delete_created(self, keys: Sequence[str]) -> None:
+    async def _delete_created_task(self, keys: Sequence[str]) -> None:
         unique_keys = list(dict.fromkeys(keys))
         if not unique_keys:
             return
-        cleanup = asyncio.ensure_future(
-            asyncio.gather(
-                *(asyncio.to_thread(self.storage.delete, key) for key in unique_keys),
-                return_exceptions=True,
-            )
+        results = await asyncio.gather(
+            *(asyncio.to_thread(self.storage.delete, key) for key in unique_keys),
+            return_exceptions=True,
         )
-        results = await _wait_for_started_task(cleanup)
         for key, result in zip(unique_keys, results, strict=False):
             if isinstance(result, BaseException):
                 logger.warning(
@@ -99,6 +125,30 @@ class StorageWriteCoordinator:
                     key,
                     result,
                 )
+
+    async def _delete_created(self, keys: Sequence[str]) -> None:
+        cleanup = asyncio.create_task(self._delete_created_task(keys))
+        try:
+            await wait_for_started_task(
+                cleanup,
+                timeout_seconds=self.operation_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(
+                "storage cleanup exceeded %.3fs; continuing in background",
+                self.operation_timeout_seconds,
+            )
+            self.track_background_task(cleanup)
+
+    async def _finish_abandoned_write(
+        self,
+        started: asyncio.Future[object],
+    ) -> None:
+        raw_results = await asyncio.shield(started)
+        if not isinstance(raw_results, Sequence):
+            return
+        created_keys, _first_error = _write_outcome(raw_results)
+        await self._delete_created(created_keys)
 
     async def write_files(
         self,
@@ -162,8 +212,17 @@ class StorageWriteCoordinator:
                     asyncio.shield(started),
                     guard,
                 )
-            except BaseException:
-                raw_results = await _wait_for_started_task(started)
+            except BaseException as operation_error:
+                try:
+                    raw_results = await wait_for_started_task(
+                        started,
+                        timeout_seconds=self.operation_timeout_seconds,
+                    )
+                except TimeoutError:
+                    self.track_background_task(
+                        asyncio.create_task(self._finish_abandoned_write(started))
+                    )
+                    raise operation_error
                 created_keys, _first_error = _write_outcome(raw_results)
                 await self._delete_created(created_keys)
                 raise
@@ -211,4 +270,5 @@ __all__ = [
     "StorageWrite",
     "StorageWriteCoordinator",
     "StorageWriteOperation",
+    "wait_for_started_task",
 ]

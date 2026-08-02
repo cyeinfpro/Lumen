@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+import secrets
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +44,7 @@ from ..domain.artifact import (
     ArtifactKey,
     ArtifactManifestItem,
     ArtifactStatus,
+    PublishedArtifact,
     UploadTicket,
 )
 from ..domain.resource_estimate import ImageResourceEstimate
@@ -61,6 +64,8 @@ logger = logging.getLogger(__name__)
 
 _INITIAL_STORAGE_SAFETY_MIN_BYTES = 1024 * 1024
 _INITIAL_STORAGE_SAFETY_MAX_BYTES = 8 * 1024 * 1024
+_DEFAULT_PUBLISH_TIMEOUT_SECONDS = 60.0
+_MAX_PUBLISH_TIMEOUT_SECONDS = 90.0
 
 
 class UploadCommandError(ValueError):
@@ -69,6 +74,10 @@ class UploadCommandError(ValueError):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+class UploadPublishTimeout(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -98,6 +107,12 @@ class _ReservedUploadContext:
     storage_reservation_bytes: int | None
 
 
+@dataclass
+class _UploadCommandState(UploadExecutionState):
+    user_id: str = ""
+    storage_intent_token: str | None = None
+
+
 def _active_user_upload_error(error: ActiveUserFenceError) -> UploadCommandError:
     if isinstance(error, ActiveSessionExpired):
         code, message = "session_expired", "session expired"
@@ -121,6 +136,12 @@ def _artifact_store_upload_error(error: ArtifactStoreError) -> UploadCommandErro
 
 
 def _map_upload_error(error: Exception) -> UploadCommandError | None:
+    if isinstance(error, UploadPublishTimeout):
+        return UploadCommandError(
+            "upload_storage_timeout",
+            "image artifact publication timed out",
+            503,
+        )
     if isinstance(error, (CapacityExceeded, CapacityUnavailable, CapacityLeaseLost)):
         return UploadCommandError(
             "upload_capacity_exceeded",
@@ -183,6 +204,7 @@ class UploadCommandService:
         repository: SQLAlchemyImageRepository,
         processing_executor: ImageProcessingExecutorPort,
         storage_lease_ttl_seconds: float | None = None,
+        publish_timeout_seconds: float = _DEFAULT_PUBLISH_TIMEOUT_SECONDS,
     ) -> None:
         self.artifacts = artifacts
         self.capacity = capacity
@@ -198,6 +220,13 @@ class UploadCommandService:
             if storage_lease_ttl_seconds is None
             else storage_lease_ttl_seconds
         )
+        if (
+            not math.isfinite(publish_timeout_seconds)
+            or publish_timeout_seconds <= 0
+            or publish_timeout_seconds > _MAX_PUBLISH_TIMEOUT_SECONDS
+        ):
+            raise ValueError("image publish timeout must be between 0 and 90 seconds")
+        self.publish_timeout_seconds = float(publish_timeout_seconds)
 
     async def aclose(self) -> None:
         await self.processing_executor.aclose()
@@ -297,7 +326,7 @@ class UploadCommandService:
 
     async def _run_reserved(
         self,
-        state: UploadExecutionState,
+        state: _UploadCommandState,
         context: _ReservedUploadContext,
     ) -> Image:
         inspection = await self._stage_and_inspect(
@@ -370,7 +399,7 @@ class UploadCommandService:
 
     async def _publish_and_mark_ready(
         self,
-        state: UploadExecutionState,
+        state: _UploadCommandState,
         *,
         lease_guard: CapacityLeaseGuard,
         user_id: str,
@@ -385,26 +414,20 @@ class UploadCommandService:
             guard for guard in (lease_guard, storage_lease_guard) if guard is not None
         )
         await assert_capacity_leases_owned(guards)
-        async with self._active_user_fence(user_id, session_id=session_id):
-            original = await race_with_capacity_leases(
-                self.artifacts.publish_path(
-                    prepared.original_path,
-                    original_key,
-                    expected=prepared.original_identity,
-                ),
-                guards,
-            )
-            await assert_capacity_leases_owned(guards)
-            normalized_ref = await race_with_capacity_leases(
-                self.artifacts.publish_path(
-                    prepared.normalized_ref_path,
-                    normalized_key,
-                    expected=prepared.normalized_ref_identity,
-                ),
-                guards,
-            )
-            await self._verify_published(original.key, original.identity)
-            await self._verify_published(normalized_ref.key, normalized_ref.identity)
+        intent_token = secrets.token_urlsafe(32)
+        await self.repository.create_storage_intent(
+            state.image_id,
+            user_id=user_id,
+            token=intent_token,
+            session_id=session_id,
+        )
+        state.storage_intent_token = intent_token
+        original, normalized_ref = await self._publish_artifacts_with_timeout(
+            prepared=prepared,
+            original_key=original_key,
+            normalized_key=normalized_key,
+            guards=guards,
+        )
         manifest = published_manifest(
             state.ticket,
             ArtifactManifestItem(
@@ -419,35 +442,116 @@ class UploadCommandService:
             ),
         )
         await assert_capacity_leases_owned(guards)
-        transition_kwargs = {
-            "expected": [ArtifactStatus.PUBLISHING],
-            "target": ArtifactStatus.READY,
-            "values": {
-                "artifact_manifest_jsonb": manifest,
-                "reconcile_after": None,
-                "last_artifact_error": None,
-                "ready_at": datetime.now(timezone.utc),
-            },
-        }
-        if session_id:
-            transition_kwargs.update(
-                active_user_id=user_id,
+        try:
+            return await self.repository.adopt_storage_intent(
+                state.image_id,
+                user_id=user_id,
+                token=intent_token,
+                manifest=manifest,
+                ready_at=datetime.now(timezone.utc),
                 session_id=session_id,
             )
-        return await self.repository.transition(
-            state.image_id,
-            **transition_kwargs,
-        )
+        except ActiveUserFenceError as exc:
+            await self._abandon_rejected_storage_intent(
+                state.image_id,
+                user_id=user_id,
+                token=intent_token,
+                error=exc,
+            )
+            raise
+
+    async def _publish_artifacts_with_timeout(
+        self,
+        *,
+        prepared: PreparedUpload,
+        original_key: ArtifactKey,
+        normalized_key: ArtifactKey,
+        guards: tuple[CapacityLeaseGuard, ...],
+    ) -> tuple[PublishedArtifact, PublishedArtifact]:
+        try:
+            async with asyncio.timeout(self.publish_timeout_seconds):
+                original = await race_with_capacity_leases(
+                    self.artifacts.publish_path(
+                        prepared.original_path,
+                        original_key,
+                        expected=prepared.original_identity,
+                    ),
+                    guards,
+                )
+                await assert_capacity_leases_owned(guards)
+                normalized_ref = await race_with_capacity_leases(
+                    self.artifacts.publish_path(
+                        prepared.normalized_ref_path,
+                        normalized_key,
+                        expected=prepared.normalized_ref_identity,
+                    ),
+                    guards,
+                )
+                await self._verify_published(original.key, original.identity)
+                await self._verify_published(
+                    normalized_ref.key,
+                    normalized_ref.identity,
+                )
+                return original, normalized_ref
+        except TimeoutError as exc:
+            raise UploadPublishTimeout(
+                "image artifact publication exceeded its total timeout"
+            ) from exc
+
+    async def _abandon_rejected_storage_intent(
+        self,
+        image_id: str,
+        *,
+        user_id: str,
+        token: str,
+        error: ActiveUserFenceError,
+    ) -> None:
+        try:
+            abandoned = await self.repository.abandon_storage_intent(
+                image_id,
+                user_id=user_id,
+                token=token,
+                error_message=str(error) or error.__class__.__name__,
+            )
+            if not abandoned:
+                logger.warning(
+                    "image storage intent was not abandoned image_id=%s",
+                    image_id,
+                )
+        except Exception:
+            logger.exception(
+                "failed to abandon rejected image storage intent image_id=%s",
+                image_id,
+            )
 
     async def _handle_failure(
         self,
-        state: UploadExecutionState,
+        state: _UploadCommandState,
         error: Exception,
     ) -> None:
         if state.image_id is None:
             return
         if not state.publishing_started:
             await self._mark_failed(state.image_id, error)
+            return
+        if state.storage_intent_token is not None:
+            try:
+                await self.repository.record_storage_intent_failure(
+                    state.image_id,
+                    user_id=state.user_id,
+                    token=state.storage_intent_token,
+                    error_message=str(error),
+                    retry_at=(
+                        None
+                        if isinstance(error, UploadPublishTimeout)
+                        else datetime.now(timezone.utc)
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to record image storage intent failure image_id=%s",
+                    state.image_id,
+                )
             return
         try:
             await self.repository.update_publishing(
@@ -475,24 +579,6 @@ class UploadCommandService:
                     state.ticket.value,
                 )
 
-    @asynccontextmanager
-    async def _active_user_fence(
-        self,
-        user_id: str,
-        *,
-        session_id: str | None = None,
-    ) -> AsyncIterator[None]:
-        fence = getattr(self.repository, "active_user_fence", None)
-        if not callable(fence):
-            yield
-            return
-        if session_id:
-            async with fence(user_id, session_id=session_id):
-                yield
-            return
-        async with fence(user_id):
-            yield
-
     async def _execute_reserved(
         self,
         *,
@@ -508,7 +594,10 @@ class UploadCommandService:
         storage_lease_guard: CapacityLeaseGuard | None = None,
         storage_reservation_bytes: int | None = None,
     ) -> Image:
-        state = UploadExecutionState(ticket=UploadTicket(new_uuid7()))
+        state = _UploadCommandState(
+            ticket=UploadTicket(new_uuid7()),
+            user_id=user_id,
+        )
         try:
             return await self._run_reserved(
                 state,

@@ -12,7 +12,7 @@ from lumen_core.model_entities import (
     UserMemoryScope,
 )
 
-from .memory_extraction_values import conversation_disabled_memory_ids
+PROMPT_MEMORY_ROW_LIMIT = 128
 
 
 async def _default_scope(session: Any, user_id: str) -> UserMemoryScope:
@@ -54,25 +54,28 @@ async def _prompt_memory_rows(
     session: Any,
     *,
     user_id: str,
-    conversation_id: str,
     scope_ids: set[str],
-    redis: Any | None,
+    disabled_ids: set[str] | None = None,
 ) -> list[UserMemory]:
-    rows = list(
+    statement = select(UserMemory).where(
+        UserMemory.user_id == user_id,
+        UserMemory.disabled.is_(False),
+        UserMemory.superseded_by.is_(None),
+        UserMemory.scope_id.in_(scope_ids),
+    )
+    if disabled_ids:
+        statement = statement.where(UserMemory.id.not_in(disabled_ids))
+    return list(
         (
             await session.execute(
-                select(UserMemory).where(
-                    UserMemory.user_id == user_id,
-                    UserMemory.disabled.is_(False),
-                    UserMemory.superseded_by.is_(None),
-                    UserMemory.scope_id.in_(scope_ids),
-                )
+                statement.order_by(
+                    UserMemory.pinned.desc(),
+                    UserMemory.confidence.desc(),
+                    UserMemory.updated_at.desc(),
+                    UserMemory.id.desc(),
+                ).limit(PROMPT_MEMORY_ROW_LIMIT)
             )
         )
         .scalars()
         .all()
     )
-    disabled_ids = await conversation_disabled_memory_ids(redis, conversation_id)
-    if not disabled_ids:
-        return rows
-    return [memory for memory in rows if memory.id not in disabled_ids]

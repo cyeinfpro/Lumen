@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -54,15 +55,23 @@ def _render(statement: Any) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("existence_probe", "expected_level", "expected_log", "unexpected_log"),
+    (
+        "owner_id",
+        "existence_probe",
+        "expected_level",
+        "expected_log",
+        "unexpected_log",
+    ),
     [
         (
+            "user-1",
             "gen-1",
             logging.INFO,
             "generation initial claim skipped locked row task_id=gen-1",
             "generation not found task_id=gen-1",
         ),
         (
+            None,
             None,
             logging.WARNING,
             "generation not found task_id=gen-1",
@@ -72,12 +81,17 @@ def _render(statement: Any) -> str:
 )
 async def test_initial_claim_distinguishes_locked_row_from_missing_task(
     caplog: pytest.LogCaptureFixture,
+    owner_id: str | None,
     existence_probe: str | None,
     expected_level: int,
     expected_log: str,
     unexpected_log: str,
 ) -> None:
-    session = _Session([None, existence_probe])
+    results: list[Any] = [owner_id]
+    if owner_id is not None:
+        results.append(SimpleNamespace(deleted_at=None))
+    results.extend([None, existence_probe])
+    session = _Session(results)
     default_runtime = build_generation_runtime()
     runtime = replace(
         default_runtime,
@@ -95,9 +109,13 @@ async def test_initial_claim_distinguishes_locked_row_from_missing_task(
             "gen-1",
         )
 
-    assert len(session.statements) == 2
-    assert "FOR UPDATE SKIP LOCKED" in _render(session.statements[0])
-    assert "FOR UPDATE" not in _render(session.statements[1])
+    assert "FOR UPDATE" not in _render(session.statements[0])
+    claim_index = 2 if owner_id is not None else 1
+    if owner_id is not None:
+        assert "FROM users" in _render(session.statements[1])
+        assert "FOR UPDATE" in _render(session.statements[1])
+    assert "FOR UPDATE SKIP LOCKED" in _render(session.statements[claim_index])
+    assert "FOR UPDATE" not in _render(session.statements[claim_index + 1])
     assert expected_log in caplog.text
     assert unexpected_log not in caplog.text
     assert any(

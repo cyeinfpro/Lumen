@@ -31,6 +31,9 @@ from .history import (
     sticky_text_from_message as _sticky_text_from_message,
 )
 
+ATTACHMENT_READ_TIMEOUT_S = 30.0
+HISTORY_SCAN_MAX_MESSAGES = 2048
+
 
 @dataclass(frozen=True)
 class ContextLoadingHooks:
@@ -87,8 +90,15 @@ async def _attachment_to_data_url(
         key = image.storage_key
         mime = image.mime or "image/png"
 
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
     try:
-        raw = await asyncio.to_thread(storage_get_bytes, key)
+        async with asyncio.timeout(ATTACHMENT_READ_TIMEOUT_S):
+            raw = await asyncio.to_thread(storage_get_bytes, key)
+    except TimeoutError:
+        logger.warning("attachment read timed out image_id=%s key=%s", image_id, key)
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("attachment read failed image_id=%s err=%s", image_id, exc)
         return None
@@ -210,6 +220,10 @@ async def _load_rows_desc(
     truncated = False
 
     while True:
+        remaining_messages = HISTORY_SCAN_MAX_MESSAGES - len(rows_desc)
+        if remaining_messages <= 0:
+            truncated = True
+            break
         same_timestamp_filter = (
             Message.id <= cursor_id if cursor_inclusive else Message.id < cursor_id
         )
@@ -228,7 +242,7 @@ async def _load_rows_desc(
                 *((retention_filter,) if retention_filter is not None else ()),
             )
             .order_by(desc(Message.created_at), desc(Message.id))
-            .limit(HISTORY_FETCH_BATCH)
+            .limit(min(HISTORY_FETCH_BATCH, remaining_messages))
         )
         batch = list((await session.execute(query)).scalars())
         if not batch:
@@ -253,7 +267,10 @@ async def _load_rows_desc(
             cursor_created_at = message.created_at
             cursor_id = message.id
 
-        if stop or len(batch) < HISTORY_FETCH_BATCH:
+        if len(rows_desc) >= HISTORY_SCAN_MAX_MESSAGES:
+            truncated = True
+            break
+        if stop or len(batch) < min(HISTORY_FETCH_BATCH, remaining_messages):
             break
         cursor_inclusive = False
 

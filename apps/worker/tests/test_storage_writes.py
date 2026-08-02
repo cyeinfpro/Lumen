@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from pathlib import Path
 
 import pytest
 
+from app import artifact_commit
+from app.artifact_commit import ArtifactAdoption
 from app.storage import LocalStorage, StoragePutResult
 from app.storage_writes import (
     CapacityLeaseLost,
@@ -25,6 +28,43 @@ class _Lease:
 
     async def release(self) -> None:
         self.release_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_artifact_commit_and_rollback_confirmation_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    never = asyncio.Event()
+
+    class Session:
+        async def commit(self) -> None:
+            await never.wait()
+
+        async def rollback(self) -> None:
+            await never.wait()
+
+    async def probe() -> ArtifactAdoption:
+        return ArtifactAdoption.UNKNOWN
+
+    monkeypatch.setattr(artifact_commit, "ARTIFACT_COMMIT_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        artifact_commit,
+        "ARTIFACT_CONFIRMATION_TIMEOUT_SECONDS",
+        0.05,
+    )
+
+    result = await asyncio.wait_for(
+        artifact_commit.commit_with_adoption_probe(
+            Session(),
+            probe=probe,
+            logger=logging.getLogger(__name__),
+            label="bounded artifact",
+        ),
+        timeout=0.5,
+    )
+
+    assert result.outcome is ArtifactAdoption.UNKNOWN
+    assert isinstance(result.commit_error, TimeoutError)
 
 
 class _Capacity:
@@ -51,11 +91,13 @@ def _coordinator(
     *,
     storage: LocalStorage | None = None,
     lease_ttl_seconds: float = 30,
+    operation_timeout_seconds: float = 30,
 ) -> StorageWriteCoordinator:
     return StorageWriteCoordinator(
         storage=storage or LocalStorage(root),
         capacity=capacity,  # type: ignore[arg-type]
         lease_ttl_seconds=lease_ttl_seconds,
+        operation_timeout_seconds=operation_timeout_seconds,
     )
 
 
@@ -179,6 +221,48 @@ async def test_cancellation_waits_for_started_write_before_cleanup_and_release(
 
     assert not storage.path_for(key).exists()
     assert capacity.lease.release_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_of_stuck_write_exits_with_bounded_background_cleanup(
+    tmp_path: Path,
+) -> None:
+    storage = LocalStorage(tmp_path)
+    capacity = _Capacity()
+    coordinator = _coordinator(
+        tmp_path,
+        capacity,
+        storage=storage,
+        operation_timeout_seconds=0.05,
+    )
+    started = threading.Event()
+    finish = threading.Event()
+    key = "u/user/g/gen/stuck.png"
+
+    def write() -> bool:
+        result = storage.put_bytes_result(key, b"data")
+        started.set()
+        finish.wait()
+        return bool(result.created)
+
+    task = asyncio.create_task(
+        coordinator.write_operations(
+            [StorageWriteOperation(key=key, size_bytes=4, write=write)]
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+    assert capacity.lease.release_calls == 1
+
+    finish.set()
+    for _attempt in range(50):
+        if not storage.path_for(key).exists():
+            break
+        await asyncio.sleep(0.02)
+    assert not storage.path_for(key).exists()
 
 
 @pytest.mark.asyncio

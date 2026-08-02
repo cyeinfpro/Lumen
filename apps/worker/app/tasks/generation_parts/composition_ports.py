@@ -26,7 +26,7 @@ from ...provider_runtime.contracts import ResolvedProvider
 from ...provider_runtime.upstream_services import ImageUpstreamRuntime
 from ...upstream_parts import GeneratedImageResult
 from ...storage import LocalStorage
-from ...storage_writes import StorageWriteCoordinator
+from ...storage_writes import StorageWriteCoordinator, wait_for_started_task
 from ...upstream_parts.image_dispatch import edit_image, generate_image
 from ...upstream_parts.image_execution import ImageExecutionRequest, ImageRequestContext
 from .event_delivery import (
@@ -44,15 +44,6 @@ from .services import (
 
 
 logger = logging.getLogger(__name__)
-
-
-async def _wait_for_started_task(task: asyncio.Future[object]) -> object:
-    while True:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +89,10 @@ class DefaultGenerationArtifacts:
         try:
             results = await asyncio.shield(started)
         except BaseException:
-            results = await _wait_for_started_task(started)
+            results = await wait_for_started_task(
+                started,
+                timeout_seconds=30.0,
+            )
             created = [
                 key
                 for result in results
@@ -133,7 +127,10 @@ class DefaultGenerationArtifacts:
                 return_exceptions=True,
             )
         )
-        results = await _wait_for_started_task(started)
+        results = await wait_for_started_task(
+            started,
+            timeout_seconds=30.0,
+        )
         for key, result in zip(unique_keys, results, strict=False):
             if isinstance(result, BaseException):
                 logger.warning(
@@ -333,6 +330,21 @@ class DefaultGenerationCredentials:
 
 @dataclass(frozen=True, slots=True)
 class DefaultGenerationWorkflows:
+    async def auto_tag_generated_workflow_image(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        user_id: str,
+        generation: Generation,
+        image_id: str,
+    ) -> None:
+        from .workflow_service import auto_tag_generated_workflow_image
+
+        await auto_tag_generated_workflow_image(
+            session_factory=session_factory, user_id=user_id,
+            generation=generation, image_id=image_id,
+        )
+
     async def record_model_library_generate_image(
         self,
         *,

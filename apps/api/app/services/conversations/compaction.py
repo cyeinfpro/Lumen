@@ -644,6 +644,9 @@ async def compact_conversation(
         "context.manual_compact_cooldown_seconds",
         MANUAL_COMPACT_DEFAULT_COOLDOWN_SECONDS,
     )
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     retry_after = await circuit_breaker_retry_after(redis)
     if retry_after is not None:
         raise _circuit_open_error(retry_after)

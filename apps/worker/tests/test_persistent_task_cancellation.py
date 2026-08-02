@@ -512,6 +512,9 @@ class _GenerationMarkerResult:
     def scalar_one_or_none(self) -> Any:
         return self.row
 
+    def one_or_none(self) -> Any:
+        return self.row
+
 
 class _CancellationInterleavingMarkerSession:
     def __init__(self) -> None:
@@ -565,6 +568,7 @@ class _TaskOnlyMarkerSession:
 class _DeletedAccountFenceSession:
     def __init__(self) -> None:
         self.statements: list[Any] = []
+        self.commits = 0
 
     async def __aenter__(self) -> _DeletedAccountFenceSession:
         return self
@@ -578,18 +582,18 @@ class _DeletedAccountFenceSession:
             SimpleNamespace(deleted_at=datetime.now(timezone.utc))
         )
 
+    async def commit(self) -> None:
+        self.commits += 1
 
-class _MarkerThenDeletedAccountStore:
+
+class _DeletedAccountStore:
     def __init__(self) -> None:
-        self.marker = _TaskOnlyMarkerSession()
         self.fence = _DeletedAccountFenceSession()
         self.calls = 0
 
     def session(self) -> Any:
         self.calls += 1
         if self.calls == 1:
-            return self.marker
-        if self.calls == 2:
             return self.fence
         raise AssertionError(f"unexpected generation session {self.calls}")
 
@@ -605,6 +609,7 @@ def _dispatch_marker_state(
         ),
         generation=SimpleNamespace(execution_epoch=9),
         task_id="gen-1",
+        user_id="user-1",
         attempt=2,
         gen_upstream_request_snapshot={},
     )
@@ -612,38 +617,32 @@ def _dispatch_marker_state(
 
 @pytest.mark.asyncio
 async def test_cancel_commit_between_probe_and_marker_blocks_generation_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _CancellationInterleavingMarkerSession()
     state = _dispatch_marker_state(session)
-    state.task_deadline = asyncio.get_running_loop().time() + 1
-    upstream_calls = 0
-
-    async def pre_dispatch_probe_passes(_state: Any) -> None:
-        return None
-
-    async def upstream_must_not_run(_state: Any) -> None:
-        nonlocal upstream_calls
-        upstream_calls += 1
-
-    monkeypatch.setattr(
-        runner_dispatch_phase,
-        "raise_if_pre_upstream_interrupted",
-        pre_dispatch_probe_passes,
-    )
-    monkeypatch.setattr(runner_dispatch_phase, "call_upstream", upstream_must_not_run)
 
     with pytest.raises(runner_dispatch_phase.StaleGenerationAttempt):
-        await runner_dispatch_phase.dispatch_upstream_request(state)
+        await runner_dispatch_phase.record_generation_upstream_marker(
+            state,
+            response_received=False,
+            fence_active_user=True,
+        )
 
-    assert upstream_calls == 0
     assert session.commits == 0
-    marker_sql = str(
+    user_lock_sql = str(
         session.statements[0].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
+    marker_sql = str(
+        session.statements[1].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "FROM users" in user_lock_sql
+    assert "FOR UPDATE" in user_lock_sql
     assert "generations.cancel_requested_at IS NULL" in marker_sql
 
 
@@ -673,10 +672,10 @@ async def test_proven_undelivered_marker_can_settle_cancelled_generation() -> No
 
 
 @pytest.mark.asyncio
-async def test_account_delete_after_task_only_marker_blocks_provider_dispatch(
+async def test_deleted_account_blocks_atomic_dispatch_marker_and_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _MarkerThenDeletedAccountStore()
+    store = _DeletedAccountStore()
     state = SimpleNamespace(
         services=SimpleNamespace(
             store=store,
@@ -688,6 +687,7 @@ async def test_account_delete_after_task_only_marker_blocks_provider_dispatch(
         user_id="user-1",
         attempt=2,
         gen_upstream_request_snapshot={},
+        image_iter=None,
         task_deadline=asyncio.get_running_loop().time() + 1,
     )
     upstream_calls = 0
@@ -717,7 +717,8 @@ async def test_account_delete_after_task_only_marker_blocks_provider_dispatch(
     ):
         await runner_dispatch_phase.dispatch_upstream_request(state)
 
-    assert store.marker.commits == 1
+    assert store.calls == 1
+    assert store.fence.commits == 0
     assert upstream_calls == 0
     assert len(store.fence.statements) == 1
     user_lock_sql = str(
@@ -725,3 +726,221 @@ async def test_account_delete_after_task_only_marker_blocks_provider_dispatch(
     ).upper()
     assert "FROM USERS" in user_lock_sql
     assert "FOR UPDATE" in user_lock_sql
+
+
+class _DispatchThenUndeliveredStore:
+    def __init__(self) -> None:
+        self.fence = _ActiveDispatchFenceSession()
+        self.undelivered = _TaskOnlyMarkerSession()
+        self.calls = 0
+
+    def session(self) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            return self.fence
+        if self.calls == 2:
+            return self.undelivered
+        raise AssertionError(f"unexpected generation session {self.calls}")
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_dispatch_marker_is_recorded_as_proven_undelivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _DispatchThenUndeliveredStore()
+    state = SimpleNamespace(
+        services=SimpleNamespace(
+            store=store,
+            events=object(),
+            provider=object(),
+        ),
+        generation=SimpleNamespace(execution_epoch=9),
+        task_id="gen-1",
+        user_id="user-1",
+        attempt=2,
+        gen_upstream_request_snapshot={},
+        image_iter=None,
+        task_deadline=asyncio.get_running_loop().time() + 1,
+    )
+    probes = 0
+    upstream_calls = 0
+
+    async def cancel_after_marker(_state: Any) -> None:
+        nonlocal probes
+        probes += 1
+        if probes == 2:
+            raise runner_dispatch_phase.TaskCancelled(
+                "cancelled before provider iterator"
+            )
+
+    def provider_must_not_start(_state: Any) -> Any:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        raise AssertionError("cancelled task reached upstream provider")
+
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "raise_if_pre_upstream_interrupted",
+        cancel_after_marker,
+    )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "build_image_iterator",
+        provider_must_not_start,
+    )
+
+    with pytest.raises(
+        runner_dispatch_phase.TaskCancelled,
+        match="cancelled before provider iterator",
+    ):
+        await runner_dispatch_phase.dispatch_upstream_request(state)
+
+    assert probes == 2
+    assert upstream_calls == 0
+    assert store.fence.commits == 1
+    assert store.undelivered.commits == 1
+    assert (
+        state.gen_upstream_request_snapshot["upstream_dispatch_delivery"]
+        == "proven_undelivered"
+    )
+
+
+class _ActiveDispatchFenceSession:
+    def __init__(self) -> None:
+        self.statements: list[Any] = []
+        self.commits = 0
+        self.exited = False
+
+    async def __aenter__(self) -> _ActiveDispatchFenceSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        self.exited = True
+
+    async def execute(self, statement: Any) -> _GenerationMarkerResult:
+        self.statements.append(statement)
+        if len(self.statements) == 1:
+            return _GenerationMarkerResult(SimpleNamespace(deleted_at=None))
+        return _GenerationMarkerResult(SimpleNamespace(upstream_request={}))
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _ProgressGuardSession:
+    async def __aenter__(self) -> _ProgressGuardSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def execute(self, _statement: Any) -> _GenerationMarkerResult:
+        return _GenerationMarkerResult((2, 9))
+
+
+class _DispatchThenProgressStore:
+    def __init__(self) -> None:
+        self.fence = _ActiveDispatchFenceSession()
+        self.progress = _ProgressGuardSession()
+        self.response = _TaskOnlyMarkerSession()
+        self.calls = 0
+
+    def session(self) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            return self.fence
+        if self.calls == 2:
+            return self.progress
+        if self.calls == 3:
+            return self.response
+        raise AssertionError(f"unexpected generation session {self.calls}")
+
+
+class _RecordingProgressPublisher:
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    async def __call__(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+
+    def pop_provider_used_event(self) -> dict[str, str]:
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_generation_dispatch_releases_fence_before_progress_epoch_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _DispatchThenProgressStore()
+    state = SimpleNamespace(
+        services=SimpleNamespace(
+            store=store,
+            events=object(),
+            provider=object(),
+        ),
+        generation=SimpleNamespace(execution_epoch=9),
+        task_id="gen-1",
+        user_id="user-1",
+        attempt=2,
+        gen_upstream_request_snapshot={},
+        image_iter=None,
+        lease_lost=asyncio.Event(),
+        redis=object(),
+        stage_timer=SimpleNamespace(set_ms=lambda *_args: None),
+    )
+    inner_progress = _RecordingProgressPublisher()
+    state.progress_publisher = runner_dispatch_phase._EpochGuardedProgressPublisher(
+        state,
+        inner_progress,
+    )
+
+    async def pre_dispatch_probe_passes(_state: Any) -> None:
+        return None
+
+    async def image_iter():
+        assert store.fence.commits == 1
+        assert store.fence.exited is True
+        await state.progress_publisher(
+            {"type": "provider_used", "provider": "test-provider"}
+        )
+        yield ("encoded-image", None)
+
+    async def direct_anext(iterator: Any, *_args: Any, **_kwargs: Any) -> Any:
+        return await iterator.__anext__()
+
+    async def no_batch_extras(_state: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "raise_if_pre_upstream_interrupted",
+        pre_dispatch_probe_passes,
+    )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "build_image_iterator",
+        lambda _state: image_iter(),
+    )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "anext_image_with_guards",
+        direct_anext,
+    )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "record_winner_provider",
+        lambda _state: None,
+    )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "consume_batch_extra_pairs",
+        no_batch_extras,
+    )
+
+    await asyncio.wait_for(runner_dispatch_phase.call_upstream(state), timeout=0.25)
+
+    assert store.calls == 3
+    assert inner_progress.events == [
+        {"type": "provider_used", "provider": "test-provider"}
+    ]
+    assert state.b64_result == "encoded-image"

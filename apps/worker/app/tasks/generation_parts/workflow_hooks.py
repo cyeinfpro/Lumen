@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import (
+    Image,
     PosterMaster,
     PosterRender,
     PosterStyleItem,
@@ -21,6 +23,8 @@ from lumen_core.models import (
 )
 from lumen_core.vision_tagging import AutoTagResult, PosterStyleAutoTagResult
 
+from .active_user_fence import lock_active_generation_user
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +32,14 @@ logger = logging.getLogger(__name__)
 class ModelLibraryTagger(Protocol):
     async def __call__(
         self,
-        session: AsyncSession,
-        *,
-        image_id: str,
-        user_id: str,
+        image_record: Any,
     ) -> AutoTagResult: ...
 
 
 class PosterStyleTagger(Protocol):
     async def __call__(
         self,
-        session: AsyncSession,
-        *,
-        image_id: str,
-        user_id: str,
+        image_record: Any,
     ) -> PosterStyleAutoTagResult: ...
 
 
@@ -135,38 +133,9 @@ async def maybe_record_model_library_generate_image(
         image_ids.append(image_id)
     step.image_ids = list(dict.fromkeys(image_ids))
 
-    input_json = step.input_json if isinstance(step.input_json, dict) else {}
-    auto_tag = bool(input_json.get("auto_tag", False))
     requested = model_library_requested_count_from_step(step)
 
     output_json = dict(step.output_json or {})
-    if auto_tag:
-        try:
-            result = await services.model_library_tagger(
-                session,
-                image_id=image_id,
-                user_id=user_id,
-            )
-            tagging_results = output_json.get("tagging_results")
-            if not isinstance(tagging_results, dict):
-                tagging_results = {}
-            tagging_results[image_id] = {
-                "style_tags": list(result.style_tags or []),
-                "appearance_direction": result.appearance_direction,
-                "age_segment": result.age_segment,
-                "gender": result.gender,
-                "notes": result.notes,
-            }
-            output_json["tagging_results"] = tagging_results
-        except (TimeoutError, asyncio.CancelledError):
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.info(
-                "model_library_generate tagging skipped run=%s image=%s err=%s",
-                run.id,
-                image_id,
-                exc,
-            )
 
     finished_count = len(step.image_ids or [])
     if finished_count >= requested and requested > 0 and step.status == "running":
@@ -198,7 +167,7 @@ async def maybe_record_poster_style_library_generate_image(
     run, step = loaded
     _append_step_image(step, image_id)
     input_value = _poster_style_input(step)
-    target_item = await _find_or_create_poster_style_item(
+    await _find_or_create_poster_style_item(
         session,
         user_id=user_id,
         image_id=image_id,
@@ -206,15 +175,6 @@ async def maybe_record_poster_style_library_generate_image(
         input_value=input_value,
         services=services,
     )
-    if input_value.auto_tag:
-        await _auto_tag_poster_style_item(
-            session,
-            user_id=user_id,
-            image_id=image_id,
-            run=run,
-            target_item=target_item,
-            services=services,
-        )
     _complete_poster_style_step(run, step, input_value)
 
 
@@ -357,33 +317,6 @@ async def _find_or_create_poster_style_item(
     return item
 
 
-async def _auto_tag_poster_style_item(
-    session: Any,
-    *,
-    user_id: str,
-    image_id: str,
-    run: Any,
-    target_item: Any,
-    services: WorkflowHookServices,
-) -> None:
-    try:
-        result = await services.poster_style_tagger(
-            session,
-            image_id=image_id,
-            user_id=user_id,
-        )
-        _apply_poster_style_tag_result(target_item, result)
-    except (TimeoutError, asyncio.CancelledError):
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.info(
-            "poster_style_library_generate tagging skipped run=%s image=%s err=%s",
-            run.id,
-            image_id,
-            exc,
-        )
-
-
 def _apply_poster_style_tag_result(
     target_item: PosterStyleItem,
     result: PosterStyleAutoTagResult,
@@ -409,6 +342,210 @@ def _apply_poster_style_tag_result(
         "notes": result.notes,
     }
     target_item.metadata_jsonb = metadata
+
+
+def _workflow_request(generation: Any) -> dict[str, Any]:
+    request = getattr(generation, "upstream_request", None)
+    return dict(request) if isinstance(request, dict) else {}
+
+
+async def _load_taggable_image(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    user_id: str,
+    image_id: str,
+) -> Any | None:
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(Image).where(
+                    Image.id == image_id,
+                    Image.user_id == user_id,
+                    Image.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return SimpleNamespace(
+            id=str(row.id),
+            storage_key=row.storage_key,
+            mime=row.mime,
+        )
+
+
+async def _model_library_auto_tag_enabled(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    run_id: str,
+    image_id: str,
+) -> bool:
+    async with session_factory() as session:
+        step = (
+            await session.execute(
+                select(WorkflowStep).where(
+                    WorkflowStep.workflow_run_id == run_id,
+                    WorkflowStep.step_key == "model_library_generate",
+                )
+            )
+        ).scalar_one_or_none()
+        input_json = step.input_json if step is not None else None
+        return bool(
+            step is not None
+            and image_id in list(step.image_ids or [])
+            and isinstance(input_json, dict)
+            and input_json.get("auto_tag") is True
+        )
+
+
+async def _apply_model_library_tag_result(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    user_id: str,
+    run_id: str,
+    image_id: str,
+    result: AutoTagResult,
+) -> None:
+    async with session_factory() as session:
+        if not await lock_active_generation_user(session, user_id=user_id):
+            return
+        step = (
+            await session.execute(
+                select(WorkflowStep)
+                .where(
+                    WorkflowStep.workflow_run_id == run_id,
+                    WorkflowStep.step_key == "model_library_generate",
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if step is None or image_id not in list(step.image_ids or []):
+            return
+        output_json = dict(step.output_json or {})
+        tagging_results = output_json.get("tagging_results")
+        if not isinstance(tagging_results, dict):
+            tagging_results = {}
+        tagging_results[image_id] = {
+            "style_tags": list(result.style_tags or []),
+            "appearance_direction": result.appearance_direction,
+            "age_segment": result.age_segment,
+            "gender": result.gender,
+            "notes": result.notes,
+        }
+        output_json["tagging_results"] = tagging_results
+        step.output_json = output_json
+        await session.commit()
+
+
+async def _poster_style_auto_tag_enabled(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    run_id: str,
+    image_id: str,
+) -> bool:
+    async with session_factory() as session:
+        step = (
+            await session.execute(
+                select(WorkflowStep).where(
+                    WorkflowStep.workflow_run_id == run_id,
+                    WorkflowStep.step_key == "poster_style_library_generate",
+                )
+            )
+        ).scalar_one_or_none()
+        input_json = step.input_json if step is not None else None
+        return bool(
+            step is not None
+            and image_id in list(step.image_ids or [])
+            and isinstance(input_json, dict)
+            and input_json.get("auto_tag") is True
+        )
+
+
+async def _apply_poster_style_post_commit_tag(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    user_id: str,
+    image_id: str,
+    result: PosterStyleAutoTagResult,
+) -> None:
+    async with session_factory() as session:
+        if not await lock_active_generation_user(session, user_id=user_id):
+            return
+        target_item = (
+            await session.execute(
+                select(PosterStyleItem)
+                .where(
+                    PosterStyleItem.user_id == user_id,
+                    PosterStyleItem.cover_image_id == image_id,
+                )
+                .with_for_update()
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if target_item is None:
+            return
+        _apply_poster_style_tag_result(target_item, result)
+        await session.commit()
+
+
+async def maybe_auto_tag_generated_workflow_image(
+    *,
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    user_id: str,
+    generation: Any,
+    image_id: str,
+    services: WorkflowHookServices,
+) -> None:
+    request = _workflow_request(generation)
+    run_id = request.get("workflow_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+    action = request.get("workflow_action")
+    if action == "model_library_generate":
+        if not await _model_library_auto_tag_enabled(
+            session_factory,
+            run_id=run_id,
+            image_id=image_id,
+        ):
+            return
+        image_record = await _load_taggable_image(
+            session_factory,
+            user_id=user_id,
+            image_id=image_id,
+        )
+        if image_record is None:
+            return
+        result = await services.model_library_tagger(image_record)
+        await _apply_model_library_tag_result(
+            session_factory,
+            user_id=user_id,
+            run_id=run_id,
+            image_id=image_id,
+            result=result,
+        )
+        return
+    if action != "poster_style_library_generate":
+        return
+    if not await _poster_style_auto_tag_enabled(
+        session_factory,
+        run_id=run_id,
+        image_id=image_id,
+    ):
+        return
+    image_record = await _load_taggable_image(
+        session_factory,
+        user_id=user_id,
+        image_id=image_id,
+    )
+    if image_record is None:
+        return
+    result = await services.poster_style_tagger(image_record)
+    await _apply_poster_style_post_commit_tag(
+        session_factory,
+        user_id=user_id,
+        image_id=image_id,
+        result=result,
+    )
 
 
 def _complete_poster_style_step(

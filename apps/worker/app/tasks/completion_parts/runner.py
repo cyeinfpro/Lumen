@@ -20,6 +20,7 @@ from .failure_settlement import (
     handle_completion_run_failure,
     settle_cancelled_completion,
 )
+from .request_context import load_request_context
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,7 +28,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from lumen_core.constants import (
-    DEFAULT_CHAT_INSTRUCTIONS,
     EV_COMP_DELTA,
     EV_COMP_PROGRESS,
     EV_COMP_RESTARTED,
@@ -127,6 +127,30 @@ async def claim_completion(state: CompletionExecution) -> bool:
         )
     )
 
+    raw_expected_execution_epoch = state.preparation.queue_metadata_payload.get(
+        _EXECUTION_EPOCH_KEY
+    )
+    if raw_expected_execution_epoch is None:
+        async with state.ports.persistence.SessionLocal() as session:
+            current_execution_epoch = (
+                await session.execute(
+                    state.ports.persistence.select(
+                        state.ports.persistence.Completion.execution_epoch
+                    ).where(
+                        state.ports.persistence.Completion.id
+                        == state.request.task_id
+                    )
+                )
+            ).scalar_one_or_none()
+        expected_execution_epoch = max(0, int(current_execution_epoch or 0))
+        state.preparation.queue_metadata_payload[_EXECUTION_EPOCH_KEY] = (
+            expected_execution_epoch
+        )
+    else:
+        expected_execution_epoch = max(0, int(raw_expected_execution_epoch))
+    await bind_task_lease_execution_epoch(state, expected_execution_epoch)
+    bind_completion_execution_fence(state, expected_execution_epoch)
+
     async with state.ports.persistence.SessionLocal() as session:
         await state.ports.persistence._acquire_completion_xact_lock(
             session, state.request.task_id
@@ -150,16 +174,6 @@ async def claim_completion(state: CompletionExecution) -> bool:
             0,
             int(getattr(completion, "execution_epoch", 0) or 0),
         )
-        raw_expected_execution_epoch = state.preparation.queue_metadata_payload.get(
-            _EXECUTION_EPOCH_KEY
-        )
-        if raw_expected_execution_epoch is None:
-            expected_execution_epoch = current_execution_epoch
-            state.preparation.queue_metadata_payload[_EXECUTION_EPOCH_KEY] = (
-                current_execution_epoch
-            )
-        else:
-            expected_execution_epoch = max(0, int(raw_expected_execution_epoch))
         if current_execution_epoch != expected_execution_epoch:
             raise state.ports.retry._CompletionEpochSuperseded(
                 f"completion execution superseded task={state.request.task_id} "
@@ -195,8 +209,6 @@ async def claim_completion(state: CompletionExecution) -> bool:
         if getattr(completion, "cancel_requested_at", None) is not None:
             state.settlement.task_outcome = CompletionOutcome.CANCELLED.value
             return False
-        await bind_task_lease_execution_epoch(state, expected_execution_epoch)
-        bind_completion_execution_fence(state, expected_execution_epoch)
         (
             state.preparation.attempt,
             preflight_failure,
@@ -298,96 +310,9 @@ async def _resolve_runtime_override(state: CompletionExecution) -> None:
         )
 
 
-async def _load_request_context(state: CompletionExecution) -> None:
-    state.streaming.instructions = (
-        state.preparation.system_prompt or DEFAULT_CHAT_INSTRUCTIONS
-    )
-    async with state.ports.persistence.SessionLocal() as session:
-        state.preparation.target_msg = await session.get(
-            state.ports.persistence.Message, state.preparation.message_id
-        )
-        if state.preparation.conversation_id is not None:
-            packed = await state.ports.context._pack_recent_history(
-                session,
-                conversation_id=state.preparation.conversation_id,
-                up_to_message_id=state.preparation.message_id,
-                system_prompt=state.preparation.system_prompt,
-                redis=state.request.redis,
-                chat_model=state.preparation.chat_model,
-                account_mode=state.preparation.account_mode,
-            )
-            if state.settlement.lease_lost.is_set():
-                raise state.ports.retry._LeaseLost("lease lost after history pack")
-            state.streaming.input_list = packed.input_list
-            state.streaming.instructions = (
-                state.ports.context._instructions_with_summary_guardrail(
-                    state.preparation.system_prompt,
-                    enabled=packed.summary_used or packed.sticky_used,
-                )
-            )
-            memory_meta = await state.ports.context._inject_user_memory_context(
-                session,
-                input_list=state.streaming.input_list,
-                user_id=state.preparation.user_id,
-                conversation_id=state.preparation.conversation_id,
-                parent_user_message_id=(
-                    getattr(state.preparation.target_msg, "parent_message_id", None)
-                    if state.preparation.target_msg is not None
-                    else None
-                ),
-                redis=state.request.redis,
-            )
-            state.usage.memory_meta_for_event = memory_meta
-            await state.ports.context._record_completion_context_metadata(
-                session,
-                task_id=state.request.task_id,
-                attempt_epoch=state.preparation.attempt_epoch,
-                packed=packed,
-            )
-            if memory_meta.get("used_memory_ids"):
-                completion = (
-                    await session.execute(
-                        state.ports.persistence.select(
-                            state.ports.persistence.Completion
-                        )
-                        .where(
-                            state.ports.persistence.Completion.id
-                            == state.request.task_id,
-                            state.ports.persistence.Completion.attempt
-                            == state.preparation.attempt_epoch,
-                            state.ports.persistence.Completion.execution_epoch
-                            == _completion_execution_epoch(state),
-                        )
-                        .with_for_update()
-                    )
-                ).scalar_one_or_none()
-                if completion is not None:
-                    upstream_request = dict(completion.upstream_request or {})
-                    upstream_request["memory"] = memory_meta
-                    completion.upstream_request = upstream_request
-                    await session.commit()
-
-        if (
-            state.preparation.target_msg is not None
-            and state.preparation.target_msg.parent_message_id
-        ):
-            parent = await session.get(
-                state.ports.persistence.Message,
-                state.preparation.target_msg.parent_message_id,
-            )
-            if parent is not None and isinstance(parent.content, dict):
-                effort = parent.content.get("reasoning_effort")
-                if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
-                    state.preparation.reasoning_effort = effort
-                state.preparation.fast_mode = parent.content.get("fast") is True
-                state.streaming.chat_tools = (
-                    await state.ports.tools._chat_tools_from_content(parent.content)
-                )
-
-
 async def prepare_completion_request(state: CompletionExecution) -> None:
     await _resolve_runtime_override(state)
-    await _load_request_context(state)
+    await load_request_context(state)
     state.preparation.reasoning_effort = (
         state.ports.upstream._normalize_reasoning_effort_for_upstream(
             state.preparation.reasoning_effort

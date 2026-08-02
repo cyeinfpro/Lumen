@@ -18,12 +18,7 @@ from lumen_core.constants import (
     VideoGenerationStatus,
     task_channel,
 )
-from lumen_core.model_entities import (
-    OutboxEvent,
-    User,
-    Video,
-    VideoGeneration,
-)
+from lumen_core.model_entities import OutboxEvent, Video, VideoGeneration
 from lumen_core.schema_models import (
     VideoCreateIn,
     VideoGenerationOut,
@@ -34,11 +29,46 @@ from lumen_core.schema_models import (
 from ..images.application.deleted_media_references import (
     active_video_generation_reference_id,
 )
-from ..services.video_storage_lifecycle import (
-    VIDEO_STORAGE_CLEANUP_METADATA_KEY,
-    VideoStorageLifecycle,
-    record_video_storage_cleanup,
+from ..services.video_storage_lifecycle import VideoStorageLifecycle
+from . import video_cleanup_routes as _video_cleanup_routes
+
+_locked_owned_video = _video_cleanup_routes._locked_owned_video
+_detach_video_cleanup_if_owned = (
+    _video_cleanup_routes.detach_video_cleanup_if_owned
 )
+_record_video_cleanup_result = _video_cleanup_routes.record_video_cleanup_result
+
+
+async def _reject_active_video_reference(
+    db: AsyncSession,
+    *,
+    video: Video,
+    deps: Any,
+    restore_soft_delete: bool,
+) -> None:
+    await _video_cleanup_routes._reject_active_reference(
+        db,
+        video=video,
+        deps=deps,
+        restore_soft_delete=restore_soft_delete,
+        active_reference=active_video_generation_reference_id,
+    )
+
+
+async def _prepare_video_cleanup(
+    *,
+    video_id: str,
+    user_id: str,
+    db: AsyncSession,
+    deps: Any,
+) -> Any:
+    return await _video_cleanup_routes.prepare_video_cleanup(
+        video_id=video_id,
+        user_id=user_id,
+        db=db,
+        deps=deps,
+        reject_active_reference=_reject_active_video_reference,
+    )
 
 
 @dataclass(frozen=True)
@@ -97,80 +127,6 @@ def _video_submit_delivery_state(generation: VideoGeneration) -> str:
     ):
         return "proven_absent"
     return "unknown"
-
-
-async def _locked_owned_video(
-    db: AsyncSession,
-    *,
-    video_id: str,
-    user_id: str,
-) -> Video | None:
-    return (
-        await db.execute(
-            select(Video)
-            .where(
-                Video.id == video_id,
-                Video.user_id == user_id,
-            )
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-    ).scalar_one_or_none()
-
-
-def _mark_video_storage_cleanup_pending(
-    video: Video,
-    *,
-    deleted_at: datetime,
-) -> None:
-    metadata = dict(video.metadata_jsonb or {})
-    previous = metadata.get(VIDEO_STORAGE_CLEANUP_METADATA_KEY)
-    previous_cleanup = previous if isinstance(previous, dict) else {}
-    remaining_artifacts = previous_cleanup.get("remaining_artifact_count")
-    remaining_bytes = previous_cleanup.get("remaining_bytes")
-    metadata[VIDEO_STORAGE_CLEANUP_METADATA_KEY] = {
-        "state": "pending",
-        "attempted_at": deleted_at.isoformat(),
-        "remaining_artifact_count": (
-            max(1, int(remaining_artifacts))
-            if isinstance(remaining_artifacts, int)
-            else 1
-        ),
-        "remaining_bytes": (
-            max(0, int(remaining_bytes))
-            if isinstance(remaining_bytes, int)
-            else max(0, int(video.size_bytes or 0))
-        ),
-    }
-    video.metadata_jsonb = metadata
-
-
-def _clear_video_storage_cleanup_pending(video: Video) -> None:
-    metadata = dict(video.metadata_jsonb or {})
-    metadata.pop(VIDEO_STORAGE_CLEANUP_METADATA_KEY, None)
-    video.metadata_jsonb = metadata
-
-
-async def _reject_active_video_reference(
-    db: AsyncSession,
-    *,
-    video: Video,
-    deps: GenerationRouteDependencies,
-    restore_soft_delete: bool,
-) -> None:
-    generation_id = await active_video_generation_reference_id(db, video=video)
-    if generation_id is None:
-        return
-    if restore_soft_delete and video.deleted_at is not None:
-        video.deleted_at = None
-        _clear_video_storage_cleanup_pending(video)
-        await db.commit()
-    raise deps.http_error(
-        "video_generation_reference_active",
-        "video is retained by an active generation",
-        409,
-        video_generation_id=generation_id,
-    )
 
 
 async def list_video_generations(
@@ -557,55 +513,32 @@ async def delete_video(
     db: AsyncSession,
     deps: GenerationRouteDependencies,
 ) -> Response:
-    await db.execute(select(User.id).where(User.id == user.id).with_for_update())
-    video = await _locked_owned_video(
-        db,
+    attempt = await _prepare_video_cleanup(
         video_id=video_id,
         user_id=user.id,
-    )
-    if video is None:
-        raise deps.http_error("not_found", "video not found", 404)
-    if video.deleted_at is None:
-        await deps.ensure_not_canvas_referenced(db, video_id=video.id)
-        await _reject_active_video_reference(
-            db,
-            video=video,
-            deps=deps,
-            restore_soft_delete=False,
-        )
-        deleted_at = datetime.now(timezone.utc)
-        video.deleted_at = deleted_at
-        _mark_video_storage_cleanup_pending(video, deleted_at=deleted_at)
-        await db.commit()
-
-        await db.execute(select(User.id).where(User.id == user.id).with_for_update())
-        video = await _locked_owned_video(
-            db,
-            video_id=video_id,
-            user_id=user.id,
-        )
-        if video is None:
-            raise deps.http_error("not_found", "video not found", 404)
-        if video.deleted_at is None:
-            deps.logger.info(
-                "video cleanup skipped after concurrent restore video_id=%s",
-                video.id,
-            )
-            return Response(status_code=204)
-
-    await _reject_active_video_reference(
-        db,
-        video=video,
+        db=db,
         deps=deps,
-        restore_soft_delete=True,
     )
-    cleanup = await deps.storage_lifecycle.cleanup(video)
-    record_video_storage_cleanup(video, cleanup)
-    await db.commit()
-    if not cleanup.complete:
+    if attempt is None:
+        return Response(status_code=204)
+    detached = await _detach_video_cleanup_if_owned(
+        attempt=attempt,
+        db=db,
+        deps=deps,
+    )
+    if detached is None:
+        return Response(status_code=204)
+    cleanup = await deps.storage_lifecycle.cleanup_detached(detached)
+    recorded = await _record_video_cleanup_result(
+        attempt=attempt,
+        cleanup=cleanup,
+        db=db,
+        deps=deps,
+    )
+    if recorded and not cleanup.complete:
         deps.logger.warning(
             "video storage cleanup pending video_id=%s remaining=%s bytes=%s errors=%s",
-            video.id,
+            attempt.snapshot.id,
             cleanup.remaining.artifact_count,
             cleanup.remaining.bytes_on_disk,
             cleanup.errors,

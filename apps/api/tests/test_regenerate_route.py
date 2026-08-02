@@ -28,6 +28,9 @@ class _Result:
         return self.all_values
 
 
+_NO_CONVERSATION_OVERRIDE = object()
+
+
 class _Db:
     def __init__(self, results: list[_Result]) -> None:
         self.results = results
@@ -35,12 +38,26 @@ class _Db:
         self.added: list[Any] = []
         self.committed = False
         self.rolled_back = False
+        self._conversation: Any | None = None
+        self.locked_conversation_override: Any = _NO_CONVERSATION_OVERRIDE
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
-        if "from users" in str(statement).lower():
+        rendered = str(statement).lower()
+        if "from users" in rendered:
             return _Result("user-1")
-        return self.results.pop(0) if self.results else _Result()
+        if (
+            "from conversations" in rendered
+            and getattr(statement, "_for_update_arg", None) is not None
+        ):
+            if self.locked_conversation_override is not _NO_CONVERSATION_OVERRIDE:
+                return _Result(self.locked_conversation_override)
+            if self._conversation is not None:
+                return _Result(self._conversation)
+        result = self.results.pop(0) if self.results else _Result()
+        if "from conversations" in rendered and result.value is not None:
+            self._conversation = result.value
+        return result
 
     def add(self, value: Any) -> None:
         self.added.append(value)
@@ -393,6 +410,48 @@ async def test_regenerate_publishes_appended_event_for_new_assistant(
         }
     ]
     assert task_publish_calls == ["assistant-new"]
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_conversation_deleted_before_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(regenerate.MESSAGES_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(regenerate, "get_redis", lambda: object())
+
+    target = _target()
+    db = _Db(
+        [
+            _Result(_conv()),
+            _Result(target),
+            _Result(_parent_user({"text": "hello", "attachments": []})),
+            _Result(None),
+            _Result(None),
+            _Result(None),
+            _Result(None),
+            _Result(all_values=[]),
+            _Result(None),
+        ]
+    )
+    db.locked_conversation_override = None
+
+    with pytest.raises(Exception) as excinfo:
+        await regenerate.regenerate_message(
+            "conv-1",
+            "assistant-old",
+            RegenerateIn(intent="chat", idempotency_key="deleted-race"),
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 404
+    assert excinfo.value.detail["error"]["code"] == "not_found"
+    assert target.status == "streaming"
+    assert db.added == []
+    assert db.committed is False
 
 
 @pytest.mark.asyncio

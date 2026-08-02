@@ -272,8 +272,11 @@ async def test_run_completion_setup_lease_loss_does_not_mutate_row(
     )
 
     class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
         def scalar_one_or_none(self) -> Any:
-            return row
+            return self.value
 
     class Session:
         async def __aenter__(self) -> "Session":
@@ -283,8 +286,11 @@ async def test_run_completion_setup_lease_loss_does_not_mutate_row(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def execute(self, _statement: Any) -> Result:
-            return Result()
+        async def execute(self, statement: Any) -> Result:
+            rendered = str(statement)
+            if "completions.execution_epoch" in rendered and "FOR UPDATE" not in rendered:
+                return Result(0)
+            return Result(row)
 
         async def get(self, *_args: Any) -> Any:
             raise AssertionError("lost lease must abort before loading related rows")

@@ -497,6 +497,14 @@ async def delete_conversation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
+    try:
+        session_id = durable_session_id(request)
+        if session_id:
+            await lock_active_user(db, user.id, session_id=session_id)
+        else:
+            await lock_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     conversation = await _get_owned_conv_for_update(db, conv_id, user.id)
     now = datetime.now(timezone.utc)
     conversation.deleted_at = now
@@ -519,6 +527,12 @@ async def delete_conversation(
         conv_id=conversation.id,
         user_id=user.id,
         canceled_at=now,
+    )
+    deleted_images += await _soft_delete_conversation_generated_images(
+        db,
+        conv_id=conversation.id,
+        user_id=user.id,
+        deleted_at=now,
     )
     await write_audit(
         db,

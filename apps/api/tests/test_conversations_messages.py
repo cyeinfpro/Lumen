@@ -45,11 +45,15 @@ class _ContextDb:
         self.rows = rows
         self.by_id = by_id or {getattr(row, "id", ""): row for row in rows}
         self.message_selects = 0
+        self.transaction_open = False
+        self.rollbacks = 0
 
     async def get(self, _model: Any, object_id: str) -> Any:
+        self.transaction_open = True
         return self.by_id.get(object_id)
 
     async def execute(self, statement: Any) -> _Result:
+        self.transaction_open = True
         rendered = str(statement)
         if "FROM system_prompts" in rendered:
             return _Result([])
@@ -57,6 +61,10 @@ class _ContextDb:
             self.message_selects += 1
             return _Result(self.rows if self.message_selects == 1 else [])
         return _Result([])
+
+    async def rollback(self) -> None:
+        self.transaction_open = False
+        self.rollbacks += 1
 
 
 class _WriteResult:
@@ -775,6 +783,36 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
     assert out.manual_compact_available is False
     assert out.manual_compact_min_input_tokens == 4000
     assert out.manual_compact_unavailable_reason == "below_min_tokens"
+
+
+@pytest.mark.asyncio
+async def test_context_window_releases_db_transaction_before_redis_status() -> None:
+    now = datetime.now(timezone.utc)
+    message = _message("msg-1", now)
+    message.content = {"text": "x" * 24_000}
+    db = _ContextDb([message])
+    conv = SimpleNamespace(
+        id="conv-1",
+        default_system=None,
+        default_system_prompt_id=None,
+        summary_jsonb=None,
+    )
+
+    class Redis:
+        async def get(self, _key: str) -> None:
+            assert db.transaction_open is False
+            return None
+
+    out = await conversations._estimate_context_window(
+        db,  # type: ignore[arg-type]
+        conv=conv,  # type: ignore[arg-type]
+        user_id="user-1",
+        user_default_prompt_id=None,
+        redis=Redis(),
+    )
+
+    assert db.rollbacks == 1
+    assert out.manual_compact_available is True
 
 
 @pytest.mark.asyncio

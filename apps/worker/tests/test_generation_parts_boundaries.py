@@ -788,3 +788,13 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
         user_fence,
     )
     assert user_fence < publish
+
+
+def test_generation_success_uses_user_first_lock_order() -> None:
+    source = inspect.getsource(success._persist_generation_success)
+
+    user_lock = source.index("lock_active_generation_user(")
+    generation_lock = source.index("ensure_generation_attempt_current(", user_lock)
+    conversation_lock = source.index("ensure_generation_conversation_alive(", generation_lock)
+
+    assert user_lock < generation_lock < conversation_lock

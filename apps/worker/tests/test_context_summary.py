@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.tasks import context_summary
+from app.tasks.completion_parts.context_loading import (
+    HISTORY_SCAN_MAX_MESSAGES,
+    _load_rows_desc,
+)
 from lumen_core.constants import Role
 from lumen_core.context_window import SUMMARY_KIND, SUMMARY_VERSION
 from lumen_core.models import Base, Conversation, Message, User, UserMemoryScope
@@ -33,6 +37,42 @@ class _ScalarResult:
 
     def scalar_one_or_none(self) -> Any:
         return self.value
+
+
+@pytest.mark.asyncio
+async def test_history_loader_stops_at_hard_message_limit() -> None:
+    calls = 0
+
+    class Rows:
+        def __iter__(self) -> Any:
+            nonlocal calls
+            start = calls * 256
+            calls += 1
+            return iter([_message(start + index) for index in range(256)])
+
+    class Result:
+        def scalars(self) -> Rows:
+            return Rows()
+
+    class Session:
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+    target = _message(99_999)
+    rows, used_tokens, truncated = await _load_rows_desc(
+        Session(),
+        conversation_id="conv-1",
+        target=target,
+        budget_tokens=None,
+        system_prompt=None,
+        count_message_tokens=lambda _role, _content: 1,
+        estimate_system_prompt_tokens=lambda _prompt: 0,
+    )
+
+    assert len(rows) == HISTORY_SCAN_MAX_MESSAGES
+    assert used_tokens == HISTORY_SCAN_MAX_MESSAGES
+    assert truncated is True
+    assert calls == HISTORY_SCAN_MAX_MESSAGES // 256
 
 
 class _FakeSession:
@@ -1645,6 +1685,69 @@ async def test_ensure_context_summary_lock_busy_waits_and_reuses_latest(
     assert result["status"] == "cached_after_lock_wait"
     assert result["summary_tokens"] == 10
     assert "text" not in result
+
+
+@pytest.mark.asyncio
+async def test_summary_releases_transactions_before_redis_coordination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(3)
+    conv = Conversation(id="conv-1", user_id="user-1", summary_jsonb=None)
+
+    class TransactionTrackingSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.transaction_active = False
+            self.commits = 0
+
+        async def commit(self) -> None:
+            self.transaction_active = False
+            self.commits += 1
+
+    session = TransactionTrackingSession()
+
+    async def fake_load(
+        *_args: Any, **_kwargs: Any
+    ) -> context_summary.LoadedSummaryMessages:
+        session.transaction_active = True
+        return context_summary.LoadedSummaryMessages([_message(1)], 1, 20, 0)
+
+    async def fake_circuit_open(_redis: Any) -> bool:
+        assert session.transaction_active is False
+        return False
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> None:
+        assert session.transaction_active is False
+        return None
+
+    async def fake_sleep(_seconds: float) -> None:
+        assert session.transaction_active is False
+
+    async def fake_read(*_args: Any, **_kwargs: Any) -> None:
+        session.transaction_active = True
+        return None
+
+    async def fake_metrics(*_args: Any, **_kwargs: Any) -> None:
+        assert session.transaction_active is False
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", fake_load)
+    monkeypatch.setattr(context_summary, "_is_circuit_open", fake_circuit_open)
+    monkeypatch.setattr(context_summary, "_acquire_summary_lock", fake_acquire)
+    monkeypatch.setattr(context_summary.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(context_summary, "_read_current_summary", fake_read)
+    monkeypatch.setattr(context_summary, "record_summary_metrics", fake_metrics)
+
+    result = await context_summary.ensure_context_summary(
+        session,
+        conv,
+        boundary,
+        {"redis": _FakeRedis()},
+        force=True,
+    )
+
+    assert result is None
+    assert session.transaction_active is False
+    assert session.commits == 2
 
 
 @pytest.mark.asyncio

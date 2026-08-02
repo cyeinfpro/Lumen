@@ -563,6 +563,19 @@ async def regenerate_message(
             await lock_active_user(db, user.id)
     except ActiveUserFenceError as exc:
         raise active_user_fence_http_error(exc) from exc
+    conv = (
+        await db.execute(
+            select(Conversation)
+            .where(
+                Conversation.id == conv.id,
+                Conversation.user_id == user.id,
+                Conversation.deleted_at.is_(None),
+            )
+            .with_for_update(of=Conversation)
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        raise _http("not_found", "conversation not found", 404)
     now = datetime.now(timezone.utc)
     cleanup = await _cancel_regenerate_target_active_tasks(
         db,

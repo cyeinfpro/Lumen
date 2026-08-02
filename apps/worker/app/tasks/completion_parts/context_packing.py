@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from lumen_core.context_window import (
+    HISTORY_SCAN_MAX_TOKENS,
     MESSAGE_OVERHEAD_TOKENS,
     estimate_summary_tokens,
     format_sticky_input_text,
@@ -685,7 +686,7 @@ async def pack_recent_history(
         session,
         conversation_id=conversation_id,
         target=target,
-        budget_tokens=None,
+        budget_tokens=HISTORY_SCAN_MAX_TOKENS,
         system_prompt=system_prompt,
         retention_filter=retention_filter,
     )

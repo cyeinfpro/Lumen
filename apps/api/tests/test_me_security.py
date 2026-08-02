@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import io
+import inspect
+import json
 import os
-from datetime import datetime, timezone
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from app.config import settings
-from app.routes import admin, me
+from app.routes import admin, me, me_export
 from app.services import account_deletion
-from fastapi import Response
+from fastapi import Request, Response
 from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
@@ -152,6 +155,318 @@ def test_export_message_record_strips_internal_fields_but_keeps_memory_writes() 
         "memory_writes": [{"kind": "added", "id": "memory-1"}],
     }
     assert record["created_at"] == "2026-07-18T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_export_route_rolls_back_before_storage_and_zip_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class ActiveUserResult:
+        def scalar_one_or_none(self) -> str:
+            return "user-1"
+
+    class Db:
+        transaction_open = False
+
+        async def execute(self, _statement: Any) -> ActiveUserResult:
+            self.transaction_open = True
+            events.append("active-user")
+            return ActiveUserResult()
+
+        async def rollback(self) -> None:
+            self.transaction_open = False
+            events.append("rollback")
+
+    db = Db()
+    tempfiles: list[io.BytesIO] = []
+
+    async def check_rate_limit(_redis: Any, key: str) -> None:
+        assert key == "rl:me:export:user-1"
+        assert db.transaction_open is False
+        events.append("rate-limit")
+
+    async def build_export_archive(
+        session: Db,
+        tmp: io.BytesIO,
+        user_id: str,
+    ) -> Any:
+        assert session is db
+        assert user_id == "user-1"
+        assert db.transaction_open is False
+        events.append("build")
+        tmp.write(b"zip-data")
+        return me_export.ExportStats(
+            messages=501,
+            images=2,
+            images_skipped=1,
+            zip_bytes=8,
+        )
+
+    async def write_export_audit(session: Db, **kwargs: Any) -> bool:
+        assert session is db
+        assert db.transaction_open is False
+        assert kwargs["autocommit"] is True
+        assert kwargs["event_type"] == "me.data.export"
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["actor_email"] == "user@example.com"
+        assert kwargs["target_user_id"] == "user-1"
+        assert kwargs["details"] == {
+            "messages": 501,
+            "images": 2,
+            "images_skipped": 1,
+            "zip_bytes": 8,
+        }
+        events.append("audit")
+        return True
+
+    def temporary_file() -> io.BytesIO:
+        tmp = io.BytesIO()
+        tempfiles.append(tmp)
+        return tmp
+
+    monkeypatch.setattr(me._EXPORT_LIMITER, "check", check_rate_limit)
+    monkeypatch.setattr(me, "get_redis", object)
+    monkeypatch.setattr(me, "_build_export_archive", build_export_archive)
+    monkeypatch.setattr(me, "write_audit", write_export_audit)
+    monkeypatch.setattr(me.tempfile, "TemporaryFile", temporary_file)
+
+    response = await me.export_my_data(
+        request=Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/me/export",
+                "headers": [],
+                "client": ("127.0.0.1", 1234),
+            }
+        ),
+        user=SimpleNamespace(id="user-1", email="user@example.com"),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    assert body == b"zip-data"
+    assert tempfiles[0].closed is True
+    assert response.headers["content-length"] == "8"
+    assert response.headers["content-disposition"].startswith(
+        'attachment; filename="lumen-export-user-1-'
+    )
+    assert events == [
+        "active-user",
+        "rollback",
+        "rate-limit",
+        "build",
+        "audit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_export_batch_iterators_cap_batches_and_rollback_before_yield() -> None:
+    created_at = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    messages = [
+        SimpleNamespace(
+            conversation_id="conv-1",
+            id=f"message-{index:04d}",
+            role="assistant",
+            content={"text": str(index)},
+            intent="chat",
+            status="succeeded",
+            created_at=created_at + timedelta(microseconds=index),
+        )
+        for index in range(501)
+    ]
+    images = [
+        SimpleNamespace(
+            id=f"image-{index:04d}",
+            storage_key=f"u/user-1/image-{index:04d}.png",
+            mime="image/png",
+            created_at=created_at + timedelta(microseconds=index),
+        )
+        for index in range(501)
+    ]
+
+    class RowsResult:
+        def __init__(self, rows: list[Any]) -> None:
+            self._rows = rows
+
+        def all(self) -> list[Any]:
+            return self._rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.transaction_open = False
+            self.rollback_count = 0
+            self.limits: list[int] = []
+            self._responses = [
+                messages[:500],
+                messages[500:],
+                [],
+                images[:500],
+                images[500:],
+                [],
+            ]
+
+        async def execute(self, statement: Any) -> RowsResult:
+            self.transaction_open = True
+            self.limits.append(statement._limit_clause.value)
+            return RowsResult(self._responses.pop(0))
+
+        async def rollback(self) -> None:
+            self.transaction_open = False
+            self.rollback_count += 1
+
+    db = Db()
+    message_batch_sizes: list[int] = []
+    async for batch in me_export.iter_export_message_batches(
+        db,  # type: ignore[arg-type]
+        "user-1",
+    ):
+        assert db.transaction_open is False
+        message_batch_sizes.append(len(batch))
+
+    image_batch_sizes: list[int] = []
+    async for batch in me_export.iter_export_image_batches(
+        db,  # type: ignore[arg-type]
+        "user-1",
+    ):
+        assert db.transaction_open is False
+        image_batch_sizes.append(len(batch))
+
+    assert inspect.isasyncgenfunction(me_export.iter_export_message_batches)
+    assert inspect.isasyncgenfunction(me_export.iter_export_image_batches)
+    assert message_batch_sizes == [500, 1]
+    assert image_batch_sizes == [500, 1]
+    assert db.limits == [500] * 6
+    assert db.rollback_count == 6
+
+
+@pytest.mark.asyncio
+async def test_export_batches_write_outside_transactions_and_preserve_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_at = datetime(2026, 7, 18, tzinfo=timezone.utc)
+    message = SimpleNamespace(
+        conversation_id="conv-1",
+        id="message-1",
+        role="assistant",
+        content={
+            "text": "public",
+            "memory_writes": [{"kind": "added", "id": "memory-1"}],
+            "_memory_extraction": {"owner": "private"},
+        },
+        intent="chat",
+        status="succeeded",
+        created_at=created_at,
+    )
+    image = SimpleNamespace(
+        id="image-1",
+        storage_key="u/user-1/image.png",
+        mime="image/png",
+        created_at=created_at,
+    )
+
+    class RowsResult:
+        def __init__(self, rows: list[Any]) -> None:
+            self._rows = rows
+
+        def all(self) -> list[Any]:
+            return self._rows
+
+    class Db:
+        def __init__(self) -> None:
+            self.transaction_open = False
+            self._responses = [[message], [], [image], []]
+
+        async def execute(self, _statement: Any) -> RowsResult:
+            self.transaction_open = True
+            return RowsResult(self._responses.pop(0))
+
+        async def rollback(self) -> None:
+            self.transaction_open = False
+
+    db = Db()
+
+    class GuardedBuffer(io.BytesIO):
+        def _assert_transaction_closed(self) -> None:
+            assert db.transaction_open is False
+
+        def flush(self) -> None:
+            self._assert_transaction_closed()
+            super().flush()
+
+        def seek(self, *args: Any, **kwargs: Any) -> int:
+            self._assert_transaction_closed()
+            return super().seek(*args, **kwargs)
+
+        def tell(self) -> int:
+            self._assert_transaction_closed()
+            return super().tell()
+
+        def write(self, data: bytes) -> int:
+            self._assert_transaction_closed()
+            return super().write(data)
+
+    class GuardedReader(io.BytesIO):
+        def read(self, *args: Any, **kwargs: Any) -> bytes:
+            assert db.transaction_open is False
+            return super().read(*args, **kwargs)
+
+    image_missing = SimpleNamespace(
+        id="image-missing",
+        storage_key="u/user-1/missing.png",
+        mime="image/png",
+        created_at=created_at + timedelta(microseconds=1),
+    )
+    image_escape = SimpleNamespace(
+        id="image-escape",
+        storage_key="../outside.png",
+        mime="image/png",
+        created_at=created_at + timedelta(microseconds=2),
+    )
+    db._responses[2].extend([image_missing, image_escape])
+
+    def open_storage_file(storage_key: str | None) -> io.BytesIO | None:
+        assert db.transaction_open is False
+        if storage_key == "u/user-1/image.png":
+            return GuardedReader(b"image-data")
+        return None
+
+    monkeypatch.setattr(me_export, "open_storage_file_safe", open_storage_file)
+
+    archive_file = GuardedBuffer()
+    stats = await me_export.build_export_archive(
+        db,  # type: ignore[arg-type]
+        archive_file,
+        "user-1",
+    )
+
+    archive_file.seek(0)
+    with zipfile.ZipFile(archive_file) as archive:
+        message_record = json.loads(archive.read("messages.ndjson"))
+        assert archive.namelist() == ["messages.ndjson", "images/image-1.png"]
+        assert archive.read("images/image-1.png") == b"image-data"
+
+    assert message_record == {
+        "conversation_id": "conv-1",
+        "id": "message-1",
+        "role": "assistant",
+        "content": {
+            "text": "public",
+            "memory_writes": [{"kind": "added", "id": "memory-1"}],
+        },
+        "intent": "chat",
+        "status": "succeeded",
+        "created_at": "2026-07-18T00:00:00+00:00",
+    }
+    assert stats == me_export.ExportStats(
+        messages=1,
+        images=1,
+        images_skipped=2,
+        zip_bytes=len(archive_file.getvalue()),
+    )
 
 
 @pytest.mark.asyncio

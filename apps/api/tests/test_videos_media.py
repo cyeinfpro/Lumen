@@ -148,7 +148,12 @@ async def test_reference_video_dedupe_repairs_missing_storage(
         def __init__(self) -> None:
             self.results = [
                 Result("user-1"),
+                Result(existing),
+                Result(existing),
                 Result(),
+                Result(),
+                Result(),
+                Result("user-1"),
                 Result(existing),
                 Result(existing),
                 Result(),
@@ -184,7 +189,7 @@ async def test_reference_video_dedupe_repairs_missing_storage(
     assert out.created is False
     assert repaired.read_bytes() == payload
     assert db.committed is True
-    assert db.rolled_back is False
+    assert db.rolled_back is True
 
 
 def test_video_upload_output_marks_new_assets() -> None:

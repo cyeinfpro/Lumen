@@ -84,6 +84,27 @@ class ValidationOutcome:
     challenge_jsonb: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SupplierValidationTarget:
+    base_url: str
+    validation_model: str | None
+    validation_timeout_ms: int | None
+
+    @classmethod
+    def from_supplier(cls, supplier: ApiSupplierTemplate) -> SupplierValidationTarget:
+        return cls(
+            base_url=str(getattr(supplier, "base_url", "") or ""),
+            validation_model=(
+                str(getattr(supplier, "validation_model", "") or "") or None
+            ),
+            validation_timeout_ms=(
+                int(getattr(supplier, "validation_timeout_ms"))
+                if getattr(supplier, "validation_timeout_ms", None) is not None
+                else None
+            ),
+        )
+
+
 def byok_master_secret() -> str:
     return settings.byok_api_key_master_secret.strip()
 
@@ -359,7 +380,8 @@ async def resolve_supplier_proxy(
     db: AsyncSession,
     supplier: ApiSupplierTemplate,
 ) -> ProviderProxyDefinition | None:
-    if not supplier.proxy_name:
+    proxy_name = getattr(supplier, "proxy_name", None)
+    if not proxy_name:
         return None
     raw = (
         await db.execute(
@@ -368,16 +390,16 @@ async def resolve_supplier_proxy(
     ).scalar_one_or_none()
     proxies, _errors = parse_proxy_json(raw)
     for proxy in proxies:
-        if proxy.name == supplier.proxy_name and proxy.enabled:
+        if proxy.name == proxy_name and proxy.enabled:
             return proxy
     return None
 
 
 async def validate_api_key_with_supplier(
-    db: AsyncSession,
-    supplier: ApiSupplierTemplate,
+    supplier: SupplierValidationTarget,
     api_key: str,
     *,
+    proxy: ProviderProxyDefinition | None = None,
     validation_model: str | None = None,
     timeout_ms: int | None = None,
 ) -> ValidationOutcome:
@@ -420,7 +442,6 @@ async def validate_api_key_with_supplier(
         "authorization": f"Bearer {key}",
         "content-type": "application/json",
     }
-    proxy = await resolve_supplier_proxy(db, supplier)
     proxy_url = await resolve_provider_proxy_url(proxy)
     effective_timeout = max(
         1000,

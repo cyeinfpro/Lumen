@@ -25,11 +25,10 @@ from ..redis_client import get_redis
 from .active_task_cleanup import cancel_video_generation_rows
 from .generation_queue import (
     GenerationQueueReleaseToken,
-    capture_generation_queue_state,
+    capture_queued_generation_cleanup_entries,
     completion_cancel_requires_durable_settlement,
     current_execution_epoch,
     generation_cancel_requires_durable_settlement,
-    queued_generation_cleanup_entries,
     release_generation_queue_state,
 )
 
@@ -187,22 +186,6 @@ async def cancel_account_active_tasks(
             queued_generation_execution_epochs[generation.id] = current_execution_epoch(
                 generation
             )
-            if queue_redis is not None:
-                try:
-                    token = await capture_generation_queue_state(
-                        queue_redis,
-                        generation.id,
-                        expected_execution_epoch=current_execution_epoch(generation),
-                    )
-                    if token is not None:
-                        queued_generation_queue_tokens[generation.id] = token
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "account deletion image_queue ownership snapshot failed "
-                        "task=%s err=%s",
-                        generation.id,
-                        exc,
-                    )
             generation.status = GenerationStatus.CANCELED.value
             generation.finished_at = canceled_at
             if should_release_queued_holds:
@@ -319,7 +302,7 @@ async def post_commit_account_task_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    queued_generation_entries = queued_generation_cleanup_entries(cleanup)
+    queued_generation_ids = cleanup.get("queued_generation_ids")
     cancel_task_ids = [
         *[
             task_id
@@ -342,7 +325,10 @@ async def post_commit_account_task_cleanup(
             if isinstance(task_id, str)
         ],
     ]
-    if not queued_generation_entries and not cancel_task_ids:
+    has_queued_generations = bool(
+        isinstance(queued_generation_ids, list) and queued_generation_ids
+    )
+    if not has_queued_generations and not cancel_task_ids:
         if int(cleanup.get("holds_released") or 0) > 0:
             try:
                 await invalidate_balance_cache(user_id)
@@ -355,6 +341,9 @@ async def post_commit_account_task_cleanup(
         return
     try:
         redis = get_redis()
+        queued_generation_entries = (
+            await capture_queued_generation_cleanup_entries(redis, cleanup)
+        )
         for task_id, execution_epoch, ownership_token in queued_generation_entries:
             await _release_account_generation_queue_state(
                 redis,

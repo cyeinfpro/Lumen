@@ -31,6 +31,7 @@ from . import context_runtime
 @dataclass(frozen=True, slots=True)
 class ContextAdapterDependencies:
     runtime_settings: Callable[[], Any]
+    session_factory: Callable[[], Any]
     count_tokens: Callable[[], Callable[[str], int]]
     estimate_system_prompt_tokens: Callable[[], Callable[[str], int]]
     estimate_text_tokens: Callable[[], Callable[[str], int]]
@@ -329,7 +330,7 @@ class ContextAdapter:
 
     async def inject_user_memory_context(
         self,
-        session: Any,
+        _session: Any,
         *,
         input_list: list[dict[str, Any]],
         user_id: str,
@@ -337,17 +338,18 @@ class ContextAdapter:
         parent_user_message_id: str | None,
         redis: Any | None = None,
     ) -> dict[str, Any]:
-        return await context_runtime.inject_memory_context(
-            session,
-            input_list=input_list,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            parent_user_message_id=parent_user_message_id,
-            redis=redis,
-            injector=inject_user_memory_context,
-            memory_extraction=self._deps.memory_extraction(),
-            message_model=Message,
-        )
+        async with self._deps.session_factory() as memory_session:
+            return await context_runtime.inject_memory_context(
+                memory_session,
+                input_list=input_list,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                parent_user_message_id=parent_user_message_id,
+                redis=redis,
+                injector=inject_user_memory_context,
+                memory_extraction=self._deps.memory_extraction(),
+                message_model=Message,
+            )
 
     async def record_completion_context_metadata(
         self,

@@ -68,6 +68,9 @@ class _GenerationExecutionTaskId(str):
         value.execution_epoch = max(0, int(execution_epoch))
         return value
 
+    def __getnewargs__(self) -> tuple[str, int]:
+        return str(self), self.execution_epoch
+
 
 def generation_execution_epoch(task_or_state: object) -> int:
     task = getattr(task_or_state, "generation", task_or_state)
