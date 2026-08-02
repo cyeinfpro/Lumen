@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import CheckConstraint
 
 from lumen_core import billing
+from lumen_core import billing_estimates
 from lumen_core.billing_cache import BillingCacheService, MAX_WINDOW_INCREMENT_MICRO
 from lumen_core.models import UserWallet
 from lumen_core.pricing import (
@@ -195,7 +196,7 @@ async def test_estimate_image_cost_fails_closed_without_positive_pricing(
     async def fake_price(*_args: Any, **_kwargs: Any) -> int | None:
         return unit_price
 
-    monkeypatch.setattr(billing, "pricing_price_micro", fake_price)
+    monkeypatch.setattr(billing_estimates, "pricing_price_micro", fake_price)
 
     with pytest.raises(billing.BillingError) as exc:
         await billing.estimate_image_cost(
@@ -216,7 +217,7 @@ async def test_estimate_image_cost_for_tier_fails_closed_for_zero_pricing(
     async def fake_price(*_args: Any, **_kwargs: Any) -> int:
         return 0
 
-    monkeypatch.setattr(billing, "pricing_price_micro", fake_price)
+    monkeypatch.setattr(billing_estimates, "pricing_price_micro", fake_price)
 
     with pytest.raises(billing.BillingError) as exc:
         await billing.estimate_image_cost_for_tier(
@@ -489,6 +490,44 @@ async def test_billing_cache_set_balance_does_not_delete_on_success() -> None:
 
     assert redis.sets == [("lumen:billing:balance:user-1", 500)]
     assert redis.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_billing_cache_get_balance_writeback_never_clobbers_newer_value() -> None:
+    """get_balance 回源写回只能填空缓存，不能覆盖 set_balance 刚写入的新余额。
+
+    竞态顺序：get_balance 缓存未命中 → 读库拿到结算前旧值 100 → worker 的
+    set_balance 把结算后新余额 500 写进缓存 → get_balance 若无条件写回，
+    旧值 100 会覆盖 500 并带着完整 TTL 陈旧 300 秒（两个进程，进程内 _lock
+    管不到）。修复要求写回带 nx=True，只在该 key 为空时才生效。
+    """
+    store: dict[str, Any] = {}
+
+    class Result:
+        def scalar_one_or_none(self) -> int:
+            return 100  # 读库发生在结算提交之前，拿到旧余额
+
+    class Session:
+        async def execute(self, _stmt: Any) -> Result:
+            # 模拟 worker 的 set_balance 在 DB 读之后、写回之前执行
+            await service.set_balance("user-1", 500)
+            return Result()
+
+    class Redis:
+        async def get(self, _key: str) -> Any:
+            return None  # 缓存未命中，触发回源
+
+        async def set(self, key: str, value: Any, **kwargs: Any) -> None:
+            if kwargs.get("nx") and key in store:
+                return  # SET NX 语义：key 已存在则跳过
+            store[key] = value
+
+    redis = Redis()
+    service = BillingCacheService(redis=redis)
+
+    assert await service.get_balance(Session(), "user-1") == 100
+
+    assert store["lumen:billing:balance:user-1"] == 500  # 新余额未被旧值覆盖
 
 
 @pytest.mark.asyncio
@@ -938,7 +977,12 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
     wallet = SimpleNamespace(
         balance_micro=0, hold_micro=0, lifetime_spend_micro=100, version=4
     )
-    consumed_tx = SimpleNamespace(id="settle-existing")
+    consumed_tx = SimpleNamespace(
+        id="settle-existing",
+        kind="settle",
+        amount_micro=-100,
+        meta={"actual_micro": 100},
+    )
 
     async def fake_existing_tx(*_args: Any) -> None:
         return None
@@ -973,6 +1017,116 @@ async def test_settle_returns_existing_ref_consumption_when_hold_is_gone(
     assert result is consumed_tx
     assert wallet.balance_micro == 0
     assert wallet.version == 4
+
+
+@pytest.mark.asyncio
+async def test_settle_after_release_records_real_cost_as_direct_debit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A prior `release` must not swallow a later confirmed upstream charge.
+
+    release only refunds the hold; if the upstream cost turns out to be real
+    (proven_absent was a misjudgement), the settlement must bill `actual` in
+    full instead of returning the old release transaction. With held=0 this is
+    a direct debit — same semantics as `charge`.
+    """
+    wallet = SimpleNamespace(
+        balance_micro=100, hold_micro=0, lifetime_spend_micro=0, version=1
+    )
+    released_tx = SimpleNamespace(
+        id="release-existing",
+        kind="release",
+        amount_micro=100,
+        meta={"released_micro": 100},
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 0
+
+    async def fake_ref_consumption(*_args: Any) -> Any:
+        return released_tx
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="video_generation",
+        ref_id="video-1",
+        actual_micro=120,
+        idempotency_key="video_generation:settle:video-1",
+    )
+
+    assert wallet.balance_micro == -20
+    assert wallet.lifetime_spend_micro == 120
+    assert tx.amount_micro == -120
+    assert tx.meta["actual_micro"] == 120
+    assert tx.meta["unauthorized_micro"] == 120
+
+
+@pytest.mark.asyncio
+async def test_settle_after_zero_settle_records_real_cost(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A zero-amount settle is not a settlement either: a later confirmed real
+    charge on the same ref must be recorded, not returned as a replay."""
+    wallet = SimpleNamespace(
+        balance_micro=50, hold_micro=0, lifetime_spend_micro=0, version=1
+    )
+    zero_tx = SimpleNamespace(
+        id="zero-settle-existing",
+        kind="settle",
+        amount_micro=0,
+        meta={"actual_micro": 0},
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_held_amount(*_args: Any) -> int:
+        return 0
+
+    async def fake_ref_consumption(*_args: Any) -> Any:
+        return zero_tx
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_held_amount_for_ref", fake_held_amount)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.settle(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        ref_type="generation",
+        ref_id="gen-1",
+        actual_micro=30,
+        idempotency_key="settle:gen-1:confirmed",
+    )
+
+    assert wallet.balance_micro == 20
+    assert wallet.lifetime_spend_micro == 30
+    assert tx.amount_micro == -30
+    assert tx.meta["actual_micro"] == 30
 
 
 @pytest.mark.asyncio
@@ -1288,8 +1442,12 @@ async def test_charge_never_absorbs_cost_regardless_of_allow_negative(
     async def insert(*_args: Any, **kwargs: Any) -> Any:
         return SimpleNamespace(**kwargs)
 
+    async def no_consumption(*_args: Any) -> None:
+        return None
+
     monkeypatch.setattr(billing, "_existing_tx", no_existing)
     monkeypatch.setattr(billing, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", no_consumption)
     monkeypatch.setattr(billing, "_insert_tx", insert)
 
     tx = await billing.charge(
@@ -1341,8 +1499,12 @@ async def test_charge_with_zero_balance_bills_full_amount(
     async def insert(*_args: Any, **kwargs: Any) -> Any:
         return SimpleNamespace(**kwargs)
 
+    async def no_consumption(*_args: Any) -> None:
+        return None
+
     monkeypatch.setattr(billing, "_existing_tx", no_existing)
     monkeypatch.setattr(billing, "get_wallet", get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", no_consumption)
     monkeypatch.setattr(billing, "_insert_tx", insert)
 
     tx = await billing.charge(
@@ -1480,11 +1642,15 @@ async def test_charge_allow_negative_marks_no_overdraw_debt(
     async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
         return wallet
 
+    async def no_consumption(*_args: Any) -> None:
+        return None
+
     async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
         return SimpleNamespace(**kwargs)
 
     monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
     monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", no_consumption)
     monkeypatch.setattr(billing, "_insert_tx", fake_insert)
 
     tx = await billing.charge(
@@ -1520,11 +1686,15 @@ async def test_charge_records_gross_lifetime_spend_for_existing_debt(
     async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
         return wallet
 
+    async def no_consumption(*_args: Any) -> None:
+        return None
+
     async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
         return SimpleNamespace(**kwargs)
 
     monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
     monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", no_consumption)
     monkeypatch.setattr(billing, "_insert_tx", fake_insert)
 
     tx = await billing.charge(
@@ -1542,6 +1712,173 @@ async def test_charge_records_gross_lifetime_spend_for_existing_debt(
     assert wallet.lifetime_spend_micro == 150
     assert tx.amount_micro == -100
     assert tx.meta["overdraw_micro"] == 130
+
+
+@pytest.mark.asyncio
+async def test_charge_after_real_settle_returns_existing_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """同一 ref 已有真实结算后，charge 直扣必须 no-op，不得二次扣费。"""
+    wallet = SimpleNamespace(
+        balance_micro=100,
+        hold_micro=0,
+        lifetime_spend_micro=50,
+        version=4,
+    )
+    consumed_tx = SimpleNamespace(
+        id="settle-existing",
+        kind="settle",
+        amount_micro=40,
+        meta={"actual_micro": 60},
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_ref_consumption(*_args: Any) -> Any:
+        return consumed_tx
+
+    async def fail_insert(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("charge after settlement must not mutate or insert")
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fail_insert)
+
+    result = await billing.charge(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        60,
+        ref_type="video_generation",
+        ref_id="video-1",
+        idempotency_key="charge:video-1",
+    )
+
+    assert result is consumed_tx
+    assert wallet.balance_micro == 100
+    assert wallet.lifetime_spend_micro == 50
+    assert wallet.version == 4
+
+
+@pytest.mark.asyncio
+async def test_charge_after_release_still_bills_real_cost(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """只有 release 没有真实结算时，charge 直扣必须照记（纯转嫁）。
+
+    release 只是退回 hold、上游成本并未记账；若上游实际扣了费，直扣路径
+    不能因为存在 release 流水就吞掉这笔成本。
+    """
+    wallet = SimpleNamespace(
+        balance_micro=100,
+        hold_micro=0,
+        lifetime_spend_micro=0,
+        version=1,
+    )
+    released_tx = SimpleNamespace(
+        id="release-existing",
+        kind="release",
+        amount_micro=100,
+        meta={"released_micro": 100},
+    )
+
+    async def fake_existing_tx(*_args: Any) -> None:
+        return None
+
+    async def fake_get_wallet(*_args: Any, **_kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_ref_consumption(*_args: Any) -> Any:
+        return released_tx
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_existing_ref_consumption_tx", fake_ref_consumption)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    tx = await billing.charge(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        60,
+        ref_type="video_generation",
+        ref_id="video-1",
+        idempotency_key="charge:video-1",
+    )
+
+    assert wallet.balance_micro == 40
+    assert wallet.lifetime_spend_micro == 60
+    assert tx.amount_micro == -60
+    assert tx.meta["cost_micro"] == 60
+
+
+@pytest.mark.asyncio
+async def test_held_amount_for_ref_sums_all_outstanding_holds() -> None:
+    """同一 ref 多次 hold 时未消费金额必须累加，只取最新一笔会让早期 hold
+    永久滞留在 hold_micro 里。"""
+
+    class _Result:
+        def __init__(self, value: Any) -> None:
+            self._value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return None
+
+        def scalar_one(self) -> Any:
+            return self._value
+
+    class _Session:
+        def __init__(self, total: Any) -> None:
+            self._total = total
+
+        async def execute(self, _stmt: Any) -> Any:
+            return _Result(self._total)
+
+    held = await billing._held_amount_for_ref(  # noqa: SLF001
+        _Session(-300), "user-1", "generation", "gen-1"
+    )
+    assert held == 300
+
+
+def test_consumption_settled_cost_micro_counts_legacy_settle_without_meta() -> None:
+    """无 meta 的老 settle：退款方向（amount_micro > 0）与零 delta 也是真实
+    结算，不能只认负 delta。release 与零成本现代 settle 仍不计。"""
+    assert (
+        billing._consumption_settled_cost_micro(  # noqa: SLF001
+            SimpleNamespace(kind="settle", amount_micro=-80, meta=None)
+        )
+        == 80
+    )
+    assert (
+        billing._consumption_settled_cost_micro(  # noqa: SLF001
+            SimpleNamespace(kind="settle", amount_micro=40, meta=None)
+        )
+        > 0
+    )
+    assert (
+        billing._consumption_settled_cost_micro(  # noqa: SLF001
+            SimpleNamespace(kind="settle", amount_micro=0, meta=None)
+        )
+        > 0
+    )
+    assert (
+        billing._consumption_settled_cost_micro(  # noqa: SLF001
+            SimpleNamespace(kind="release", amount_micro=-80, meta=None)
+        )
+        == 0
+    )
+    assert (
+        billing._consumption_settled_cost_micro(  # noqa: SLF001
+            SimpleNamespace(kind="settle", amount_micro=0, meta={"actual_micro": 0})
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -1579,6 +1916,144 @@ async def test_adjust_enforces_min_balance_after_wallet_lock(
     assert exc.value.code == "negative_balance_limit_exceeded"
     assert wallet.balance_micro == 100
     assert lock_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_adjust_without_key_rejects_second_identical_submission(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """adjust() without a caller key must not silently swallow a repeat.
+
+    The input-derived fallback key keeps a double-click / HTTP retry from
+    double-applying, but it cannot tell a retry apart from a second,
+    independent adjustment with identical amount+reason. Silently returning
+    the original transaction would lose real money in both directions
+    (compensation never credited, recovery never debited), so a repeat
+    submission raises ADJUST_REPLAYED instead; callers that may submit
+    identical adjustments more than once must pass a per-operation key.
+    """
+    wallet = SimpleNamespace(
+        balance_micro=100,
+        lifetime_topup_micro=0,
+        hold_micro=0,
+        version=0,
+    )
+    inserts: list[Any] = []
+
+    async def fake_existing_tx(*_args: Any) -> Any:
+        return inserts[0] if inserts else None
+
+    async def fake_get_wallet(*_args: Any, **kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        tx = SimpleNamespace(**kwargs)
+        inserts.append(tx)
+        return tx
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    await billing.adjust(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        100,
+        admin_id="admin-1",
+        reason="manual top-up",
+    )
+    assert wallet.balance_micro == 200
+    assert wallet.lifetime_topup_micro == 100
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.adjust(
+            object(),  # type: ignore[arg-type]
+            "user-1",
+            100,
+            admin_id="admin-1",
+            reason="manual top-up",
+        )
+    assert exc.value.code == "ADJUST_REPLAYED"
+    assert exc.value.status_code == 409
+    assert wallet.balance_micro == 200
+    assert wallet.lifetime_topup_micro == 100
+    assert len(inserts) == 1
+
+
+@pytest.mark.asyncio
+async def test_adjust_with_caller_key_replays_only_same_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A caller-supplied per-operation key replays a retry of the same
+    operation but lets a second, independent adjustment with identical
+    amount+reason apply.
+
+    This is the contract the admin UI relies on: one UUID per form
+    submission, reused on retries of that submission, fresh on the next
+    submission.
+    """
+    wallet = SimpleNamespace(
+        balance_micro=100,
+        lifetime_topup_micro=0,
+        hold_micro=0,
+        version=0,
+    )
+    inserts: list[Any] = []
+
+    async def fake_existing_tx(_db: Any, _user_id: str, key: str) -> Any:
+        return next(
+            (tx for tx in inserts if tx.idempotency_key == key),
+            None,
+        )
+
+    async def fake_get_wallet(*_args: Any, **kwargs: Any) -> Any:
+        return wallet
+
+    async def fake_insert(*_args: Any, **kwargs: Any) -> Any:
+        tx = SimpleNamespace(**kwargs)
+        inserts.append(tx)
+        return tx
+
+    monkeypatch.setattr(billing, "_existing_tx", fake_existing_tx)
+    monkeypatch.setattr(billing, "get_wallet", fake_get_wallet)
+    monkeypatch.setattr(billing, "_insert_tx", fake_insert)
+
+    first = await billing.adjust(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        100,
+        admin_id="admin-1",
+        reason="manual top-up",
+        idempotency_key="op-1",
+    )
+    assert wallet.balance_micro == 200
+
+    # 同一次提交的重试：同一 key 命中既有流水，静默重放，余额不再变动。
+    retry = await billing.adjust(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        100,
+        admin_id="admin-1",
+        reason="manual top-up",
+        idempotency_key="op-1",
+    )
+    assert retry is first
+    assert wallet.balance_micro == 200
+    assert len(inserts) == 1
+
+    # 第二次独立调账：新 key 即使金额+reason 完全相同也必须入账。
+    second = await billing.adjust(
+        object(),  # type: ignore[arg-type]
+        "user-1",
+        100,
+        admin_id="admin-1",
+        reason="manual top-up",
+        idempotency_key="op-2",
+    )
+    assert second is not first
+    assert wallet.balance_micro == 300
+    assert wallet.lifetime_topup_micro == 200
+    assert len(inserts) == 2
 
 
 @pytest.mark.asyncio

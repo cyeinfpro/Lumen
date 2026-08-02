@@ -16,7 +16,7 @@ import weakref
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +26,7 @@ from lumen_core.capacity_leases import (
     maintained_capacity_lease,
     race_with_capacity_lease,
 )
-from lumen_core.models import Image, ImageVariant, Video
+from lumen_core.models import Image, ImageVariant, User, Video
 from lumen_core.storage_capacity import (
     StorageCapacityExceeded,
     StorageCapacityPort,
@@ -63,6 +63,12 @@ from .volcano_asset_media_types import (
 
 
 logger = logging.getLogger(__name__)
+VIDEO_REFERENCE_STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024
+_VIDEO_STORAGE_CLEANUP_METADATA_KEY = "video_storage_cleanup"
+_VIDEO_REFERENCE_VARIANT_METADATA_KEYS = (
+    "upstream_reference_video_variant",
+    VOLCANO_ASSET_VIDEO_METADATA_KEY,
+)
 
 _even = _transcode._even
 _padded_canvas_size = _transcode._padded_canvas_size
@@ -133,14 +139,30 @@ def _fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _mkdir_parents_durable(path: Path) -> None:
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+        else:
+            _fsync_directory(directory.parent)
 
 
 def _file_sha256(path: Path) -> str:
@@ -194,7 +216,7 @@ def _install_file_atomic(
             "normalized asset media checksum is invalid",
             503,
         )
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_parents_durable(path.parent)
     existed_before = path.exists()
     for _attempt in range(3):
         if _file_matches(path, size_bytes=size_bytes, sha256=sha256):
@@ -630,6 +652,95 @@ def volcano_asset_video_variant_metadata(video: Video) -> dict[str, Any] | None:
     return normalized
 
 
+def _video_cleanup_is_complete(video: Any) -> bool:
+    metadata = video.metadata_jsonb if isinstance(video.metadata_jsonb, dict) else {}
+    cleanup = metadata.get(_VIDEO_STORAGE_CLEANUP_METADATA_KEY)
+    return (
+        getattr(video, "deleted_at", None) is not None
+        and isinstance(cleanup, dict)
+        and cleanup.get("state") == "complete"
+    )
+
+
+def _video_variant_quota_bytes(video: Any, metadata_key: str) -> int:
+    if _video_cleanup_is_complete(video):
+        return 0
+    metadata = video.metadata_jsonb if isinstance(video.metadata_jsonb, dict) else {}
+    raw = metadata.get(metadata_key)
+    if not isinstance(raw, dict):
+        return 0
+    try:
+        return max(0, int(raw.get("size_bytes") or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _video_reference_declared_bytes(video: Any) -> int:
+    if _video_cleanup_is_complete(video):
+        return 0
+    video_id = str(getattr(video, "id", "") or "")
+    user_id = str(getattr(video, "user_id", "") or "")
+    storage_key = str(getattr(video, "storage_key", "") or "")
+    primary_bytes = (
+        max(0, int(getattr(video, "size_bytes", 0) or 0))
+        if storage_key.startswith(f"u/{user_id}/vref/{video_id}/")
+        else 0
+    )
+    return primary_bytes + sum(
+        _video_variant_quota_bytes(video, metadata_key)
+        for metadata_key in _VIDEO_REFERENCE_VARIANT_METADATA_KEYS
+    )
+
+
+def _result_rows(result: Any) -> list[Any]:
+    scalars = getattr(result, "scalars", None)
+    if callable(scalars):
+        return list(scalars().all())
+    value = result.scalar_one_or_none()
+    return [] if value is None else [value]
+
+
+async def _locked_reference_storage_usage(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    guard: CapacityLeaseGuard,
+) -> int:
+    cleanup_state = Video.metadata_jsonb[_VIDEO_STORAGE_CLEANUP_METADATA_KEY][
+        "state"
+    ].as_string()
+    upstream_variant_key = Video.metadata_jsonb["upstream_reference_video_variant"][
+        "storage_key"
+    ].as_string()
+    volcano_variant_key = Video.metadata_jsonb[VOLCANO_ASSET_VIDEO_METADATA_KEY][
+        "storage_key"
+    ].as_string()
+    rows = _result_rows(
+        await race_with_capacity_lease(
+            db.execute(
+                select(Video)
+                .where(
+                    Video.user_id == user_id,
+                    or_(
+                        Video.storage_key.like(f"u/{user_id}/vref/%"),
+                        upstream_variant_key.is_not(None),
+                        volcano_variant_key.is_not(None),
+                    ),
+                    or_(
+                        Video.deleted_at.is_(None),
+                        cleanup_state.is_(None),
+                        cleanup_state != "complete",
+                    ),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ),
+            guard,
+        )
+    )
+    return sum(_video_reference_declared_bytes(row) for row in rows)
+
+
 def _video_variant_file_is_valid(
     path: Path,
     metadata: dict[str, Any],
@@ -664,10 +775,12 @@ async def ensure_volcano_asset_video_variant(
 ) -> tuple[dict[str, Any], VolcanoAssetInstallReceipt | None]:
     current_video = (
         await db.execute(
-            select(Video).where(
+            select(Video)
+            .where(
                 Video.id == video.id,
                 Video.deleted_at.is_(None),
             )
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if current_video is None:
@@ -689,6 +802,10 @@ async def ensure_volcano_asset_video_variant(
     source_path = _storage_path(storage_root, video.storage_key)
     if not source_path.is_file():
         raise VolcanoAssetMediaError("not_found", "video binary is missing", 404)
+    source_video_id = str(video.id)
+    source_user_id = str(video.user_id)
+    source_storage_key = str(video.storage_key)
+    source_sha256 = str(video.sha256)
     async with _video_transcode_semaphore():
         rendered = await asyncio.to_thread(
             make_volcano_asset_video_mp4,
@@ -703,21 +820,35 @@ async def ensure_volcano_asset_video_variant(
             storage_lease,
             ttl_seconds=storage_lease_ttl_seconds,
         ) as guard:
+            await race_with_capacity_lease(
+                db.execute(
+                    select(User.id).where(User.id == source_user_id).with_for_update()
+                ),
+                guard,
+            )
             current_video = (
                 await race_with_capacity_lease(
                     db.execute(
                         select(Video)
                         .where(
-                            Video.id == video.id,
+                            Video.id == source_video_id,
+                            Video.user_id == source_user_id,
+                            Video.storage_key == source_storage_key,
+                            Video.sha256 == source_sha256,
                             Video.deleted_at.is_(None),
                         )
                         .with_for_update()
+                        .execution_options(populate_existing=True)
                     ),
                     guard,
                 )
             ).scalar_one_or_none()
             if current_video is None:
-                raise VolcanoAssetMediaError("not_found", "video was deleted", 404)
+                raise VolcanoAssetMediaError(
+                    "video_reference_changed",
+                    "video changed or was deleted during asset preparation",
+                    409,
+                )
             video = current_video
             existing = volcano_asset_video_variant_metadata(video)
             if existing is not None:
@@ -735,6 +866,28 @@ async def ensure_volcano_asset_video_variant(
                 )
                 if is_valid:
                     return existing, None
+
+            current_bytes = await _locked_reference_storage_usage(
+                db,
+                user_id=source_user_id,
+                guard=guard,
+            )
+            replaced_bytes = _video_variant_quota_bytes(
+                video,
+                VOLCANO_ASSET_VIDEO_METADATA_KEY,
+            )
+            projected_bytes = (
+                current_bytes - min(current_bytes, replaced_bytes)
+            ) + rendered.size_bytes
+            if (
+                projected_bytes > VIDEO_REFERENCE_STORAGE_QUOTA_BYTES
+                and projected_bytes > current_bytes
+            ):
+                raise VolcanoAssetMediaError(
+                    "reference_video_quota_exceeded",
+                    "reference video storage quota exceeded",
+                    429,
+                )
 
             key = volcano_asset_video_key(video)
             receipt = await _install_rendered_media(

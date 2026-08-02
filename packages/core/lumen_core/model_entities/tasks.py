@@ -34,6 +34,10 @@ class Generation(Base, TimestampMixin):
     __tablename__ = "generations"
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_gen_user_idemp"),
+        CheckConstraint(
+            "execution_epoch >= 0",
+            name="ck_generations_execution_epoch_nonnegative",
+        ),
         Index("ix_gen_user_status_created", "user_id", "status", "created_at"),
         Index("ix_generations_user_created", "user_id", "created_at"),
         Index(
@@ -57,6 +61,17 @@ class Generation(Base, TimestampMixin):
             "id",
             postgresql_where=text("status IN ('queued', 'running')"),
             sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+        Index(
+            "ix_generations_cancel_requested",
+            "cancel_requested_at",
+            "id",
+            postgresql_where=text(
+                "cancel_requested_at IS NOT NULL AND status IN ('queued', 'running')"
+            ),
+            sqlite_where=text(
+                "cancel_requested_at IS NOT NULL AND status IN ('queued', 'running')"
+            ),
         ),
     )
 
@@ -107,6 +122,9 @@ class Generation(Base, TimestampMixin):
         String(32), nullable=False, default="queued"
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     billing_retry_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
@@ -116,6 +134,9 @@ class Generation(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     upstream_pixels: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -293,6 +314,10 @@ class Completion(Base, TimestampMixin):
     __tablename__ = "completions"
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_comp_user_idemp"),
+        CheckConstraint(
+            "execution_epoch >= 0",
+            name="ck_completions_execution_epoch_nonnegative",
+        ),
         Index("ix_completions_user_status_created", "user_id", "status", "created_at"),
         Index(
             "ix_completions_user_message_created",
@@ -308,6 +333,17 @@ class Completion(Base, TimestampMixin):
             "id",
             postgresql_where=text("status IN ('queued', 'streaming')"),
             sqlite_where=text("status IN ('queued', 'streaming')"),
+        ),
+        Index(
+            "ix_completions_cancel_requested",
+            "cancel_requested_at",
+            "id",
+            postgresql_where=text(
+                "cancel_requested_at IS NOT NULL AND status IN ('queued', 'streaming')"
+            ),
+            sqlite_where=text(
+                "cancel_requested_at IS NOT NULL AND status IN ('queued', 'streaming')"
+            ),
         ),
     )
 
@@ -369,12 +405,18 @@ class Completion(Base, TimestampMixin):
         String(32), nullable=False, default="queued"
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    execution_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)

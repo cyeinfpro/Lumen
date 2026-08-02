@@ -2,6 +2,7 @@ from sqlalchemy import CheckConstraint, Float
 
 from lumen_core.models import (
     BillingWindowUsageEvent,
+    Completion,
     Generation,
     Image,
     RedemptionBatch,
@@ -59,6 +60,25 @@ def test_generation_persists_billing_retry_identity():
     assert column.default is not None
     assert column.default.arg == 0
     assert str(column.server_default.arg) == "0"
+
+
+def test_generation_and_completion_execution_epochs_are_durable_nonnegative() -> None:
+    for model, constraint_name in (
+        (Generation, "ck_generations_execution_epoch_nonnegative"),
+        (Completion, "ck_completions_execution_epoch_nonnegative"),
+    ):
+        column = model.__table__.c.execution_epoch
+        checks = {
+            constraint.name: str(constraint.sqltext)
+            for constraint in model.__table__.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+
+        assert column.nullable is False
+        assert column.default is not None
+        assert column.default.arg == 0
+        assert str(column.server_default.arg) == "0"
+        assert checks[constraint_name] == "execution_epoch >= 0"
 
 
 def test_billing_window_usage_enforces_credential_ownership_and_positive_amount():

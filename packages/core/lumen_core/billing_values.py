@@ -7,7 +7,6 @@ import hmac
 import json
 import logging
 import secrets
-import sys
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Any
@@ -17,8 +16,16 @@ from .immutables import immutable_mapping
 logger = logging.getLogger(__name__)
 
 
+class BillingError(RuntimeError):
+    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+
+
 def _billing_error(code: str, message: str, status_code: int = 400) -> Exception:
-    return sys.modules["lumen_core.billing"].BillingError(code, message, status_code)
+    return BillingError(code, message, status_code)
 
 
 MICRO_RMB = 1_000_000

@@ -221,8 +221,16 @@ class BillingCacheService:
             balance = int(row or 0)
         if self.redis is not None:
             try:
+                # 只填空缓存：读库与写回之间，worker 的 set_balance 可能已把
+                # 结算后的新余额写进缓存（两个进程，_lock 管不到）。无条件
+                # 写回会把新值覆盖成旧值，还带着完整 TTL 陈旧 300s。nx=True
+                # 让写回只在 key 为空时生效；set_balance 仍是唯一无条件写入方，
+                # 保证新值永远不会被旧读回写覆盖。
                 await self.redis.set(
-                    self._balance_key(user_id), balance, ex=self.balance_ttl_sec
+                    self._balance_key(user_id),
+                    balance,
+                    ex=self.balance_ttl_sec,
+                    nx=True,
                 )
             except Exception:
                 pass

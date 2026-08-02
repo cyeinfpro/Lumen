@@ -32,7 +32,9 @@ SEEDANCE_20_MODEL = "seedance-2.0"
 _SEEDANCE_20_FAST_RE = re.compile(
     r"(?:seedance[-.]2[-.]0[-.]fast|video[-.]ds[-.]2[-.]0[-.]fast)"
 )
-_SEEDANCE_20_MINI_RE = re.compile(r"seedance[-.]2[-.]0[-.]mini")
+_SEEDANCE_20_MINI_RE = re.compile(
+    r"(?:seedance[-.]2[-.]0[-.]mini|video[-.]ds[-.]2[-.]0[-.]mini)"
+)
 VIDEO_PRICING_VARIANTS = (
     "t2v",
     "i2v",

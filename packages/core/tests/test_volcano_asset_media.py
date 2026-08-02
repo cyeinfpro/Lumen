@@ -166,6 +166,42 @@ def test_atomic_install_replaces_different_content(tmp_path: Path) -> None:
     assert destination.read_bytes() == expected
 
 
+def test_atomic_install_fsyncs_new_parents_and_final_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "new" / "nested" / "variant.bin"
+    payload = b"durable-variant"
+    events: list[tuple[str, Path]] = []
+    original_replace = volcano_asset_media.os.replace
+
+    def replace(source: Path, target: Path) -> None:
+        events.append(("replace", target))
+        original_replace(source, target)
+
+    def fsync_directory(path: Path) -> None:
+        events.append(("fsync", path))
+
+    monkeypatch.setattr(volcano_asset_media.os, "replace", replace)
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "_fsync_directory",
+        fsync_directory,
+    )
+
+    volcano_asset_media._install_file_atomic(
+        destination,
+        payload,
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+    replace_index = events.index(("replace", destination))
+    assert ("fsync", tmp_path) in events[:replace_index]
+    assert ("fsync", destination.parent.parent) in events[:replace_index]
+    assert events[-1] == ("fsync", destination.parent)
+    assert destination.read_bytes() == payload
+
+
 def test_atomic_install_detects_a_competing_different_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -286,7 +322,7 @@ async def test_video_variant_repairs_hash_mismatch_without_commit(
         "make_volcano_asset_video_mp4",
         lambda _source: rendered,
     )
-    session = _Session(video, video)
+    session = _Session(video, None, video, video)
 
     capacity = _StorageCapacity()
     result, receipt = await volcano_asset_media.ensure_volcano_asset_video_variant(
@@ -306,6 +342,73 @@ async def test_video_variant_repairs_hash_mismatch_without_commit(
         == result
     )
     session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_video_variant_rejects_quota_growth_before_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _video("videos/source.mp4", {})
+    source_path = tmp_path / source.storage_key
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(b"source")
+    retained = _video(
+        "u/user-1/vref/retained/original.mp4",
+        {},
+    )
+    retained.id = "retained"
+    retained.size_bytes = 15
+    rendered_data = b"0123456789"
+    rendered = volcano_asset_media.VolcanoAssetVideoMp4(
+        data=rendered_data,
+        width=1280,
+        height=720,
+        duration_ms=2_000,
+        fps=30.0,
+        has_audio=False,
+        size_bytes=len(rendered_data),
+        sha256=hashlib.sha256(rendered_data).hexdigest(),
+    )
+    installed = False
+
+    async def fail_install(**_kwargs: object) -> None:
+        nonlocal installed
+        installed = True
+        raise AssertionError("quota must be checked before installation")
+
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "make_volcano_asset_video_mp4",
+        lambda _source: rendered,
+    )
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "_install_rendered_media",
+        fail_install,
+    )
+    monkeypatch.setattr(
+        volcano_asset_media,
+        "VIDEO_REFERENCE_STORAGE_QUOTA_BYTES",
+        20,
+    )
+    session = _Session(source, None, source, retained)
+
+    with pytest.raises(volcano_asset_media.VolcanoAssetMediaError) as exc_info:
+        await volcano_asset_media.ensure_volcano_asset_video_variant(
+            session,
+            source,
+            storage_root=str(tmp_path),
+            storage_capacity=_StorageCapacity(),
+            storage_lease_ttl_seconds=30,
+        )
+
+    assert exc_info.value.code == "reference_video_quota_exceeded"
+    assert exc_info.value.status_code == 429
+    assert installed is False
+    assert volcano_asset_media.VOLCANO_ASSET_VIDEO_METADATA_KEY not in (
+        source.metadata_jsonb
+    )
 
 
 def test_video_transcode_semaphore_is_scoped_to_running_loop() -> None:
