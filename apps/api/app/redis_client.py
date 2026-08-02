@@ -14,6 +14,8 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from .config import settings
 
 _REDIS_RETRY_DELAYS = (0.05, 0.2, 0.5)
+_REDIS_CONNECT_TIMEOUT_S = 5.0
+_REDIS_COMMAND_TIMEOUT_S = 5.0
 
 # 响应丢失后重发仍安全的命令:只读命令,以及 DELETE/UNLINK 这类第二次执行
 # 不改变任何状态的严格幂等命令。写命令(INCR/SET NX/PUBLISH/EVAL 等)若在
@@ -93,6 +95,8 @@ def _new_redis() -> ReconnectingRedis:
         decode_responses=True,
         health_check_interval=30,
         socket_keepalive=True,
+        socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_S,
+        socket_timeout=_REDIS_COMMAND_TIMEOUT_S,
     )
 
 

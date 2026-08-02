@@ -120,21 +120,6 @@ async def cancel_generation_rows(
             queued_ids.append(generation.id)
             execution_epoch = execution_epoch_for(generation)
             queued_execution_epochs[generation.id] = execution_epoch
-            if capture_queue_ownership:
-                try:
-                    token = await capture_queue_state(
-                        queue_redis,
-                        generation.id,
-                        expected_execution_epoch=execution_epoch_for(generation),
-                    )
-                    if token is not None:
-                        queued_queue_tokens[generation.id] = token
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        snapshot_failure_message,
-                        generation.id,
-                        exc,
-                    )
             generation.status = GenerationStatus.CANCELED.value
             generation.progress_stage = "finalizing"
             generation.finished_at = canceled_at

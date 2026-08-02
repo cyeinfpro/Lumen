@@ -36,6 +36,8 @@ from ..byok_service import (
     hash_text_for_audit,
     pending_expires_at,
     read_byok_settings,
+    resolve_supplier_proxy,
+    SupplierValidationTarget,
     supplier_to_public_out,
     validate_api_key_with_supplier,
 )
@@ -79,6 +81,12 @@ def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException
     if details:
         err["details"] = details
     return HTTPException(status_code=http, detail={"error": err})
+
+
+async def _rollback_if_supported(db: Any) -> None:
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
 
 
 @router_auth_public.get(
@@ -130,12 +138,16 @@ async def verify_api_key_public(
         or not supplier.public_signup_enabled
     ):
         raise _http("supplier_not_available", "supplier is not available", 404)
+    supplier_id = str(supplier.id)
+    validation_target = SupplierValidationTarget.from_supplier(supplier)
+    proxy = await resolve_supplier_proxy(db, supplier)
+    await _rollback_if_supported(db)
 
     redis = get_redis()
     ip = require_client_ip(request)
     await _VERIFY_IP_LIMITER.check(redis, f"rl:byok:verify:ip:{ip}")
     await _VERIFY_SUPPLIER_LIMITER.check(
-        redis, f"rl:byok:verify:supplier:{supplier.id}"
+        redis, f"rl:byok:verify:supplier:{supplier_id}"
     )
     try:
         key_hash_for_limit = api_key_rate_limit_hash(body.api_key)
@@ -144,9 +156,9 @@ async def verify_api_key_public(
     await _VERIFY_KEY_LIMITER.check(redis, f"rl:byok:verify:key:{key_hash_for_limit}")
 
     outcome = await validate_api_key_with_supplier(
-        db,
-        supplier,
+        validation_target,
         body.api_key,
+        proxy=proxy,
         validation_model=settings_out.validation_model,
         timeout_ms=settings_out.validation_timeout_ms,
     )
@@ -159,7 +171,7 @@ async def verify_api_key_public(
             event_type="auth.api_key.verify.fail",
             actor_ip_hash=request_ip_hash(request),
             details={
-                "supplier_id": supplier.id,
+                "supplier_id": supplier_id,
                 "error_code": outcome.error_code,
                 "http_status": outcome.http_status,
                 "latency_ms": outcome.latency_ms,
@@ -178,7 +190,7 @@ async def verify_api_key_public(
     verified_at = datetime.now(timezone.utc)
     pending = PendingApiKeyVerification(
         token_hash=token_hash,
-        supplier_id=supplier.id,
+        supplier_id=supplier_id,
         key_ciphertext=key_ciphertext,
         key_hash=key_hash,
         key_hint=key_hint,
@@ -193,14 +205,14 @@ async def verify_api_key_public(
         db,
         event_type="auth.api_key.verify.success",
         actor_ip_hash=request_ip_hash(request),
-        details={"supplier_id": supplier.id, "latency_ms": outcome.latency_ms},
+        details={"supplier_id": supplier_id, "latency_ms": outcome.latency_ms},
         autocommit=False,
     )
     await db.commit()
     return ApiKeyVerifyOut(
         ok=True,
         verification_token=token,
-        supplier_id=supplier.id,
+        supplier_id=supplier_id,
         key_hint=key_hint,
         verified_at=verified_at,
     )
@@ -289,7 +301,6 @@ async def probe_my_api_credential(
                 UserApiCredential.user_id == user.id,
                 UserApiCredential.deleted_at.is_(None),
             )
-            .with_for_update()
         )
     ).one_or_none()
     if row is None:
@@ -305,7 +316,42 @@ async def probe_my_api_credential(
         raise _http("supplier_not_available", "supplier is not available", 404)
     key_ciphertext = credential.key_ciphertext
     supplier_id = supplier.id
+    validation_target = SupplierValidationTarget.from_supplier(supplier)
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     await _PROBE_SUPPLIER_LIMITER.check(redis, f"rl:byok:probe:supplier:{supplier_id}")
+    row = (
+        await db.execute(
+            select(UserApiCredential, ApiSupplierTemplate)
+            .join(
+                ApiSupplierTemplate,
+                ApiSupplierTemplate.id == UserApiCredential.supplier_id,
+            )
+            .where(
+                UserApiCredential.id == credential_id,
+                UserApiCredential.user_id == user.id,
+                UserApiCredential.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        raise _http("not_found", "credential not found", 404)
+    credential, supplier = row
+    if (
+        credential.status != "active"
+        or supplier.id != supplier_id
+        or supplier.deleted_at is not None
+        or not supplier.enabled
+    ):
+        raise _http(
+            "credential_changed",
+            "credential changed while the probe was starting",
+            409,
+        )
+    key_ciphertext = credential.key_ciphertext
+    validation_target = SupplierValidationTarget.from_supplier(supplier)
     await db.commit()
 
     try:
@@ -328,12 +374,14 @@ async def probe_my_api_credential(
     except ValueError as exc:
         raise _http("invalid_api_key", "API key is invalid", 400) from exc
     await _PROBE_KEY_LIMITER.check(redis, f"rl:byok:probe:key:{key_hash_for_limit}")
-
     settings_out = await read_byok_settings(db)
+    proxy = await resolve_supplier_proxy(db, supplier)
+    await _rollback_if_supported(db)
+
     outcome = await validate_api_key_with_supplier(
-        db,
-        supplier,
+        validation_target,
         api_key,
+        proxy=proxy,
         validation_model=settings_out.validation_model,
         timeout_ms=settings_out.validation_timeout_ms,
     )
@@ -426,6 +474,10 @@ async def put_my_api_credential(
         or not supplier.user_bind_enabled
     ):
         raise _http("supplier_not_available", "supplier is not available", 404)
+    validation_target = SupplierValidationTarget.from_supplier(supplier)
+    proxy = await resolve_supplier_proxy(db, supplier)
+    supplier_name = str(supplier.name)
+    await _rollback_if_supported(db)
 
     redis = get_redis()
     ip = require_client_ip(request)
@@ -439,9 +491,9 @@ async def put_my_api_credential(
     await _PROBE_KEY_LIMITER.check(redis, f"rl:byok:put:key:{key_hash_for_limit}")
 
     outcome = await validate_api_key_with_supplier(
-        db,
-        supplier,
+        validation_target,
         body.api_key,
+        proxy=proxy,
         validation_model=settings_out.validation_model,
         timeout_ms=settings_out.validation_timeout_ms,
     )
@@ -486,7 +538,7 @@ async def put_my_api_credential(
     replaced_ids = [row[0] for row in update_result.all()]
     credential = UserApiCredential(
         user_id=user.id,
-        supplier_id=supplier.id,
+        supplier_id=supplier_id,
         key_ciphertext=key_ciphertext,
         key_hash=key_hash,
         key_hint=key_hint,
@@ -515,14 +567,14 @@ async def put_my_api_credential(
         actor_email_hash=hash_email(user.email),
         actor_ip_hash=request_ip_hash(request),
         details={
-            "supplier_id": supplier.id,
+            "supplier_id": supplier_id,
             "credential_id": credential.id,
             "replaced_credential_ids": replaced_ids,
         },
         autocommit=False,
     )
     await db.commit()
-    return _credential_out(credential, supplier)
+    return _credential_out(credential, supplier_name)
 
 
 @router_me.delete(
@@ -565,12 +617,13 @@ async def revoke_my_api_credential(
 
 def _credential_out(
     credential: UserApiCredential,
-    supplier: ApiSupplierTemplate,
+    supplier: ApiSupplierTemplate | str,
 ) -> UserApiCredentialOut:
+    supplier_name = supplier if isinstance(supplier, str) else supplier.name
     return UserApiCredentialOut(
         id=credential.id,
         supplier_id=credential.supplier_id,
-        supplier_name=supplier.name,
+        supplier_name=supplier_name,
         key_hint=credential.key_hint,
         status=credential.status,
         last_verified_at=credential.last_verified_at,

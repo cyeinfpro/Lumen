@@ -36,6 +36,7 @@ from ...upstream_parts import (
     cleanup_owned_generated_payload,
     materialize_generated_payload,
 )
+from .active_user_fence import lock_active_generation_user
 from .diagnostics import (
     build_generation_diagnostics,
     image_effective_params_snapshot,
@@ -54,6 +55,7 @@ from .persistence import (
     maybe_embed_model_image_metadata_bytes,
     model_image_metadata_from_request,
 )
+from .post_commit import enqueue_auto_title, run_workflow_tagging
 from .queue import redis_text
 from .retry_state import (
     RUNNING_GENERATION_STATUSES,
@@ -68,6 +70,9 @@ from .retry_state import (
 )
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
+
+# Keep the old private seam available to focused tests and extensions.
+_run_post_commit_workflow_tagging = run_workflow_tagging
 
 
 logger = logging.getLogger(__name__)
@@ -140,8 +145,9 @@ async def finalize_generation_success(
         g,
     )
     state.task_outcome = "succeeded"
+    await run_workflow_tagging(state, artifact.image_id, g)
     await _finalize_batch_extra_images(state, artifact.actual_image_count, g)
-    await _enqueue_auto_title(state)
+    await enqueue_auto_title(state)
     await _finalize_dual_race_bonus(state, g)
 
 
@@ -441,6 +447,11 @@ async def _persist_generation_success(
             "cancelled before generation persistence",
         )
         async with g.store.session() as session:
+            if not await lock_active_generation_user(
+                session,
+                user_id=state.user_id,
+            ):
+                raise TaskCancelled("account deleted before generation persistence")
             await ensure_generation_attempt_current(
                 session,
                 state.task_id,
@@ -875,17 +886,6 @@ async def _finalize_batch_extra_images(
                 batch_index,
                 exc,
             )
-
-
-async def _enqueue_auto_title(state: GenerationRunState) -> None:
-    if not state.conversation_id_for_title:
-        return
-    from ..auto_title import maybe_enqueue_auto_title
-
-    await maybe_enqueue_auto_title(
-        state.redis,
-        state.conversation_id_for_title,
-    )
 
 
 async def _finalize_dual_race_bonus(

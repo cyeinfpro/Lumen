@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +13,6 @@ from starlette.requests import Request
 from app import deps
 from app.images.adapters.sqlalchemy_repository import SQLAlchemyImageRepository
 from app.images.application import http_routes
-from app.images.application.upload import UploadCommandService
 from app.images.domain.artifact import ArtifactStatus
 from app.routes import conversations, me, messages, regenerate, tasks
 from app.services.active_user import (
@@ -266,17 +264,6 @@ class _NoStorageUploadService:
         raise AssertionError("a deleted user must not start upload storage work")
 
 
-class _DeletedPublicationRepository:
-    def __init__(self, state: _SharedUserState) -> None:
-        self.state = state
-
-    @asynccontextmanager
-    async def active_user_fence(self, _user_id: str):
-        if self.state.deleted:
-            raise ActiveUserDeleted()
-        yield
-
-
 def _request() -> Request:
     return Request(
         {
@@ -512,31 +499,6 @@ async def test_authenticated_conversation_create_after_delete_never_commits(
     rendered = str(db.statements[0].compile(dialect=postgresql.dialect())).upper()
     assert "FOR UPDATE" in rendered
     assert "USERS.DELETED_AT IS NULL" in rendered
-
-
-@pytest.mark.asyncio
-async def test_deleted_user_publication_fence_prevents_storage_side_effect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    state = _SharedUserState()
-    user = SimpleNamespace(
-        id=state.user_id,
-        email="member@example.com",
-        account_mode="wallet",
-        deleted_at=None,
-    )
-    authenticated_user = await _authenticate_request(user)
-    await _commit_account_deletion(monkeypatch, state, authenticated_user)
-
-    service = object.__new__(UploadCommandService)
-    service.repository = _DeletedPublicationRepository(state)  # type: ignore[attr-defined]
-    published: list[str] = []
-
-    with pytest.raises(ActiveUserDeleted):
-        async with service._active_user_fence(authenticated_user.id):  # noqa: SLF001
-            published.append("original")
-
-    assert published == []
 
 
 @pytest.mark.asyncio

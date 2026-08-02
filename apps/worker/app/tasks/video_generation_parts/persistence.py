@@ -377,6 +377,15 @@ async def delete_video_storage_keys(
                 key,
                 result,
             )
+    failures = [
+        key
+        for key, result in zip(unique_keys, results, strict=False)
+        if isinstance(result, BaseException)
+    ]
+    if failures:
+        raise RuntimeError(
+            f"video artifact cleanup failed for {len(failures)} key(s)"
+        )
 
 
 async def _cleanup_unadopted_video_storage_keys(

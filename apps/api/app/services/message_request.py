@@ -271,6 +271,23 @@ async def persist_message_request(
             )
         else:
             await lock_active_user(db, user.id)
+        conversation = (
+            await db.execute(
+                select(Conversation)
+                .where(
+                    Conversation.id == command.conversation_id,
+                    Conversation.user_id == user.id,
+                    Conversation.deleted_at.is_(None),
+                )
+                .with_for_update(of=Conversation)
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            raise runtime.http_error(
+                "not_found",
+                "conversation not found",
+                404,
+            )
         db.add(user_message)
         await db.flush()
         if is_chat_intent(intent):

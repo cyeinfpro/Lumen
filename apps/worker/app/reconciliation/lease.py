@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
@@ -12,6 +13,7 @@ from .metrics import reconciliation_lease_state_total
 
 logger = logging.getLogger(__name__)
 LEASE_UNKNOWN_LOG_SAMPLE = 3
+LEASE_READ_TIMEOUT_S = 2.0
 
 # 与 worker 侧 lease TTL(60s) 对齐，留一倍余量吸收续期抖动。
 LEASE_FRESHNESS_WINDOW = timedelta(seconds=120)
@@ -82,7 +84,10 @@ async def read_lease_state(
     out and release a hold the upstream has already charged for.
     """
     try:
-        value = await redis.get(f"task:{task_id}:lease")
+        value = await asyncio.wait_for(
+            redis.get(f"task:{task_id}:lease"),
+            timeout=LEASE_READ_TIMEOUT_S,
+        )
     except Exception as exc:  # noqa: BLE001
         if kind is not None:
             reconciliation_lease_state_total.labels(
@@ -110,6 +115,33 @@ async def read_lease_state(
             state=state.value,
         ).inc()
     return state
+
+
+async def read_lease_states(
+    redis: Any,
+    tasks: list[Any],
+    *,
+    kind: str,
+    unknowns: LeaseUnknownSummary | None,
+    now: datetime,
+) -> dict[str, LeaseState]:
+    states = await asyncio.gather(
+        *(
+            read_lease_state(
+                redis,
+                str(task.id),
+                kind=kind,
+                unknowns=unknowns,
+                heartbeat_at=getattr(task, "updated_at", None),
+                now=now,
+            )
+            for task in tasks
+        )
+    )
+    return {
+        str(task.id): state
+        for task, state in zip(tasks, states, strict=True)
+    }
 
 
 async def lease_expired(redis: Any, task_id: str) -> bool:

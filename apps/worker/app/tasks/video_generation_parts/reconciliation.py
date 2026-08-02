@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .runtime import video_ports
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -16,6 +16,10 @@ from lumen_core.constants import (
 from lumen_core.models import VideoGeneration
 
 from ...video_upstream_service import PollResult
+from .runtime import video_ports
+
+
+_RECON_ROW_TIMEOUT_S = 5.0
 
 
 async def finalize_submit_unknown(
@@ -145,16 +149,16 @@ async def _reconcile_pre_submit_row(
     return True
 
 
-async def _video_rows_for_reconciliation(
+async def _video_ids_for_reconciliation(
     session: Any,
     *,
     now: datetime,
-) -> list[VideoGeneration]:
+) -> list[str]:
     cutoff = now - timedelta(seconds=video_ports()._RECON_STALE_AFTER_S)
     return (
         (
             await session.execute(
-                select(VideoGeneration)
+                select(VideoGeneration.id)
                 .where(
                     VideoGeneration.status.in_(
                         [
@@ -173,12 +177,57 @@ async def _video_rows_for_reconciliation(
                 )
                 .order_by(VideoGeneration.created_at)
                 .limit(video_ports()._RECON_LIMIT)
-                .with_for_update(skip_locked=True)
             )
         )
         .scalars()
         .all()
     )
+
+
+async def _reconcile_video_row(
+    redis: Any,
+    task_id: str,
+    *,
+    now: datetime,
+    submit_unknown_cutoff: datetime,
+) -> tuple[int, bool, str | None]:
+    async with video_ports().SessionLocal() as session:
+        row = (
+            await session.execute(
+                select(VideoGeneration)
+                .where(VideoGeneration.id == task_id)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+        if row is None or row.status in video_ports()._TERMINAL_STATUSES:
+            return 0, False, None
+        recover_cached = False
+        release_provider = None
+        if row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value:
+            changed, recover_cached, release_provider = (
+                await video_ports()._reconcile_submit_unknown(
+                    session,
+                    redis,
+                    row,
+                    now=now,
+                )
+            )
+        elif row.provider_task_id:
+            await video_ports()._enqueue_poll(redis, row.id, defer_s=0)
+            changed = True
+        else:
+            changed = await _reconcile_pre_submit_row(
+                session,
+                redis,
+                row,
+                now=now,
+                submit_unknown_cutoff=submit_unknown_cutoff,
+            )
+            if row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value:
+                release_provider = row.provider_name
+        await session.commit()
+        await video_ports().worker_flush_balance_cache(session)
+        return int(changed), recover_cached, release_provider
 
 
 async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
@@ -202,47 +251,29 @@ async def reconcile_video_tasks(ctx: dict[str, Any]) -> int:
     release_slots: list[tuple[str, str]] = []
     cached_recoveries: list[str] = []
     async with video_ports().SessionLocal() as session:
-        rows = await _video_rows_for_reconciliation(session, now=now)
-        for row in rows:
-            if row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value:
-                (
-                    changed,
-                    recover_cached,
-                    release_provider,
-                ) = await video_ports()._reconcile_submit_unknown(
-                    session,
-                    redis,
-                    row,
-                    now=now,
+        task_ids = await _video_ids_for_reconciliation(session, now=now)
+    for task_id in task_ids:
+        try:
+            async with asyncio.timeout(_RECON_ROW_TIMEOUT_S):
+                changed, recover_cached, release_provider = (
+                    await _reconcile_video_row(
+                        redis,
+                        task_id,
+                        now=now,
+                        submit_unknown_cutoff=submit_unknown_cutoff,
+                    )
                 )
-                if recover_cached:
-                    cached_recoveries.append(row.id)
-                if release_provider:
-                    release_slots.append((release_provider, row.id))
-                touched += int(changed)
-                continue
-            if row.provider_task_id:
-                await video_ports()._enqueue_poll(redis, row.id, defer_s=0)
-                touched += 1
-                continue
-            touched += int(
-                await _reconcile_pre_submit_row(
-                    session,
-                    redis,
-                    row,
-                    now=now,
-                    submit_unknown_cutoff=submit_unknown_cutoff,
-                )
+        except TimeoutError:
+            video_ports().logger.warning(
+                "video reconciliation row timed out task=%s",
+                task_id,
             )
-            if (
-                row.status == VideoGenerationStatus.SUBMIT_UNKNOWN.value
-                and row.provider_name
-            ):
-                # The submitter is gone (no active lease); release its slot now
-                # instead of holding it until finalize or the slot TTL.
-                release_slots.append((row.provider_name, row.id))
-        await session.commit()
-        await video_ports().worker_flush_balance_cache(session)
+            continue
+        touched += changed
+        if recover_cached:
+            cached_recoveries.append(task_id)
+        if release_provider:
+            release_slots.append((release_provider, task_id))
     for task_id in cached_recoveries:
         try:
             await video_ports()._enqueue_submit(redis, task_id, defer_s=0)

@@ -154,11 +154,15 @@ async def claim_video_artifact_fence(
         or generation.cancel_requested_at is not None
     ):
         return None
+    owner_token = video_ports().new_uuid7()
+    owned_artifact_attempt_id = hashlib.sha256(
+        f"{artifact_attempt_id}\0{owner_token}".encode("utf-8")
+    ).hexdigest()[:32]
     fence = _VideoArtifactFence(
-        owner_token=video_ports().new_uuid7(),
+        owner_token=owner_token,
         execution_epoch=_video_artifact_execution_epoch(generation),
         attempt_epoch=_video_artifact_attempt_epoch(generation),
-        artifact_attempt_id=artifact_attempt_id,
+        artifact_attempt_id=owned_artifact_attempt_id,
     )
     diagnostics = (
         dict(generation.diagnostics) if isinstance(generation.diagnostics, dict) else {}
@@ -398,6 +402,8 @@ async def cleanup_video_artifacts_if_owned(
         )
         return False
     try:
+        cleanup_state: str | None = None
+        deletable_keys: list[str] = []
         async with video_ports().SessionLocal() as session:
             generation = await session.get(
                 VideoGeneration,
@@ -426,9 +432,9 @@ async def cleanup_video_artifacts_if_owned(
             payload = _video_artifact_fence_payload(generation)
             if payload is None:
                 return False
-            state = payload.get("state")
+            cleanup_state = payload.get("state")
             adopted_video = await video_for_generation(session, generation_id)
-            if state == _VIDEO_ARTIFACT_PENDING:
+            if cleanup_state == _VIDEO_ARTIFACT_PENDING:
                 if (
                     generation.status == VideoGenerationStatus.SUCCEEDED.value
                     or adopted_video is not None
@@ -443,7 +449,7 @@ async def cleanup_video_artifacts_if_owned(
                 deletable_keys = unique_keys
             else:
                 if (
-                    state != _VIDEO_ARTIFACT_ADOPTED
+                    cleanup_state != _VIDEO_ARTIFACT_ADOPTED
                     or generation.status != VideoGenerationStatus.SUCCEEDED.value
                     or adopted_video is None
                 ):
@@ -465,10 +471,23 @@ async def cleanup_video_artifacts_if_owned(
                 deletable_keys = [
                     key for key in unique_keys if key not in protected_keys
                 ]
+            await session.commit()
 
-            if deletable_keys:
-                await video_ports()._delete_video_storage_keys(deletable_keys)
-            if state == _VIDEO_ARTIFACT_PENDING:
+        if deletable_keys:
+            await video_ports()._delete_video_storage_keys(deletable_keys)
+        if cleanup_state == _VIDEO_ARTIFACT_PENDING:
+            async with video_ports().SessionLocal() as session:
+                generation = await session.get(
+                    VideoGeneration,
+                    generation_id,
+                    with_for_update=True,
+                )
+                if generation is None or not _generation_matches_video_artifact_fence(
+                    generation,
+                    fence,
+                    states={_VIDEO_ARTIFACT_PENDING},
+                ):
+                    return False
                 diagnostics = (
                     dict(generation.diagnostics)
                     if isinstance(generation.diagnostics, dict)
@@ -478,8 +497,8 @@ async def cleanup_video_artifacts_if_owned(
                     state=_VIDEO_ARTIFACT_CLEANED
                 )
                 generation.diagnostics = diagnostics
-            await session.commit()
-            return True
+                await session.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
         video_ports().logger.error(
             "video artifact cleanup ownership check failed closed task=%s "

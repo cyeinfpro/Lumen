@@ -487,19 +487,6 @@ async def cancel_generation(
         await _notify_task_cancel(redis, gen.id, kind="generation")
         return {"status": "canceling", "cancel_requested": True}
 
-    queue_ownership = None
-    try:
-        queue_ownership = await capture_generation_queue_state(
-            redis,
-            gen.id,
-            expected_execution_epoch=current_execution_epoch(gen),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "cancel image_queue ownership snapshot failed gen=%s err=%s",
-            gen.id,
-            exc,
-        )
     gen.status = GenerationStatus.CANCELED.value
     gen.finished_at = now
     released_hold = False
@@ -520,6 +507,11 @@ async def cancel_generation(
     # image_queue side state so a canceled queued row cannot keep capacity.
     try:
         if was_queued:
+            queue_ownership = await capture_generation_queue_state(
+                redis,
+                gen.id,
+                expected_execution_epoch=current_execution_epoch(gen),
+            )
             await _release_generation_queue_state(
                 redis,
                 gen.id,

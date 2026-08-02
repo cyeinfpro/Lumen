@@ -19,10 +19,12 @@ from lumen_core.constants import (
 from lumen_core.generation_resources import generation_resource_demand
 from lumen_core.models import Generation, Message
 from lumen_core.queue_metadata import generation_queue_metadata
+from lumen_core.upstream_billing import upstream_dispatch_result_unknown
 
 from ...observability import safe_outcome, task_duration_seconds
 from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from ..state import is_generation_terminal
+from .active_user_fence import lock_active_generation_user
 from .diagnostics import generation_trace_id, queue_wait_ms
 from .errors import TaskCancelled
 from .execution_boundary import (
@@ -50,11 +52,27 @@ from .runner_phase_services import ClaimGenerationServices
 
 
 logger = logging.getLogger(f"{__package__}.runner")
+RESULT_UNKNOWN_CODE = "result_unknown"
+RESULT_UNKNOWN_MESSAGE = "upstream dispatch has no response receipt; result is unknown"
 
 
 async def load_initial_generation(state: GenerationRunState) -> bool:
     services = ClaimGenerationServices.from_deps(state.services)
     async with services.store.session() as session:
+        owner_id = (
+            await session.execute(
+                select(Generation.user_id).where(Generation.id == state.task_id)
+            )
+        ).scalar_one_or_none()
+        if owner_id is not None and not await lock_active_generation_user(
+            session,
+            user_id=str(owner_id),
+        ):
+            logger.info(
+                "generation initial claim blocked by inactive user task_id=%s",
+                state.task_id,
+            )
+            return False
         generation = await claim_generation_row(state, session)
         if generation is None:
             return False
@@ -83,6 +101,8 @@ async def load_initial_generation(state: GenerationRunState) -> bool:
                 services=services,
             )
             return False
+        if await fail_nonreplayable_dispatch(state, session, services):
+            return False
         state.attempt, may_run = bounded_next_attempt(generation.attempt)
         if not may_run:
             await fail_max_attempts(state, session, services)
@@ -104,6 +124,34 @@ async def load_initial_generation(state: GenerationRunState) -> bool:
             output_count=int(request.get("n") or 1),
             dual_race=request.get("image_route") == "dual_race",
         )
+    return True
+
+
+async def fail_nonreplayable_dispatch(
+    state: GenerationRunState,
+    session: Any,
+    services: ClaimGenerationServices,
+) -> bool:
+    generation = state.generation
+    if not upstream_dispatch_result_unknown(
+        generation,
+        execution_epoch=getattr(generation, "execution_epoch", None),
+    ):
+        return False
+    logger.warning(
+        "generation replay blocked by unresolved dispatch task=%s epoch=%s attempt=%s",
+        state.task_id,
+        getattr(generation, "execution_epoch", 0),
+        getattr(generation, "attempt", 0),
+    )
+    await fail_queued_generation(
+        state,
+        session,
+        code=RESULT_UNKNOWN_CODE,
+        message=RESULT_UNKNOWN_MESSAGE,
+        next_attempt=None,
+        services=services,
+    )
     return True
 
 
@@ -402,6 +450,7 @@ def observe_task_duration(state: GenerationRunState) -> None:
 
 __all__ = [
     "claim_generation_row",
+    "fail_nonreplayable_dispatch",
     "fail_queued_generation",
     "generation_cannot_start",
     "load_generation_fields",

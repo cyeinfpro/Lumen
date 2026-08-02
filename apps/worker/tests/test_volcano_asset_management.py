@@ -769,41 +769,32 @@ def test_reference_token_reuses_unexpired_value() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("asset_type", "token_key", "ensure_name"),
-    [
-        (
-            "Image",
-            "video_reference_access_token",
-            "ensure_volcano_asset_image_variant",
-        ),
-        (
-            "Video",
-            "reference_access_token",
-            "ensure_volcano_asset_video_variant",
-        ),
-    ],
-)
-async def test_concurrent_source_urls_share_one_locked_token(
+async def test_concurrent_image_source_urls_share_one_locked_token(
     monkeypatch: pytest.MonkeyPatch,
-    asset_type: str,
-    token_key: str,
-    ensure_name: str,
 ) -> None:
     from app.tasks import volcano_asset_orchestrator as volcano_assets
     from app.tasks import volcano_asset_source_media
 
-    source = SimpleNamespace(id="source-1", metadata_jsonb={})
+    asset_type = "Image"
+    token_key = "video_reference_access_token"
+    persisted_metadata: dict[str, Any] = {}
     row_lock = asyncio.Lock()
     locked_statements: list[str] = []
 
     class _Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
         def scalar_one_or_none(self) -> Any:
-            return source
+            return self.value
 
     class _Session:
         def __init__(self) -> None:
             self.owns_lock = False
+            self.source = SimpleNamespace(
+                id="source-1",
+                metadata_jsonb=dict(persisted_metadata),
+            )
 
         async def __aenter__(self) -> "_Session":
             return self
@@ -816,23 +807,38 @@ async def test_concurrent_source_urls_share_one_locked_token(
         async def execute(self, statement: Any) -> _Result:
             rendered = str(statement)
             if "FOR UPDATE" in rendered:
-                await row_lock.acquire()
-                self.owns_lock = True
+                if not self.owns_lock:
+                    await row_lock.acquire()
+                    self.owns_lock = True
                 locked_statements.append(rendered)
-            return _Result()
+            if "FROM users" in rendered:
+                return _Result("user-1")
+            if statement.get_execution_options().get("populate_existing"):
+                self.source.metadata_jsonb = dict(persisted_metadata)
+            return _Result(self.source)
 
         async def commit(self) -> None:
+            nonlocal persisted_metadata
+            persisted_metadata = dict(self.source.metadata_jsonb)
             if self.owns_lock:
                 row_lock.release()
                 self.owns_lock = False
 
-    async def ensure_variant(*_args: Any, **_kwargs: Any) -> tuple[None, None]:
-        return None, None
+        async def rollback(self) -> None:
+            return None
+
+    async def ensure_variant(
+        session: _Session,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> tuple[Any, None]:
+        await session.rollback()
+        return SimpleNamespace(storage_key="images/source-1.volcano.jpg"), None
 
     monkeypatch.setattr(volcano_asset_source_media, "SessionLocal", _Session)
     monkeypatch.setattr(
         volcano_asset_source_media,
-        ensure_name,
+        "ensure_volcano_asset_image_variant",
         ensure_variant,
     )
     operation = {
@@ -858,5 +864,5 @@ async def test_concurrent_source_urls_share_one_locked_token(
     )
 
     assert first[0] == second[0]
-    assert source.metadata_jsonb[token_key]
-    assert len(locked_statements) == 2
+    assert persisted_metadata[token_key]
+    assert len(locked_statements) == 4

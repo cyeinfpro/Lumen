@@ -449,13 +449,14 @@ async def assemble_user_memory_prompt(
     redis: Any | None = None,
     parent_user_message_id: str | None = None,
 ) -> AssembledMemoryPrompt:
+    if not await _embedding_provider_available(None):
+        return AssembledMemoryPrompt(None, None, None, [], [])
+    disabled_ids = await _conversation_disabled_memory_ids(redis, conversation_id)
     user = await session.get(User, user_id)
     conv = await session.get(Conversation, conversation_id)
     if user is None or conv is None:
         return AssembledMemoryPrompt(None, None, None, [], [])
     if user.memory_disabled or conv.memory_disabled:
-        return AssembledMemoryPrompt(None, None, None, [], [])
-    if not await _embedding_provider_available(None):
         return AssembledMemoryPrompt(None, None, None, [], [])
 
     scope_ids, active_scope = await _memory_scope_context(
@@ -466,10 +467,12 @@ async def assemble_user_memory_prompt(
     rows = await _prompt_memory_rows(
         session,
         user_id=user_id,
-        conversation_id=conversation_id,
         scope_ids=scope_ids,
-        redis=redis,
+        disabled_ids=disabled_ids,
     )
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
     now = datetime.now(timezone.utc)
     profiles, avoids, context_memories, query_vec = await _ranked_prompt_memories(
         rows,

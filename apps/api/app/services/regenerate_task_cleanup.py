@@ -21,11 +21,11 @@ from .active_task_cleanup import (
     post_commit_best_effort_cleanup,
 )
 from .generation_queue import (
+    capture_queued_generation_cleanup_entries,
     capture_generation_queue_state,
     completion_cancel_requires_durable_settlement,
     current_execution_epoch,
     generation_cancel_requires_durable_settlement,
-    queued_generation_cleanup_entries,
 )
 
 
@@ -174,10 +174,11 @@ async def post_commit_regenerate_cancel_cleanup(
         *cleanup_string_list(cleanup, "deferred_generation_ids"),
         *cleanup_string_list(cleanup, "deferred_completion_ids"),
     ]
+    queued_entries = await capture_queued_generation_cleanup_entries(redis, cleanup)
     await post_commit_best_effort_cleanup(
         redis,
         user_id=user_id,
-        queued_entries=queued_generation_cleanup_entries(cleanup),
+        queued_entries=queued_entries,
         cancel_ids=active_task_ids,
         invalidate_balance_required=int(cleanup.get("holds_released") or 0) > 0,
         release_queue_state=release_queue_state,

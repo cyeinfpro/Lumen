@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 import sqlalchemy as sa
+from arq.jobs import deserialize_job, serialize_job
 from sqlalchemy.dialects import postgresql
 
 from app import upstream_image_requests
@@ -19,6 +20,7 @@ from app.tasks.completion_parts import runner as completion_runner
 from app.tasks.completion_parts.execution import CompletionRequest
 from app.tasks.generation_parts import lease as generation_lease
 from app.tasks.generation_parts import retry_state
+from app.tasks.generation_parts import runner_claim_phase
 from app.tasks.generation_parts import runner_dispatch_phase
 from lumen_core.models import Completion
 
@@ -83,6 +85,85 @@ def test_generation_lease_identity_includes_execution_epoch_and_attempt() -> Non
     assert first != manual_retry
     assert "execution:4:attempt:1" in first
     assert "execution:5:attempt:1" in manual_retry
+
+
+def test_generation_execution_task_id_survives_arq_serialization() -> None:
+    task_id = retry_state.generation_execution_task_id("gen-1", 7)
+
+    restored_job = deserialize_job(
+        serialize_job(
+            "run_generation",
+            (task_id,),
+            {},
+            2,
+            1_000,
+        )
+    )
+    restored_task_id = restored_job.args[0]
+
+    assert restored_task_id == "gen-1"
+    assert retry_state.current_generation_execution_epoch(restored_task_id) == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_request", "blocked"),
+    [
+        ({}, True),
+        ({"upstream_dispatch_delivery": "proven_undelivered"}, False),
+        (
+            {
+                "provider_idempotency_key": "provider-key",
+                "provider_idempotency_stable": True,
+            },
+            False,
+        ),
+    ],
+)
+async def test_generation_claim_blocks_only_nonreplayable_dispatch_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_request: dict[str, Any],
+    blocked: bool,
+) -> None:
+    request = {
+        "upstream_dispatch_started_at": "2026-08-02T08:00:00+00:00",
+        "upstream_dispatch_execution_epoch": 7,
+        **extra_request,
+    }
+    state = SimpleNamespace(
+        task_id="gen-1",
+        generation=SimpleNamespace(
+            execution_epoch=7,
+            attempt=2,
+            upstream_request=request,
+        ),
+    )
+    failures: list[dict[str, Any]] = []
+
+    async def fail_queued(
+        _state: Any,
+        _session: Any,
+        **kwargs: Any,
+    ) -> None:
+        failures.append(kwargs)
+
+    monkeypatch.setattr(
+        runner_claim_phase,
+        "fail_queued_generation",
+        fail_queued,
+    )
+
+    result = await runner_claim_phase.fail_nonreplayable_dispatch(
+        state,
+        object(),
+        object(),
+    )
+
+    assert result is blocked
+    assert bool(failures) is blocked
+    if blocked:
+        assert failures[0]["code"] == "result_unknown"
+        assert failures[0]["next_attempt"] is None
 
 
 def test_generation_provider_identity_rotates_only_between_execution_epochs() -> None:

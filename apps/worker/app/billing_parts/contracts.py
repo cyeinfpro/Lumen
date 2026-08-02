@@ -87,6 +87,14 @@ class CompletionPricingDependencies:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletionBillingRuntimeSnapshot:
+    billing_enabled: bool
+    cache_aware: bool
+    allow_negative: bool
+    window_rate_limit: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CompletionDependencies:
     billing_core: Any
     async_session_type: type

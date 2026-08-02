@@ -26,6 +26,7 @@ class _Db:
         self.rows = list(rows)
         self.statements: list[Any] = []
         self.commits = 0
+        self.rollbacks = 0
         self.refreshes: list[tuple[Any, list[str] | None]] = []
 
     async def execute(self, statement: Any) -> _Result:
@@ -34,6 +35,9 @@ class _Db:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
 
     async def refresh(self, obj: Any, attrs: list[str] | None = None) -> None:
         self.refreshes.append((obj, attrs))
@@ -71,6 +75,10 @@ def _supplier() -> SimpleNamespace:
     return SimpleNamespace(
         id="supplier-1",
         name="OpenAI",
+        base_url="https://upstream.example",
+        validation_model="gpt-test",
+        validation_timeout_ms=250,
+        proxy_name=None,
         enabled=True,
         deleted_at=None,
         user_bind_enabled=True,
@@ -87,13 +95,17 @@ async def test_probe_credential_releases_row_lock_before_upstream(
 ) -> None:
     first_credential = _credential()
     second_credential = first_credential
+    final_credential = first_credential
     supplier = _supplier()
-    db = _Db((first_credential, supplier), (second_credential, supplier))
+    db = _Db(
+        (first_credential, supplier),
+        (second_credential, supplier),
+        (final_credential, supplier),
+    )
     user = SimpleNamespace(id="user-1", email="user@example.test")
     validation_seen: dict[str, Any] = {}
 
     async def fake_validate(
-        _db: Any,
         _supplier: Any,
         api_key: str,
         **_kwargs: Any,
@@ -146,8 +158,11 @@ async def test_probe_credential_releases_row_lock_before_upstream(
         "commits_before_validate": 1,
     }
     assert db.commits == 2
-    assert len(db.statements) == 2
-    assert all(_for_update(statement) for statement in db.statements)
+    assert db.rollbacks == 2
+    assert len(db.statements) == 3
+    assert _for_update(db.statements[0]) is False
+    assert _for_update(db.statements[1]) is True
+    assert _for_update(db.statements[2]) is True
 
 
 @pytest.mark.asyncio
@@ -186,7 +201,7 @@ async def test_probe_credential_masks_decrypt_failure(
 ) -> None:
     credential = _credential()
     supplier = _supplier()
-    db = _Db((credential, supplier))
+    db = _Db((credential, supplier), (credential, supplier))
     user = SimpleNamespace(id="user-1", email="user@example.test")
     audits: list[dict[str, Any]] = []
 
@@ -254,7 +269,6 @@ async def test_put_credential_rate_limits_all_dimensions_before_upstream(
         )
 
     async def fake_validate(
-        _db: Any,
         _supplier: Any,
         _api_key: str,
         **_kwargs: Any,

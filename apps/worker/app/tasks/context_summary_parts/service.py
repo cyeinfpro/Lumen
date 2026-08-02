@@ -357,6 +357,7 @@ async def handle_lost_summary_lock(
     deps: SummaryServiceDependencies,
 ) -> dict[str, Any] | None:
     latest = await deps.read_summary(session, request.conv_id)
+    await deps.release_transaction(session)
     if summary_satisfies_request(latest, request.boundary, request.extra_hash):
         return public_summary_result(
             latest,
@@ -442,6 +443,7 @@ async def persist_summary_result(
     )
     if not wrote:
         latest = await deps.read_summary(session, request.conv_id)
+        await deps.release_transaction(session)
         if summary_satisfies_request(latest, request.boundary, request.extra_hash):
             return public_summary_result(
                 latest,
@@ -617,6 +619,7 @@ async def wait_for_summary_lock(
 ) -> dict[str, Any] | None:
     await deps.sleep(deps.lock_wait_s)
     latest = await deps.read_summary(session, request.conv_id)
+    await deps.release_transaction(session)
     if summary_satisfies_request(latest, request.boundary, request.extra_hash):
         return public_summary_result(
             latest,
@@ -689,6 +692,7 @@ async def ensure_context_summary(
         summary_satisfies_request_fn=summary_satisfies_request,
         public_summary_result_fn=public_summary_result,
     )
+    await deps.release_transaction(session)
     if plan.handled:
         return plan.immediate_result
     request = plan.request

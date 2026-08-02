@@ -78,6 +78,7 @@ run_completion = _run_completion
 _context_adapter = context_adapter.ContextAdapter(
     context_adapter.ContextAdapterDependencies(
         runtime_settings=lambda: runtime_settings,
+        session_factory=SessionLocal,
         count_tokens=lambda: count_tokens,
         estimate_system_prompt_tokens=lambda: estimate_system_prompt_tokens,
         estimate_text_tokens=lambda: estimate_text_tokens,

@@ -42,6 +42,7 @@ from app.tasks.generation_parts.runtime import GenerationRuntime
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from app.upstream_parts import entrypoints as upstream
 from app.tasks.video_generation_parts import default_runtime as video_runtime
+from app.tasks.video_generation_parts import submission as video_submission
 from app.video_provider_slots import VIDEO_PROVIDER_SLOT_TTL_S
 from app.video_upstream_parts.contracts import (
     PollResult,
@@ -564,7 +565,7 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
     )
     run_source = inspect.getsource(
         video_generation._run_video_generation_with_lease  # noqa: SLF001
-    )
+    ) + inspect.getsource(video_submission._submit_fresh_video)
 
     release_snippet = (
         "_release_provider_slot(redis, release_provider_name, generation.id)"
@@ -573,8 +574,8 @@ def test_video_generation_releases_provider_slot_on_terminal_paths() -> None:
     assert "_release_provider_slot(redis, release_provider_name, task_id)" in (
         submit_failure_source
     )
-    assert "slot_provider_name = provider.name" in run_source
-    assert "provider_name=slot_provider_name" in run_source
+    assert "attempt.slot_provider_name = provider.name" in run_source
+    assert "provider_name=attempt.slot_provider_name" in run_source
 
 
 def test_video_postprocess_rejects_unvalidated_artifacts(

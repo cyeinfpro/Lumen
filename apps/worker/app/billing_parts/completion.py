@@ -124,6 +124,10 @@ async def charge_completion(
     completion: Completion,
     *,
     deps: CompletionDependencies,
+    billing_enabled: bool | None = None,
+    cache_aware: bool | None = None,
+    allow_negative: bool | None = None,
+    window_rate_limit: bool | None = None,
 ) -> None:
     billing_ref_id = deps.completion_billing_ref_id(completion)
     if not await deps.wallet_billing_applies(
@@ -133,7 +137,12 @@ async def charge_completion(
         ref_id=billing_ref_id,
     ):
         return
-    if not await deps.billing_enabled():
+    enabled = (
+        await deps.billing_enabled()
+        if billing_enabled is None
+        else bool(billing_enabled)
+    )
+    if not enabled:
         return
     idempotency_key = f"complete:{billing_ref_id}"
     existing = await deps.existing_wallet_tx(
@@ -149,12 +158,16 @@ async def charge_completion(
             replay_source="precheck",
         )
         return
-    cache_aware = (
-        await deps.cache_aware_enabled()
-        if isinstance(session, deps.async_session_type)
-        else True
+    resolved_cache_aware = (
+        (
+            await deps.cache_aware_enabled()
+            if isinstance(session, deps.async_session_type)
+            else True
+        )
+        if cache_aware is None
+        else bool(cache_aware)
     )
-    usage = deps.completion_usage(completion, cache_aware=cache_aware)
+    usage = deps.completion_usage(completion, cache_aware=resolved_cache_aware)
     rate_multiplier = await deps.completion_rate_multiplier_x10000(session, completion)
     service_tier = deps.completion_service_tier(completion)
     breakdown = await deps.resolve_completion_breakdown(
@@ -187,8 +200,13 @@ async def charge_completion(
         cache=cache,
         key_id=key_id,
         cost=cost,
+        window_rate_limit=window_rate_limit,
     )
-    allow_negative = await deps.allow_negative_balance()
+    resolved_allow_negative = (
+        await deps.allow_negative_balance()
+        if allow_negative is None
+        else bool(allow_negative)
+    )
     # No balance re-check here: the upstream cost has already been incurred and
     # delivered, so settlement must record it in full (pure pass-through).
     # billing_core.settle never rejects on insufficient balance — the deficit
@@ -205,7 +223,7 @@ async def charge_completion(
             ref_id=billing_ref_id,
             actual_micro=cost,
             idempotency_key=idempotency_key,
-            allow_negative=allow_negative,
+            allow_negative=resolved_allow_negative,
             record_zero=cost == 0 and rate_multiplier == 0,
             meta={
                 "completion_id": completion.id,

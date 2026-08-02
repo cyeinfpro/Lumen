@@ -81,9 +81,25 @@ def video_reference_quota_contribution(
         if inspection.issues:
             accounted_bytes = max(accounted_bytes, declared_size)
         return 1, accounted_bytes
-    if not inspection.retained:
+    metadata = (
+        getattr(video, "metadata_jsonb", None)
+        if isinstance(getattr(video, "metadata_jsonb", None), dict)
+        else {}
+    )
+    cleanup = metadata.get(VIDEO_STORAGE_CLEANUP_METADATA_KEY)
+    cleanup_remaining_count = (
+        max(0, int(cleanup.get("remaining_artifact_count") or 0))
+        if isinstance(cleanup, dict)
+        else 0
+    )
+    cleanup_remaining_bytes = (
+        max(0, int(cleanup.get("remaining_bytes") or 0))
+        if isinstance(cleanup, dict)
+        else 0
+    )
+    if not inspection.retained and cleanup_remaining_count <= 0:
         return 0, 0
-    accounted_bytes = inspection.bytes_on_disk
+    accounted_bytes = max(inspection.bytes_on_disk, cleanup_remaining_bytes)
     if inspection.issues:
         accounted_bytes = max(accounted_bytes, declared_size)
     return 1, accounted_bytes

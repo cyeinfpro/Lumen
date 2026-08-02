@@ -68,6 +68,9 @@ async def load_reference_images(
             )
         )
     ).all()
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
     by_id = {row.id: row for row in rows}
     out: list[tuple[str, bytes]] = []
     for image_id in image_ids:
@@ -156,6 +159,9 @@ async def load_mask_image(
             status_code=404,
         )
     storage_key = row.storage_key
+    commit = getattr(session, "commit", None)
+    if callable(commit):
+        await commit()
     try:
         async with asyncio.timeout(timeout_seconds):
             raw = await storage.aget_bytes(storage_key)

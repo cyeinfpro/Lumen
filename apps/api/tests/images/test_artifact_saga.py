@@ -157,6 +157,101 @@ class _Repository:
             setattr(row, key, value)
         return self._touch(row)
 
+    async def create_storage_intent(
+        self,
+        image_id: str,
+        *,
+        user_id: str,
+        token: str,
+        session_id: str | None = None,
+    ) -> Image:
+        del session_id
+        row = self.rows[image_id]
+        assert row.user_id == user_id
+        assert row.artifact_status == ArtifactStatus.PUBLISHING.value
+        manifest = dict(row.artifact_manifest_jsonb or {})
+        manifest["storage_intent"] = {
+            "version": 1,
+            "state": "pending",
+            "user_id": user_id,
+            "image_id": image_id,
+            "token": token,
+        }
+        row.artifact_manifest_jsonb = manifest
+        return self._touch(row)
+
+    async def adopt_storage_intent(
+        self,
+        image_id: str,
+        *,
+        user_id: str,
+        token: str,
+        manifest: dict[str, Any],
+        ready_at: datetime,
+        session_id: str | None = None,
+    ) -> Image:
+        del session_id
+        row = self.rows[image_id]
+        intent = (row.artifact_manifest_jsonb or {}).get("storage_intent", {})
+        assert row.user_id == user_id
+        assert intent.get("token") == token
+        adopted_manifest = dict(manifest)
+        adopted_manifest["storage_intent"] = {
+            "version": 1,
+            "state": "adopted",
+            "user_id": user_id,
+            "image_id": image_id,
+            "token": token,
+        }
+        row.artifact_manifest_jsonb = adopted_manifest
+        row.artifact_status = ArtifactStatus.READY.value
+        row.ready_at = ready_at
+        row.reconcile_after = None
+        row.last_artifact_error = None
+        return self._touch(row)
+
+    async def record_storage_intent_failure(
+        self,
+        image_id: str,
+        *,
+        user_id: str,
+        token: str,
+        error_message: str,
+        retry_at: datetime | None,
+    ) -> bool:
+        row = self.rows[image_id]
+        intent = (row.artifact_manifest_jsonb or {}).get("storage_intent", {})
+        if (
+            row.user_id != user_id
+            or row.artifact_status != ArtifactStatus.PUBLISHING.value
+            or intent.get("token") != token
+        ):
+            return False
+        row.last_artifact_error = error_message
+        if retry_at is not None:
+            row.reconcile_after = retry_at
+        self._touch(row)
+        return True
+
+    async def abandon_storage_intent(
+        self,
+        image_id: str,
+        *,
+        user_id: str,
+        token: str,
+        error_message: str,
+    ) -> bool:
+        row = self.rows[image_id]
+        intent = (row.artifact_manifest_jsonb or {}).get("storage_intent", {})
+        if row.user_id != user_id or intent.get("token") != token:
+            return False
+        row.artifact_status = ArtifactStatus.FAILED.value
+        row.deleted_at = datetime.now(timezone.utc)
+        row.last_artifact_error = error_message
+        row.reconcile_after = None
+        self._touch(row)
+        return True
+
     async def list_reconcile_candidates(self, **_kwargs: Any) -> list[Image]:
         return list(self.rows.values())
 

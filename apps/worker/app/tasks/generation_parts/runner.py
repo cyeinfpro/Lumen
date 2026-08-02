@@ -520,6 +520,8 @@ async def _acquire_generation_lease(state: GenerationRunState) -> bool:
 async def _transition_generation_running(
     state: GenerationRunState,
 ) -> bool:
+    stale_claim = False
+    stale_error: StaleGenerationAttempt | None = None
     async with state.services.store.session() as session:
         current = (
             await session.execute(
@@ -529,37 +531,46 @@ async def _transition_generation_running(
             )
         ).scalar_one_or_none()
         if current is None or is_generation_terminal(current.status):
-            await _release_stale_claim(state)
-            return False
-        state.attempt, may_run = bounded_next_attempt(current.attempt)
-        if not may_run:
-            await _release_stale_claim(state)
-            return False
-        running_request = _running_upstream_request(state, current)
-        started_at = datetime.now(timezone.utc)
-        state.queue_metadata_payload = generation_queue_metadata(
-            upstream_request=running_request,
-            action=current.action,
-            size_requested=current.size_requested,
-            mask_image_id=current.mask_image_id,
-            created_at=current.created_at,
-            started_at=started_at,
-            finished_at=current.finished_at,
-            upstream_pixels=current.upstream_pixels,
-            now=started_at,
-        )
-        running_request = merge_queue_metadata(
-            running_request,
-            state.queue_metadata_payload,
-        )
-        state.gen_upstream_request_snapshot = dict(running_request)
-        await _commit_running_transition(
-            state,
-            session,
-            current,
-            running_request,
-            started_at,
-        )
+            stale_claim = True
+        else:
+            state.attempt, may_run = bounded_next_attempt(current.attempt)
+            if not may_run:
+                stale_claim = True
+            else:
+                running_request = _running_upstream_request(state, current)
+                started_at = datetime.now(timezone.utc)
+                state.queue_metadata_payload = generation_queue_metadata(
+                    upstream_request=running_request,
+                    action=current.action,
+                    size_requested=current.size_requested,
+                    mask_image_id=current.mask_image_id,
+                    created_at=current.created_at,
+                    started_at=started_at,
+                    finished_at=current.finished_at,
+                    upstream_pixels=current.upstream_pixels,
+                    now=started_at,
+                )
+                running_request = merge_queue_metadata(
+                    running_request,
+                    state.queue_metadata_payload,
+                )
+                state.gen_upstream_request_snapshot = dict(running_request)
+                try:
+                    await _commit_running_transition(
+                        state,
+                        session,
+                        current,
+                        running_request,
+                        started_at,
+                    )
+                except StaleGenerationAttempt as exc:
+                    stale_claim = True
+                    stale_error = exc
+    if stale_claim:
+        await _release_stale_claim(state)
+        if stale_error is not None:
+            raise stale_error
+        return False
     return True
 
 
@@ -612,15 +623,11 @@ async def _commit_running_transition(
             error_message=None,
         )
     )
-    try:
-        ensure_generation_updated(
-            result,
-            state.task_id,
-            current.attempt,
-        )
-    except StaleGenerationAttempt:
-        await _release_stale_claim(state)
-        raise
+    ensure_generation_updated(
+        result,
+        state.task_id,
+        current.attempt,
+    )
     await session.commit()
 
 

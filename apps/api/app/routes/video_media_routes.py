@@ -253,25 +253,39 @@ async def reference_video_binary(
             raise _http("not_found", "video not found", 404)
         if variant_meta is None:
             raise _http("not_found", "video not found", 404)
+        storage_key = str(variant_meta["storage_key"])
+        etag = str(variant_meta["sha256"])
+        last_modified = video.updated_at
+        inline_filename = (
+            volcano_asset_safe_filename(video.id, asset_type="Video")
+            if variant == VOLCANO_ASSET_VIDEO_KIND
+            else None
+        )
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            await rollback()
         return media_response(
             request,
-            fs_path(str(variant_meta["storage_key"])),
+            fs_path(storage_key),
             media_type=media_type,
-            etag=str(variant_meta["sha256"]),
-            last_modified=video.updated_at,
+            etag=etag,
+            last_modified=last_modified,
             immutable=True,
-            inline_filename=(
-                volcano_asset_safe_filename(video.id, asset_type="Video")
-                if variant == VOLCANO_ASSET_VIDEO_KIND
-                else None
-            ),
+            inline_filename=inline_filename,
         )
+    storage_key = video.storage_key
+    media_type = video.mime
+    etag = video.etag or video.sha256
+    last_modified = video.updated_at
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     return media_response(
         request,
-        fs_path(video.storage_key),
-        media_type=video.mime,
-        etag=video.etag or video.sha256,
-        last_modified=video.updated_at,
+        fs_path(storage_key),
+        media_type=media_type,
+        etag=etag,
+        last_modified=last_modified,
         immutable=True,
     )
 
@@ -306,15 +320,26 @@ async def video_binary(
     download: bool,
 ) -> Response:
     video = await owned_video(db, user_id, video_id)
-    extension = Path(video.storage_key).suffix.lower() or ".mp4"
+    storage_key = video.storage_key
+    media_type = video.mime
+    etag = video.etag or video.sha256
+    last_modified = video.updated_at
+    download_filename = (
+        f"lumen-video-{video.id}{Path(storage_key).suffix.lower() or '.mp4'}"
+        if download
+        else None
+    )
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     return media_response(
         request,
-        fs_path(video.storage_key),
-        media_type=video.mime,
-        etag=video.etag or video.sha256,
-        last_modified=video.updated_at,
+        fs_path(storage_key),
+        media_type=media_type,
+        etag=etag,
+        last_modified=last_modified,
         immutable=True,
-        download_filename=f"lumen-video-{video.id}{extension}" if download else None,
+        download_filename=download_filename,
     )
 
 
@@ -327,11 +352,17 @@ async def video_poster(
     video = await owned_video(db, user_id, video_id)
     if not video.poster_storage_key:
         raise _http("not_found", "poster not found", 404)
+    storage_key = video.poster_storage_key
+    etag = f"{video.etag}:poster"
+    last_modified = video.updated_at
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     return media_response(
         request,
-        fs_path(video.poster_storage_key),
+        fs_path(storage_key),
         media_type="image/jpeg",
-        etag=f"{video.etag}:poster",
-        last_modified=video.updated_at,
+        etag=etag,
+        last_modified=last_modified,
         immutable=True,
     )

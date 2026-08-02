@@ -44,11 +44,11 @@ from ...services.active_task_cleanup import (
 )
 from ...services.generation_queue import (
     GenerationQueueReleaseToken,
+    capture_queued_generation_cleanup_entries,
     capture_generation_queue_state,
     completion_cancel_requires_durable_settlement,
     current_execution_epoch,
     generation_cancel_requires_durable_settlement,
-    queued_generation_cleanup_entries,
     release_generation_queue_state,
 )
 from ..domain.apparel_library import (
@@ -501,7 +501,7 @@ async def _post_commit_workflow_generated_cleanup(
     user_id: str,
     cleanup: dict[str, Any],
 ) -> None:
-    queued_generation_entries = queued_generation_cleanup_entries(cleanup)
+    queued_generation_ids = _cleanup_string_list(cleanup, "queued_generation_ids")
     running_generation_ids = _cleanup_string_list(cleanup, "running_generation_ids")
     streaming_completion_ids = _cleanup_string_list(cleanup, "streaming_completion_ids")
     deferred_generation_ids = _cleanup_string_list(
@@ -519,7 +519,12 @@ async def _post_commit_workflow_generated_cleanup(
         *deferred_generation_ids,
         *deferred_completion_ids,
     ]
-    redis = get_redis() if queued_generation_entries or cancel_ids else None
+    redis = get_redis() if queued_generation_ids or cancel_ids else None
+    queued_generation_entries = (
+        await capture_queued_generation_cleanup_entries(redis, cleanup)
+        if redis is not None
+        else []
+    )
     await post_commit_best_effort_cleanup(
         redis,
         user_id=user_id,

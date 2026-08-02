@@ -1275,10 +1275,19 @@ async def test_redeem_code_cache_miss_replays_existing_usage_from_db(
     async def fail_operational(_db: Any) -> None:
         raise AssertionError("DB idempotency fallback must avoid a second redeem")
 
+    async def allow_redemption(_redis: Any, _key: str) -> None:
+        return None
+
     monkeypatch.setattr(billing_services, "_cached_redemption_out", no_cached)
     monkeypatch.setattr(billing_services, "_lock_redemption_idempotency_key", lock_key)
     monkeypatch.setattr(billing_services, "_redemption_out_for_usage", existing_usage)
     monkeypatch.setattr(billing_services, "_cache_redemption_out", cache_response)
+    monkeypatch.setattr(billing_composition, "get_redis", object)
+    monkeypatch.setattr(
+        billing_services.REDEMPTION_LIMITER,
+        "check",
+        allow_redemption,
+    )
     monkeypatch.setattr(
         billing_services, "_require_redemption_operational", fail_operational
     )

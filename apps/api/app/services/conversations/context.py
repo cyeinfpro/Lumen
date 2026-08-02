@@ -459,6 +459,7 @@ async def estimate_context_window(
     user_default_prompt_id: str | None,
     redis: Any | None = None,
 ) -> ConversationContextOut:
+    conv_id = str(conv.id)
     conversation_prompt = await load_prompt_content(
         db,
         user_id=user_id,
@@ -519,7 +520,7 @@ async def estimate_context_window(
     compression_enabled = bool(await setting_int(db, "context.compression_enabled", 0))
     latest_meta = await _latest_context_meta(
         db,
-        conv_id=conv.id,
+        conv_id=conv_id,
         user_id=user_id,
     )
     latest_fallback = latest_meta.get("fallback_reason")
@@ -550,10 +551,13 @@ async def estimate_context_window(
         "context.manual_compact_cooldown_seconds",
         MANUAL_COMPACT_DEFAULT_COOLDOWN_SECONDS,
     )
+    rollback = getattr(db, "rollback", None)
+    if callable(rollback):
+        await rollback()
     available, reset_seconds, unavailable_reason = await _manual_status(
         redis,
         user_id=user_id,
-        conv_id=conv.id,
+        conv_id=conv_id,
         used_tokens=used_tokens,
         min_input_tokens=manual_min_input_tokens,
         cooldown_seconds=manual_cooldown_seconds,

@@ -238,41 +238,43 @@ async def export_my_data(
       messages.ndjson           — one JSON object per line, asc by created_at
       images/{image_id}.{ext}   — binary blobs (skips entries whose file is gone)
     """
+    user_id = user.id
+    user_email = user.email
     active_user_id = (
         await db.execute(
-            select(User.id).where(User.id == user.id, User.deleted_at.is_(None))
+            select(User.id).where(User.id == user_id, User.deleted_at.is_(None))
         )
     ).scalar_one_or_none()
+    await db.rollback()
     if active_user_id is None:
         raise _http("user_deleted", "user account was deleted", 401)
-    await _EXPORT_LIMITER.check(get_redis(), f"rl:me:export:{user.id}")
+    await _EXPORT_LIMITER.check(get_redis(), f"rl:me:export:{user_id}")
 
     tmp = tempfile.TemporaryFile()
-
     try:
-        stats = await _build_export_archive(db, tmp, user.id)
+        stats = await _build_export_archive(db, tmp, user_id)
         await write_audit(
             db,
             event_type="me.data.export",
-            user_id=user.id,
-            actor_email=user.email,
+            user_id=user_id,
+            actor_email=user_email,
             actor_ip_hash=request_ip_hash(request),
-            target_user_id=user.id,
+            target_user_id=user_id,
             details={
                 "messages": stats.messages,
                 "images": stats.images,
                 "images_skipped": stats.images_skipped,
                 "zip_bytes": stats.zip_bytes,
             },
+            autocommit=True,
         )
-        await db.commit()
         tmp.seek(0)
     except Exception:
         tmp.close()
         raise
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"lumen-export-{user.id}-{ts}.zip"
+    filename = f"lumen-export-{user_id}-{ts}.zip"
 
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',

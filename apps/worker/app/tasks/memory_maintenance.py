@@ -14,6 +14,8 @@ from lumen_core.model_entities import (
     UserMemoryStaging,
 )
 
+MEMORY_MAINTENANCE_BATCH_SIZE = 500
+
 
 async def cleanup_memory(
     ctx: dict[str, Any],
@@ -32,6 +34,8 @@ async def cleanup_memory(
                         UserMemoryStaging.decision == "pending",
                         UserMemoryStaging.expires_at < now,
                     )
+                    .limit(MEMORY_MAINTENANCE_BATCH_SIZE)
+                    .with_for_update(skip_locked=True)
                 )
             )
             .scalars()
@@ -48,6 +52,8 @@ async def cleanup_memory(
                         UserMemory.deleted_at.is_not(None),
                         UserMemory.deleted_at < cutoff,
                     )
+                    .limit(MEMORY_MAINTENANCE_BATCH_SIZE)
+                    .with_for_update(skip_locked=True)
                 )
             )
             .scalars()
@@ -66,13 +72,12 @@ async def flush_memory_last_used(
     last_used_pending_key: str,
     logger: logging.Logger,
 ) -> None:
-    """Drain memory:last_used_pending ZSET into one batched UPDATE per timestamp.
+    """Drain one bounded memory:last_used_pending batch per cron tick.
 
     Why ZSET: assemble_user_memory_prompt fan-outs N writes per chat turn; per
     DESIGN §7.3 step 8 we batch them into one cron tick instead of hammering
-    user_memories with row-by-row UPDATEs. Race: a second producer may bump a
-    member's score between our zrange and zrem; we lose at most one timestamp
-    update — non-fatal because last_used_at only feeds decay scoring.
+    user_memories with row-by-row UPDATEs. Removal compares the observed score
+    atomically so a producer bump that races this flush remains queued.
     """
     redis = ctx.get("redis")
     if redis is None:
@@ -81,7 +86,7 @@ async def flush_memory_last_used(
         members = await redis.zrange(
             last_used_pending_key,
             0,
-            -1,
+            MEMORY_MAINTENANCE_BATCH_SIZE - 1,
             withscores=True,
         )
     except Exception:
@@ -89,14 +94,15 @@ async def flush_memory_last_used(
     if not members:
         return
     by_score: dict[float, list[str]] = defaultdict(list)
-    member_names: list[str] = []
+    member_scores: list[tuple[str, float]] = []
     for member, score in members:
         if isinstance(member, bytes):
             member = member.decode("utf-8", errors="ignore")
         if not isinstance(member, str):
             continue
-        member_names.append(member)
-        by_score[float(score)].append(member)
+        parsed_score = float(score)
+        member_scores.append((member, parsed_score))
+        by_score[parsed_score].append(member)
     if not by_score:
         return
     async with session_factory() as session:
@@ -110,9 +116,28 @@ async def flush_memory_last_used(
             )
         await session.commit()
     try:
-        await redis.zrem(last_used_pending_key, *member_names)
+        argv = [
+            value
+            for member, score in member_scores
+            for value in (member, repr(score))
+        ]
+        await redis.eval(
+            """
+            local removed = 0
+            for i = 1, #ARGV, 2 do
+              local current = redis.call('ZSCORE', KEYS[1], ARGV[i])
+              if current and tonumber(current) == tonumber(ARGV[i + 1]) then
+                removed = removed + redis.call('ZREM', KEYS[1], ARGV[i])
+              end
+            end
+            return removed
+            """,
+            1,
+            last_used_pending_key,
+            *argv,
+        )
     except Exception:
         logger.warning(
-            "flush_memory_last_used zrem failed members=%d",
-            len(member_names),
+            "flush_memory_last_used conditional zrem failed members=%d",
+            len(member_scores),
         )

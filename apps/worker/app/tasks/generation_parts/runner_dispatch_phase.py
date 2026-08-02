@@ -30,7 +30,7 @@ from lumen_core.upstream_billing import (
 )
 
 from ...observability import get_tracer, upstream_calls_total
-from ...provider_runtime.errors import UpstreamError
+from ...provider_runtime.errors import UpstreamCancelled, UpstreamError
 from ...task_cancellation import force_next_cancellation_check
 from ...upstream_parts import GeneratedImageResult
 from .active_user_fence import lock_active_generation_user
@@ -47,6 +47,7 @@ from .retry_state import (
     RUNNING_GENERATION_STATUSES,
     anext_image_with_guards,
     ensure_generation_attempt_current,
+    generation_dispatch_requires_unknown_settlement,
     generation_execution_epoch,
     generation_execution_identity,
 )
@@ -220,7 +221,6 @@ async def publish_stream_started(state: GenerationRunState) -> None:
 async def dispatch_upstream_request(state: GenerationRunState) -> None:
     async with asyncio.timeout_at(state.task_deadline):
         await raise_if_pre_upstream_interrupted(state)
-        await record_generation_upstream_marker(state, response_received=False)
         with tracer.start_as_current_span("upstream.generate_image") as span:
             annotate_upstream_span(state, span)
             try:
@@ -229,7 +229,7 @@ async def dispatch_upstream_request(state: GenerationRunState) -> None:
                     kind="generation",
                     outcome="ok",
                 ).inc()
-            except Exception as exc:
+            except (Exception, UpstreamCancelled) as exc:
                 upstream_calls_total.labels(
                     kind="generation",
                     outcome="error",
@@ -240,8 +240,25 @@ async def dispatch_upstream_request(state: GenerationRunState) -> None:
 
 async def _raise_dispatch_failure(
     state: GenerationRunState,
-    exc: Exception,
+    exc: BaseException,
 ) -> None:
+    if (
+        getattr(state, "image_iter", None) is None
+        and generation_dispatch_requires_unknown_settlement(state)
+    ):
+        try:
+            await record_generation_upstream_marker(
+                state,
+                response_received=False,
+                proven_undelivered=True,
+            )
+        except StaleGenerationAttempt:
+            logger.info(
+                "generation pre-dispatch receipt superseded task=%s attempt=%s",
+                state.task_id,
+                state.attempt,
+            )
+        return
     if isinstance(exc, TaskCancelled):
         return
     if getattr(exc, "error_code", None) in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
@@ -271,7 +288,7 @@ async def _raise_dispatch_failure(
     ) from exc
 
 
-def _dispatch_failure_proves_undelivered(exc: Exception) -> bool:
+def _dispatch_failure_proves_undelivered(exc: BaseException) -> bool:
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
         return True
     payload = getattr(exc, "payload", None)
@@ -285,7 +302,7 @@ def _dispatch_failure_proves_undelivered(exc: Exception) -> bool:
     )
 
 
-def _dispatch_failure_has_response(exc: Exception) -> bool:
+def _dispatch_failure_has_response(exc: BaseException) -> bool:
     status_code = getattr(exc, "status_code", None)
     return isinstance(status_code, int) and status_code > 0
 
@@ -324,16 +341,22 @@ def annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
 
 async def call_upstream(state: GenerationRunState) -> None:
     started = time.monotonic()
-    services = DispatchGenerationServices.from_deps(state.services)
-    async with services.store.session() as session:
-        await _lock_generation_for_provider_dispatch(session, state)
-        state.image_iter = build_image_iterator(state)
-        first_pair = await anext_image_with_guards(
-            state.image_iter,
-            state.lease_lost,
-            redis=state.redis,
-            task_id=state.task_id,
-        )
+    await record_generation_upstream_marker(
+        state,
+        response_received=False,
+        fence_active_user=True,
+    )
+    # The marker commit is the dispatch linearization point. Recheck durable
+    # cancellation after releasing all database locks, immediately before the
+    # provider iterator can perform external I/O.
+    await raise_if_pre_upstream_interrupted(state)
+    state.image_iter = build_image_iterator(state)
+    first_pair = await anext_image_with_guards(
+        state.image_iter,
+        state.lease_lost,
+        redis=state.redis,
+        task_id=state.task_id,
+    )
     if first_pair is None:
         raise UpstreamError(
             "upstream image generator yielded no result",
@@ -348,49 +371,33 @@ async def call_upstream(state: GenerationRunState) -> None:
     await consume_batch_extra_pairs(state)
 
 
-async def _lock_generation_for_provider_dispatch(
-    session: Any,
-    state: GenerationRunState,
-) -> None:
-    """Retain User -> Generation locks through the first upstream iterator pull."""
-    if not await lock_active_generation_user(session, user_id=state.user_id):
-        raise TaskCancelled("account deleted before upstream dispatch")
-    generation = (
-        await session.execute(
-            select(Generation)
-            .where(
-                Generation.id == state.task_id,
-                Generation.user_id == state.user_id,
-                Generation.attempt == state.attempt,
-                Generation.execution_epoch == generation_execution_epoch(state),
-                Generation.status.in_(RUNNING_GENERATION_STATUSES),
-                Generation.cancel_requested_at.is_(None),
-            )
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if generation is None:
-        raise StaleGenerationAttempt(
-            "generation dispatch fenced by task state "
-            f"task={state.task_id} attempt={state.attempt}"
-        )
-
-
 async def record_generation_upstream_marker(
     state: GenerationRunState,
     *,
     response_received: bool,
     proven_undelivered: bool = False,
+    fence_active_user: bool = False,
 ) -> None:
+    """Persist an upstream receipt in a short, ownership-fenced transaction."""
+
+    if fence_active_user and (response_received or proven_undelivered):
+        raise ValueError("active-user fence is only valid for dispatch-start markers")
     services = DispatchGenerationServices.from_deps(state.services)
     recorded_at = datetime.now(timezone.utc).isoformat()
     async with services.store.session() as session:
+        if fence_active_user and not await lock_active_generation_user(
+            session,
+            user_id=state.user_id,
+        ):
+            raise TaskCancelled("account deleted before upstream dispatch")
         ownership_conditions = [
             Generation.id == state.task_id,
             Generation.attempt == state.attempt,
             Generation.execution_epoch == generation_execution_epoch(state),
             Generation.status.in_(RUNNING_GENERATION_STATUSES),
         ]
+        if fence_active_user:
+            ownership_conditions.append(Generation.user_id == state.user_id)
         if not proven_undelivered:
             ownership_conditions.append(Generation.cancel_requested_at.is_(None))
         current = (

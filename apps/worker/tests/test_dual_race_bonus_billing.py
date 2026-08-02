@@ -42,6 +42,7 @@ class _FakeSession:
         self.delete_after_commit = delete_after_commit
         self.operations: list[str] = []
         self.lock_order: list[str] = []
+        self.context_depth = 0
 
     def add(self, row: Any) -> None:
         self.added.append(row)
@@ -77,11 +78,21 @@ class _FakeStore:
 
     @asynccontextmanager
     async def session(self):
-        yield self.session_value
+        self.session_value.context_depth += 1
+        try:
+            yield self.session_value
+        finally:
+            self.session_value.context_depth -= 1
 
 
 class _FakeArtifacts:
-    def __init__(self, *, fail_on_write: bool = False) -> None:
+    def __init__(
+        self,
+        session: _FakeSession,
+        *,
+        fail_on_write: bool = False,
+    ) -> None:
+        self.session = session
         self.fail_on_write = fail_on_write
         self.write_calls = 0
         self.deleted_keys: list[list[str]] = []
@@ -90,6 +101,7 @@ class _FakeArtifacts:
         self,
         files: list[tuple[str, bytes]],
     ) -> list[str]:
+        assert self.session.context_depth == 0
         self.write_calls += 1
         if self.fail_on_write:
             raise AssertionError("echoed reference must not be written")
@@ -146,6 +158,7 @@ class _FakeEvents:
         deliveries: list[tuple[str, str, dict[str, Any]]],
     ) -> None:
         assert self.session.committed is True
+        assert self.session.context_depth == 0
         for _event_id, _kind, payload in deliveries:
             self.events.append((payload["event_name"], payload["data"]))
 
@@ -168,7 +181,7 @@ def _deps(
     deps = replace(
         runtime.deps,
         store=_FakeStore(session),
-        artifacts=_FakeArtifacts(fail_on_write=fail_on_write),
+        artifacts=_FakeArtifacts(session, fail_on_write=fail_on_write),
         billing=billing,
         events=events,
     )

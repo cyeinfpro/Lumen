@@ -76,6 +76,11 @@ async def redeem_code(
     cached = await queries.cached_redemption_out(user.id, idempotency_key, request_hash)
     if cached is not None:
         return cached
+    redis = commands.get_redis()
+    await services.redemption_limiter.check(redis, f"rl:redemption:user:{user.id}")
+    await services.redemption_limiter.check(
+        redis, f"rl:redemption:ip:{client_ip(request)}"
+    )
     await commands.lock_redemption_idempotency_key(db, user.id, idempotency_key)
     cached = await queries.cached_redemption_out(user.id, idempotency_key, request_hash)
     if cached is not None:
@@ -94,11 +99,6 @@ async def redeem_code(
         return existing
 
     await commands.require_redemption_operational(db)
-    redis = commands.get_redis()
-    await services.redemption_limiter.check(redis, f"rl:redemption:user:{user.id}")
-    await services.redemption_limiter.check(
-        redis, f"rl:redemption:ip:{client_ip(request)}"
-    )
     code_hashes = [
         billing_core.hash_redemption_code(normalized_code, secret)
         for secret in await queries.redemption_secrets(db)

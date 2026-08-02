@@ -27,6 +27,7 @@ from ..db import affected_rows
 
 ASSEMBLY_COMMIT_MARKER_FILENAME = "commit-recovery.json"
 ASSEMBLY_COMMIT_MARKER_SCHEMA = "lumen.storyboard-assembly-commit-recovery.v1"
+ASSEMBLY_RECOVERY_SCAN_LIMIT = 64
 ASSEMBLY_ARTIFACT_IDENTITY_KEY = "assembly_artifact_identity"
 
 
@@ -202,7 +203,7 @@ def load_assembly_recovery_candidate(
             ),
             key=lambda path: path.name,
             reverse=True,
-        )
+        )[:ASSEMBLY_RECOVERY_SCAN_LIMIT]
     except FileNotFoundError:
         return None
 
@@ -486,6 +487,9 @@ async def load_assembly_commit_reconcile_target(
                 stored_candidate if isinstance(stored_candidate, dict) else None
             )
         if raw_candidate is None and recovery_candidate_loader is not None:
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                await commit()
             raw_candidate = await asyncio.to_thread(
                 recovery_candidate_loader,
                 run_id=run.id,

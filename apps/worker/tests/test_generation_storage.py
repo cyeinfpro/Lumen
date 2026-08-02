@@ -1888,10 +1888,18 @@ async def test_generation_commit_cleanup_requires_confirmed_non_adoption(
     async def probe(*_args: Any, **_kwargs: Any) -> ArtifactAdoption:
         return outcome
 
+    async def active_user(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
     monkeypatch.setattr(
         generation_success,
         "raise_if_generation_interrupted",
         noop_async,
+    )
+    monkeypatch.setattr(
+        generation_success,
+        "lock_active_generation_user",
+        active_user,
     )
     monkeypatch.setattr(
         generation_success,
@@ -2255,7 +2263,7 @@ async def test_model_library_hook_injects_current_requested_count(
 
 
 @pytest.mark.asyncio
-async def test_model_library_hook_propagates_tagger_cancellation(
+async def test_model_library_hook_defers_tagger_until_after_success_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = SimpleNamespace(id="run-1", status="running", current_step="")
@@ -2268,7 +2276,11 @@ async def test_model_library_hook_propagates_tagger_cancellation(
     )
     session = _ModelLibraryHookSession(run, step)
 
+    tagger_calls = 0
+
     async def cancel_tagger(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal tagger_calls
+        tagger_calls += 1
         raise asyncio.CancelledError
 
     monkeypatch.setattr(
@@ -2277,13 +2289,41 @@ async def test_model_library_hook_propagates_tagger_cancellation(
         lambda: cancel_tagger,
     )
 
-    with pytest.raises(asyncio.CancelledError):
-        await workflow_service.record_model_library_generate_image(
-            session=session,
-            user_id="user-1",
-            generation=_model_library_generation(),
-            image_id="img-1",
-        )
+    await workflow_service.record_model_library_generate_image(
+        session=session,
+        user_id="user-1",
+        generation=_model_library_generation(),
+        image_id="img-1",
+    )
+
+    assert tagger_calls == 0
+    assert step.image_ids == ["img-1"]
+    assert step.status == "succeeded"
+    assert run.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_post_commit_workflow_tagger_cancellation_cannot_fail_generation() -> None:
+    async def cancel_tagger(**_kwargs: Any) -> None:
+        raise asyncio.CancelledError
+
+    state = SimpleNamespace(
+        task_id="gen-1",
+        user_id="user-1",
+        generation=SimpleNamespace(upstream_request={}),
+    )
+    services = SimpleNamespace(
+        store=SimpleNamespace(session=lambda: None),
+        workflows=SimpleNamespace(
+            auto_tag_generated_workflow_image=cancel_tagger,
+        ),
+    )
+
+    await generation_success._run_post_commit_workflow_tagging(  # noqa: SLF001
+        state,
+        "img-1",
+        services,
+    )
 
 
 @pytest.mark.asyncio

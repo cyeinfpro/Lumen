@@ -291,14 +291,17 @@ async def audit_completion_window_limit(
     cache: Any,
     key_id: str | None,
     cost: int,
+    window_rate_limit: bool | None = None,
     deps: CompletionPricingDependencies,
 ) -> None:
-    if (
-        cache is None
-        or not isinstance(session, deps.async_session_type)
-        or not key_id
-        or not await deps.window_rate_limit_enabled()
-    ):
+    if cache is None or not isinstance(session, deps.async_session_type) or not key_id:
+        return
+    enabled = (
+        await deps.window_rate_limit_enabled()
+        if window_rate_limit is None
+        else bool(window_rate_limit)
+    )
+    if not enabled:
         return
     allowed, window, window_usage = await cache.evaluate_rate_limits(
         session,

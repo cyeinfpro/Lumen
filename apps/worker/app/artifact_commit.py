@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+ARTIFACT_COMMIT_TIMEOUT_SECONDS = 30.0
+ARTIFACT_CONFIRMATION_TIMEOUT_SECONDS = 10.0
 
 
 class ArtifactAdoption(Enum):
@@ -58,13 +62,37 @@ class ArtifactCommitNotAdopted(RuntimeError):
         self.commit_error = commit_error
 
 
-async def _wait_for_started_task(task: asyncio.Future[Any]) -> Any:
+def _consume_detached_task(task: asyncio.Future[Any]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _wait_for_started_task(
+    task: asyncio.Future[Any],
+    *,
+    timeout_seconds: float,
+) -> Any:
+    deadline = time.monotonic() + max(0.001, timeout_seconds)
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            task.cancel()
+            task.add_done_callback(_consume_detached_task)
+            raise TimeoutError("artifact operation confirmation timed out")
         try:
-            return await asyncio.shield(task)
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=remaining,
+            )
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
+        except TimeoutError:
+            task.cancel()
+            task.add_done_callback(_consume_detached_task)
+            raise
 
 
 async def rollback_artifact_transaction(
@@ -78,7 +106,10 @@ async def rollback_artifact_transaction(
         return False
     task = asyncio.ensure_future(rollback())
     try:
-        await _wait_for_started_task(task)
+        await _wait_for_started_task(
+            task,
+            timeout_seconds=ARTIFACT_CONFIRMATION_TIMEOUT_SECONDS,
+        )
     except BaseException as exc:  # noqa: BLE001
         logger.warning("%s rollback confirmation failed err=%s", label, exc)
         return False
@@ -92,8 +123,12 @@ async def commit_with_adoption_probe(
     logger: logging.Logger,
     label: str,
 ) -> ArtifactCommitResult:
+    commit_task = asyncio.ensure_future(session.commit())
     try:
-        await session.commit()
+        await _wait_for_started_task(
+            commit_task,
+            timeout_seconds=ARTIFACT_COMMIT_TIMEOUT_SECONDS,
+        )
     except BaseException as commit_error:  # noqa: BLE001
         await rollback_artifact_transaction(
             session,
@@ -102,7 +137,10 @@ async def commit_with_adoption_probe(
         )
         probe_task = asyncio.ensure_future(probe())
         try:
-            outcome = await _wait_for_started_task(probe_task)
+            outcome = await _wait_for_started_task(
+                probe_task,
+                timeout_seconds=ARTIFACT_CONFIRMATION_TIMEOUT_SECONDS,
+            )
         except BaseException as probe_error:  # noqa: BLE001
             logger.error(
                 "%s commit outcome remains unknown commit_err=%s probe_err=%s",

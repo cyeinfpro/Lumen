@@ -14,6 +14,8 @@ from lumen_core.constants import (
 )
 from lumen_core.chat_tools import ToolStatus
 
+from ...billing_parts.contracts import CompletionBillingRuntimeSnapshot
+
 
 async def _maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
     from ..auto_title import maybe_enqueue_auto_title
@@ -100,7 +102,12 @@ def _apply_success_message(state: Any, message: Any, final_text: str) -> None:
     message.status = MessageStatus.SUCCEEDED
 
 
-async def _charge_success(state: Any, session: Any) -> None:
+async def _charge_success(
+    state: Any,
+    session: Any,
+    *,
+    billing_snapshot: CompletionBillingRuntimeSnapshot,
+) -> None:
     completion = await session.get(
         state.ports.persistence.Completion,
         state.request.task_id,
@@ -114,12 +121,14 @@ async def _charge_success(state: Any, session: Any) -> None:
     )
     completion.upstream_request = upstream_request or None
     state.usage.usage_totals.apply_to(completion)
-    await state.ports.retry._raise_if_completion_cancelled(
-        state.request.redis,
-        state.request.task_id,
-        "cancelled before billing settle",
+    await state.ports.billing.worker_billing.charge_completion(
+        session,
+        completion,
+        billing_enabled=billing_snapshot.billing_enabled,
+        cache_aware=billing_snapshot.cache_aware,
+        allow_negative=billing_snapshot.allow_negative,
+        window_rate_limit=billing_snapshot.window_rate_limit,
     )
-    await state.ports.billing.worker_billing.charge_completion(session, completion)
 
 
 async def _stage_success_deliveries(
@@ -173,7 +182,9 @@ async def _stage_success_deliveries(
 async def _persist_success(
     state: Any,
     final_text: str,
-) -> tuple[tuple[str, str, dict[str, Any]], Any]:
+    *,
+    billing_snapshot: CompletionBillingRuntimeSnapshot,
+) -> tuple[tuple[str, str, dict[str, Any]], Any] | None:
     await state.ports.tools._publish_completion_tool_updates(
         redis=state.request.redis,
         user_id=state.preparation.user_id,
@@ -209,20 +220,16 @@ async def _persist_success(
             )
         )
         if state.ports.persistence.affected_rows(result) == 0:
-            await state.ports.retry._raise_if_completion_cancelled(
-                state.request.redis,
-                state.request.task_id,
-                "cancelled during success commit",
-            )
-            raise state.ports.retry._CompletionEpochSuperseded(
-                f"completion epoch superseded before success task={state.request.task_id} "
-                f"attempt_epoch={state.preparation.attempt_epoch}"
-            )
+            return None
         message = await session.get(
             state.ports.persistence.Message, state.preparation.message_id
         )
         _apply_success_message(state, message, final_text)
-        await _charge_success(state, session)
+        await _charge_success(
+            state,
+            session,
+            billing_snapshot=billing_snapshot,
+        )
         success_delivery, memory_delivery = await _stage_success_deliveries(
             state,
             session,
@@ -244,7 +251,30 @@ async def settle_success(state: Any) -> None:
         state.request.task_id,
         "cancelled before success commit",
     )
-    success_delivery, memory_delivery = await _persist_success(state, final_text)
+    billing_snapshot = (
+        await state.ports.billing.worker_billing.snapshot_completion_billing_runtime()
+    )
+    await state.ports.retry._raise_if_completion_cancelled(
+        state.request.redis,
+        state.request.task_id,
+        "cancelled before billing settle",
+    )
+    persisted = await _persist_success(
+        state,
+        final_text,
+        billing_snapshot=billing_snapshot,
+    )
+    if persisted is None:
+        await state.ports.retry._raise_if_completion_cancelled(
+            state.request.redis,
+            state.request.task_id,
+            "cancelled during success commit",
+        )
+        raise state.ports.retry._CompletionEpochSuperseded(
+            f"completion epoch superseded before success task={state.request.task_id} "
+            f"attempt_epoch={state.preparation.attempt_epoch}"
+        )
+    success_delivery, memory_delivery = persisted
     await state.ports.events._deliver_completion_event(
         state.request.redis, success_delivery
     )

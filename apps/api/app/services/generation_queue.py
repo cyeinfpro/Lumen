@@ -147,6 +147,37 @@ def queued_generation_cleanup_entries(
     return entries
 
 
+async def capture_queued_generation_cleanup_entries(
+    redis: Any,
+    cleanup: dict[str, Any],
+) -> list[tuple[str, int, GenerationQueueReleaseToken]]:
+    existing = queued_generation_cleanup_entries(cleanup)
+    if existing:
+        return existing
+    raw_ids = cleanup.get("queued_generation_ids")
+    raw_epochs = cleanup.get("queued_generation_execution_epochs")
+    if not isinstance(raw_ids, list) or not isinstance(raw_epochs, dict):
+        return []
+    entries: list[tuple[str, int, GenerationQueueReleaseToken]] = []
+    seen: set[str] = set()
+    for task_id in raw_ids:
+        if not isinstance(task_id, str) or not task_id or task_id in seen:
+            continue
+        try:
+            execution_epoch = max(0, int(raw_epochs[task_id]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        token = await capture_generation_queue_state(
+            redis,
+            task_id,
+            expected_execution_epoch=execution_epoch,
+        )
+        if token is not None:
+            entries.append((task_id, execution_epoch, token))
+        seen.add(task_id)
+    return entries
+
+
 def completion_has_trustworthy_persisted_usage(completion: object) -> bool:
     request = getattr(completion, "upstream_request", None)
     if not isinstance(request, dict):
@@ -310,6 +341,7 @@ async def release_generation_queue_state(
 
 __all__ = [
     "GenerationQueueReleaseToken",
+    "capture_queued_generation_cleanup_entries",
     "capture_generation_queue_state",
     "completion_cancel_requires_durable_settlement",
     "completion_has_trustworthy_persisted_usage",

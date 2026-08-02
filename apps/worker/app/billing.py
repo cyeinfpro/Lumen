@@ -36,6 +36,7 @@ from .billing_parts.helpers import (
 )
 from .billing_parts.contracts import (
     CommonDependencies,
+    CompletionBillingRuntimeSnapshot,
     CompletionDependencies,
     CompletionPricingDependencies,
     GenerationDependencies,
@@ -79,6 +80,15 @@ async def billing_enabled() -> bool:
 
 async def allow_negative_balance() -> bool:
     return await _allow_negative_balance()
+
+
+async def snapshot_completion_billing_runtime() -> CompletionBillingRuntimeSnapshot:
+    return CompletionBillingRuntimeSnapshot(
+        billing_enabled=await _billing_enabled(),
+        cache_aware=await _cache_aware_enabled(),
+        allow_negative=await _allow_negative_balance(),
+        window_rate_limit=await _window_rate_limit_enabled(),
+    )
 
 
 async def account_mode(session: AsyncSession, user_id: str) -> str:
@@ -497,6 +507,7 @@ async def _audit_completion_window_limit(
     cache: Any,
     key_id: str | None,
     cost: int,
+    window_rate_limit: bool | None = None,
 ) -> None:
     await completion_pricing.audit_completion_window_limit(
         session,
@@ -504,6 +515,7 @@ async def _audit_completion_window_limit(
         cache=cache,
         key_id=key_id,
         cost=cost,
+        window_rate_limit=window_rate_limit,
         deps=_completion_pricing_dependencies(),
     )
 
@@ -547,11 +559,23 @@ async def _record_completion_settlement(
     )
 
 
-async def charge_completion(session: AsyncSession, completion: Completion) -> None:
+async def charge_completion(
+    session: AsyncSession,
+    completion: Completion,
+    *,
+    billing_enabled: bool | None = None,
+    cache_aware: bool | None = None,
+    allow_negative: bool | None = None,
+    window_rate_limit: bool | None = None,
+) -> None:
     await completion_service.charge_completion(
         session,
         completion,
         deps=_completion_dependencies(),
+        billing_enabled=billing_enabled,
+        cache_aware=cache_aware,
+        allow_negative=allow_negative,
+        window_rate_limit=window_rate_limit,
     )
 
 

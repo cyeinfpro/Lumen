@@ -153,6 +153,41 @@ async def test_event_stream_keeps_liveness_frames_on_periodic_revalidation(
     assert closed is True
 
 
+@pytest.mark.asyncio
+async def test_events_releases_request_transaction_before_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rolled_back = False
+    captured: dict[str, Any] = {}
+
+    class Db:
+        async def rollback(self) -> None:
+            nonlocal rolled_back
+            rolled_back = True
+
+    async def state(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace()
+
+    class Response:
+        def __init__(self, stream: Any) -> None:
+            assert rolled_back is True
+            captured["stream"] = stream
+
+    request = _request()
+    request.state.session_id = "session-a"
+    monkeypatch.setattr(events, "_event_stream_state", state)
+    monkeypatch.setattr(events, "EventSourceResponse", Response)
+
+    response = await events.events(
+        request,
+        SimpleNamespace(id="user-1"),
+        Db(),  # type: ignore[arg-type]
+    )
+
+    assert isinstance(response, Response)
+    await captured["stream"].aclose()
+
+
 def _live_event_message(
     *,
     channel: str,

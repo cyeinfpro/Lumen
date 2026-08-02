@@ -29,7 +29,9 @@ from ..byok_service import (
     invalidate_byok_settings_cache,
     normalize_base_url,
     read_byok_settings,
+    resolve_supplier_proxy,
     slugify_supplier,
+    SupplierValidationTarget,
     supplier_to_out,
     validate_api_key_with_supplier,
 )
@@ -322,7 +324,14 @@ async def probe_api_supplier(
     supplier = await db.get(ApiSupplierTemplate, supplier_id)
     if supplier is None or supplier.deleted_at is not None:
         raise _http("not_found", "supplier not found", 404)
-    outcome = await validate_api_key_with_supplier(db, supplier, body.api_key)
+    validation_target = SupplierValidationTarget.from_supplier(supplier)
+    proxy = await resolve_supplier_proxy(db, supplier)
+    await db.rollback()
+    outcome = await validate_api_key_with_supplier(
+        validation_target,
+        body.api_key,
+        proxy=proxy,
+    )
     return {
         "ok": outcome.ok,
         "error_code": outcome.error_code,

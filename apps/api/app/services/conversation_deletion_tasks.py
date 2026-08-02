@@ -22,11 +22,11 @@ from .active_task_cleanup import (
     post_commit_fail_fast_cleanup,
 )
 from .generation_queue import (
+    capture_queued_generation_cleanup_entries,
     capture_generation_queue_state,
     completion_cancel_requires_durable_settlement,
     current_execution_epoch,
     generation_cancel_requires_durable_settlement,
-    queued_generation_cleanup_entries,
 )
 
 
@@ -193,12 +193,19 @@ async def post_commit_conversation_task_cleanup(
         ]
         if isinstance(task_id, str)
     ]
+    queued_ids = cleanup.get("queued_generation_ids")
+    redis = get_redis() if queued_ids or cancel_ids else None
+    queued_entries = (
+        await capture_queued_generation_cleanup_entries(redis, cleanup)
+        if redis is not None
+        else []
+    )
     await post_commit_fail_fast_cleanup(
         user_id=user_id,
-        queued_entries=queued_generation_cleanup_entries(cleanup),
+        queued_entries=queued_entries,
         cancel_ids=cancel_ids,
         invalidate_balance_required=cleanup.get("holds_released", 0) > 0,
-        get_redis=get_redis,
+        get_redis=(lambda: redis),
         release_queue_state=release_queue_state,
         invalidate_balance=invalidate_balance,
         logger=logger,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import secrets
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.capacity_leases import CapacityLeaseLost
+from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import Video
 from lumen_core.schema_models import VideoUploadOut
 from lumen_core.storage_capacity import (
@@ -23,6 +25,7 @@ from lumen_core.storage_capacity import (
 
 from ..services.video_storage_capacity import VideoStorageCapacityManager
 from ..services.video_storage_lifecycle import (
+    VideoReferenceStorageLockTimeout,
     VideoUploadAdoptionMarker,
     VideoStorageLifecycle,
     clear_video_storage_cleanup_state,
@@ -34,12 +37,20 @@ from ..services.video_upload_adoption import (
     clear_adoption_marker_best_effort as _clear_adoption_marker_best_effort,
 )
 from .video_upload_inventory import (
+    ReferenceInventorySnapshot,
     load_reference_inventory as _load_reference_inventory,
+    lock_reference_inventory_for_adoption,
 )
 
 _REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE = 32
 _REFERENCE_UPLOAD_FILENAME_MAX_CHARS = 255
 _REFERENCE_UPLOAD_FILENAME_MAX_BYTES = 255
+_REFERENCE_UPLOAD_CAS_ATTEMPTS = 3
+_STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS = 30.0
+
+
+class _ReferenceInventoryChanged(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -146,9 +157,13 @@ def _ensure_projected_quota(
 
 
 async def _wait_for_started_task(task: asyncio.Future[Any]) -> Any:
+    deadline = time.monotonic() + _STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("reference video operation confirmation timed out")
         try:
-            return await asyncio.shield(task)
+            return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
@@ -180,7 +195,6 @@ async def _best_effort_rollback(db: AsyncSession, *, logger: Any) -> None:
 
 async def _record_reference_video_adoption_pending(
     *,
-    db: AsyncSession,
     video_id: str,
     user_id: str,
     storage_key: str,
@@ -199,7 +213,6 @@ async def _record_reference_video_adoption_pending(
         )
     except BaseException as exc:
         await _cleanup_written_path(written_path, deps=deps)
-        await _best_effort_rollback(db, logger=deps.logger)
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise deps.http_error(
@@ -280,6 +293,7 @@ async def _commit_reference_video_with_probe(
     *,
     db: AsyncSession,
     video: Any,
+    marker: VideoUploadAdoptionMarker | None,
     written_path: Path | None,
     sha256: str,
     deps: UploadDependencies,
@@ -288,15 +302,6 @@ async def _commit_reference_video_with_probe(
     user_id = str(video.user_id)
     storage_key = str(video.storage_key)
     size_bytes = int(getattr(video, "size_bytes", 0) or 0)
-    marker = await _record_reference_video_adoption_pending(
-        db=db,
-        video_id=video_id,
-        user_id=user_id,
-        storage_key=storage_key,
-        written_path=written_path,
-        sha256=sha256,
-        deps=deps,
-    )
     commit_error = await _commit_reference_video_transaction(
         db,
         marker=marker,
@@ -399,142 +404,124 @@ async def _write_reserved(
         raise
 
 
-async def upload_reference_video(
+@dataclass(frozen=True)
+class _ReferenceUploadPlan:
+    created: bool
+    video_id: str
+    storage_key: str
+    path: Path | None
+
+
+async def _rollback_inherited_transaction(db: AsyncSession) -> None:
+    in_transaction = getattr(db, "in_transaction", None)
+    if callable(in_transaction) and in_transaction():
+        await db.rollback()
+
+
+def _ensure_inventory_projected_quota(
     *,
-    user: Any,
-    db: AsyncSession,
-    file: UploadFile,
+    inventory: ReferenceInventorySnapshot,
+    upload_size: int,
     deps: UploadDependencies,
-) -> VideoUploadOut:
-    try:
-        filename = deps.normalize_filename(file.filename)
-    except ValueError as exc:
-        raise deps.http_error("invalid_filename", str(exc), 422) from exc
-    file.filename = filename
-    mime, ext = deps.reference_upload_ext(file)
-    size, sha, header = await deps.inspect_upload(file)
-    if not deps.looks_like_video(header):
-        raise deps.http_error(
-            "invalid_video_file",
-            "reference video must be a valid mp4 or mov file",
-            415,
+) -> None:
+    existing = inventory.existing
+    if existing is None:
+        _ensure_projected_quota(
+            current_count=inventory.quota_count,
+            current_bytes=inventory.quota_bytes,
+            projected_count=inventory.quota_count + 1,
+            projected_bytes=inventory.quota_bytes + upload_size,
+            deps=deps,
         )
-
-    existing, inspections, quota_count, quota_bytes = await _load_reference_inventory(
-        user_id=user.id,
-        sha256=sha,
-        db=db,
-        deps=deps,
-        cleanup_page_size=_REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE,
-        result_rows=_result_rows,
-        matching_video=_matching_video,
-        clear_adoption_marker=_clear_adoption_marker_best_effort,
-        adopted_outcome=VideoUploadAdoption.ADOPTED,
-        not_adopted_outcome=VideoUploadAdoption.NOT_ADOPTED,
+        return
+    if existing.deleted_at is None:
+        return
+    inspection = inventory.inspections[str(existing.id)]
+    current_count, current_bytes = video_reference_quota_contribution(
+        existing,
+        inspection,
     )
-
-    if existing is not None:
-        inspection = inspections[str(existing.id)]
-        if inspection.issues and not inspection.primary_present:
-            raise deps.http_error(
-                "video_storage_state_invalid",
-                "reference video storage cannot be repaired safely",
-                503,
-            )
-        if getattr(existing, "deleted_at", None) is not None:
-            if inspection.issues:
-                raise deps.http_error(
-                    "video_storage_state_invalid",
-                    "deleted reference video storage cannot be recovered safely",
-                    503,
-                )
-            current_count, current_bytes = video_reference_quota_contribution(
-                existing,
-                inspection,
-            )
-            recovered_bytes = inspection.bytes_on_disk + max(
-                0,
-                size - inspection.primary_size_bytes,
-            )
-            _ensure_projected_quota(
-                current_count=quota_count,
-                current_bytes=quota_bytes,
-                projected_count=quota_count - current_count + 1,
-                projected_bytes=quota_bytes - current_bytes + recovered_bytes,
-                deps=deps,
-            )
-
-        if not inspection.primary_present:
-            repaired_key = deps.upload_key(user.id, existing.id, ext)
-            repaired_path = deps.fs_path(repaired_key)
-            wrote_file = False
-            try:
-                await _write_reserved(
-                    path=repaired_path,
-                    file=file,
-                    size=size,
-                    deps=deps,
-                )
-                wrote_file = True
-                _update_reference_video(
-                    existing,
-                    filename=filename,
-                    mime=mime,
-                    size=size,
-                    sha256=sha,
-                    storage_key=repaired_key,
-                    deps=deps,
-                )
-                wrote_file = False
-                adopted = await _commit_reference_video_with_probe(
-                    db=db,
-                    video=existing,
-                    written_path=repaired_path,
-                    sha256=sha,
-                    deps=deps,
-                )
-            except BaseException:
-                try:
-                    await _best_effort_rollback(db, logger=deps.logger)
-                except BaseException:
-                    deps.logger.warning(
-                        "reference video repair rollback failed video_id=%s",
-                        existing.id,
-                        exc_info=True,
-                    )
-                if wrote_file:
-                    await _cleanup_written_path(repaired_path, deps=deps)
-                raise
-            return deps.upload_out(adopted, created=False)
-        _update_reference_video(
-            existing,
-            filename=filename,
-            mime=mime,
-            size=size,
-            sha256=sha,
-            storage_key=None,
-            deps=deps,
-        )
-        adopted = await _commit_reference_video_with_probe(
-            db=db,
-            video=existing,
-            written_path=None,
-            sha256=sha,
-            deps=deps,
-        )
-        return deps.upload_out(adopted, created=False)
-
+    recovered_bytes = inspection.bytes_on_disk + max(
+        0,
+        upload_size - inspection.primary_size_bytes,
+    )
     _ensure_projected_quota(
-        current_count=quota_count,
-        current_bytes=quota_bytes,
-        projected_count=quota_count + 1,
-        projected_bytes=quota_bytes + size,
+        current_count=inventory.quota_count,
+        current_bytes=inventory.quota_bytes,
+        projected_count=inventory.quota_count - current_count + 1,
+        projected_bytes=inventory.quota_bytes - current_bytes + recovered_bytes,
         deps=deps,
     )
+
+
+def _reference_upload_plan(
+    *,
+    user_id: str,
+    ext: str,
+    inventory: ReferenceInventorySnapshot,
+    upload_size: int,
+    deps: UploadDependencies,
+) -> _ReferenceUploadPlan:
+    _ensure_inventory_projected_quota(
+        inventory=inventory,
+        upload_size=upload_size,
+        deps=deps,
+    )
+    existing = inventory.existing
+    if existing is None:
+        video_id = new_uuid7()
+        storage_key = deps.upload_key(user_id, video_id, ext)
+        return _ReferenceUploadPlan(
+            created=True,
+            video_id=video_id,
+            storage_key=storage_key,
+            path=deps.fs_path(storage_key),
+        )
+
+    inspection = inventory.inspections[str(existing.id)]
+    if inspection.issues and not inspection.primary_present:
+        raise deps.http_error(
+            "video_storage_state_invalid",
+            "reference video storage cannot be repaired safely",
+            503,
+        )
+    if existing.deleted_at is not None and inspection.issues:
+        raise deps.http_error(
+            "video_storage_state_invalid",
+            "deleted reference video storage cannot be recovered safely",
+            503,
+        )
+    if inspection.primary_present:
+        return _ReferenceUploadPlan(
+            created=False,
+            video_id=existing.id,
+            storage_key=existing.storage_key,
+            path=None,
+        )
+    storage_key = deps.upload_key(user_id, existing.id, ext)
+    return _ReferenceUploadPlan(
+        created=False,
+        video_id=existing.id,
+        storage_key=storage_key,
+        path=deps.fs_path(storage_key),
+    )
+
+
+def _new_reference_video(
+    *,
+    plan: _ReferenceUploadPlan,
+    user_id: str,
+    filename: str,
+    mime: str,
+    size: int,
+    sha256: str,
+    deps: UploadDependencies,
+) -> Video:
     video = Video(
-        user_id=user.id,
+        id=plan.video_id,
+        user_id=user_id,
         owner_generation_id=None,
-        storage_key="",
+        storage_key=plan.storage_key,
         poster_storage_key=None,
         mime=mime,
         width=0,
@@ -542,8 +529,8 @@ async def upload_reference_video(
         duration_ms=0,
         fps=None,
         size_bytes=size,
-        sha256=sha,
-        etag=sha,
+        sha256=sha256,
+        etag=sha256,
         has_audio=False,
         faststart=False,
         visibility="private",
@@ -554,38 +541,259 @@ async def upload_reference_video(
             "reference_access_token_expires_at": deps.token_expiry(),
         },
     )
-    db.add(video)
-    await db.flush()
-    key = deps.upload_key(user.id, video.id, ext)
-    video.storage_key = key
-    path = deps.fs_path(key)
-    wrote_file = False
+    return video
+
+
+async def _discard_prepared_upload(
+    *,
+    marker: VideoUploadAdoptionMarker | None,
+    written_path: Path | None,
+    deps: UploadDependencies,
+) -> None:
     try:
-        await _write_reserved(
-            path=path,
-            file=file,
-            size=size,
+        if marker is not None:
+            discard = asyncio.ensure_future(
+                deps.storage_lifecycle.discard_unadopted_upload(marker)
+            )
+            await _wait_for_started_task(discard)
+        elif written_path is not None:
+            await _cleanup_written_path(written_path, deps=deps)
+    except BaseException:
+        deps.logger.warning(
+            "reference video prepared upload cleanup failed path=%s",
+            written_path,
+            exc_info=True,
+        )
+
+
+async def _adopt_reference_upload(
+    *,
+    user_id: str,
+    filename: str,
+    mime: str,
+    size: int,
+    sha256: str,
+    inventory: ReferenceInventorySnapshot,
+    plan: _ReferenceUploadPlan,
+    marker: VideoUploadAdoptionMarker | None,
+    db: AsyncSession,
+    deps: UploadDependencies,
+) -> Any:
+    commit_started = False
+    try:
+        locked = await lock_reference_inventory_for_adoption(
+            user_id=user_id,
+            sha256=sha256,
+            db=db,
+            deps=deps,
+            cleanup_page_size=_REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE,
+            result_rows=_result_rows,
+            matching_video=_matching_video,
+        )
+        if locked.signature != inventory.signature:
+            raise _ReferenceInventoryChanged
+
+        _ensure_inventory_projected_quota(
+            inventory=inventory,
+            upload_size=size,
             deps=deps,
         )
-        wrote_file = True
-        wrote_file = False
-        adopted = await _commit_reference_video_with_probe(
+        if plan.created:
+            if locked.existing is not None:
+                raise _ReferenceInventoryChanged
+            video = _new_reference_video(
+                plan=plan,
+                user_id=user_id,
+                filename=filename,
+                mime=mime,
+                size=size,
+                sha256=sha256,
+                deps=deps,
+            )
+            db.add(video)
+        else:
+            snapshot = inventory.existing
+            video = locked.existing
+            if (
+                snapshot is None
+                or video is None
+                or str(video.id) != plan.video_id
+                or not snapshot.matches(video)
+            ):
+                raise _ReferenceInventoryChanged
+            _update_reference_video(
+                video,
+                filename=filename,
+                mime=mime,
+                size=size,
+                sha256=sha256,
+                storage_key=plan.storage_key if plan.path is not None else None,
+                deps=deps,
+            )
+
+        commit_started = True
+        return await _commit_reference_video_with_probe(
             db=db,
             video=video,
-            written_path=path,
-            sha256=sha,
+            marker=marker,
+            written_path=plan.path,
+            sha256=sha256,
             deps=deps,
         )
-    except BaseException:
-        try:
-            await _best_effort_rollback(db, logger=deps.logger)
-        except BaseException:
-            deps.logger.warning(
-                "reference video create rollback failed video_id=%s",
-                video.id,
-                exc_info=True,
-            )
-        if wrote_file:
-            await _cleanup_written_path(path, deps=deps)
+    except _ReferenceInventoryChanged:
+        await _best_effort_rollback(db, logger=deps.logger)
         raise
-    return deps.upload_out(adopted, created=True)
+    except BaseException:
+        if not commit_started:
+            await _best_effort_rollback(db, logger=deps.logger)
+            await _discard_prepared_upload(
+                marker=marker,
+                written_path=plan.path,
+                deps=deps,
+            )
+        raise
+
+
+async def _resolve_inventory_change(
+    *,
+    user_id: str,
+    size: int,
+    sha256: str,
+    plan: _ReferenceUploadPlan,
+    marker: VideoUploadAdoptionMarker | None,
+    deps: UploadDependencies,
+) -> Any | None:
+    if marker is None:
+        return None
+    probe, probe_cancellation = await _probe_reference_video_adoption(
+        video_id=plan.video_id,
+        user_id=user_id,
+        storage_key=plan.storage_key,
+        sha256=sha256,
+        size_bytes=size,
+        deps=deps,
+    )
+    if probe.outcome is VideoUploadAdoption.ADOPTED:
+        await _clear_adoption_marker_best_effort(marker=marker, deps=deps)
+        return probe.video
+    if probe.outcome is VideoUploadAdoption.NOT_ADOPTED:
+        await _discard_prepared_upload(
+            marker=marker,
+            written_path=plan.path,
+            deps=deps,
+        )
+        return None
+    if probe_cancellation is not None:
+        raise probe_cancellation
+    raise deps.http_error(
+        "video_upload_commit_unknown",
+        "reference video upload ownership changed while adopting; "
+        "the file was retained for reconciliation",
+        503,
+    )
+
+
+async def upload_reference_video(
+    *,
+    user: Any,
+    db: AsyncSession,
+    file: UploadFile,
+    deps: UploadDependencies,
+) -> VideoUploadOut:
+    user_id = str(user.id)
+    try:
+        filename = deps.normalize_filename(file.filename)
+    except ValueError as exc:
+        raise deps.http_error("invalid_filename", str(exc), 422) from exc
+    file.filename = filename
+    mime, ext = deps.reference_upload_ext(file)
+    await _rollback_inherited_transaction(db)
+    size, sha, header = await deps.inspect_upload(file)
+    if not deps.looks_like_video(header):
+        raise deps.http_error(
+            "invalid_video_file",
+            "reference video must be a valid mp4 or mov file",
+            415,
+        )
+
+    for attempt in range(_REFERENCE_UPLOAD_CAS_ATTEMPTS):
+        inventory = await _load_reference_inventory(
+            user_id=user_id,
+            sha256=sha,
+            db=db,
+            deps=deps,
+            cleanup_page_size=_REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE,
+            result_rows=_result_rows,
+            matching_video=_matching_video,
+            clear_adoption_marker=_clear_adoption_marker_best_effort,
+            adopted_outcome=VideoUploadAdoption.ADOPTED,
+            not_adopted_outcome=VideoUploadAdoption.NOT_ADOPTED,
+        )
+        plan = _reference_upload_plan(
+            user_id=user_id,
+            ext=ext,
+            inventory=inventory,
+            upload_size=size,
+            deps=deps,
+        )
+        try:
+            async with deps.storage_lifecycle.reference_mutation_lock(
+                user_id=user_id,
+                video_id=plan.video_id,
+            ):
+                marker: VideoUploadAdoptionMarker | None = None
+                if plan.path is not None:
+                    await file.seek(0)
+                    await _write_reserved(
+                        path=plan.path,
+                        file=file,
+                        size=size,
+                        deps=deps,
+                    )
+                    marker = await _record_reference_video_adoption_pending(
+                        video_id=plan.video_id,
+                        user_id=user_id,
+                        storage_key=plan.storage_key,
+                        written_path=plan.path,
+                        sha256=sha,
+                        deps=deps,
+                    )
+                try:
+                    adopted = await _adopt_reference_upload(
+                        user_id=user_id,
+                        filename=filename,
+                        mime=mime,
+                        size=size,
+                        sha256=sha,
+                        inventory=inventory,
+                        plan=plan,
+                        marker=marker,
+                        db=db,
+                        deps=deps,
+                    )
+                except _ReferenceInventoryChanged:
+                    adopted = await _resolve_inventory_change(
+                        user_id=user_id,
+                        size=size,
+                        sha256=sha,
+                        plan=plan,
+                        marker=marker,
+                        deps=deps,
+                    )
+        except VideoReferenceStorageLockTimeout as exc:
+            raise deps.http_error(
+                "video_storage_busy",
+                "reference video storage is busy; retry shortly",
+                503,
+            ) from exc
+        if adopted is None:
+            if attempt + 1 < _REFERENCE_UPLOAD_CAS_ATTEMPTS:
+                continue
+            raise deps.http_error(
+                "video_upload_inventory_changed",
+                "reference video inventory changed repeatedly; retry the upload",
+                409,
+            )
+        return deps.upload_out(adopted, created=plan.created)
+
+    raise AssertionError("reference video upload CAS loop exhausted")
