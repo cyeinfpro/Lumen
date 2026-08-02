@@ -139,6 +139,7 @@ async def upload_image_impl(
     ensure_storage_free_space: Any,
     upload_command_service: UploadCommandService,
     image_out: Any,
+    session_id: str | None = None,
 ) -> ImageOut:
     await check_upload_rate_limit(user.id)
     try:
@@ -148,11 +149,11 @@ async def upload_image_impl(
             if isinstance(reference_width, int) and isinstance(reference_height, int)
             else None
         )
-        image = await upload_command_service.execute(
-            user_id=user.id,
-            upload_file=file,
-            filename=file.filename,
-            policy=UploadPolicy(
+        execute_kwargs = {
+            "user_id": user.id,
+            "upload_file": file,
+            "filename": file.filename,
+            "policy": UploadPolicy(
                 allowed_mime=ALLOWED_MIME,
                 normalizable_mime=NORMALIZABLE_UPLOAD_MIME,
                 extensions=EXT_BY_MIME,
@@ -169,9 +170,14 @@ async def upload_image_impl(
                 ),
                 reference_size=reference_size,
             ),
-            metadata_profile=MODEL_LIBRARY_METADATA_PROFILE,
-            metadata_finalizer=upload_metadata_finalizer,
-            storage_guard=ensure_storage_free_space,
+            "metadata_profile": MODEL_LIBRARY_METADATA_PROFILE,
+            "metadata_finalizer": upload_metadata_finalizer,
+            "storage_guard": ensure_storage_free_space,
+        }
+        if session_id:
+            execute_kwargs["session_id"] = session_id
+        image = await upload_command_service.execute(
+            **execute_kwargs,
         )
     except UploadCommandError as exc:
         raise http_error(exc.code, exc.message, exc.status_code) from exc

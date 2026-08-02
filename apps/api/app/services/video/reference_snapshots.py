@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.models import Image, Video
+from lumen_core.models import Image, User, Video
 from lumen_core.schemas import VideoReferenceMediaIn
 
 
@@ -82,6 +82,29 @@ def _has_local_source(snapshot: dict[str, Any], kind: str) -> bool:
     if kind == "video":
         return isinstance(snapshot.get("video_id"), str)
     return False
+
+
+async def lock_user_reference_media(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    http_error: HttpErrorFactory,
+) -> None:
+    """Lock an active user so writes serialize with account deletion."""
+    user_id_result = await db.execute(
+        select(User.id)
+        .where(
+            User.id == user_id,
+            User.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if user_id_result.scalar_one_or_none() is None:
+        raise http_error(
+            "user_deleted",
+            "user account was deleted",
+            401,
+        )
 
 
 async def _normalize_fallback_snapshot(

@@ -6,26 +6,19 @@ POST /prompts/enhance — 流式返回 AI 优化后的图像生成提示词。
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
-import mimetypes
 import os
-import secrets
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Annotated, Any, AsyncIterator
-from urllib.parse import urlencode
+from typing import Annotated, Any, AsyncIterator, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.models import Image, Video, new_uuid7
+from lumen_core.models import new_uuid7
 from lumen_core.providers import (
     DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderDefinition,
@@ -36,14 +29,11 @@ from lumen_core.providers import (
 )
 from lumen_core.providers_parts.selection import provider_supports_route
 from lumen_core.runtime_settings import get_spec
-from lumen_core.vision_tagging import image_record_to_data_url
 
 from ..billing_cache_state import invalidate_balance_cache
-from ..config import settings
 from ..db import SessionLocal, get_db
 from ..deps import CurrentUser, verify_csrf
 from ..audit import hash_email, write_audit
-from ..public_urls import resolve_public_base_url
 from ..ratelimit import RateLimiter
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
@@ -63,17 +53,18 @@ from .prompt_parts import billing as _prompt_billing
 from .prompt_parts import failover as _prompt_failover
 from .prompt_parts import keepalive as _prompt_keepalive
 from .prompt_parts import upstream as _prompt_upstream
+from .prompt_parts.enhance_content import (
+    PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES as _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,  # noqa: F401 - test-facing re-export
+    append_input_image_with_budget as _append_input_image_with_budget,  # noqa: F401 - test-facing re-export
+    build_video_enhance_content as _build_video_enhance_content,
+)
 
 logger = logging.getLogger(__name__)
 httpx = _prompt_upstream.httpx
 
-_VIDEO_REFERENCE_ACCESS_TOKEN_TTL = timedelta(hours=24)
-
 _RETRYABLE_HTTP_STATUS = _prompt_upstream.RETRYABLE_HTTP_STATUS
 _FALLBACK_400_MARKERS = _prompt_upstream.FALLBACK_400_MARKERS
 PROMPTS_ENHANCE_LIMITER = RateLimiter(capacity=20, refill_per_sec=20 / 60)
-_PROMPT_ENHANCE_MEDIA_MAX_BYTES = 18 * 1024 * 1024
-_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES = 24 * 1024 * 1024
 _PROMPT_ENHANCE_KEEPALIVE_SECONDS = 10.0
 _PROMPT_ENHANCE_KEEPALIVE_CHUNK = ": keep-alive\n\n"
 _PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -151,13 +142,6 @@ class EnhanceIn(BaseModel):
 VideoEnhanceIn = _prompt_content.VideoEnhanceIn
 
 
-def _http(code: str, msg: str, http: int = 400, **details: Any) -> HTTPException:
-    err: dict[str, Any] = {"code": code, "message": msg}
-    if details:
-        err["details"] = details
-    return HTTPException(status_code=http, detail={"error": err})
-
-
 def _responses_url(base_url: str) -> str:
     return _prompt_upstream.responses_url(base_url)
 
@@ -219,191 +203,6 @@ def _build_enhance_body(
     )
 
 
-def _storage_path(storage_key: str) -> Path:
-    root = Path(settings.storage_root).resolve()
-    if not storage_key or "\x00" in storage_key:
-        raise _http("invalid_path", "invalid storage path", 400)
-    key_path = Path(storage_key)
-    if key_path.is_absolute():
-        raise _http("invalid_path", "absolute storage paths are not allowed", 400)
-    path = (root / key_path).resolve()
-    try:
-        path.relative_to(root)
-    except ValueError:
-        raise _http("invalid_path", "storage path escapes root", 400) from None
-    return path
-
-
-async def _owned_image(db: AsyncSession, *, user_id: str, image_id: str) -> Image:
-    image = (
-        await db.execute(
-            select(Image).where(
-                Image.id == image_id,
-                Image.user_id == user_id,
-                Image.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if image is None:
-        raise _http("image_not_found", "image not found", 404)
-    return image
-
-
-async def _owned_video(db: AsyncSession, *, user_id: str, video_id: str) -> Video:
-    video = (
-        await db.execute(
-            select(Video).where(
-                Video.id == video_id,
-                Video.user_id == user_id,
-                Video.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if video is None:
-        raise _http("video_not_found", "video not found", 404)
-    return video
-
-
-async def _image_data_url(image: Image) -> str | None:
-    if image.size_bytes and image.size_bytes > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
-        return None
-    try:
-        raw = await asyncio.to_thread(_storage_path(image.storage_key).read_bytes)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.info(
-            "prompt enhance read image failed image_id=%s key=%s err=%s",
-            image.id,
-            image.storage_key,
-            exc,
-        )
-        return None
-    if len(raw) > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
-        return None
-    return image_record_to_data_url(image, raw)
-
-
-async def _video_poster_data_url(video: Video) -> str | None:
-    key = (video.poster_storage_key or "").strip()
-    if not key:
-        return None
-    try:
-        raw = await asyncio.to_thread(_storage_path(key).read_bytes)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.info(
-            "prompt enhance read video poster failed video_id=%s key=%s err=%s",
-            video.id,
-            key,
-            exc,
-        )
-        return None
-    if not raw or len(raw) > _PROMPT_ENHANCE_MEDIA_MAX_BYTES:
-        return None
-    mime, _encoding = mimetypes.guess_type(key)
-    if not mime or not mime.startswith("image/"):
-        mime = "image/jpeg"
-    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-
-
-def _append_input_image_with_budget(
-    content: list[dict[str, Any]],
-    image_url: str,
-    *,
-    media_payload_bytes: int,
-) -> tuple[bool, int]:
-    return _prompt_content.append_input_image_with_budget(
-        content,
-        image_url,
-        media_payload_bytes=media_payload_bytes,
-        media_total_max_bytes=_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,
-    )
-
-
-def _external_image_url_for_input(url: str | None) -> str | None:
-    return _prompt_content.external_image_url_for_input(url)
-
-
-def _append_video_context_line(lines: list[str], key: str, value: Any) -> None:
-    _prompt_content.append_video_context_line(lines, key, value)
-
-
-def _reference_anchor(ref_id: str | None, kind: str, index: int) -> str:
-    return _prompt_content.reference_anchor(ref_id, kind, index)
-
-
-def _video_reference_public_url(video: Video, public_base_url: str) -> tuple[str, bool]:
-    metadata = dict(video.metadata_jsonb or {})
-    token = metadata.get("reference_access_token")
-    expires_raw = metadata.get("reference_access_token_expires_at")
-    expires_at = None
-    if isinstance(expires_raw, str) and expires_raw.strip():
-        with suppress(ValueError):
-            expires_at = datetime.fromisoformat(expires_raw)
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            else:
-                expires_at = expires_at.astimezone(timezone.utc)
-    changed = False
-    if (
-        not isinstance(token, str)
-        or not token
-        or expires_at is None
-        or expires_at <= datetime.now(timezone.utc)
-    ):
-        token = secrets.token_urlsafe(32)
-        metadata["reference_access_token"] = token
-        changed = True
-    metadata["reference_access_token_expires_at"] = (
-        datetime.now(timezone.utc) + _VIDEO_REFERENCE_ACCESS_TOKEN_TTL
-    ).isoformat()
-    video.metadata_jsonb = metadata
-    changed = True
-    query = urlencode({"token": token})
-    return (
-        f"{public_base_url.rstrip('/')}/api/videos/reference/{video.id}/binary?{query}",
-        changed,
-    )
-
-
-async def _resolve_optional_public_base_url(
-    request: Request,
-    db: AsyncSession,
-) -> str | None:
-    try:
-        return await resolve_public_base_url(request, db)
-    except Exception as exc:  # noqa: BLE001
-        logger.info("prompt enhance public base unavailable: %s", exc)
-        return None
-
-
-async def _build_video_enhance_content(
-    body: VideoEnhanceIn,
-    *,
-    request: Request,
-    db: AsyncSession,
-    user_id: str,
-) -> tuple[list[dict[str, Any]], bool]:
-    runtime = _prompt_content.ContentRuntime(
-        owned_image=_owned_image,
-        owned_video=_owned_video,
-        image_data_url=_image_data_url,
-        video_poster_data_url=_video_poster_data_url,
-        resolve_public_base_url=_resolve_optional_public_base_url,
-        video_reference_public_url=_video_reference_public_url,
-    )
-    return await _prompt_content.build_video_enhance_content(
-        body,
-        request=request,
-        db=db,
-        user_id=user_id,
-        runtime=runtime,
-        media_total_max_bytes=_PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,
-    )
-
-
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
     spec = get_spec(key)
     if spec is None:
@@ -449,7 +248,6 @@ def _prompt_billing_runtime() -> _prompt_billing.BillingRuntime:
         invalidate_balance_cache=invalidate_balance_cache,
         write_audit=write_audit,
         hash_email=hash_email,
-        release_hold=_release_prompt_enhance_hold,
         logger=logger,
     )
 
@@ -498,6 +296,18 @@ async def _release_prompt_enhance_hold(
     reason: str,
 ) -> None:
     await _prompt_billing.release_prompt_enhance_hold(
+        billing,
+        reason=reason,
+        runtime=_prompt_billing_runtime(),
+    )
+
+
+async def _settle_prompt_enhance_default_hold(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+) -> None:
+    await _prompt_billing.settle_prompt_enhance_default_hold(
         billing,
         reason=reason,
         runtime=_prompt_billing_runtime(),
@@ -556,6 +366,62 @@ async def _release_prompt_enhance_hold_after_cancel(
         raise
 
 
+async def _settle_prompt_enhance_default_hold_detached(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+) -> None:
+    if billing is None or billing.hold_amount_micro <= 0:
+        return
+    async with SessionLocal() as db:
+        detached = replace(billing, db=db)
+        await _settle_prompt_enhance_default_hold(detached, reason=reason)
+
+
+def _schedule_prompt_enhance_default_settle(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+    runtime: _PromptRuntime,
+) -> asyncio.Task[None] | None:
+    if billing is None or billing.hold_amount_micro <= 0:
+        return None
+    # 先置位结算尝试标记再建任务:客户端断流后,链外孤儿兜底释放与 detached
+    # settle 存在竞态——标记可让兜底跳过,hold 只由 settle 消费;若 settle
+    # 落库失败则 hold 留在钱包中由管理端孤儿扫描对账,不 fail-open 退款。
+    billing.settle_outcome.attempted = True
+    task = asyncio.create_task(
+        _settle_prompt_enhance_default_hold_detached(billing, reason=reason)
+    )
+    runtime.track_release_task(task)
+    return task
+
+
+async def _settle_prompt_enhance_hold_after_cancel(
+    billing: _EnhanceBillingContext | None,
+    *,
+    reason: str,
+    runtime: _PromptRuntime,
+) -> None:
+    task = _schedule_prompt_enhance_default_settle(
+        billing,
+        reason=reason,
+        runtime=runtime,
+    )
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        logger.info(
+            "prompt enhance default settle continues after stream cancellation "
+            "request_id=%s reason=%s",
+            billing.request_id if billing is not None else None,
+            reason,
+        )
+        raise
+
+
 def _is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:
     return _prompt_upstream.is_retryable_upstream_error(status_code, raw)
 
@@ -581,6 +447,7 @@ async def _stream_enhance_one(
     system_prompt: str = ENHANCE_SYSTEM_PROMPT,
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
+    on_dispatched: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     timeouts = _prompt_upstream.StreamTimeouts(
         connect=_PROMPT_ENHANCE_CONNECT_TIMEOUT_SECONDS,
@@ -597,6 +464,7 @@ async def _stream_enhance_one(
         content=content,
         metadata=metadata,
         timeouts=timeouts,
+        on_dispatched=on_dispatched,
     ):
         yield chunk
 
@@ -624,11 +492,24 @@ async def _stream_enhance(
             runtime=active_runtime,
         )
 
+    async def settle_after_cancel(
+        context: _EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        await _settle_prompt_enhance_hold_after_cancel(
+            context,
+            reason=reason,
+            runtime=active_runtime,
+        )
+
     stream_runtime = _prompt_failover.StreamRuntime(
         stream_one=_stream_enhance_one,
         charge=_charge_prompt_enhance,
         release=_release_prompt_enhance_hold,
         release_after_cancel=release_after_cancel,
+        settle_default=_settle_prompt_enhance_default_hold,
+        settle_default_after_cancel=settle_after_cancel,
     )
     stream = _prompt_failover.stream_enhance(
         text,
@@ -661,6 +542,98 @@ async def _stream_with_keepalive(
         yield chunk
 
 
+class _TrackedStreamIterator:
+    """包装 body 迭代器,记录是否被消费至正常耗尽(StopAsyncIteration)。
+
+    正常耗尽 ⇒ failover 链内已完成 settle/release;未耗尽(从未迭代或
+    中途断流)才可能遗留孤儿 hold,需要链外守卫兜底。
+    """
+
+    def __init__(self, source: AsyncIterator[str]) -> None:
+        self._source = source
+        self.exhausted = False
+
+    def __aiter__(self) -> _TrackedStreamIterator:
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return await self._source.__anext__()
+        except StopAsyncIteration:
+            self.exhausted = True
+            raise
+
+    async def aclose(self) -> None:
+        await self._source.aclose()
+
+
+class _GuardedEnhanceStreamingResponse(StreamingResponse):
+    """Prompt enhance SSE 的链外计费守卫。
+
+    客户端在首字节发送窗口断连时,Starlette 可能对从未被迭代的 body
+    生成器直接调用 aclose()(对未启动生成器是 no-op),生成器链内的
+    hold 释放(CancelledError/GeneratorExit 分支)不会执行,hold 永久
+    冻结。本类在 stream_response 的 finally 中触发幂等 release——
+    release 按 ref_id 幂等(已有 settle/release 交易则 no-op),正常
+    计费/释放路径不受影响,孤儿 hold 则被兜底释放。
+
+    守卫仅在 body 未正常耗尽时触发:正常耗尽时 failover 已在链内
+    settle/release,若再调度释放任务,每次成功请求都会凭空开一个
+    fresh-session DB 连接执行幂等 no-op;未耗尽(从未迭代/中途断流)
+    才可能遗留孤儿 hold,需要兜底。结算已被调度或执行
+    (settle_outcome.attempted)时同样跳过——结算失败时 hold 必须留在
+    钱包中由管理端孤儿扫描对账,不得 fail-open 退款。
+    """
+
+    def __init__(
+        self,
+        content: AsyncIterator[str],
+        *,
+        on_teardown: Callable[[], None],
+        **kwargs: Any,
+    ) -> None:
+        self._body = _TrackedStreamIterator(content)
+        super().__init__(self._body, **kwargs)
+        self._on_teardown = on_teardown
+
+    async def stream_response(self, send: Any) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            if not self._body.exhausted:
+                self._on_teardown()
+
+
+def _schedule_orphan_hold_release(
+    billing: _EnhanceBillingContext | None,
+    runtime: _PromptRuntime,
+) -> Callable[[], None]:
+    """构造响应兜底:body 未正常耗尽(断连/异常/从未迭代)时调度幂等 hold 释放。
+
+    仅兜底「孤儿 hold」:链内已 settle/charge 时 release 幂等 no-op;结算已被
+    调度或执行(settle_outcome.attempted)时同样跳过——结算成功则 hold 已消费,
+    结算落库失败则 hold 保留在钱包中交由管理端孤儿扫描对账,避免 fail-open
+    退款让平台吸收上游已产生的成本。
+    """
+
+    def release_orphan_hold() -> None:
+        if billing is not None and billing.settle_outcome.attempted:
+            logger.warning(
+                "prompt enhance orphan release skipped settle_attempted "
+                "request_id=%s hold_micro=%d",
+                billing.request_id,
+                billing.hold_amount_micro,
+            )
+            return
+        _schedule_prompt_enhance_hold_release(
+            billing,
+            reason="stream_orphaned",
+            runtime=runtime,
+        )
+
+    return release_orphan_hold
+
+
 @router.post("/enhance")
 async def enhance_prompt(
     body: EnhanceIn,
@@ -684,7 +657,7 @@ async def enhance_prompt(
         )
     billing = await _prepare_prompt_enhance_billing(db, user)
 
-    return StreamingResponse(
+    return _GuardedEnhanceStreamingResponse(
         _stream_with_keepalive(
             _stream_enhance(
                 body.text,
@@ -698,6 +671,7 @@ async def enhance_prompt(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+        on_teardown=_schedule_orphan_hold_release(billing, runtime),
     )
 
 
@@ -740,7 +714,7 @@ async def enhance_video_prompt(
         await db.commit()
     billing = await _prepare_prompt_enhance_billing(db, user)
 
-    return StreamingResponse(
+    return _GuardedEnhanceStreamingResponse(
         _stream_with_keepalive(
             _stream_enhance(
                 body.text,
@@ -756,4 +730,5 @@ async def enhance_video_prompt(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+        on_teardown=_schedule_orphan_hold_release(billing, runtime),
     )

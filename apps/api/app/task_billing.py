@@ -51,6 +51,18 @@ class ChatWalletPreflight:
 
 
 @dataclass
+class EnhanceSettleOutcome:
+    """prompt enhance 结算尝试标记(可变对象,dataclasses.replace 后仍共享同一实例)。
+
+    默认结算被调度或执行时置位 attempted,链外孤儿 hold 兜底释放据此跳过:
+    结算已落库则 release 本应幂等 no-op;结算落库失败则 hold 必须保留在钱包
+    中交由管理端孤儿扫描对账,不能 fail-open 退款让平台吸收上游已产生的成本。
+    """
+
+    attempted: bool = False
+
+
+@dataclass
 class EnhanceBillingContext:
     db: AsyncSession
     user_id: str
@@ -61,6 +73,7 @@ class EnhanceBillingContext:
     allow_negative: bool
     hold_amount_micro: int = 0
     pricing_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    settle_outcome: EnhanceSettleOutcome = field(default_factory=EnhanceSettleOutcome)
 
 
 @dataclass

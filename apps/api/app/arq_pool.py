@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import weakref
 from dataclasses import dataclass, field
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
@@ -28,7 +29,12 @@ class _ArqPoolState:
     loop: asyncio.AbstractEventLoop | None = None
     loop_id: int | None = None
     checked_at: float = 0.0
-    locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    # Weak values: each lock is only referenced while its loop's callers are
+    # running, so a closed loop's lock is reclaimed (and its entry dropped)
+    # instead of accumulating forever as loops are created and destroyed.
+    locks: weakref.WeakValueDictionary[int, asyncio.Lock] = field(
+        default_factory=weakref.WeakValueDictionary
+    )
 
 
 _pool_state = _ArqPoolState()
@@ -49,13 +55,21 @@ def _lock_for_current_loop() -> asyncio.Lock:
 
 _ARQ_MAX_CONNECTIONS = 50
 _ARQ_HEALTH_CHECK_INTERVAL_SECONDS = 30.0
+# 半开连接下 ping 可能永不返回;健康检查在全局锁内执行,无界等待会把
+# 进程内所有入队永久卡死,故 ping 必须带上限超时。
+_ARQ_PING_TIMEOUT_SECONDS = 2.0
+# create_pool 内部同样执行无界 ping(connect 阶段才有 conn_timeout 限制),
+# 且重试预算为 5 × (1s connect + 1s retry_delay)≈10s;上限取 15s 既不打断
+# arq 的正常重试,又保证半开场景下全局锁不会永久卡死。
+_ARQ_POOL_CREATE_TIMEOUT_SECONDS = 15.0
 
 
 def _redis_settings() -> RedisSettings:
     # arq parses a redis URL via RedisSettings.from_dsn
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     redis_settings.max_connections = _ARQ_MAX_CONNECTIONS
-    redis_settings.retry_on_timeout = True
+    # 不能开 retry_on_timeout:入队走 XADD(非幂等),响应超时丢失后 redis-py
+    # 会盲目重发,同一任务被入队两次、执行两次;超时直接抛错由调用方兜底。
     return redis_settings
 
 
@@ -71,7 +85,7 @@ async def _close_pool(pool: ArqRedis) -> None:
 
 async def _pool_is_healthy(pool: ArqRedis) -> bool:
     try:
-        await pool.ping()
+        await asyncio.wait_for(pool.ping(), timeout=_ARQ_PING_TIMEOUT_SECONDS)
     except (
         RedisConnectionError,
         RedisTimeoutError,
@@ -119,7 +133,10 @@ async def get_arq_pool() -> ArqRedis:
                 _pool_state.checked_at = 0.0
                 await _close_pool(old)
         if _pool_state.pool is None:
-            _pool_state.pool = await create_pool(_redis_settings())
+            _pool_state.pool = await asyncio.wait_for(
+                create_pool(_redis_settings()),
+                timeout=_ARQ_POOL_CREATE_TIMEOUT_SECONDS,
+            )
             _pool_state.loop = loop
             _pool_state.loop_id = loop_id
             _pool_state.checked_at = loop.time()

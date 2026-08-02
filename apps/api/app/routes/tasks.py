@@ -6,17 +6,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.arq_jobs import arq_job_id
 from lumen_core.constants import (
     CompletionStage,
     CompletionStatus,
-    EV_COMP_QUEUED,
-    EV_GEN_QUEUED,
     GenerationStage,
     GenerationStatus,
     task_channel,
@@ -27,16 +24,31 @@ from lumen_core.schemas import (
     CompletionOut,
     GenerationOut,
 )
+from lumen_core.upstream_billing import clear_upstream_execution_state
 
 from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
 from ..canvas_services.task_guard import reject_canvas_retry
 from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ..services.generation_queue import release_generation_queue_state
+from ..services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    lock_active_user,
+)
+from ..services.generation_queue import (
+    capture_generation_queue_state,
+    completion_cancel_requires_durable_settlement,
+    current_execution_epoch,
+    generation_cancel_requires_durable_settlement,
+    release_generation_queue_state,
+)
+from ..services.task_retry_publisher import (
+    publish_queued_retry as _publish_queued_retry,
+)
 from ..sse_publish import publish_sse_event
 from ..task_billing import apply_rate_multiplier_micro, user_rate_multiplier_x10000
 from . import task_listing_routes as _task_listing
@@ -98,6 +110,48 @@ def _completion_billing_retry_count(task: Completion) -> int:
 
 def _completion_task_billing_ref_id(task: Completion) -> str:
     return billing_core.completion_billing_ref_id(task)
+
+
+def _next_execution_epoch(task: Generation | Completion) -> int:
+    try:
+        current = max(0, int(getattr(task, "execution_epoch", 0) or 0))
+    except (TypeError, ValueError):
+        current = 0
+    return current + 1
+
+
+_COMPLETION_EXECUTION_USAGE_FIELDS = (
+    "tokens_in",
+    "tokens_out",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+    "reasoning_tokens",
+    "image_output_tokens",
+)
+_COMPLETION_EXECUTION_REQUEST_KEYS = frozenset(
+    {
+        "tool_image_reserved_micro",
+        "completion_usage_execution_epoch",
+        "completion_usage_attempt_epoch",
+        "context",
+        "memory",
+    }
+)
+
+
+def _reset_completion_execution_fields(completion: Completion) -> None:
+    completion.text = ""
+    for field in _COMPLETION_EXECUTION_USAGE_FIELDS:
+        setattr(completion, field, 0)
+
+
+def _clear_completion_execution_request(completion: Completion) -> dict[str, object]:
+    request = clear_upstream_execution_state(completion)
+    for key in _COMPLETION_EXECUTION_REQUEST_KEYS:
+        request.pop(key, None)
+    return request
 
 
 async def _setting_raw(db: AsyncSession, key: str) -> str | None:
@@ -221,6 +275,7 @@ async def _hold_generation_retry_wallet(
                 "generation_id": gen.id,
                 "reason": "generation retry",
                 "retry_count": retry_count,
+                "execution_epoch": int(getattr(gen, "execution_epoch", 0) or 0),
             },
         )
     except billing_core.BillingError as exc:
@@ -284,6 +339,7 @@ async def _hold_completion_retry_wallet(
                 "reason": "completion retry",
                 "billing_retry_count": next_retry_count,
                 "previous_billing_retry_count": previous_retry_count,
+                "execution_epoch": int(getattr(completion, "execution_epoch", 0) or 0),
             },
         )
     except billing_core.BillingError as exc:
@@ -330,6 +386,50 @@ async def _task_should_release_wallet_hold(
     return await _task_wallet_exists(db, user.id)
 
 
+async def _notify_task_cancel(redis: Any, task_id: str, *, kind: str) -> None:
+    try:
+        await redis.set(f"task:{task_id}:cancel", "1", ex=3600)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cancel notification write failed kind=%s task=%s err=%s",
+            kind,
+            task_id,
+            exc,
+        )
+
+
+async def _clear_task_cancel_notification(
+    redis: Any,
+    task_id: str,
+    *,
+    kind: str,
+) -> None:
+    try:
+        await redis.delete(f"task:{task_id}:cancel")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cancel notification cleanup failed kind=%s task=%s err=%s",
+            kind,
+            task_id,
+            exc,
+        )
+
+
+async def _lock_active_user_for_task_write(
+    db: AsyncSession,
+    user: Any,
+    *,
+    session_id: str | None = None,
+) -> None:
+    try:
+        if session_id:
+            await lock_active_user(db, user.id, session_id=session_id)
+        else:
+            await lock_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+
+
 # ---------- generations ----------
 
 
@@ -356,7 +456,7 @@ async def cancel_generation(
     gen_id: str,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> dict[str, str]:
+) -> dict[str, object]:
     gen = (
         await db.execute(
             select(Generation)
@@ -366,6 +466,8 @@ async def cancel_generation(
     ).scalar_one_or_none()
     if not gen:
         raise _http("not_found", "generation not found", 404)
+    if gen.status == GenerationStatus.CANCELED.value:
+        return {"status": gen.status, "cancel_requested": True}
     if gen.status not in (
         GenerationStatus.QUEUED.value,
         GenerationStatus.RUNNING.value,
@@ -373,25 +475,33 @@ async def cancel_generation(
         raise _http("not_cancelable", f"status is {gen.status}", 409)
 
     redis = get_redis()
+    now = datetime.now(timezone.utc)
     was_queued = gen.status == GenerationStatus.QUEUED.value
-    if gen.status == GenerationStatus.RUNNING.value:
-        # The worker still owns an upstream call and the image queue lease.
-        # Keep the task visible as running until the worker observes the cancel
-        # flag, stops the upstream awaitable, and writes the final canceled row.
-        # Why no explicit commit: this branch makes no field mutation on `gen`
-        # — only the SELECT FOR UPDATE row lock is held. The lock is released
-        # at session exit by ``get_db``'s context manager (rollback on raise,
-        # commit on clean return); calling commit() here would just be wasted
-        # round-trip with identical lock-release timing.
-        try:
-            await redis.set(f"task:{gen.id}:cancel", "1", ex=3600)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("cancel flag write failed gen=%s err=%s", gen.id, exc)
-            raise _http("cancel_unavailable", "cancel signal unavailable", 503) from exc
-        return {"status": gen.status}
+    gen.cancel_requested_at = getattr(gen, "cancel_requested_at", None) or now
+    if gen.status == GenerationStatus.RUNNING.value or (
+        was_queued and generation_cancel_requires_durable_settlement(gen)
+    ):
+        # The worker still owns upstream/billing cleanup. Persist the intent
+        # first; Redis only wakes the live worker and is never authoritative.
+        await db.commit()
+        await _notify_task_cancel(redis, gen.id, kind="generation")
+        return {"status": "canceling", "cancel_requested": True}
 
+    queue_ownership = None
+    try:
+        queue_ownership = await capture_generation_queue_state(
+            redis,
+            gen.id,
+            expected_execution_epoch=current_execution_epoch(gen),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "cancel image_queue ownership snapshot failed gen=%s err=%s",
+            gen.id,
+            exc,
+        )
     gen.status = GenerationStatus.CANCELED.value
-    gen.finished_at = datetime.now(timezone.utc)
+    gen.finished_at = now
     released_hold = False
     if await _task_should_release_wallet_hold(db, user):
         released_hold = await _release_queued_task_hold(
@@ -410,7 +520,12 @@ async def cancel_generation(
     # image_queue side state so a canceled queued row cannot keep capacity.
     try:
         if was_queued:
-            await _release_generation_queue_state(redis, gen.id)
+            await _release_generation_queue_state(
+                redis,
+                gen.id,
+                expected_execution_epoch=current_execution_epoch(gen),
+                ownership_token=queue_ownership,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "cancel image_queue release failed gen=%s err=%s",
@@ -449,7 +564,13 @@ async def retry_generation(
     gen_id: str,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> dict[str, str]:
+    await _lock_active_user_for_task_write(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
     gen = (
         await db.execute(
             select(Generation)
@@ -467,27 +588,28 @@ async def retry_generation(
         raise _http("not_retryable", f"status is {gen.status}", 409)
 
     redis = get_redis()
-    try:
-        await redis.delete(f"task:{gen.id}:cancel")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("retry cancel-flag cleanup failed gen=%s err=%s", gen.id, exc)
-        raise _http(
-            "retry_unavailable", "could not clear prior cancel signal", 503
-        ) from exc
 
     gen.status = GenerationStatus.QUEUED.value
     gen.progress_stage = GenerationStage.QUEUED.value
     gen.attempt = 0
+    gen.execution_epoch = _next_execution_epoch(gen)
     gen.billing_retry_count = _generation_billing_retry_count(gen) + 1
     gen.error_code = None
     gen.error_message = None
     gen.started_at = None
     gen.finished_at = None
+    gen.cancel_requested_at = None
+    gen.upstream_request = clear_upstream_execution_state(gen)
     held_retry = False
     if await _task_should_release_wallet_hold(db, user):
         held_retry = await _hold_generation_retry_wallet(db, user.id, gen)
 
-    payload = {"task_id": gen.id, "user_id": user.id, "kind": "generation"}
+    payload = {
+        "task_id": gen.id,
+        "user_id": user.id,
+        "kind": "generation",
+        "execution_epoch": gen.execution_epoch,
+    }
     outbox = OutboxEvent(kind="generation", payload=payload, published_at=None)
     db.add(outbox)
     await db.flush()
@@ -497,6 +619,7 @@ async def retry_generation(
     if held_retry:
         await invalidate_balance_cache(user.id)
 
+    await _clear_task_cancel_notification(redis, gen.id, kind="generation")
     # best-effort publish
     await _publish_queued(payload, gen.message_id)
     return {"status": gen.status}
@@ -538,6 +661,8 @@ async def cancel_completion(
     ).scalar_one_or_none()
     if not comp:
         raise _http("not_found", "completion not found", 404)
+    if comp.status == CompletionStatus.CANCELED.value:
+        return {"status": comp.status, "cancel_requested": True}
     if comp.status not in (
         CompletionStatus.QUEUED.value,
         CompletionStatus.STREAMING.value,
@@ -545,17 +670,19 @@ async def cancel_completion(
         raise _http("not_cancelable", f"status is {comp.status}", 409)
 
     redis = get_redis()
-    if comp.status == CompletionStatus.STREAMING.value:
-        try:
-            await redis.set(f"task:{comp.id}:cancel", "1", ex=3600)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("cancel flag write failed comp=%s err=%s", comp.id, exc)
-            raise _http("cancel_unavailable", "cancel signal unavailable", 503) from exc
+    now = datetime.now(timezone.utc)
+    comp.cancel_requested_at = getattr(comp, "cancel_requested_at", None) or now
+    if comp.status == CompletionStatus.STREAMING.value or (
+        comp.status == CompletionStatus.QUEUED.value
+        and completion_cancel_requires_durable_settlement(comp)
+    ):
+        await db.commit()
+        await _notify_task_cancel(redis, comp.id, kind="completion")
         return {"status": "canceling", "cancel_requested": True}
 
     comp.status = CompletionStatus.CANCELED.value
     comp.progress_stage = CompletionStage.FINALIZING.value
-    comp.finished_at = datetime.now(timezone.utc)
+    comp.finished_at = now
     released_hold = False
     if await _task_should_release_wallet_hold(db, user):
         released_hold = await _release_queued_task_hold(
@@ -576,7 +703,13 @@ async def retry_completion(
     comp_id: str,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: Request = None,
 ) -> dict[str, str]:
+    await _lock_active_user_for_task_write(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
     comp = (
         await db.execute(
             select(Completion)
@@ -594,21 +727,17 @@ async def retry_completion(
         raise _http("not_retryable", f"status is {comp.status}", 409)
 
     redis = get_redis()
-    try:
-        await redis.delete(f"task:{comp.id}:cancel")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("retry cancel-flag cleanup failed comp=%s err=%s", comp.id, exc)
-        raise _http(
-            "retry_unavailable", "could not clear prior cancel signal", 503
-        ) from exc
 
     comp.status = CompletionStatus.QUEUED.value
     comp.progress_stage = CompletionStage.QUEUED.value
     comp.attempt = 0
+    comp.execution_epoch = _next_execution_epoch(comp)
     comp.error_code = None
     comp.error_message = None
     comp.started_at = None
     comp.finished_at = None
+    comp.cancel_requested_at = None
+    _reset_completion_execution_fields(comp)
     previous_retry_count = _completion_billing_retry_count(comp)
     held_retry = False
     if await _task_should_release_wallet_hold(db, user):
@@ -618,11 +747,16 @@ async def retry_completion(
             comp,
             previous_retry_count,
         )
-    upstream_request = dict(comp.upstream_request or {})
+    upstream_request = _clear_completion_execution_request(comp)
     upstream_request["billing_retry_count"] = previous_retry_count + 1
     comp.upstream_request = upstream_request or None
 
-    payload = {"task_id": comp.id, "user_id": user.id, "kind": "completion"}
+    payload = {
+        "task_id": comp.id,
+        "user_id": user.id,
+        "kind": "completion",
+        "execution_epoch": comp.execution_epoch,
+    }
     outbox = OutboxEvent(kind="completion", payload=payload, published_at=None)
     db.add(outbox)
     await db.flush()
@@ -632,6 +766,7 @@ async def retry_completion(
     if held_retry:
         await invalidate_balance_cache(user.id)
 
+    await _clear_task_cancel_notification(redis, comp.id, kind="completion")
     await _publish_queued(payload, comp.message_id)
     return {"status": comp.status}
 
@@ -642,42 +777,12 @@ router.include_router(_task_listing.router)
 
 
 async def _publish_queued(payload: dict, message_id: str) -> None:
-    """Best-effort arq enqueue + PubSub on retry. Outbox publisher is the source of truth."""
-    try:
-        redis = get_redis()
-        kind = payload["kind"]
-        fn_name = "run_completion" if kind == "completion" else "run_generation"
-        ev_name = EV_COMP_QUEUED if kind == "completion" else EV_GEN_QUEUED
-        id_field = "completion_id" if kind == "completion" else "generation_id"
-        # Enqueue via arq so the Worker's registered functions consume it.
-        pool = await get_arq_pool()
-        await pool.enqueue_job(
-            fn_name,
-            payload["task_id"],
-            _job_id=arq_job_id(kind, payload["task_id"], payload.get("outbox_id")),
-        )
-        await publish_sse_event(
-            redis,
-            user_id=payload["user_id"],
-            channel=task_channel(payload["task_id"]),
-            event_name=ev_name,
-            data={
-                id_field: payload["task_id"],
-                "message_id": message_id,
-                "kind": kind,
-                "stage": "queued",
-                "substage": "waiting_queue",
-                "retrying": False,
-                "waiting_provider": False,
-                "cancelled": False,
-            },
-        )
-    except Exception:
-        kind = str(payload.get("kind") or "unknown")
-        task_publish_errors_total.labels(kind=kind).inc()
-        logger.warning(
-            "best-effort queued task publish failed kind=%s task_id=%s",
-            kind,
-            payload.get("task_id"),
-            exc_info=True,
-        )
+    await _publish_queued_retry(
+        payload,
+        message_id,
+        get_redis=get_redis,
+        get_arq_pool=get_arq_pool,
+        publish_sse_event=publish_sse_event,
+        publish_error_counter=task_publish_errors_total,
+        logger=logger,
+    )

@@ -30,6 +30,10 @@ from .variants import render_image_variant
 
 
 _PROCESS_JOIN_TIMEOUT_SECONDS = 2.0
+# A hung child would otherwise pin the request and its renewed capacity
+# leases forever: bound the result read so the child is killed and the
+# upload/variant capacity slot is released.
+_PROCESS_RESULT_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -189,10 +193,18 @@ def _stop_process(process: multiprocessing.Process) -> None:
 
 
 class IsolatedImageProcessingExecutor:
-    def __init__(self) -> None:
+    def __init__(self, result_timeout_seconds: float | None = None) -> None:
         self._context = multiprocessing.get_context("spawn")
         self._active: set[multiprocessing.Process] = set()
         self._closed = False
+        # 默认读模块常量而非函数默认值,保证测试 monkeypatch
+        # _PROCESS_RESULT_TIMEOUT_SECONDS 仍然生效;生产由 composition 注入
+        # settings.image_processing_result_timeout_s(环境变量可配)。
+        self._result_timeout_seconds = (
+            result_timeout_seconds
+            if result_timeout_seconds is not None
+            else _PROCESS_RESULT_TIMEOUT_SECONDS
+        )
 
     async def _run(
         self,
@@ -228,7 +240,16 @@ class IsolatedImageProcessingExecutor:
             name=f"lumen-image-{request.operation}-result",
         )
         try:
-            result = await receive_task
+            result = await asyncio.wait_for(
+                receive_task,
+                timeout=self._result_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise ProcessingError(
+                "image_processing_timeout",
+                "isolated image process timed out",
+                503,
+            ) from exc
         except asyncio.CancelledError:
             await asyncio.shield(asyncio.to_thread(_stop_process, process))
             await asyncio.gather(receive_task, return_exceptions=True)

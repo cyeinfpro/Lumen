@@ -683,7 +683,8 @@ async def create_poster_renders(
     conv = await _get_owned_conversation(
         db, user_id=user.id, conversation_id=run.conversation_id or ""
     )
-    # 已有 render 行（同 aspect 已生成过则跳过，避免唯一冲突）
+    # 已有 render 行（同 aspect 已生成过则跳过，避免唯一冲突）；
+    # failed 行不占位：允许重试重新生成，重新提交前先删掉旧行（唯一约束不允许双行）。
     existing_renders = (
         (
             await db.execute(
@@ -695,10 +696,21 @@ async def create_poster_renders(
     )
     requested_aspects, pending_aspect_values = pending_poster_aspects(
         aspects,
-        (render.aspect_ratio for render in existing_renders),
+        (
+            render.aspect_ratio
+            for render in existing_renders
+            if render.status != "failed"
+        ),
     )
     aspects = list(requested_aspects)
     pending_aspects = list(pending_aspect_values)
+    if pending_aspects:
+        # 清理本次要重试的 failed 旧行：submit_render 会新建行，
+        # 而 uq_poster_renders_run_aspect 不允许同 aspect 两行并存。
+        pending_set = set(pending_aspects)
+        for render in existing_renders:
+            if render.status == "failed" and render.aspect_ratio in pending_set:
+                await db.delete(render)
     multi_step.status = "running"
     multi_step.input_json = {
         **(multi_step.input_json or {}),

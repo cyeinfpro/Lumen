@@ -191,6 +191,13 @@ class Settings(BaseSettings):
         default="",
         alias="LUMEN_IMAGE_UPLOAD_CAPACITY_DEGRADED_POLICY",
     )
+    # 隔离子进程图片处理的结果读取超时秒数。慢而健康的合法大图渲染(大像素/
+    # 高压缩输入 + 繁忙主机)可能超过默认 60s,按主机情况调大而不是杀掉子进程。
+    image_processing_result_timeout_s: float = Field(
+        default=60.0,
+        ge=10.0,
+        alias="LUMEN_IMAGE_PROCESSING_RESULT_TIMEOUT_S",
+    )
     lumen_scripts_dir: str = ""
     public_base_url: str = _DEFAULT_PUBLIC_BASE_URL
     cors_allow_origins: str = _DEFAULT_CORS_ALLOW_ORIGINS

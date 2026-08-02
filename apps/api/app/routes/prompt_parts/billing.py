@@ -27,7 +27,6 @@ class BillingRuntime:
     invalidate_balance_cache: Callable[[str], Awaitable[None]]
     write_audit: Callable[..., Awaitable[Any]]
     hash_email: Callable[[str | None], str | None]
-    release_hold: Callable[..., Awaitable[None]]
     logger: Any
 
 
@@ -440,9 +439,12 @@ async def charge_prompt_enhance(
     runtime: BillingRuntime,
 ) -> None:
     if not capture.usage:
-        await runtime.release_hold(
+        # 内容已完整交付、上游必然已计费,只是拿不到用量:不得 fail-open 释放,
+        # 按 hold 默认金额结算(纯转嫁:上游扣费用户必付)。
+        await settle_prompt_enhance_default_hold(
             billing,
             reason="missing_usage",
+            runtime=runtime,
         )
         return
     model = capture.model or runtime.attempts[0].model
@@ -451,9 +453,10 @@ async def charge_prompt_enhance(
         cache_aware=billing.cache_aware,
     )
     if _usage_is_empty(usage):
-        await runtime.release_hold(
+        await settle_prompt_enhance_default_hold(
             billing,
             reason="zero_usage",
+            runtime=runtime,
         )
         return
     breakdown = await _resolve_breakdown(
@@ -502,6 +505,48 @@ async def charge_prompt_enhance(
     await billing.db.commit()
     if transaction is not None:
         await runtime.invalidate_balance_cache(billing.user_id)
+
+
+async def settle_prompt_enhance_default_hold(
+    billing: EnhanceBillingContext | None,
+    *,
+    reason: str,
+    runtime: BillingRuntime,
+) -> None:
+    """按 hold 默认金额结算「上游成本已发生但真实用量不可知」的路径。
+
+    纯转嫁铁律与 lumen_core.upstream_billing 决策表(仅 PROVEN_ABSENT 才
+    RELEASE):已产出内容、读超时、上游处理中失败、客户端断流、计费失败、
+    用量缺失等一律按默认金额(hold)结算,不得 fail-open 释放 hold 让平台
+    吸收上游成本;真实成本差额交给对账。hold <= 0(零费率)时无成本可记。
+    """
+    if billing is None or billing.hold_amount_micro <= 0:
+        return
+    # 结算尝试标记:链外孤儿兜底释放据此跳过(见 EnhanceSettleOutcome)。
+    billing.settle_outcome.attempted = True
+    try:
+        model = runtime.attempts[0].model if runtime.attempts else None
+        await _settle_or_charge(
+            billing,
+            cost=billing.hold_amount_micro,
+            ref_id=billing.request_id,
+            transaction_meta={
+                "route": "prompts.enhance",
+                "model": model,
+                "reason": reason,
+                "settle_source": "unknown_upstream_hold",
+            },
+        )
+        await billing.db.commit()
+        await runtime.invalidate_balance_cache(billing.user_id)
+    except Exception:
+        # 结算落库失败:attempted 已置位,兜底不会 fail-open 释放,hold 保留在
+        # 钱包中由管理端孤儿扫描对账;日志带上 request_id 便于人工追回。
+        runtime.logger.exception(
+            "prompt enhance billing default settle failed request_id=%s hold_micro=%d",
+            billing.request_id,
+            billing.hold_amount_micro,
+        )
 
 
 async def release_prompt_enhance_hold(

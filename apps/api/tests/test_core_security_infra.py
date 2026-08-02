@@ -580,6 +580,16 @@ async def test_write_audit_can_use_caller_transaction() -> None:
         async def flush(self):
             self.flushed = True
 
+        def begin_nested(self):
+            # write_audit(autocommit=False) 走 savepoint;stub 直接透传 flush。
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc: object):
+            return None
+
     session = CallerSession()
 
     await audit.write_audit(

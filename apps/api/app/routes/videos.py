@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
-import shutil
+import os  # noqa: F401 - test patch surface
+import shutil  # noqa: F401 - test patch surface
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO
 from types import MappingProxyType
+from typing import Annotated, Any, BinaryIO
 
 from fastapi import (
     APIRouter,
@@ -48,15 +48,26 @@ from ..billing_cache_state import invalidate_balance_cache
 from ..canvas_services import asset_ref_service
 from ..canvas_services.task_guard import reject_canvas_retry
 from ..config import settings  # noqa: F401 - compatibility patch surface
-from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..db import SessionLocal, get_db
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..public_urls import resolve_public_base_url
 from ..services.video import options as video_options_service
 from ..services.video import presentation as video_presentation
 from ..services.video import reference_media as video_reference_service
 from ..services.video import submission as video_submission_service
 from ..services.video.errors import video_http_error
+from ..services.video_file_durability import (
+    fsync_directory as _durability_fsync_directory,
+    mkdir_parents_durable as _durability_mkdir_parents,
+    write_new_file_atomic as _durability_write_new_file_atomic,
+)
 from ..services.video_publish import publish_video_queued
+from ..services.video_storage_capacity import (
+    VIDEO_REFERENCE_STORAGE_QUOTA_BYTES,
+    build_video_storage_capacity_manager,
+)
+from ..services.video_storage_lifecycle import VideoStorageLifecycle
+from ..services.video_upload_adoption import probe_reference_video_adoption
 from ..sse_publish import publish_sse_event  # noqa: F401 - test patch surface
 from ..video_reference_videos import (
     ensure_video_reference_video_variant,
@@ -72,7 +83,7 @@ logger = logging.getLogger(__name__)
 _VIDEO_LIST_LIMIT_MAX = 100
 _VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 _VIDEO_REFERENCE_UPLOAD_MAX_COUNT = 20
-_VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES = 1024 * 1024 * 1024
+_VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES = VIDEO_REFERENCE_STORAGE_QUOTA_BYTES
 _VIDEO_REFERENCE_MIME_EXT = MappingProxyType(
     {
         "video/mp4": "mp4",
@@ -115,6 +126,33 @@ _media_response = _video_media_routes.media_response
 _owned_video = _video_media_routes.owned_video
 
 
+def _video_storage_lifecycle() -> VideoStorageLifecycle:
+    return VideoStorageLifecycle(settings.storage_root)
+
+
+async def _probe_reference_video_adoption(
+    *,
+    video_id: str,
+    user_id: str,
+    storage_key: str,
+    sha256: str,
+    size_bytes: int,
+) -> _video_upload_routes.VideoUploadAdoptionProbe:
+    return await probe_reference_video_adoption(
+        video_id=video_id,
+        user_id=user_id,
+        storage_key=storage_key,
+        sha256=sha256,
+        size_bytes=size_bytes,
+        session_factory=SessionLocal,
+        video_model=Video,
+        lifecycle_factory=_video_storage_lifecycle,
+        logger=logger,
+        adoption_type=_video_upload_routes.VideoUploadAdoption,
+        probe_type=_video_upload_routes.VideoUploadAdoptionProbe,
+    )
+
+
 def _generation_route_dependencies() -> (
     _video_generation_routes.GenerationRouteDependencies
 ):
@@ -125,9 +163,11 @@ def _generation_route_dependencies() -> (
         encode_cursor=_encode_cursor,
         terminal_statuses=_VIDEO_TERMINAL_STATUSES,
         invalidate_balance_cache=invalidate_balance_cache,
+        allow_negative_balance=_allow_negative_balance,
         reject_canvas_retry=reject_canvas_retry,
         create_record=_create_video_generation_record,
         ensure_not_canvas_referenced=asset_ref_service.ensure_asset_not_canvas_referenced,
+        storage_lifecycle=_video_storage_lifecycle(),
         logger=logger,
         list_limit_max=_VIDEO_LIST_LIMIT_MAX,
     )
@@ -235,19 +275,20 @@ _provider_prefers_public_media_url = (
 
 
 def _write_new_file_atomic(path: Path, source: BinaryIO) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            source.seek(0)
-            shutil.copyfileobj(source, f, length=1024 * 1024)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    _durability_write_new_file_atomic(
+        path,
+        source,
+        mkdir_parents=_mkdir_parents_durable,
+        fsync=_fsync_directory,
+    )
+
+
+def _fsync_directory(path: Path) -> None:
+    _durability_fsync_directory(path)
+
+
+def _mkdir_parents_durable(path: Path) -> None:
+    _durability_mkdir_parents(path, fsync=_fsync_directory)
 
 
 def _unlink_file_if_exists(path: Path) -> None:
@@ -291,6 +332,7 @@ def _video_upload_out(video: Video, *, created: bool) -> VideoUploadOut:
 def _upload_dependencies() -> _video_upload_routes.UploadDependencies:
     return _video_upload_routes.UploadDependencies(
         reference_upload_ext=_reference_upload_ext,
+        normalize_filename=_video_upload_routes.normalize_reference_filename,
         inspect_upload=_inspect_reference_video_upload,
         looks_like_video=_looks_like_reference_video,
         http_error=_http,
@@ -301,6 +343,10 @@ def _upload_dependencies() -> _video_upload_routes.UploadDependencies:
         ensure_access_token=_ensure_reference_video_access_token,
         token_expiry=_reference_token_expiry,
         upload_out=_video_upload_out,
+        storage_capacity=build_video_storage_capacity_manager(),
+        storage_lifecycle=_video_storage_lifecycle(),
+        probe_adoption=_probe_reference_video_adoption,
+        logger=logger,
         max_count=_VIDEO_REFERENCE_UPLOAD_MAX_COUNT,
         total_max_bytes=_VIDEO_REFERENCE_UPLOAD_TOTAL_MAX_BYTES,
     )
@@ -504,6 +550,7 @@ async def _create_video_generation_record(
         user,
         context=video_submission_service.VideoSubmissionContext(
             request=request,
+            session_id=durable_session_id(request),
             input_image_snapshot=input_image_snapshot,
             reference_media_snapshot=reference_media_snapshot,
             workflow_metadata=workflow_metadata,

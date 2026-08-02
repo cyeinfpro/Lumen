@@ -9,6 +9,20 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
+
+
+_STALE_AFTER_SECONDS = 24 * 60 * 60
+
+
+class UpdateMarkerBusy(RuntimeError):
+    """Raised when a live update/rollback marker blocks a new launch claim.
+
+    The Redis system lock is the cross-process guard in normal operation.
+    When Redis is unavailable the service degrades to marker-file checks,
+    so marker creation itself must be exclusive to close the local
+    check/write race (same rationale as admin_backups._try_write_pid_marker).
+    """
 
 
 @dataclass(frozen=True)
@@ -115,19 +129,85 @@ def read_marker(
     return None
 
 
+def _existing_marker_is_live(marker: Path) -> bool:
+    """True iff an existing marker still guards a running operation.
+
+    Mirrors admin_backups._read_pid_marker: a fresh unit line is
+    authoritative, a pid line is live only while that process runs.
+
+    An empty/unparsable marker (created with O_EXCL but payload not yet
+    written) is treated as in-progress while its mtime is fresh: otherwise
+    a contender could read the marker inside the winner's open→write window,
+    judge it corrupt, unlink it, and both processes would proceed.
+    """
+    try:
+        raw = marker.read_text(encoding="utf-8")
+        parsed = parse_marker_text(raw)
+    except (FileNotFoundError, OSError):
+        return False
+    if parsed.unit and not marker_is_stale(
+        parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
+    ):
+        return True
+    if parsed.pid and pid_is_running(parsed.pid) and not marker_is_stale(
+        parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
+    ):
+        return True
+    if not raw.strip():
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            return False
+        return age < _STALE_AFTER_SECONDS
+    return False
+
+
 def write_marker(
     marker: Path,
     *,
     pid: int,
     started_at: str,
     unit: str | None,
-    chmod: Callable[[Path, int], None],
-) -> None:
+) -> bool:
+    """Atomically claim the update/rollback marker.
+
+    Returns False when a live marker already exists; the caller must treat
+    that as "another update or rollback is running" instead of launching.
+    Creation uses O_CREAT|O_EXCL so two processes racing to claim the
+    marker (e.g. while Redis is unavailable) cannot both succeed; a stale
+    or corrupt marker is removed and the claim retried once.
+    """
     marker.parent.mkdir(parents=True, exist_ok=True)
-    tmp = marker.with_suffix(f"{marker.suffix}.tmp")
     lines = [f"pid={pid}", f"started_at={started_at}"]
     if unit:
         lines.append(f"unit={unit}")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    chmod(tmp, 0o600)
-    tmp.replace(marker)
+    payload = ("\n".join(lines) + "\n").encode()
+    for _ in range(2):
+        try:
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if _existing_marker_is_live(marker):
+                return False
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            continue
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+            except PermissionError:
+                # Squashed CIFS mounts pin the mode; O_CREAT already set
+                # 0o600 and non-owner fchmod there returns EPERM.
+                pass
+            os.write(fd, payload)
+            return True
+        except Exception:
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(fd)
+    return False

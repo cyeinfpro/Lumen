@@ -141,9 +141,10 @@ async def _message_statement(
             )
         ).order_by(desc(Message.created_at), desc(Message.id))
         uses_desc_order = True
-    elif since:
-        stmt = stmt.order_by(Message.created_at.asc(), Message.id.asc())
     else:
+        # since 与首次加载共用同一方向(新→旧):since 窗口取 since 之后最新的一页,
+        # 下一页游标落在窗口末尾(最旧一条),跟随后继续向更旧分页,与 cursor 语义一致,
+        # 不会重复返回已见消息或跳过 since 之后的新消息。
         stmt = stmt.order_by(desc(Message.created_at), desc(Message.id))
         uses_desc_order = True
     return stmt.limit(limit + 1), uses_desc_order

@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import SystemSetting
@@ -75,6 +75,27 @@ async def read_providers(
     if legacy is not None:
         return legacy, "env"
     return None, "none"
+
+
+async def lock_providers_config(db: AsyncSession) -> None:
+    """Serialize read-modify-write of the shared `system_settings.providers` row.
+
+    Every admin writer of the providers config (proxy pool PUT and provider
+    items PUT/PATCH live in the same row) must acquire this before its
+    read-modify-write, otherwise concurrent saves can silently overwrite each
+    other's changes (lost update). Transaction-scoped PostgreSQL advisory lock,
+    released automatically at commit/rollback; other dialects are a no-op
+    (SQLite tests run on a single connection where the race cannot occur).
+    """
+    connection = getattr(db, "connection", None)
+    if connection is None:
+        return  # test doubles without a real session; nothing to lock
+    bind = await connection()
+    if bind.dialect.name != "postgresql":
+        return
+    await db.execute(
+        select(func.pg_advisory_xact_lock(func.hashtext("lumen:providers-config")))
+    )
 
 
 def parse_provider_config(

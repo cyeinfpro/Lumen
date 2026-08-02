@@ -105,7 +105,39 @@ async def require_active_session_user(
     return session, user
 
 
+async def is_active_session(db: AsyncSession, sid: str) -> bool:
+    """Check the durable session state without reusing request-scoped auth cache."""
+    if not sid:
+        return False
+    now = datetime.now(timezone.utc)
+    session_id = (
+        await db.execute(
+            select(AuthSession.id)
+            .join(User, User.id == AuthSession.user_id)
+            .where(
+                AuthSession.id == sid,
+                AuthSession.revoked_at.is_(None),
+                AuthSession.expires_at > now,
+                User.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    return session_id is not None
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def durable_session_id(request: Request | None) -> str | None:
+    """Return the durable cookie-session identity established for this request.
+
+    Non-cookie authentication adapters intentionally do not populate this
+    state. A write fence must still validate this ID against the user it locks.
+    """
+    if request is None:
+        return None
+    session_id = getattr(request.state, "session_id", None)
+    return session_id if isinstance(session_id, str) and session_id else None
 
 
 async def _record_failed_session_validation(request: Request) -> None:

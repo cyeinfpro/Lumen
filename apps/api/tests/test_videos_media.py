@@ -11,10 +11,12 @@ from typing import Any
 import pytest
 from fastapi import HTTPException, Request, UploadFile
 from lumen_core.schemas import VideoCreateIn, VideoPriceOptionOut, VideoReferenceMediaIn
+from lumen_core.video_billing import VideoCostEstimate
 from lumen_core.video_providers import VideoProviderDefinition
 
+from app import video_reference_videos
 from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
-from app.routes import events, videos
+from app.routes import events, video_upload_routes, videos
 from app.services.video import submission as video_submission
 from lumen_core.volcano_asset_media import VOLCANO_ASSET_VIDEO_KIND
 from app.video_reference_videos import (
@@ -25,6 +27,10 @@ from app.video_reference_videos import (
 
 
 VIDEO_REFERENCE_IMAGE_KIND = VIDEO_REFERENCE_VARIANT
+
+
+async def _async_value(value: Any) -> Any:
+    return value
 
 
 def _request(headers: list[tuple[bytes, bytes]] | None = None) -> Request:
@@ -72,6 +78,33 @@ async def test_reference_video_upload_inspection_stops_at_hard_cap(
     assert exc_info.value.status_code == 413
 
 
+def test_atomic_video_upload_fsyncs_new_parents_and_final_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "new" / "nested" / "video.mp4"
+    events: list[tuple[str, Path]] = []
+    original_replace = videos.os.replace
+
+    def replace(source: Path, target: Path) -> None:
+        events.append(("replace", target))
+        original_replace(source, target)
+
+    def fsync_directory(path: Path) -> None:
+        events.append(("fsync", path))
+
+    monkeypatch.setattr(videos.os, "replace", replace)
+    monkeypatch.setattr(videos, "_fsync_directory", fsync_directory)
+
+    videos._write_new_file_atomic(destination, io.BytesIO(b"durable-video"))
+
+    replace_index = events.index(("replace", destination))
+    assert ("fsync", tmp_path) in events[:replace_index]
+    assert ("fsync", destination.parent.parent) in events[:replace_index]
+    assert events[-1] == ("fsync", destination.parent)
+    assert destination.read_bytes() == b"durable-video"
+
+
 @pytest.mark.asyncio
 async def test_reference_video_dedupe_repairs_missing_storage(
     tmp_path: Path,
@@ -113,7 +146,15 @@ async def test_reference_video_dedupe_repairs_missing_storage(
 
     class Db:
         def __init__(self) -> None:
-            self.results = [Result(), Result(existing)]
+            self.results = [
+                Result("user-1"),
+                Result(),
+                Result(existing),
+                Result(existing),
+                Result(),
+                Result(),
+                Result(),
+            ]
             self.committed = False
             self.rolled_back = False
 
@@ -1740,6 +1781,189 @@ def test_create_video_generation_commits_video_hold_and_outbox_together() -> Non
     assert guarded.index("db.add(outbox)") < guarded.index("await db.commit()")
 
 
+@pytest.mark.asyncio
+async def test_video_wallet_admission_rejects_before_reference_transcode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="video", video_id="video-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="wallet-admission-low",
+    )
+    provider = SimpleNamespace(
+        kind="volcano",
+        name="provider-1",
+        upstream_model_for=lambda _model, _action: "video-ds-2-0-fast",
+    )
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [None, None, "user-1"]
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.results.pop(0))
+
+        async def connection(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> VideoCostEstimate:
+        return VideoCostEstimate(
+            estimated_tokens=100,
+            hold_micro=500,
+            unit_price_micro=5_000_000,
+            source="test",
+        )
+
+    async def fail_expensive(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "reference snapshots must not run before balance admission"
+        )
+
+    async def fail_hold(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("wallet hold must not run after failed admission")
+
+    monkeypatch.setattr(video_submission, "estimate_video_cost", estimate)
+    monkeypatch.setattr(video_submission.billing_core, "hold", fail_hold)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await video_submission.create_video_generation_record(
+            Db(),  # type: ignore[arg-type]
+            body,
+            SimpleNamespace(id="user-1"),
+            services=video_submission.VideoSubmissionServices(
+                require_ready=lambda *_args, **_kwargs: _async_value((provider, {})),
+                public_base_loader=fail_expensive,
+                input_snapshot_loader=fail_expensive,
+                reference_snapshot_loader=fail_expensive,
+                reference_validator=lambda *_args, **_kwargs: None,
+                allow_negative_loader=lambda *_args, **_kwargs: _async_value(False),
+                wallet_loader=lambda *_args, **_kwargs: _async_value(
+                    SimpleNamespace(balance_micro=0)
+                ),
+                generation_renderer=fail_expensive,
+                balance_invalidator=fail_expensive,
+                queued_publisher=fail_expensive,
+            ),
+        )
+
+    assert exc_info.value.status_code == 402
+    assert exc_info.value.detail["error"]["code"] == "INSUFFICIENT_BALANCE"
+
+
+@pytest.mark.asyncio
+async def test_video_wallet_preflight_runs_before_transcode_and_hold_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="video", video_id="video-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="wallet-admission-order",
+    )
+    provider = SimpleNamespace(
+        kind="volcano",
+        name="provider-1",
+        upstream_model_for=lambda _model, _action: "video-ds-2-0-fast",
+    )
+    order: list[str] = []
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.results = [None, None, "user-1"]
+            self.added: list[Any] = []
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.results.pop(0))
+
+        async def connection(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        def add(self, value: Any) -> None:
+            self.added.append(value)
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, _value: Any) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    async def estimate(*_args: Any, **_kwargs: Any) -> VideoCostEstimate:
+        return VideoCostEstimate(
+            estimated_tokens=100,
+            hold_micro=500,
+            unit_price_micro=5_000_000,
+            source="test",
+        )
+
+    async def wallet(*_args: Any, **_kwargs: Any) -> Any:
+        order.append("wallet")
+        return SimpleNamespace(balance_micro=1_000)
+
+    async def references(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        order.append("transcode")
+        return [{"kind": "video", "video_id": "video-1"}]
+
+    async def hold(*_args: Any, **_kwargs: Any) -> None:
+        order.append("hold")
+
+    async def render(_db: Any, generation: Any) -> Any:
+        return generation
+
+    monkeypatch.setattr(video_submission, "estimate_video_cost", estimate)
+    monkeypatch.setattr(video_submission.billing_core, "hold", hold)
+
+    await video_submission.create_video_generation_record(
+        Db(),  # type: ignore[arg-type]
+        body,
+        SimpleNamespace(id="user-1"),
+        services=video_submission.VideoSubmissionServices(
+            require_ready=lambda *_args, **_kwargs: _async_value((provider, {})),
+            public_base_loader=lambda *_args, **_kwargs: _async_value(None),
+            input_snapshot_loader=lambda *_args, **_kwargs: _async_value(
+                (None, None, None)
+            ),
+            reference_snapshot_loader=references,
+            reference_validator=lambda *_args, **_kwargs: None,
+            allow_negative_loader=lambda *_args, **_kwargs: _async_value(False),
+            wallet_loader=wallet,
+            generation_renderer=render,
+            balance_invalidator=lambda *_args, **_kwargs: _async_value(None),
+            queued_publisher=lambda *_args, **_kwargs: _async_value(None),
+        ),
+    )
+
+    assert order == ["wallet", "transcode", "hold"]
+
+
 def test_create_video_generation_reuses_request_fingerprint() -> None:
     submission_source = inspect.getsource(
         video_submission.create_video_generation_record
@@ -1962,6 +2186,24 @@ def test_reference_upload_ext_only_accepts_official_seedance_video_formats() -> 
         assert getattr(excinfo.value, "status_code", None) == 415
 
 
+def test_reference_upload_filename_is_normalized_and_bounded() -> None:
+    assert (
+        video_upload_routes.normalize_reference_filename("  cafe\u0301.mp4  ")
+        == "caf\u00e9.mp4"
+    )
+    assert video_upload_routes.normalize_reference_filename(None) == "reference-video"
+
+    for filename in (
+        "bad\nname.mp4",
+        "bad\u202ename.mp4",
+        "../escape.mp4",
+        "a" * 256,
+        ("\u754c" * 85) + ".mp4",
+    ):
+        with pytest.raises(ValueError):
+            video_upload_routes.normalize_reference_filename(filename)
+
+
 def test_reference_video_magic_requires_iso_bmff_file() -> None:
     assert videos._looks_like_reference_video(  # noqa: SLF001
         b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
@@ -1980,6 +2222,148 @@ def test_reference_video_fit_dimensions_stays_under_seedance_r2v_limit() -> None
     assert portrait_width == 1080
     assert portrait_height == 1920
     assert portrait_width * portrait_height <= VIDEO_REFERENCE_VIDEO_PIXEL_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("metadata", "code"),
+    [
+        (
+            {
+                "width": 9000,
+                "height": 100,
+                "duration_ms": 5_000,
+                "fps": 30.0,
+            },
+            "too_many_video_pixels",
+        ),
+        (
+            {
+                "width": 1280,
+                "height": 720,
+                "duration_ms": 15_001,
+                "fps": 30.0,
+            },
+            "invalid_video_duration",
+        ),
+        (
+            {
+                "width": 1280,
+                "height": 720,
+                "duration_ms": 5_000,
+                "fps": 61.0,
+            },
+            "invalid_video_fps",
+        ),
+        (
+            {
+                "width": 3840,
+                "height": 2160,
+                "duration_ms": 5_000,
+                "fps": 60.0,
+            },
+            "video_decode_budget_exceeded",
+        ),
+    ],
+)
+def test_reference_video_source_metadata_has_hard_limits(
+    metadata: dict[str, Any],
+    code: str,
+) -> None:
+    with pytest.raises(video_reference_videos.VideoReferenceVideoError) as exc_info:
+        video_reference_videos._validate_source_video(metadata)  # noqa: SLF001
+
+    assert exc_info.value.code == code
+
+
+def test_reference_video_transcode_is_thread_and_output_bounded_without_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mov"
+    destination = tmp_path / "output" / "reference.mp4"
+    source.write_bytes(b"source")
+    output = b"bounded-output"
+    commands: list[list[str]] = []
+
+    def probe(_ffprobe: str, path: Path) -> dict[str, Any]:
+        if path == source:
+            return {
+                "width": 3840,
+                "height": 2160,
+                "duration_ms": 5_000,
+                "fps": 30.0,
+                "has_audio": True,
+                "video_codec": "hevc",
+                "audio_codec": "aac",
+                "size_bytes": source.stat().st_size,
+            }
+        return {
+            "width": 1920,
+            "height": 1080,
+            "duration_ms": 5_000,
+            "fps": 30.0,
+            "has_audio": True,
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "size_bytes": len(output),
+        }
+
+    def run(command: list[str], **_kwargs: Any) -> Any:
+        commands.append(command)
+        Path(command[-1]).write_bytes(output)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(
+        video_reference_videos.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(video_reference_videos, "_probe_video", probe)
+    monkeypatch.setattr(video_reference_videos.subprocess, "run", run)
+
+    rendered = video_reference_videos.make_video_reference_mp4(
+        source,
+        destination,
+    )
+
+    assert destination.read_bytes() == output
+    assert rendered.size_bytes == len(output)
+    assert rendered.sha256 == hashlib.sha256(output).hexdigest()
+    command = commands[0]
+    assert command.count("-threads") == 2
+    assert command[command.index("-fs") + 1] == str(
+        video_reference_videos.VIDEO_REFERENCE_VIDEO_MAX_BYTES
+    )
+    assert command[command.index("-t") + 1] == "5.000"
+    assert command[command.index("-map") + 3] == "0:a:0?"
+    assert command[command.index("-max_alloc") + 1] == str(
+        video_reference_videos.VIDEO_REFERENCE_VIDEO_FFMPEG_MAX_ALLOC_BYTES
+    )
+    assert "fps=30" in command[command.index("-vf") + 1]
+    assert "read_bytes" not in inspect.getsource(
+        video_reference_videos.make_video_reference_mp4
+    )
+
+
+def test_reference_video_output_duration_must_match_source() -> None:
+    with pytest.raises(video_reference_videos.VideoReferenceVideoError) as exc_info:
+        video_reference_videos._validate_output_video(  # noqa: SLF001
+            {
+                "width": 1920,
+                "height": 1080,
+                "duration_ms": 2_000,
+                "fps": 30.0,
+                "has_audio": True,
+                "video_codec": "h264",
+                "audio_codec": "aac",
+                "size_bytes": 1_024,
+            },
+            expected_width=1920,
+            expected_height=1080,
+            expected_duration_ms=10_000,
+        )
+
+    assert exc_info.value.code == "video_reference_transcode_failed"
 
 
 def test_validate_reference_url_accepts_public_url_or_asset_uri() -> None:
@@ -2315,6 +2699,7 @@ def test_cancel_video_generation_only_auto_cancels_queued_rows() -> None:
         in compact_source
     )
     assert "await billing_core.release" in source
+    assert "await billing_core.settle" in source
     assert "if transaction is None:" in source
     assert "await db.rollback()" in source
     assert "if balance_changed:" in source
@@ -2376,6 +2761,11 @@ async def test_cancel_video_generation_rolls_back_when_hold_release_missing(
         model="seedance",
         action="text",
         provider_name="provider-a",
+        diagnostics={},
+        attempt=0,
+        submission_epoch=0,
+        submit_started_at=None,
+        est_cost_micro=1_000,
     )
     db = Db(row)
     monkeypatch.setattr(videos.billing_core, "release", missing_release)
@@ -2395,6 +2785,128 @@ async def test_cancel_video_generation_rolls_back_when_hold_release_missing(
     assert db.committed is False
     assert db.refreshed is False
     assert invalidated == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_ambiguous_submit_settles_default_not_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self, row: Any) -> None:
+            self.row = row
+            self.added: list[Any] = []
+            self.committed = False
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.row)
+
+        def add(self, value: Any) -> None:
+            self.added.append(value)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def refresh(self, _row: Any) -> None:
+            return None
+
+    row = SimpleNamespace(
+        id="video-gen-ambiguous",
+        user_id="user-ambiguous",
+        status=videos.VideoGenerationStatus.QUEUED.value,
+        provider_task_id=None,
+        provider_idempotency_key="video:video-gen-ambiguous",
+        cancel_requested_at=None,
+        progress_stage=videos.VideoGenerationStage.QUEUED.value,
+        progress_pct=5,
+        error_code=None,
+        error_message=None,
+        finished_at=None,
+        model="seedance",
+        action="text",
+        provider_name="provider-a",
+        diagnostics={
+            "submit_delivery_state": "unknown",
+            "submit_delivery_history": [
+                {
+                    "state": "unknown",
+                    "reason": "submit_exception",
+                    "submission_epoch": 1,
+                }
+            ],
+        },
+        attempt=1,
+        submission_epoch=1,
+        submit_started_at=datetime.now(timezone.utc),
+        est_cost_micro=1_000,
+        billed_cost_micro=None,
+        billed_tokens=None,
+    )
+    db = Db(row)
+    operations: list[tuple[str, dict[str, Any]]] = []
+
+    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
+        return 1_500
+
+    async def settle(_db: Any, user_id: str, **kwargs: Any) -> Any:
+        operations.append(("settle", {"user_id": user_id, **kwargs}))
+        return SimpleNamespace(
+            amount_micro=-1_500,
+            balance_after=0,
+            hold_after=0,
+        )
+
+    async def fail_release(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("ambiguous submit cancellation must not release")
+
+    async def allow_negative(_db: Any) -> bool:
+        return False
+
+    async def render(_db: Any, generation: Any, *_args: Any) -> Any:
+        return generation
+
+    invalidated: list[str] = []
+
+    async def invalidate(user_id: str) -> None:
+        invalidated.append(user_id)
+
+    monkeypatch.setattr(
+        videos.billing_core,
+        "_held_amount_for_ref",
+        held_amount,
+    )
+    monkeypatch.setattr(videos.billing_core, "settle", settle)
+    monkeypatch.setattr(videos.billing_core, "release", fail_release)
+    monkeypatch.setattr(videos, "_allow_negative_balance", allow_negative)
+    monkeypatch.setattr(videos, "_generation_out", render)
+    monkeypatch.setattr(videos, "invalidate_balance_cache", invalidate)
+
+    result = await videos.cancel_video_generation(
+        row.id,
+        SimpleNamespace(id=row.user_id),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert result is row
+    assert db.committed is True
+    assert row.status == videos.VideoGenerationStatus.CANCELED.value
+    assert row.billed_cost_micro == 1_500
+    assert row.diagnostics["cancel_billing"] == {
+        "at": row.finished_at.isoformat(),
+        "decision": "cancel_submit_delivery_unknown_default_charge",
+        "actual_micro": 1_500,
+        "submit_delivery_state": "unknown",
+    }
+    assert operations[0][0] == "settle"
+    assert operations[0][1]["actual_micro"] == 1_500
+    assert invalidated == [row.user_id]
+    assert len(db.added) == 1
 
 
 def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:

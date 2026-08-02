@@ -302,8 +302,12 @@ async def test_cancel_conversation_active_tasks_releases_only_queued_holds(
         "active_generation_ids": ["gen-queued", "gen-running"],
         "active_completion_ids": ["comp-queued", "comp-streaming"],
         "queued_generation_ids": ["gen-queued"],
+        "queued_generation_execution_epochs": {"gen-queued": 0},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": ["gen-running"],
         "streaming_completion_ids": ["comp-streaming"],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
     }
     assert [call["ref_id"] for call in released] == [
         "gen-queued:retry:1",
@@ -314,6 +318,63 @@ async def test_cancel_conversation_active_tasks_releases_only_queued_holds(
     assert gen_running.status == GenerationStatus.RUNNING.value
     assert comp_queued.status == CompletionStatus.CANCELED.value
     assert comp_streaming.status == CompletionStatus.STREAMING.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_conversation_active_tasks_defers_receipt_bearing_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(
+        id="gen-retry",
+        status=GenerationStatus.QUEUED.value,
+        execution_epoch=5,
+        cancel_requested_at=None,
+        upstream_request={
+            "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+            "upstream_response_attempt": 2,
+            "upstream_response_execution_epoch": 5,
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 5,
+        },
+    )
+    comp = SimpleNamespace(
+        id="comp-retry",
+        status=CompletionStatus.QUEUED.value,
+        execution_epoch=6,
+        cancel_requested_at=None,
+        tokens_out=42,
+        upstream_request={"completion_usage_execution_epoch": 6},
+    )
+    db = _ActiveTaskDb([[gen], [comp]])
+    released: list[str] = []
+
+    async def release_conversation_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        conversations,
+        "_release_conversation_task_hold",
+        release_conversation_task_hold,
+    )
+
+    cleanup = await conversations._cancel_conversation_active_tasks(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        conv_id="conv-1",
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+    )
+
+    assert cleanup["holds_released"] == 0
+    assert cleanup["queued_generation_ids"] == []
+    assert cleanup["deferred_generation_ids"] == ["gen-retry"]
+    assert cleanup["deferred_completion_ids"] == ["comp-retry"]
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert comp.status == CompletionStatus.QUEUED.value
+    assert gen.cancel_requested_at is not None
+    assert comp.cancel_requested_at is not None
+    assert released == []
 
 
 @pytest.mark.asyncio
@@ -365,8 +426,16 @@ async def test_post_commit_conversation_task_cleanup_runs_after_commit(
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append((user_id, db.committed))
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append((task_id, db.committed))
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-3"
+        queue_released.append((f"{task_id}:{expected_execution_epoch}", db.committed))
+        return True
 
     monkeypatch.setattr(conversations, "get_redis", lambda: Redis())
     monkeypatch.setattr(
@@ -386,16 +455,30 @@ async def test_post_commit_conversation_task_cleanup_runs_after_commit(
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 3},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 3,
+                    "provider_name": "provider-3",
+                    "lease_token": "worker:execution:3:attempt:1",
+                    "reservation_token": "reservation-3",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-1"],
+            "deferred_generation_ids": ["gen-deferred"],
+            "deferred_completion_ids": ["comp-deferred"],
         },
     )
 
     assert invalidated == [("user-1", True)]
-    assert queue_released == [("gen-queued", True)]
+    assert queue_released == [("gen-queued:3", True)]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-1:cancel", "1", 3600),
+        ("task:gen-deferred:cancel", "1", 3600),
+        ("task:comp-deferred:cancel", "1", 3600),
     ]
 
 
@@ -413,8 +496,16 @@ async def test_post_commit_conversation_task_cleanup_keeps_cancel_when_cache_fai
     async def invalidate_balance_cache(_user_id: str) -> None:
         raise RuntimeError("cache unavailable")
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append(task_id)
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-4"
+        queue_released.append(f"{task_id}:{expected_execution_epoch}")
+        return True
 
     monkeypatch.setattr(conversations, "get_redis", lambda: Redis())
     monkeypatch.setattr(
@@ -433,12 +524,22 @@ async def test_post_commit_conversation_task_cleanup_keeps_cancel_when_cache_fai
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 4},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 4,
+                    "provider_name": "provider-4",
+                    "lease_token": "worker:execution:4:attempt:1",
+                    "reservation_token": "reservation-4",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-1"],
         },
     )
 
-    assert queue_released == ["gen-queued"]
+    assert queue_released == ["gen-queued:4"]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-1:cancel", "1", 3600),
@@ -562,6 +663,45 @@ async def test_list_messages_cursor_page_returns_older_messages_chronological(
 
 def test_conversation_cursor_ignores_invalid_payload() -> None:
     assert conversations._dec_cursor("not-a-valid-cursor") is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_list_messages_since_page_uses_desc_window_and_followable_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_owned_conv(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(id="conv-1")
+
+    monkeypatch.setattr(conversations, "_get_owned_conv", fake_get_owned_conv)
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        # Simulates the DB result for a DESC page after the since boundary.
+        _message("msg-5", now + timedelta(seconds=5)),
+        _message("msg-4", now + timedelta(seconds=4)),
+        _message("msg-3", now + timedelta(seconds=3)),
+    ]
+    db = _Db(rows)
+
+    out = await conversations.list_messages(
+        "conv-1",
+        SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+        since=(now + timedelta(seconds=2)).isoformat(),
+        limit=2,
+        include=None,
+    )
+
+    # 窗口 = since 之后最新的一页,按时间正序展示;游标指向窗口末尾(最旧一条),
+    # 跟随后走向更旧分页,不会重复返回本页消息。
+    assert [m.id for m in out.items] == ["msg-4", "msg-5"]
+    decoded = conversations._dec_cursor(out.next_cursor)
+    assert decoded is not None
+    assert decoded["id"] == "msg-4"
+    assert decoded["ca"] == (now + timedelta(seconds=4)).isoformat()
+    rendered = str(db.statements[0])
+    assert "messages.created_at >" in rendered
+    assert "messages.created_at DESC" in rendered
 
 
 @pytest.mark.asyncio

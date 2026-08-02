@@ -12,6 +12,8 @@ import subprocess
 import time
 from typing import TextIO
 
+from .admin_update_marker import UpdateMarkerBusy
+
 
 def _unlink_all(paths: tuple[Path, ...]) -> None:
     for path in paths:
@@ -29,7 +31,7 @@ class PathUnitLaunchRuntime:
     trigger_path: Path
     marker_path: Path
     unit: str
-    write_marker: Callable[[int, str, str | None], None]
+    write_marker: Callable[[int, str, str | None], bool]
     request_payload: Callable[[dict[str, str], datetime], dict[str, object]]
     chmod: Callable[[Path, int], None]
     trigger_only_mode: Callable[[], bool]
@@ -64,7 +66,8 @@ def start_update_via_path_unit(
     except OSError:
         initial_log_size = 0
 
-    write_marker(0, started_at.isoformat(), unit)
+    if not write_marker(0, started_at.isoformat(), unit):
+        raise UpdateMarkerBusy("another update or rollback is already running")
     request_text = json.dumps(
         request_payload(env, started_at),
         ensure_ascii=True,
@@ -141,7 +144,9 @@ def start_update_systemd_unit(
     env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
     env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
     env_file = write_env_file(env, unit)
-    write_marker(0, started_at.isoformat(), unit)
+    if not write_marker(0, started_at.isoformat(), unit):
+        _unlink_all((env_file,))
+        raise UpdateMarkerBusy("another update or rollback is already running")
 
     for label, command in systemd_attempts(
         unit=unit,

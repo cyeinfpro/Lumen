@@ -15,6 +15,7 @@ from ...services import storage_files
 
 
 _INTERNAL_REDIRECT_PREFIX = "/_internal_storage/"
+OWNER_PROTECTED_MEDIA_CACHE_CONTROL = "no-store"
 
 
 def _http(code: str, message: str, status_code: int) -> HTTPException:

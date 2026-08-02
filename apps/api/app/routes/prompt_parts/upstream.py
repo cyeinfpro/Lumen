@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 
@@ -65,10 +65,35 @@ class _ResponseState:
     emitted: bool = False
 
 
+# 可证明「请求从未送达上游」的传输异常:全部发生在连接/代理/连接池阶段,
+# 请求字节尚未写入 socket,上游不可能计费。纯转嫁决策表
+# (lumen_core.upstream_billing:仅 PROVEN_ABSENT 才 RELEASE)只允许这类
+# 失败 release;与之相对的 ReadTimeout/WriteTimeout/ReadError/WriteError/
+# RemoteProtocolError 意味着请求已经(至少部分)发出,结果不可知,必须按
+# 「上游可能已扣费」结算。与 worker 的 UNDELIVERED_TRANSPORT_ERRORS 一致。
+_UNDELIVERED_TRANSPORT_ERRORS: tuple[type[httpx.TransportError], ...] = (
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ConnectError,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+)
+
+
 class EnhanceProviderError(Exception):
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        no_upstream_cost: bool = False,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        # 可证明「上游未产生费用」:连接层未送达、或上游(网关)非 2xx 显式拒绝。
+        # 缺省 False = 不可知,按纯转嫁决策表一律结算而非 fail-open 释放。
+        self.no_upstream_cost = no_upstream_cost
 
 
 def responses_url(base_url: str) -> str:
@@ -309,6 +334,9 @@ async def _raise_for_status(
     raise EnhanceProviderError(
         f"upstream http {response.status_code}",
         retryable=is_retryable_upstream_error(response.status_code, raw),
+        # 4xx = 网关显式拒绝,未产生生成成本,可证明未扣费;5xx = 网关可能已
+        # 转发并让真实上游产生成本,结果不可知,必须按已扣费结算(纯转嫁)。
+        no_upstream_cost=response.status_code < 500,
     )
 
 
@@ -322,6 +350,7 @@ async def stream_enhance_one(
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
     timeouts: StreamTimeouts,
+    on_dispatched: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     body = build_enhance_body(
         text,
@@ -353,6 +382,11 @@ async def stream_enhance_one(
                     "Content-Type": "application/json",
                 },
             ) as response:
+                # 进入 client.stream 上下文 = 请求字节已写入 socket 且已收到响应头,
+                # 即「已发送」边界。发送前取消(代理解析/连接/连接池阶段)不会触达
+                # 此处,failover 据此判定可证明未扣费并释放 hold。
+                if on_dispatched is not None:
+                    on_dispatched()
                 await _raise_for_status(
                     response,
                     provider=provider,
@@ -367,13 +401,23 @@ async def stream_enhance_one(
                     yield chunk
     except EnhanceProviderError:
         raise
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as exc:
         logger.warning(
             "enhance upstream timeout provider=%s attempt=%s read_timeout_s=%s",
             provider.name,
             attempt.name,
             timeouts.read,
         )
-        raise EnhanceProviderError("timeout", retryable=True) from None
+        # 连接/连接池阶段超时:请求未送达,可证明未扣费;读/写超时:请求已发出,
+        # 结果不可知,按「上游可能已扣费」处理。
+        raise EnhanceProviderError(
+            "timeout",
+            retryable=True,
+            no_upstream_cost=isinstance(exc, _UNDELIVERED_TRANSPORT_ERRORS),
+        ) from None
     except httpx.HTTPError as exc:
-        raise EnhanceProviderError(type(exc).__name__, retryable=True) from exc
+        raise EnhanceProviderError(
+            type(exc).__name__,
+            retryable=True,
+            no_upstream_cost=isinstance(exc, _UNDELIVERED_TRANSPORT_ERRORS),
+        ) from exc

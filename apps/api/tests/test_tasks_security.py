@@ -52,6 +52,7 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
         error_message="cancelled",
         started_at=object(),
         finished_at=object(),
+        cancel_requested_at=object(),
         message_id="msg-1",
     )
 
@@ -63,6 +64,8 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
 
         async def execute(self, statement: Any) -> _One:
             self.statements.append(statement)
+            if "from users" in str(statement).lower():
+                return _One("user-1")
             return _One(gen)
 
         def add(self, row: Any) -> None:
@@ -99,27 +102,28 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
     )
 
     assert out == {"status": "queued"}
+    assert gen.cancel_requested_at is None
     assert redis.deleted == ["task:gen-1:cancel"]
     assert db.committed is True
-    assert (
-        "FOR UPDATE"
-        in str(db.statements[0].compile(dialect=postgresql.dialect())).upper()
-    )
+    active_user_sql = str(
+        db.statements[0].compile(dialect=postgresql.dialect())
+    ).upper()
+    task_sql = str(db.statements[1].compile(dialect=postgresql.dialect())).upper()
+    assert "FROM USERS" in active_user_sql
+    assert "FOR UPDATE" in active_user_sql
+    assert "FOR UPDATE" in task_sql
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_generation_sets_cancel_without_commit(
+async def test_cancel_running_generation_commits_intent_before_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RUNNING-branch contract: write redis cancel flag, do NOT commit.
-
-    The branch makes no field mutation on the generation row, so an
-    explicit commit would just round-trip without releasing any work — the
-    SELECT FOR UPDATE row lock is released by the FastAPI session
-    context manager at request exit. This test pins the contract so a
-    future regression that re-adds the commit is caught.
-    """
-    gen = SimpleNamespace(id="gen-1", user_id="user-1", status="running")
+    gen = SimpleNamespace(
+        id="gen-1",
+        user_id="user-1",
+        status="running",
+        cancel_requested_at=None,
+    )
     order: list[str] = []
 
     class Db:
@@ -141,77 +145,201 @@ async def test_cancel_running_generation_sets_cancel_without_commit(
         Db(),  # type: ignore[arg-type]
     )
 
-    assert out == {"status": "running"}
-    assert order == ["set:task:gen-1:cancel:1:3600"]
+    assert out == {"status": "canceling", "cancel_requested": True}
+    assert gen.cancel_requested_at is not None
+    assert order == ["commit", "set:task:gen-1:cancel:1:3600"]
 
 
 @pytest.mark.asyncio
-async def test_release_generation_queue_state_removes_task_members() -> None:
-    class Pipe:
-        def __init__(self) -> None:
-            self.calls: list[tuple[Any, ...]] = []
-
-        def zrem(self, key: str, member: str) -> None:
-            self.calls.append(("zrem", key, member))
-
-        def delete(self, key: str) -> None:
-            self.calls.append(("delete", key))
-
-        async def execute(self) -> None:
-            self.calls.append(("execute",))
+async def test_release_generation_queue_state_removes_matching_epoch_owner() -> None:
+    task_id = "gen-1"
+    provider = "provider-1"
+    provider_key = "generation:image_queue:provider_active:provider-1"
+    global_key = "generation:image_queue:active"
+    task_provider_key = "generation:image_queue:task_provider:gen-1"
+    lease_key = "task:gen-1:lease"
+    reservation_key = "generation:image_queue:reservation:gen-1"
 
     class Redis:
         def __init__(self) -> None:
-            self.pipe = Pipe()
+            self.values = {
+                task_provider_key: provider,
+                lease_key: "worker:execution:3:attempt:2",
+                reservation_key: "reservation-3",
+            }
+            self.zsets = {
+                provider_key: {task_id},
+                global_key: {task_id},
+            }
 
-        async def get(self, key: str) -> str:
-            assert key == "generation:image_queue:task_provider:gen-1"
-            return "provider-1"
+        async def get(self, key: str) -> Any:
+            return self.values.get(key)
 
-        def pipeline(self, *, transaction: bool = False) -> Pipe:
-            assert transaction is False
-            return self.pipe
+        async def eval(self, _script: str, numkeys: int, *args: Any) -> int:
+            keys = args[:numkeys]
+            argv = args[numkeys:]
+            (
+                expected_provider,
+                expected_lease,
+                expected_reservation,
+                expected_task_id,
+                active_member,
+                dual_race,
+            ) = argv
+            assert self.values.get(keys[2]) == expected_provider
+            assert self.values.get(keys[3]) == expected_lease
+            assert self.values.get(keys[4]) == expected_reservation
+            if dual_race == "0":
+                self.zsets[keys[0]].discard(expected_task_id)
+            self.zsets[keys[1]].discard(active_member)
+            for key in keys[2:]:
+                self.values.pop(key, None)
+            return 1
 
     redis = Redis()
+    ownership_token = await tasks.capture_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=3,
+    )
 
-    await tasks._release_generation_queue_state(redis, "gen-1")
+    released = await tasks._release_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=3,
+        ownership_token=ownership_token,
+    )
 
-    assert ("zrem", "generation:image_queue:active", "gen-1") in redis.pipe.calls
-    assert (
-        "zrem",
-        "generation:image_queue:provider_active:provider-1",
-        "gen-1",
-    ) in redis.pipe.calls
-    assert ("delete", "generation:image_queue:task_provider:gen-1") in redis.pipe.calls
-    assert ("delete", "task:gen-1:lease") in redis.pipe.calls
+    assert released is True
+    assert task_id not in redis.zsets[provider_key]
+    assert task_id not in redis.zsets[global_key]
+    assert task_provider_key not in redis.values
+    assert lease_key not in redis.values
+    assert reservation_key not in redis.values
 
 
 @pytest.mark.asyncio
-async def test_release_generation_queue_state_without_pipeline() -> None:
+async def test_release_generation_queue_state_cas_preserves_concurrent_retry() -> None:
+    task_id = "gen-1"
+    provider = "provider-1"
+    provider_key = "generation:image_queue:provider_active:provider-1"
+    global_key = "generation:image_queue:active"
+    task_provider_key = "generation:image_queue:task_provider:gen-1"
+    lease_key = "task:gen-1:lease"
+    reservation_key = "generation:image_queue:reservation:gen-1"
+
     class Redis:
         def __init__(self) -> None:
-            self.calls: list[tuple[Any, ...]] = []
+            self.values = {
+                task_provider_key: provider,
+                reservation_key: "reservation-old",
+            }
+            self.zsets = {
+                provider_key: {task_id: 30.0},
+                global_key: {task_id: 30.0},
+            }
 
-        async def get(self, key: str) -> str:
-            self.calls.append(("get", key))
-            return "provider-1"
+        async def get(self, key: str) -> Any:
+            return self.values.get(key)
 
-        async def zrem(self, key: str, member: str) -> None:
-            self.calls.append(("zrem", key, member))
-
-        async def delete(self, key: str) -> None:
-            self.calls.append(("delete", key))
+        async def eval(self, _script: str, numkeys: int, *args: Any) -> int:
+            keys = args[:numkeys]
+            argv = args[numkeys:]
+            self.values[reservation_key] = "reservation-new"
+            self.zsets[provider_key][task_id] = 90.0
+            self.zsets[global_key][task_id] = 90.0
+            expected_provider, expected_lease, expected_reservation = argv[:3]
+            if self.values.get(keys[2]) != expected_provider:
+                return 0
+            if (self.values.get(keys[3]) or "") != expected_lease:
+                return 0
+            if (self.values.get(keys[4]) or "") != expected_reservation:
+                return 0
+            raise AssertionError("stale cleanup must not pass the ownership CAS")
 
     redis = Redis()
+    ownership_token = await tasks.capture_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=3,
+    )
 
-    await tasks._release_generation_queue_state(redis, "gen-1")
+    released = await tasks._release_generation_queue_state(
+        redis,
+        task_id,
+        expected_execution_epoch=3,
+        ownership_token=ownership_token,
+    )
+
+    assert released is False
+    assert redis.values[task_provider_key] == provider
+    assert lease_key not in redis.values
+    assert redis.values[reservation_key] == "reservation-new"
+    assert redis.zsets[provider_key][task_id] == 90.0
+    assert redis.zsets[global_key][task_id] == 90.0
+
+
+@pytest.mark.asyncio
+async def test_release_generation_queue_state_fails_closed_without_atomic_cas() -> None:
+    class Redis:
+        async def get(self, key: str) -> str | None:
+            values = {
+                "generation:image_queue:task_provider:gen-1": "provider-1",
+                "task:gen-1:lease": "worker:execution:2:attempt:1",
+                "generation:image_queue:reservation:gen-1": "reservation-2",
+            }
+            return values.get(key)
+
+    redis = Redis()
+    ownership_token = await tasks.capture_generation_queue_state(
+        redis,
+        "gen-1",
+        expected_execution_epoch=2,
+    )
+    released = await tasks._release_generation_queue_state(
+        redis,
+        "gen-1",
+        expected_execution_epoch=2,
+        ownership_token=ownership_token,
+    )
+
+    assert released is False
+
+
+def test_cancel_billing_evidence_is_scoped_to_current_execution() -> None:
+    stale_generation = SimpleNamespace(
+        execution_epoch=4,
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 1,
+            "upstream_dispatch_execution_epoch": 3,
+        },
+    )
+    proven_undelivered = SimpleNamespace(
+        execution_epoch=4,
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 1,
+            "upstream_dispatch_execution_epoch": 4,
+            "upstream_dispatch_delivery": "proven_undelivered",
+        },
+    )
+    stale_completion_usage = SimpleNamespace(
+        execution_epoch=5,
+        tokens_out=64,
+        upstream_request={"completion_usage_execution_epoch": 4},
+    )
 
     assert (
-        "zrem",
-        "generation:image_queue:provider_active:provider-1",
-        "gen-1",
-    ) in redis.calls
-    assert ("delete", "task:gen-1:lease") in redis.calls
+        tasks.generation_cancel_requires_durable_settlement(stale_generation) is False
+    )
+    assert (
+        tasks.generation_cancel_requires_durable_settlement(proven_undelivered) is False
+    )
+    assert (
+        tasks.completion_cancel_requires_durable_settlement(stale_completion_usage)
+        is False
+    )
 
 
 @pytest.mark.asyncio

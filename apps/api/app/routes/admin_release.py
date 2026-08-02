@@ -22,6 +22,7 @@ import asyncio
 import os
 import re
 import shlex
+import signal
 import subprocess
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..deps import AdminUser, verify_csrf
 from ..services.system_lock import LockBusy, SystemOperationLockService
+from .admin_update_marker import UpdateMarkerBusy
 from ._admin_common import (
     admin_http as _http,
     cleanup_marker_when_done,
@@ -337,6 +339,27 @@ def _rollback_unit_name(started_at: datetime) -> str:
     return f"lumen-rollback-{stamp}-{os.getpid()}.service"
 
 
+def _kill_launched_script(proc: subprocess.Popen[bytes]) -> None:
+    """Abort a freshly-spawned rollback script after losing the marker claim.
+
+    The script runs in its own session (start_new_session=True), so
+    SIGTERM to the group reaches the script as well as its bash wrapper;
+    escalate to SIGKILL if it does not exit within 5s.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 def _start_rollback_systemd_unit(
     *,
     inline_script: str,
@@ -358,7 +381,8 @@ def _start_rollback_systemd_unit(
     env.setdefault("XDG_RUNTIME_DIR", runtime_dir)
     env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus")
 
-    update_write_marker(0, started_at.isoformat(), unit=unit)
+    if not update_write_marker(0, started_at.isoformat(), unit=unit):
+        raise UpdateMarkerBusy("another update or rollback is already running")
     attempted: list[str] = []
 
     for label, command in update_systemd_run_inline_attempts(
@@ -515,7 +539,18 @@ async def rollback_release(
                     close_fds=True,
                 )
                 pid = proc.pid
-                update_write_marker(proc.pid, started_at.isoformat())
+                if not update_write_marker(proc.pid, started_at.isoformat()):
+                    _kill_launched_script(proc)
+                    raise UpdateMarkerBusy(
+                        "another update or rollback is already running"
+                    )
+        except UpdateMarkerBusy:
+            raise _http(
+                "update_running",
+                "Lumen update, rollback, backup, or restore is already running; "
+                "wait for it to finish first",
+                409,
+            ) from None
         finally:
             log_fh.close()
 

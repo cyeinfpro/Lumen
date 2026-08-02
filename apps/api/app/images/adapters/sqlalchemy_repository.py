@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lumen_core.models import Image
 from lumen_core.model_entities.media_workflows import ImageReconcileEpoch
 
+from ...services.active_user import lock_active_user
 from ..domain.artifact import ArtifactStatus, ensure_artifact_transition
 
 
@@ -120,6 +122,24 @@ class SQLAlchemyImageRepository:
         async with self.session_factory() as session:
             return await session.get(Image, image_id)
 
+    @asynccontextmanager
+    async def active_user_fence(
+        self,
+        user_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> AsyncIterator[None]:
+        """Retain the identity fence across durable file publication."""
+        async with self.session_factory() as session:
+            if session_id:
+                await lock_active_user(session, user_id, session_id=session_id)
+            else:
+                await lock_active_user(session, user_id)
+            try:
+                yield
+            finally:
+                await session.rollback()
+
     async def next_reconcile_fence(self) -> int:
         async with self.session_factory() as session:
             result = await session.execute(
@@ -192,10 +212,23 @@ class SQLAlchemyImageRepository:
                 f"image artifact commit not observed for {target_status.value}"
             ) from exc
 
-    async def create_staging(self, image: Image) -> Image:
+    async def create_staging(
+        self,
+        image: Image,
+        *,
+        session_id: str | None = None,
+    ) -> Image:
         if image.artifact_status != ArtifactStatus.STAGING.value:
             raise ValueError("new upload image must start in staging")
         async with self.session_factory() as session:
+            if session_id:
+                await lock_active_user(
+                    session,
+                    image.user_id,
+                    session_id=session_id,
+                )
+            else:
+                await lock_active_user(session, image.user_id)
             session.add(image)
             await session.flush()
             return await self._resolve_commit(
@@ -220,7 +253,11 @@ class SQLAlchemyImageRepository:
         target: ArtifactStatus,
         values: dict[str, Any] | None = None,
         reconcile_fence: int | None = None,
+        active_user_id: str | None = None,
+        session_id: str | None = None,
     ) -> Image:
+        if session_id and not active_user_id:
+            raise ValueError("session_id requires active_user_id")
         expected_set = frozenset(expected)
         if not expected_set:
             raise ValueError("artifact transition requires an expected status")
@@ -243,6 +280,15 @@ class SQLAlchemyImageRepository:
         else:
             conditions.append(Image.reconcile_fence == 0)
         async with self.session_factory() as session:
+            if active_user_id:
+                if session_id:
+                    await lock_active_user(
+                        session,
+                        active_user_id,
+                        session_id=session_id,
+                    )
+                else:
+                    await lock_active_user(session, active_user_id)
             result = await session.execute(
                 update(Image).where(*conditions).values(**payload)
             )

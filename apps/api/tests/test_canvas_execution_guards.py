@@ -26,7 +26,7 @@ from lumen_core.canvas_models import (
     CanvasTaskTerminalReceipt,
     CanvasVersion,
 )
-from lumen_core.models import Base, Image, OutboxEvent, VideoGeneration
+from lumen_core.models import Base, Image, OutboxEvent, User, VideoGeneration
 from lumen_core.schemas import VideoCreateIn, VideoModelOptionOut, VideoOptionsOut
 from lumen_core.video_billing import VideoCostEstimate
 
@@ -110,6 +110,7 @@ async def _session() -> AsyncIterator[AsyncSession]:
         CanvasAssetRef.__table__,
         CanvasRunEvent.__table__,
         CanvasTaskTerminalReceipt.__table__,
+        User.__table__,
         Image.__table__,
         VideoGeneration.__table__,
         OutboxEvent.__table__,
@@ -1182,6 +1183,11 @@ async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
     async def allow_negative_loader(_db):
         return False
 
+    async def wallet_loader(_db, user_id, *, lock):
+        assert user_id == "user-1"
+        assert lock is False
+        return SimpleNamespace(balance_micro=100)
+
     async def generation_renderer(_db, generation):
         return SimpleNamespace(id=generation.id)
 
@@ -1195,6 +1201,7 @@ async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
         reference_snapshot_loader=reference_snapshot_loader,
         reference_validator=reference_validator,
         allow_negative_loader=allow_negative_loader,
+        wallet_loader=wallet_loader,
         generation_renderer=generation_renderer,
         balance_invalidator=unexpected_publish,
         queued_publisher=unexpected_publish,
@@ -1288,6 +1295,8 @@ async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
         idempotency_key="canvas-video-transaction",
     )
     async with _session() as db:
+        db.add(User(id="user-1", email="user@example.com"))
+        await db.flush()
         commit = AsyncMock(wraps=db.commit)
         monkeypatch.setattr(db, "commit", commit)
 

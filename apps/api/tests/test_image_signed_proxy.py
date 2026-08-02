@@ -210,7 +210,81 @@ async def test_signed_proxy_share_lookup_requires_primary_share_image_owner(
     rendered = str(db.statements[1])
     assert "JOIN images AS images_1" in rendered
     assert "images_1.user_id = :user_id_1" in rendered
-    assert "images_1.deleted_at IS NULL" in rendered
+    # 主图仅用于归属校验，不参与存活过滤——请求图片自身的 deleted_at 已在
+    # 前面 Image 查询校验，软删的主图不应阻断集合内其余存活图片。
+    assert "images_1.deleted_at IS NULL" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_signed_proxy_share_lookup_gates_revoked_and_expired_shares(
+    _signed_proxy_secret: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """分享 row 被 revoke / 过期时签名通道必须整体不可访问:share 查询 SQL
+    必须同时含 revoked_at IS NULL 与 expires_at 校验,所有成员一视同仁。"""
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    fp = tmp_path / "u" / "user-1" / "img.png"
+    fp.parent.mkdir(parents=True)
+    fp.write_bytes(b"PNG-PAYLOAD")
+    img = SimpleNamespace(
+        id=_IMG_ID,
+        user_id="user-1",
+        storage_key="u/user-1/img.png",
+        mime="image/png",
+        sha256="abc123",
+        deleted_at=None,
+    )
+    exp_ms, sig = sign_image_url_query(
+        _IMG_ID, "orig", _SECRET.encode("utf-8"), ttl_sec=3600
+    )
+    db = _SequencedDb([img, "share-1"])
+    resp = await images.get_image_signed(
+        _IMG_ID,
+        "orig",
+        exp_ms,
+        sig,
+        _request(),
+        db,  # type: ignore[arg-type]
+    )
+    assert resp.media_type == "image/png"
+    share_stmt = str(db.statements[1])
+    assert "revoked_at IS NULL" in share_stmt
+    assert "expires_at" in share_stmt
+
+
+@pytest.mark.asyncio
+async def test_signed_proxy_serves_share_member_after_primary_soft_delete(
+    _signed_proxy_secret: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多图分享：主图软删后，集合内其余存活图片仍可经签名 URL 访问。"""
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    fp = tmp_path / "u" / "user-1" / "img.png"
+    fp.parent.mkdir(parents=True)
+    fp.write_bytes(b"PNG-PAYLOAD")
+
+    img = SimpleNamespace(
+        id=_IMG_ID,
+        user_id="user-1",
+        storage_key="u/user-1/img.png",
+        mime="image/png",
+        sha256="abc123",
+        deleted_at=None,
+    )
+    exp_ms, sig = sign_image_url_query(
+        _IMG_ID, "orig", _SECRET.encode("utf-8"), ttl_sec=3600
+    )
+    # Image 查询命中（存活），Share 查询命中（主图已软删但分享未撤销）。
+    db = _SequencedDb([img, "share-1"])
+    resp = await images.get_image_signed(
+        _IMG_ID,
+        "orig",
+        exp_ms,
+        sig,
+        _request(),
+        db,  # type: ignore[arg-type]
+    )
+    assert resp.media_type == "image/png"
+    assert resp.headers["etag"] == '"abc123"'
+    assert "images_1.deleted_at IS NULL" not in str(db.statements[1])
 
 
 # --- 200 happy path: orig ---------------------------------------------------

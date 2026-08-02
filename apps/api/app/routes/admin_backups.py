@@ -19,7 +19,7 @@ import signal
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, NamedTuple, TextIO
+from typing import Mapping
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
@@ -29,6 +29,11 @@ from ..deps import AdminUser, verify_csrf
 from ..services.system_lock import LockBusy, SystemOperationLockService
 from ._admin_common import admin_http as _http, write_admin_audit_isolated
 from . import admin_backup_catalog as _backup_catalog
+from .admin_backup_fs import (
+    ScriptResult as _ScriptResult,
+    chmod_tolerate_eperm as _chmod_tolerate_eperm,
+    open_private_append as _open_private_append,
+)
 
 router = APIRouter(prefix="/admin/backups", tags=["admin"])
 
@@ -48,48 +53,7 @@ _RESTORE_LOG_NAME = ".restore.log"
 _RESTORE_RUNNER_UNIT = "lumen-restore-runner.service"
 _UPDATE_RUNNING_MARKER = ".update.running"
 
-class _ScriptResult(NamedTuple):
-    returncode: int
-    stdout: str
-    stderr: str
-
-
 _BackupPair = _backup_catalog.BackupPair
-
-
-def _chmod_tolerate_eperm(path: Path | str, mode: int) -> None:
-    """chmod that swallows EPERM from squashing mounts (CIFS/NFS).
-
-    Production /opt/lumendata is commonly mounted CIFS with
-    ``forceuid,forcegid,uid=...,gid=...,file_mode=0664``. The mount option
-    pins the on-wire mode and uid; every chmod from any caller — even the
-    file's apparent local owner — returns EPERM because the CIFS server
-    doesn't accept the mode change. The mount itself already enforces
-    file_mode, so our redundant chmod is purely defensive on local fs.
-    Any other OSError still propagates so genuine faults (ENOSPC, EBADF,
-    EROFS, ...) keep failing fast.
-    """
-    try:
-        os.chmod(path, mode)
-    except PermissionError:
-        pass
-
-
-def _open_private_append(path: Path) -> TextIO:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        try:
-            os.fchmod(fd, 0o600)
-        except PermissionError:
-            # Same EPERM-on-squashed-mount story as _chmod_tolerate_eperm; see
-            # there for the full rationale. Kept inline because os.fchmod takes
-            # a fd, not a path, so the helper signature doesn't fit.
-            pass
-        return os.fdopen(fd, "a", encoding="utf-8")
-    except Exception:
-        os.close(fd)
-        raise
 
 
 def _backup_root() -> Path:
@@ -136,6 +100,27 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
+def _kill_launched_script(proc: subprocess.Popen[bytes]) -> None:
+    """Abort a freshly-spawned restore script after losing the marker claim.
+
+    The script runs in its own session (start_new_session=True), so
+    SIGTERM to the group reaches the script as well as its bash wrapper;
+    escalate to SIGKILL if it does not exit within 5s.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 def _marker_is_stale(started_at: str | None) -> bool:
     if not started_at:
         return False
@@ -179,23 +164,6 @@ def _read_pid_marker(path: Path) -> bool:
     except OSError:
         pass
     return False
-
-
-def _write_pid_marker(
-    path: Path,
-    pid: int,
-    started_at: datetime,
-    *,
-    unit: str | None = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    lines = [f"pid={pid}", f"started_at={started_at.isoformat()}"]
-    if unit:
-        lines.append(f"unit={unit}")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(tmp, 0o600)
-    tmp.replace(path)
 
 
 def _try_write_pid_marker(
@@ -767,11 +735,15 @@ async def restore_backup(
             start_new_session=True,
             close_fds=True,
         )
-        _write_pid_marker(
-            marker,
-            proc.pid,
-            started_at,
-        )
+        if not _try_write_pid_marker(marker, proc.pid, started_at):
+            # Another maintenance op won the marker claim while the Redis
+            # lock was degraded; never let a second restore.sh run.
+            _kill_launched_script(proc)
+            raise _http(
+                "maintenance_busy",
+                "another maintenance operation is running",
+                409,
+            )
     except Exception:
         await lock_service.release(
             lock, succeeded=False, reason="restore_launch_failed"

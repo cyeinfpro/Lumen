@@ -9,8 +9,14 @@ from typing import Any
 
 import pytest
 from app.config import settings
-from app.routes import me
-from lumen_core.constants import CompletionStatus, GenerationStatus
+from app.routes import admin, me
+from app.services import account_deletion
+from fastapi import Response
+from lumen_core.constants import (
+    CompletionStatus,
+    GenerationStatus,
+    VideoGenerationStatus,
+)
 from sqlalchemy.dialects import postgresql
 
 
@@ -33,6 +39,34 @@ class _Db:
 
     async def execute(self, _statement: Any) -> _Result:
         return _Result(self.responses.pop(0) if self.responses else [])
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class _AdminDeleteResult(_Result):
+    def __init__(
+        self,
+        rows: list[Any] | None = None,
+        *,
+        scalar: Any = None,
+        rowcount: int = 0,
+    ) -> None:
+        super().__init__(rows or [])
+        self.scalar = scalar
+        self.rowcount = rowcount
+
+    def scalar_one_or_none(self) -> Any:
+        return self.scalar
+
+
+class _AdminDeleteDb:
+    def __init__(self, responses: list[_AdminDeleteResult]) -> None:
+        self.responses = responses
+        self.committed = False
+
+    async def execute(self, _statement: Any) -> _AdminDeleteResult:
+        return self.responses.pop(0)
 
     async def commit(self) -> None:
         self.committed = True
@@ -132,7 +166,7 @@ async def test_cancel_account_memory_extractions_fences_active_runs() -> None:
 
     db = Db()
     canceled_at = datetime.now(timezone.utc)
-    count = await me._cancel_account_memory_extractions(  # noqa: SLF001
+    count = await account_deletion.cancel_account_memory_extractions(
         db,  # type: ignore[arg-type]
         user_id="user-1",
         canceled_at=canceled_at,
@@ -168,7 +202,24 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
         id="comp-streaming",
         status=CompletionStatus.STREAMING.value,
     )
-    db = _Db([[gen_queued, gen_running], [comp_queued, comp_streaming]])
+    video_queued = SimpleNamespace(
+        id="video-queued",
+        status=VideoGenerationStatus.QUEUED.value,
+        cancel_requested_at=None,
+    )
+    existing_video_cancel = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    video_running = SimpleNamespace(
+        id="video-running",
+        status=VideoGenerationStatus.RUNNING.value,
+        cancel_requested_at=existing_video_cancel,
+    )
+    db = _Db(
+        [
+            [gen_queued, gen_running],
+            [comp_queued, comp_streaming],
+            [video_queued, video_running],
+        ]
+    )
     released: list[dict[str, Any]] = []
 
     async def release_account_delete_task_hold(
@@ -189,13 +240,17 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
         return True
 
     monkeypatch.setattr(
-        me,
+        account_deletion,
         "_release_account_delete_task_hold",
         release_account_delete_task_hold,
     )
-    monkeypatch.setattr(me, "_account_wallet_exists", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        account_deletion,
+        "_account_wallet_exists",
+        lambda *_args, **_kwargs: False,
+    )
 
-    cleanup = await me._cancel_account_active_tasks(  # noqa: SLF001
+    cleanup = await account_deletion.cancel_account_active_tasks(
         db,  # type: ignore[arg-type]
         user_id="user-1",
         canceled_at=datetime.now(timezone.utc),
@@ -204,6 +259,8 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
     assert cleanup == {
         "generations_canceled": 2,
         "completions_canceled": 2,
+        "video_generations_canceled": 2,
+        "videos_deleted": 0,
         "memory_extractions_canceled": 0,
         "holds_released": 2,
         "task_ids": [
@@ -213,8 +270,13 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
             "comp-streaming",
         ],
         "queued_generation_ids": ["gen-queued"],
+        "queued_generation_execution_epochs": {"gen-queued": 0},
+        "queued_generation_queue_tokens": {},
         "running_generation_ids": ["gen-running"],
         "streaming_completion_ids": ["comp-streaming"],
+        "deferred_generation_ids": [],
+        "deferred_completion_ids": [],
+        "active_video_generation_ids": ["video-queued", "video-running"],
     }
     assert [call["ref_id"] for call in released] == [
         "gen-queued:retry:1",
@@ -225,6 +287,238 @@ async def test_cancel_account_active_tasks_releases_only_queued_holds(
     assert gen_running.status == GenerationStatus.RUNNING.value
     assert comp_queued.status == CompletionStatus.CANCELED.value
     assert comp_streaming.status == CompletionStatus.STREAMING.value
+    assert video_queued.status == VideoGenerationStatus.QUEUED.value
+    assert video_running.status == VideoGenerationStatus.RUNNING.value
+    assert video_queued.cancel_requested_at is not None
+    assert video_running.cancel_requested_at == existing_video_cancel
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_fences_video_work_and_tombstones_videos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = SimpleNamespace(
+        id="user-admin-delete",
+        email="member@example.com",
+        account_mode="byok",
+        deleted_at=None,
+    )
+    video_generation = SimpleNamespace(
+        id="video-generation-admin-delete",
+        status=VideoGenerationStatus.SUBMITTED.value,
+        cancel_requested_at=None,
+    )
+    db = _AdminDeleteDb(
+        [
+            _AdminDeleteResult(scalar=target),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(),
+            _AdminDeleteResult(),
+            _AdminDeleteResult(rows=[video_generation]),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=0),
+        ]
+    )
+    audits: list[dict[str, Any]] = []
+    post_commit: list[dict[str, Any]] = []
+
+    async def write_admin_audit(*_args: Any, **kwargs: Any) -> None:
+        audits.append(kwargs)
+
+    async def post_commit_account_task_cleanup(
+        *_args: Any,
+        **kwargs: Any,
+    ) -> None:
+        post_commit.append(kwargs)
+
+    monkeypatch.setattr(admin, "write_admin_audit", write_admin_audit)
+    monkeypatch.setattr(
+        admin,
+        "post_commit_account_task_cleanup",
+        post_commit_account_task_cleanup,
+    )
+
+    out = await admin.delete_user(
+        target.id,
+        SimpleNamespace(),
+        SimpleNamespace(id="admin-1", email="admin@example.com"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out == {"ok": True}
+    assert target.deleted_at is not None
+    assert video_generation.cancel_requested_at is not None
+    assert db.committed is True
+    assert audits[0]["event_type"] == "admin.user.delete"
+    assert post_commit == [
+        {
+            "user_id": target.id,
+            "cleanup": {
+                "generations_canceled": 0,
+                "completions_canceled": 0,
+                "video_generations_canceled": 1,
+                "videos_deleted": 1,
+                "memory_extractions_canceled": 0,
+                "holds_released": 0,
+                "task_ids": [],
+                "queued_generation_ids": [],
+                "queued_generation_execution_epochs": {},
+                "queued_generation_queue_tokens": {},
+                "running_generation_ids": [],
+                "streaming_completion_ids": [],
+                "deferred_generation_ids": [],
+                "deferred_completion_ids": [],
+                "active_video_generation_ids": [video_generation.id],
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_my_account_keeps_audit_detail_and_post_commit_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = SimpleNamespace(
+        id="user-self-delete",
+        email="member@example.com",
+        account_mode="wallet",
+    )
+    db = _AdminDeleteDb(
+        [
+            _AdminDeleteResult(scalar=user.id),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=2),
+            _AdminDeleteResult(rowcount=3),
+            _AdminDeleteResult(rowcount=4),
+        ]
+    )
+    cleanup = {
+        "generations_canceled": 5,
+        "completions_canceled": 6,
+        "video_generations_canceled": 7,
+        "videos_deleted": 8,
+        "memory_extractions_canceled": 9,
+    }
+    audits: list[dict[str, Any]] = []
+    post_commit: list[tuple[dict[str, Any], bool]] = []
+
+    async def cancel_account_active_tasks(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["queue_redis"] is queue_redis
+        return cleanup
+
+    async def write_audit(*_args: Any, **kwargs: Any) -> None:
+        audits.append(kwargs)
+
+    async def post_commit_account_task_cleanup(**kwargs: Any) -> None:
+        post_commit.append((kwargs, db.committed))
+
+    queue_redis = object()
+    monkeypatch.setattr(me, "get_redis", lambda: queue_redis)
+    monkeypatch.setattr(me, "cancel_account_active_tasks", cancel_account_active_tasks)
+    monkeypatch.setattr(me, "write_audit", write_audit)
+    monkeypatch.setattr(
+        me,
+        "post_commit_account_task_cleanup",
+        post_commit_account_task_cleanup,
+    )
+
+    response = Response()
+    out = await me.delete_my_account(
+        None,  # type: ignore[arg-type]
+        user,
+        response,
+        db,  # type: ignore[arg-type]
+    )
+
+    assert out is response
+    assert response.status_code == 204
+    assert db.committed is True
+    assert audits == [
+        {
+            "event_type": "me.account.delete",
+            "user_id": user.id,
+            "actor_email": user.email,
+            "actor_ip_hash": None,
+            "target_user_id": user.id,
+            "details": {
+                "users": 1,
+                "sessions_revoked": 2,
+                "conversations_deleted": 3,
+                "images_deleted": 4,
+                "generations_canceled": 5,
+                "completions_canceled": 6,
+                "video_generations_canceled": 7,
+                "videos_deleted": 8,
+                "memory_extractions_canceled": 9,
+            },
+        }
+    ]
+    assert post_commit == [({"user_id": user.id, "cleanup": cleanup}, True)]
+    cookie_headers = [
+        value.decode("latin-1")
+        for key, value in response.raw_headers
+        if key == b"set-cookie"
+    ]
+    assert any(header.startswith("session=") for header in cookie_headers)
+    assert any(header.startswith("csrf=") for header in cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_cancel_account_active_tasks_defers_receipt_bearing_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = SimpleNamespace(
+        id="gen-retry",
+        status=GenerationStatus.QUEUED.value,
+        execution_epoch=11,
+        cancel_requested_at=None,
+        upstream_request={
+            "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+            "upstream_response_attempt": 2,
+            "upstream_response_execution_epoch": 11,
+            "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 11,
+        },
+    )
+    comp = SimpleNamespace(
+        id="comp-retry",
+        status=CompletionStatus.QUEUED.value,
+        execution_epoch=12,
+        cancel_requested_at=None,
+        tokens_in=256,
+        upstream_request={"completion_usage_execution_epoch": 12},
+    )
+    db = _Db([[gen], [comp]])
+    released: list[str] = []
+
+    async def release_account_delete_task_hold(*_args: Any, **_kwargs: Any) -> bool:
+        released.append("called")
+        return True
+
+    monkeypatch.setattr(
+        account_deletion,
+        "_release_account_delete_task_hold",
+        release_account_delete_task_hold,
+    )
+
+    cleanup = await account_deletion.cancel_account_active_tasks(
+        db,  # type: ignore[arg-type]
+        user_id="user-1",
+        canceled_at=datetime.now(timezone.utc),
+    )
+
+    assert cleanup["holds_released"] == 0
+    assert cleanup["queued_generation_ids"] == []
+    assert cleanup["deferred_generation_ids"] == ["gen-retry"]
+    assert cleanup["deferred_completion_ids"] == ["comp-retry"]
+    assert gen.status == GenerationStatus.QUEUED.value
+    assert comp.status == CompletionStatus.QUEUED.value
+    assert gen.cancel_requested_at is not None
+    assert comp.cancel_requested_at is not None
+    assert released == []
 
 
 @pytest.mark.asyncio
@@ -241,7 +535,7 @@ async def test_cancel_account_active_tasks_skips_holds_for_byok(
         return True
 
     monkeypatch.setattr(
-        me,
+        account_deletion,
         "_release_account_delete_task_hold",
         release_account_delete_task_hold,
     )
@@ -249,9 +543,9 @@ async def test_cancel_account_active_tasks_skips_holds_for_byok(
     async def wallet_exists(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
-    monkeypatch.setattr(me, "_account_wallet_exists", wallet_exists)
+    monkeypatch.setattr(account_deletion, "_account_wallet_exists", wallet_exists)
 
-    cleanup = await me._cancel_account_active_tasks(  # noqa: SLF001
+    cleanup = await account_deletion.cancel_account_active_tasks(
         db,  # type: ignore[arg-type]
         user_id="user-1",
         canceled_at=datetime.now(timezone.utc),
@@ -280,33 +574,59 @@ async def test_post_commit_account_task_cleanup_runs_after_commit(
     async def invalidate_balance_cache(user_id: str) -> None:
         invalidated.append((user_id, db.committed))
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append((task_id, db.committed))
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-13"
+        queue_released.append((f"{task_id}:{expected_execution_epoch}", db.committed))
+        return True
 
-    monkeypatch.setattr(me, "get_redis", lambda: Redis())
-    monkeypatch.setattr(me, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(account_deletion, "get_redis", lambda: Redis())
     monkeypatch.setattr(
-        me,
+        account_deletion,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        account_deletion,
         "_release_account_generation_queue_state",
         release_generation_queue_state,
     )
 
     await db.commit()
-    await me._post_commit_account_task_cleanup(  # noqa: SLF001
+    await account_deletion.post_commit_account_task_cleanup(
         user_id="user-1",
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 13},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 13,
+                    "provider_name": "provider-13",
+                    "lease_token": "worker:execution:13:attempt:1",
+                    "reservation_token": "reservation-13",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-1"],
+            "deferred_generation_ids": ["gen-deferred"],
+            "deferred_completion_ids": ["comp-deferred"],
         },
     )
 
     assert invalidated == [("user-1", True)]
-    assert queue_released == [("gen-queued", True)]
+    assert queue_released == [("gen-queued:13", True)]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-1:cancel", "1", 3600),
+        ("task:gen-deferred:cancel", "1", 3600),
+        ("task:comp-deferred:cancel", "1", 3600),
     ]
 
 
@@ -324,28 +644,50 @@ async def test_post_commit_account_task_cleanup_keeps_cancel_when_cache_fails(
     async def invalidate_balance_cache(_user_id: str) -> None:
         raise RuntimeError("cache unavailable")
 
-    async def release_generation_queue_state(_redis: Redis, task_id: str) -> None:
-        queue_released.append(task_id)
+    async def release_generation_queue_state(
+        _redis: Redis,
+        task_id: str,
+        *,
+        expected_execution_epoch: int,
+        ownership_token: Any,
+    ) -> bool:
+        assert ownership_token.provider_name == "provider-14"
+        queue_released.append(f"{task_id}:{expected_execution_epoch}")
+        return True
 
-    monkeypatch.setattr(me, "get_redis", lambda: Redis())
-    monkeypatch.setattr(me, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(account_deletion, "get_redis", lambda: Redis())
     monkeypatch.setattr(
-        me,
+        account_deletion,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
+    monkeypatch.setattr(
+        account_deletion,
         "_release_account_generation_queue_state",
         release_generation_queue_state,
     )
 
-    await me._post_commit_account_task_cleanup(  # noqa: SLF001
+    await account_deletion.post_commit_account_task_cleanup(
         user_id="user-1",
         cleanup={
             "holds_released": 1,
             "queued_generation_ids": ["gen-queued"],
+            "queued_generation_execution_epochs": {"gen-queued": 14},
+            "queued_generation_queue_tokens": {
+                "gen-queued": {
+                    "task_id": "gen-queued",
+                    "execution_epoch": 14,
+                    "provider_name": "provider-14",
+                    "lease_token": "worker:execution:14:attempt:1",
+                    "reservation_token": "reservation-14",
+                }
+            },
             "running_generation_ids": ["gen-running"],
             "streaming_completion_ids": ["comp-1"],
         },
     )
 
-    assert queue_released == ["gen-queued"]
+    assert queue_released == ["gen-queued:14"]
     assert redis_calls == [
         ("task:gen-running:cancel", "1", 3600),
         ("task:comp-1:cancel", "1", 3600),
@@ -367,10 +709,14 @@ async def test_post_commit_account_task_cleanup_invalidates_hold_only_cleanup(
         redis_requested = True
         return object()
 
-    monkeypatch.setattr(me, "get_redis", get_redis)
-    monkeypatch.setattr(me, "invalidate_balance_cache", invalidate_balance_cache)
+    monkeypatch.setattr(account_deletion, "get_redis", get_redis)
+    monkeypatch.setattr(
+        account_deletion,
+        "invalidate_balance_cache",
+        invalidate_balance_cache,
+    )
 
-    await me._post_commit_account_task_cleanup(  # noqa: SLF001
+    await account_deletion.post_commit_account_task_cleanup(
         user_id="user-1",
         cleanup={
             "holds_released": 1,

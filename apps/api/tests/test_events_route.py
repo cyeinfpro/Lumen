@@ -64,6 +64,95 @@ def test_normalize_recoverable_sse_id_accepts_only_redis_stream_ids() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_event_stream_blocks_revoked_private_event_inside_revalidation_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+    revoked = False
+    session_checks: list[str] = []
+
+    async def fake_stream_events(*_args: Any, **_kwargs: Any):
+        nonlocal closed, revoked
+        try:
+            yield {
+                "event": "generation.progress",
+                "data": json.dumps({"generation_id": "gen-a"}),
+            }
+            revoked = True
+            yield {
+                "event": "generation.completed",
+                "data": json.dumps({"generation_id": "gen-a"}),
+            }
+        finally:
+            closed = True
+
+    async def fake_is_active_session(_db: Any, session_id: str) -> bool:
+        session_checks.append(session_id)
+        return not revoked
+
+    monkeypatch.setattr(events, "stream_events", fake_stream_events)
+    monkeypatch.setattr(events, "is_active_session", fake_is_active_session)
+
+    frames = [
+        frame
+        async for frame in events._event_stream(  # noqa: SLF001
+            SimpleNamespace(),
+            db=object(),  # type: ignore[arg-type]
+            session_id="session-a",
+        )
+    ]
+
+    assert frames == [
+        {
+            "event": "generation.progress",
+            "data": '{"generation_id": "gen-a"}',
+        },
+        {"event": "auth_invalidated", "data": "{}"},
+    ]
+    assert session_checks == ["session-a", "session-a"]
+    assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_event_stream_keeps_liveness_frames_on_periodic_revalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+    session_checks: list[str] = []
+
+    async def fake_stream_events(*_args: Any, **_kwargs: Any):
+        nonlocal closed
+        try:
+            yield {"event": "keepalive", "data": "{}"}
+            yield {"event": "idle", "data": '{"type":"idle"}'}
+        finally:
+            closed = True
+
+    async def fake_is_active_session(_db: Any, session_id: str) -> bool:
+        session_checks.append(session_id)
+        return True
+
+    monkeypatch.setattr(events, "stream_events", fake_stream_events)
+    monkeypatch.setattr(events, "is_active_session", fake_is_active_session)
+
+    frames = [
+        frame
+        async for frame in events._event_stream(  # noqa: SLF001
+            SimpleNamespace(),
+            db=object(),  # type: ignore[arg-type]
+            session_id="session-a",
+        )
+    ]
+
+    assert frames == [
+        {"event": "keepalive", "data": "{}"},
+        {"event": "idle", "data": '{"type":"idle"}'},
+    ]
+    assert session_checks == ["session-a"]
+    assert closed is True
+
+
 def _live_event_message(
     *,
     channel: str,

@@ -40,6 +40,19 @@ class _Result:
         return self.value
 
 
+class _Savepoint:
+    """write_audit(autocommit=False) 的 savepoint 契约 stub。"""
+
+    def __init__(self, db: "_Db") -> None:
+        self._db = db
+
+    async def __aenter__(self) -> "_Savepoint":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
 class _Db:
     def __init__(self, results: list[_Result]) -> None:
         self.results = results
@@ -51,10 +64,16 @@ class _Db:
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
+        if "from users" in str(statement).lower():
+            return _Result("user-1")
         return self.results.pop(0) if self.results else _Result()
 
     def add(self, value: Any) -> None:
         self.added.append(value)
+
+    def begin_nested(self) -> Any:
+        # write_audit(autocommit=False) 走 savepoint;stub 直接透传 flush。
+        return _Savepoint(self)
 
     async def flush(self) -> None:
         now = datetime.now(timezone.utc)

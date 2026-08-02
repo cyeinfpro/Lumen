@@ -27,6 +27,12 @@ from lumen_core.schema_models import (
     MessageOut,
 )
 
+from ...services.active_user import (
+    ActiveUserFenceError,
+    active_user_fence_http_error,
+    lock_active_user,
+)
+
 
 SILENT_GENERATION_REQUEST_HASH_KEY = "request_hash"
 
@@ -204,6 +210,7 @@ async def create_silent_generation(
     db: AsyncSession,
     *,
     runtime: SilentGenerationRuntime,
+    session_id: str | None = None,
 ) -> SilentGenerationOut:
     redis = runtime.get_redis()
     conv = (
@@ -298,6 +305,13 @@ async def create_silent_generation(
         body.image_params,
         fast_default,
     )
+    try:
+        if session_id:
+            await lock_active_user(db, user.id, session_id=session_id)
+        else:
+            await lock_active_user(db, user.id)
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
     result = await runtime.create_assistant_task(
         db=db,
         user_id=user.id,
