@@ -17,6 +17,63 @@ current_alembic_revision() {
         | alembic_revision_from_output
 }
 
+guard_automatic_app_rollback_compatibility() {
+    local rollback_release="${1:-}"
+    local database_release="${2:-${NEW_RELEASE:-}}"
+    local rollback_head=""
+    local database_head=""
+    local rollback_tag=""
+    local database_tag="${TARGET_TAG:-${LUMEN_IMAGE_TAG:-}}"
+
+    if [ "${UPDATE_MIGRATION_STARTED:-0}" -ne 1 ] \
+            && [ "${UPDATE_MIGRATION_VERIFIED:-0}" -ne 1 ]; then
+        return 0
+    fi
+    if [ -z "${rollback_release}" ] || [ ! -d "${rollback_release}" ]; then
+        log_error "自动应用回滚兼容性无法验证：旧 release 不存在。"
+        return 1
+    fi
+    if [ -z "${database_release}" ] || [ ! -d "${database_release}" ]; then
+        log_error "自动应用回滚兼容性无法验证：数据库探测 release 不存在。"
+        return 1
+    fi
+    if [ -f "${rollback_release}/.image-tag" ]; then
+        rollback_tag="$(
+            head -n1 "${rollback_release}/.image-tag" 2>/dev/null \
+                | tr -d '[:space:]'
+        )"
+    fi
+    rollback_tag="${rollback_tag:-${PREVIOUS_TAG:-}}"
+    if [ -z "${rollback_tag}" ] || [ -z "${database_tag}" ]; then
+        log_error "自动应用回滚兼容性无法验证：rollback_tag=${rollback_tag:-<unknown>} database_tag=${database_tag:-<unknown>}。"
+        return 1
+    fi
+
+    rollback_head="$(
+        LUMEN_IMAGE_TAG="${rollback_tag}" \
+            target_alembic_head "${rollback_release}" 2>/dev/null || true
+    )"
+    database_head="$(
+        LUMEN_IMAGE_TAG="${database_tag}" \
+            current_alembic_revision "${database_release}" 2>/dev/null || true
+    )"
+    if [ -z "${rollback_head}" ] || [ -z "${database_head}" ]; then
+        log_error "自动应用回滚兼容性无法验证：rollback_head=${rollback_head:-<unknown>} database_head=${database_head:-<unknown>}。"
+        return 1
+    fi
+    if [ -n "${UPDATE_MIGRATION_HEAD:-}" ] \
+            && [ "${database_head}" != "${UPDATE_MIGRATION_HEAD}" ]; then
+        log_error "自动应用回滚兼容性无法验证：数据库 revision ${database_head} 与已验证 migration head ${UPDATE_MIGRATION_HEAD} 不一致。"
+        return 1
+    fi
+    if [ "${rollback_head}" != "${database_head}" ]; then
+        log_error "拒绝自动应用回滚：旧应用 Alembic head=${rollback_head}，当前数据库 revision=${database_head}。"
+        log_error "数据库不会自动 downgrade；请保持新版本并执行前向恢复，或使用已验证恢复点进行人工整库回滚。"
+        return 1
+    fi
+    return 0
+}
+
 disk_free_gb_opt() {
     local out
     if command -v df >/dev/null 2>&1; then

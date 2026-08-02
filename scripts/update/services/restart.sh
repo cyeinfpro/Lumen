@@ -178,14 +178,28 @@ else
     if [ "${UPDATE_MIGRATION_STARTED}" -eq 1 ]; then
         log_update_restore_boundary restart_services
     fi
+    _auto_rollback_compatible=1
+    if ! guard_automatic_app_rollback_compatibility \
+            "${ROOT}/releases/${CURRENT_ID:-}" "${NEW_RELEASE:-}"; then
+        _auto_rollback_compatible=0
+        emit_warn restart_services "auto_rollback_blocked_schema_incompatible"
+    fi
     if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -n "${_shift_script:-}" ]; then
-        log_warn "[restart_services] 蓝绿路径失败，仅在 blue 健康且流量切回成功后停止 green。"
-        if blue_green_restore_blue_traffic; then
-            blue_green_stop_green
+        if [ "${_auto_rollback_compatible}" = "1" ]; then
+            log_warn "[restart_services] 蓝绿路径失败，仅在 blue 健康且流量切回成功后停止 green。"
+            if blue_green_restore_blue_traffic; then
+                blue_green_stop_green
+            fi
+        else
+            log_error "[restart_services] 旧应用与当前数据库 revision 不兼容，拒绝把流量切回 blue。"
         fi
     fi
-    log_error "[restart_services] 目标服务启动/proof 失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
-    emit_warn restart_services "starting_auto_rollback"
+    if [ "${_auto_rollback_compatible}" = "1" ]; then
+        log_error "[restart_services] 目标服务启动/proof 失败，尝试自动回滚到上一已知好 tag：${PREVIOUS_TAG:-<none>}"
+        emit_warn restart_services "starting_auto_rollback"
+    else
+        log_error "[restart_services] 目标服务启动/proof 失败，schema capability guard 已禁止应用级自动回滚。"
+    fi
     # 事务化回滚：先备份新 tag、改 .env，pull/up 任一步失败就把 .env 恢复成新 tag，
     # 确保 SHARED_ENV 与 current symlink 状态一致（不会出现 .env 是旧 tag 但 current
     # 仍是新 release 的中间态）。
@@ -208,7 +222,9 @@ else
             "${ROOT}/releases/${CURRENT_ID}/VERSION" 2>/dev/null \
             | tr -d '[:space:]')"
     fi
-    if [ -n "${ROLLBACK_TAG}" ] && [ "${ROLLBACK_TAG}" != "${TARGET_TAG}" ]; then
+    if [ "${_auto_rollback_compatible}" = "1" ] \
+            && [ -n "${ROLLBACK_TAG}" ] \
+            && [ "${ROLLBACK_TAG}" != "${TARGET_TAG}" ]; then
         # 还要验证 PREVIOUS release 目录还在；缺失时回滚没意义，直接走手动恢复路径
         if [ -z "${CURRENT_ID:-}" ] || [ ! -d "${ROOT}/releases/${CURRENT_ID}" ]; then
             log_error "[restart_services] previous release 目录不存在（${ROOT}/releases/${CURRENT_ID:-<none>}），跳过自动回滚。"
@@ -272,10 +288,16 @@ else
         emit_fail restart_services 1
         exit 1
     fi
-    log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
-    log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
-    log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
-    log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose up --pull missing -d --wait api worker web"
+    if [ "${_auto_rollback_compatible}" = "0" ]; then
+        log_error "[restart_services] 禁止只切回旧应用：当前数据库 revision 超出旧应用 capability。"
+        log_error "  保持目标 release 与数据库不变，修复目标服务后执行前向恢复。"
+        log_error "  如必须回到旧应用，先使用本轮 PostgreSQL/Redis 恢复点完成配套数据回滚。"
+    else
+        log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
+        log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
+        log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
+        log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose up --pull missing -d --wait api worker web"
+    fi
     emit_fail restart_services 1
     exit 1
 fi

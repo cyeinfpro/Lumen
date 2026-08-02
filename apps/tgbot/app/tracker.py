@@ -43,6 +43,12 @@ _DELIVERY_LOCK_SECONDS = 5 * 60
 _SUBMIT_ONCE_PREFIX = "tg:submit-once:"
 # 覆盖 HTTP 调用超时（api_client 30 s）加一倍余量；过期后允许合法重试（用户已 /new）
 _SUBMIT_ONCE_TTL_SECONDS = 60
+_RETRY_SOURCE_PREFIX = "tg:track:retry-src:"
+# retry/redo 按钮会长期留在消息里（redo 按钮永不删除；retry 按钮在消息
+# 超过 48h 删不掉/改不了时也残留）。幂等键按 (chat, gen) 固定,同一按钮
+# 二次点击服务端只会回放第一次的任务、不会新建 —— 用这个标记识别「已经
+# 点过」,给用户明确反馈而不是重复输出「已排队」。
+_RETRY_SOURCE_TTL_SECONDS = 90 * 24 * 3600
 ACTIVE_USER_STREAMS_KEY = "tg:track:active-users"
 ACTIVE_USER_STREAM_TTL_SECONDS = TRACK_RETENTION_SECONDS
 _ACTIVE_USER_STREAMS_KEY_TTL_SECONDS = ACTIVE_USER_STREAM_TTL_SECONDS + 3600
@@ -119,7 +125,10 @@ return 1
 @dataclass
 class TaskTrack:
     chat_id: int
-    status_message_id: int
+    # 常规注册时是 placeholder 消息 id；bonus 走「先注册后发消息」的路径
+    # （listener._on_attached 防崩溃重投重复发 🎁），send 成功前为 None，
+    # 之后由 update_status_message 补上。
+    status_message_id: int | None
     prompt: str
     params: dict[str, object] = field(default_factory=dict)
     is_bonus: bool = False
@@ -161,7 +170,7 @@ class Tracker:
             mapping={
                 "chat_id": str(track.chat_id),
                 "user_id": user_id,
-                "status_message_id": str(track.status_message_id),
+                "status_message_id": str(track.status_message_id or ""),
                 "prompt": track.prompt,
                 "params": json.dumps(track.params, ensure_ascii=False),
                 "is_bonus": "1" if track.is_bonus else "0",
@@ -177,6 +186,20 @@ class Tracker:
             ACTIVE_USER_STREAMS_KEY,
             _ACTIVE_USER_STREAMS_KEY_TTL_SECONDS,
         )
+        await pipe.execute()
+
+    async def update_status_message(self, gen_id: str, message_id: int) -> None:
+        """补写 status_message_id（listener._on_attached 先注册后发消息用）。
+
+        send_message 成功前 track 的 status_message_id 为空，拿到真实
+        message_id 后在这里补上，后续 progress / 终态编辑才能命中正确的消息。
+        """
+        if not gen_id or message_id <= 0:
+            return
+        client = self._client()
+        pipe = client.pipeline(transaction=True)
+        pipe.hset(_key(gen_id), "status_message_id", str(message_id))
+        pipe.expire(_key(gen_id), _TRACK_TTL_SECONDS)
         await pipe.execute()
 
     async def refresh(self, gen_id: str, user_id: str) -> bool:
@@ -255,15 +278,17 @@ class Tracker:
         try:
             chat_raw = d.get("chat_id")
             msg_raw = d.get("status_message_id")
-            if not chat_raw or not msg_raw:
+            # status_message_id 允许为空：bonus 先注册后发消息（listener.
+            # _on_attached），send 成功前 track 就是「无消息 id」的合法中间态。
+            if not chat_raw:
                 await self._drop_dirty(client, gen_id, "missing_ids", d)
                 return None
             chat_id = int(chat_raw)
-            msg_id = int(msg_raw)
+            msg_id = int(msg_raw) if msg_raw else 0
         except ValueError:
             await self._drop_dirty(client, gen_id, "bad_ints", d)
             return None
-        if chat_id <= 0 or msg_id <= 0:
+        if chat_id <= 0:
             await self._drop_dirty(client, gen_id, "non_positive_ids", d)
             return None
         try:
@@ -272,7 +297,7 @@ class Tracker:
             params = {}
         return TaskTrack(
             chat_id=chat_id,
-            status_message_id=msg_id,
+            status_message_id=msg_id or None,
             prompt=d.get("prompt") or "",
             params=params if isinstance(params, dict) else {},
             is_bonus=(d.get("is_bonus") == "1"),
@@ -297,6 +322,42 @@ class Tracker:
         lock_key = f"{_SUBMIT_ONCE_PREFIX}{idempotency_key}"
         result = await client.set(lock_key, b"1", nx=True, ex=_SUBMIT_ONCE_TTL_SECONDS)
         return bool(result)
+
+    async def mark_retry_submitted(
+        self,
+        scope: str,
+        chat_id: int,
+        gen_id: str,
+        new_gen_id: str,
+    ) -> None:
+        """Record that (scope, chat, gen) already produced one retry/redo task.
+
+        retry/redo 的幂等键按 (chat, gen) 固定：同一按钮第二次点击时服务端
+        只会回放第一次提交的任务、不会新建。这里把「源任务 → 新任务」的
+        对应关系记下来,让 handler 在重复点击时给出明确反馈,而不是再输出
+        一次误导性的「已排队 #B」。
+        """
+        client = self._client()
+        key = f"{_RETRY_SOURCE_PREFIX}{scope}:{chat_id}:{gen_id}"
+        await client.set(key, new_gen_id, ex=_RETRY_SOURCE_TTL_SECONDS)
+
+    async def retry_source_new_gen(
+        self,
+        scope: str,
+        chat_id: int,
+        gen_id: str,
+    ) -> str | None:
+        """If (scope, chat, gen) already had a retry/redo, return its new gen id."""
+        client = self._client()
+        raw = await client.get(f"{_RETRY_SOURCE_PREFIX}{scope}:{chat_id}:{gen_id}")
+        if not raw:
+            return None
+        value = (
+            raw.decode("utf-8", errors="replace")
+            if isinstance(raw, (bytes, bytearray))
+            else str(raw)
+        )
+        return value or None
 
     async def begin_delivery(self, gen_id: str) -> bool:
         """Acquire a short delivery lock unless this terminal event was delivered."""

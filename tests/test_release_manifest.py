@@ -386,9 +386,9 @@ def test_stable_shared_aliases_precede_github_release() -> None:
 
 def test_alembic_breaking_lint_covers_pr_main_and_release() -> None:
     alembic_workflow = yaml.load(
-        (
-            ROOT / ".github" / "workflows" / "alembic-expand.yml"
-        ).read_text(encoding="utf-8"),
+        (ROOT / ".github" / "workflows" / "alembic-expand.yml").read_text(
+            encoding="utf-8"
+        ),
         Loader=yaml.BaseLoader,
     )
     triggers = alembic_workflow["on"]
@@ -397,15 +397,43 @@ def test_alembic_breaking_lint_covers_pr_main_and_release() -> None:
     assert triggers["push"]["tags"] == ["v*"]
 
     docker_workflow = _load_workflow()
+    resolve_ref = docker_workflow["jobs"]["resolve-ref"]
+    assert (
+        resolve_ref["outputs"]["migration_base"]
+        == "${{ steps.source.outputs.migration_base }}"
+    )
     quality_gate = docker_workflow["jobs"]["quality-gate"]
     migration_step = _step(quality_gate, "Alembic breaking migration gate")
-    assert migration_step["run"] == (
-        "uv run python scripts/lint_alembic_breaking.py"
+    assert migration_step["env"]["MIGRATION_BASE"] == (
+        "${{ needs.resolve-ref.outputs.migration_base }}"
     )
+    assert migration_step["env"]["MIGRATION_HEAD"] == (
+        "${{ needs.resolve-ref.outputs.commit }}"
+    )
+    assert '--base "${MIGRATION_BASE}"' in migration_step["run"]
+    assert '--head "${MIGRATION_HEAD}"' in migration_step["run"]
 
     ci_workflow = yaml.load(
         (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
-    ci_step = _step(ci_workflow["jobs"]["backend"], "Alembic breaking migration gate")
-    assert ci_step["run"] == "uv run python scripts/lint_alembic_breaking.py"
+    backend = ci_workflow["jobs"]["backend"]
+    assert backend["steps"][0]["with"]["fetch-depth"] == "0"
+    ci_step = _step(backend, "Alembic breaking migration gate")
+    assert ci_step["env"]["MIGRATION_BASE"] == (
+        "${{ needs.impact-plan.outputs.comparison_base }}"
+    )
+    assert ci_step["env"]["MIGRATION_HEAD"] == "${{ github.sha }}"
+    assert '--base "${MIGRATION_BASE}"' in ci_step["run"]
+    assert '--head "${MIGRATION_HEAD}"' in ci_step["run"]
+
+    migration_step = _step(
+        alembic_workflow["jobs"]["lint"],
+        "Check Alembic upgrade safety",
+    )
+    assert migration_step["env"]["MIGRATION_BASE"] == (
+        "${{ steps.migration.outputs.base }}"
+    )
+    assert migration_step["env"]["MIGRATION_HEAD"] == (
+        "${{ steps.migration.outputs.head }}"
+    )

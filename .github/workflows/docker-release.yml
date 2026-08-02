@@ -41,6 +41,7 @@ jobs:
       release_tag: ${{ steps.source.outputs.release_tag }}
       is_release: ${{ steps.source.outputs.is_release }}
       is_main_push: ${{ steps.source.outputs.is_main_push }}
+      migration_base: ${{ steps.source.outputs.migration_base }}
     steps:
       - name: Reject tag-like workflow dispatch refs
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.ref != '' && (startsWith(github.event.inputs.ref, 'v') || startsWith(github.event.inputs.ref, 'refs/tags/'))
@@ -57,6 +58,8 @@ jobs:
 
       - name: Resolve source commit
         id: source
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         shell: bash
         run: |
           set -euo pipefail
@@ -111,6 +114,7 @@ jobs:
             exit 1
           fi
           short_sha="${commit:0:7}"
+          migration_base=""
 
           if [[ "${is_release}" == "true" ]]; then
             tag_commit="$(git rev-parse --verify "${event_ref}^{commit}")"
@@ -129,6 +133,28 @@ jobs:
               echo "release tag commit is not reachable from origin/main" >&2
               exit 1
             fi
+            previous_tag="$(
+              git tag --merged "${commit}" --sort=-version:refname 'v*' \
+                | grep -Fvx "${release_tag}" \
+                | head -n1 \
+                || true
+            )"
+            if [[ -n "${previous_tag}" ]]; then
+              migration_base="$(git rev-parse --verify "${previous_tag}^{commit}")"
+            else
+              migration_base="$(git hash-object -t tree -w --stdin < /dev/null)"
+            fi
+          elif [[ "${is_main_push}" == "true" ]]; then
+            migration_base="${PUSH_BEFORE_SHA}"
+          elif git rev-parse --verify 'HEAD^' >/dev/null 2>&1; then
+            migration_base="$(git rev-parse --verify 'HEAD^')"
+          else
+            migration_base="$(git hash-object -t tree -w --stdin < /dev/null)"
+          fi
+          if [[ -z "${migration_base}" || "${migration_base}" =~ ^0+$ ]] \
+            || ! git cat-file -e "${migration_base}^{object}" 2>/dev/null; then
+            echo "cannot resolve migration comparison base" >&2
+            exit 1
           fi
 
           build_tag="sha-${commit}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -141,6 +167,7 @@ jobs:
             printf '%s\n' "release_tag=${release_tag}"
             printf '%s\n' "is_release=${is_release}"
             printf '%s\n' "is_main_push=${is_main_push}"
+            printf '%s\n' "migration_base=${migration_base}"
           } >> "${GITHUB_OUTPUT}"
 
   version-check:
@@ -199,7 +226,13 @@ jobs:
         run: uv sync --all-packages
 
       - name: Alembic breaking migration gate
-        run: uv run python scripts/lint_alembic_breaking.py
+        env:
+          MIGRATION_BASE: ${{ needs.resolve-ref.outputs.migration_base }}
+          MIGRATION_HEAD: ${{ needs.resolve-ref.outputs.commit }}
+        run: >-
+          uv run python scripts/lint_alembic_breaking.py
+          --base "${MIGRATION_BASE}"
+          --head "${MIGRATION_HEAD}"
 
       - name: Governance baseline monotonicity gate
         run: uv run python scripts/baseline_monotonic.py

@@ -182,9 +182,7 @@ def test_lib_facade_loads_structured_modules_and_stays_below_600_lines() -> None
         "self_update.sh",
         "step_protocol.sh",
         "system.sh",
-    } <= {
-        path.name for path in LIB_MODULES
-    }
+    } <= {path.name for path in LIB_MODULES}
     assert "lib/environment.sh" in facade
     assert "lib/step_protocol.sh" in facade
     assert "lib/runtime.sh" in facade
@@ -246,9 +244,7 @@ def test_self_update_supports_nested_lib_modules(tmp_path: Path) -> None:
         ),
         "lib/release_layout.sh": ("#!/usr/bin/env bash\nREMOTE_RELEASE_LAYOUT=1\n"),
         "lib/self_update.sh": (
-            (ROOT / "scripts" / "lib" / "self_update.sh").read_text(
-                encoding="utf-8"
-            )
+            (ROOT / "scripts" / "lib" / "self_update.sh").read_text(encoding="utf-8")
         ),
         "release_manifest_guard.py": (
             "#!/usr/bin/env python3\nREMOTE_RELEASE_GUARD = 1\n"
@@ -3279,6 +3275,11 @@ def test_prepare_image_job_credential_env_rejects_random_rotation(
 
 
 def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
+    # start_new_session:让子进程脱离本地终端的控制终端(PTY)。lumenctl 的
+    # read_or_default 优先从 /dev/tty 读取,若子进程继承调用者的控制终端,
+    # 测试经 stdin 管道送入的 "\n" 永远不会被读到,带 PTY 的本地全量测试会
+    # 永久挂起;脱离后 /dev/tty 打开失败、回退读 stdin,与 CI 环境一致。
+    # timeout 兜底,防止任何回归让全量测试无限期卡死。
     result = subprocess.run(
         ["bash", str(LUMENCTL), "menu"],
         cwd=ROOT,
@@ -3287,6 +3288,8 @@ def test_lumenctl_menu_accepts_default_exit_without_error() -> None:
         capture_output=True,
         env=script_env(),
         check=False,
+        start_new_session=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr + result.stdout
     assert "Lumen 一键运维菜单" in result.stdout
@@ -3919,6 +3922,12 @@ def test_update_blue_green_failure_keeps_green_until_blue_is_healthy() -> None:
     rollback_block = text[rollback_start:rollback_success]
     assert "blue_green_restore_blue_traffic()" in text
     assert "lumen_wait_for_http_ok" in text
+    compatibility_guard = failure_block.index(
+        "guard_automatic_app_rollback_compatibility"
+    )
+    assert compatibility_guard < failure_block.index(
+        "blue_green_restore_blue_traffic; then"
+    )
     assert failure_recovery.index("blue_green_restore_blue_traffic; then") < (
         failure_recovery.index("blue_green_stop_green")
     )
@@ -3930,6 +3939,33 @@ def test_update_blue_green_failure_keeps_green_until_blue_is_healthy() -> None:
         'bash "${_shift_script}" blue 100 >/dev/null 2>&1 || true'
         not in failure_recovery
     )
+
+
+def test_precommit_state_restore_checks_schema_capability_before_side_effects() -> None:
+    state = (ROOT / "scripts/update/recovery/state.sh").read_text(encoding="utf-8")
+    restore_start = state.index("restore_uncommitted_update_state()")
+    restore_end = state.index("\n}\n", restore_start)
+    restore = state[restore_start:restore_end]
+
+    guard = restore.index("guard_automatic_app_rollback_compatibility")
+    assert guard < restore.index("restore_update_symlink_snapshot")
+    assert guard < restore.index("restore_update_env_snapshot")
+    assert guard < restore.index('lumen_compose_in "${ROOT}/current"')
+
+
+def test_schema_incompatible_restart_failure_does_not_recommend_app_only_rollback() -> (
+    None
+):
+    restart = (ROOT / "scripts/update/services/restart.sh").read_text(encoding="utf-8")
+    blocked = restart.index('if [ "${_auto_rollback_compatible}" = "0" ]; then')
+    manual = restart.index("自动回滚失败 → 请按 §18 手动回滚", blocked)
+    else_branch = restart.rfind("\n    else\n", blocked, manual)
+
+    assert blocked < else_branch < manual
+    blocked_branch = restart[blocked:else_branch]
+    assert "禁止只切回旧应用" in blocked_branch
+    assert "PostgreSQL/Redis 恢复点" in blocked_branch
+    assert "ln -sfn releases/" not in blocked_branch
 
 
 def test_nginx_example_security_headers_are_not_duplicated() -> None:

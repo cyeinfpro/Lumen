@@ -164,6 +164,8 @@ jobs:
       LUMEN_TEST_REDIS_URL: redis://127.0.0.1:6379/15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
@@ -192,8 +194,16 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ needs.impact-plan.outputs.comparison_base }}
         run: uv run python scripts/baseline_monotonic.py
+      - name: Alembic linter regression tests
+        run: uv run pytest -q tests/test_lint_alembic_breaking.py
       - name: Alembic breaking migration gate
-        run: uv run python scripts/lint_alembic_breaking.py
+        env:
+          MIGRATION_BASE: ${{ needs.impact-plan.outputs.comparison_base }}
+          MIGRATION_HEAD: ${{ github.sha }}
+        run: >-
+          uv run python scripts/lint_alembic_breaking.py
+          --base "${MIGRATION_BASE}"
+          --head "${MIGRATION_HEAD}"
       - name: Download impact plan
         if: github.event_name == 'pull_request' && needs.impact-plan.outputs.full_mandatory != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

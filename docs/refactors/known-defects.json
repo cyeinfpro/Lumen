@@ -192,8 +192,8 @@
         "scripts/promote_release_images.py"
       ],
       "regression_tests": [
-        "tests/test_promote_release_images.py::test_first_new_major_rolls_back_absent_aliases_after_partial_write",
-        "tests/test_promote_release_images.py::test_signal_interruption_restores_absent_aliases"
+        "tests/test_promote_release_images.py::test_first_new_major_partial_failure_restores_absent_mutable_aliases",
+        "tests/test_promote_release_images.py::test_first_new_major_interrupt_restores_absent_mutable_aliases"
       ],
       "severity": "P1",
       "status": "closed",

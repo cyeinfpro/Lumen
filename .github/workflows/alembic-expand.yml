@@ -20,5 +20,56 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
+      - name: Resolve migration comparison
+        id: migration
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse --verify 'HEAD^{commit}')"
+          case "${EVENT_NAME}:${REF_TYPE}" in
+            pull_request:branch)
+              base="${PR_BASE_SHA}"
+              ;;
+            push:branch)
+              base="${PUSH_BEFORE_SHA}"
+              ;;
+            push:tag)
+              previous_tag="$(
+                git tag --merged "${head}" --sort=-version:refname 'v*' \
+                  | grep -Fvx "${REF_NAME}" \
+                  | head -n1 \
+                  || true
+              )"
+              if [[ -n "${previous_tag}" ]]; then
+                base="$(git rev-parse --verify "${previous_tag}^{commit}")"
+              else
+                base="$(git hash-object -t tree -w --stdin < /dev/null)"
+              fi
+              ;;
+            *)
+              echo "unsupported migration comparison event" >&2
+              exit 1
+              ;;
+          esac
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]] \
+            || ! git cat-file -e "${base}^{object}" 2>/dev/null; then
+            echo "cannot resolve migration comparison base" >&2
+            exit 1
+          fi
+          {
+            printf 'base=%s\n' "${base}"
+            printf 'head=%s\n' "${head}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Check Alembic upgrade safety
-        run: python scripts/lint_alembic_breaking.py
+        env:
+          MIGRATION_BASE: ${{ steps.migration.outputs.base }}
+          MIGRATION_HEAD: ${{ steps.migration.outputs.head }}
+        run: >-
+          python scripts/lint_alembic_breaking.py
+          --base "${MIGRATION_BASE}"
+          --head "${MIGRATION_HEAD}"

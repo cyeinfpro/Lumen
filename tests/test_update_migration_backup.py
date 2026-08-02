@@ -364,3 +364,133 @@ def test_failure_log_names_restore_point_and_database_rollback_boundary() -> Non
     assert "本轮恢复点：timestamp=20260718-010203" in result.stderr
     assert "数据库可能已部分变更" in result.stderr
     assert "自动回滚仅覆盖 release/env/服务" in result.stderr
+
+
+def test_automatic_app_rollback_requires_matching_schema_heads(
+    tmp_path: Path,
+) -> None:
+    old_release = tmp_path / "old"
+    new_release = tmp_path / "new"
+    old_release.mkdir()
+    new_release.mkdir()
+    (old_release / ".image-tag").write_text("v1.2.83\n", encoding="utf-8")
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("guard_automatic_app_rollback_compatibility")}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        target_alembic_head() {{
+            test "${{LUMEN_IMAGE_TAG:?}}" = v1.2.83
+            printf '%s\\n' "${{ROLLBACK_HEAD:?}}"
+        }}
+        current_alembic_revision() {{
+            test "${{LUMEN_IMAGE_TAG:?}}" = v1.2.84
+            printf '%s\\n' "${{DATABASE_HEAD:?}}"
+        }}
+        UPDATE_MIGRATION_STARTED=1
+        UPDATE_MIGRATION_VERIFIED=1
+        UPDATE_MIGRATION_HEAD=0052_task_execution_epoch
+        PREVIOUS_TAG=ignored-by-release-anchor
+        TARGET_TAG=v1.2.84
+        ROLLBACK_HEAD=0050_outbox_claim_v2
+        DATABASE_HEAD=0052_task_execution_epoch
+        if guard_automatic_app_rollback_compatibility \
+                {shlex.quote(str(old_release))} \
+                {shlex.quote(str(new_release))}; then
+            exit 91
+        fi
+        ROLLBACK_HEAD=0052_task_execution_epoch
+        guard_automatic_app_rollback_compatibility \
+            {shlex.quote(str(old_release))} \
+            {shlex.quote(str(new_release))}
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "拒绝自动应用回滚" in result.stderr
+
+
+def test_automatic_app_rollback_fails_closed_when_head_is_unknown(
+    tmp_path: Path,
+) -> None:
+    old_release = tmp_path / "old"
+    new_release = tmp_path / "new"
+    old_release.mkdir()
+    new_release.mkdir()
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("guard_automatic_app_rollback_compatibility")}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        target_alembic_head() {{ printf ''; }}
+        current_alembic_revision() {{ printf '0052_task_execution_epoch\\n'; }}
+        UPDATE_MIGRATION_STARTED=1
+        UPDATE_MIGRATION_VERIFIED=0
+        UPDATE_MIGRATION_HEAD=""
+        PREVIOUS_TAG=v1.2.83
+        TARGET_TAG=v1.2.84
+        if guard_automatic_app_rollback_compatibility \
+                {shlex.quote(str(old_release))} \
+                {shlex.quote(str(new_release))}; then
+            exit 92
+        fi
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "兼容性无法验证" in result.stderr
+
+
+def test_automatic_app_rollback_skips_schema_probe_before_migration() -> None:
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("guard_automatic_app_rollback_compatibility")}
+        log_error() {{ exit 90; }}
+        target_alembic_head() {{ exit 91; }}
+        current_alembic_revision() {{ exit 92; }}
+        UPDATE_MIGRATION_STARTED=0
+        UPDATE_MIGRATION_VERIFIED=0
+        UPDATE_MIGRATION_HEAD=""
+        guard_automatic_app_rollback_compatibility "" ""
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_precommit_restore_has_no_side_effects_when_schema_guard_rejects(
+    tmp_path: Path,
+) -> None:
+    side_effect = tmp_path / "side-effect"
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("restore_uncommitted_update_state")}
+        guard_automatic_app_rollback_compatibility() {{ return 1; }}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        restore_update_symlink_snapshot() {{ : > {shlex.quote(str(side_effect))}; }}
+        restore_update_env_snapshot() {{ : > {shlex.quote(str(side_effect))}; }}
+        lumen_restore_operations_host_artifacts() {{
+            : > {shlex.quote(str(side_effect))}
+        }}
+        lumen_compose_in() {{ : > {shlex.quote(str(side_effect))}; }}
+        lumen_release_remove_unused() {{ : > {shlex.quote(str(side_effect))}; }}
+        discard_update_state_snapshot() {{ : > {shlex.quote(str(side_effect))}; }}
+        ROOT={shlex.quote(str(tmp_path))}
+        CURRENT_ID=old
+        NEW_RELEASE={shlex.quote(str(tmp_path / "new"))}
+        NEW_ID=new
+        UPDATE_ENV_SNAPSHOT=""
+        UPDATE_HOST_ARTIFACT_SNAPSHOT=""
+        UPDATE_RELEASE_SWITCHED=1
+        UPDATE_OLD_SERVICES_STOPPED=1
+        if restore_uncommitted_update_state; then
+            exit 91
+        fi
+        test ! -e {shlex.quote(str(side_effect))}
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "schema capability guard" in result.stderr

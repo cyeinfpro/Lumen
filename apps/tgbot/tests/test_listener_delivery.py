@@ -809,6 +809,36 @@ async def test_succeeded_download_failure_is_retryable(
 
 
 @pytest.mark.asyncio
+async def test_succeeded_all_downloads_failed_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """全部图片下载失败 = 和查询失败同类的可重试错误，不能标 delivered。
+
+    旧实现在这里 delivered=True + mark_notified，重投直接跳过，用户永远
+    拿不到已付费的图。修复后 delivered 保持 False，走 attempt 计数重投。
+    """
+    events: list[object] = []
+    monkeypatch.setattr(listener, "tracker", RecordingTracker(events))
+    _patch_delivery(monkeypatch, events)
+
+    with pytest.raises(RuntimeError, match="terminal delivery failed"):
+        await listener._on_succeeded(
+            RecordingBot(events),
+            RecordingApi(events, tmp_path, download_errors={"img-1", "img-2"}),
+            "gen-1",
+            _succeeded_track(),
+            {"images": [{"image_id": "img-1"}, {"image_id": "img-2"}]},
+        )
+
+    assert ("mark", "gen-1", False) not in events
+    assert ("clear", "gen-1") in events
+    # 不提前给用户「下载失败」的结论：重投时同文本 edit 会命中 message not
+    # modified → fallback send_message，把失败提示重复发一遍（J-3 同款策略）。
+    assert "edit" not in events
+
+
+@pytest.mark.asyncio
 async def test_dispatch_drop_tells_user_the_task_already_succeeded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -877,3 +907,116 @@ async def test_batch_finalize_skips_delete_when_counter_is_missing(
     assert ("batch_decr", "batch-1", "gen-1") in events
     assert "delete" not in events
     assert ("batch_remove", "batch-1") not in events
+
+
+@pytest.mark.asyncio
+async def test_attached_registers_bonus_before_send_and_dedups_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计 P2：send_message 与 tracker.add 之间崩溃会让重投重复发「🎁 双引擎」。
+
+    修复后先注册后发消息：第一次调用严格按「注册 → send → 补写 message_id」
+    顺序；模拟崩溃后的重投命中「已注册」跳过分支，不再发第二条。
+    """
+    events: list[object] = []
+    registered: set[str] = set()
+
+    class BonusTracker(RecordingTracker):
+        def __init__(self) -> None:
+            super().__init__(events)
+
+        async def get(self, gen_id: str) -> object | None:
+            events.append(("get", gen_id))
+            if gen_id == "parent-1":
+                return SimpleNamespace(
+                    chat_id=1,
+                    status_message_id=2,
+                    prompt="p",
+                    params={},
+                    is_bonus=False,
+                    user_id="user-1",
+                )
+            if gen_id in registered:
+                return SimpleNamespace(chat_id=1, status_message_id=42, prompt="p")
+            return None
+
+        async def add(self, gen_id: str, _track: object) -> None:
+            events.append(("add", gen_id))
+            registered.add(gen_id)
+
+        async def update_status_message(self, gen_id: str, message_id: int) -> None:
+            events.append(("update_status_message", gen_id, message_id))
+
+    monkeypatch.setattr(listener, "tracker", BonusTracker())
+
+    class Message:
+        def __init__(self) -> None:
+            self.message_id = 42
+
+    class Bot:
+        async def send_message(self, *, chat_id: int, text: str) -> Message:
+            events.append(("send_message", chat_id))
+            assert "🎁" in text
+            return Message()
+
+    data = {"parent_generation_id": "parent-1", "generation_id": "bonus-1"}
+
+    await listener._on_attached(Bot(), data)
+
+    # 注册必须先于 send；send 成功后补写真实 message_id
+    assert events == [
+        ("get", "parent-1"),
+        ("get", "bonus-1"),
+        ("add", "bonus-1"),
+        ("send_message", 1),
+        ("update_status_message", "bonus-1", 42),
+    ]
+
+    # 重投（旧实现里 send 与 add 之间崩溃的场景）：bonus 已注册 → 直接跳过
+    events.clear()
+    await listener._on_attached(Bot(), data)
+    assert events == [("get", "parent-1"), ("get", "bonus-1")]
+
+
+@pytest.mark.asyncio
+async def test_attached_skips_send_when_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注册失败绝不能先发消息：否则留下「发了 🎁 但 tracker 里没有 bonus」的
+    悬挂态，succeeded(bonus_id) 也找不到 chat，用户永远拿不到图。"""
+    events: list[object] = []
+
+    class FailingTracker(RecordingTracker):
+        def __init__(self) -> None:
+            super().__init__(events)
+
+        async def get(self, gen_id: str) -> object | None:
+            events.append(("get", gen_id))
+            if gen_id == "parent-1":
+                return SimpleNamespace(
+                    chat_id=1,
+                    status_message_id=2,
+                    prompt="p",
+                    params={},
+                    is_bonus=False,
+                    user_id="user-1",
+                )
+            return None
+
+        async def add(self, gen_id: str, _track: object) -> None:
+            events.append(("add", gen_id))
+            raise RuntimeError("redis down")
+
+    monkeypatch.setattr(listener, "tracker", FailingTracker())
+
+    class Bot:
+        async def send_message(self, **_kwargs) -> None:
+            events.append("send_message")  # pragma: no cover - 不应被调用
+
+    await listener._on_attached(
+        Bot(),
+        {"parent_generation_id": "parent-1", "generation_id": "bonus-1"},
+    )
+
+    assert "send_message" not in events
+    assert ("add", "bonus-1") in events
