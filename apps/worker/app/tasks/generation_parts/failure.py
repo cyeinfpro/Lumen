@@ -18,6 +18,7 @@ from lumen_core.models import Generation, Message
 from lumen_core.upstream_billing import decide_image_failure_billing
 
 from ...retry import RetryDecision, is_moderation_block
+from ...task_cancellation import force_next_cancellation_check
 from .diagnostics import (
     build_generation_diagnostics,
     request_event_provider_from_attempts,
@@ -29,8 +30,9 @@ from .event_delivery import stage_generation_failure_event
 from .execution_boundary import (
     SIDECAR_EXECUTION_KEY,
     release_or_settle_generation,
+    release_would_absorb_upstream_cost,
 )
-from .lease import cancel_renewer_task, release_lease
+from .lease import cancel_renewer_task, is_cancelled, release_lease
 from .lifecycle import finalize_running_generation_cancel
 from .queue import (
     avoid_provider_for_task,
@@ -73,6 +75,27 @@ class GenerationFailure:
     upstream_request: dict[str, Any]
     moderation_upgrade: bool = False
     effective_max_attempts: int = 0
+    exc: BaseException | None = None
+
+
+async def _finish_durable_cancel_if_requested(
+    state: GenerationRunState,
+    reason: BaseException,
+    g: RunGenerationDeps,
+) -> bool:
+    force_next_cancellation_check(state.task_id)
+    if not await is_cancelled(state.redis, state.task_id):
+        return False
+    state.task_outcome = await finalize_running_generation_cancel(
+        state.redis,
+        task_id=state.task_id,
+        message_id=state.message_id,
+        user_id=state.user_id,
+        attempt=state.attempt,
+        reason=reason,
+        services=g,
+    )
+    return True
 
 
 async def handle_lease_lost(
@@ -80,6 +103,8 @@ async def handle_lease_lost(
     exc: BaseException,
     g: RunGenerationDeps,
 ) -> None:
+    if await _finish_durable_cancel_if_requested(state, exc, g):
+        return
     logger.warning(
         "generation lease lost task=%s attempt=%s err=%s",
         state.task_id,
@@ -123,6 +148,8 @@ async def handle_stale_attempt(
     exc: BaseException,
     g: RunGenerationDeps,
 ) -> None:
+    if await _finish_durable_cancel_if_requested(state, exc, g):
+        return
     logger.info(
         "generation stale attempt task=%s attempt=%s err=%s",
         state.task_id,
@@ -161,6 +188,8 @@ async def handle_generation_exception(
     exc: Exception,
     g: RunGenerationDeps,
 ) -> None:
+    if await _finish_durable_cancel_if_requested(state, exc, g):
+        return
     failure = await _build_failure(state, exc, g)
     failure = await _apply_moderation_retry_policy(state, exc, failure, g)
     should_retry = (
@@ -227,6 +256,7 @@ async def _build_failure(
         diagnostics=diagnostics,
         upstream_request=upstream_request,
         effective_max_attempts=MAX_ATTEMPTS,
+        exc=exc,
     )
 
 
@@ -619,6 +649,7 @@ async def _fail_generation_terminal(
                 state,
                 failure.error_code,
                 g,
+                exc=failure.exc,
             )
             delivery = stage_generation_failure_event(
                 session,
@@ -651,6 +682,8 @@ async def _mark_message_and_release_billing(
     state: GenerationRunState,
     error_code: str,
     g: RunGenerationDeps,
+    *,
+    exc: BaseException | None = None,
 ) -> None:
     message = await session.get(Message, state.message_id)
     if message is not None and message.status != MessageStatus.CANCELED:
@@ -670,6 +703,17 @@ async def _mark_message_and_release_billing(
         }
     decision = decide_image_failure_billing(error_code)
     if decision.released:
+        # 决策表 release 前提「非 unknown 码 = 适配层已证明上游未计费」只对
+        # UpstreamError 成立;本地失败(artifact commit 未被采纳、存储/DB 错误等)
+        # 已收到当前 dispatch 的响应时上游必然已计费,必须结算而不是退款。
+        if release_would_absorb_upstream_cost(exc, generation):
+            await g.billing.settle_unknown_upstream(
+                session,
+                generation,
+                reason=error_code,
+                knowledge="incurred",
+            )
+            return
         await release_or_settle_generation(
             g.billing,
             session,

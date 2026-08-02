@@ -228,6 +228,14 @@ def _image_job_exc(kind: str) -> upstream.UpstreamError:
             error_code="upstream_timeout",
             payload={"path": "image-jobs"},
         )
+    if kind == "unknown_submit":
+        return upstream.UpstreamError(
+            "image job submit result is unknown; the request may already "
+            "have been accepted and billed upstream",
+            status_code=0,
+            error_code="image_job_result_unknown",
+            payload={"path": "image-jobs", "upstream_result_unknown": True},
+        )
     raise AssertionError(f"unknown image job failure kind: {kind}")
 
 
@@ -627,6 +635,54 @@ async def test_image_jobs_failover_continues_endpoint_then_provider(
     else:
         assert ("report_image_failure", "acc1", {}) in pool.calls
     assert pool.calls.count(("report_image_success", "acc2", {})) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_jobs_unknown_submit_does_not_failover_endpoint_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """提交结果未知（读超时/连接重置，请求可能已被 sidecar 接受）不得重跑。
+
+    换 endpoint 会带新幂等键（body 变了）创建第二个上游作业、第二笔成本无处
+    转嫁；换 provider 同理。正确做法是就地失败、按 hold 结算（纯转嫁），与
+    lumen_core.upstream_billing 的 IMAGE_UPSTREAM_RESULT_UNKNOWN 语义对齐。
+    """
+    pool = RecordingPool(["acc1", "acc2"])
+
+    async def fake_get_pool() -> RecordingPool:
+        return pool
+
+    attempts: list[tuple[str, str]] = []
+
+    async def fake_run_once(
+        _request: ImageExecutionRequest,
+        *,
+        endpoint: str,
+        api_key: str,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
+        attempts.append((api_key.removeprefix("sk-"), endpoint))
+        raise _image_job_exc("unknown_submit")
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.image_jobs, "image_job_run_once", fake_run_once
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.direct, "resolve_image_job_base_url", _resolved_job_base
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    with pytest.raises(upstream.UpstreamError) as excinfo:
+        await TEST_UPSTREAM_SERVICES.image_jobs.image_job_with_failover(
+            _image_request(progress_callback=progress_events.append)
+        )
+
+    assert excinfo.value.error_code == "image_job_result_unknown"
+    # 只碰了 acc1 的第一个 endpoint：既没换 endpoint 也没换 provider。
+    assert attempts == [("acc1", "generations")]
+    assert not [e for e in progress_events if e.get("type") == "provider_failover"]
+    assert not [e for e in progress_events if e.get("type") == "endpoint_failover"]
 
 
 @pytest.mark.asyncio

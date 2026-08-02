@@ -21,7 +21,7 @@ from app.observability import (
 from app.tasks import context_summary
 from lumen_core.constants import Role
 from lumen_core.context_window import SUMMARY_KIND, SUMMARY_VERSION
-from lumen_core.models import Conversation, Message
+from lumen_core.models import Conversation, Message, User
 
 
 # ---------- Helpers --------------------------------------------------------
@@ -71,7 +71,18 @@ class _ScalarResult:
 
 
 class _FakeSession:
-    async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+    async def execute(self, stmt: Any, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+        # lock_active_summary_context 对 select(Conversation) 的结果访问
+        # .user_id,并校验 conversation.user_id == active user id,因此按
+        # 查询实体返回一致的契约对象;其余查询返回占位字符串。
+        descs = getattr(stmt, "column_descriptions", None)
+        entity = descs[0]["entity"] if descs else None
+        if entity is Conversation:
+            return _ScalarResult(
+                Conversation(id="conv-prom-1", user_id="user-1", summary_jsonb=None)
+            )
+        if entity is User:
+            return _ScalarResult("user-1")
         return _ScalarResult("first-user")
 
     async def commit(self) -> None:

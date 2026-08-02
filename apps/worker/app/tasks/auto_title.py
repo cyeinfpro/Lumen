@@ -153,7 +153,10 @@ async def maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
         async with SessionLocal() as session:
             row = (
                 await session.execute(
-                    select(Conversation.title).where(Conversation.id == conversation_id)
+                    select(Conversation.title).where(
+                        Conversation.id == conversation_id,
+                        Conversation.deleted_at.is_(None),
+                    )
                 )
             ).scalar_one_or_none()
             if row is None or not _is_default_title(row):
@@ -184,6 +187,22 @@ def _extract_text(content: dict[str, Any] | None) -> str:
     return ""
 
 
+async def _load_active_conversation(
+    session: Any, conversation_id: str
+) -> Conversation | None:
+    """Reload a live conversation without trusting an identity-map snapshot."""
+    return (
+        await session.execute(
+            select(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                Conversation.deleted_at.is_(None),
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
 async def _build_summary(session: Any, conversation_id: str) -> list[dict[str, Any]]:
     """读最近 N 条消息（按 created_at DESC 取最新），转成 /v1/responses input 列表。
 
@@ -194,7 +213,12 @@ async def _build_summary(session: Any, conversation_id: str) -> list[dict[str, A
         (
             await session.execute(
                 select(Message)
-                .where(Message.conversation_id == conversation_id)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.deleted_at.is_(None),
+                    Conversation.deleted_at.is_(None),
+                )
                 .order_by(Message.created_at.desc())
                 .limit(_HISTORY_WINDOW)
             )
@@ -507,16 +531,26 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
 
     try:
         async with SessionLocal() as session:
-            conv = await session.get(Conversation, conversation_id)
+            conv = await _load_active_conversation(session, conversation_id)
             if conv is None:
                 return
             if not _is_default_title(conv.title):
                 _mark_title_confirmed(conversation_id)
                 return  # 用户可能手动改过；尊重用户
-            user_id = conv.user_id
             input_list = await _build_summary(session, conversation_id)
             if not input_list:
                 return  # 没足够内容生成标题
+
+        # 会话可在读取消息后被删除。用新的 session 重新加载，避免长事务/identity map
+        # 让刚删除的会话仍然被发送给外部 provider。
+        async with SessionLocal() as session:
+            current = await _load_active_conversation(session, conversation_id)
+            if current is None:
+                return
+            if not _is_default_title(current.title):
+                _mark_title_confirmed(conversation_id)
+                return
+            user_id = current.user_id
 
         # 调上游
         try:
@@ -540,6 +574,7 @@ async def auto_title_conversation(ctx: dict[str, Any], conversation_id: str) -> 
                 update(Conversation)
                 .where(
                     Conversation.id == conversation_id,
+                    Conversation.deleted_at.is_(None),
                     _default_title_condition(),
                 )
                 .values(title=title)
@@ -621,6 +656,7 @@ async def reconcile_default_titles(ctx: dict[str, Any]) -> int:
             has_user_msg = exists().where(
                 and_(
                     Message.conversation_id == Conversation.id,
+                    Message.deleted_at.is_(None),
                     Message.role == "user",
                     Message.status == "succeeded",
                 )
@@ -631,6 +667,7 @@ async def reconcile_default_titles(ctx: dict[str, Any]) -> int:
                     Conversation.last_activity_at >= lookback_start,
                     Conversation.last_activity_at <= stable_before,
                     _default_title_condition(),
+                    Conversation.deleted_at.is_(None),
                     Conversation.archived.is_(False),
                     has_user_msg,
                 )

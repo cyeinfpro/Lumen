@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from PIL import Image as PILImage
 from sqlalchemy import select
 
 from lumen_core.constants import (
@@ -20,96 +17,36 @@ from lumen_core.constants import (
     GenerationStatus,
     ImageSource,
 )
-from lumen_core.model_image_metadata import (
-    build_model_image_metadata,
-    model_image_filename,
-    save_image_with_model_metadata,
-)
 from lumen_core.models import (
     Conversation,
     Generation,
     Image,
     ImageVariant,
     Message,
-    new_uuid7,
 )
 
-from ...upstream_parts import (
-    GeneratedPayloadInput,
-    cleanup_owned_generated_payload,
-    materialize_generated_payload,
+from ...artifact_commit import (
+    ArtifactAdoption,
+    commit_error_or_default,
+    commit_with_adoption_probe,
 )
-from .errors import TaskCancelled
+from .active_user_fence import lock_active_generation_user
+from .bonus_artifacts import (
+    BonusGenerationContext,
+    BonusImageArtifact,
+    prepare_bonus_artifact,
+)
+from .errors import StaleGenerationAttempt, TaskCancelled
 from .event_delivery import stage_generation_event
-from .image_artifact_contracts import sha256
+from .image_metadata import (
+    clean_model_style_tags as clean_model_style_tags,
+    maybe_embed_model_image_metadata_bytes as maybe_embed_model_image_metadata_bytes,
+    model_image_metadata_from_request as model_image_metadata_from_request,
+)
 from .services import RunGenerationDeps
 
 
 logger = logging.getLogger(__name__)
-
-
-def clean_model_style_tags(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    output: list[str] = []
-    seen: set[str] = set()
-    for raw in value:
-        if not isinstance(raw, str):
-            continue
-        tag = raw.strip()
-        if not tag or tag in seen:
-            continue
-        seen.add(tag)
-        output.append(tag[:32])
-        if len(output) >= 12:
-            break
-    return output
-
-
-def model_image_metadata_from_request(
-    *,
-    image_id: str,
-    mime: str,
-    request: dict[str, Any] | None,
-    prompt: str | None = None,
-) -> dict[str, Any]:
-    request_value = request if isinstance(request, dict) else {}
-    if request_value.get("workflow_action") != "model_library_generate":
-        return {}
-    age_segment = request_value.get("workflow_model_library_age_segment")
-    gender = request_value.get("workflow_model_library_gender")
-    appearance_direction = request_value.get(
-        "workflow_model_library_appearance_direction"
-    )
-    style_tags = clean_model_style_tags(
-        request_value.get("workflow_model_library_style_tags") or []
-    )
-    payload = build_model_image_metadata(
-        age_segment=age_segment if isinstance(age_segment, str) else None,
-        gender=gender if isinstance(gender, str) else None,
-        appearance_direction=(
-            appearance_direction if isinstance(appearance_direction, str) else None
-        ),
-        style_tags=style_tags,
-        source="model_library_generate",
-        prompt_hint=prompt,
-    )
-    if not payload:
-        return {}
-    extension = "png"
-    if isinstance(mime, str) and mime.startswith("image/"):
-        extension = "jpg" if mime == "image/jpeg" else mime.removeprefix("image/")
-    return {
-        "model_library": payload,
-        "suggested_filename": model_image_filename(
-            image_id=image_id,
-            ext=extension,
-            age_segment=payload.get("age_segment"),
-            gender=payload.get("gender"),
-            appearance_direction=payload.get("appearance_direction"),
-            style_tags=style_tags,
-        ),
-    }
 
 
 def compact_image_payload_meta(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -124,26 +61,6 @@ def compact_image_payload_meta(metadata: dict[str, Any]) -> dict[str, Any]:
         if value is not None and value is not False:
             output[key] = value
     return output
-
-
-def maybe_embed_model_image_metadata_bytes(
-    *,
-    image: PILImage.Image,
-    fmt: str,
-    raw_image: bytes,
-    metadata: dict[str, Any],
-) -> bytes:
-    payload = metadata.get("model_library") if isinstance(metadata, dict) else None
-    if fmt.upper() != "PNG" or not isinstance(payload, dict) or not payload:
-        return raw_image
-    output = io.BytesIO()
-    save_image_with_model_metadata(
-        image,
-        output,
-        fmt="PNG",
-        metadata=payload,
-    )
-    return output.getvalue()
 
 
 async def find_existing_generated_image(
@@ -288,71 +205,11 @@ async def cleanup_storage_on_error(
         raise
 
 
-@dataclass(slots=True)
-class BonusGenerationContext:
-    services: RunGenerationDeps
-    redis: Any
-    user_id: str
-    channel: str
-    parent_task_id: str
-    parent_idempotency_key: str
-    parent_upstream_request: dict[str, Any] | None
-    message_id: str
-    action: str
-    model: str
-    prompt: str
-    size_requested: str
-    aspect_ratio: str
-    input_image_ids: list[str]
-    primary_input_image_id: str | None
-    references: list[tuple[str, bytes]]
-    image_request_options: dict[str, Any]
-    b64_result: GeneratedPayloadInput
-    revised_prompt: str | None
-    upstream_provider: str | None
-    upstream_actual_route: str | None
-    upstream_actual_source: str | None
-    upstream_actual_endpoint: str | None
-    billing_meta: dict[str, Any] | None
-    idempotency_suffix: str
-    extra_upstream_fields: dict[str, Any] | None
-    record_model_library_candidate: bool
-    settle_billing: bool
-    log_label: str
-
-
-@dataclass(slots=True)
-class BonusImageArtifact:
-    bonus_generation_id: str
-    image_id: str
-    raw_image: bytes
-    sha256: str
-    orig_mime: str
-    width: int
-    height: int
-    blurhash: str | None
-    display_bytes: bytes
-    display_size: tuple[int, int]
-    preview_bytes: bytes
-    preview_size: tuple[int, int]
-    thumb_bytes: bytes
-    thumb_size: tuple[int, int]
-    transparent_alpha_recovered: bool
-    transparent_qc_payload: dict[str, Any] | None
-    transparent_provider: str | None
-    image_metadata: dict[str, Any]
-    billing_meta: dict[str, Any]
-    key_orig: str
-    key_display: str
-    key_preview: str
-    key_thumb: str
-
-
 async def handle_dual_race_bonus_image(
     context: BonusGenerationContext,
 ) -> bool:
     """Persist and publish a separately billed bonus generation."""
-    artifact = await _prepare_bonus_artifact(context)
+    artifact = await prepare_bonus_artifact(context)
     if artifact is None:
         return False
     created_keys = await _write_bonus_files(context, artifact)
@@ -365,7 +222,8 @@ async def handle_dual_race_bonus_image(
     )
     if deliveries is None:
         return False
-    await context.services.events.deliver_many(context.redis, deliveries)
+    if not await _deliver_bonus_events(context, deliveries):
+        return False
     logger.info(
         "%s image done: parent=%s bonus=%s",
         context.log_label,
@@ -375,207 +233,27 @@ async def handle_dual_race_bonus_image(
     return True
 
 
-async def _prepare_bonus_artifact(
-    context: BonusGenerationContext,
-) -> BonusImageArtifact | None:
-    if context.b64_result is None:
-        return None
-    raw_image = _decode_bonus_image(context)
-    if raw_image is None or _bonus_sha_echoed(context, raw_image):
-        return None
-    processed = await _postprocess_bonus_image(context, raw_image)
-    if processed is None:
-        return None
-    billing_meta = _bonus_billing_meta(context)
-    if billing_meta is None:
-        return None
-    return _build_bonus_artifact(context, processed, billing_meta)
-
-
-def _decode_bonus_image(
-    context: BonusGenerationContext,
-) -> bytes | None:
-    try:
-        return materialize_generated_payload(context.b64_result)
-    except (TypeError, ValueError):
-        logger.warning(
-            "%s image payload decode failed parent=%s",
-            context.log_label,
-            context.parent_task_id,
-        )
-        return None
-    finally:
-        if not isinstance(context.b64_result, str):
-            cleanup_owned_generated_payload(context.b64_result)
-
-
-def _bonus_sha_echoed(
-    context: BonusGenerationContext,
-    raw_image: bytes,
-) -> bool:
-    # 只要这次请求带了参考图，就必须做 sha 回声检测，不能只对 EDIT 生效：
-    # 回声图会被当成 bonus image 建行并**单独结算**，把上游原样退回的输入图
-    # 计费给用户。判据用「有没有参考图」而不是「action 是不是 EDIT」，新增
-    # 带参考图的 action 时自动继承这道防线。
-    if not context.references:
-        return False
-    sha = sha256(raw_image)
-    echoed = any(sha == reference_sha for reference_sha, _raw in context.references)
-    if echoed:
-        logger.info(
-            "%s sha echoed reference parent=%s; skip",
-            context.log_label,
-            context.parent_task_id,
-        )
-    return echoed
-
-
-async def _postprocess_bonus_image(
-    context: BonusGenerationContext,
-    raw_image: bytes,
-) -> Any | None:
-    try:
-        return await context.services.provider.postprocess(
-            raw_image,
-            prompt=context.prompt,
-            transparent_requested=(
-                context.image_request_options.get("background") == "transparent"
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "%s pillow decode failed parent=%s err=%r",
-            context.log_label,
-            context.parent_task_id,
-            exc,
-        )
-        return None
-
-
-def _bonus_billing_meta(
-    context: BonusGenerationContext,
-) -> dict[str, Any] | None:
-    result = (
-        dict(context.billing_meta)
-        if context.billing_meta is not None
-        else {
-            "is_dual_race_bonus": True,
-            "billing_free": False,
-            "billing_label": "billable",
-            "billing_policy": "dual_race_loser_settled_separately",
-        }
-    )
-    if result.get("billing_free") is not True and not context.settle_billing:
-        logger.warning(
-            "%s missing settle_billing for billable image parent=%s",
-            context.log_label,
-            context.parent_task_id,
-        )
-        return None
-    return result
-
-
-def _build_bonus_artifact(
-    context: BonusGenerationContext,
-    processed: Any,
-    billing_meta: dict[str, Any],
-) -> BonusImageArtifact:
-    bonus_generation_id = new_uuid7()
-    image_id = new_uuid7()
-    extension, mime = _bonus_format(processed.orig_format)
-    model_metadata = model_image_metadata_from_request(
-        image_id=image_id,
-        mime=mime,
-        request=context.parent_upstream_request,
-        prompt=context.prompt,
-    )
-    raw_image, sha = _embed_bonus_metadata(
-        context,
-        processed.raw_image,
-        processed.sha256,
-        processed.orig_format,
-        model_metadata,
-    )
-    return BonusImageArtifact(
-        bonus_generation_id=bonus_generation_id,
-        image_id=image_id,
-        raw_image=raw_image,
-        sha256=sha,
-        orig_mime=mime,
-        width=processed.width,
-        height=processed.height,
-        blurhash=processed.blurhash,
-        display_bytes=processed.display.bytes,
-        display_size=processed.display.size,
-        preview_bytes=processed.preview.bytes,
-        preview_size=processed.preview.size,
-        thumb_bytes=processed.thumb.bytes,
-        thumb_size=processed.thumb.size,
-        transparent_alpha_recovered=processed.transparent_alpha_recovered,
-        transparent_qc_payload=processed.transparent_qc_payload,
-        transparent_provider=processed.transparent_provider,
-        image_metadata={**model_metadata, **billing_meta},
-        billing_meta=billing_meta,
-        key_orig=(f"u/{context.user_id}/g/{bonus_generation_id}/orig.{extension}"),
-        key_display=(f"u/{context.user_id}/g/{bonus_generation_id}/display2048.webp"),
-        key_preview=(f"u/{context.user_id}/g/{bonus_generation_id}/preview1024.webp"),
-        key_thumb=(f"u/{context.user_id}/g/{bonus_generation_id}/thumb256.jpg"),
-    )
-
-
-def _bonus_format(orig_format: str) -> tuple[str, str]:
-    return (
-        {"PNG": "png", "WEBP": "webp", "JPEG": "jpg"}[orig_format],
-        {
-            "PNG": "image/png",
-            "WEBP": "image/webp",
-            "JPEG": "image/jpeg",
-        }[orig_format],
-    )
-
-
-def _embed_bonus_metadata(
-    context: BonusGenerationContext,
-    raw_image: bytes,
-    sha: str,
-    orig_format: str,
-    model_metadata: dict[str, Any],
-) -> tuple[bytes, str]:
-    if not model_metadata:
-        return raw_image, sha
-    try:
-        with PILImage.open(io.BytesIO(raw_image)) as image:
-            image.load()
-            raw_image = maybe_embed_model_image_metadata_bytes(
-                image=image,
-                fmt=orig_format,
-                raw_image=raw_image,
-                metadata=model_metadata,
-            )
-        return raw_image, sha256(raw_image)
-    except Exception as exc:  # noqa: BLE001
-        logger.info(
-            "%s model metadata embed skipped parent=%s err=%s",
-            context.log_label,
-            context.parent_task_id,
-            exc,
-        )
-        return raw_image, sha
-
-
 async def _write_bonus_files(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
 ) -> list[str] | None:
     try:
-        return await context.services.artifacts.write_files(
-            [
-                (artifact.key_orig, artifact.raw_image),
-                (artifact.key_display, artifact.display_bytes),
-                (artifact.key_preview, artifact.preview_bytes),
-                (artifact.key_thumb, artifact.thumb_bytes),
-            ]
-        )
+        async with context.services.store.session() as session:
+            if not await _lock_active_bonus_user(
+                session,
+                context,
+                boundary="storage",
+            ):
+                return None
+            await _lock_current_bonus_parent(session, context)
+            return await context.services.artifacts.write_files(
+                [
+                    (artifact.key_orig, artifact.raw_image),
+                    (artifact.key_display, artifact.display_bytes),
+                    (artifact.key_preview, artifact.preview_bytes),
+                    (artifact.key_thumb, artifact.thumb_bytes),
+                ]
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s storage write failed parent=%s err=%r",
@@ -586,38 +264,115 @@ async def _write_bonus_files(
         return None
 
 
+async def _lock_active_bonus_user(
+    session: Any,
+    context: BonusGenerationContext,
+    *,
+    boundary: str,
+) -> bool:
+    if await lock_active_generation_user(session, user_id=context.user_id):
+        return True
+    logger.info(
+        "%s blocked by inactive user parent=%s boundary=%s",
+        context.log_label,
+        context.parent_task_id,
+        boundary,
+    )
+    return False
+
+
+async def _lock_current_bonus_parent(
+    session: Any,
+    context: BonusGenerationContext,
+) -> Generation:
+    parent = await session.get(
+        Generation,
+        context.parent_task_id,
+        with_for_update=True,
+    )
+    if parent is None:
+        raise LookupError(f"parent generation missing: {context.parent_task_id}")
+    if getattr(parent, "user_id", None) != context.user_id:
+        raise StaleGenerationAttempt(
+            f"bonus generation parent user mismatch task={context.parent_task_id}"
+        )
+    if (
+        int(getattr(parent, "execution_epoch", 0) or 0) != context.execution_epoch
+        or int(parent.attempt or 0) != context.attempt
+    ):
+        raise StaleGenerationAttempt(
+            "bonus generation parent execution superseded "
+            f"task={context.parent_task_id} "
+            f"epoch={context.execution_epoch} attempt={context.attempt}"
+        )
+    return parent
+
+
 async def _persist_bonus_generation(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
     created_storage_keys: list[str],
 ) -> list[Any] | None:
+    cleanup_allowed = True
+    inactive_user = False
+    deliveries: list[Any] = []
     try:
-        async with context.services.artifacts.cleanup_on_error(created_storage_keys):
-            async with context.services.store.session() as session:
+        async with context.services.store.session() as session:
+            if not await _lock_active_bonus_user(
+                session,
+                context,
+                boundary="persistence",
+            ):
+                inactive_user = True
+            else:
+                await _lock_current_bonus_parent(session, context)
                 upstream_request = _bonus_upstream_request(context, artifact)
-                _add_bonus_rows(
-                    session,
-                    context,
-                    artifact,
-                    upstream_request,
-                )
-                await _attach_bonus_image_to_message(
-                    session,
-                    context,
-                    artifact,
-                )
+                _add_bonus_rows(session, context, artifact, upstream_request)
+                await _attach_bonus_image_to_message(session, context, artifact)
                 await _record_bonus_model_candidate(
                     session,
                     context,
                     artifact.image_id,
                 )
-                deliveries = _stage_bonus_events(
+                deliveries = _stage_bonus_events(session, context, artifact)
+                commit_result = await commit_with_adoption_probe(
                     session,
-                    context,
-                    artifact,
+                    probe=lambda: _probe_bonus_generation_adoption(
+                        context,
+                        artifact,
+                    ),
+                    logger=logger,
+                    label=(
+                        f"bonus generation artifact parent={context.parent_task_id} "
+                        f"bonus={artifact.bonus_generation_id}"
+                    ),
                 )
-                await session.commit()
+                if commit_result.adopted:
+                    cleanup_allowed = False
+                elif commit_result.outcome is ArtifactAdoption.NOT_ADOPTED:
+                    raise commit_error_or_default(
+                        commit_result,
+                        label=(
+                            f"bonus generation artifact {artifact.bonus_generation_id}"
+                        ),
+                    )
+                else:
+                    cleanup_allowed = False
+                    logger.error(
+                        "%s DB commit outcome unknown parent=%s bonus=%s; "
+                        "artifacts retained for reconciliation",
+                        context.log_label,
+                        context.parent_task_id,
+                        artifact.bonus_generation_id,
+                    )
+                    return None
+    except asyncio.CancelledError:
+        if cleanup_allowed:
+            await context.services.artifacts.delete_files(created_storage_keys)
+        raise
     except Exception as exc:  # noqa: BLE001
+        if cleanup_allowed:
+            await context.services.artifacts.delete_files(created_storage_keys)
         logger.warning(
             "%s DB write failed parent=%s err=%r",
             context.log_label,
@@ -625,15 +380,69 @@ async def _persist_bonus_generation(
             exc,
         )
         return None
-    if context.settle_billing:
-        await _settle_bonus_billing(context, artifact)
+    if inactive_user:
+        await context.services.artifacts.delete_files(created_storage_keys)
+        return None
+    if context.settle_billing and not await _settle_bonus_billing(context, artifact):
+        return None
     return deliveries
+
+
+async def _deliver_bonus_events(
+    context: BonusGenerationContext,
+    deliveries: list[Any],
+) -> bool:
+    async with context.services.store.session() as session:
+        if not await _lock_active_bonus_user(
+            session,
+            context,
+            boundary="event_delivery",
+        ):
+            return False
+        await context.services.events.deliver_many(context.redis, deliveries)
+    return True
+
+
+async def _probe_bonus_generation_adoption(
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> ArtifactAdoption:
+    async with context.services.store.session() as session:
+        parent = await session.get(
+            Generation,
+            context.parent_task_id,
+            with_for_update=True,
+        )
+        bonus = await session.get(Generation, artifact.bonus_generation_id)
+        image = await session.get(Image, artifact.image_id)
+        if bonus is not None or image is not None:
+            exact_bonus = (
+                bonus is not None
+                and bonus.status == GenerationStatus.SUCCEEDED.value
+                and bonus.user_id == context.user_id
+                and bonus.message_id == context.message_id
+            )
+            exact_image = (
+                image is not None
+                and image.owner_generation_id == artifact.bonus_generation_id
+                and image.user_id == context.user_id
+                and image.storage_key == artifact.key_orig
+                and image.sha256 == artifact.sha256
+            )
+            return (
+                ArtifactAdoption.ADOPTED
+                if exact_bonus and exact_image
+                else ArtifactAdoption.UNKNOWN
+            )
+        if parent is None:
+            return ArtifactAdoption.UNKNOWN
+        return ArtifactAdoption.NOT_ADOPTED
 
 
 async def _settle_bonus_billing(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
-) -> None:
+) -> bool:
     """bonus 图的结算单独成事务，且必须排在行落盘之后（审计 D-1）。
 
     以前 settle 和插入行共用一个事务：commit 之前的任何异常都会把刚写好的
@@ -642,17 +451,31 @@ async def _settle_bonus_billing(
     性调用 release_generation」是退款，方向相反，不采纳。
     拆开之后行先落盘，结算即便失败也只留下一条「SUCCEEDED 但没有 settle
     流水」的 generation，可被对账捡起来重扣，不会静默变成免费图。
+    异常时返回 False 而不是吞掉：调用方据此中止「已完成」流程并有机会
+    重试（重试时 adoption 探针识别已落盘的行，settle 会再次尝试）；
+    对账兜底仍然有效。
     """
     try:
         async with context.services.store.session() as session:
+            if not await _lock_active_bonus_user(
+                session,
+                context,
+                boundary="billing",
+            ):
+                return False
             bonus_row = await session.get(
                 Generation,
                 artifact.bonus_generation_id,
+                with_for_update=True,
             )
             if bonus_row is None:
                 raise LookupError(
                     f"bonus generation missing after commit: "
                     f"{artifact.bonus_generation_id}"
+                )
+            if getattr(bonus_row, "user_id", None) != context.user_id:
+                raise StaleGenerationAttempt(
+                    f"bonus generation user mismatch: {artifact.bonus_generation_id}"
                 )
             await context.services.billing.settle(
                 session,
@@ -672,6 +495,8 @@ async def _settle_bonus_billing(
             artifact.bonus_generation_id,
             exc,
         )
+        return False
+    return True
 
 
 def _bonus_upstream_request(
@@ -686,6 +511,8 @@ def _bonus_upstream_request(
             "mime": artifact.orig_mime,
             **artifact.billing_meta,
             "parent_generation_id": context.parent_task_id,
+            "parent_execution_epoch": context.execution_epoch,
+            "parent_attempt": context.attempt,
         }
     )
     if context.extra_upstream_fields:

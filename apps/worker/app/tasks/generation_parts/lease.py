@@ -4,8 +4,10 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
+from ...task_cancellation import scoped_cancellation_requested
 from .admission import WeightedPermit, renew_weighted_permit
 from .errors import LeaseLost
 from .queue import (
@@ -33,23 +35,105 @@ end
 return 0
 """
 
+REBIND_LEASE_EXECUTION_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ttl)
+return 1
+"""
+
 LEASE_RENEW_RETRY_S = 1.0
 LEASE_EXPIRY_SAFETY_S = 1.0
 
 logger = logging.getLogger(__name__)
 
 
-async def is_cancelled(redis: Any, task_id: str) -> bool:
+def generation_lease_token(
+    worker_token: str,
+    *,
+    execution_epoch: int,
+    attempt: int,
+) -> str:
+    return (
+        f"{worker_token}:execution:{max(0, int(execution_epoch))}:"
+        f"attempt:{max(0, int(attempt))}"
+    )
+
+
+async def bind_task_lease_execution_epoch(
+    state: Any,
+    execution_epoch: int,
+) -> None:
+    old_token = state.request.lease_token
+    new_token = f"{old_token}:execution:{max(0, int(execution_epoch))}"
+    renewer = state.settlement.renewer
+    if renewer is not None:
+        renewer.cancel()
+        try:
+            await renewer
+        except asyncio.CancelledError:
+            pass
+        except BaseException:  # noqa: BLE001
+            logger.debug("lease renewer stopped during epoch bind", exc_info=True)
+        state.settlement.renewer = None
+    if state.settlement.lease_lost.is_set():
+        raise state.ports.retry._LeaseLost("lease lost before execution epoch bind")
+    try:
+        rebound = await state.request.redis.eval(
+            REBIND_LEASE_EXECUTION_LUA,
+            1,
+            f"task:{state.request.task_id}:lease",
+            old_token,
+            new_token,
+        )
+    except Exception as exc:
+        state.settlement.lease_lost.set()
+        raise state.ports.retry._LeaseLost(
+            "lease epoch bind outcome is unknown"
+        ) from exc
+    if int(rebound or 0) != 1:
+        state.settlement.lease_lost.set()
+        raise state.ports.retry._LeaseLost("lease owner changed during epoch bind")
+    state.request = replace(state.request, lease_token=new_token)
+    state.settlement.renewer = asyncio.create_task(
+        state.ports.retry._lease_renewer(
+            state.request.redis,
+            state.request.task_id,
+            new_token,
+            state.settlement.lease_lost,
+        )
+    )
+
+
+async def is_cancelled(
+    redis: Any,
+    task_id: str,
+    *,
+    force_db: bool = False,
+) -> bool:
     try:
         value = await redis.get(f"task:{task_id}:cancel")
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "generation cancel check failed closed task=%s err=%s",
+            "generation cancel notification read failed task=%s err=%s",
             task_id,
             exc,
         )
-        return True
-    return bool(value)
+        return await scoped_cancellation_requested(
+            task_id,
+            redis_signal=None,
+            force_db=force_db,
+        )
+    return await scoped_cancellation_requested(
+        task_id,
+        redis_signal=bool(value),
+        force_db=force_db,
+    )
 
 
 async def acquire_lease(

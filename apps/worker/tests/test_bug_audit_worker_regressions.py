@@ -168,7 +168,7 @@ async def test_generation_runtime_scopes_explicit_services() -> None:
 def test_generation_success_event_is_staged_before_commit_and_delivered_after() -> None:
     source = inspect.getsource(generation_success._persist_generation_success)
     stage_idx = source.index("success_delivery = _stage_success_event(")
-    commit_idx = source.index("await session.commit()", stage_idx)
+    commit_idx = source.index("commit_with_adoption_probe(", stage_idx)
     deliver_idx = source.index(
         "await g.events.deliver(state.redis, success_delivery)",
         commit_idx,

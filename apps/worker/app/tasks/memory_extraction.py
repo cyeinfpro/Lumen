@@ -5,25 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select
 
 from lumen_core.constants import conv_channel
 from lumen_core.memory import (
     ExtractedMemory,
-    cosine_similarity,
     deterministic_embedding,
     embedding_literal,
     extract_memories,
-    parse_embedding_literal,
 )
 from lumen_core.models import (
     Conversation,
-    MemoryAudit,
     Message,
     User,
     UserMemory,
@@ -56,12 +53,20 @@ from .memory_extraction_parts.delivery import (
     prune_expired_memory_extraction_undo,
     restore_undo_tokens,
 )
+from .memory_extraction_parts.prompt_assembly import (
+    clipped_prompt_memories as _clipped_prompt_memories_impl,
+    confirmation_instruction as _confirmation_instruction_impl,
+    pick_confirmation_candidate as _pick_confirmation_candidate_impl,
+    ranked_prompt_memories as _ranked_prompt_memories_impl,
+    record_used_memories as _record_used_memories_impl,
+)
 from .memory_extraction_parts.run_state import (
     MemoryExtractionStateDependencies,
     abandon_memory_extraction_claim,
     claim_memory_extraction,
     finalize_memory_extraction,
     lock_memory_extraction_run,
+    revalidate_memory_extraction_claim,
 )
 
 
@@ -79,6 +84,23 @@ _MEMORY_EXTRACTION_LEASE_SECONDS = 600
 _MEMORY_UNDO_CLEANUP_BATCH = 1000
 
 _logger = logging.getLogger(__name__)
+
+
+class _MemoryExtractionExternalFenceBlocked(RuntimeError):
+    """The claim was invalidated before its text could leave the worker."""
+
+
+async def _require_memory_extraction_external_fence(
+    fence: Callable[[], Awaitable[bool]] | None,
+) -> None:
+    """Claim 在外部调用前必须仍有效:失效则阻断本次提取。
+
+    fence 由 memory_extract 以显式参数下传(不使用模块级 ContextVar):
+    每个任务上下文独立持有,避免跨任务泄漏与并发串扰。
+    """
+    if fence is not None and not await fence():
+        raise _MemoryExtractionExternalFenceBlocked()
+
 
 AssembledMemoryPrompt = _memory_values.AssembledMemoryPrompt
 _MAX_POSITIVE_SIGNAL = _memory_values._MAX_POSITIVE_SIGNAL
@@ -180,7 +202,12 @@ directive 只用于用户明确要求你记住，例如“记住…”或“reme
 多数消息没有记忆点，允许输出 {"items":[]}。"""
 
 
-async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[float]:
+async def _embedding_vector(
+    ctx: dict[str, Any] | None,
+    content: str,
+    *,
+    fence: Callable[[], Awaitable[bool]] | None = None,
+) -> list[float]:
     try:
         from ..provider_pool import get_pool, text_provider_attempt
 
@@ -202,6 +229,7 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
         try:
             with text_provider_attempt(pool, provider) as provider_attempt:
                 try:
+                    await _require_memory_extraction_external_fence(fence)
                     proxy_url = await resolve_provider_proxy_url(
                         getattr(provider, "proxy", None)
                     )
@@ -222,6 +250,8 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
                                 "content-type": "application/json",
                             },
                         )
+                except _MemoryExtractionExternalFenceBlocked:
+                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -248,6 +278,8 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
                 "memory_extraction.embedding_provider_invalid_payload provider=%s",
                 provider_name,
             )
+        except _MemoryExtractionExternalFenceBlocked:
+            raise
         except Exception as exc:  # noqa: BLE001
             _logger.debug(
                 "memory_extraction.embedding_provider_failed provider=%s err=%s",
@@ -263,8 +295,13 @@ async def _embedding_vector(ctx: dict[str, Any] | None, content: str) -> list[fl
     return deterministic_embedding(content)
 
 
-async def _embedding_literal_async(ctx: dict[str, Any] | None, content: str) -> str:
-    return embedding_literal(await _embedding_vector(ctx, content))
+async def _embedding_literal_async(
+    ctx: dict[str, Any] | None,
+    content: str,
+    *,
+    fence: Callable[[], Awaitable[bool]] | None = None,
+) -> str:
+    return embedding_literal(await _embedding_vector(ctx, content, fence=fence))
 
 
 async def _try_llm_extract(
@@ -273,6 +310,7 @@ async def _try_llm_extract(
     explicit_only: bool,
     scope_hint: str | None = None,
     image_upstream_runtime: ImageUpstreamRuntime | None = None,
+    fence: Callable[[], Awaitable[bool]] | None = None,
 ) -> list[ExtractedMemory]:
     try:
         from ..provider_pool import get_pool, text_provider_attempt
@@ -321,11 +359,14 @@ async def _try_llm_extract(
                 kwargs["proxy_override"] = provider.proxy
             with text_provider_attempt(pool, provider) as provider_attempt:
                 try:
+                    await _require_memory_extraction_external_fence(fence)
                     payload = await responses_call(
                         body,
                         runtime=image_upstream_runtime,
                         **kwargs,
                     )
+                except _MemoryExtractionExternalFenceBlocked:
+                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -339,6 +380,8 @@ async def _try_llm_extract(
                 items = [item for item in items if item.intent_kind == "directive"]
             if items:
                 return items
+        except _MemoryExtractionExternalFenceBlocked:
+            raise
         except Exception as exc:  # noqa: BLE001
             if not classify_retriable(
                 getattr(exc, "error_code", None),
@@ -356,39 +399,13 @@ async def _ranked_prompt_memories(
     user_text: str,
     now: datetime,
 ) -> tuple[list[UserMemory], list[UserMemory], list[UserMemory], list[float] | None]:
-    profiles = [memory for memory in rows if memory.type == "profile"]
-    avoids = [memory for memory in rows if memory.type == "avoid"]
-    pinned = [memory for memory in rows if memory.pinned]
-    candidates = [
-        memory
-        for memory in rows
-        if memory.type in {"preference", "project"} and not memory.pinned
-    ]
-
-    query_vec = None
-    ranked: list[tuple[float, UserMemory]] = []
-    if len((user_text or "").strip()) >= 5:
-        query_vec = await _embedding_vector(None, user_text)
-        for memory in candidates:
-            memory_vec = parse_embedding_literal(
-                memory.embedding
-            ) or deterministic_embedding(memory.content)
-            score = (
-                cosine_similarity(query_vec, memory_vec)
-                * (1 + 0.1 * memory.positive_signal - 0.15 * memory.negative_signal)
-                * _decay(memory, now)
-            )
-            ranked.append((score, memory))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-
-    context_memories: list[UserMemory] = []
-    seen: set[str] = set()
-    for memory in [*pinned, *[memory for _, memory in ranked[:8]]]:
-        if memory.id in seen or memory.type in {"profile", "avoid"}:
-            continue
-        seen.add(memory.id)
-        context_memories.append(memory)
-    return profiles, avoids, context_memories, query_vec
+    return await _ranked_prompt_memories_impl(
+        rows,
+        user_text=user_text,
+        now=now,
+        embedding_vector=_embedding_vector,
+        decay=_decay,
+    )
 
 
 def _clipped_prompt_memories(
@@ -396,15 +413,12 @@ def _clipped_prompt_memories(
     avoids: list[UserMemory],
     context_memories: list[UserMemory],
 ) -> tuple[list[UserMemory], list[UserMemory], list[UserMemory]]:
-    profiles = _clip_lines(
-        sorted(profiles, key=lambda memory: (not memory.pinned, -memory.confidence)),
-        max_chars=400,
+    return _clipped_prompt_memories_impl(
+        profiles,
+        avoids,
+        context_memories,
+        clip_lines=_clip_lines,
     )
-    avoids = _clip_lines(
-        sorted(avoids, key=lambda memory: (not memory.pinned, -memory.confidence)),
-        max_chars=400,
-    )
-    return profiles, avoids, _clip_lines(context_memories, max_chars=600)
 
 
 async def _record_used_memories(
@@ -414,37 +428,16 @@ async def _record_used_memories(
     used_ids: list[str],
     now: datetime,
 ) -> None:
-    if not used_ids:
-        return
-    flushed = False
-    if redis is not None:
-        try:
-            pipe = redis.pipeline(transaction=False)
-            score = now.timestamp()
-            for memory_id in used_ids:
-                pipe.zadd(_LAST_USED_PENDING_KEY, {memory_id: score})
-            await pipe.execute()
-            flushed = True
-        except Exception:
-            flushed = False
-    if flushed:
-        return
-    await session.execute(
-        update(UserMemory)
-        .where(UserMemory.id.in_(used_ids))
-        .values(last_used_at=now)
-        .execution_options(synchronize_session=False)
+    await _record_used_memories_impl(
+        session,
+        redis=redis,
+        used_ids=used_ids,
+        now=now,
+        last_used_pending_key=_LAST_USED_PENDING_KEY,
     )
 
 
-def _confirmation_instruction(memory: UserMemory | None) -> str | None:
-    if memory is None:
-        return None
-    return (
-        f"如果用户问题与用户偏好「{memory.content}」高度相关,"
-        "请在回答开头用一句话简短确认:「按你之前提到的这个偏好来吗?」再继续回答。"
-        "不要解释为什么记得。"
-    )
+_confirmation_instruction = _confirmation_instruction_impl
 
 
 async def assemble_user_memory_prompt(
@@ -539,93 +532,18 @@ async def _pick_confirmation_candidate(
     parent_user_message_id: str | None,
     query_vec: list[float] | None = None,
 ) -> UserMemory | None:
-    if not user.confirmation_enabled:
-        return None
-    if re.search(
-        r"(记住|remember|以后|不要|never|always)", user_text or "", re.IGNORECASE
-    ):
-        return None
-    if parent_user_message_id:
-        # advisory lock: 在 (user, conversation, day) 维度串行化 select-then-insert,
-        # 避免并发请求各自看到 daily_count=0 后双双 prompt 同一记忆 (设计 §16.4 daily=1).
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        await _try_advisory_xact_lock(
-            session,
-            f"{user.id}:confirm_prompt:{conversation_id}:{int(day_start.timestamp())}",
-        )
-        week_cutoff = now - timedelta(days=7)
-        weekly_count = (
-            await session.execute(
-                select(func.count(MemoryAudit.id)).where(
-                    MemoryAudit.user_id == user.id,
-                    MemoryAudit.event_type == "confirm_prompted",
-                    MemoryAudit.created_at >= week_cutoff,
-                )
-            )
-        ).scalar_one()
-        if int(weekly_count or 0) >= _CONFIRM_WEEKLY_LIMIT:
-            return None
-
-        daily_count = (
-            await session.execute(
-                select(func.count(MemoryAudit.id))
-                .select_from(MemoryAudit)
-                .join(Message, MemoryAudit.source_message_id == Message.id)
-                .where(
-                    MemoryAudit.user_id == user.id,
-                    MemoryAudit.event_type == "confirm_prompted",
-                    MemoryAudit.created_at >= day_start,
-                    Message.conversation_id == conversation_id,
-                )
-            )
-        ).scalar_one()
-        if int(daily_count or 0) > 0:
-            return None
-    for memory in sorted(memories, key=lambda m: m.positive_signal, reverse=True):
-        if memory.type not in {"preference", "avoid"}:
-            continue
-        if memory.positive_signal < 3:
-            continue
-        if memory.last_confirmed_at and (now - memory.last_confirmed_at).days < 14:
-            continue
-        if parent_user_message_id:
-            prompted_count = (
-                await session.execute(
-                    select(func.count(MemoryAudit.id))
-                    .select_from(MemoryAudit)
-                    .join(Message, MemoryAudit.source_message_id == Message.id)
-                    .where(
-                        MemoryAudit.user_id == user.id,
-                        MemoryAudit.memory_id == memory.id,
-                        MemoryAudit.event_type == "confirm_prompted",
-                        Message.conversation_id == conversation_id,
-                    )
-                )
-            ).scalar_one()
-            if int(prompted_count or 0) > 0:
-                continue
-        score = cosine_similarity(
-            query_vec or deterministic_embedding(user_text),
-            parse_embedding_literal(memory.embedding)
-            or deterministic_embedding(memory.content),
-        )
-        if score >= 0.92:
-            if parent_user_message_id:
-                session.add(
-                    MemoryAudit(
-                        user_id=user.id,
-                        memory_id=memory.id,
-                        event_type="confirm_prompted",
-                        source_message_id=parent_user_message_id,
-                        details={
-                            "conversation_id": conversation_id,
-                            "weekly_limit": _CONFIRM_WEEKLY_LIMIT,
-                        },
-                    )
-                )
-                await session.flush()
-            return memory
-    return None
+    return await _pick_confirmation_candidate_impl(
+        session,
+        memories,
+        user=user,
+        user_text=user_text,
+        now=now,
+        conversation_id=conversation_id,
+        parent_user_message_id=parent_user_message_id,
+        try_advisory_xact_lock=_try_advisory_xact_lock,
+        confirm_weekly_limit=_CONFIRM_WEEKLY_LIMIT,
+        query_vec=query_vec,
+    )
 
 
 async def _publish_memory_writes(
@@ -713,6 +631,15 @@ async def _abandon_memory_extraction_claim(
     )
 
 
+async def _revalidate_memory_extraction_claim_before_external(
+    claim: _MemoryExtractionClaim,
+) -> bool:
+    return await revalidate_memory_extraction_claim(
+        _memory_extraction_state_dependencies(),
+        claim,
+    )
+
+
 async def _best_effort_abandon_memory_extraction_claim(
     claim: _MemoryExtractionClaim,
     *,
@@ -733,6 +660,8 @@ async def _best_effort_abandon_memory_extraction_claim(
 async def _prepare_memory_extraction(
     ctx: dict[str, Any],
     claim: _MemoryExtractionClaim,
+    *,
+    fence: Callable[[], Awaitable[bool]] | None = None,
 ) -> tuple[list[_PreparedMemoryCandidate], bool]:
     candidates, rejected_pii = extract_memories(claim.text, explicit_only=False)
     if candidates and not rejected_pii:
@@ -741,11 +670,13 @@ async def _prepare_memory_extraction(
         except KeyError:
             image_upstream_runtime = None
         if isinstance(image_upstream_runtime, ImageUpstreamRuntime):
+            await _require_memory_extraction_external_fence(fence)
             llm_candidates = await _try_llm_extract(
                 claim.text,
                 explicit_only=False,
                 scope_hint=claim.scope_hint,
                 image_upstream_runtime=image_upstream_runtime,
+                fence=fence,
             )
         else:
             _logger.warning(
@@ -757,10 +688,15 @@ async def _prepare_memory_extraction(
             candidates = llm_candidates
     prepared: list[_PreparedMemoryCandidate] = []
     for candidate in candidates:
+        await _require_memory_extraction_external_fence(fence)
         prepared.append(
             _PreparedMemoryCandidate(
                 candidate=candidate,
-                embedding=await _embedding_literal_async(ctx, candidate.content),
+                embedding=await _embedding_literal_async(
+                    ctx,
+                    candidate.content,
+                    fence=fence,
+                ),
             )
         )
     return prepared, rejected_pii
@@ -884,7 +820,13 @@ async def memory_extract(
         return
 
     claim = claim_result
+
+    async def _claim_still_valid() -> bool:
+        return await _revalidate_memory_extraction_claim_before_external(claim)
+
     try:
+        if not await _claim_still_valid():
+            return
         if not await _embedding_provider_available(ctx):
             await _best_effort_abandon_memory_extraction_claim(
                 claim,
@@ -894,12 +836,15 @@ async def memory_extract(
         prepared_candidates, rejected_pii = await _prepare_memory_extraction(
             ctx,
             claim,
+            fence=_claim_still_valid,
         )
         completed = await _finalize_memory_extraction(
             claim,
             prepared_candidates=prepared_candidates,
             rejected_pii=rejected_pii,
         )
+    except _MemoryExtractionExternalFenceBlocked:
+        return
     except asyncio.CancelledError:
         await asyncio.shield(
             _best_effort_abandon_memory_extraction_claim(

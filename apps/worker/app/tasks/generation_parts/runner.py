@@ -22,13 +22,16 @@ from lumen_core.constants import (
 from lumen_core.generation_resources import generation_resource_demand
 from lumen_core.models import Generation, Message, new_uuid7
 from lumen_core.queue_metadata import generation_queue_metadata, merge_queue_metadata
+from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
+from ...artifact_commit import ArtifactCommitOutcomeUnknown
 from ...observability import (
     safe_outcome,
     task_duration_seconds,
 )
 from ...generation_dispatch import dispatch_identity_from_context
 from ...provider_runtime.errors import UpstreamError
+from ...task_cancellation import bind_task_cancellation
 from ..state import is_generation_terminal
 from . import failure, success
 from .admission import WeightedPermit
@@ -40,6 +43,8 @@ from .execution_boundary import release_or_settle_generation
 from .lease import (
     acquire_lease,
     cancel_renewer_task,
+    generation_lease_token,
+    is_cancelled,
     lease_renewer,
     release_lease,
 )
@@ -56,6 +61,7 @@ from .queue import (
 )
 from .queue_claim import (
     GenerationResourceLease,
+    image_queue_reservation_token,
     release_generation_runtime_resources,
     release_image_queue_slot,
     reserve_image_queue_slot,
@@ -64,7 +70,13 @@ from .retry_state import (
     bounded_next_attempt,
     consume_image_iter_close_result,
     ensure_generation_updated,
+    finalize_generation_cancel_unknown,
+    finalize_generation_result_unknown,
     generation_attempt_update,
+    generation_dispatch_requires_unknown_settlement,
+    generation_execution_epoch,
+    generation_execution_identity,
+    generation_execution_task_id,
 )
 from .run_state import GenerationRunState
 from .runtime_contracts import GENERATION_RUN_TIMEOUT_S
@@ -93,8 +105,27 @@ async def run_generation(
 ) -> None:
     """Run one ARQ image-generation task through explicit lifecycle phases."""
     state = _new_run_state(ctx, task_id, services)
+    with bind_task_cancellation(
+        kind="generation",
+        task_id=task_id,
+        model=Generation,
+        session_factory=services.store.session,
+        logger=logger,
+    ):
+        await _run_generation_scoped(state)
+
+
+async def _run_generation_scoped(state: GenerationRunState) -> None:
     if not await _load_initial_generation(state):
         return
+    execution_epoch = generation_execution_epoch(state)
+    state.task_id = generation_execution_task_id(state.task_id, execution_epoch)
+    if hasattr(state, "lease_token"):
+        state.lease_token = generation_lease_token(
+            state.lease_token,
+            execution_epoch=execution_epoch,
+            attempt=state.attempt,
+        )
     if not await _prepare_provider_reservation(state):
         return
     if not await _start_generation_attempt(state):
@@ -104,18 +135,45 @@ async def run_generation(
         await _prepare_upstream_request(state)
         await _dispatch_upstream_request(state)
         await success.finalize_generation_success(state, state.services)
+    except ArtifactCommitOutcomeUnknown as exc:
+        logger.error(
+            "generation artifact commit pending reconciliation "
+            "task=%s attempt=%s err=%s",
+            state.task_id,
+            state.attempt,
+            exc,
+        )
+        state.task_outcome = "commit_unknown"
     except LeaseLost as exc:
-        await failure.handle_lease_lost(state, exc, state.services)
+        if generation_dispatch_requires_unknown_settlement(state):
+            if await is_cancelled(state.redis, state.task_id, force_db=True):
+                await finalize_generation_cancel_unknown(state)
+            else:
+                await finalize_generation_result_unknown(state, exc)
+        else:
+            await failure.handle_lease_lost(state, exc, state.services)
     except StaleGenerationAttempt as exc:
         await failure.handle_stale_attempt(state, exc, state.services)
     except TaskCancelled as exc:
-        await failure.handle_cancel(state, exc, state.services)
+        if generation_dispatch_requires_unknown_settlement(state):
+            await finalize_generation_cancel_unknown(state)
+        else:
+            await failure.handle_cancel(state, exc, state.services)
     except Exception as exc:  # noqa: BLE001
-        await failure.handle_generation_exception(
-            state,
-            exc,
-            state.services,
-        )
+        if (
+            getattr(exc, "error_code", None) in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+            and generation_dispatch_requires_unknown_settlement(state)
+        ):
+            if await is_cancelled(state.redis, state.task_id, force_db=True):
+                await finalize_generation_cancel_unknown(state)
+            else:
+                await finalize_generation_result_unknown(state, exc)
+        else:
+            await failure.handle_generation_exception(
+                state,
+                exc,
+                state.services,
+            )
     finally:
         await _cleanup_generation_run(state)
 
@@ -232,7 +290,7 @@ async def _persist_user_runtime_failure(
     result = await session.execute(
         generation_attempt_update(
             state.task_id,
-            state.loaded_attempt,
+            state.generation.attempt,
             statuses=(
                 GenerationStatus.QUEUED.value,
                 GenerationStatus.RUNNING.value,
@@ -240,7 +298,7 @@ async def _persist_user_runtime_failure(
         ).values(
             status=GenerationStatus.FAILED.value,
             progress_stage=GenerationStage.FINALIZING,
-            attempt=state.loaded_attempt,
+            attempt=state.generation.attempt,
             finished_at=datetime.now(timezone.utc),
             error_code=error_code,
             error_message=error_message,
@@ -249,7 +307,7 @@ async def _persist_user_runtime_failure(
     ensure_generation_updated(
         result,
         state.task_id,
-        state.loaded_attempt,
+        state.generation.attempt,
     )
     message = await session.get(Message, state.message_id)
     if message is not None and message.status != MessageStatus.CANCELED:
@@ -320,6 +378,10 @@ async def _reserve_provider_slot(state: GenerationRunState) -> bool:
     state.reserved_provider_name = redis_text(
         getattr(state.reserved_provider, "name", None)
     )
+    state.image_queue_reservation_token = await image_queue_reservation_token(
+        state.redis,
+        state.task_id,
+    )
     state.upstream_provider_label = (
         "dual_race"
         if is_dual_race_sentinel(state.reserved_provider_name)
@@ -339,7 +401,10 @@ async def _reserve_provider(
     )
     permit = WeightedPermit(
         task_id=state.task_id,
-        attempt=state.attempt,
+        attempt=generation_execution_identity(
+            generation_execution_epoch(state),
+            state.attempt,
+        ),
         revision=(
             state.dispatch_identity.revision
             if state.dispatch_identity is not None
@@ -446,6 +511,7 @@ async def _acquire_generation_lease(state: GenerationRunState) -> bool:
             state.redis,
             task_id=state.task_id,
             provider_name=state.reserved_provider_name,
+            reservation_token=state.image_queue_reservation_token,
             services=state.services,
         )
         return False
@@ -508,6 +574,7 @@ def _running_upstream_request(
     )
     state.lease_reacquired = current.error_code == "lease_lost"
     request["trace_id"] = state.trace_id
+    request["execution_epoch"] = generation_execution_epoch(state)
     request["upstream_route"] = state.image_route
     if state.route_diagnostics:
         request["route_diagnostics"] = state.route_diagnostics[:12]
@@ -531,7 +598,9 @@ async def _commit_running_transition(
         .where(
             Generation.id == state.task_id,
             Generation.attempt == current.attempt,
+            Generation.execution_epoch == generation_execution_epoch(state),
             Generation.status == GenerationStatus.QUEUED.value,
+            Generation.cancel_requested_at.is_(None),
         )
         .values(
             status=GenerationStatus.RUNNING.value,
@@ -561,6 +630,7 @@ async def _release_stale_claim(state: GenerationRunState) -> None:
         state.redis,
         task_id=state.task_id,
         provider_name=state.reserved_provider_name,
+        reservation_token=state.image_queue_reservation_token,
         services=state.services,
     )
     await release_lease(
@@ -592,6 +662,11 @@ async def _publish_generation_started(state: GenerationRunState) -> None:
             "message_id": state.message_id,
             "trace_id": state.trace_id,
             "attempt": state.attempt,
+            "execution_epoch": generation_execution_epoch(state),
+            "attempt_epoch": generation_execution_identity(
+                generation_execution_epoch(state),
+                state.attempt,
+            ),
             "provider": (None if state.is_dual_race else state.upstream_provider_label),
             "route": state.image_route,
             "lease_reacquired": bool(state.lease_reacquired),
@@ -646,6 +721,7 @@ async def _cleanup_failed_setup(state: GenerationRunState) -> None:
             task_id=state.task_id,
             lease_token=state.lease_token,
             provider_name=state.reserved_provider_name,
+            reservation_token=state.image_queue_reservation_token,
             weighted_permit=state.weighted_permit,
             clear_avoided_providers=True,
             services=state.services,
@@ -694,6 +770,7 @@ async def _critical_release_cleanup(state: GenerationRunState) -> None:
             task_id=state.task_id,
             lease_token=state.lease_token,
             provider_name=state.reserved_provider_name,
+            reservation_token=state.image_queue_reservation_token,
             weighted_permit=state.weighted_permit,
             clear_avoided_providers=state.task_outcome != "retry",
         )

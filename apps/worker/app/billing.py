@@ -96,6 +96,17 @@ async def held_amount_for_ref(
     )
 
 
+async def existing_ref_consumption_tx(
+    session: AsyncSession,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+) -> Any:
+    return await billing_core._existing_ref_consumption_tx(  # noqa: SLF001
+        session, user_id, ref_type, ref_id
+    )
+
+
 async def _rate_multiplier_x10000(session: AsyncSession, user_id: str) -> int:
     if not isinstance(session, AsyncSession):
         return 10_000
@@ -152,6 +163,7 @@ def _generation_dependencies() -> GenerationDependencies:
         apply_rate_multiplier_micro=_apply_rate_multiplier_micro,
         thresholds=_thresholds,
         held_amount_for_ref=held_amount_for_ref,
+        existing_ref_consumption_tx=existing_ref_consumption_tx,
         allow_negative_balance=_allow_negative_balance,
         record_balance_cache_refresh=_record_balance_cache_refresh,
         audit=_audit,
@@ -168,6 +180,7 @@ def _unknown_upstream_dependencies() -> UnknownUpstreamDependencies:
         existing_wallet_tx=_existing_wallet_tx,
         add_replay_audit=_add_replay_audit,
         held_amount_for_ref=held_amount_for_ref,
+        existing_ref_consumption_tx=existing_ref_consumption_tx,
         allow_negative_balance=_allow_negative_balance,
         record_balance_cache_refresh=_record_balance_cache_refresh,
         audit=_audit,
@@ -183,6 +196,7 @@ def _completion_pricing_dependencies() -> CompletionPricingDependencies:
         existing_fingerprint_tx=_existing_fingerprint_tx,
         add_replay_audit=_add_replay_audit,
         held_amount_for_ref=held_amount_for_ref,
+        existing_ref_consumption_tx=existing_ref_consumption_tx,
         completion_cost_breakdown=_completion_cost_breakdown,
         completion_rate_multiplier_x10000=completion_rate_multiplier_x10000,
         completion_service_tier=_completion_service_tier,
@@ -211,7 +225,6 @@ def _completion_dependencies() -> CompletionDependencies:
         resolve_completion_breakdown=_resolve_completion_breakdown,
         completion_request_fingerprint=_completion_request_fingerprint,
         audit_completion_window_limit=_audit_completion_window_limit,
-        ensure_completion_image_charge_fundable=_ensure_completion_image_charge_fundable,
         allow_negative_balance=_allow_negative_balance,
         record_completion_settlement=_record_completion_settlement,
         record_balance_cache_refresh=_record_balance_cache_refresh,
@@ -253,26 +266,6 @@ async def _existing_fingerprint_tx(
         user_id,
         fingerprint,
         async_session_type=AsyncSession,
-    )
-
-
-async def _ensure_completion_image_charge_fundable(
-    session: AsyncSession,
-    *,
-    completion: Completion,
-    billing_ref_id: str,
-    image_output_cost_micro: int,
-    rate_multiplier_x10000: int,
-    allow_negative: bool,
-) -> None:
-    await common_service.ensure_completion_image_charge_fundable(
-        session,
-        completion=completion,
-        billing_ref_id=billing_ref_id,
-        image_output_cost_micro=image_output_cost_micro,
-        rate_multiplier_x10000=rate_multiplier_x10000,
-        allow_negative=allow_negative,
-        deps=_common_dependencies(),
     )
 
 

@@ -17,9 +17,13 @@ from lumen_core.constants import (
 from lumen_core.models import Generation, Message
 
 from ...observability import safe_outcome, task_duration_seconds
+from ...task_cancellation import force_next_cancellation_check
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .event_delivery import stage_generation_event
-from .execution_boundary import release_or_settle_generation
+from .execution_boundary import (
+    release_or_settle_generation,
+    release_would_absorb_upstream_cost,
+)
 from .lease import is_cancelled
 from .retry_state import (
     RUNNING_GENERATION_STATUSES,
@@ -40,6 +44,7 @@ async def raise_if_generation_interrupted(
 ) -> None:
     if lease_lost.is_set():
         raise LeaseLost(f"generation lease lost {reason}")
+    force_next_cancellation_check(task_id)
     if await is_cancelled(redis, task_id):
         raise TaskCancelled(reason)
 
@@ -56,6 +61,7 @@ async def settle_existing_generated_image(
     task_started_at: float,
     services: RunGenerationDeps,
 ) -> Literal["failed", "succeeded"]:
+    force_next_cancellation_check(task_id)
     if await is_cancelled(redis, task_id):
         cancel_message = "cancelled before existing image settlement"
         result = await session.execute(
@@ -63,7 +69,10 @@ async def settle_existing_generated_image(
                 task_id,
                 generation.attempt,
                 statuses=(GenerationStatus.QUEUED.value,),
-            ).values(
+                allow_cancel_requested=True,
+            )
+            .where(Generation.cancel_requested_at.is_not(None))
+            .values(
                 status=GenerationStatus.CANCELED.value,
                 progress_stage=GenerationStage.FINALIZING,
                 finished_at=datetime.now(timezone.utc),
@@ -79,12 +88,22 @@ async def settle_existing_generated_image(
             MessageStatus.CANCELED,
         ):
             message.status = MessageStatus.FAILED
-        await release_or_settle_generation(
-            services.billing,
-            session,
-            generation,
-            reason=EC.CANCELLED.value,
-        )
+        # 既有图片意味着此前尝试已在上游产出并计费:一旦收据证实当前 dispatch
+        # 已收到响应,取消也走结算而不是退款(纯转嫁)。
+        if release_would_absorb_upstream_cost(None, generation):
+            await services.billing.settle_unknown_upstream(
+                session,
+                generation,
+                reason=EC.CANCELLED.value,
+                knowledge="incurred",
+            )
+        else:
+            await release_or_settle_generation(
+                services.billing,
+                session,
+                generation,
+                reason=EC.CANCELLED.value,
+            )
         failure_delivery = stage_generation_event(
             session,
             user_id,
@@ -147,17 +166,11 @@ async def settle_existing_generated_image(
                 {
                     "image_id": existing_image.id,
                     "from_generation_id": task_id,
-                    "actual_size": (
-                        f"{existing_image.width}x{existing_image.height}"
-                    ),
-                    "url": services.artifacts.public_url(
-                        existing_image.storage_key
-                    ),
+                    "actual_size": (f"{existing_image.width}x{existing_image.height}"),
+                    "url": services.artifacts.public_url(existing_image.storage_key),
                 }
             ],
-            "final_size": (
-                f"{existing_image.width}x{existing_image.height}"
-            ),
+            "final_size": (f"{existing_image.width}x{existing_image.height}"),
         },
     )
     await session.commit()
@@ -197,7 +210,10 @@ async def finalize_running_generation_cancel(
                     task_id,
                     attempt,
                     statuses=RUNNING_GENERATION_STATUSES,
-                ).values(
+                    allow_cancel_requested=True,
+                )
+                .where(Generation.cancel_requested_at.is_not(None))
+                .values(
                     status=GenerationStatus.CANCELED.value,
                     progress_stage=GenerationStage.FINALIZING,
                     finished_at=datetime.now(timezone.utc),
@@ -215,12 +231,23 @@ async def finalize_running_generation_cancel(
                 message.status = MessageStatus.FAILED
             generation = await session.get(Generation, task_id)
             if generation is not None:
-                await release_or_settle_generation(
-                    services.billing,
-                    session,
-                    generation,
-                    reason="cancelled",
-                )
+                # 取消前若当前 dispatch 已收到响应,上游成本已经发生,必须结算
+                # 而不是 release(reason 是触发取消的异常,本地失败不满足决策表
+                # 的「适配层已证明未计费」前提)。
+                if release_would_absorb_upstream_cost(reason, generation):
+                    await services.billing.settle_unknown_upstream(
+                        session,
+                        generation,
+                        reason="cancelled",
+                        knowledge="incurred",
+                    )
+                else:
+                    await release_or_settle_generation(
+                        services.billing,
+                        session,
+                        generation,
+                        reason="cancelled",
+                    )
             failure_delivery = stage_generation_event(
                 session,
                 user_id,

@@ -24,6 +24,10 @@ from lumen_core.constants import (
     task_channel,
 )
 from lumen_core.models import Generation, Message
+from lumen_core.upstream_billing import (
+    has_proven_undelivered_dispatch,
+    has_upstream_dispatch_receipt,
+)
 
 from ...provider_runtime.errors import UpstreamError
 from ...upstream_parts import GeneratedImageResult
@@ -50,6 +54,181 @@ RETRY_BACKOFF_MAX_SECONDS = 15 * 60
 RUNNING_GENERATION_STATUSES = (GenerationStatus.RUNNING.value,)
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+
+
+class _GenerationExecutionTaskId(str):
+    execution_epoch: int
+
+    def __new__(
+        cls,
+        task_id: str,
+        execution_epoch: int,
+    ) -> _GenerationExecutionTaskId:
+        value = super().__new__(cls, task_id)
+        value.execution_epoch = max(0, int(execution_epoch))
+        return value
+
+
+def generation_execution_epoch(task_or_state: object) -> int:
+    task = getattr(task_or_state, "generation", task_or_state)
+    try:
+        return max(0, int(getattr(task, "execution_epoch", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def generation_execution_identity(execution_epoch: int, attempt: int) -> int:
+    epoch = max(0, int(execution_epoch))
+    retry_attempt = max(0, int(attempt))
+    return (epoch << 32) | retry_attempt
+
+
+def generation_execution_trace_id(trace_id: str, execution_epoch: int) -> str:
+    """Keep provider idempotency stable inside one epoch and rotate on manual retry."""
+
+    value = str(trace_id).strip()
+    prefix, separator, suffix = value.rpartition(":execution:")
+    if separator and suffix.isdigit():
+        value = prefix
+    return f"{value}:execution:{max(0, int(execution_epoch))}"
+
+
+def generation_execution_task_id(
+    task_id: str,
+    execution_epoch: int,
+) -> str:
+    return _GenerationExecutionTaskId(str(task_id), execution_epoch)
+
+
+def current_generation_execution_epoch(task_id: str) -> int | None:
+    value = getattr(task_id, "execution_epoch", None)
+    if value is None:
+        return None
+    return max(0, int(value))
+
+
+def generation_dispatch_requires_unknown_settlement(state: Any) -> bool:
+    request = state.gen_upstream_request_snapshot or {}
+    execution_epoch = generation_execution_epoch(state)
+    return bool(
+        has_upstream_dispatch_receipt(
+            request,
+            execution_epoch=execution_epoch,
+        )
+        and not has_proven_undelivered_dispatch(
+            request,
+            execution_epoch=execution_epoch,
+        )
+    )
+
+
+async def finalize_generation_cancel_unknown(state: Any) -> None:
+    await _finalize_generation_unknown(
+        state,
+        status=GenerationStatus.CANCELED.value,
+        code=EC.CANCELLED.value,
+        error_message="cancelled by user",
+        allow_cancel_requested=True,
+    )
+
+
+async def finalize_generation_result_unknown(
+    state: Any,
+    exc: BaseException,
+) -> None:
+    await _finalize_generation_unknown(
+        state,
+        status=GenerationStatus.FAILED.value,
+        code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        error_message=str(exc)[:2000] or "upstream result is unknown",
+        allow_cancel_requested=False,
+    )
+
+
+async def _finalize_generation_unknown(
+    state: Any,
+    *,
+    status: str,
+    code: str,
+    error_message: str,
+    allow_cancel_requested: bool,
+) -> None:
+    delivery = None
+    try:
+        async with state.services.store.session() as session:
+            result = await session.execute(
+                generation_attempt_update(
+                    state.task_id,
+                    state.attempt,
+                    statuses=(GenerationStatus.RUNNING.value,),
+                    allow_cancel_requested=allow_cancel_requested,
+                    execution_epoch=generation_execution_epoch(state),
+                ).values(
+                    status=status,
+                    progress_stage=GenerationStage.FINALIZING,
+                    finished_at=datetime.now(timezone.utc),
+                    error_code=code,
+                    error_message=error_message,
+                )
+            )
+            ensure_generation_updated(result, state.task_id, state.attempt)
+            message_row = await session.get(Message, state.message_id)
+            if message_row is not None and message_row.status not in (
+                MessageStatus.SUCCEEDED,
+                MessageStatus.FAILED,
+                MessageStatus.CANCELED,
+            ):
+                message_row.status = MessageStatus.FAILED
+            generation = await session.get(Generation, state.task_id)
+            if generation is None:
+                raise LookupError(f"generation missing: {state.task_id}")
+            await state.services.billing.settle_unknown_upstream(
+                session,
+                generation,
+                reason=code,
+                knowledge="unknown",
+            )
+            delivery = stage_generation_event(
+                session,
+                state.user_id,
+                state.channel,
+                EV_GEN_FAILED,
+                {
+                    "generation_id": state.task_id,
+                    "message_id": state.message_id,
+                    "execution_epoch": generation_execution_epoch(state),
+                    "attempt": state.attempt,
+                    "code": code,
+                    "message": error_message,
+                    "retriable": False,
+                },
+            )
+            await session.commit()
+            await state.services.billing.flush_after_commit(session)
+    except StaleGenerationAttempt as exc:
+        logger.info(
+            "generation unknown settlement superseded task=%s epoch=%s "
+            "attempt=%s err=%s",
+            state.task_id,
+            generation_execution_epoch(state),
+            state.attempt,
+            exc,
+        )
+        state.task_outcome = "stale_attempt"
+        return
+    if delivery is None:
+        raise RuntimeError("generation unknown settlement event was not staged")
+    await state.services.events.deliver(state.redis, delivery)
+    state.task_outcome = "failed"
+
+
+def _expected_execution_epoch(
+    task_id: str,
+    execution_epoch: int | None,
+) -> int | None:
+    if execution_epoch is not None:
+        return max(0, int(execution_epoch))
+    return current_generation_execution_epoch(task_id)
 
 
 def bounded_next_attempt(current_attempt: int | None) -> tuple[int, bool]:
@@ -98,13 +277,22 @@ def generation_attempt_update(
     attempt_epoch: int,
     *,
     statuses: tuple[str, ...] | None = None,
+    allow_cancel_requested: bool = False,
+    execution_epoch: int | None = None,
 ) -> Any:
     statement = update(Generation).where(
         Generation.id == task_id,
         Generation.attempt == attempt_epoch,
     )
+    expected_execution_epoch = _expected_execution_epoch(task_id, execution_epoch)
+    if expected_execution_epoch is not None:
+        statement = statement.where(
+            Generation.execution_epoch == expected_execution_epoch
+        )
     if statuses:
         statement = statement.where(Generation.status.in_(statuses))
+    if not allow_cancel_requested:
+        statement = statement.where(Generation.cancel_requested_at.is_(None))
     return statement
 
 
@@ -124,16 +312,46 @@ async def ensure_generation_attempt_current(
     session: Any,
     task_id: str,
     attempt_epoch: int,
+    *,
+    execution_epoch: int | None = None,
 ) -> None:
-    current_attempt = (
+    current = (
         await session.execute(
-            select(Generation.attempt).where(Generation.id == task_id).with_for_update()
+            select(Generation.attempt, Generation.execution_epoch)
+            .where(Generation.id == task_id)
+            .with_for_update()
+        )
+    ).one_or_none()
+    expected_execution_epoch = _expected_execution_epoch(task_id, execution_epoch)
+    current_attempt = current[0] if current is not None else None
+    current_execution_epoch = current[1] if current is not None else None
+    if current_attempt != attempt_epoch or (
+        expected_execution_epoch is not None
+        and current_execution_epoch != expected_execution_epoch
+    ):
+        raise StaleGenerationAttempt(
+            f"generation {task_id} execution moved from "
+            f"epoch={expected_execution_epoch} attempt={attempt_epoch} to "
+            f"epoch={current_execution_epoch} attempt={current_attempt}"
+        )
+
+
+async def ensure_generation_execution_current(
+    session: Any,
+    task_id: str,
+    execution_epoch: int,
+) -> None:
+    current_epoch = (
+        await session.execute(
+            select(Generation.execution_epoch)
+            .where(Generation.id == task_id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
-    if current_attempt != attempt_epoch:
+    if current_epoch != max(0, int(execution_epoch)):
         raise StaleGenerationAttempt(
-            f"generation {task_id} attempt moved from "
-            f"{attempt_epoch} to {current_attempt}"
+            f"generation {task_id} execution epoch moved from "
+            f"{execution_epoch} to {current_epoch}"
         )
 
 
@@ -187,6 +405,7 @@ async def mark_generation_attempt_failed(
                 {
                     "generation_id": task_id,
                     "message_id": message_id,
+                    "execution_epoch": current_generation_execution_epoch(task_id),
                     "code": error_code,
                     "message": error_message,
                     "retriable": retriable,
@@ -298,6 +517,7 @@ async def mark_generation_attempt_retrying(
             "generation_id": task_id,
             "message_id": message_id,
             "attempt": attempt,
+            "execution_epoch": current_generation_execution_epoch(task_id),
             "max_attempts": max_attempts,
             "retry_delay_seconds": delay,
             "error_code": error_code,
@@ -337,6 +557,20 @@ async def maybe_requeue_stale_generation_attempt(
                     .with_for_update(skip_locked=True)
                 )
             ).one_or_none()
+            expected_execution_epoch = current_generation_execution_epoch(task_id)
+            if (
+                row is not None
+                and expected_execution_epoch is not None
+                and (
+                    await session.execute(
+                        select(Generation.execution_epoch).where(
+                            Generation.id == task_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                != expected_execution_epoch
+            ):
+                return False
             if row is None:
                 return False
             _status, message_id, user_id = row

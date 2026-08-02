@@ -34,7 +34,7 @@ class RuntimeSlot(Generic[T]):
             self._default = None
 
     def current(self) -> T:
-        runtime = self._active.get() or self._default
+        runtime = self.current_or_none()
         if runtime is None and self._default_factory is not None:
             with self._default_lock:
                 if self._default is None:
@@ -43,6 +43,9 @@ class RuntimeSlot(Generic[T]):
         if runtime is None:
             raise RuntimeError("task runtime is not configured")
         return runtime
+
+    def current_or_none(self) -> T | None:
+        return self._active.get() or self._default
 
     @contextmanager
     def use(self, runtime: T) -> Iterator[None]:

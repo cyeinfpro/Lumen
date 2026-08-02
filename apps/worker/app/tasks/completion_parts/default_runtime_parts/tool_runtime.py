@@ -28,6 +28,7 @@ class CompletionToolInsufficientBalance(UpstreamError):
 class ToolImageServiceDependencies:
     default_write_files: Callable[..., Any]
     default_cleanup_on_error: Callable[..., Any]
+    default_delete_files: Callable[..., Any]
     reserve_budget: Callable[..., Any]
     format_and_meta: Callable[..., Any]
     sha256: Callable[[bytes], str]
@@ -173,6 +174,11 @@ def build_completion_tool_image_service(
         if storage_writes is None
         else storage_writes.cleanup_on_error
     )
+    delete_files = (
+        dependencies.default_delete_files
+        if storage_writes is None
+        else storage_writes.delete_files
+    )
     usage_hooks = tool_images.ToolImageUsageHooks(
         acquire_lock=dependencies.acquire_lock,
         completion_model=dependencies.completion_model,
@@ -192,6 +198,9 @@ def build_completion_tool_image_service(
         repository=CompletionToolImageRepository(
             session_factory=dependencies.session_factory,
             new_id=dependencies.new_id,
+            acquire_task_lock=dependencies.acquire_lock,
+            completion_model=dependencies.completion_model,
+            superseded_error_type=dependencies.superseded_error_type,
             record_usage=partial(
                 tool_images._record_completion_tool_image_usage,
                 hooks=usage_hooks,
@@ -204,6 +213,7 @@ def build_completion_tool_image_service(
         storage=CompletionToolImageStorage(
             write_files=write_files,
             cleanup_on_error=cleanup_on_error,
+            delete_files=delete_files,
         ),
         events=CompletionToolImageEvents(
             publish=dependencies.publish_event,

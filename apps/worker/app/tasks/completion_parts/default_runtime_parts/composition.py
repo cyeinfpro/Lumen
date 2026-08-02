@@ -103,6 +103,7 @@ from ..artifact_codec import (
 )
 from ..artifact_storage import (
     cleanup_completion_image_files_on_error as _cleanup_storage_on_error,
+    delete_completion_image_files as _delete_storage_files,
     write_completion_image_files as _write_generation_files,
 )
 from ..citation_text import (
@@ -204,6 +205,7 @@ from ....upstream_parts.responses import (
 )
 
 __all__ = [name for name in tuple(locals()) if not name.startswith("__")]
+
 
 @dataclass(frozen=True, slots=True)
 class CompletionAdapterCallbacks:
@@ -327,9 +329,7 @@ def build_bindings(
             _fallback_completion_tool_image_tokens=(
                 completion_billing.fallback_completion_tool_image_tokens
             ),
-            _settle_cancelled_completion_billing=(
-                _settle_cancelled_completion_billing
-            ),
+            _settle_cancelled_completion_billing=(_settle_cancelled_completion_billing),
             _settle_failed_completion_billing=callbacks.settle_failed_billing,
             byok_error_message=byok_error_message,
             byok_error_to_generation_code=byok_error_to_generation_code,

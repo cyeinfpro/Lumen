@@ -285,6 +285,9 @@ def test_completion_runtime_binds_injected_tool_image_storage() -> None:
         ) -> list[str]:
             return []
 
+        async def delete_files(self, _keys: list[str]) -> None:
+            return None
+
         @asynccontextmanager
         async def cleanup_on_error(self, _keys: list[str]):
             yield
@@ -299,6 +302,7 @@ def test_completion_runtime_binds_injected_tool_image_storage() -> None:
 
     assert service.storage.write_files.__self__ is storage_writes
     assert service.storage.cleanup_on_error.__self__ is storage_writes
+    assert service.storage.delete_files.__self__ is storage_writes
 
 
 def test_completion_runtime_binds_explicit_image_upstream_runtime() -> None:

@@ -81,6 +81,8 @@ from .context_summary_parts.upstream_payloads import (
 logger = logging.getLogger(__name__)
 _SUMMARY_MODEL = _config.SUMMARY_MODEL
 _SUMMARY_MAX_SEGMENTS = _config.SUMMARY_MAX_SEGMENTS
+
+
 def _message_to_summary_line(
     msg: Message,
     image_captions: Mapping[str, str] | None = None,
@@ -92,10 +94,12 @@ def _message_to_summary_line(
         truncate_fn=_truncate,
         summarize_text_fn=_summarize_text_blob,
     )
-async def _message_position(
-    session: Any, message_id: str
-) -> tuple[Any, str] | None:
+
+
+async def _message_position(session: Any, message_id: str) -> tuple[Any, str] | None:
     return await _selection.message_position(session, message_id)
+
+
 async def _load_messages_for_summary(
     session: Any,
     conv_id: str,
@@ -109,8 +113,12 @@ async def _load_messages_for_summary(
         before_boundary_id,
         position_loader=_message_position,
     )
+
+
 async def _release_business_transaction(session: Any) -> None:
     await _persistence.release_business_transaction(session)
+
+
 async def _caption_images_for_summary(
     session: Any,
     messages: Sequence[Message],
@@ -125,6 +133,8 @@ async def _caption_images_for_summary(
         release_business_transaction=_release_business_transaction,
         logger=logger,
     )
+
+
 def _summary_response_body(
     input_text: str,
     *,
@@ -139,6 +149,8 @@ def _summary_response_body(
         instructions=instructions,
         reasoning_effort=_config.SUMMARY_REASONING_EFFORT,
     )
+
+
 def _summary_upstream_runtime(
     *,
     get_pool: Callable[[], Awaitable[Any]],
@@ -161,6 +173,8 @@ def _summary_upstream_runtime(
         retry_attempts=_config.PER_PROVIDER_RETRY_ATTEMPTS,
         retry_backoff_s=_config.PER_PROVIDER_RETRY_BACKOFF_S,
     )
+
+
 async def _call_summary_upstream(
     input_text: str,
     target_tokens: int,
@@ -180,6 +194,8 @@ async def _call_summary_upstream(
         image_upstream_runtime=image_upstream_runtime,
         runtime_factory=_summary_upstream_runtime,
     )
+
+
 def _local_fallback_summary_text(
     *,
     previous_summary: str | None,
@@ -197,6 +213,8 @@ def _local_fallback_summary_text(
         message_to_line=_message_to_summary_line,
         truncate_fn=_truncate,
     )
+
+
 async def _call_summary_upstream_compatible(
     input_text: str,
     target_tokens: int,
@@ -230,6 +248,8 @@ async def _call_summary_upstream_compatible(
             extra_instruction=extra_instruction,
             **runtime_kwargs,
         )
+
+
 def _bounded_summary_segments(
     segments: Sequence[_SummarySegment],
 ) -> tuple[list[_SummarySegment], str | None]:
@@ -333,6 +353,7 @@ async def _segment_and_summarize(
                 _call_summary_upstream_compatible,
                 image_upstream_runtime=execution.image_upstream_runtime,
             ),
+            before_upstream=execution.before_upstream,
             compose_input=_compose_summary_input,
             plan_segments=_summary_segments_by_budget,
             bound_segments=_bounded_summary_segments,
@@ -467,10 +488,25 @@ async def _renew_summary_lock_loop(
     )
 
 
-async def _read_current_summary(
-    session: Any, conv_id: str
-) -> dict[str, Any] | None:
+async def _read_current_summary(session: Any, conv_id: str) -> dict[str, Any] | None:
     return await _persistence.read_current_summary(session, conv_id, logger=logger)
+
+
+async def _lock_active_summary_context(
+    session: Any,
+    conv_id: str,
+    *,
+    user_id: str,
+) -> bool:
+    return (
+        await _persistence.lock_active_summary_context(
+            session,
+            conv_id,
+            user_id=user_id,
+            logger=logger,
+        )
+        is not None
+    )
 
 
 async def _cas_write_summary(
@@ -506,6 +542,7 @@ def _service_dependencies() -> _service.SummaryServiceDependencies:
         renew_lock=_renew_summary_lock_loop,
         read_summary=_read_current_summary,
         write_summary=_cas_write_summary,
+        lock_active_context=_lock_active_summary_context,
         release_transaction=_release_business_transaction,
         delete_partial=_safe_delete_partial,
         publish_event=_publish_compaction_event,
@@ -585,6 +622,7 @@ async def manual_compact_conversation(
 
 __all__ = [
     "_call_summary_upstream",
+    "_lock_active_summary_context",
     "_load_messages_for_summary",
     "_message_to_summary_line",
     "_segment_and_summarize",

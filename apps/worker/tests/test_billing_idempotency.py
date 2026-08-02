@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app import billing as worker_billing
+from lumen_core import billing_estimates
 from lumen_core.pricing import CostBreakdown
 
 
@@ -148,6 +149,90 @@ async def test_settle_generation_settles_hold_when_pricing_disappears(
 
     assert [row.event_type for row in session.added] == [
         "billing.pricing.hold_fallback_after_upstream",
+        "wallet.settle.image",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_settle_generation_charges_released_hold_when_pricing_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 定价缺失且 hold 已被先前 release 消费：按退回金额补记，不能吞上游成本。
+    session = _Session()
+    generation = SimpleNamespace(
+        id="gen-1",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={"billing_tier": "1k"},
+    )
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return True
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def missing_price(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+        raise worker_billing.billing_core.BillingError(
+            "PRICING_MISSING",
+            "pricing disappeared",
+            503,
+        )
+
+    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def existing_consumption(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind="release",
+            amount_micro=8000,
+            idempotency_key="release:gen-1",
+        )
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        assert kwargs["actual_micro"] == 8000
+        return SimpleNamespace(
+            id="settle-1",
+            amount_micro=-8000,
+            balance_after=-8000,
+            hold_after=0,
+            meta=kwargs["meta"],
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(
+        worker_billing, "_allow_negative_balance", allow_negative_balance
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "held_amount_for_ref", held_amount)
+    monkeypatch.setattr(
+        worker_billing,
+        "existing_ref_consumption_tx",
+        existing_consumption,
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_image_cost_for_tier",
+        missing_price,
+    )
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert [row.event_type for row in session.added] == [
+        "billing.pricing.released_hold_fallback_after_upstream",
         "wallet.settle.image",
     ]
 
@@ -702,8 +787,23 @@ async def test_charge_completion_uses_retry_billing_ref(
     )
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
     monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
+    # 两个入口都要拦:直接经 billing_core 模块属性的调用,以及
+    # estimate_completion_cost 在 billing_estimates 命名空间内的内部调用
+    # (拆分后与 billing 模块属性解耦)。
     monkeypatch.setattr(
         worker_billing.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    # estimate_completion_cost 在 billing_estimates 命名空间内直接调用
+    # estimate_completion_breakdown(拆分后与 billing 模块属性解耦),需一并拦截。
+    monkeypatch.setattr(
+        billing_estimates,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    monkeypatch.setattr(
+        billing_estimates,
         "estimate_completion_breakdown",
         estimate_breakdown,
     )
@@ -718,9 +818,18 @@ async def test_charge_completion_uses_retry_billing_ref(
 
 
 @pytest.mark.asyncio
-async def test_charge_completion_image_cost_guard_locks_wallet_before_settle(
+async def test_charge_completion_settles_image_cost_in_full_when_balance_insufficient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Pure pass-through: low balance must not block settlement.
+
+    The upstream image output cost is already incurred and delivered by the
+    time charge_completion runs. Raising INSUFFICIENT_BALANCE here would leave
+    the user unbilled while the platform pays the provider. Settlement records
+    the full cost and overdraw_micro marks the deficit for collection; balance
+    gating happens before dispatch
+    (_ensure_completion_tool_image_wallet_budget), never at settlement.
+    """
     session = _Session()
     completion = SimpleNamespace(
         id="completion-1",
@@ -737,7 +846,7 @@ async def test_charge_completion_image_cost_guard_locks_wallet_before_settle(
         user_api_credential_id=None,
         upstream_request={},
     )
-    wallet_locks: list[tuple[bool, bool]] = []
+    calls: dict[str, Any] = {}
 
     async def account_mode(*_args: Any) -> str:
         return "wallet"
@@ -773,17 +882,16 @@ async def test_charge_completion_image_cost_guard_locks_wallet_before_settle(
             pricing_source="db",
         )
 
-    async def get_wallet(*_args: Any, **kwargs: Any) -> Any:
-        wallet_locks.append((bool(kwargs.get("lock")), bool(kwargs.get("create"))))
-        return SimpleNamespace(balance_micro=10)
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        calls["settle"] = kwargs
+        return SimpleNamespace(
+            id="tx-1",
+            amount_micro=-100,
+            balance_after=-70,
+            hold_after=0,
+            meta={**kwargs["meta"], "overdraw_micro": 70},
+        )
 
-    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
-        return 20
-
-    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("insufficient image budget must fail before settle")
-
-    monkeypatch.setattr(worker_billing, "AsyncSession", _Session)
     monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
     monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
     monkeypatch.setattr(worker_billing, "_cache_aware_enabled", cache_aware_enabled)
@@ -798,20 +906,25 @@ async def test_charge_completion_image_cost_guard_locks_wallet_before_settle(
         "estimate_completion_breakdown",
         estimate_breakdown,
     )
-    monkeypatch.setattr(worker_billing.billing_core, "get_wallet", get_wallet)
+    # estimate_completion_cost 在 billing_estimates 命名空间内直接调用
+    # estimate_completion_breakdown(拆分后与 billing 模块属性解耦),需一并拦截。
     monkeypatch.setattr(
-        worker_billing.billing_core,
-        "_held_amount_for_ref",
-        held_amount_for_ref,
+        billing_estimates,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
     )
-    monkeypatch.setattr(worker_billing.billing_core, "settle", fail_settle)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
     monkeypatch.setattr(worker_billing, "get_billing_cache", lambda: None)
 
-    with pytest.raises(worker_billing.billing_core.BillingError) as excinfo:
-        await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
+    await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
 
-    assert excinfo.value.code == "INSUFFICIENT_BALANCE"
-    assert wallet_locks == [(True, False)]
+    assert calls["settle"]["actual_micro"] == 100
+    assert calls["settle"]["allow_negative"] is False
+    assert calls["settle"]["meta"]["image_output_tokens"] == 200
+    assert any(
+        getattr(row, "event_type", None) == "wallet.overdrawn"
+        for row in session.added
+    )
 
 
 @pytest.mark.asyncio
@@ -993,6 +1106,13 @@ async def test_charge_completion_legacy_mode_folds_cache_tokens_into_input(
     monkeypatch.setattr(worker_billing, "_rate_multiplier_x10000", rate_multiplier)
     monkeypatch.setattr(
         worker_billing.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    # estimate_completion_cost 在 billing_estimates 命名空间内直接调用
+    # estimate_completion_breakdown(拆分后与 billing 模块属性解耦),需一并拦截。
+    monkeypatch.setattr(
+        billing_estimates,
         "estimate_completion_breakdown",
         estimate_breakdown,
     )
@@ -1235,6 +1355,13 @@ async def test_charge_completion_defers_window_increment_until_post_commit_flush
     )
     monkeypatch.setattr(
         worker_billing.billing_core,
+        "estimate_completion_breakdown",
+        estimate_breakdown,
+    )
+    # estimate_completion_cost 在 billing_estimates 命名空间内直接调用
+    # estimate_completion_breakdown(拆分后与 billing 模块属性解耦),需一并拦截。
+    monkeypatch.setattr(
+        billing_estimates,
         "estimate_completion_breakdown",
         estimate_breakdown,
     )
@@ -1618,6 +1745,7 @@ def _patch_unknown_upstream_settle(
     *,
     held: int,
     settled: list[dict[str, Any]],
+    consumed: Any = None,
 ) -> None:
     """把 settle_generation_unknown_upstream 的外部依赖钉成可断言的假实现。"""
 
@@ -1635,6 +1763,9 @@ def _patch_unknown_upstream_settle(
 
     async def held_amount(*_args: Any, **_kwargs: Any) -> int:
         return held
+
+    async def existing_consumption(*_args: Any, **_kwargs: Any) -> Any:
+        return consumed
 
     async def settle(
         _session: Any,
@@ -1657,6 +1788,11 @@ def _patch_unknown_upstream_settle(
     )
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
     monkeypatch.setattr(worker_billing, "held_amount_for_ref", held_amount)
+    monkeypatch.setattr(
+        worker_billing,
+        "existing_ref_consumption_tx",
+        existing_consumption,
+    )
     monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
 
 
@@ -1692,11 +1828,13 @@ async def test_unknown_upstream_settles_full_hold_instead_of_releasing(
 async def test_unknown_upstream_without_hold_only_records_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 没有 hold 可结算时不能凭空扣款，只留待对账记录。
+    # 从未建 hold、也没有被 release 消费过的 hold 时不能凭空扣款，只留待对账记录。
     session = _Session()
     generation = SimpleNamespace(id="gen-2", user_id="user-1", model="gpt-image-2")
     settled: list[dict[str, Any]] = []
-    _patch_unknown_upstream_settle(monkeypatch, held=0, settled=settled)
+    _patch_unknown_upstream_settle(
+        monkeypatch, held=0, settled=settled, consumed=None
+    )
 
     await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
         session,
@@ -1709,6 +1847,67 @@ async def test_unknown_upstream_without_hold_only_records_audit(
     assert len(session.added) == 1
     assert session.added[0].event_type == "billing.unresolved_after_upstream"
     assert session.added[0].details["scope"] == "image_result_unknown"
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstream_after_release_charges_released_amount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """先 release 后确认上游扣费：held 已被消费也要按退回金额补记（纯转嫁）。"""
+    session = _Session()
+    generation = SimpleNamespace(id="gen-2", user_id="user-1", model="gpt-image-2")
+    settled: list[dict[str, Any]] = []
+    consumed = SimpleNamespace(
+        kind="release",
+        amount_micro=4200,
+        idempotency_key="release:gen-2",
+    )
+    _patch_unknown_upstream_settle(
+        monkeypatch, held=0, settled=settled, consumed=consumed
+    )
+
+    await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
+        session,
+        generation,
+        reason="direct_image_result_unknown",
+        knowledge="incurred",
+    )
+
+    # 必须进入核心 settle 的 held=0 直扣分支，按被退回的 hold 金额扣款。
+    assert settled[0]["actual_micro"] == 4200
+    assert settled[0]["idempotency_key"] == "settle:gen-2"
+    event_types = [row.event_type for row in session.added]
+    assert "billing.pricing.released_hold_fallback_after_upstream" in event_types
+    assert "wallet.settle.image_result_unknown" in event_types
+
+
+@pytest.mark.asyncio
+async def test_unknown_upstream_prior_settle_still_audits_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 已存在真实 settle（不同 key）时不得再扣，只留对账记录。
+    session = _Session()
+    generation = SimpleNamespace(id="gen-3", user_id="user-1", model="gpt-image-2")
+    settled: list[dict[str, Any]] = []
+    consumed = SimpleNamespace(
+        kind="settle",
+        amount_micro=-4200,
+        idempotency_key="adjust:gen-3",
+    )
+    _patch_unknown_upstream_settle(
+        monkeypatch, held=0, settled=settled, consumed=consumed
+    )
+
+    await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
+        session,
+        generation,
+        reason="direct_image_result_unknown",
+        knowledge="incurred",
+    )
+
+    assert settled == []
+    assert len(session.added) == 1
+    assert session.added[0].event_type == "billing.unresolved_after_upstream"
 
 
 @pytest.mark.asyncio
@@ -1736,3 +1935,72 @@ async def test_unknown_upstream_replay_is_idempotent(
     assert settled == []
     assert len(session.added) == 1
     assert session.added[0].event_type == "wallet.settle.replay"
+
+
+@pytest.mark.asyncio
+async def test_completion_breakdown_uses_released_hold_when_pricing_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # completion 侧同款漏扣:定价缺失且 hold 已被先前 release 消费时,按退回
+    # 金额补记,不能吞掉已发生的上游成本。
+    from app.billing_parts import completion_pricing
+
+    session = _Session()
+    completion = SimpleNamespace(
+        id="comp-1",
+        user_id="user-1",
+        model="gpt-4o",
+        tokens_in=100,
+        tokens_out=50,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        upstream_request={},
+    )
+
+    async def missing_price(*_args: Any, **_kwargs: Any) -> Any:
+        raise worker_billing.billing_core.BillingError(
+            "PRICING_MISSING",
+            "pricing disappeared",
+            503,
+        )
+
+    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def existing_consumption(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind="release",
+            amount_micro=6000,
+            idempotency_key="release:comp-1",
+        )
+
+    deps = SimpleNamespace(
+        billing_core=worker_billing.billing_core,
+        completion_cost_breakdown=missing_price,
+        held_amount_for_ref=held_amount,
+        existing_ref_consumption_tx=existing_consumption,
+        audit=worker_billing._audit,
+    )
+
+    breakdown = await completion_pricing.resolve_completion_breakdown(
+        session,
+        completion,
+        billing_ref_id="comp-1",
+        usage=completion_pricing.completion_usage(
+            completion,
+            cache_aware=True,
+        ),
+        rate_multiplier=10_000,
+        service_tier="standard",
+        deps=deps,  # type: ignore[arg-type]
+    )
+
+    assert breakdown is not None
+    assert breakdown.actual_cost_micro == 6000
+    assert breakdown.pricing_source == "released_hold_fallback"
+    event_types = [row.event_type for row in session.added]
+    assert event_types == ["billing.pricing.released_hold_fallback_after_upstream"]

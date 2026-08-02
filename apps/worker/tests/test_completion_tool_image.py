@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 from PIL import Image as PILImage
 
+from app.artifact_commit import ArtifactAdoption
 from app.storage import LocalStorage
 from app.storage_writes import StorageWriteCoordinator
 from app.tasks.completion_parts import default_runtime as completion
@@ -77,6 +79,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    published_payloads: list[dict[str, Any]] = []
     expected_payload = {"image_id": "image-1"}
 
     async def ensure_budget(**_kwargs: Any) -> int:
@@ -101,11 +104,14 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
     async def store(_self: Any, **kwargs: Any) -> dict[str, Any]:
         events.append("storage_orm_stage")
         assert kwargs["raw_image"] == b"raw-image"
+        assert kwargs["attempt_epoch"] == 2
+        assert kwargs["execution_epoch"] == 7
         await kwargs["session"].commit()
         return expected_payload
 
-    async def publish(*_args: Any, **_kwargs: Any) -> None:
+    async def publish(*args: Any, **_kwargs: Any) -> None:
         events.append("sse_publish")
+        published_payloads.append(args[-1])
 
     @asynccontextmanager
     async def cleanup(_keys: list[str]):
@@ -115,6 +121,12 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         return []
 
     async def record_usage(**_kwargs: Any) -> None:
+        return None
+
+    async def acquire_task_lock(_session: Any, _task_id: str) -> None:
+        return None
+
+    async def delete_files(_keys: list[str]) -> None:
         return None
 
     service = CompletionToolImageService(
@@ -129,6 +141,9 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         repository=CompletionToolImageRepository(
             session_factory=lambda: Session(),
             new_id=lambda: "image-1",
+            acquire_task_lock=acquire_task_lock,
+            completion_model=object,
+            superseded_error_type=RuntimeError,
             record_usage=record_usage,
             image_model=object,
             image_variant_model=object,
@@ -138,6 +153,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         storage=CompletionToolImageStorage(
             write_files=write_files,
             cleanup_on_error=cleanup,
+            delete_files=delete_files,
         ),
         events=CompletionToolImageEvents(
             publish=publish,
@@ -154,6 +170,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         message_id="message-1",
         attempt=2,
         attempt_epoch=2,
+        execution_epoch=7,
         b64_image="encoded",
         revised_prompt="revised",
         reserved_tool_image_micro=5,
@@ -161,6 +178,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
 
     assert payload is expected_payload
     assert reserved == 17
+    assert payload["image_id"] == "image-1"
     assert events == [
         "budget",
         "decode",
@@ -169,6 +187,16 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         "commit",
         "session_exit",
         "sse_publish",
+    ]
+    assert published_payloads == [
+        {
+            "completion_id": "comp-1",
+            "message_id": "message-1",
+            "attempt": 2,
+            "attempt_epoch": 2,
+            "execution_epoch": 7,
+            "images": [expected_payload],
+        }
     ]
 
 
@@ -407,6 +435,7 @@ async def test_tool_image_usage_is_persisted_under_current_attempt_fence(
 ) -> None:
     row = SimpleNamespace(
         attempt=2,
+        execution_epoch=7,
         status=completion.CompletionStatus.STREAMING.value,
         upstream_request={},
         tokens_out=0,
@@ -439,6 +468,7 @@ async def test_tool_image_usage_is_persisted_under_current_attempt_fence(
         session=Session(),
         task_id="comp-1",
         attempt_epoch=2,
+        execution_epoch=7,
         budget_micro=100,
         hooks=hooks,
     )
@@ -446,11 +476,14 @@ async def test_tool_image_usage_is_persisted_under_current_attempt_fence(
         session=Session(),
         task_id="comp-1",
         attempt_epoch=2,
+        execution_epoch=7,
         budget_micro=200,
         hooks=hooks,
     )
 
     assert row.upstream_request["tool_image_reserved_micro"] == 300
+    assert row.upstream_request["completion_usage_execution_epoch"] == 7
+    assert row.upstream_request["completion_usage_attempt_epoch"] == 2
     assert row.image_output_tokens == 30
     assert row.tokens_out == 30
 
@@ -459,6 +492,7 @@ async def test_tool_image_usage_is_persisted_under_current_attempt_fence(
 async def test_tool_image_usage_rejects_superseded_attempt() -> None:
     row = SimpleNamespace(
         attempt=3,
+        execution_epoch=7,
         status=completion.CompletionStatus.STREAMING.value,
         upstream_request={},
     )
@@ -478,6 +512,7 @@ async def test_tool_image_usage_rejects_superseded_attempt() -> None:
             session=Session(),
             task_id="comp-1",
             attempt_epoch=2,
+            execution_epoch=7,
             budget_micro=100,
             hooks=tool_images.ToolImageUsageHooks(
                 acquire_lock=acquire_lock,
@@ -490,10 +525,89 @@ async def test_tool_image_usage_rejects_superseded_attempt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_image_commit_failure_removes_real_local_storage_files(
+async def test_tool_image_usage_rejects_committed_cancel_intent() -> None:
+    row = SimpleNamespace(
+        attempt=2,
+        execution_epoch=7,
+        status=completion.CompletionStatus.STREAMING.value,
+        cancel_requested_at=object(),
+        upstream_request={},
+    )
+
+    class Session:
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return row
+
+    async def acquire_lock(_session: Any, _task_id: str) -> None:
+        return None
+
+    async def fallback_tokens(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("cancelled completion must fail before usage calculation")
+
+    with pytest.raises(completion._CompletionEpochSuperseded):
+        await tool_images._record_completion_tool_image_usage(
+            session=Session(),
+            task_id="comp-1",
+            attempt_epoch=2,
+            execution_epoch=7,
+            budget_micro=100,
+            hooks=tool_images.ToolImageUsageHooks(
+                acquire_lock=acquire_lock,
+                completion_model=completion.Completion,
+                running_statuses=(completion.CompletionStatus.STREAMING.value,),
+                superseded_error_type=completion._CompletionEpochSuperseded,
+                fallback_image_tokens=fallback_tokens,
+            ),
+        )
+
+    assert row.upstream_request == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_image_usage_rejects_same_attempt_from_old_execution() -> None:
+    row = SimpleNamespace(
+        attempt=2,
+        execution_epoch=8,
+        status=completion.CompletionStatus.STREAMING.value,
+        cancel_requested_at=None,
+        upstream_request={},
+    )
+
+    class Session:
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return row
+
+    async def acquire_lock(_session: Any, _task_id: str) -> None:
+        return None
+
+    async def fallback_tokens(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("old execution must fail before usage calculation")
+
+    with pytest.raises(completion._CompletionEpochSuperseded):
+        await tool_images._record_completion_tool_image_usage(
+            session=Session(),
+            task_id="comp-1",
+            attempt_epoch=2,
+            execution_epoch=7,
+            budget_micro=100,
+            hooks=tool_images.ToolImageUsageHooks(
+                acquire_lock=acquire_lock,
+                completion_model=completion.Completion,
+                running_statuses=(completion.CompletionStatus.STREAMING.value,),
+                superseded_error_type=completion._CompletionEpochSuperseded,
+                fallback_image_tokens=fallback_tokens,
+            ),
+        )
+
+    assert row.upstream_request == {}
+
+
+def _tool_image_commit_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    outcome: ArtifactAdoption,
+) -> tuple[Any, type[Any], list[int], Any]:
     local_storage = LocalStorage(tmp_path)
     message = SimpleNamespace(content={})
     reserved: list[int] = []
@@ -517,23 +631,38 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
     class Session:
         def __init__(self) -> None:
             self.added: list[Any] = []
+            self.rolled_back = False
 
         def add(self, value: Any) -> None:
             self.added.append(value)
 
-        async def get(self, model: Any, _row_id: str) -> Any:
+        async def get(self, model: Any, _row_id: str, **_kwargs: Any) -> Any:
             return message if model is completion.Message else None
 
         async def commit(self) -> None:
             raise RuntimeError("commit failed")
 
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
     async def record_usage(**_kwargs: Any) -> None:
         return None
+
+    async def probe(
+        _self: CompletionToolImageService,
+        **_kwargs: Any,
+    ) -> ArtifactAdoption:
+        return outcome
 
     monkeypatch.setattr(
         tool_images,
         "_record_completion_tool_image_usage",
         record_usage,
+    )
+    monkeypatch.setattr(
+        CompletionToolImageService,
+        "_probe_tool_image_adoption",
+        probe,
     )
     coordinator = StorageWriteCoordinator(
         storage=local_storage,
@@ -543,12 +672,26 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
     service = completion._build_completion_tool_image_service(  # noqa: SLF001
         coordinator
     )
+    return service, Session, reserved, lease
+
+
+@pytest.mark.asyncio
+async def test_tool_image_confirmed_non_adoption_removes_storage_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, reserved, lease = _tool_image_commit_fixture(
+        tmp_path,
+        monkeypatch,
+        outcome=ArtifactAdoption.NOT_ADOPTED,
+    )
 
     with pytest.raises(RuntimeError, match="commit failed"):
         await service.store_tool_image(
-            session=Session(),
+            session=session_type(),
             task_id="comp-commit-failure",
             attempt_epoch=1,
+            execution_epoch=4,
             user_id="user-1",
             message_id="message-1",
             raw_image=_png_bytes(32, 24),
@@ -560,3 +703,164 @@ async def test_tool_image_commit_failure_removes_real_local_storage_files(
     assert reserved[0] > len(_png_bytes(32, 24))
     assert lease.released == 1
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_image_cancel_intent_rolls_back_and_removes_storage_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, _reserved, lease = _tool_image_commit_fixture(
+        tmp_path,
+        monkeypatch,
+        outcome=ArtifactAdoption.NOT_ADOPTED,
+    )
+
+    async def reject_cancelled_usage(**_kwargs: Any) -> None:
+        raise completion._CompletionEpochSuperseded(
+            "completion tool image superseded by cancel intent"
+        )
+
+    service = replace(
+        service,
+        repository=replace(
+            service.repository,
+            record_usage=reject_cancelled_usage,
+        ),
+    )
+    session = session_type()
+    with pytest.raises(
+        completion._CompletionEpochSuperseded,
+        match="cancel intent",
+    ):
+        await service.store_tool_image(
+            session=session,
+            task_id="comp-cancelled",
+            attempt_epoch=2,
+            execution_epoch=4,
+            user_id="user-1",
+            message_id="message-1",
+            raw_image=_png_bytes(32, 24),
+            revised_prompt=None,
+            billing_budget_micro=100,
+        )
+
+    assert session.rolled_back is True
+    assert lease.released == 1
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_image_lost_commit_ack_keeps_adopted_storage_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, _reserved, _lease = _tool_image_commit_fixture(
+        tmp_path,
+        monkeypatch,
+        outcome=ArtifactAdoption.ADOPTED,
+    )
+
+    payload = await service.store_tool_image(
+        session=session_type(),
+        task_id="comp-commit-adopted",
+        attempt_epoch=2,
+        execution_epoch=4,
+        user_id="user-1",
+        message_id="message-1",
+        raw_image=_png_bytes(32, 24),
+        revised_prompt=None,
+        billing_budget_micro=100,
+    )
+
+    files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert payload["image_id"]
+    assert len(files) == 4
+    assert all("/executions/4/attempts/2/" in str(path) for path in files)
+
+
+@pytest.mark.asyncio
+async def test_tool_image_unknown_commit_keeps_files_for_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, _reserved, _lease = _tool_image_commit_fixture(
+        tmp_path,
+        monkeypatch,
+        outcome=ArtifactAdoption.UNKNOWN,
+    )
+
+    with pytest.raises(
+        completion._CompletionEpochSuperseded,
+        match="commit outcome unknown",
+    ):
+        await service.store_tool_image(
+            session=session_type(),
+            task_id="comp-commit-unknown",
+            attempt_epoch=3,
+            execution_epoch=5,
+            user_id="user-1",
+            message_id="message-1",
+            raw_image=_png_bytes(32, 24),
+            revised_prompt=None,
+            billing_budget_micro=100,
+        )
+
+    files = [path for path in tmp_path.rglob("*") if path.is_file()]
+    assert len(files) == 4
+    assert all("/executions/5/attempts/3/" in str(path) for path in files)
+
+
+@pytest.mark.asyncio
+async def test_tool_image_adoption_rejects_same_attempt_from_old_execution() -> None:
+    completion_row = SimpleNamespace(
+        attempt=2,
+        execution_epoch=8,
+        user_id="user-1",
+    )
+    image_row = SimpleNamespace(
+        user_id="user-1",
+        storage_key="key-orig",
+        sha256="sha-1",
+        metadata_jsonb={
+            "completion_id": "comp-1",
+            "completion_attempt_epoch": 2,
+            "completion_execution_epoch": 7,
+        },
+    )
+
+    class Session:
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, model: Any, _row_id: str, **_kwargs: Any) -> Any:
+            if model is completion.Completion:
+                return completion_row
+            return image_row
+
+    async def acquire_task_lock(_session: Any, _task_id: str) -> None:
+        return None
+
+    service = SimpleNamespace(
+        repository=SimpleNamespace(
+            session_factory=lambda: Session(),
+            acquire_task_lock=acquire_task_lock,
+            completion_model=completion.Completion,
+            image_model=object(),
+        )
+    )
+
+    result = await CompletionToolImageService._probe_tool_image_adoption(
+        service,  # type: ignore[arg-type]
+        task_id="comp-1",
+        attempt_epoch=2,
+        execution_epoch=7,
+        image_id="image-1",
+        key_orig="key-orig",
+        sha="sha-1",
+    )
+
+    assert result is ArtifactAdoption.UNKNOWN

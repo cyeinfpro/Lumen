@@ -1,8 +1,7 @@
 """对账器把卡死任务判超时时的计费动作。
 
-核心不变式（纯转嫁）：**超时不等于可以退款**。只有能证明上游请求从未发出去
-才 release，其余一律按 hold 全额结算。任务被 worker 认领过就意味着上游可能
-已经计了费，此时退款等于平台替用户吸收这笔成本。
+核心不变式（纯转嫁）：**超时不等于可以退款**。可信实际用量已持久化时按实际
+用量结算；只有没有实际用量证据时才按 hold 结算。能证明请求从未发出才 release。
 """
 
 from __future__ import annotations
@@ -13,12 +12,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from lumen_core.constants import CompletionStatus
 
 from app.reconciliation.contracts import ReconcileContext
 from app.reconciliation.bonus_billing import BONUS_BILLING_RECONCILER
 from app.reconciliation.task_domains import (
     COMPLETION_RECONCILER,
     GENERATION_RECONCILER,
+    RECON_RESULT_UNKNOWN_CODE,
     RECON_TIMEOUT_CODE,
 )
 
@@ -34,13 +35,30 @@ class _RecordingBilling:
         return _call
 
     def __getattr__(self, name: str):
-        if name.startswith("release_") or name.startswith("settle_"):
+        if (
+            name.startswith("release_")
+            or name.startswith("settle_")
+            or name.startswith("charge_")
+        ):
             return self._record(name)
         raise AttributeError(name)
 
 
 class _NullSession:
     async def get(self, _model: Any, _pk: Any) -> None:
+        return None
+
+
+class _TaskSession(_NullSession):
+    def __init__(self, task: Any) -> None:
+        self.task = task
+
+    async def execute(self, _statement: Any) -> _ScalarResult:
+        return _ScalarResult([self.task])
+
+
+class _ExpiredLeaseRedis:
+    async def get(self, _key: str) -> None:
         return None
 
 
@@ -95,8 +113,42 @@ def _task(
     status: str,
     attempt: int,
     *,
+    dispatch_started: bool = False,
     response_received: bool = False,
+    execution_epoch: int = 3,
+    receipt_epoch: int | None = None,
+    stable_idempotency: bool = False,
+    usage_epoch: int | None = None,
+    tokens_out: int = 0,
+    image_output_tokens: int = 0,
 ) -> SimpleNamespace:
+    marker_epoch = execution_epoch if receipt_epoch is None else receipt_epoch
+    upstream_request: dict[str, Any] = {}
+    if dispatch_started or response_received:
+        upstream_request.update(
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": attempt,
+                "upstream_dispatch_execution_epoch": marker_epoch,
+            }
+        )
+    if response_received:
+        upstream_request.update(
+            {
+                "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+                "upstream_response_attempt": attempt,
+                "upstream_response_execution_epoch": marker_epoch,
+            }
+        )
+    if stable_idempotency:
+        upstream_request.update(
+            {
+                "provider_idempotency_key": "provider-key-1",
+                "provider_idempotency_stable": True,
+            }
+        )
+    if usage_epoch is not None:
+        upstream_request["completion_usage_execution_epoch"] = usage_epoch
     return SimpleNamespace(
         id="task-1",
         user_id="user-1",
@@ -104,15 +156,21 @@ def _task(
         status=status,
         progress_stage=status,
         attempt=attempt,
+        execution_epoch=execution_epoch,
         error_code=None,
         error_message=None,
         finished_at=None,
         updated_at=None,
-        upstream_request=(
-            {"upstream_response_received_at": "2026-07-26T00:00:00+00:00"}
-            if response_received
-            else {}
-        ),
+        upstream_request=upstream_request,
+        cancel_requested_at=None,
+        tokens_in=0,
+        tokens_out=tokens_out,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=image_output_tokens,
     )
 
 
@@ -185,6 +243,108 @@ async def test_response_receipt_settles_even_after_requeue(
         "reason": RECON_TIMEOUT_CODE,
         "knowledge": "unknown",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method_name",
+    ["_apply_timeout", "_apply_result_unknown", "_apply_cancel"],
+)
+async def test_completion_reconciliation_charges_trusted_persisted_usage(
+    method_name: str,
+) -> None:
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        1,
+        execution_epoch=7,
+        usage_epoch=7,
+        tokens_out=41,
+        image_output_tokens=37,
+    )
+    billing = _RecordingBilling()
+
+    await getattr(COMPLETION_RECONCILER, method_name)(_context(billing), task)
+
+    assert billing.calls == [("charge_completion", {})]
+
+
+@pytest.mark.asyncio
+async def test_completion_old_usage_marker_falls_back_to_unknown_hold() -> None:
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        1,
+        response_received=True,
+        execution_epoch=8,
+        usage_epoch=7,
+        tokens_out=41,
+        image_output_tokens=37,
+    )
+
+    billing = await _timeout(COMPLETION_RECONCILER, task)
+
+    assert billing.calls == [
+        (
+            "settle_completion_unknown_upstream",
+            {"reason": RECON_TIMEOUT_CODE, "knowledge": "unknown"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_old_response_receipt_cannot_settle_new_execution_hold() -> None:
+    task = _task(
+        "running",
+        1,
+        response_received=True,
+        execution_epoch=8,
+        receipt_epoch=7,
+    )
+
+    billing = await _timeout(GENERATION_RECONCILER, task)
+
+    assert billing.calls == [("release_generation", {"reason": RECON_TIMEOUT_CODE})]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_without_response_converges_to_result_unknown() -> None:
+    task = _task("running", 1, dispatch_started=True)
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+
+    result = await GENERATION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert task.status == "failed"
+    assert task.error_code == RECON_RESULT_UNKNOWN_CODE
+    assert [name for name, _ in billing.calls] == ["settle_generation_unknown_upstream"]
+    assert billing.calls[0][1] == {
+        "reason": RECON_RESULT_UNKNOWN_CODE,
+        "knowledge": "unknown",
+    }
+    assert len(result.pending_outbox) == 1
+
+
+@pytest.mark.asyncio
+async def test_stable_provider_idempotency_allows_safe_requeue() -> None:
+    task = _task(
+        "running",
+        1,
+        dispatch_started=True,
+        stable_idempotency=True,
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+
+    result = await GENERATION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert task.status == "queued"
+    assert billing.calls == []
+    assert len(result.pending_outbox) == 2
 
 
 @pytest.mark.asyncio

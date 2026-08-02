@@ -328,6 +328,46 @@ async def abandon_memory_extraction_claim(
         return True
 
 
+async def revalidate_memory_extraction_claim(
+    dependencies: MemoryExtractionStateDependencies,
+    claim: MemoryExtractionClaim,
+) -> bool:
+    """Release a short deletion fence before sending claim text externally."""
+    async with dependencies.session_factory() as session:
+        entities = await lock_memory_extraction_entities(
+            session,
+            conversation_id=claim.conversation_id,
+            source_message_id=claim.source_message_id,
+            assistant_message_id=claim.assistant_message_id,
+            user_id=claim.user_id,
+        )
+        run = await lock_memory_extraction_run(
+            session,
+            event_id=claim.event_id,
+            advisory_xact_lock=dependencies.advisory_xact_lock,
+        )
+        if run is None or not memory_extraction_claim_matches(run, claim):
+            await session.rollback()
+            return False
+        invalid_reason = invalid_memory_extraction_context(
+            entities,
+            conversation_id=claim.conversation_id,
+            source_message_id=claim.source_message_id,
+            assistant_message_id=claim.assistant_message_id,
+            user_id=claim.user_id,
+        )
+        if invalid_reason is not None:
+            cancel_memory_extraction_run(
+                run,
+                reason=invalid_reason,
+                now=dependencies.now(),
+            )
+            await session.commit()
+            return False
+        await session.commit()
+        return True
+
+
 @dataclass(frozen=True)
 class _MemoryFinalizationContext:
     session: Any

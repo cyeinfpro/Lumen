@@ -92,6 +92,16 @@ async def _direct_generate_image_with_failover(
                 "generations",
             )
         started = time.monotonic()
+        # 每次尝试前预留账号配额槽位；失败/重试必须释放（见 claim 的 docstring），
+        # 否则失败请求会永久占用账号当日配额。
+        claim, release_failed_attempts = (
+            services.providers.image_request_attempt_claim(
+                pool,
+                provider,
+                route="image2:generations",
+                request_context=context,
+            )
+        )
         try:
             unavailable_error = (
                 services.providers.provider_endpoint_unavailable_error(
@@ -117,18 +127,13 @@ async def _direct_generate_image_with_failover(
                 )
                 if pinned_target is not None:
                     kwargs["pinned_target_override"] = pinned_target
-                kwargs["before_attempt"] = (
-                    services.providers.image_request_attempt_claim(
-                        pool,
-                        provider,
-                        route="image2:generations",
-                        request_context=context,
-                    )
-                )
+                kwargs["before_attempt"] = claim
                 result = await services.direct.direct_generate_image_once(
                     request,
                     **kwargs,
                 )
+                # 成功：保留最后一次尝试的预留作为入账记录，释放链上更早的失败尝试。
+                await release_failed_attempts(keep_last=True)
                 if not services.providers.is_byok_provider(provider):
                     services.providers.pool_report_image_success(
                         pool,
@@ -166,6 +171,10 @@ async def _direct_generate_image_with_failover(
             ):
                 raise
             except Exception as exc:  # noqa: BLE001
+                if not services.direct.is_direct_image_result_unknown(exc):
+                    # 失败未产生上游成本（非 result-unknown）：释放本次尝试链的
+                    # 全部预留，重试会重新预留，终态错误也不会泄漏配额。
+                    await release_failed_attempts()
                 errors.append(exc)
                 decision = classify_retriable(
                     getattr(exc, "error_code", None),
@@ -241,6 +250,63 @@ async def _direct_generate_image_with_failover(
     )
 
 
+def _report_direct_edit_provider_failure(
+    services: Any,
+    pool: Any,
+    provider: Any,
+    *,
+    is_rate_limited: bool,
+    retry_after: float | None,
+) -> None:
+    if not services.providers.is_byok_provider(provider):
+        if is_rate_limited:
+            pool.report_image_rate_limited(
+                provider.name,
+                retry_after_s=retry_after,
+            )
+        else:
+            services.providers.pool_report_image_failure(
+                pool,
+                provider.name,
+                endpoint_kind="generations",
+            )
+
+
+async def _emit_direct_edit_failover_progress(
+    services: Any,
+    progress_callback: Any,
+    provider: Any,
+    *,
+    attempt: int,
+    started: float,
+    remaining: int,
+    reason: str,
+    exc: BaseException,
+) -> None:
+    services.infrastructure.logger.warning(
+        "direct edit provider_failover: from=%s remaining=%d reason=%s",
+        provider.name,
+        remaining,
+        reason,
+    )
+    await services.transport.emit_image_progress(
+        progress_callback,
+        "provider_failover",
+        from_provider=provider.name,
+        remaining=remaining,
+        reason=reason,
+        route="image2_edit_direct",
+        **services.providers.provider_attempt_context(
+            provider,
+            attempt=attempt,
+            duration_ms=(time.monotonic() - started) * 1000,
+            status="failed",
+            reason=reason,
+            exc=exc,
+        ),
+    )
+
+
 async def _direct_edit_image_with_failover(
     request: ImageExecutionRequest,
 ) -> list[tuple[str, str | None]]:
@@ -277,6 +343,7 @@ async def _direct_edit_image_with_failover(
                 "generations",
             )
         started = time.monotonic()
+        quota_reservation: Any = None
         try:
             unavailable_error = (
                 services.providers.provider_endpoint_unavailable_error(
@@ -356,6 +423,14 @@ async def _direct_edit_image_with_failover(
             ):
                 raise
             except Exception as exc:  # noqa: BLE001
+                if quota_reservation is not None and not (
+                    services.direct.is_direct_image_result_unknown(exc)
+                ):
+                    # edit 失败未产生上游成本：释放预留，避免失败永久占用账号配额。
+                    await services.providers.release_image_reservation_best_effort(
+                        pool,
+                        quota_reservation,
+                    )
                 errors.append(exc)
                 decision = classify_retriable(
                     getattr(exc, "error_code", None),
@@ -379,41 +454,24 @@ async def _direct_edit_image_with_failover(
                 is_rate_limited, retry_after = (
                     services.providers.is_image_rate_limit_error(exc)
                 )
-                if not services.providers.is_byok_provider(provider):
-                    if is_rate_limited:
-                        pool.report_image_rate_limited(
-                            provider.name,
-                            retry_after_s=retry_after,
-                        )
-                    else:
-                        services.providers.pool_report_image_failure(
-                            pool,
-                            provider.name,
-                            endpoint_kind="generations",
-                        )
+                _report_direct_edit_provider_failure(
+                    services,
+                    pool,
+                    provider,
+                    is_rate_limited=is_rate_limited,
+                    retry_after=retry_after,
+                )
                 remaining = len(providers) - index - 1
                 if remaining > 0:
-                    services.infrastructure.logger.warning(
-                        "direct edit provider_failover: from=%s remaining=%d reason=%s",
-                        provider.name,
-                        remaining,
-                        decision.reason,
-                    )
-                    await services.transport.emit_image_progress(
+                    await _emit_direct_edit_failover_progress(
+                        services,
                         progress_callback,
-                        "provider_failover",
-                        from_provider=provider.name,
+                        provider,
+                        attempt=index + 1,
+                        started=started,
                         remaining=remaining,
                         reason=decision.reason,
-                        route="image2_edit_direct",
-                        **services.providers.provider_attempt_context(
-                            provider,
-                            attempt=index + 1,
-                            duration_ms=(time.monotonic() - started) * 1000,
-                            status="failed",
-                            reason=decision.reason,
-                            exc=exc,
-                        ),
+                        exc=exc,
                     )
         finally:
             if lane_owns_inflight:
@@ -466,6 +524,15 @@ async def _responses_image_stream_with_failover(
                 "responses",
             )
         started = time.monotonic()
+        # 每次尝试前预留账号配额槽位；失败/重试必须释放（见 claim 的 docstring）。
+        claim, release_failed_attempts = (
+            services.providers.image_request_attempt_claim(
+                pool,
+                provider,
+                route="responses:image_generation",
+                request_context=context,
+            )
+        )
         try:
             unavailable_error = (
                 services.providers.provider_endpoint_unavailable_error(
@@ -492,20 +559,15 @@ async def _responses_image_stream_with_failover(
                 )
                 if pinned_target is not None:
                     kwargs["pinned_target_override"] = pinned_target
-                kwargs["before_attempt"] = (
-                    services.providers.image_request_attempt_claim(
-                        pool,
-                        provider,
-                        route="responses:image_generation",
-                        request_context=context,
-                    )
-                )
+                kwargs["before_attempt"] = claim
                 result = (
                     await services.retry.responses_image_stream_with_retry(
                         request,
                         **kwargs
                     )
                 )
+                # 成功：保留最后一次尝试的预留作为入账记录，释放链上更早的失败尝试。
+                await release_failed_attempts(keep_last=True)
                 if not services.providers.is_byok_provider(provider):
                     services.providers.pool_report_image_success(
                         pool,
@@ -533,6 +595,10 @@ async def _responses_image_stream_with_failover(
             ):
                 raise
             except Exception as exc:  # noqa: BLE001
+                if not services.direct.is_direct_image_result_unknown(exc):
+                    # 失败未产生上游成本（非 result-unknown）：释放本次尝试链的
+                    # 全部预留，重试会重新预留，终态错误也不会泄漏配额。
+                    await release_failed_attempts()
                 errors.append(exc)
                 decision = classify_retriable(
                     getattr(exc, "error_code", None),

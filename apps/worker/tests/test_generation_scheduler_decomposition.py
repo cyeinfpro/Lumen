@@ -36,8 +36,10 @@ def test_queue_claim_delegates_each_scheduler_control() -> None:
 
 
 def test_runner_delegates_claim_and_dispatch_phases() -> None:
-    source = inspect.getsource(runner.run_generation)
+    wrapper_source = inspect.getsource(runner.run_generation)
+    source = inspect.getsource(runner._run_generation_scoped)
 
+    assert "await _run_generation_scoped(state)" in wrapper_source
     assert "await _load_initial_generation(state)" in source
     assert "await _prepare_provider_reservation(state)" in source
     assert "await _start_generation_attempt(state)" in source

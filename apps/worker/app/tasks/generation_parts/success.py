@@ -19,8 +19,16 @@ from lumen_core.constants import (
     ImageSource,
     MessageStatus,
 )
-from lumen_core.models import Image, ImageVariant, Message, new_uuid7
+from lumen_core.model_base import new_uuid7
+from lumen_core.model_entities import Generation, Image, ImageVariant, Message
 
+from ...artifact_commit import (
+    ArtifactAdoption,
+    ArtifactCommitNotAdopted,
+    ArtifactCommitOutcomeUnknown,
+    commit_error_or_default,
+    commit_with_adoption_probe,
+)
 from ...provider_runtime.errors import UpstreamError
 from ...upstream_parts import (
     GeneratedImageResult,
@@ -55,6 +63,8 @@ from .retry_state import (
     ensure_generation_attempt_current,
     ensure_generation_updated,
     generation_attempt_update,
+    generation_execution_epoch,
+    generation_execution_identity,
 )
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
@@ -92,6 +102,28 @@ class GeneratedArtifact:
     key_preview: str
     key_thumb: str
     generation_diagnostics: dict[str, Any] | None = None
+
+
+def generation_artifact_keys(
+    *,
+    user_id: str,
+    task_id: str,
+    execution_epoch: int = 0,
+    attempt: int | None = None,
+    attempt_epoch: int | None = None,
+    orig_ext: str,
+) -> tuple[str, str, str, str]:
+    epoch = max(0, int(execution_epoch))
+    retry_attempt = int(attempt if attempt is not None else attempt_epoch or 0)
+    if retry_attempt <= 0:
+        raise ValueError("generation artifact attempt must be positive")
+    prefix = f"u/{user_id}/g/{task_id}/executions/{epoch}/attempts/{retry_attempt}"
+    return (
+        f"{prefix}/orig.{orig_ext}",
+        f"{prefix}/display2048.webp",
+        f"{prefix}/preview1024.webp",
+        f"{prefix}/thumb256.jpg",
+    )
 
 
 async def finalize_generation_success(
@@ -155,6 +187,8 @@ async def _publish_finalizing_stage(
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
+            "execution_epoch": generation_execution_epoch(state),
+            "attempt": state.attempt,
             "stage": GenerationStage.FINALIZING.value,
             "substage": substage,
         },
@@ -257,7 +291,22 @@ def _build_artifact(
         height=processed.height,
         mime=orig_mime,
     )
-    image_metadata = dict(model_metadata)
+    image_metadata = {
+        **model_metadata,
+        "artifact_attempt_epoch": state.attempt,
+        "artifact_execution_epoch": generation_execution_epoch(state),
+        "artifact_execution_identity": generation_execution_identity(
+            generation_execution_epoch(state),
+            state.attempt,
+        ),
+    }
+    key_orig, key_display, key_preview, key_thumb = generation_artifact_keys(
+        user_id=state.user_id,
+        task_id=state.task_id,
+        execution_epoch=generation_execution_epoch(state),
+        attempt=state.attempt,
+        orig_ext=orig_ext,
+    )
     return GeneratedArtifact(
         image_id=image_id,
         raw_image=raw_image,
@@ -281,10 +330,10 @@ def _build_artifact(
         model_metadata=model_metadata,
         effective_params=effective_params,
         image_metadata=image_metadata,
-        key_orig=f"u/{state.user_id}/g/{state.task_id}/orig.{orig_ext}",
-        key_display=f"u/{state.user_id}/g/{state.task_id}/display2048.webp",
-        key_preview=f"u/{state.user_id}/g/{state.task_id}/preview1024.webp",
-        key_thumb=f"u/{state.user_id}/g/{state.task_id}/thumb256.jpg",
+        key_orig=key_orig,
+        key_display=key_display,
+        key_preview=key_preview,
+        key_thumb=key_thumb,
     )
 
 
@@ -383,7 +432,8 @@ async def _persist_generation_success(
     created_storage_keys: list[str],
     g: RunGenerationDeps,
 ) -> None:
-    async with g.artifacts.cleanup_on_error(created_storage_keys):
+    cleanup_allowed = True
+    try:
         await raise_if_generation_interrupted(
             state.redis,
             state.task_id,
@@ -395,6 +445,7 @@ async def _persist_generation_success(
                 session,
                 state.task_id,
                 state.attempt,
+                execution_epoch=generation_execution_epoch(state),
             )
             state.conversation_id_for_title = (
                 await ensure_generation_conversation_alive(
@@ -434,9 +485,102 @@ async def _persist_generation_success(
             # handler 会按 lease_lost 走 release 分支，等于平台替用户吸收这
             # 笔上游成本——纯转嫁要杜绝的。中断只允许发生在 settle 之前。
             success_delivery = _stage_success_event(session, state, artifact, g)
-            await session.commit()
+            commit_result = await commit_with_adoption_probe(
+                session,
+                probe=lambda: _probe_generation_success_adoption(
+                    state,
+                    artifact,
+                    g,
+                ),
+                logger=logger,
+                label=(
+                    f"generation artifact task={state.task_id} "
+                    f"epoch={generation_execution_epoch(state)} "
+                    f"attempt={state.attempt}"
+                ),
+            )
+            if commit_result.adopted:
+                cleanup_allowed = False
+            elif commit_result.outcome is ArtifactAdoption.NOT_ADOPTED:
+                # 上游已产出图片并计费,只是本地 artifact 事务未被采纳;必须带
+                # IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES 内的 error_code 抛出,让
+                # runner 的 unknown 结算分支 settle 而不是 release(failure 决策表
+                # 的 release 前提「非 unknown 码 = 适配层已证明上游未计费」对本地
+                # 失败不成立,否则平台吸收已发生的上游成本)。
+                commit_error = commit_error_or_default(
+                    commit_result,
+                    label=f"generation artifact task={state.task_id}",
+                )
+                raise ArtifactCommitNotAdopted(
+                    f"generation artifact commit was not adopted task={state.task_id} "
+                    f"epoch={generation_execution_epoch(state)} attempt={state.attempt}"
+                    + (
+                        f" cause={commit_error}"
+                        if commit_error is not None
+                        else ""
+                    ),
+                    error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+                    commit_error=commit_error,
+                ) from commit_error
+            else:
+                cleanup_allowed = False
+                unknown = ArtifactCommitOutcomeUnknown(
+                    f"generation artifact commit outcome unknown task={state.task_id} "
+                    f"epoch={generation_execution_epoch(state)} attempt={state.attempt}"
+                )
+                if commit_result.commit_error is not None:
+                    raise unknown from commit_result.commit_error
+                raise unknown
             await g.billing.flush_after_commit(session)
+    except BaseException:
+        if cleanup_allowed:
+            await g.artifacts.delete_files(created_storage_keys)
+        raise
     await g.events.deliver(state.redis, success_delivery)
+
+
+async def _probe_generation_success_adoption(
+    state: GenerationRunState,
+    artifact: GeneratedArtifact,
+    g: RunGenerationDeps,
+) -> ArtifactAdoption:
+    async with g.store.session() as session:
+        generation = await session.get(
+            Generation,
+            state.task_id,
+            with_for_update=True,
+        )
+        image = await session.get(Image, artifact.image_id)
+        if image is not None:
+            exact_image = (
+                image.owner_generation_id == state.task_id
+                and image.user_id == state.user_id
+                and image.storage_key == artifact.key_orig
+                and image.sha256 == artifact.sha256
+                and isinstance(image.metadata_jsonb, dict)
+                and image.metadata_jsonb.get("artifact_attempt_epoch") == state.attempt
+                and image.metadata_jsonb.get("artifact_execution_epoch")
+                == generation_execution_epoch(state)
+            )
+            exact_generation = (
+                generation is not None
+                and generation.attempt == state.attempt
+                and generation.execution_epoch == generation_execution_epoch(state)
+                and generation.status == GenerationStatus.SUCCEEDED.value
+            )
+            return (
+                ArtifactAdoption.ADOPTED
+                if exact_image and exact_generation
+                else ArtifactAdoption.UNKNOWN
+            )
+        if (
+            generation is not None
+            and generation.attempt == state.attempt
+            and generation.execution_epoch == generation_execution_epoch(state)
+            and generation.status == GenerationStatus.SUCCEEDED.value
+        ):
+            return ArtifactAdoption.UNKNOWN
+        return ArtifactAdoption.NOT_ADOPTED
 
 
 def _add_image_rows(
@@ -508,6 +652,8 @@ def _success_upstream_request(
             "image_count_actual": artifact.actual_image_count,
             "generation_diagnostics": artifact.generation_diagnostics,
             "debug_id": state.task_id,
+            "execution_epoch": generation_execution_epoch(state),
+            "attempt": state.attempt,
         }
     )
     _apply_route_and_provider_fields(upstream_request, state, g)
@@ -583,6 +729,7 @@ async def _mark_generation_succeeded(
             state.task_id,
             state.attempt,
             statuses=RUNNING_GENERATION_STATUSES,
+            execution_epoch=generation_execution_epoch(state),
         ).values(
             status=GenerationStatus.SUCCEEDED.value,
             progress_stage=GenerationStage.FINALIZING,
@@ -818,6 +965,8 @@ def _bonus_context(
         user_id=state.user_id,
         channel=state.channel,
         parent_task_id=state.task_id,
+        execution_epoch=generation_execution_epoch(state),
+        attempt=state.attempt,
         parent_idempotency_key=state.gen_idempotency_key,
         parent_upstream_request=(
             state.parent_upstream_request_for_bonus

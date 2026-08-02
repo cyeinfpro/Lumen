@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.tasks.generation_parts.execution_boundary import (
     release_or_settle_generation,
@@ -46,9 +47,7 @@ def _execution(
         result_state=result_state,
         cost_knowledge=cost_knowledge,
         sidecar_status=(
-            "succeeded"
-            if result_state == ImageJobResultState.SUCCEEDED
-            else "accepted"
+            "succeeded" if result_state == ImageJobResultState.SUCCEEDED else "accepted"
         ),
         result_artifact=result_artifact,
     )
@@ -291,15 +290,22 @@ async def test_succeeded_retry_is_delivery_only(
 @pytest.mark.asyncio
 async def test_progress_persists_accepted_execution_before_polling() -> None:
     execution = _execution()
-    generation = SimpleNamespace(upstream_request={"trace_id": "trace-1"})
+    generation = SimpleNamespace(
+        attempt=2,
+        execution_epoch=6,
+        status="running",
+        upstream_request={"trace_id": "trace-1"},
+    )
     commits = 0
+    statements: list[Any] = []
 
     class Result:
         def scalar_one_or_none(self) -> Any:
             return generation
 
     class Session:
-        async def execute(self, _statement: Any) -> Result:
+        async def execute(self, statement: Any) -> Result:
+            statements.append(statement)
             return Result()
 
         async def commit(self) -> None:
@@ -314,6 +320,7 @@ async def test_progress_persists_accepted_execution_before_polling() -> None:
     state = SimpleNamespace(
         task_id="generation-1",
         attempt=2,
+        generation=SimpleNamespace(execution_epoch=6),
         sidecar_execution=None,
         gen_upstream_request_snapshot={"trace_id": "trace-1"},
     )
@@ -332,6 +339,13 @@ async def test_progress_persists_accepted_execution_before_polling() -> None:
     assert commits == 1
     assert generation.upstream_request["sidecar_execution"] == execution.to_dict()
     assert state.sidecar_execution == execution
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "generations.execution_epoch = 6" in sql
 
 
 @pytest.mark.asyncio
@@ -350,6 +364,107 @@ async def test_billing_never_releases_unknown_or_incurred_sidecar_cost(
     execution = _execution(cost_knowledge=knowledge)
     generation = SimpleNamespace(
         upstream_request={"sidecar_execution": execution.to_dict()}
+    )
+    calls: list[str] = []
+
+    class Billing:
+        async def release(self, *_args: Any, **_kwargs: Any) -> None:
+            calls.append("release")
+
+        async def settle_unknown_upstream(
+            self,
+            *_args: Any,
+            knowledge: str,
+            **_kwargs: Any,
+        ) -> None:
+            calls.append(f"settle:{knowledge}")
+
+    await release_or_settle_generation(
+        Billing(),
+        object(),
+        generation,
+        reason="terminal",
+    )
+
+    assert calls == [expected_call]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_payload", "execution_epoch", "expected_call"),
+    [
+        # 直接引擎：请求已派发、结果不可知 → 必须结算而不是释放（纯转嫁铁律）。
+        (
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": 2,
+                "upstream_dispatch_execution_epoch": 3,
+            },
+            3,
+            "settle:unknown",
+        ),
+        # 已派发且已收到同 attempt 的明确应答（如 400 内容政策拒绝）→ 失败语义
+        # 交给决策表（PROVEN_ABSENT → release），不得按 dispatch 收据结算，
+        # 否则把用户 hold 全额扣掉（多收钱）。
+        (
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": 2,
+                "upstream_dispatch_execution_epoch": 3,
+                "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+                "upstream_response_attempt": 2,
+                "upstream_response_execution_epoch": 3,
+            },
+            3,
+            "release",
+        ),
+        # 应答收据属于更早 attempt（同 epoch 重试后当前 dispatch 仍无应答）→
+        # 当前请求结果仍不可知，必须结算。
+        (
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": 3,
+                "upstream_dispatch_execution_epoch": 3,
+                "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
+                "upstream_response_attempt": 2,
+                "upstream_response_execution_epoch": 3,
+            },
+            3,
+            "settle:unknown",
+        ),
+        # 已派发但可证明未送达（proven_undelivered）→ 允许释放。
+        (
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": 2,
+                "upstream_dispatch_execution_epoch": 3,
+                "upstream_dispatch_delivery": "proven_undelivered",
+            },
+            3,
+            "release",
+        ),
+        # 收据属于更早的执行纪元（手动重试已推进）→ 释放当前纪元的 hold。
+        (
+            {
+                "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
+                "upstream_dispatch_attempt": 2,
+                "upstream_dispatch_execution_epoch": 3,
+            },
+            4,
+            "release",
+        ),
+        # 从未派发 → 允许释放。
+        ({}, 3, "release"),
+    ],
+)
+async def test_release_respects_direct_engine_dispatch_receipt(
+    request_payload: dict[str, Any],
+    execution_epoch: int,
+    expected_call: str,
+) -> None:
+    generation = SimpleNamespace(
+        execution_epoch=execution_epoch,
+        upstream_request=request_payload,
     )
     calls: list[str] = []
 

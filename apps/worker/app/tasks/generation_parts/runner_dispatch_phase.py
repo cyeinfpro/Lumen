@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 
 from lumen_core.constants import (
@@ -20,13 +21,19 @@ from lumen_core.constants import (
 from lumen_core.models import Generation
 from lumen_core.sizing import resolve_size
 from lumen_core.upstream_billing import (
+    IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
+    NO_UPSTREAM_COST_RECEIPTS,
+    has_stable_provider_idempotency_key,
     mark_upstream_dispatch_started,
+    mark_upstream_dispatch_proven_undelivered,
     mark_upstream_response_received,
 )
 
 from ...observability import get_tracer, upstream_calls_total
 from ...provider_runtime.errors import UpstreamError
+from ...task_cancellation import force_next_cancellation_check
 from ...upstream_parts import GeneratedImageResult
+from .active_user_fence import lock_active_generation_user
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .lease import is_cancelled
 from .progress import ImageProgressPublisher
@@ -39,6 +46,9 @@ from .request_options import (
 from .retry_state import (
     RUNNING_GENERATION_STATUSES,
     anext_image_with_guards,
+    ensure_generation_attempt_current,
+    generation_execution_epoch,
+    generation_execution_identity,
 )
 from .run_state import GenerationRunState
 from .runner_phase_services import DispatchGenerationServices
@@ -51,6 +61,29 @@ from .services import (
 
 logger = logging.getLogger(f"{__package__}.runner")
 tracer = get_tracer("lumen.worker.generation")
+
+
+class _EpochGuardedProgressPublisher:
+    def __init__(
+        self,
+        state: GenerationRunState,
+        publisher: ImageProgressPublisher,
+    ) -> None:
+        self._state = state
+        self._publisher = publisher
+
+    async def __call__(self, event: dict[str, Any]) -> None:
+        async with self._state.services.store.session() as session:
+            await ensure_generation_attempt_current(
+                session,
+                self._state.task_id,
+                self._state.attempt,
+                execution_epoch=generation_execution_epoch(self._state),
+            )
+        await self._publisher(event)
+
+    def pop_provider_used_event(self) -> dict[str, str]:
+        return self._publisher.pop_provider_used_event()
 
 
 def initialize_execution_state(state: GenerationRunState) -> None:
@@ -89,9 +122,13 @@ async def prepare_upstream_request(state: GenerationRunState) -> None:
     normalize_mask(state)
     state.stage_timer.add_elapsed("normalize", started)
     await publish_stream_started(state)
-    state.progress_publisher = ImageProgressPublisher(
+    progress_publisher = ImageProgressPublisher(
         state,
         state.services,
+    )
+    state.progress_publisher = _EpochGuardedProgressPublisher(
+        state,
+        progress_publisher,
     )
 
 
@@ -172,6 +209,8 @@ async def publish_stream_started(state: GenerationRunState) -> None:
             "generation_id": state.task_id,
             "message_id": state.message_id,
             "trace_id": state.trace_id,
+            "execution_epoch": generation_execution_epoch(state),
+            "attempt": state.attempt,
             "stage": GenerationStage.RENDERING.value,
             "substage": GenerationStage.STREAM_STARTED.value,
         },
@@ -190,12 +229,65 @@ async def dispatch_upstream_request(state: GenerationRunState) -> None:
                     kind="generation",
                     outcome="ok",
                 ).inc()
-            except Exception:
+            except Exception as exc:
                 upstream_calls_total.labels(
                     kind="generation",
                     outcome="error",
                 ).inc()
+                await _raise_dispatch_failure(state, exc)
                 raise
+
+
+async def _raise_dispatch_failure(
+    state: GenerationRunState,
+    exc: Exception,
+) -> None:
+    if isinstance(exc, TaskCancelled):
+        return
+    if getattr(exc, "error_code", None) in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
+        return
+    if _dispatch_failure_proves_undelivered(exc):
+        await record_generation_upstream_marker(
+            state,
+            response_received=False,
+            proven_undelivered=True,
+        )
+        return
+    if _dispatch_failure_has_response(exc):
+        await record_generation_upstream_marker(state, response_received=True)
+        return
+    if has_stable_provider_idempotency_key(state.gen_upstream_request_snapshot or {}):
+        return
+    raise UpstreamError(
+        "upstream dispatch completed without a response receipt; result is unknown",
+        status_code=getattr(exc, "status_code", None),
+        error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        payload={
+            "upstream_result_unknown": True,
+            "execution_epoch": generation_execution_epoch(state),
+            "attempt": state.attempt,
+            "cause": type(exc).__name__,
+        },
+    ) from exc
+
+
+def _dispatch_failure_proves_undelivered(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return True
+    payload = getattr(exc, "payload", None)
+    if not isinstance(payload, dict):
+        return False
+    receipt_reason = payload.get("receipt_reason") or payload.get(
+        "upstream_receipt_reason"
+    )
+    return (
+        isinstance(receipt_reason, str) and receipt_reason in NO_UPSTREAM_COST_RECEIPTS
+    )
+
+
+def _dispatch_failure_has_response(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    return isinstance(status_code, int) and status_code > 0
 
 
 async def raise_if_pre_upstream_interrupted(
@@ -203,6 +295,7 @@ async def raise_if_pre_upstream_interrupted(
 ) -> None:
     if state.lease_lost.is_set():
         raise LeaseLost("generation lease renewer failed")
+    force_next_cancellation_check(state.task_id)
     if await is_cancelled(state.redis, state.task_id):
         raise TaskCancelled("cancelled before upstream request")
 
@@ -231,13 +324,16 @@ def annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
 
 async def call_upstream(state: GenerationRunState) -> None:
     started = time.monotonic()
-    state.image_iter = build_image_iterator(state)
-    first_pair = await anext_image_with_guards(
-        state.image_iter,
-        state.lease_lost,
-        redis=state.redis,
-        task_id=state.task_id,
-    )
+    services = DispatchGenerationServices.from_deps(state.services)
+    async with services.store.session() as session:
+        await _lock_generation_for_provider_dispatch(session, state)
+        state.image_iter = build_image_iterator(state)
+        first_pair = await anext_image_with_guards(
+            state.image_iter,
+            state.lease_lost,
+            redis=state.redis,
+            task_id=state.task_id,
+        )
     if first_pair is None:
         raise UpstreamError(
             "upstream image generator yielded no result",
@@ -252,23 +348,54 @@ async def call_upstream(state: GenerationRunState) -> None:
     await consume_batch_extra_pairs(state)
 
 
+async def _lock_generation_for_provider_dispatch(
+    session: Any,
+    state: GenerationRunState,
+) -> None:
+    """Retain User -> Generation locks through the first upstream iterator pull."""
+    if not await lock_active_generation_user(session, user_id=state.user_id):
+        raise TaskCancelled("account deleted before upstream dispatch")
+    generation = (
+        await session.execute(
+            select(Generation)
+            .where(
+                Generation.id == state.task_id,
+                Generation.user_id == state.user_id,
+                Generation.attempt == state.attempt,
+                Generation.execution_epoch == generation_execution_epoch(state),
+                Generation.status.in_(RUNNING_GENERATION_STATUSES),
+                Generation.cancel_requested_at.is_(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if generation is None:
+        raise StaleGenerationAttempt(
+            "generation dispatch fenced by task state "
+            f"task={state.task_id} attempt={state.attempt}"
+        )
+
+
 async def record_generation_upstream_marker(
     state: GenerationRunState,
     *,
     response_received: bool,
+    proven_undelivered: bool = False,
 ) -> None:
     services = DispatchGenerationServices.from_deps(state.services)
     recorded_at = datetime.now(timezone.utc).isoformat()
     async with services.store.session() as session:
+        ownership_conditions = [
+            Generation.id == state.task_id,
+            Generation.attempt == state.attempt,
+            Generation.execution_epoch == generation_execution_epoch(state),
+            Generation.status.in_(RUNNING_GENERATION_STATUSES),
+        ]
+        if not proven_undelivered:
+            ownership_conditions.append(Generation.cancel_requested_at.is_(None))
         current = (
             await session.execute(
-                select(Generation)
-                .where(
-                    Generation.id == state.task_id,
-                    Generation.attempt == state.attempt,
-                    Generation.status.in_(RUNNING_GENERATION_STATUSES),
-                )
-                .with_for_update()
+                select(Generation).where(*ownership_conditions).with_for_update()
             )
         ).scalar_one_or_none()
         if current is None:
@@ -278,12 +405,15 @@ async def record_generation_upstream_marker(
         marker = (
             mark_upstream_response_received
             if response_received
+            else mark_upstream_dispatch_proven_undelivered
+            if proven_undelivered
             else mark_upstream_dispatch_started
         )
         request = marker(
             current,
             at=recorded_at,
             attempt=state.attempt,
+            execution_epoch=generation_execution_epoch(state),
         )
         current.upstream_request = request
         await session.commit()
@@ -311,7 +441,10 @@ def build_image_iterator(state: GenerationRunState) -> Any:
             trace_id=state.trace_id,
             retry_attempt=state.attempt,
             quota_task_id=state.task_id,
-            quota_attempt_epoch=state.attempt,
+            quota_attempt_epoch=generation_execution_identity(
+                generation_execution_epoch(state),
+                state.attempt,
+            ),
             sidecar_execution=getattr(state, "sidecar_execution", None),
         ),
     )

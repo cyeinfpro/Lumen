@@ -39,6 +39,7 @@ async def is_cancelled(
     *,
     cancel_check_errors_total: Any,
     logger: Any,
+    force_db: bool = False,
 ) -> bool:
     return await completion_stream._is_cancelled(
         redis,
@@ -47,6 +48,7 @@ async def is_cancelled(
             cancel_check_errors_total=cancel_check_errors_total,
             logger=logger,
         ),
+        force_db=force_db,
     )
 
 

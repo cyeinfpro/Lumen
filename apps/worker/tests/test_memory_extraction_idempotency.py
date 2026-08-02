@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 
 import pytest
@@ -280,7 +281,10 @@ async def test_network_awaits_run_outside_transactions_and_publish_retry_is_idem
         async def embedding_literal(
             _ctx: dict[str, Any] | None,
             content: str,
+            *,
+            fence: Callable[[], Awaitable[bool]] | None = None,
         ) -> str:
+            del fence
             nonlocal embedding_calls
             harness.assert_network_safe()
             assert content == "用户喜欢简洁回答"
@@ -365,6 +369,109 @@ async def test_network_awaits_run_outside_transactions_and_publish_retry_is_idem
         assert len(published) == 2
         assert published[0] == published[1]
         assert published[0]["event_id"] == ("memory-extract:user-msg-1:assistant-msg-1")
+
+
+@pytest.mark.parametrize(
+    ("deleted_row", "expected_reason"),
+    [
+        ("user", "user_deleted"),
+        ("conversation", "conversation_deleted"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_deletion_after_claim_blocks_memory_external_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    deleted_row: str,
+    expected_reason: str,
+) -> None:
+    async with _memory_database(monkeypatch) as harness:
+        await _seed_memory_context(harness)
+        fence_entered = asyncio.Event()
+        deletion_committed = asyncio.Event()
+        provider_checks = 0
+        embedding_calls = 0
+        original_revalidate = (
+            memory_extraction._revalidate_memory_extraction_claim_before_external
+        )
+
+        async def revalidate_after_delete(
+            claim: memory_extraction._MemoryExtractionClaim,  # noqa: SLF001
+        ) -> bool:
+            fence_entered.set()
+            await deletion_committed.wait()
+            return await original_revalidate(claim)
+
+        async def provider_available(_ctx: dict[str, Any] | None) -> bool:
+            nonlocal provider_checks
+            harness.assert_network_safe()
+            provider_checks += 1
+            return True
+
+        async def unexpected_embedding(
+            _ctx: dict[str, Any] | None,
+            _content: str,
+        ) -> str:
+            nonlocal embedding_calls
+            embedding_calls += 1
+            raise AssertionError("deleted account text reached embedding processing")
+
+        monkeypatch.setattr(
+            memory_extraction,
+            "_revalidate_memory_extraction_claim_before_external",
+            revalidate_after_delete,
+        )
+        monkeypatch.setattr(
+            memory_extraction,
+            "_embedding_provider_available",
+            provider_available,
+        )
+        monkeypatch.setattr(
+            memory_extraction,
+            "_embedding_literal_async",
+            unexpected_embedding,
+        )
+        monkeypatch.setattr(
+            memory_extraction,
+            "extract_memories",
+            lambda _text, *, explicit_only: (
+                [_prepared_candidate().candidate],
+                False,
+            ),
+        )
+
+        task = asyncio.create_task(
+            memory_extraction.memory_extract(
+                {"redis": None, "job_id": "memory-job-delete-race"},
+                "conv-1",
+                "user-msg-1",
+                "assistant-msg-1",
+            )
+        )
+        await asyncio.wait_for(fence_entered.wait(), timeout=1)
+        async with harness.factory() as session:
+            if deleted_row == "user":
+                row = await session.get(User, "user-1")
+            else:
+                row = await session.get(Conversation, "conv-1")
+            assert row is not None
+            row.deleted_at = datetime.now(timezone.utc)
+            await session.commit()
+        deletion_committed.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        async with harness.factory() as session:
+            run = (await session.execute(select(MemoryExtractionRun))).scalar_one()
+            memory = await session.get(UserMemory, "memory-1")
+            assistant = await session.get(Message, "assistant-msg-1")
+
+        assert provider_checks == 0
+        assert embedding_calls == 0
+        assert run.status == "canceled"
+        assert run.cancel_reason == expected_reason
+        assert run.fence == 2
+        assert memory is not None and memory.positive_signal == 0
+        assert assistant is not None
+        assert "memory_writes" not in assistant.content
 
 
 @pytest.mark.asyncio
@@ -628,7 +735,10 @@ async def test_cancelled_worker_marks_run_retryable_and_retry_reclaims(
         async def canceled_prepare(
             _ctx: dict[str, Any],
             _claim: memory_extraction._MemoryExtractionClaim,  # noqa: SLF001
+            *,
+            fence: Callable[[], Awaitable[bool]] | None = None,
         ) -> tuple[list[Any], bool]:
+            del fence
             harness.assert_network_safe()
             if cancel_stage == "prepare":
                 raise asyncio.CancelledError

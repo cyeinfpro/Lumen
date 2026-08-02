@@ -405,7 +405,10 @@ async def test_image_job_cancellation_releases_selected_provider_inflight(
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.providers,
         "image_request_attempt_claim",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: (
+            lambda _attempt: None,
+            lambda **_kw: None,
+        ),
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.providers,

@@ -196,6 +196,7 @@ async def _persist_success(
                 state.ports.persistence.Completion.status.in_(
                     state.ports.retry._RUNNING_COMPLETION_STATUSES
                 ),
+                state.ports.persistence.Completion.cancel_requested_at.is_(None),
             )
             .values(
                 status=CompletionStatus.SUCCEEDED.value,
@@ -208,6 +209,11 @@ async def _persist_success(
             )
         )
         if state.ports.persistence.affected_rows(result) == 0:
+            await state.ports.retry._raise_if_completion_cancelled(
+                state.request.redis,
+                state.request.task_id,
+                "cancelled during success commit",
+            )
             raise state.ports.retry._CompletionEpochSuperseded(
                 f"completion epoch superseded before success task={state.request.task_id} "
                 f"attempt_epoch={state.preparation.attempt_epoch}"

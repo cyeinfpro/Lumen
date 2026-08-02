@@ -189,14 +189,14 @@ async def charge_completion(
         cost=cost,
     )
     allow_negative = await deps.allow_negative_balance()
-    await deps.ensure_completion_image_charge_fundable(
-        session,
-        completion=completion,
-        billing_ref_id=billing_ref_id,
-        image_output_cost_micro=breakdown.image_output_cost_micro,
-        rate_multiplier_x10000=rate_multiplier,
-        allow_negative=allow_negative,
-    )
+    # No balance re-check here: the upstream cost has already been incurred and
+    # delivered, so settlement must record it in full (pure pass-through).
+    # billing_core.settle never rejects on insufficient balance — the deficit
+    # lands in overdraw_micro as a collectible debt marker. Wallet gating for
+    # image tool output happens only before dispatch
+    # (_ensure_completion_tool_image_wallet_budget), while the cost is still
+    # avoidable; an INSUFFICIENT_BALANCE raise at this stage would leave the
+    # user unbilled for a provider charge the platform already paid.
     try:
         tx = await deps.billing_core.settle(
             session,

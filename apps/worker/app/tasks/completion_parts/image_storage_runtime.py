@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import binascii
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, AsyncContextManager
 
 from lumen_core.constants import ImageSource
+
+from ...artifact_commit import (
+    ArtifactAdoption,
+    commit_error_or_default,
+    commit_with_adoption_probe,
+    rollback_artifact_transaction,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +36,9 @@ class CompletionToolImageCodec:
 class CompletionToolImageRepository:
     session_factory: Callable[[], Any]
     new_id: Callable[[], str]
+    acquire_task_lock: Callable[[Any, str], Awaitable[None]]
+    completion_model: Any
+    superseded_error_type: type[BaseException]
     record_usage: Callable[..., Awaitable[None]]
     image_model: Any
     image_variant_model: Any
@@ -40,12 +53,38 @@ class CompletionToolImageStorage:
         Awaitable[list[str]],
     ]
     cleanup_on_error: Callable[[list[str]], AsyncContextManager[None]]
+    delete_files: Callable[[list[str]], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
 class CompletionToolImageEvents:
     publish: Callable[..., Awaitable[None]]
     image_event: str
+
+
+def _tool_image_delivery_payload(
+    *,
+    image_id: str,
+    task_id: str,
+    attempt_epoch: int,
+    execution_epoch: int,
+    mime: str,
+    key_orig: str,
+    revised_prompt: str | None,
+    public_url: Callable[[str], str],
+) -> dict[str, Any]:
+    return {
+        "image_id": image_id,
+        "from_completion_id": task_id,
+        "completion_execution_epoch": execution_epoch,
+        "completion_attempt_epoch": attempt_epoch,
+        "mime": mime,
+        "url": public_url(key_orig),
+        "display_url": f"/api/images/{image_id}/variants/display2048",
+        "preview_url": f"/api/images/{image_id}/variants/preview1024",
+        "thumb_url": f"/api/images/{image_id}/variants/thumb256",
+        **({"revised_prompt": revised_prompt} if revised_prompt else {}),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +101,7 @@ class CompletionToolImageService:
         session: Any,
         task_id: str,
         attempt_epoch: int,
+        execution_epoch: int,
         user_id: str,
         message_id: str,
         raw_image: bytes,
@@ -83,11 +123,24 @@ class CompletionToolImageService:
         ) = self.codec.format_and_meta(raw_image)
         image_id = self.repository.new_id()
         sha = self.codec.sha256(raw_image)
-        key_prefix = f"u/{user_id}/completion-tools/{task_id}/{image_id}"
+        key_prefix = (
+            f"u/{user_id}/completion-tools/{task_id}/"
+            f"executions/{execution_epoch}/attempts/{attempt_epoch}/{image_id}"
+        )
         key_orig = f"{key_prefix}/orig.{orig_ext}"
         key_display = f"{key_prefix}/display2048.webp"
         key_preview = f"{key_prefix}/preview1024.webp"
         key_thumb = f"{key_prefix}/thumb256.jpg"
+        delivery_payload = _tool_image_delivery_payload(
+            image_id=image_id,
+            task_id=task_id,
+            attempt_epoch=attempt_epoch,
+            execution_epoch=execution_epoch,
+            mime=orig_mime,
+            key_orig=key_orig,
+            revised_prompt=revised_prompt,
+            public_url=self.repository.public_url,
+        )
 
         created_storage_keys = await self.storage.write_files(
             [
@@ -97,7 +150,9 @@ class CompletionToolImageService:
                 (key_thumb, thumb_bytes),
             ]
         )
-        async with self.storage.cleanup_on_error(created_storage_keys):
+        cleanup_allowed = True
+        non_adoption_confirmed = False
+        try:
             image = self.repository.image_model(
                 id=image_id,
                 user_id=user_id,
@@ -115,11 +170,9 @@ class CompletionToolImageService:
                 metadata_jsonb={
                     "source": "completion_tool",
                     "completion_id": task_id,
-                    **(
-                        {"revised_prompt": revised_prompt}
-                        if revised_prompt
-                        else {}
-                    ),
+                    "completion_attempt_epoch": attempt_epoch,
+                    "completion_execution_epoch": execution_epoch,
+                    **({"revised_prompt": revised_prompt} if revised_prompt else {}),
                 },
             )
             session.add(image)
@@ -157,24 +210,9 @@ class CompletionToolImageService:
                 images_list = list(content.get("images") or [])
                 images_list.append(
                     {
-                        "image_id": image_id,
-                        "from_completion_id": task_id,
+                        **delivery_payload,
                         "width": width,
                         "height": height,
-                        "mime": orig_mime,
-                        "url": self.repository.public_url(key_orig),
-                        "display_url": (
-                            f"/api/images/{image_id}/variants/display2048"
-                        ),
-                        "preview_url": (
-                            f"/api/images/{image_id}/variants/preview1024"
-                        ),
-                        "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                        **(
-                            {"revised_prompt": revised_prompt}
-                            if revised_prompt
-                            else {}
-                        ),
                     }
                 )
                 content["images"] = images_list
@@ -184,25 +222,111 @@ class CompletionToolImageService:
                 session=session,
                 task_id=task_id,
                 attempt_epoch=attempt_epoch,
+                execution_epoch=execution_epoch,
                 budget_micro=billing_budget_micro,
             )
             image_payload = {
-                "image_id": image_id,
-                "from_completion_id": task_id,
+                **delivery_payload,
                 "actual_size": f"{width}x{height}",
-                "mime": orig_mime,
-                "url": self.repository.public_url(key_orig),
-                "display_url": f"/api/images/{image_id}/variants/display2048",
-                "preview_url": f"/api/images/{image_id}/variants/preview1024",
-                "thumb_url": f"/api/images/{image_id}/variants/thumb256",
-                **(
-                    {"revised_prompt": revised_prompt}
-                    if revised_prompt
-                    else {}
-                ),
             }
-            await session.commit()
+            commit_result = await commit_with_adoption_probe(
+                session,
+                probe=lambda: self._probe_tool_image_adoption(
+                    task_id=task_id,
+                    attempt_epoch=attempt_epoch,
+                    execution_epoch=execution_epoch,
+                    image_id=image_id,
+                    key_orig=key_orig,
+                    sha=sha,
+                ),
+                logger=logger,
+                label=(
+                    f"completion tool image task={task_id} "
+                    f"epoch={execution_epoch} attempt={attempt_epoch} image={image_id}"
+                ),
+            )
+            if commit_result.adopted:
+                cleanup_allowed = False
+            elif commit_result.outcome is ArtifactAdoption.NOT_ADOPTED:
+                non_adoption_confirmed = True
+                raise commit_error_or_default(
+                    commit_result,
+                    label=f"completion tool image {image_id}",
+                )
+            else:
+                cleanup_allowed = False
+                unknown = self.repository.superseded_error_type(
+                    f"completion tool image commit outcome unknown task={task_id} "
+                    f"execution_epoch={execution_epoch} "
+                    f"attempt_epoch={attempt_epoch} image={image_id}"
+                )
+                if commit_result.commit_error is not None:
+                    raise unknown from commit_result.commit_error
+                raise unknown
             return image_payload
+        except BaseException:
+            if cleanup_allowed:
+                rolled_back = non_adoption_confirmed or (
+                    await rollback_artifact_transaction(
+                        session,
+                        logger=logger,
+                        label=(
+                            f"completion tool image task={task_id} "
+                            f"epoch={execution_epoch} attempt={attempt_epoch}"
+                        ),
+                    )
+                )
+                if rolled_back:
+                    await self.storage.delete_files(created_storage_keys)
+                else:
+                    logger.error(
+                        "completion tool image cleanup deferred because rollback "
+                        "was not confirmed task=%s epoch=%s attempt=%s image=%s",
+                        task_id,
+                        execution_epoch,
+                        attempt_epoch,
+                        image_id,
+                    )
+            raise
+
+    async def _probe_tool_image_adoption(
+        self,
+        *,
+        task_id: str,
+        attempt_epoch: int,
+        execution_epoch: int,
+        image_id: str,
+        key_orig: str,
+        sha: str,
+    ) -> ArtifactAdoption:
+        async with self.repository.session_factory() as session:
+            await self.repository.acquire_task_lock(session, task_id)
+            completion = await session.get(
+                self.repository.completion_model,
+                task_id,
+                with_for_update=True,
+            )
+            image = await session.get(self.repository.image_model, image_id)
+            if image is not None:
+                metadata = (
+                    image.metadata_jsonb
+                    if isinstance(image.metadata_jsonb, dict)
+                    else {}
+                )
+                exact = (
+                    completion is not None
+                    and completion.attempt == attempt_epoch
+                    and int(getattr(completion, "execution_epoch", 0) or 0)
+                    == execution_epoch
+                    and image.user_id == getattr(completion, "user_id", None)
+                    and image.storage_key == key_orig
+                    and image.sha256 == sha
+                    and metadata.get("completion_id") == task_id
+                    and metadata.get("completion_attempt_epoch") == attempt_epoch
+                    and metadata.get("completion_execution_epoch") == execution_epoch
+                )
+                return ArtifactAdoption.ADOPTED if exact else ArtifactAdoption.UNKNOWN
+            return ArtifactAdoption.NOT_ADOPTED
 
     async def store_and_publish_tool_image(
         self,
@@ -214,6 +338,7 @@ class CompletionToolImageService:
         message_id: str,
         attempt: int,
         attempt_epoch: int,
+        execution_epoch: int,
         b64_image: str,
         revised_prompt: str | None,
         reserved_tool_image_micro: int = 0,
@@ -236,6 +361,7 @@ class CompletionToolImageService:
                 session=session,
                 task_id=task_id,
                 attempt_epoch=attempt_epoch,
+                execution_epoch=execution_epoch,
                 user_id=user_id,
                 message_id=message_id,
                 raw_image=raw_image,
@@ -253,6 +379,7 @@ class CompletionToolImageService:
                 "message_id": message_id,
                 "attempt": attempt,
                 "attempt_epoch": attempt_epoch,
+                "execution_epoch": execution_epoch,
                 "images": [image_payload],
             },
         )

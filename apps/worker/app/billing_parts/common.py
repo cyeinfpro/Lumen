@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core.model_entities import (
     AuditLog,
     BillingWindowUsageEvent,
-    Completion,
     WalletTransaction,
 )
 
@@ -95,49 +94,6 @@ async def existing_fingerprint_tx(
         ).scalar_one_or_none()
     except Exception:  # noqa: BLE001
         return None
-
-
-async def ensure_completion_image_charge_fundable(
-    session: AsyncSession,
-    *,
-    completion: Completion,
-    billing_ref_id: str,
-    image_output_cost_micro: int,
-    rate_multiplier_x10000: int,
-    allow_negative: bool,
-    deps: CommonDependencies,
-) -> None:
-    if allow_negative or not isinstance(session, deps.async_session_type):
-        return
-    image_cost = max(0, int(image_output_cost_micro or 0))
-    if image_cost <= 0:
-        return
-    image_charge_micro = (
-        image_cost * max(0, int(rate_multiplier_x10000 or 0))
-    ) // 10_000
-    if image_charge_micro <= 0:
-        return
-
-    wallet = await deps.billing_core.get_wallet(
-        session,
-        completion.user_id,
-        lock=True,
-        create=False,
-    )
-    balance_micro = int(getattr(wallet, "balance_micro", 0) or 0) if wallet else 0
-    held_micro = await deps.billing_core._held_amount_for_ref(  # noqa: SLF001
-        session,
-        completion.user_id,
-        "completion",
-        billing_ref_id,
-    )
-    if balance_micro + int(held_micro or 0) >= image_charge_micro:
-        return
-    raise deps.billing_core.BillingError(
-        "INSUFFICIENT_BALANCE",
-        "insufficient wallet balance for completion image output",
-        402,
-    )
 
 
 def add_replay_audit(

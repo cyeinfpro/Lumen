@@ -7,11 +7,13 @@ import time
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from app.tasks import context_summary
 from lumen_core.constants import Role
 from lumen_core.context_window import SUMMARY_KIND, SUMMARY_VERSION
-from lumen_core.models import Conversation, Message
+from lumen_core.models import Base, Conversation, Message, User, UserMemoryScope
 
 
 def _message(index: int, text: str = "hello", role: str = Role.USER.value) -> Message:
@@ -34,7 +36,27 @@ class _ScalarResult:
 
 
 class _FakeSession:
-    async def execute(self, *_args: Any, **_kwargs: Any) -> _ScalarResult:
+    def __init__(self) -> None:
+        self.user = User(
+            id="user-1",
+            email="fake-summary@example.test",
+            display_name="Fake Summary",
+        )
+        self.conversation = Conversation(
+            id="conv-1",
+            user_id=self.user.id,
+            title="Fake Summary",
+        )
+
+    async def execute(self, *args: Any, **_kwargs: Any) -> _ScalarResult:
+        statement = args[0] if args else None
+        rendered = str(statement)
+        if "FROM users" in rendered:
+            return _ScalarResult(self.user.id)
+        if "FROM conversations" in rendered:
+            if "SELECT conversations.user_id" in rendered:
+                return _ScalarResult(self.user.id)
+            return _ScalarResult(self.conversation)
         return _ScalarResult("first-user")
 
     async def commit(self) -> None:
@@ -47,6 +69,11 @@ class _FakeSession:
 class _CasSession:
     def __init__(self, conv: Conversation) -> None:
         self.conv = conv
+        self.user = User(
+            id=conv.user_id,
+            email="cas-summary@example.test",
+            display_name="CAS Summary",
+        )
         self.commits = 0
         self.rollbacks = 0
         self.execute_calls = 0
@@ -59,6 +86,11 @@ class _CasSession:
             self.statements.append(args[0])
         if self.after_execute is not None:
             self.after_execute()
+        rendered = str(args[0]) if args else ""
+        if "FROM users" in rendered:
+            return _ScalarResult(self.user.id)
+        if "SELECT conversations.user_id" in rendered:
+            return _ScalarResult(self.conv.user_id)
         return _ScalarResult(self.conv)
 
     async def commit(self) -> None:
@@ -147,6 +179,151 @@ class _MetricsRedis:
 
     async def set(self, key: str, value: str, **_kwargs: Any) -> None:
         self.values[key] = value
+
+
+@pytest.mark.asyncio
+async def test_context_summary_deletion_barrier_blocks_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = _message(3)
+    conversation = Conversation(
+        id="conv-1",
+        user_id="user-1",
+        title="Summary fence",
+    )
+    fence_entered = asyncio.Event()
+    deletion_committed = asyncio.Event()
+    upstream_calls = 0
+
+    async def load_messages(*_args: Any, **_kwargs: Any) -> Any:
+        return context_summary.LoadedSummaryMessages(
+            [boundary],
+            source_message_count=1,
+            source_token_estimate=10,
+            image_caption_count=0,
+        )
+
+    async def lock_active_context(*_args: Any, **_kwargs: Any) -> bool:
+        fence_entered.set()
+        await deletion_committed.wait()
+        return False
+
+    async def fail_caption(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise AssertionError("deleted conversation must not reach caption providers")
+
+    async def fail_segment(*_args: Any, **_kwargs: Any) -> str | None:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        raise AssertionError("deleted conversation must not reach summary providers")
+
+    async def acquire_lock(*_args: Any, **_kwargs: Any) -> Any:
+        return context_summary._SummaryLock("test")  # noqa: SLF001
+
+    async def release_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def circuit_closed(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(context_summary, "_load_messages_for_summary", load_messages)
+    monkeypatch.setattr(
+        context_summary, "_lock_active_summary_context", lock_active_context
+    )
+    monkeypatch.setattr(context_summary, "_caption_images_for_summary", fail_caption)
+    monkeypatch.setattr(context_summary, "_segment_and_summarize", fail_segment)
+    monkeypatch.setattr(context_summary, "_acquire_summary_lock", acquire_lock)
+    monkeypatch.setattr(context_summary, "_release_summary_lock", release_lock)
+    monkeypatch.setattr(context_summary, "_is_circuit_open", circuit_closed)
+
+    task = asyncio.create_task(
+        context_summary.ensure_context_summary(
+            _FakeSession(),
+            conversation,
+            boundary,
+            {},
+        )
+    )
+    await asyncio.wait_for(fence_entered.wait(), timeout=1)
+    deletion_committed.set()
+    result = await asyncio.wait_for(task, timeout=1)
+
+    assert result == {"status": "summary_failed"}
+    assert upstream_calls == 0
+
+
+@pytest.mark.parametrize("deleted_row", ["user", "conversation"])
+@pytest.mark.asyncio
+async def test_summary_cas_refuses_tombstoned_context(deleted_row: str) -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(
+                lambda sync_connection: Base.metadata.create_all(
+                    sync_connection,
+                    tables=[
+                        User.__table__,
+                        UserMemoryScope.__table__,
+                        Conversation.__table__,
+                    ],
+                )
+            )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        deleted_at = datetime.now(timezone.utc)
+        async with factory() as session:
+            session.add_all(
+                [
+                    User(
+                        id="user-1",
+                        email="summary-fence@example.test",
+                        display_name="Summary Fence",
+                        deleted_at=(deleted_at if deleted_row == "user" else None),
+                    ),
+                    Conversation(
+                        id="conv-1",
+                        user_id="user-1",
+                        title="Deleted summary",
+                        deleted_at=(
+                            deleted_at if deleted_row == "conversation" else None
+                        ),
+                    ),
+                ]
+            )
+            await session.commit()
+
+        summary = {
+            "version": SUMMARY_VERSION,
+            "kind": SUMMARY_KIND,
+            "up_to_message_id": "msg-003",
+            "up_to_created_at": "2026-01-01T00:00:03+00:00",
+            "first_user_message_id": "msg-001",
+            "text": "must not persist",
+            "tokens": 10,
+            "compression_runs": 1,
+            "compressed_at": "2026-01-01T00:01:00+00:00",
+        }
+        async with factory() as session:
+            wrote = await context_summary._cas_write_summary(  # noqa: SLF001
+                session,
+                "conv-1",
+                summary,
+            )
+            assert wrote is False
+
+        async with factory() as session:
+            stored = await session.get(Conversation, "conv-1")
+            stored_user = await session.get(User, "user-1")
+        assert stored is not None
+        assert stored_user is not None
+        if deleted_row == "user":
+            assert stored_user.deleted_at is not None
+        else:
+            assert stored.deleted_at is not None
+        assert stored.summary_jsonb is None
+    finally:
+        await engine.dispose()
 
 
 def _half_open_text_pool() -> tuple[Any, Any]:
@@ -994,7 +1171,7 @@ async def test_cas_write_refuses_equal_boundary_fallback_downgrade() -> None:
     assert conv.summary_jsonb == current_summary
     assert session.commits == 0
     assert session.rollbacks == 0
-    assert session.statements[0].get_execution_options()["populate_existing"] is True
+    assert session.statements[-1].get_execution_options()["populate_existing"] is True
 
 
 @pytest.mark.asyncio
@@ -1050,7 +1227,7 @@ async def test_cas_write_rolls_back_when_lease_lost_after_row_lock() -> None:
     )
 
     assert wrote is False
-    assert session.execute_calls == 1
+    assert session.execute_calls == 3
     assert session.rollbacks == 1
     assert session.commits == 0
     assert conv.summary_jsonb is None

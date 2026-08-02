@@ -244,14 +244,19 @@ class _TimingRedis:
                 self.blocked_release_started.set()
                 await self.allow_blocked_release.wait()
             async with self._mutex:
-                owns_reservation = bool(
-                    reservation_token
-                    and self._get_string(reservation_key) == reservation_token
+                current_reservation = self._get_string(reservation_key)
+                owns_slot = (
+                    bool(
+                        reservation_token
+                        and current_reservation == reservation_token
+                    )
+                    if current_reservation
+                    else bool(
+                        lease_token
+                        and self._get_string(task_lease_key) == lease_token
+                    )
                 )
-                owns_lease = bool(
-                    lease_token and self._get_string(task_lease_key) == lease_token
-                )
-                if not owns_reservation and not owns_lease:
+                if not owns_slot:
                     self.reservation_release_results.append((lease_token, 0))
                     return 0
                 if self._get_string(task_provider_key) != expected_provider:
@@ -263,7 +268,7 @@ class _TimingRedis:
                 self._delete(reservation_key)
                 if self._get_string(legacy_provider_lock_key) == task_id:
                     self._delete(legacy_provider_lock_key)
-                owner_token = reservation_token if owns_reservation else lease_token
+                owner_token = reservation_token if current_reservation else lease_token
                 self.reservation_release_results.append((owner_token, 1))
                 self.fenced_mutations.append(("release", owner_token))
                 return 1
@@ -677,6 +682,7 @@ async def test_dual_race_reservation_token_survives_lease_free_cleanup(
         redis,
         task_id=task_id,
         provider_name=sentinel,
+        reservation_token=reservation_token,
         services=generation_services,
     )
 
@@ -721,6 +727,7 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
             task_id=task_id,
             lease_token=old_lease,
             provider_name=provider_name,
+            reservation_token=old_reservation,
             clear_avoided_providers=False,
             services=generation_services,
         )
@@ -743,6 +750,86 @@ async def test_stale_worker_finally_cannot_delete_takeover_reservation(
     assert redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY][task_id] == new_expiry
     assert (old_lease, 0) in redis.reservation_release_results
     assert ("release", old_lease) not in redis.fenced_mutations
+
+
+@pytest.mark.asyncio
+async def test_old_cleanup_cannot_adopt_current_reservation_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "gen-release-after-takeover"
+    provider_name = "provider-shared"
+    old_lease = "worker-old:lease"
+    new_lease = "worker-new:lease"
+    new_reservation = "reservation-new"
+    redis = _TimingRedis()
+    task_lease_key = f"task:{task_id}:lease"
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
+    reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
+    expiry = time.time() + 90.0
+
+    await redis.set(task_lease_key, new_lease)
+    await redis.set(task_provider_key, provider_name)
+    await redis.set(reservation_key, new_reservation)
+    await redis.zadd(provider_key, {task_id: expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
+
+    await queue_claim.release_generation_runtime_resources(
+        redis,
+        task_id=task_id,
+        lease_token=old_lease,
+        provider_name=provider_name,
+        clear_avoided_providers=False,
+        services=generation_services,
+    )
+
+    assert redis.strings[task_lease_key] == new_lease
+    assert redis.strings[task_provider_key] == provider_name
+    assert redis.strings[reservation_key] == new_reservation
+    assert redis.zsets[provider_key][task_id] == expiry
+    assert redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY][task_id] == expiry
+    assert (old_lease, 0) in redis.reservation_release_results
+
+
+@pytest.mark.asyncio
+async def test_unfenced_cleanup_cannot_release_tokenized_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "gen-release-unfenced"
+    provider_name = "provider-owned"
+    reservation_token = "reservation-owned"
+    redis = _TimingRedis()
+    task_provider_key = queue.image_task_provider_key(task_id)
+    provider_key = queue.image_provider_active_key(provider_name)
+    reservation_key = queue_claim._image_queue_reservation_token_key(task_id)
+    expiry = time.time() + 60.0
+
+    await redis.set(task_provider_key, provider_name)
+    await redis.set(reservation_key, reservation_token)
+    await redis.zadd(provider_key, {task_id: expiry})
+    await redis.zadd(queue.IMAGE_QUEUE_ACTIVE_KEY, {task_id: expiry})
+
+    async def no_kick(_redis: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(queue_claim, "kick_image_queue", no_kick)
+
+    await queue_claim.release_image_queue_slot(
+        redis,
+        task_id=task_id,
+        provider_name=provider_name,
+        services=generation_services,
+    )
+
+    assert redis.strings[task_provider_key] == provider_name
+    assert redis.strings[reservation_key] == reservation_token
+    assert redis.zsets[provider_key][task_id] == expiry
+    assert redis.zsets[queue.IMAGE_QUEUE_ACTIVE_KEY][task_id] == expiry
 
 
 @pytest.mark.asyncio
@@ -812,6 +899,7 @@ async def test_reservation_token_releases_after_worker_lease_was_removed(
         task_id=task_id,
         provider_name=provider_name,
         lease_token="already-released-worker-lease",
+        reservation_token=reservation_token,
         services=generation_services,
     )
 

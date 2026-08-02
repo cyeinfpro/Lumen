@@ -11,10 +11,16 @@ from typing import Any
 import pytest
 from lumen_core.constants import GenerationAction, GenerationErrorCode, MessageStatus
 from lumen_core.models import Generation, Message
+from lumen_core.upstream_billing import (
+    mark_upstream_dispatch_started,
+    mark_upstream_response_received,
+)
 
+from app.provider_runtime.errors import UpstreamError
 from app.tasks.generation_parts import (
     composition,
     composition_ports,
+    execution_boundary,
     failure,
     lease,
     lifecycle,
@@ -499,6 +505,194 @@ async def test_terminal_failure_settles_when_upstream_cost_is_unknown(
     assert generation_row.upstream_request == {}
 
 
+def test_release_would_absorb_upstream_cost_receipt_matrix() -> None:
+    no_receipts = SimpleNamespace(upstream_request={})
+    dispatched = SimpleNamespace(
+        upstream_request=mark_upstream_dispatch_started(
+            {},
+            at="2026-01-01T00:00:00+00:00",
+            attempt=1,
+            execution_epoch=0,
+        ),
+    )
+    responded = SimpleNamespace(
+        upstream_request=mark_upstream_response_received(
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-01-01T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=0,
+            ),
+            at="2026-01-01T00:00:01+00:00",
+            attempt=1,
+            execution_epoch=0,
+        ),
+    )
+    # 更早 attempt 留下的 response 收据不代表当前 dispatch 已有答案
+    # (新 dispatch 覆盖 attempt,旧 response 收据仍在)。
+    stale_response = SimpleNamespace(
+        upstream_request={
+            "upstream_dispatch_started_at": "2026-01-01T00:00:02+00:00",
+            "upstream_dispatch_attempt": 2,
+            "upstream_dispatch_execution_epoch": 0,
+            "upstream_response_received_at": "2026-01-01T00:00:01+00:00",
+            "upstream_response_attempt": 1,
+            "upstream_response_execution_epoch": 0,
+        }
+    )
+    sidecar = SimpleNamespace(
+        upstream_request={
+            "sidecar_execution": {
+                "job_id": "job-1",
+                "provider_id": "provider-1",
+                "endpoint": "https://example.invalid",
+                "base_url": "https://example.invalid",
+                "idempotency_key": "ik-1",
+                "cost_knowledge": "none",
+            }
+        }
+    )
+
+    local_exc = RuntimeError("generation artifact commit was not adopted")
+    adapter_exc = UpstreamError(
+        "sha_echo",
+        error_code="sha_echo",
+        status_code=200,
+    )
+
+    assert execution_boundary.release_would_absorb_upstream_cost(
+        local_exc, no_receipts
+    ) is False
+    assert execution_boundary.release_would_absorb_upstream_cost(
+        local_exc, dispatched
+    ) is False
+    assert execution_boundary.release_would_absorb_upstream_cost(
+        local_exc, responded
+    ) is True
+    assert execution_boundary.release_would_absorb_upstream_cost(
+        local_exc, stale_response
+    ) is False
+    assert execution_boundary.release_would_absorb_upstream_cost(
+        adapter_exc, responded
+    ) is False
+    assert execution_boundary.release_would_absorb_upstream_cost(None, sidecar) is False
+    assert execution_boundary.release_would_absorb_upstream_cost(None, responded) is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_local_failure_with_response_settles_not_releases() -> None:
+    """本地失败(非 UpstreamError)且当前 dispatch 已收到响应 → 结算而不是退款。"""
+    message = SimpleNamespace(status=None)
+    generation_row = SimpleNamespace(
+        id="gen-1",
+        execution_epoch=0,
+        upstream_request=mark_upstream_response_received(
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-01-01T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=0,
+            ),
+            at="2026-01-01T00:00:01+00:00",
+            attempt=1,
+            execution_epoch=0,
+        ),
+    )
+    release_calls: list[Any] = []
+    settle_calls: list[tuple[Any, Any, str, str]] = []
+
+    class Session:
+        async def get(self, model: Any, object_id: str) -> Any:
+            if model is Message:
+                assert object_id == "msg-1"
+                return message
+            if model is Generation:
+                assert object_id == "gen-1"
+                return generation_row
+            raise AssertionError("unexpected model")
+
+    class Billing:
+        async def release(self, session: Any, generation: Any, *, reason: str) -> None:
+            release_calls.append((session, generation, reason))
+
+        async def settle_unknown_upstream(
+            self, session: Any, generation: Any, *, reason: str, knowledge: str
+        ) -> None:
+            settle_calls.append((session, generation, reason, knowledge))
+
+    session = Session()
+    state = SimpleNamespace(message_id="msg-1", task_id="gen-1")
+    deps = _generation_deps(billing=Billing())
+
+    await failure._mark_message_and_release_billing(
+        session,
+        state,
+        "local_failure",
+        deps,
+        exc=RuntimeError("generation artifact commit was not adopted"),
+    )
+
+    assert message.status == MessageStatus.FAILED
+    assert release_calls == []
+    assert settle_calls == [(session, generation_row, "local_failure", "incurred")]
+
+
+@pytest.mark.asyncio
+async def test_terminal_adapter_failure_with_response_still_releases() -> None:
+    """适配层 UpstreamError(已证明上游未计费)即使有响应收据也保持 release。"""
+    message = SimpleNamespace(status=None)
+    generation_row = SimpleNamespace(
+        id="gen-1",
+        execution_epoch=0,
+        upstream_request=mark_upstream_response_received(
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-01-01T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=0,
+            ),
+            at="2026-01-01T00:00:01+00:00",
+            attempt=1,
+            execution_epoch=0,
+        ),
+    )
+    release_calls: list[Any] = []
+    settle_calls: list[Any] = []
+
+    class Session:
+        async def get(self, model: Any, object_id: str) -> Any:
+            if model is Message:
+                return message
+            if model is Generation:
+                return generation_row
+            raise AssertionError("unexpected model")
+
+    class Billing:
+        async def release(self, session: Any, generation: Any, *, reason: str) -> None:
+            release_calls.append((session, generation, reason))
+
+        async def settle_unknown_upstream(
+            self, session: Any, generation: Any, *, reason: str, knowledge: str
+        ) -> None:
+            settle_calls.append((session, generation, reason, knowledge))
+
+    session = Session()
+    state = SimpleNamespace(message_id="msg-1", task_id="gen-1")
+    deps = _generation_deps(billing=Billing())
+
+    await failure._mark_message_and_release_billing(
+        session,
+        state,
+        "sha_echo",
+        deps,
+        exc=UpstreamError("sha_echo", error_code="sha_echo", status_code=200),
+    )
+
+    assert message.status == MessageStatus.FAILED
+    assert release_calls == [(session, generation_row, "sha_echo")]
+    assert settle_calls == []
+
+
 @pytest.mark.asyncio
 async def test_queue_claim_cleanup_preserves_release_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -561,7 +755,7 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     # 否则 commit 前的异常会把钱包流水连同已产出的上游图一起回滚（平台吸收成本）。
     persistence_source = inspect.getsource(persistence._persist_bonus_generation)
     stage = persistence_source.index("_stage_bonus_events(")
-    commit = persistence_source.index("await session.commit()", stage)
+    commit = persistence_source.index("commit_with_adoption_probe(", stage)
     settle = persistence_source.index("_settle_bonus_billing(", commit)
     assert stage < commit < settle
 
@@ -582,7 +776,15 @@ def test_bonus_persistence_keeps_billing_and_publish_boundaries() -> None:
     entrypoint_source = inspect.getsource(persistence.handle_dual_race_bonus_image)
     persist = entrypoint_source.index("_persist_bonus_generation(")
     deliver = entrypoint_source.index(
-        "await context.services.events.deliver_many(",
+        "await _deliver_bonus_events(",
         persist,
     )
     assert persist < deliver
+
+    delivery_source = inspect.getsource(persistence._deliver_bonus_events)
+    user_fence = delivery_source.index("_lock_active_bonus_user(")
+    publish = delivery_source.index(
+        "await context.services.events.deliver_many(",
+        user_fence,
+    )
+    assert user_fence < publish

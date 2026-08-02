@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -15,6 +15,7 @@ from .messages import loaded_summary_prefix
 @dataclass(frozen=True)
 class SummaryRequest:
     conv_id: str
+    user_id: str
     boundary: Any
     boundary_id: str
     boundary_dt: datetime
@@ -51,6 +52,7 @@ class SummaryGenerationResult:
 class SegmentSummaryExecution:
     coverage: SummaryCoverage | None = None
     image_upstream_runtime: Any = None
+    before_upstream: Callable[[], Awaitable[bool]] | None = None
 
 
 def summary_event_payload(
