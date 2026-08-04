@@ -363,7 +363,7 @@ export function PosterInpaintDialog({
                     type="button"
                     onClick={() => setMode("draw")}
                     className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
+                      "inline-flex h-11 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                       mode === "draw"
                         ? "bg-accent text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -376,7 +376,7 @@ export function PosterInpaintDialog({
                     type="button"
                     onClick={() => setMode("erase")}
                     className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
+                      "inline-flex h-11 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                       mode === "erase"
                         ? "bg-accent text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
