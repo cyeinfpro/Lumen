@@ -29,8 +29,8 @@ import { isValidEmailInput, normalizeEmailInput } from "@/lib/email";
 
 // review §9: 8+ BYOK 错误码 → 中文文案。signup 与绑定页共用。
 const BYOK_ERROR_TEXT: Record<string, string> = {
-  byok_disabled: "当前未开放 API Key 注册",
-  invalid_api_key: "API Key 无效或被供应商拒绝",
+  byok_disabled: "当前未开放 API 密钥 注册",
+  invalid_api_key: "API 密钥 无效或被供应商拒绝",
   supplier_unsupported: "供应商或协议不支持",
   model_not_available: "供应商不可用此模型",
   key_rate_limited: "Key 当前被限流，稍后再试",
@@ -38,10 +38,10 @@ const BYOK_ERROR_TEXT: Record<string, string> = {
   validation_timeout: "验证超时",
   validation_wrong_answer: "供应商返回不可信，检查 Key 与供应商配置",
   invalid_supplier_response: "供应商响应格式不兼容",
-  invalid_verification_token: "验证已失效，重新验证 API Key",
-  verification_expired: "验证已过期，重新验证 API Key",
-  verification_consumed: "验证已使用，重新验证 API Key",
-  verification_not_found: "验证记录不存在，重新验证 API Key",
+  invalid_verification_token: "验证已失效，重新验证 API 密钥",
+  verification_expired: "验证已过期，重新验证 API 密钥",
+  verification_consumed: "验证已使用，重新验证 API 密钥",
+  verification_not_found: "验证记录不存在，重新验证 API 密钥",
   email_taken: "该邮箱已注册，可直接登录",
 };
 
@@ -59,7 +59,7 @@ function getSignupValidationError({
   password: string;
   confirm: string;
 }): string | null {
-  if (!verificationToken) return "API Key 未验证";
+  if (!verificationToken) return "API 密钥 未验证";
   if (!isValidEmailInput(email)) return "邮箱格式不正确";
   if (password.length < 8) return "密码至少 8 位";
   if (password !== confirm) return "两次密码输入不一致";
@@ -115,7 +115,7 @@ export default function SignupPage() {
       return;
     }
     if (!apiKey.trim()) {
-      setError("API Key 未填");
+      setError("API 密钥 未填");
       return;
     }
     if (verifyGuardRef.current) return;
@@ -162,7 +162,7 @@ export default function SignupPage() {
       if (code && VERIFICATION_RESET_RE.test(code)) {
         setVerificationToken("");
         setKeyHint("");
-        setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，重新验证 API Key");
+        setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，重新验证 API 密钥");
         submitGuardRef.current = false;
         setSubmitting(false);
         return;
@@ -188,7 +188,7 @@ export default function SignupPage() {
               返回登录
             </Link>
             <h1 className="type-page-title">创建 Lumen 账号</h1>
-            <p className="type-body">连接你的 API Key 后继续注册。</p>
+            <p className="type-body">连接你的 API 密钥 后继续注册。</p>
           </header>
 
           <ApiKeyVerificationSection
@@ -262,7 +262,7 @@ function ApiKeyVerificationSection({
     <section className="page-section grid gap-4 !pt-0">
       <div className="type-label flex items-center gap-2">
         <KeyRound className="w-3.5 h-3.5" />
-        连接 API Key
+        连接 API 密钥
       </div>
       <SupplierLoadError
         visible={suppliersError}
@@ -291,7 +291,7 @@ function ApiKeyVerificationSection({
         </select>
       </label>
       <label className="auth-field">
-        <span className="type-label">API Key</span>
+        <span className="type-label">API 密钥</span>
         <div className="relative">
           <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--fg-2)]" />
           <input

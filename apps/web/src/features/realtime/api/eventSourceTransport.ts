@@ -50,7 +50,7 @@ export class BrowserEventSourceTransport implements EventStreamTransport {
   open(input: OpenStreamInput, sink: EventStreamSink): StreamHandle {
     // 修复 sequence 竞态：旧实现用共享自增计数器判活，「被新连接顶掉」和「自己已关闭」
     // 两件事混在一个比较里 —— 被顶掉的旧流只是不再回调，底层 EventSource 从没关过，
-    // 既漏浏览器连接又让服务端连接数虚高。改为开新流时先确定性关掉上一条，判活只看
+    // 既漏浏览器连接又让服务端连接数虚高。改为开新流时先明确关闭上一条，判活只看
     // 本 handle 自己的 closed 标志，无跨 handle 比较，也就没有竞态窗口。
     this.current?.close();
     const source = this.factory(input.url, { withCredentials: true });

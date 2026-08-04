@@ -417,7 +417,7 @@ function RecentProjects({
             onClick={onRetry}
             className="flex min-h-24 w-full items-center justify-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-1)]"
           >
-            最近项目加载失败，点击重试
+            重试
           </button>
         ) : items.length === 0 ? (
           <div className="grid min-h-24 place-items-center px-4 text-center type-body-sm leading-[1.6] text-[var(--fg-2)]">

@@ -36,28 +36,28 @@ export function useQualityReviewStageController(workflow: WorkflowRun) {
   const create = useCreateShowcaseImagesMutation(workflow.id, {
     onError: (err) =>
       toast.error("继续生成失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success(`已追加派发 ${form.outputCount} 张展示图`),
   });
   const revise = useReviseWorkflowImageMutation(workflow.id, {
     onError: (err) =>
       toast.error("文字返修失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("返修任务已派发"),
   });
   const complete = useCompleteWorkflowDeliveryMutation(workflow.id, {
     onError: (err) =>
       toast.error("交付失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("项目已进入交付状态"),
   });
   const reopen = useReopenModelSelectionMutation(workflow.id, {
     onError: (err) =>
       toast.error("返回重选模特失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("已返回模特候选阶段"),
   });

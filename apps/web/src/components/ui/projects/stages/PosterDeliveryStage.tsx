@@ -76,7 +76,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     },
     onError: (error) => {
       toast.error("加入项目素材失败", {
-        description: error.message || "请稍后重试",
+        description: error.message || "稍后重试",
       });
     },
   });
@@ -115,7 +115,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       await navigator.clipboard.writeText(text);
       toast.success("项目信息已复制到剪贴板");
     } catch {
-      toast.error("复制失败，请手动选择");
+      toast.error("复制失败，手动选择");
     }
   };
 

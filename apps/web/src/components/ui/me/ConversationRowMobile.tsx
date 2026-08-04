@@ -47,7 +47,7 @@ export interface ConversationRowMobileProps {
 
 function titleOf(c: ConversationSummary): string {
   const t = c.title?.trim();
-  return t || "New Canvas";
+  return t || "新画布";
 }
 
 function relativeTime(iso: string): string {

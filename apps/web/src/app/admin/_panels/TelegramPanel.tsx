@@ -159,7 +159,7 @@ export function TelegramPanel() {
       const res = await restartMut.mutateAsync();
       if (res.receivers === 0) {
         setRestartHint(
-          "已发送重启指令，但当前没有 bot 进程在监听控制通道。请手动执行 systemctl restart lumen-tgbot 重新加载配置。",
+          "已发送重启指令，但当前没有 bot 进程在监听控制通道。手动执行 systemctl restart lumen-tgbot 重新加载配置。",
         );
       } else {
         setRestartHint(`已发送重启指令，机器人会在数秒内自动重新启动。`);
@@ -262,7 +262,7 @@ export function TelegramPanel() {
             勾选要用的代理；一个都不勾表示用所有「启用」的代理。
           </p>
           {allProxies.length === 0 ? (
-            <p className="type-caption text-[var(--fg-2)]">代理池为空，请先到供应商标签页添加代理。</p>
+            <p className="type-caption text-[var(--fg-2)]">代理池为空，先到供应商标签页添加代理。</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {allProxies.map((p) => {
@@ -468,7 +468,7 @@ function RestartConfirmModal({
             loading={pending}
             leftIcon={!pending ? <RotateCw className="w-3.5 h-3.5" /> : undefined}
           >
-            {pending ? "正在重启" : "立即重启"}
+            {pending ? "重启中" : "立即重启"}
           </Button>
         </div>
       </motion.div>

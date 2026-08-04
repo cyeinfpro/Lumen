@@ -294,7 +294,7 @@ async function runMobileShare({
   } catch {
     if (operationIsCurrent()) {
       showNotice(
-        { kind: "error", text: "复制失败，请手动复制" },
+        { kind: "error", text: "复制失败，手动复制" },
         operationIsCurrent,
       );
     }

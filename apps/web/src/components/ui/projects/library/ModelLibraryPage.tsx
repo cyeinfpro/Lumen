@@ -46,7 +46,7 @@ export function ModelLibraryPage() {
     },
     onError: (err) =>
       toast.error("派发失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 

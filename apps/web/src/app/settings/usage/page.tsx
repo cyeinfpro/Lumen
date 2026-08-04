@@ -62,7 +62,7 @@ export default function UsagePage() {
     USAGE_PERIODS.find((period) => period.value === days) ?? USAGE_PERIODS[1];
 
   return (
-    <SettingsShell title="用量统计" subtitle={`USAGE · ${selectedPeriod.label}`}>
+    <SettingsShell title="用量统计" subtitle={`用量 · ${selectedPeriod.label}`}>
       <motion.div
         initial={false}
         animate={{ opacity: 1, y: 0 }}
@@ -293,7 +293,7 @@ function UsageView({ data }: { data: UsageOut }) {
             {formatBytes(data.storage_bytes)}
           </div>
           <div className="type-caption text-[var(--fg-2)] mt-0.5 font-mono tabular-nums">
-            {formatThousands(data.storage_bytes)} bytes
+            {formatThousands(data.storage_bytes)} 字节
           </div>
         </SecondaryCard>
       </div>

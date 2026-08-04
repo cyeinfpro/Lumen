@@ -179,7 +179,7 @@ export function StoryboardIndexPage() {
               onClick={() => query.refetch()}
               className="min-h-40 border border-[var(--border)] bg-[var(--bg-1)] type-body-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
             >
-              分镜项目加载失败，点击重试
+              重试
             </button>
           ) : (query.data?.items ?? []).length === 0 ? (
             <div className="grid min-h-72 place-items-center border border-[var(--border)] bg-[var(--bg-1)]/72 p-6 text-center">
@@ -671,7 +671,7 @@ function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot })
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="type-caption text-[var(--fg-3)]">
-          SEG {String(shot.index).padStart(2, "0")}
+          段 {String(shot.index).padStart(2, "0")}
         </span>
         <div className="flex flex-wrap gap-2">
           <StatusPill status={shot.status} />

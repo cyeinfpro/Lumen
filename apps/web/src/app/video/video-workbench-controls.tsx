@@ -265,7 +265,7 @@ export function VideoParameterPanelView({
           </summary>
           <div className="border-t border-[var(--border-subtle)] p-3">
             <label className="block min-w-0 space-y-1.5">
-              <span className="type-caption text-[var(--fg-2)]">Seed</span>
+              <span className="type-caption text-[var(--fg-2)]">种子</span>
               <input
                 value={seed}
                 onChange={(event) => onSeedChange(event.target.value)}
@@ -275,7 +275,7 @@ export function VideoParameterPanelView({
               />
             </label>
             <p className="mt-2 type-caption leading-5 text-[var(--fg-2)]">
-              使用相同 Seed 可提高同一模型与参数下的结果可复现性。
+              使用相同种子可提高同一模型与参数下的结果可复现性。
             </p>
           </div>
         </details>
@@ -361,7 +361,7 @@ export function VideoWorkbenchHeader({
             </span>
           </div>
           <p className="mt-1 truncate type-caption text-[var(--fg-2)]">
-            {loading ? "正在读取视频服务" : serviceSummary}
+            {loading ? "视频服务读取中" : serviceSummary}
           </p>
         </div>
       </div>

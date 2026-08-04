@@ -105,7 +105,7 @@ test("share labels and prompt aggregation remain unchanged", () => {
   strictEqual(shareImageAlt(image), "保留公开分享提示词");
   strictEqual(shareImageAlt(shareImage({ prompt: null })), "分享图片");
   strictEqual(shareSizeLabel([image]), "2048 × 1024 · PNG 格式");
-  strictEqual(shareSizeLabel([image, duplicatePrompt]), "2048 x 1024");
+  strictEqual(shareSizeLabel([image, duplicatePrompt]), "2048 × 1024");
   strictEqual(
     shareSizeLabel([image, shareImage({ id: "image-3", width: 1024 })]),
     "多尺寸",

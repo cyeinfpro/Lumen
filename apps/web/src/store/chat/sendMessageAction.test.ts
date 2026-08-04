@@ -470,7 +470,7 @@ test("conversation switch during blocked acquire preserves the new draft", async
       messages: [],
       composer: {
         ...createComposerState(null),
-        text: "新会话中尚未发送的草稿",
+        text: "新会话中未发送的草稿",
       },
     });
     releaseAcquire.resolve();
@@ -478,7 +478,7 @@ test("conversation switch during blocked acquire preserves the new draft", async
 
     assert.equal(posts, 0);
     assert.equal(harness.get().currentConvId, "conv-2");
-    assert.equal(harness.get().composer.text, "新会话中尚未发送的草稿");
+    assert.equal(harness.get().composer.text, "新会话中未发送的草稿");
     assert.deepEqual(harness.get().messages, []);
     assert.deepEqual(harness.get().generations, {});
   } finally {
@@ -666,7 +666,7 @@ test("abortAllSendRequests aborts a send that has not reached the backend", asyn
   };
 
   const pendingSend = harness.sendMessage({ intentOverride: "chat" });
-  // sendMessage 尚未执行到 POST（首个 await 在 ensureConversation 处），
+  // sendMessage 未执行到 POST（首个 await 在 ensureConversation 处），
   // 此时 abort 无副作用：后端未收到请求，也不会计费。
   runtime.abortAllSendRequests();
   await pendingSend;

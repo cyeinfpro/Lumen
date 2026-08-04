@@ -417,7 +417,7 @@ function VideoPricingTable({
             <th className="px-3 py-2">I2V ¥/百万 token</th>
             <th className="px-3 py-2">参考图片 ¥/百万 token</th>
             <th className="px-3 py-2">参考视频 ¥/百万 token</th>
-            <th className="px-3 py-2">Reference fallback</th>
+            <th className="px-3 py-2">参考图回退</th>
             <th className="px-3 py-2">状态</th>
             <th className="px-3 py-2">更新于</th>
             <th className="px-3 py-2" />

@@ -157,7 +157,7 @@ export function useVideoTaskMutations({
       const createdNewTask = generation.id !== request.taskId;
       toast.success(createdNewTask ? "已创建新的重试任务" : "已重新生成", {
         description: createdNewTask
-          ? `正在跟踪新任务 ${generation.id.slice(0, 8)}`
+          ? `新任务 ${generation.id.slice(0, 8)} 跟踪中`
           : undefined,
       });
       scheduleGenerationRefresh(generation.id, { delayMs: 800 });

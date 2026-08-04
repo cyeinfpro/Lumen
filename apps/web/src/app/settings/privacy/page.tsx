@@ -58,7 +58,7 @@ export default function PrivacyPage() {
   });
 
   return (
-    <SettingsShell title="隐私 & 数据" subtitle="PRIVACY">
+    <SettingsShell title="隐私与数据" subtitle="隐私与数据">
       <motion.div
         initial={false}
         animate={{ opacity: 1, y: 0 }}

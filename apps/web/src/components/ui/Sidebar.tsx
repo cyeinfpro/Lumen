@@ -698,7 +698,7 @@ function EmptyState({
         className="text-[var(--accent)] no-underline hover:underline"
         leftIcon={<MessageSquarePlus className="h-3.5 w-3.5" />}
       >
-        开始你的第一次对话
+        开始对话
       </Button>
     </div>
   );

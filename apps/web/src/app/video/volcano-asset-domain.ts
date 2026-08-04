@@ -181,7 +181,7 @@ export function pauseVolcanoOperationCheckpoints<
         phase: "uncertain" as const,
         recovery: "refresh" as const,
         error:
-          "提交请求已发出但结果未知。系统不会自动重发，请检查素材库后再继续。",
+          "提交请求已发出但结果未知。系统不会自动重发，检查素材库后再继续。",
       };
     }
     return {
@@ -343,13 +343,13 @@ export function volcanoOperationStageMessage(stage?: string | null): string {
     .toLowerCase();
   const messages: Record<string, string> = {
     queued: "后台任务已排队",
-    validating_scope: "正在校验素材组和项目范围",
-    checking_quota: "正在确认素材配额",
-    normalizing_image: "正在后台优化图片尺寸与格式",
-    normalizing_video: "正在后台转码视频尺寸、帧率与编码",
-    waiting_submit_slot: "正在等待火山提交配额",
+    validating_scope: "素材组和项目范围校验中",
+    checking_quota: "素材配额确认中",
+    normalizing_image: "图片尺寸与格式后台优化中",
+    normalizing_video: "视频尺寸、帧率与编码后台转码中",
+    waiting_submit_slot: "等待火山提交配额",
     waiting_rate_limit: "触发火山限流，后台稍后自动继续",
-    submitting: "正在提交到火山素材库",
+    submitting: "火山素材库提交中",
     completed: "已提交到火山素材库",
     failed: "后台任务失败",
   };
@@ -546,24 +546,24 @@ export function volcanoAssetErrorMessage(
   const code = volcanoErrorCode(error);
   const messages: Record<string, string> = {
     network_error: "网络连接中断，无法确认请求结果",
-    unauthorized: "登录状态已失效，请重新登录后再操作",
-    csrf_failed: "安全令牌已失效，请刷新页面后重试",
-    video_asset_queue_unavailable: "素材后台队列暂不可用，请稍后重试",
+    unauthorized: "登录状态已失效，重新登录后再操作",
+    csrf_failed: "安全令牌已失效，刷新页面后重试",
+    video_asset_queue_unavailable: "素材后台队列暂不可用，稍后重试",
     volcano_asset_create_rate_limited: "火山提交频率已达上限，后台稍后可继续",
     volcano_asset_quota_exceeded: "当前 Project 的素材配额已满",
     volcano_asset_group_quota_exceeded: "当前 Project 的素材组配额已满",
-    video_asset_operation_not_found: "后台任务记录已过期，请刷新素材库确认结果",
+    video_asset_operation_not_found: "后台任务记录已过期，刷新素材库确认结果",
     video_asset_operation_not_retryable:
-      "该后台任务不能重试，请刷新素材库确认结果",
+      "该后台任务不能重试，刷新素材库确认结果",
     video_asset_provider_missing: "当前模型没有可用的火山素材供应商",
     video_asset_provider_unsupported: "当前模型不是火山官方素材供应商",
     volcano_asset_credentials_missing: "火山素材库 AK/SK 配置不完整",
     video_asset_public_url_missing: "素材公开访问地址未配置，火山无法拉取文件",
     video_asset_public_url_invalid: "素材公开访问地址不可用，火山无法拉取文件",
-    video_asset_image_not_found: "本地图片已不存在，请重新选择文件",
-    video_asset_video_not_found: "本地视频已不存在，请重新选择文件",
+    video_asset_image_not_found: "本地图片已不存在，重新选择文件",
+    video_asset_video_not_found: "本地视频已不存在，重新选择文件",
     volcano_asset_scope_mismatch: "素材不属于当前 Project 或 AIGC 素材组",
-    volcano_asset_not_found: "云端素材已不存在，请刷新素材库",
+    volcano_asset_not_found: "云端素材已不存在，刷新素材库",
   };
   if (messages[code]) return messages[code];
   const message =

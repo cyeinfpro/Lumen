@@ -72,7 +72,7 @@ export function capabilityCopy(capability: VideoAssetCapabilitiesOut): {
     return {
       title: "当前模型不是火山官方 Seedance",
       description:
-        "火山虚拟素材库仅适用于 kind=volcano 的官方 Seedance。普通非人像素材继续使用视频页的“上传参考”。",
+        "火山素材库仅适用于 kind=volcano 的官方 Seedance。普通非人像素材继续使用视频页的“上传参考”。",
       action: "管理员操作：在 AI 视频供应商中为该模型选择火山官方配置。",
     };
   }
@@ -80,7 +80,7 @@ export function capabilityCopy(capability: VideoAssetCapabilitiesOut): {
     return {
       title: "缺少火山 AK / SK",
       description:
-        "当前 Seedance 可以生成视频，但火山虚拟素材库还没有资产管理凭据。",
+        "当前 Seedance 可以生成视频，但火山素材库还没有资产管理凭据。",
       action:
         "管理员操作：补全火山官方供应商的 AK、SK、ProjectName 和 Region。",
     };
@@ -102,7 +102,7 @@ export function capabilityCopy(capability: VideoAssetCapabilitiesOut): {
     };
   }
   return {
-    title: "火山虚拟素材库暂不可用",
+    title: "火山素材库暂不可用",
     description:
       capability.detail ||
       "当前视频供应商不可用或没有为该模型配置参考生成能力。",

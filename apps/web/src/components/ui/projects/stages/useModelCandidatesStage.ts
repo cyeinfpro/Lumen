@@ -175,13 +175,13 @@ function useModelCandidatesStageMutations(workflowId: string) {
   const approve = useApproveModelCandidateMutation(workflowId, {
     onError: (err) =>
       toast.error("确认模特失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
   const createCandidates = useCreateModelCandidatesMutation(workflowId, {
     onError: (err) =>
       toast.error("生成模特候选失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("已派发 3 套模特候选生成"),
   });
@@ -189,13 +189,13 @@ function useModelCandidatesStageMutations(workflowId: string) {
     useSaveAccessorySelectionMutation(workflowId, {
       onError: (err) =>
         toast.error("保存配饰四宫格选择失败", {
-          description: err instanceof Error ? err.message : "请稍后重试",
+          description: err instanceof Error ? err.message : "稍后重试",
         }),
     });
   const createShowcase = useCreateShowcaseImagesMutation(workflowId, {
     onError: (err) =>
       toast.error("生成展示图失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("展示图任务已派发"),
   });
@@ -206,7 +206,7 @@ function useModelCandidatesStageMutations(workflowId: string) {
           description:
             err instanceof Error
               ? err.message
-              : "请先确认模特后再重新生成配饰四宫格",
+              : "先确认模特后再重新生成配饰四宫格",
         }),
       onSuccess: () => toast.success("配饰四宫格任务已派发"),
     });
@@ -325,7 +325,7 @@ function buildModelCandidatesStageActions({
   };
   const regenerateCandidates = () => {
     if (!data.modelStylePrompt.trim()) {
-      toast.warning("请先填写模特风格方向");
+      toast.warning("先填写模特风格方向");
       return;
     }
     mutations.createCandidates.mutate({

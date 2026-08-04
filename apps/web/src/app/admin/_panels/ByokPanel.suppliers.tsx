@@ -446,7 +446,7 @@ function SupplierForm({
             <ToggleRow
               checked={draft.user_bind_enabled}
               label="允许已登录用户绑定"
-              hint="该供应商出现在账号设置 → API Key 列表中"
+              hint="该供应商出现在账号设置 → API 密钥 列表中"
               onChange={(value) => set({ user_bind_enabled: value })}
             />
           </div>

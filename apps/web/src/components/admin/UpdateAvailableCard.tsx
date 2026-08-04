@@ -61,7 +61,7 @@ function currentVersionFor(
   check?: AdminUpdateCheckOut | null,
   version?: AdminUpdateVersionOut | null,
 ): string {
-  return check?.current_version ?? version?.version ?? "unknown";
+  return check?.current_version ?? version?.version ?? "未知";
 }
 
 function currentLineFor(
@@ -70,7 +70,7 @@ function currentLineFor(
 ): string {
   const currentVersion = currentVersionFor(check, version);
   const channel = check?.channel ?? version?.channel ?? "stable";
-  const buildType = check?.build_type ?? version?.build_type ?? "unknown";
+  const buildType = check?.build_type ?? version?.build_type ?? "未知";
   return `${currentVersion} · ${channel} · ${buildType}`;
 }
 
@@ -135,20 +135,20 @@ function UpdateMetadata({
   return (
     <div className="mt-3 flex flex-wrap gap-1.5 type-caption text-[var(--fg-2)]">
       <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
-        current {currentVersionFor(check, version)}
+        当前 {currentVersionFor(check, version)}
       </span>
       <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
-        latest {check?.latest_version ?? "unknown"}
+        最新 {check?.latest_version ?? "未知"}
       </span>
       {!compact && (
         <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
-          cache {cache ? (cache.cached ? "hit" : "miss") : "unknown"}
-          {cache?.stale ? " · stale" : ""}
+          缓存 {cache ? (cache.cached ? "命中" : "未命中") : "未知"}
+          {cache?.stale ? " · 已过期" : ""}
         </span>
       )}
       {check?.warm_pull?.state && (
         <span className="rounded-[var(--radius-control)] border border-info-border bg-info-soft px-2 py-1 text-info">
-          warm pull {check.warm_pull.state}
+          预拉取 {check.warm_pull.state}
         </span>
       )}
       {check?.warning && (
@@ -199,15 +199,12 @@ function UpdateSummary({
   );
 }
 
-function updateButtonLabel(
-  state: UpdateCardState,
-  check?: AdminUpdateCheckOut | null,
-): string {
+function updateButtonLabel(state: UpdateCardState): string {
   switch (state) {
     case "RUNNING":
       return "更新进行中";
     case "UPDATE_AVAILABLE":
-      return `立即更新到 ${resolvedUpdateTag(check)}`;
+      return "立即更新";
     case "UP_TO_DATE":
       return "已是最新";
     case "UNKNOWN":
@@ -218,7 +215,6 @@ function updateButtonLabel(
 }
 
 function UpdateActions({
-  check,
   state,
   checking,
   triggering,
@@ -227,7 +223,6 @@ function UpdateActions({
   onTrigger,
   onRollbackPrevious,
 }: {
-  check?: AdminUpdateCheckOut | null;
   state: UpdateCardState;
   checking?: boolean;
   triggering?: boolean;
@@ -259,7 +254,7 @@ function UpdateActions({
         loading={busy}
         leftIcon={!busy ? <Rocket className="h-3.5 w-3.5" /> : undefined}
       >
-        {updateButtonLabel(state, check)}
+        {updateButtonLabel(state)}
       </Button>
       {showRollbackPrevious && (
         <Button
@@ -295,7 +290,7 @@ function ReleaseSummary({
       </summary>
       <div className="mt-3 space-y-3">
         <div className="type-caption text-[var(--fg-2)]">
-          发布于 {check.release.published_at ?? "unknown"}
+          发布于 {check.release.published_at ?? "未知"}
         </div>
         {/* 传 markdown 源码而非 body_html：预览组件内部走 react-markdown，原始 HTML 会被丢弃 */}
         <MarkdownPreview
@@ -339,7 +334,6 @@ export function UpdateAvailableCard({
           compact={compact}
         />
         <UpdateActions
-          check={check}
           state={state}
           checking={checking}
           triggering={triggering}

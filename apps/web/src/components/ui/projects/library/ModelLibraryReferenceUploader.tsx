@@ -42,13 +42,13 @@ export function ModelLibraryReferenceUploader({
     if (!file) return;
     if (!ACCEPTED_TYPES.has(file.type)) {
       toast.error("格式不支持", {
-        description: "请上传 PNG、JPG 或 WebP 图片",
+        description: "上传 PNG、JPG 或 WebP 图片",
       });
       return;
     }
     if (file.size > MAX_REFERENCE_BYTES) {
       toast.error("参考图过大", {
-        description: "请上传 10MB 以内的图片",
+        description: "上传 10MB 以内的图片",
       });
       return;
     }
@@ -62,7 +62,7 @@ export function ModelLibraryReferenceUploader({
       });
     } catch (err) {
       toast.error("上传失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     } finally {
       setUploading(false);

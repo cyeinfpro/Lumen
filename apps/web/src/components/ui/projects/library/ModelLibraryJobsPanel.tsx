@@ -33,7 +33,7 @@ export function ModelLibraryJobsPanel() {
       }),
     onError: (err) =>
       toast.error("清理失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 
@@ -147,7 +147,7 @@ export function ModelLibraryJobsPanel() {
               )}
             >
               {jobs.isFetchingNextPage ? <Spinner size={12} /> : null}
-              加载更多历史任务
+              加载更多
             </button>
           ) : null}
         </>

@@ -88,7 +88,7 @@ export function MobileEmptyStudio({
       await loadHistoricalMessages(currentConvId, false);
     } catch (err) {
       if (!isAbortLike(err)) {
-        setFallbackError(errorMessage(err) ?? "消息加载失败，请重试");
+        setFallbackError(errorMessage(err) ?? "消息加载失败，重试");
       }
     } finally {
       setFallbackLoading(false);
@@ -180,7 +180,7 @@ export function MobileEmptyStudio({
                     "bg-[var(--bg-2)] text-[var(--fg-1)]",
                   )}
                 >
-                  <span className="type-overline">IMG</span>
+                  <span className="type-overline">图像</span>
                 </span>
                 <span className="min-w-0 break-words type-body-sm leading-snug text-[var(--fg-1)]">{s.text}</span>
               </span>
@@ -222,7 +222,7 @@ export function MobileEmptyStudio({
                       "bg-[var(--bg-2)] text-[var(--fg-1)]",
                     )}
                   >
-                    <span className="type-overline">ASK</span>
+                    <span className="type-overline">提问</span>
                   </span>
                   <span className="flex-1 min-w-0 break-words type-body-sm leading-snug">{s.text}</span>
                   <ArrowRight

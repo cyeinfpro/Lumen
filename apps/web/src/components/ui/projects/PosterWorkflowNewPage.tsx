@@ -85,7 +85,7 @@ async function uploadWithProgress(
             reject(new Error("响应解析失败"));
           }
         } else if (coordinateIdentityMismatchResponse(xhr.status, xhr.responseText)) {
-          reject(new Error("登录身份已变化，请重新操作"));
+          reject(new Error("登录身份已变化，重新操作"));
         } else if (xhr.status === 403 && xhr.responseText.includes("csrf_failed")) {
           reject(new Error("csrf_failed"));
         } else if (xhr.status === 401) {
@@ -96,7 +96,7 @@ async function uploadWithProgress(
           reject(new Error(`上传失败：HTTP ${xhr.status}`));
         }
       };
-      xhr.onerror = () => reject(new Error("网络错误，请检查连接"));
+      xhr.onerror = () => reject(new Error("网络错误，检查连接"));
       xhr.onabort = () => reject(new DOMException("已取消", "AbortError"));
 
       if (signal.aborted) {
@@ -115,7 +115,7 @@ async function uploadWithProgress(
     if (err instanceof Error && err.message === "csrf_failed") {
       const fresh = await refreshCsrfToken().catch(() => null);
       if (fresh) return uploadOnce(fresh);
-      throw new Error("请求校验失败，请刷新页面后再试");
+      throw new Error("请求校验失败，刷新页面后再试");
     }
     throw err;
   }
@@ -265,7 +265,7 @@ export function PosterWorkflowNewPage() {
   const create = useCreatePosterDesignWorkflowMutation({
     onError: (err) =>
       toast.error("创建项目失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: (out) => {
       toast.success("项目已创建");
@@ -336,7 +336,7 @@ export function PosterWorkflowNewPage() {
           err instanceof DOMException && err.name === "AbortError";
         if (!canceled) {
           toast.error("上传失败", {
-            description: err instanceof Error ? err.message : "请稍后重试",
+            description: err instanceof Error ? err.message : "稍后重试",
           });
         }
         releaseBrandPreviewUrl(kind, localUrl, brandUrlRef.current);
@@ -380,11 +380,11 @@ export function PosterWorkflowNewPage() {
     if (submittingRef.current || create.isPending) return;
     setError(null);
     if (!copyTrimmed) {
-      setError("请输入海报文案");
+      setError("输入海报文案");
       return;
     }
     if (!style) {
-      setError("请选择海报风格");
+      setError("选择海报风格");
       return;
     }
     if (!aspects.length) {

@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/primitives";
 
 export function titleOf(c: ConversationSummary): string {
   const t = c.title?.trim();
-  return t || "New Canvas";
+  return t || "新画布";
 }
 
 type MenuView = "closed" | "menu" | "rename" | "confirmDelete";

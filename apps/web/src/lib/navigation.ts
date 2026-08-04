@@ -50,7 +50,7 @@ const APP_NAV_ITEMS: readonly AppNavItem[] = [
     key: "me",
     label: "我的",
     route: "/me",
-    detail: "账户、记忆、系统提示词、API Key、账单和设置",
+    detail: "账户、记忆、系统提示词、API 密钥、账单和设置",
     keywords: ["me", "profile", "account", "settings", "我的", "账号", "设置", "记忆", "账单", "api key"],
     matchPrefixes: ["/me", "/settings"],
   },

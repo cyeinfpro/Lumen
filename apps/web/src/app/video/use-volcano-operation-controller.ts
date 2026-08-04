@@ -215,7 +215,7 @@ export function useVolcanoOperationController({
         );
         setNotice({
           tone: "error",
-          text: `后台任务仍在冷却，请 ${seconds} 秒后重试`,
+          text: `后台任务仍在冷却， ${seconds} 秒后重试`,
         });
         return;
       }
@@ -232,7 +232,7 @@ export function useVolcanoOperationController({
         operationControllersRef.current.set(clientOperationId, controller);
         updateOperation(
           clientOperationId,
-          { phase: "pending", error: "正在刷新素材库确认结果" },
+          { phase: "pending", error: "素材库确认结果刷新中" },
           runner.model,
         );
         void (async () => {
@@ -254,7 +254,7 @@ export function useVolcanoOperationController({
                     phase: "uncertain",
                     recovery: "refresh",
                     error:
-                      "仍无法确认提交结果。请检查素材列表；系统不会自动重发。",
+                      "仍无法确认提交结果。检查素材列表；系统不会自动重发。",
                   },
               runner.model,
             );
@@ -365,7 +365,7 @@ export function useVolcanoOperationController({
       if (operation && volcanoOperationBlocksMutation(operation)) {
         setNotice({
           tone: "error",
-          text: "该后台操作尚未确认完成，不能移除记录或释放对象锁",
+          text: "该后台操作未确认完成，不能移除记录或释放对象锁",
         });
         return;
       }

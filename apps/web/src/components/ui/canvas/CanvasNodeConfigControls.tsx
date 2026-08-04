@@ -107,7 +107,7 @@ function OptionalSeedInputControl({
       value={draft}
       placeholder="留空为随机"
       invalid={!valid}
-      error={valid ? undefined : "请输入 -1 至 4294967295 的整数"}
+      error={valid ? undefined : "输入 -1 至 4294967295 的整数"}
       onChange={(event) => setDraft(event.currentTarget.value)}
       onBlur={() => {
         if (valid && draft !== external) onCommit(parsed);

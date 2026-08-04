@@ -1,6 +1,6 @@
 export const MAX_PROMPT_CHARS = 10_000;
 
-export const PROMPT_TOO_LONG_MESSAGE = `提示词不能超过 ${MAX_PROMPT_CHARS} 字，请精简后再发送`;
+export const PROMPT_TOO_LONG_MESSAGE = `提示词不能超过 ${MAX_PROMPT_CHARS} 字，精简后再发送`;
 
 export function isPromptTooLong(text: string): boolean {
   return text.length > MAX_PROMPT_CHARS;

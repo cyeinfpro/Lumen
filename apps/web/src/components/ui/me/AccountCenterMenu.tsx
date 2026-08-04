@@ -79,7 +79,7 @@ export function AccountCenterMenu({
           <AccountRow
             href="/settings/api-key"
             icon={<KeyRound className="h-4 w-4" />}
-            label="API Key"
+            label="API 密钥"
             grouped
           />
         )}

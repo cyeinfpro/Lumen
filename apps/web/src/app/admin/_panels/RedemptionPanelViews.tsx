@@ -510,7 +510,7 @@ function RedemptionUsageContent({
             <th className="px-4 py-2">用户</th>
             <th className="px-4 py-2">面额</th>
             <th className="px-4 py-2">流水</th>
-            <th className="px-4 py-2">IP Hash</th>
+            <th className="px-4 py-2">IP 哈希</th>
             <th className="px-4 py-2">时间</th>
           </tr>
         </thead>

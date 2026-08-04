@@ -35,7 +35,7 @@ export default function TelegramSettingsPage() {
   };
 
   return (
-    <SettingsShell title="Telegram" subtitle="BOT">
+    <SettingsShell title="Telegram" subtitle="机器人">
       <div
         className="page-frame space-y-5 pb-4 sm:space-y-7"
         data-width="settings"
@@ -48,7 +48,7 @@ export default function TelegramSettingsPage() {
             <div className="min-w-0 flex-1">
               <p className="type-card-title">绑定 Telegram 机器人</p>
               <p className="type-body-sm mt-1 text-[var(--fg-2)]">
-                绑定码 10 分钟有效。重新生成后请使用最新一组绑定码。
+                绑定码 10 分钟有效。重新生成后使用最新一组绑定码。
               </p>
             </div>
           </div>

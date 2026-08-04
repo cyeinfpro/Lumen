@@ -131,7 +131,7 @@ export function useCanvasDraftPersistence({
       },
       () => {
         onDurabilityWarning(
-          "浏览器本地恢复存储不可用；请保持页面打开，系统仍会尝试云端保存。",
+          "浏览器本地恢复存储不可用；保持页面打开，系统仍会尝试云端保存。",
         );
       },
     );
@@ -187,7 +187,7 @@ export function useCanvasDraftPersistence({
       if (!ready) return;
       if (!persistCanvasEmergencySnapshot(canvasId, clientId, store)) {
         onDurabilityWarning(
-          "页面关闭前无法写入紧急恢复副本；请等待云端保存完成。",
+          "页面关闭前无法写入紧急恢复副本；等待云端保存完成。",
         );
       }
       persist();
@@ -198,7 +198,7 @@ export function useCanvasDraftPersistence({
       if (!ready) return;
       if (!persistCanvasEmergencySnapshot(canvasId, clientId, store)) {
         onDurabilityWarning(
-          "页面进入后台前无法写入紧急恢复副本；请等待云端保存完成。",
+          "页面进入后台前无法写入紧急恢复副本；等待云端保存完成。",
         );
       }
       persist();
@@ -315,7 +315,7 @@ async function applyCanvasDraftRecovery({
   const current = store.getState();
   if (canvasEditorChangedSinceMount(current, initialDocument)) {
     current.markConflict(
-      "本地草稿恢复期间画布已发生新修改，请采用远端或另存副本。",
+      "本地草稿恢复期间画布已发生新修改，采用远端或另存副本。",
     );
     return null;
   }
@@ -389,9 +389,9 @@ function resolveCanvasDraftRecoveryStatus(
     recoverableSaveBatch,
     saveState: conflict ? "conflict" : "dirty",
     saveMessage: conflict
-      ? "检测到基于旧版本的本地草稿，请采用远端或另存副本。"
+      ? "检测到基于旧版本的本地草稿，采用远端或另存副本。"
       : recoverableSaveBatch
-        ? "已恢复上次未确认的保存请求，正在安全重试。"
+        ? "已恢复上次未确认的保存请求，安全重试中。"
         : "已恢复未保存的本地草稿。",
   };
 }
@@ -763,7 +763,7 @@ function readCanvasSaveBatch(
     return null;
   }
   if (!canvasGraphReadyToSave(state.graph)) {
-    state.markSaveError("画布规模超过当前保存上限，请拆分后重试。", false);
+    state.markSaveError("画布规模超过当前保存上限，拆分后重试。", false);
     return null;
   }
   const operations = takeAtomicAutosaveOperations(
@@ -772,7 +772,7 @@ function readCanvasSaveBatch(
   );
   if (operations.length === 0) {
     state.markSaveError(
-      "单次画布操作超过保存上限，请撤销后缩小操作范围。",
+      "单次画布操作超过保存上限，撤销后缩小操作范围。",
       false,
     );
     return null;
@@ -829,13 +829,13 @@ function canvasSaveErrorIsBlocked(status: number): boolean {
 
 function canvasBlockedSaveMessage(error: ApiError): string {
   if (error.status === 401 || error.status === 403) {
-    return "当前会话无权保存此画布，请重新登录或检查访问权限";
+    return "当前会话无权保存此画布，重新登录或检查访问权限";
   }
   if (error.status === 404) {
     return "远端画布已不存在";
   }
   if (error.status === 413) {
-    return "画布保存批次超过服务器限制，请拆分画布后重试";
+    return "画布保存批次超过服务器限制，拆分画布后重试";
   }
-  return `${error.message}。请修正画布内容或另存副本`;
+  return `${error.message}。修正画布内容或另存副本`;
 }

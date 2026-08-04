@@ -46,9 +46,11 @@ function subscribeReducedMotion(onStoreChange: () => void) {
   return () => mq.removeEventListener?.("change", onChange);
 }
 
-// "16:9" 基准分辨率 → 展示尾行 3840x2160 等（粗略映射，显示用）
+// "16:9" 基准分辨率 → 展示尾行 3840 × 2160 等（粗略映射，显示用）
 function sizeLabel(ratio: string, sizeRequested: string): string {
-  if (sizeRequested && sizeRequested !== "auto") return sizeRequested;
+  if (sizeRequested && sizeRequested !== "auto") {
+    return sizeRequested.replace(/(\d)\s*x\s*(\d)/gi, "$1 × $2");
+  }
   switch (ratio) {
     case "16:9":
       return "3840 × 2160";

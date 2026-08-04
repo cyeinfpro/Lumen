@@ -30,7 +30,7 @@ export function StreamLoadingState({ columns = 2 }: { columns?: number }) {
   });
 
   return (
-    <div className="px-2 py-3 md:px-0 md:py-4" aria-label="正在加载图库">
+    <div className="px-2 py-3 md:px-0 md:py-4" aria-label="图库加载中">
       <div
         className="grid"
         style={{

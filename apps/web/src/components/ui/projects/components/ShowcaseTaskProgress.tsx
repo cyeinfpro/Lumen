@@ -74,7 +74,7 @@ export function ShowcaseTaskProgress({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="type-caption text-[var(--fg-2)]">
-            Task Progress
+            任务进度
           </p>
           <p className="mt-1 type-body-sm leading-6 text-[var(--fg-1)]">
             {model.phase}
@@ -202,7 +202,7 @@ function TaskRow({
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <p className="type-caption text-[var(--fg-2)]">
-            Image {String(index + 1).padStart(2, "0")}
+            图像 {String(index + 1).padStart(2, "0")}
           </p>
           <span
             className={cn(

@@ -77,7 +77,7 @@ export function pauseUploadQueue(items: UploadItem[]): UploadItem[] {
         phase: "needs_refresh" as const,
         retryMode: "refresh" as const,
         error:
-          "弹窗关闭或模型切换时提交尚未确认。重新打开后请先检查状态，系统不会自动重复创建。",
+          "弹窗关闭或模型切换时提交未确认。重新打开后先检查状态，系统不会自动重复创建。",
       };
     }
     return item;

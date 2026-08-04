@@ -86,7 +86,7 @@ export function CanvasProjectIndex() {
             </Link>
             <div className="mt-2 flex items-end justify-between gap-4">
               <div>
-                <p className="type-page-kicker">Canvas Projects</p>
+                <p className="type-page-kicker">画布项目</p>
                 <h1 className="type-page-title mt-1">无限画布</h1>
                 <p className="type-body-sm mt-2 text-[var(--fg-1)]">
                   组织提示词、素材、图片与视频生成，不占用固定工作流记录。

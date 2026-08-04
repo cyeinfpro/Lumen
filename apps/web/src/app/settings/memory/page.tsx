@@ -19,7 +19,7 @@ export default function MemorySettingsPage() {
   const model = useMemoryPageModel();
 
   return (
-    <SettingsShell title="记忆" subtitle="MEMORY">
+    <SettingsShell title="记忆" subtitle="记忆">
       <div
         className="page-frame space-y-5 pb-4 sm:space-y-6"
         data-width="settings"

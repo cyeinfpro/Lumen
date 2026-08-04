@@ -25,7 +25,7 @@ interface SettingsShellProps {
 }
 
 const SETTINGS_NAV = [
-  { href: "/settings/api-key", label: "API Key", icon: KeyRound },
+  { href: "/settings/api-key", label: "API 密钥", icon: KeyRound },
   { href: "/settings/memory", label: "记忆", icon: Brain },
   { href: "/settings/privacy", label: "隐私", icon: ShieldCheck },
   { href: "/settings/prompts", label: "提示词", icon: FileText },
@@ -124,7 +124,7 @@ export function SettingsShell({
           <aside className="hidden min-w-0 md:block">
             <div className="sticky top-4 border-r border-[var(--border-subtle)] pr-6">
               <div className="mb-5 px-2">
-                <p className="type-page-kicker">Settings</p>
+                <p className="type-page-kicker">偏好设置</p>
                 <h1 className="type-page-title-sm mt-1">设置</h1>
                 <p className="type-body-sm mt-1">账户、模型与系统偏好</p>
               </div>

@@ -17,7 +17,7 @@ function runtimeStatusMessage(status: RuntimeResilienceSnapshot): string {
     return "会话验证暂不可用";
   }
   if (status.realtime === "error" || status.realtime === "closed") {
-    return "实时连接中断，正在恢复";
+    return "实时连接中断，恢复中";
   }
   return "";
 }

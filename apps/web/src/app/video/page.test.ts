@@ -676,7 +676,7 @@ test("video task model preserves status, elapsed, and error semantics", () => {
     taskModel.taskErrorSummary(
       '{"detail":"specified asset is not an image. Request id: req-1"}',
     ),
-    "参考素材不是有效图片，请检查素材类型或重新上传后再试。",
+    "参考素材不是有效图片，检查素材类型或重新上传后再试。",
   );
   deepEqual(taskModel.videoHistoryEmptyCopy("failed", 1, false), {
     title: "暂无失败记录",
@@ -971,7 +971,7 @@ test("official asset references keep the selected media kind", () => {
 
 test("volcano virtual asset manager is integrated with reference drafts", () => {
   match(videoPageViewSource, /from "\.\/volcano-asset-manager"/);
-  match(source, />\s*火山虚拟素材库\s*</);
+  match(source, />\s*火山素材库\s*</);
   match(referenceSummarySource, /existingVolcanoAssetIds/);
   match(referenceSummarySource, /remainingVolcanoAssetLimits/);
   match(referenceSummarySource, /assetIdFromReferenceUrl\(item\.url\)/);
@@ -1131,7 +1131,7 @@ test("video retry fences the original request while accepting a new task id", ()
   match(retrySource, /已创建新的重试任务/);
   match(
     retrySource,
-    /正在跟踪新任务 \$\{generation\.id\.slice\(0, 8\)\}/,
+    /新任务 \$\{generation\.id\.slice\(0, 8\)\} 跟踪中/,
   );
   match(
     retrySource,

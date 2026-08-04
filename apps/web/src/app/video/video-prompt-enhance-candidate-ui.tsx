@@ -21,7 +21,7 @@ export function PromptEnhanceLoadingStateView({
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="type-body-sm font-medium text-[var(--fg-0)]">
-            正在生成可比较版本
+            可比较版本生成中
           </p>
           <p className="mt-0.5 type-caption text-[var(--fg-2)]">
             完成后可逐个预览，不会直接覆盖当前描述。
@@ -114,7 +114,7 @@ export function PromptEnhanceCandidateCardView({
             selected ? "text-success" : previewing ? "text-[var(--accent)]" : ""
           }
         >
-          {selected ? "已应用" : previewing ? "正在预览" : "查看方案"}
+          {selected ? "已应用" : previewing ? "预览中" : "查看方案"}
         </span>
       </span>
     </button>

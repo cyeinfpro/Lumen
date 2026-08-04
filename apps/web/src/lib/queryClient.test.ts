@@ -72,10 +72,10 @@ test("mutation 错误文案归一化：Error / 类 Error 对象 / 兜底", () =>
   equal(mutationErrorMessage(new Error("余额不足")), "余额不足");
   equal(mutationErrorMessage({ message: "上游超时" }), "上游超时");
   // 空 message、非对象、null 都要落到兜底文案，不能返回空串让 toast 显示空白。
-  equal(mutationErrorMessage(new Error("")), "操作失败，请重试");
-  equal(mutationErrorMessage({ message: 42 }), "操作失败，请重试");
-  equal(mutationErrorMessage("boom"), "操作失败，请重试");
-  equal(mutationErrorMessage(null), "操作失败，请重试");
+  equal(mutationErrorMessage(new Error("")), "操作失败，重试");
+  equal(mutationErrorMessage({ message: 42 }), "操作失败，重试");
+  equal(mutationErrorMessage("boom"), "操作失败，重试");
+  equal(mutationErrorMessage(null), "操作失败，重试");
 });
 
 test("默认项：查询与 mutation 都不做双层重试，且挂上 onError 兜底", () => {

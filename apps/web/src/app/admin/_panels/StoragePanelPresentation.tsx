@@ -48,7 +48,7 @@ function storageHeadLine(
   applying: boolean,
   status: StorageConfigOut["status"],
 ): string {
-  if (applying) return "正在应用…";
+  if (applying) return "应用中…";
   if (!status) return "host 还未上报状态";
   if (status.disabled) return "已强制回退到本地默认路径";
   return status.mounted ? "存储已就绪" : "存储未挂载";
@@ -102,17 +102,17 @@ function StorageStatusHeader({
             </span>
             {status?.disabled && (
               <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 type-caption text-warning">
-                禁用 flag 已生效
+                禁用标记已生效
               </span>
             )}
           </div>
           {status && (
             <div className="type-caption leading-5 text-[var(--fg-1)]">
-              target{" "}
+              目标{" "}
               <code className="rounded bg-[var(--bg-2)] px-1.5 py-0.5 font-mono type-caption text-[var(--fg-0)]">
                 {status.target || "—"}
               </code>{" "}
-              · fstype{" "}
+              · 文件系统{" "}
               <span className="font-mono text-[var(--fg-0)]">
                 {status.fstype || "—"}
               </span>
@@ -443,7 +443,7 @@ export function SmbForm({
         hint={
           hasPassword
             ? "已存在密码记录；如无需更换可留空。"
-            : "首次配置请填写密码。"
+            : "首次配置需填写密码。"
         }
       />
     </div>

@@ -370,7 +370,7 @@ function canvasVideoModelCapabilityError(
   const configuredModels = configuredModel
     ? actionModels.filter((model) => model.model === configuredModel)
     : actionModels;
-  if (configuredModels.length === 0) return "当前视频模型不可用，请重新选择";
+  if (configuredModels.length === 0) return "当前视频模型不可用，重新选择";
   const referenceSelection = canvasReferenceCompatibleModels(configuredModels, {
     action,
     configuredModel,
@@ -385,14 +385,14 @@ function canvasVideoModelCapabilityError(
       model.resolutions.some((value) => value === resolution),
   );
   if (resolutionModels.length === 0) {
-    return "当前视频分辨率不可用，请重新选择";
+    return "当前视频分辨率不可用，重新选择";
   }
   const aspectRatio = String(node.config.aspect_ratio ?? "16:9");
   if (
     options.aspect_ratios.length > 0 &&
     !options.aspect_ratios.includes(aspectRatio)
   ) {
-    return "当前视频比例不可用，请重新选择";
+    return "当前视频比例不可用，重新选择";
   }
   return canvasVideoDurationCapabilityError(
     node,
@@ -419,7 +419,7 @@ function canvasVideoDurationCapabilityError(
       options.durations_s;
     return values.length === 0 || values.includes(duration);
   });
-  return durationSupported ? null : "当前视频时长不可用，请重新选择";
+  return durationSupported ? null : "当前视频时长不可用，重新选择";
 }
 
 function canvasExecutionConfigError(
@@ -437,7 +437,7 @@ function canvasImageExecutionConfigError(
 ): string | null {
   const aspectRatio = String(node.config.aspect_ratio ?? "1:1");
   if (!IMAGE_ASPECT_RATIOS.has(aspectRatio)) {
-    return "图片比例不受支持，请重新选择";
+    return "图片比例不受支持，重新选择";
   }
   return node.config.size_mode === "fixed"
     ? canvasFixedSizeError(String(node.config.fixed_size ?? ""))
@@ -449,11 +449,11 @@ function canvasVideoExecutionConfigError(
 ): string | null {
   const resolution = String(node.config.resolution ?? "720p");
   if (!VIDEO_RESOLUTIONS.has(resolution)) {
-    return "视频分辨率不受支持，请重新选择";
+    return "视频分辨率不受支持，重新选择";
   }
   const aspectRatio = String(node.config.aspect_ratio ?? "16:9");
   if (!VIDEO_ASPECT_RATIOS.has(aspectRatio)) {
-    return "视频比例不受支持，请重新选择";
+    return "视频比例不受支持，重新选择";
   }
   const seed = node.config.seed;
   if (
@@ -472,7 +472,7 @@ function canvasVideoExecutionConfigError(
 export function canvasFixedSizeError(value: string): string | null {
   const normalized = value.trim().toLowerCase().replace(/\s+/g, "");
   const match = /^([1-9]\d{1,4})x([1-9]\d{1,4})$/.exec(normalized);
-  if (!match) return "请输入宽x高，例如 1536x1024";
+  if (!match) return "输入宽x高，例如 1536x1024";
   const width = Number(match[1]);
   const height = Number(match[2]);
   if (

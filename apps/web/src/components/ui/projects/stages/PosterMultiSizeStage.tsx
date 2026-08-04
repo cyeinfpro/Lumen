@@ -66,7 +66,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   const create = useCreatePosterRendersMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成多尺寸成品失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("多尺寸任务已派发"),
   });
@@ -74,7 +74,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   const revise = useRevisePosterRenderMutation(workflow.id, {
     onError: (err) =>
       toast.error("返修失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => {
       toast.success("返修任务已派发");
@@ -86,7 +86,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   const inpaint = useInpaintPosterRenderMutation(workflow.id, {
     onError: (err) =>
       toast.error("局部修复失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => {
       toast.success("局部修复任务已派发");
@@ -111,7 +111,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
   const complete = useCompleteWorkflowDeliveryMutation(workflow.id, {
     onError: (err) =>
       toast.error("完成交付失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("海报已完成交付，成品已加入项目素材"),
   });
@@ -123,7 +123,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
     }
     const newAspects = aspects.filter((a) => !existingAspectSet.has(a));
     if (!newAspects.length) {
-      toast.warning("所选尺寸都已生成；如需重生请使用返修");
+      toast.warning("所选尺寸都已生成；如需重生，使用返修");
       return;
     }
     create.mutate({
@@ -244,7 +244,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
           onSubmit={() => {
             const text = reviseInstruction.trim();
             if (!text) {
-              toast.error("请输入返修指令");
+              toast.error("输入返修指令");
               return;
             }
             revise.mutate({
@@ -286,7 +286,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
             <div className="min-w-0">
               <p className="type-caption text-[var(--fg-2)]">
-                Delivery Ready
+                可交付
               </p>
               <p className="mt-1 type-body-sm leading-[1.7] text-[var(--fg-1)]">
                 {readyRenderCount} 个尺寸已就绪。完成后会进入交付页，并把海报成品写入项目素材。
@@ -299,7 +299,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
               leftIcon={<Check className="h-4 w-4" />}
               className="w-full sm:w-auto"
             >
-              完成交付并保存素材
+              完成交付
             </Button>
           </div>
         </div>

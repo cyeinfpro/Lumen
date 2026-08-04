@@ -7,7 +7,7 @@ import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 export default function PromptsPage() {
   return (
-    <SettingsShell title="系统提示词" subtitle="PROMPTS">
+    <SettingsShell title="系统提示词" subtitle="提示词">
       <div
         className="page-frame flex min-w-0 flex-col gap-5 pb-4"
         data-width="settings"

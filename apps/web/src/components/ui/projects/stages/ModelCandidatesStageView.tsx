@@ -145,7 +145,7 @@ function AdjustmentsSection({
   return (
     <section className="border-t border-[var(--border)] py-4">
       <p className="type-caption text-[var(--fg-2)]">
-        Adjustments
+        调整
       </p>
       <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <input
@@ -164,7 +164,7 @@ function AdjustmentsSection({
           onClick={controller.approveChosenCandidate}
           className="w-full md:w-auto"
         >
-          确认模特并继续
+          确认模特
         </Button>
       </div>
       <p className="mt-3 min-w-0 break-words type-caption text-[var(--fg-3)]">
@@ -189,7 +189,7 @@ function AccessorySection({
     <section className="border-t border-[var(--border)] py-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="type-caption text-[var(--fg-2)]">
-          Accessory Quad
+          配饰四宫格
         </p>
         {controller.accessoryImages.length > 0 ? (
           <p className="type-caption text-[var(--fg-3)] tabular-nums">
@@ -278,7 +278,7 @@ function ShowcaseSetupSection({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <p className="type-caption text-[var(--fg-2)]">
-        Showcase Setup
+        展示图设置
       </p>
       <ShowcaseSetupFields
         form={controller.form}
@@ -297,7 +297,7 @@ function ShowcaseSetupSection({
         leftIcon={<Shirt className="h-4 w-4" />}
       >
         {controller.showcaseHasTasks
-          ? "按当前方案再生成一批"
+          ? "再生成一批"
           : "开始生成展示图"}
       </Button>
     </section>

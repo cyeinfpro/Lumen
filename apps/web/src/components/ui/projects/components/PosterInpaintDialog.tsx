@@ -254,11 +254,11 @@ export function PosterInpaintDialog({
   const handleSubmit = async () => {
     const trimmed = instruction.trim();
     if (!hasStrokes) {
-      toast.error("请先涂抹要修复的区域");
+      toast.error("先涂抹要修复的区域");
       return;
     }
     if (!trimmed) {
-      toast.error("请输入编辑意图");
+      toast.error("输入编辑意图");
       return;
     }
     setUploadingMask(true);
@@ -275,7 +275,7 @@ export function PosterInpaintDialog({
       onSubmit({ instruction: trimmed, mask_image_id: uploaded.id });
     } catch (err) {
       toast.error("上传 mask 失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     } finally {
       setUploadingMask(false);
@@ -303,7 +303,7 @@ export function PosterInpaintDialog({
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">
-              Inpaint
+              局部修复
             </p>
             <h2 className="type-section-title mt-1">局部修复</h2>
           </div>

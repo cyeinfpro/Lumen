@@ -153,7 +153,7 @@ async function uploadWithProgress(
         } else if (
           coordinateIdentityMismatchResponse(xhr.status, xhr.responseText)
         ) {
-          reject(new Error("登录身份已变化，请重新操作"));
+          reject(new Error("登录身份已变化，重新操作"));
         } else if (xhr.status === 403 && xhr.responseText.includes("csrf_failed")) {
           reject(new Error("csrf_failed"));
         } else if (xhr.status === 401) {
@@ -164,7 +164,7 @@ async function uploadWithProgress(
           reject(new Error(`上传失败：HTTP ${xhr.status}`));
         }
       };
-      xhr.onerror = () => reject(new Error("网络错误，请检查连接"));
+      xhr.onerror = () => reject(new Error("网络错误，检查连接"));
       xhr.onabort = () => reject(new DOMException("已取消", "AbortError"));
 
       if (signal.aborted) {
@@ -183,7 +183,7 @@ async function uploadWithProgress(
     if (err instanceof Error && err.message === "csrf_failed") {
       const fresh = await refreshCsrfToken().catch(() => null);
       if (fresh) return uploadOnce(fresh);
-      throw new Error("请求校验失败，请刷新页面后再试");
+      throw new Error("请求校验失败，刷新页面后再试");
     }
     throw err;
   }
@@ -216,7 +216,7 @@ export function ApparelWorkflowNewPage() {
   const createMutation = useCreateApparelWorkflowMutation({
     onError: (err) =>
       toast.error("创建项目失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: (out) => {
       toast.success("项目已创建");
@@ -416,11 +416,11 @@ export function ApparelWorkflowNewPage() {
     setError(null);
     const snapshot = [...filesRef.current];
     if (!snapshot.length) {
-      setError(`请上传 1 到 ${MAX_PRODUCT_IMAGES} 张商品图`);
+      setError(`上传 1 到 ${MAX_PRODUCT_IMAGES} 张商品图`);
       return;
     }
     if (composedPrompt.length > PROMPT_MAX) {
-      setError("基础参数过长，请精简补充说明");
+      setError("基础参数过长，精简补充说明");
       return;
     }
     submittingRef.current = true;
@@ -442,7 +442,7 @@ export function ApparelWorkflowNewPage() {
       const currentOrder = filesRef.current.map((file) => file.uid).join(",");
       const submittedOrder = snapshot.map((file) => file.uid).join(",");
       if (currentOrder !== submittedOrder) {
-        toast.warning("图片列表已变化，请确认顺序后重新创建");
+        toast.warning("图片列表已变化，确认顺序后重新创建");
         return;
       }
       await createMutation.mutateAsync({
@@ -596,7 +596,7 @@ export function ApparelWorkflowNewPage() {
                     />
                     <label className="grid gap-2 md:col-span-2">
                       <span className="type-caption text-[var(--fg-2)]">
-                        Notes <span className="ml-1 normal-case tracking-normal text-[var(--fg-3)]">补充说明</span>
+                        补充说明
                       </span>
                       <textarea
                         value={extraPrompt}

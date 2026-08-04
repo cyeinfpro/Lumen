@@ -192,9 +192,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   return (
     <header className="page-header hidden md:grid">
       <div className="page-header-copy">
-        <p className="type-page-kicker">
-          Project Index
-        </p>
+        <p className="type-page-kicker">项目列表</p>
         <h1 className="type-page-title">服饰模特图</h1>
         <p className="type-page-subtitle hidden max-w-3xl lg:block">
           {summary}
@@ -274,7 +272,7 @@ function ModelLibraryEntry() {
         <div className="flex shrink-0 items-center gap-2">
           <div className="text-right">
             <p className="hidden type-caption text-[var(--fg-2)] sm:block">
-              Models
+              模特
             </p>
             <p className="type-metric ">
               {String(total).padStart(2, "0")}

@@ -153,7 +153,7 @@ export function ErrorPanel({ onRetry }: { onRetry: () => void }) {
             项目加载失败
           </h3>
           <p className="type-body-sm mt-0.5">
-            网络错误或服务繁忙，请稍后重试。
+            网络错误或服务繁忙，稍后重试。
           </p>
           <Button
             className="mt-3"
@@ -176,7 +176,7 @@ export function EmptyHero() {
       <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
         <div>
           <p className="type-caption text-accent">
-            Apparel Workflow
+            服饰工作流
           </p>
           <h2 className="type-page-title mt-2 max-w-2xl ">
             从一张商品图，到一条完整的模特图工作流

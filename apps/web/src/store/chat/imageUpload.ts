@@ -14,7 +14,7 @@ export function imageFilenameForMime(name: string, mime: string): string {
 
 function imageEncodeError(): Error {
   const error = new Error(
-    "图像压缩失败：浏览器无法编码当前图片，请换张图试试",
+    "图像压缩失败：浏览器无法编码当前图片，换张图试试",
   );
   (error as Error & { code?: string }).code = "image_encode_failed";
   return error;
@@ -184,7 +184,7 @@ export async function compressToMaxDim(
     if (!encoded) throw imageEncodeError();
     throwIfUploadAborted(signal);
     if (encoded.blob.size > UPLOAD_HARD_MAX_BYTES) {
-      throw new Error("图片文件过大，请换一张较小的图片或先压缩后再上传");
+      throw new Error("图片文件过大，换一张较小的图片或先压缩后再上传");
     }
 
     return new File(

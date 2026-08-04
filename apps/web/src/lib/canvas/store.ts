@@ -432,7 +432,7 @@ export function createCanvasEditorStore(
         CANVAS_AUTOSAVE_OPERATION_LIMIT
       ) {
         set({
-          saveMessage: "一次删除范围过大，请缩小选区后重试。",
+          saveMessage: "一次删除范围过大，缩小选区后重试。",
         });
         return;
       }

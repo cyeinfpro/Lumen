@@ -79,7 +79,7 @@ function ActiveVideoTaskSection({
   return (
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-3 px-1">
-        <p className="type-caption text-[var(--fg-2)]">正在进行</p>
+        <p className="type-caption text-[var(--fg-2)]">进行中</p>
         <span className="type-caption tabular-nums text-[var(--fg-2)]">
           {items.length} 条
         </span>

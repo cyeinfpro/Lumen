@@ -475,7 +475,7 @@ function videoCapabilityIssue(input: {
     issues.push("比例");
   }
   return issues.length > 0
-    ? `当前${issues.join("、")}不可用，请重新选择兼容参数`
+    ? `当前${issues.join("、")}不可用，重新选择兼容参数`
     : null;
 }
 

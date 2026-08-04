@@ -22,7 +22,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
   const reopen = useReopenModelSelectionMutation(workflow.id, {
     onError: (err) =>
       toast.error("返回重选模特失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("已返回模特候选阶段"),
   });
@@ -84,7 +84,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
           <p className="type-caption text-[var(--fg-2)]">
-            Final Showcases
+            最终展示图
           </p>
           <p className="type-caption text-[var(--fg-3)] tabular-nums">
             {String(images.length).padStart(2, "0")} 张

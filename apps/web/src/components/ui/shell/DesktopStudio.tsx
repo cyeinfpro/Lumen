@@ -439,7 +439,7 @@ function DesktopStudioContent({
       >
         <ErrorState
           title="会话加载失败"
-          description="历史消息未能载入。为避免把新消息误发到不完整的会话，请先重试。"
+          description="历史消息未能载入。为避免把新消息误发到不完整的会话，先重试。"
           detail={historyState.error}
           onRetry={onRetryHistory}
           retryLabel="重新加载"
