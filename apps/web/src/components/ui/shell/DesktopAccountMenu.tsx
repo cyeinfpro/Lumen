@@ -159,7 +159,7 @@ export function DesktopAccountMenu() {
         aria-expanded={open}
         aria-label="打开账户菜单"
         className={cn(
-          "group inline-flex h-10 w-10 items-center justify-center rounded-full",
+          "group inline-flex h-11 w-11 items-center justify-center rounded-full",
           "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         )}
       >

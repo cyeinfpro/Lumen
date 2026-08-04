@@ -354,7 +354,7 @@ function ReviseDialog({
               type="button"
               onClick={() => onScopeChange("background")}
               className={cn(
-                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
+                "inline-flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                 scope === "background"
                   ? "bg-accent text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -367,7 +367,7 @@ function ReviseDialog({
               type="button"
               onClick={() => onScopeChange("style")}
               className={cn(
-                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
+                "inline-flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                 scope === "style"
                   ? "bg-accent text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",

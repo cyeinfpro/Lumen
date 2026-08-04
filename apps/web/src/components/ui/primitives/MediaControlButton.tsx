@@ -27,6 +27,7 @@ export function MediaControlButton({
   ...props
 }: MediaControlButtonProps & { ref?: React.Ref<HTMLButtonElement> }) {
   return (
+    // @hit-area-ok: desktop media overlays stay compact; mobile sizes expand to 44px.
     <button
       {...props}
       ref={ref}
