@@ -63,7 +63,7 @@ export function ColorSwatchField({
 }) {
   return (
     <fieldset disabled={disabled} className="grid gap-2">
-      <legend className="type-caption font-medium text-[var(--fg-1)]">
+      <legend className="type-caption text-[var(--fg-2)]">
         颜色标记
       </legend>
       <div className="flex flex-wrap gap-2">
@@ -115,9 +115,9 @@ export function InspectorShell({
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg-1)] text-[var(--fg-0)]">
-      <header className="shrink-0 border-b border-[var(--border)] px-4 py-3">
-        <p className="type-page-kicker">{eyebrow}</p>
-        <h2 className="type-card-title mt-1 truncate">{title}</h2>
+      <header className="shrink-0 border-b border-[var(--border)] px-4 py-3.5">
+        <p className="type-overline">{eyebrow}</p>
+        <h2 className="type-card-title mt-1.5 truncate">{title}</h2>
       </header>
       {children}
     </div>
@@ -132,7 +132,7 @@ export function InspectorSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="grid gap-3 border-b border-[var(--border)] p-4 last:border-0">
+    <section className="grid gap-3.5 border-b border-[var(--border)] px-4 py-5 last:border-0">
       <h3 className="type-overline text-[var(--fg-2)]">{title}</h3>
       {children}
     </section>
@@ -153,8 +153,8 @@ export function SelectField({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="grid gap-1">
-      <span className="type-caption font-medium text-[var(--fg-1)]">{label}</span>
+    <label className="grid gap-1.5">
+      <span className="type-caption text-[var(--fg-2)]">{label}</span>
       <select
         className={SELECT_CLASS}
         value={value}

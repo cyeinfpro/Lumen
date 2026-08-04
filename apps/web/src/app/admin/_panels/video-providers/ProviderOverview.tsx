@@ -246,7 +246,7 @@ function VideoStatCard({
     accent === "green"
       ? "border-success-border"
       : accent === "amber"
-        ? "border-[var(--accent)]/20"
+        ? "border-warning-border"
         : "border-[var(--border)]";
 
   return <MetricCard label={label} value={value} sub={sub} className={ring} />;

@@ -401,7 +401,7 @@ function LightboxTopBar({
       >
         <X className="h-5 w-5" />
       </MediaControlButton>
-      <div className="type-body-sm pointer-events-none flex items-center gap-2 rounded-full bg-[var(--media-control-bg)] px-3.5 py-2 font-mono text-[var(--media-control-fg)] tabular-nums shadow-[var(--shadow-2)]">
+      <div className="type-body-sm pointer-events-none flex items-center gap-2 rounded-full bg-[var(--media-control-bg)] px-3.5 py-2 font-mono text-[var(--media-control-fg)] tabular-nums">
         <span>{total > 1 ? `${idx + 1} / ${total}` : sourceLabel}</span>
         {isZoomed ? (
           <>
@@ -553,10 +553,10 @@ function LightboxThumbnailStrip({
             aria-label={`第 ${itemIdx + 1} 张`}
             aria-current={active}
             className={cn(
-              "relative h-12 w-12 shrink-0 overflow-hidden rounded-[var(--radius-panel)] border",
-              "bg-[var(--media-control-bg)] shadow-[var(--shadow-1)] transition-all duration-200",
+              "relative h-12 w-12 shrink-0 overflow-hidden rounded-[var(--radius-card)] border",
+              "bg-[var(--media-control-bg)] shadow-[var(--shadow-1)] transition-[border-color,opacity] duration-200",
               active
-                ? "scale-105 border-accent-border opacity-100 ring-2 ring-[var(--accent)]"
+                ? "border-accent-border opacity-100 ring-2 ring-[var(--accent)]"
                 : "border-[var(--border)] opacity-60 active:opacity-100",
             )}
           >
@@ -570,12 +570,6 @@ function LightboxThumbnailStrip({
               draggable={false}
               className="h-full w-full object-cover"
             />
-            {active ? (
-              <span
-                aria-hidden
-                className="absolute inset-x-1.5 bottom-1 h-[2px] rounded-full bg-[var(--accent)]"
-              />
-            ) : null}
           </button>
         );
       })}
@@ -727,7 +721,7 @@ function LightboxFooter({
       className={cn(
         "absolute inset-x-0 bottom-0 px-3 pt-6",
         "pb-[var(--mobile-dialog-footer-pad-bottom)]",
-        "mobile-dialog-scroll max-h-[min(48dvh,24rem)] overflow-y-auto overscroll-contain",
+        "mobile-dialog-scroll max-h-[min(42dvh,20rem)] overflow-y-auto overscroll-contain",
         "bg-gradient-to-t from-[var(--media-control-bg)] via-[var(--media-control-bg)] to-transparent",
         "pointer-events-auto",
         !chromeVisible && "pointer-events-none",

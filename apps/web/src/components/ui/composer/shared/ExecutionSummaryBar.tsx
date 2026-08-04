@@ -28,14 +28,7 @@ export function ExecutionSummaryBar({
       )}
     >
       <span className="shrink-0 text-[var(--fg-2)]">将执行：</span>
-      <span
-        className={cn(
-          "type-label shrink-0",
-          summary.tone === "image"
-            ? "text-[var(--accent)]"
-            : "text-[var(--fg-0)]",
-        )}
-      >
+      <span className="type-label shrink-0 text-[var(--fg-0)]">
         {summary.taskLabel}
       </span>
       {summary.parts.map((part, index) => (

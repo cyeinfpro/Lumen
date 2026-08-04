@@ -99,13 +99,13 @@ export function MobileEmptyStudio({
   const chatSuggestions = SUGGESTIONS.filter((s) => s.mode === "chat");
 
   return (
-    <div className="flex flex-col items-stretch py-8 px-1">
+    <div className="flex flex-col items-stretch px-1 pb-10 pt-12">
       {/* Hero */}
-      <div className="mb-8">
-        <div className="flex items-center gap-2.5 mb-3">
+      <div className="mb-10">
+        <div className="mb-4 flex items-center gap-2.5">
           <span
             className={cn(
-              "inline-flex items-center justify-center w-9 h-9 rounded-[var(--radius-panel)]",
+              "inline-flex h-9 w-9 items-center justify-center rounded-[var(--radius-panel)]",
               "bg-accent-soft",
             )}
           >
@@ -115,7 +115,7 @@ export function MobileEmptyStudio({
             Lumen
           </h1>
         </div>
-        <p className="type-body max-w-[280px]">
+        <p className="type-body max-w-[280px] text-[var(--fg-1)]">
           先写一句话。
         </p>
       </div>
@@ -152,8 +152,8 @@ export function MobileEmptyStudio({
       ) : null}
 
       {/* 生图建议 — 2 列网格 */}
-      <div className="mb-5">
-        <div className="mb-2.5 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
+      <div className="mb-8">
+        <div className="mb-3 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
           <span className="h-1.5 w-1.5 rounded-full bg-[var(--fg-3)]" aria-hidden />
           图片
         </div>
@@ -165,28 +165,21 @@ export function MobileEmptyStudio({
               size="md"
               onClick={() => handlePick(s)}
               className={cn(
-                "group relative h-auto w-full justify-start px-3 py-3 text-left",
+                "group relative h-auto w-full justify-start px-3.5 py-3.5 text-left",
                 "rounded-[var(--radius-card)] border border-[var(--border-subtle)]",
                 "bg-[var(--bg-1)] type-body-sm text-[var(--fg-0)]",
                 "active:scale-[0.98] transition-[transform,border-color,background-color] duration-150",
-                "hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]/80",
+                "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
               )}
               style={{ fontFamily: "var(--font-zh-body)" }}
             >
-              <span className="flex flex-col gap-2">
-                <span
-                  className={cn(
-                    "shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-card)]",
-                    "bg-[var(--bg-2)] text-[var(--fg-1)]",
-                  )}
-                >
-                  <span className="type-overline">图像</span>
-                </span>
+              <span className="flex flex-col gap-2.5">
+                <span className="type-overline text-[var(--fg-3)]">图像</span>
                 <span className="min-w-0 break-words type-body-sm leading-snug text-[var(--fg-1)]">{s.text}</span>
               </span>
               <ArrowRight
                 aria-hidden
-                className="absolute top-3 right-2.5 h-3 w-3 text-[var(--fg-3)] transition-colors group-hover:text-[var(--fg-1)]"
+                className="absolute top-3.5 right-3 h-3 w-3 text-[var(--fg-3)] transition-colors group-hover:text-[var(--fg-1)]"
               />
             </Button>
           ))}
@@ -195,11 +188,11 @@ export function MobileEmptyStudio({
 
       {/* 对话建议 — 单列 */}
       <div>
-        <div className="mb-2.5 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
+        <div className="mb-3 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
           <span className="h-1.5 w-1.5 rounded-full bg-[var(--fg-3)]" aria-hidden />
           对话
         </div>
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-2.5">
           {chatSuggestions.map((s) => (
             <li key={`ask:${s.text}`}>
               <Button
@@ -207,24 +200,17 @@ export function MobileEmptyStudio({
                 size="md"
                 onClick={() => handlePick(s)}
                 className={cn(
-                  "group relative h-auto w-full justify-start px-3.5 py-3 text-left",
+                  "group relative h-auto w-full justify-start px-4 py-3.5 text-left",
                   "rounded-[var(--radius-card)] border border-[var(--border-subtle)]",
                   "bg-[var(--bg-1)] type-body text-[var(--fg-0)]",
                   "active:scale-[0.995] transition-[transform,border-color] duration-150",
-                  "hover:border-[var(--border)]",
+                  "hover:border-[var(--border-strong)]",
                 )}
                 style={{ fontFamily: "var(--font-zh-body)" }}
               >
                 <span className="flex items-center gap-3">
-                  <span
-                    className={cn(
-                      "shrink-0 inline-flex items-center justify-center w-8 h-8 rounded-[var(--radius-card)]",
-                      "bg-[var(--bg-2)] text-[var(--fg-1)]",
-                    )}
-                  >
-                    <span className="type-overline">提问</span>
-                  </span>
-                  <span className="flex-1 min-w-0 break-words type-body-sm leading-snug">{s.text}</span>
+                  <span className="type-overline shrink-0 text-[var(--fg-3)]">提问</span>
+                  <span className="flex-1 min-w-0 break-words type-body-sm leading-snug text-[var(--fg-1)]">{s.text}</span>
                   <ArrowRight
                     aria-hidden
                     className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] transition-colors group-hover:text-[var(--fg-1)]"

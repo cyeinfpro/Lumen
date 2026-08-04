@@ -148,10 +148,7 @@ export function DevelopingCard({
             重试
           </Button>
         </div>
-        <p
-          className="px-1 type-caption tabular-nums text-[var(--fg-2)]"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
+        <p className="px-1 type-caption tabular-nums text-[var(--fg-2)]">
           {gen.aspect_ratio} · {size}
         </p>
       </div>
@@ -196,10 +193,7 @@ export function DevelopingCard({
           )}
         </div>
       </div>
-      <p
-        className="mt-0.5 px-1 type-caption tabular-nums text-[var(--fg-2)]"
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
+      <p className="mt-0.5 px-1 type-caption tabular-nums text-[var(--fg-2)]">
         {gen.aspect_ratio} · {size} ·{" "}
         {isQueued ? "排队中" : startedAt ? elapsedLabel : "生成中..."}
       </p>

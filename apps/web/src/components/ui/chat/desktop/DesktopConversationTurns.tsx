@@ -218,7 +218,7 @@ export const AssistantTurn = memo(function AssistantTurn({
     <ConversationTurn
       id={`msg-${msg.id}`}
       side="assistant"
-      className="flex flex-col gap-2"
+      className="flex flex-col gap-3"
     >
       <div className={CONVERSATION_TEXT_RAIL}>
         <CompletionStatusLine msg={msg} />
@@ -326,7 +326,7 @@ function areAssistantTurnPropsEqual(
 
 export function ImageGrid({ count, children }: { count: number; children: ReactNode }) {
   if (count === 1) {
-    return <div className="flex w-full flex-col items-center gap-2">{children}</div>;
+    return <div className="flex w-full flex-col items-center gap-3">{children}</div>;
   }
 
   const cols =

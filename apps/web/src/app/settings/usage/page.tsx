@@ -70,7 +70,7 @@ export default function UsagePage() {
         className="page-frame"
         data-width="settings"
       >
-        <header className="mb-5 flex flex-wrap items-center justify-between gap-4 md:mb-8">
+        <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
           {q.data ? (
             <p className="type-caption font-mono tabular-nums text-[var(--fg-2)]">
               {formatDay(q.data.range_start)} — {formatDay(q.data.range_end)}
@@ -93,7 +93,7 @@ export default function UsagePage() {
             onRetry={() => void q.refetch()}
           />
         ) : q.data ? (
-          <div className="space-y-6">
+          <div className="space-y-6 sm:space-y-8">
             <UsageView data={q.data} />
             <BillingTransparency
               accountMode={meQ.data?.account_mode ?? "wallet"}
@@ -318,11 +318,11 @@ function BillingTransparency({
     <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 type-caption font-medium text-[var(--fg-1)]">
-            <Info className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-2 type-card-title">
+            <Info className="h-4 w-4 text-[var(--fg-2)]" aria-hidden />
             计费口径
           </div>
-          <p className="type-body-sm mt-2 text-[var(--fg-2)]">
+          <p className="type-body-sm mt-1.5 text-[var(--fg-2)]">
             提交前展示的是按当前模型、尺寸、数量和价格表计算的预估；任务完成后以实际
             token、实际图片档位和可计费成功结果结算。
           </p>
@@ -438,10 +438,10 @@ function BillingStep({
   description: string;
 }) {
   return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
       <p className="type-caption text-[var(--fg-2)]">{label}</p>
-      <p className="mt-1 type-body-sm text-[var(--fg-0)]">{value}</p>
-      <p className="mt-1 type-caption leading-relaxed text-[var(--fg-2)]">{description}</p>
+      <p className="mt-1.5 type-body-sm font-medium text-[var(--fg-0)]">{value}</p>
+      <p className="mt-1.5 type-caption leading-relaxed text-[var(--fg-2)]">{description}</p>
     </div>
   );
 }
@@ -450,7 +450,7 @@ function MiniMoney({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <p className="type-caption text-[var(--fg-2)]">{label}</p>
-      <p className="mt-1 type-card-title font-mono tabular-nums text-[var(--fg-0)]">{value}</p>
+      <p className="mt-1.5 type-card-title font-mono tabular-nums text-[var(--fg-0)]">{value}</p>
     </div>
   );
 }
@@ -489,7 +489,7 @@ function StatCard({
           {label}
         </span>
         {icon && (
-          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-accent-soft border border-accent-border text-accent flex items-center justify-center group-hover:bg-accent/20 transition-colors">
+          <span className="w-7 h-7 rounded-[var(--radius-card)] bg-accent-soft border border-accent-border text-accent flex items-center justify-center group-hover:bg-accent/20 transition-colors">
             {icon}
           </span>
         )}
@@ -548,7 +548,7 @@ function SecondaryCard({
           {label}
         </div>
         {icon && (
-          <span className="w-7 h-7 rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border)] text-[var(--fg-2)] flex items-center justify-center">
+          <span className="w-7 h-7 rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border)] text-[var(--fg-2)] flex items-center justify-center">
             {icon}
           </span>
         )}

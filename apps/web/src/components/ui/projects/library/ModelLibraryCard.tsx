@@ -314,7 +314,7 @@ function ModelLibraryCardMetadata({
 }) {
   return (
     <div className="mt-2 grid min-w-0 gap-0.5">
-      <p className="line-clamp-1 min-w-0 break-words type-body-sm font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-accent">
+      <p className="line-clamp-1 min-w-0 break-words type-body-sm font-medium leading-[1.3] text-[var(--fg-0)]">
         {item.title}
       </p>
       <p className="min-w-0 truncate type-caption text-[var(--fg-2)] ">

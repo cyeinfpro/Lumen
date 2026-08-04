@@ -441,10 +441,7 @@ export function CommandPalette() {
               )}
             >
               <span
-                className={cn(
-                  "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)]",
-                  selected ? "bg-accent-soft" : "bg-[var(--bg-2)]",
-                )}
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center"
                 aria-hidden
               >
                 <Icon
@@ -470,7 +467,7 @@ export function CommandPalette() {
                     当前
                   </Badge>
                 )}
-                <span className="hidden type-caption text-[var(--fg-2)] sm:inline">
+                <span className="hidden type-caption text-[var(--fg-3)] sm:inline">
                   {item.group}
                 </span>
                 <ArrowRight

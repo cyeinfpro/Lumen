@@ -195,7 +195,7 @@ function SidebarPrimaryAction({
         <span className="flex-1 text-left">新建会话</span>
         <Kbd
           aria-hidden
-          className="hidden border-[var(--accent-border)] bg-transparent text-[var(--accent-on)] opacity-70 shadow-none sm:inline-flex"
+          className="hidden border-transparent bg-transparent text-[var(--accent-on)] opacity-75 shadow-none sm:inline-flex"
         >
           ⌘N
         </Kbd>
@@ -366,7 +366,7 @@ function ActiveConversationGroups({
 
     return (
       <div key={bucket}>
-        <h3 className="mb-1.5 px-3 type-caption font-medium text-[var(--fg-2)]">
+        <h3 className="mb-1.5 px-3 type-overline">
           {SIDEBAR_BUCKET_LABEL[bucket]}
         </h3>
         <ul className="space-y-0.5 px-2">

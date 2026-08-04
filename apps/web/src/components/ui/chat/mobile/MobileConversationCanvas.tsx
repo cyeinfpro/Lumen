@@ -327,7 +327,7 @@ export function MobileConversationCanvas({
             onToggle={() => toggleCollapse(scene.anchorId)}
           />
           {!isCollapsed && (
-            <div className="flex flex-col gap-2.5 pl-7 pr-0.5 pb-1.5">
+            <div className="flex flex-col gap-3 pl-7 pr-0.5 pb-3">
               {scene.user && <UserTurn msg={scene.user} />}
               {scene.assistant && (
                 <AssistantTurn
@@ -534,7 +534,7 @@ const AssistantTurn = memo(function AssistantTurn({
     <ConversationTurn
       id={`msg-${msg.id}`}
       side="assistant"
-      className="flex flex-col gap-2"
+      className="flex flex-col gap-2.5"
     >
       <CompletionStatusLine msg={msg} compact />
 

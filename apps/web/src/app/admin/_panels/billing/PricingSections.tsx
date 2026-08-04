@@ -178,12 +178,12 @@ function ImagePricingTable({ form }: { form: ImagePricingFormState }) {
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
       <table className="w-full type-body-sm md:min-w-[640px]">
-        <thead className="text-left text-[var(--fg-2)]">
-          <tr className="border-b border-[var(--border-subtle)]">
-            <th className="px-3 py-2">档位</th>
-            <th className="px-3 py-2">像素下界</th>
-            <th className="px-3 py-2">单价 (¥/张)</th>
-            <th className="px-3 py-2">状态</th>
+        <thead className="text-left type-caption">
+          <tr className="border-b border-[var(--border)]">
+            <th className="px-3 py-2.5 font-normal">档位</th>
+            <th className="px-3 py-2.5 font-normal">像素下界</th>
+            <th className="px-3 py-2.5 font-normal">单价 (¥/张)</th>
+            <th className="px-3 py-2.5 font-normal">状态</th>
           </tr>
         </thead>
         <tbody>
@@ -409,18 +409,18 @@ function VideoPricingTable({
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
       <table className="w-full type-body-sm md:min-w-[1120px]">
-        <thead className="text-left text-[var(--fg-2)]">
-          <tr className="border-b border-[var(--border-subtle)]">
-            <th className="px-3 py-2">模型</th>
-            <th className="px-3 py-2">分辨率</th>
-            <th className="px-3 py-2">T2V ¥/百万 token</th>
-            <th className="px-3 py-2">I2V ¥/百万 token</th>
-            <th className="px-3 py-2">参考图片 ¥/百万 token</th>
-            <th className="px-3 py-2">参考视频 ¥/百万 token</th>
-            <th className="px-3 py-2">参考图回退</th>
-            <th className="px-3 py-2">状态</th>
-            <th className="px-3 py-2">更新于</th>
-            <th className="px-3 py-2" />
+        <thead className="text-left type-caption">
+          <tr className="border-b border-[var(--border)]">
+            <th className="px-3 py-2.5 font-normal">模型</th>
+            <th className="px-3 py-2.5 font-normal">分辨率</th>
+            <th className="px-3 py-2.5 font-normal">T2V ¥/百万 token</th>
+            <th className="px-3 py-2.5 font-normal">I2V ¥/百万 token</th>
+            <th className="px-3 py-2.5 font-normal">参考图片 ¥/百万 token</th>
+            <th className="px-3 py-2.5 font-normal">参考视频 ¥/百万 token</th>
+            <th className="px-3 py-2.5 font-normal">参考图回退</th>
+            <th className="px-3 py-2.5 font-normal">状态</th>
+            <th className="px-3 py-2.5 font-normal">更新于</th>
+            <th className="px-3 py-2.5 font-normal" />
           </tr>
         </thead>
         <tbody>
@@ -607,14 +607,14 @@ function ModelPricingTable({
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
       <table className="w-full type-body-sm md:min-w-[760px]">
-        <thead className="text-left text-[var(--fg-2)]">
-          <tr className="border-b border-[var(--border-subtle)]">
-            <th className="px-3 py-2">模型</th>
-            <th className="px-3 py-2">输入 ¥/1K</th>
-            <th className="px-3 py-2">输出 ¥/1K</th>
-            <th className="px-3 py-2">状态</th>
-            <th className="px-3 py-2">更新于</th>
-            <th className="px-3 py-2" />
+        <thead className="text-left type-caption">
+          <tr className="border-b border-[var(--border)]">
+            <th className="px-3 py-2.5 font-normal">模型</th>
+            <th className="px-3 py-2.5 font-normal">输入 ¥/1K</th>
+            <th className="px-3 py-2.5 font-normal">输出 ¥/1K</th>
+            <th className="px-3 py-2.5 font-normal">状态</th>
+            <th className="px-3 py-2.5 font-normal">更新于</th>
+            <th className="px-3 py-2.5 font-normal" />
           </tr>
         </thead>
         <tbody>

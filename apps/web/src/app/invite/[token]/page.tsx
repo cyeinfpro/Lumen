@@ -63,12 +63,12 @@ export default function InvitePage({
           transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
           className="auth-frame"
         >
-          <header className="flex items-center gap-3">
-            <span className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
+          <header className="flex flex-col items-center gap-3 text-center">
+            <span className="flex h-11 w-11 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]">
               <LumenMark />
             </span>
-            <div>
-              <p className="type-card-title">Lumen</p>
+            <div className="grid gap-0.5">
+              <p className="type-page-title-sm">Lumen</p>
               <p className="type-caption">邀请注册</p>
             </div>
           </header>
@@ -240,7 +240,7 @@ function SignupForm({
 
   return (
     <div className="grid gap-6">
-      <div className="auth-header">
+      <div className="auth-header text-center">
         <h1 className="type-page-title">
           加入 Lumen
         </h1>

@@ -187,8 +187,10 @@ export default function SignupPage() {
               <ArrowLeft className="w-4 h-4" />
               返回登录
             </Link>
-            <h1 className="type-page-title">创建 Lumen 账号</h1>
-            <p className="type-body">连接你的 API 密钥 后继续注册。</p>
+            <div className="grid gap-1.5 pt-1">
+              <h1 className="type-page-title">创建 Lumen 账号</h1>
+              <p className="type-body">连接你的 API 密钥 后继续注册。</p>
+            </div>
           </header>
 
           <ApiKeyVerificationSection

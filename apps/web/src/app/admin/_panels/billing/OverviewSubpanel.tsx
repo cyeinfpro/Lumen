@@ -133,12 +133,14 @@ function BillingMetrics({
       />
       <MetricCard
         label="活跃预扣"
-        value={`${overview?.active_holds_count ?? 0} 笔 / ¥${formatRmb(overview?.active_holds.rmb)}`}
+        value={`${overview?.active_holds_count ?? 0} 笔`}
+        sub={`合计 ¥${formatRmb(overview?.active_holds.rmb)}`}
         icon={<Activity className="h-4 w-4" />}
       />
       <MetricCard
         label="24h 兑换"
-        value={`${overview?.codes_redeemed_24h ?? 0} 张 / ¥${formatRmb(overview?.codes_redeemed_24h_amount.rmb)}`}
+        value={`${overview?.codes_redeemed_24h ?? 0} 张`}
+        sub={`合计 ¥${formatRmb(overview?.codes_redeemed_24h_amount.rmb)}`}
         icon={<KeyRound className="h-4 w-4" />}
       />
       <MetricCard

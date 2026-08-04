@@ -79,7 +79,7 @@ export function WorkflowStepRailRow({
           isCurrent
             ? "border-accent-border bg-accent text-[var(--accent-on)]"
             : done
-              ? "border-accent-border bg-transparent text-accent"
+              ? "border-[var(--border-strong)] bg-transparent text-[var(--fg-2)]"
               : isFailed
                 ? "border-danger-border text-[var(--danger)]"
                 : "border-[var(--border)] text-[var(--fg-3)]",

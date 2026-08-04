@@ -176,12 +176,12 @@ export function AllowedEmailsPanel() {
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] md:block">
               <table className="w-full type-body-sm">
-                <thead className="border-b border-[var(--border)] type-caption uppercase tracking-wider text-[var(--fg-1)]">
+                <thead className="border-b border-[var(--border)] type-caption text-[var(--fg-2)]">
                   <tr>
-                    <th className="px-4 py-3 text-left font-medium">邮箱</th>
-                    <th className="px-4 py-3 text-left font-medium">邀请人</th>
-                    <th className="px-4 py-3 text-left font-medium">创建时间</th>
-                    <th className="px-4 py-3 text-right font-medium">操作</th>
+                    <th className="px-4 py-2.5 text-left font-normal">邮箱</th>
+                    <th className="px-4 py-2.5 text-left font-normal">邀请人</th>
+                    <th className="px-4 py-2.5 text-left font-normal">创建时间</th>
+                    <th className="px-4 py-2.5 text-right font-normal">操作</th>
                   </tr>
                 </thead>
                 <tbody>

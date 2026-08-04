@@ -11,13 +11,15 @@ export function MetricCard({
   label,
   value,
   icon,
+  sub,
 }: {
   label: string;
   value: string;
   icon: ReactNode;
+  sub?: ReactNode;
 }) {
   return (
-    <PrimitiveMetricCard label={label} value={value} icon={icon} />
+    <PrimitiveMetricCard label={label} value={value} icon={icon} sub={sub} />
   );
 }
 

@@ -23,7 +23,7 @@ function CollectionStatus({ message }: { message: string }) {
   return (
     <div
       role="status"
-      className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]"
+      className="px-4 py-10 text-center type-body-sm text-[var(--fg-2)]"
     >
       {message}
     </div>
