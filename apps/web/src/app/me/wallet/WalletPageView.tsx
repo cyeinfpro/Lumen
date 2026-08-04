@@ -114,7 +114,7 @@ function LowBalanceNotice({ visible }: { visible: boolean }) {
     >
       <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
       <span>
-        余额不足，4K 图或多图任务可能无法生成。请先兑换充值或联系管理员。
+        余额不足，4K 图或多图任务可能无法生成。先兑换充值或联系管理员。
       </span>
     </div>
   );

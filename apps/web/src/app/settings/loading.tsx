@@ -3,7 +3,7 @@ import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 export default function Loading() {
   return (
-    <SettingsShell title="设置加载中" subtitle="SETTINGS">
+    <SettingsShell title="设置加载中" subtitle="设置">
       <div
         className="page-frame"
         data-width="settings"

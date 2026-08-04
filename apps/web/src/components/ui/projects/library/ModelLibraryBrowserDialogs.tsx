@@ -162,7 +162,7 @@ function UploadDialog({
     },
     onError: (err) =>
       toast.error("登记模特失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 
@@ -188,7 +188,7 @@ function UploadDialog({
       uploaded = await uploadImage.mutateAsync(uploadFile);
     } catch (error) {
       toast.error("上传模特图失败", {
-        description: error instanceof Error ? error.message : "请稍后重试",
+        description: error instanceof Error ? error.message : "稍后重试",
       });
       return;
     }

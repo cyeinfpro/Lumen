@@ -67,7 +67,7 @@ function ReviewImages({
     <section className="border-t border-[var(--border)] py-5">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="type-caption text-[var(--fg-2)]">
-          Showcases
+          展示图
         </p>
         <p className="type-caption text-[var(--fg-3)] tabular-nums">
           <span className="text-[var(--success)]">
@@ -110,7 +110,7 @@ function ContinueGenerating({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <p className="type-caption text-[var(--fg-2)]">
-        Continue Generating
+        继续生成
       </p>
       <ShowcaseSetupFields
         form={form}
@@ -127,7 +127,7 @@ function ContinueGenerating({
           leftIcon={<Shirt className="h-4 w-4" />}
           className="w-full min-[420px]:w-auto"
         >
-          继续再生成 {form.outputCount} 张
+          再生成 {form.outputCount} 张
         </Button>
         <p className="inline-flex min-w-0 flex-wrap items-center gap-2 break-words type-caption leading-6 text-[var(--fg-2)]">
           <span className="inline-flex items-center gap-1.5 type-caption text-accent">
@@ -154,7 +154,7 @@ function ReviseAndDeliver({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <p className="type-caption text-[var(--fg-2)]">
-        Revise Instruction
+        返修指令
       </p>
       <input
         value={controller.instruction}

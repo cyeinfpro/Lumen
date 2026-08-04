@@ -82,7 +82,7 @@ export function ModelLibraryDialog({
       if (!identity || !isPrivateIdentitySnapshotCurrent(identity)) return;
       setLightboxActionPending(false, identity);
       toast.error("选择模特失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     },
   });
@@ -262,7 +262,7 @@ function DialogHeader({
           rightIcon={<ArrowUpRight className="h-3.5 w-3.5" />}
           className="max-sm:hidden"
         >
-          打开完整模特库
+          打开模特库
         </Button>
         <button
           type="button"

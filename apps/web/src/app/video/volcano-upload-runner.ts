@@ -167,7 +167,7 @@ export async function startVolcanoUpload(
         phase: "needs_refresh",
         retryMode: "refresh",
         error:
-          "已存在后台任务标识，请先检查状态。系统不会自动重复创建素材。",
+          "已存在后台任务标识，先检查状态。系统不会自动重复创建素材。",
       },
       sessionId,
       item.model,
@@ -252,7 +252,7 @@ export async function startVolcanoUpload(
           `upload:${item.id}`,
         ),
         title: `创建素材「${assetName}」`,
-        pendingLabel: "正在创建并优化素材",
+        pendingLabel: "素材创建与优化中",
       },
       {
         prepare: waitForCreateAssetSlot,
@@ -317,7 +317,7 @@ export async function startVolcanoUpload(
                 phase: "needs_refresh",
                 retryMode: "refresh",
                 error:
-                  "创建任务已完成，但返回结果不是素材。请刷新素材库确认。",
+                  "创建任务已完成，但返回结果不是素材。刷新素材库确认。",
               },
               operationSessionId,
               item.model,
@@ -557,7 +557,7 @@ export async function verifyUntrackedVolcanoUpload(
   updateUpload(
     item.id,
     {
-      error: "正在检查云端素材，期间不会重新提交 CreateAsset。",
+      error: "云端素材检查中，期间不会重新提交 CreateAsset。",
     },
     sessionId,
     item.model,
@@ -577,10 +577,10 @@ export async function verifyUntrackedVolcanoUpload(
         candidates.length === 0 &&
         volcanoOperationTimedOut(item.submissionStartedAt);
       const message = verificationExpired
-        ? "超过 20 分钟仍未发现对应云端素材。系统已停止自动恢复；请先刷新素材列表确认，再移除记录并重新选择文件。"
+        ? "超过 20 分钟仍未发现对应云端素材。系统已停止自动恢复；先刷新素材列表确认，再移除记录并重新选择文件。"
         : candidates.length === 0
-          ? "暂未在云端发现可确认的同名素材，后台任务可能仍在排队。请稍后再次检查；系统不会自动重复创建。"
-          : "发现多个可能匹配的同名素材，无法安全自动绑定。请在素材列表中确认并删除重复项。";
+          ? "暂未在云端发现可确认的同名素材，后台任务可能仍在排队。稍后再次检查；系统不会自动重复创建。"
+          : "发现多个可能匹配的同名素材，无法安全自动绑定。在素材列表中确认并删除重复项。";
       updateUpload(
         item.id,
         {

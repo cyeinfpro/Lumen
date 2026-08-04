@@ -535,7 +535,7 @@ function markSendRequestSubmitted(ctl: AbortController): void {
 
 function abortAllSendRequests(): void {
   for (const record of _sendMessageAborts) {
-    // 只 abort 尚未提交到后端的请求；已提交的发送保留在途状态，让 POST
+    // 只 abort 未提交到后端的请求；已提交的发送保留在途状态，让 POST
     // 自然完成并由 isStaleSend / 还原逻辑接管，避免静默丢弃已计费发送。
     if (!record.submitted) record.controller.abort();
   }

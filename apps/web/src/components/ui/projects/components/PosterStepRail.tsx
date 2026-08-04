@@ -26,7 +26,7 @@ export function PosterStepRail({ workflow }: { workflow: WorkflowRun }) {
     <div className="grid gap-6">
       <div>
         <p className="type-caption text-[var(--fg-2)]">
-          Progress
+          进度
         </p>
         <div className="mt-2 flex items-baseline gap-3">
           <span className="type-metric ">
@@ -67,7 +67,7 @@ export function MobilePosterStageStrip({ workflow }: { workflow: WorkflowRun }) 
       <div className="flex items-baseline justify-between gap-3">
         <div>
           <p className="type-caption text-[var(--fg-2)]">
-            Progress
+            进度
           </p>
           <p className="mt-1 type-caption text-[var(--fg-1)]">
             {currentIndex + 1} / {POSTER_STEPS.length}

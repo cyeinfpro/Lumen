@@ -125,7 +125,7 @@ export function useAdminUpdateActions({
     if (!targetTag) {
       setUpdateBanner({
         kind: "error",
-        text: "请先重新检查更新，确认目标版本后再运行更新脚本。",
+        text: "先重新检查更新，确认目标版本后再运行更新脚本。",
       });
       return;
     }

@@ -217,7 +217,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
     onSuccess: () => toast.success("任务已清理"),
     onError: (err) =>
       toast.error("清理失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
   const dotTone =

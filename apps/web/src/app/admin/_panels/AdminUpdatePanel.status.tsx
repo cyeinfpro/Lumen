@@ -109,7 +109,7 @@ function updateConsoleSubtitle({
     return `失败于 ${phaseLabel(activePhase?.phase ?? "")}`;
   }
   if (startedAt) return `最近任务 ${formatDateTime(startedAt)}`;
-  return "步骤、实时输出和 release 历史已收起。";
+  return "步骤、实时输出和发布历史已收起。";
 }
 
 export function UpdateConsoleHeader({
@@ -235,7 +235,7 @@ function streamStatusLabel(status: AdminStreamStatus): string {
     case "connecting":
       return "连接中";
     case "broken":
-      return "中断，请刷新";
+      return "中断，刷新";
     case "error":
       return "重连中";
     default:
@@ -277,7 +277,7 @@ export function UpdateConsoleMeta({
       )}
       {logCount > 0 && (
         <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 font-mono text-[var(--fg-2)]">
-          log {logCount}
+          日志 {logCount}
         </span>
       )}
     </div>
@@ -377,7 +377,7 @@ function progressLabel(
   failed: boolean,
   activePhase: UpdateStepRecord | null,
 ): string {
-  if (running) return `正在执行：${phaseLabel(activePhase?.phase ?? "")}`;
+  if (running) return `执行中：${phaseLabel(activePhase?.phase ?? "")}`;
   if (failed) return `失败于：${phaseLabel(activePhase?.phase ?? "")}`;
   return "更新已完成";
 }

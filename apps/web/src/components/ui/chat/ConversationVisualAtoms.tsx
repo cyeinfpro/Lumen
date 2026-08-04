@@ -337,7 +337,7 @@ function FinalImageMedia({
 
       {free ? (
         <span className="pointer-events-none absolute left-2 top-2 type-mono-meta rounded-full border border-[var(--border-strong)] bg-[var(--media-control-bg)] px-2 py-0.5 text-[var(--media-control-fg)] backdrop-blur">
-          free
+          免费
         </span>
       ) : null}
 

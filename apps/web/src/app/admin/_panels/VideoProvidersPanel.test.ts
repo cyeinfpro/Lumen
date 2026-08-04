@@ -79,7 +79,7 @@ test("provider rename preserves API and conditional asset-secret protection", ()
     source,
     /供应商重命名后需重新填写火山资产 Access Key ID 与 Secret Access Key/,
   );
-  match(source, /供应商重命名后必须重新填写 API Key/);
+  match(source, /供应商重命名后必须重新填写 API 密钥/);
   match(
     source,
     /draftWasRenamed\(draft\)[\s\S]*?!draft\.api_key\.trim\(\)[\s\S]*?severity: "error"/,

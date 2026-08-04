@@ -131,8 +131,8 @@ function loginSessionError(
       ? "secure_cookie_requires_https"
       : "session_unverified",
     message: secureCookieBlockedByHttp
-      ? "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。请改用 HTTPS 地址后重新登录。"
-      : "密码验证成功，但登录会话未能确认。请检查 Cookie 或反向代理配置后重试。",
+      ? "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。改用 HTTPS 地址后重新登录。"
+      : "密码验证成功，但登录会话未能确认。检查 Cookie 或反向代理配置后重试。",
     status: 401,
   });
 }

@@ -61,7 +61,7 @@ function RunningBadge() {
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
         <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
       </span>
-      Running
+      运行中
     </span>
   );
 }
@@ -111,7 +111,7 @@ function OutputSetup({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <p className="type-caption text-[var(--fg-2)]">
-        Output Setup
+        输出设置
       </p>
       <ShowcaseSetupFields
         form={form}
@@ -182,11 +182,11 @@ function GenerationActions({
 function generationButtonLabel(
   controller: ShowcaseGenerationStageController,
 ): string {
-  if (controller.isRunning) return "展示图任务运行中";
+  if (controller.isRunning) return "运行中";
   if (controller.hasTasks) {
-    return `按当前模板再生成 ${controller.form.outputCount} 张`;
+    return `再生成 ${controller.form.outputCount} 张`;
   }
-  return `开始生成 ${controller.form.outputCount} 张展示图`;
+  return `生成 ${controller.form.outputCount} 张`;
 }
 
 function TaskProgress({
@@ -216,7 +216,7 @@ function GeneratedImages({
     <section className="border-t border-[var(--border)] py-5">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="type-caption text-[var(--fg-2)]">
-          Generated
+          已生成
         </p>
         <p className="type-caption text-[var(--fg-3)] tabular-nums">
           {String(controller.generated.length).padStart(2, "0")} 张

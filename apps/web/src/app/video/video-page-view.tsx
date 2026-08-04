@@ -250,7 +250,7 @@ function FirstFrameSection({
           <p className="type-body-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
         </div>
         <span className="type-caption text-[var(--fg-2)]">
-          用图片确定构图与起始状态
+          用图片锁定构图与起始状态
         </span>
       </div>
       <div className="grid gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.42fr)] lg:items-end">
@@ -349,7 +349,7 @@ function ReferenceSection({
             onClick={model.onOpenAssetManager}
             leftIcon={<Layers3 className="h-3.5 w-3.5" />}
           >
-            火山虚拟素材库
+            火山素材库
           </Button>
           <p className="min-w-0 flex-1 type-caption leading-5 text-[var(--fg-2)]">
             点击素材可预览，点击文字可插入引用。
@@ -374,7 +374,7 @@ function ReferenceSection({
               className="flex min-h-24 min-w-[min(240px,calc(100vw-3rem))] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center type-caption text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
             >
               <Upload className="h-4 w-4" />
-              添加图片或视频参考
+              添加参考
             </button>
           )}
         </div>

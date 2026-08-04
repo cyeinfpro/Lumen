@@ -111,7 +111,7 @@ export function CanvasNewPage() {
             返回画布
           </Link>
           <header className="border-b border-[var(--border)] pb-5 pt-2">
-            <p className="type-page-kicker">New Canvas</p>
+            <p className="type-page-kicker">新建画布</p>
             <h1 className="type-page-title mt-1">创建无限画布</h1>
             <p className="type-body-sm mt-2 max-w-xl text-[var(--fg-1)]">
               模板只创建画布结构。生成任务会在进入工作区后由你明确运行。

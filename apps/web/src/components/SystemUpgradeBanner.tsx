@@ -6,6 +6,33 @@ import { useEffect, useRef } from "react";
 
 import { getSystemMaintenance } from "@/lib/apiClient";
 
+const MAINTENANCE_PHASE_LABELS: Record<string, string> = {
+  lock: "获取更新锁",
+  self_update_scripts: "刷新更新脚本",
+  check: "检查版本",
+  preflight: "预检查",
+  backup_preflight: "更新前备份",
+  fetch_release: "准备发布目录",
+  set_image_tag: "写入镜像标签",
+  pull_images: "拉取镜像",
+  start_infra: "启动基础设施",
+  migrate_db: "迁移数据库",
+  switch: "切换版本",
+  check_storage: "检查存储",
+  restart_services: "重启服务",
+  refresh_update_runner: "刷新更新入口",
+  health_check: "健康检查",
+  health_post: "健康检查",
+  cleanup: "清理旧版本",
+  rollback: "回滚",
+  preparing: "准备更新",
+};
+
+function maintenancePhaseLabel(phase?: string | null): string {
+  if (!phase) return MAINTENANCE_PHASE_LABELS.preparing;
+  return MAINTENANCE_PHASE_LABELS[phase] ?? "更新处理中";
+}
+
 export function SystemUpgradeBanner() {
   const ref = useRef<HTMLDivElement>(null);
   const q = useQuery({
@@ -40,8 +67,8 @@ export function SystemUpgradeBanner() {
   }, [running]);
 
   if (!data?.running) return null;
-  const target = data.target_tag ? `到 ${data.target_tag}` : "";
-  const phase = data.phase ?? "preparing";
+  const target = data.target_tag ? `，目标版本 ${data.target_tag}` : "";
+  const phase = maintenancePhaseLabel(data.phase);
   const eta = Math.max(1, data.estimated_remaining_min ?? 1);
 
   return (
@@ -64,7 +91,7 @@ export function SystemUpgradeBanner() {
           aria-hidden
         />
         <span className="max-w-[min(92vw,640px)] break-words text-left sm:text-center">
-          Lumen 正在升级{target}（{phase} · 预计 {eta} 分钟内完成），请求会自动重试。
+          Lumen 系统升级中{target}（{phase} · 预计 {eta} 分钟内完成），请求会自动重试。
         </span>
       </div>
     </div>

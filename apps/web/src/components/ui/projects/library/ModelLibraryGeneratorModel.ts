@@ -30,7 +30,7 @@ export function modelLibrarySubmissionWarning({
 }): string | null {
   if (mode !== "reference_image") return null;
   if (referenceUploading) return "参考图仍在上传";
-  return referenceImageId ? null : "请先上传参考图";
+  return referenceImageId ? null : "先上传参考图";
 }
 
 export function buildModelLibraryGenerationBody(

@@ -231,12 +231,12 @@ function disabledReason(
       return reset > 0 ? `摘要服务熔断中，${reset} 秒后可重试` : "摘要服务熔断中";
     }
     if (stats.manual_compact_unavailable_reason === "cooldown") {
-      return reset > 0 ? `冷却中，${reset} 秒后可重试` : "冷却中，请稍后重试";
+      return reset > 0 ? `冷却中，${reset} 秒后可重试` : "冷却中，稍后重试";
     }
-    return reset > 0 ? `暂不可用，${reset} 秒后可重试` : "暂不可用，请稍后重试";
+    return reset > 0 ? `暂不可用，${reset} 秒后可重试` : "暂不可用，稍后重试";
   }
   if (stats.last_fallback_reason === "circuit_open") {
-    return "摘要服务熔断中，请稍后重试";
+    return "摘要服务熔断中，稍后重试";
   }
   return null;
 }

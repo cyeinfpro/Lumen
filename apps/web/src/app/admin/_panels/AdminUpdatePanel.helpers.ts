@@ -127,7 +127,7 @@ export function rollbackStartedBanner(
   }
   return {
     kind: "success",
-    text: `回滚已启动，目标 release ${result.target.id}`,
+    text: `回滚已启动，目标版本 ${result.target.id}`,
   };
 }
 
@@ -191,7 +191,7 @@ export function effectiveUpdateBanner(
   if (failed && !running) {
     return {
       kind: "error",
-      text: "上次更新失败，请查看 checklist 中的红色 phase 或日志。",
+      text: "上次更新失败，查看步骤列表中的红色阶段或日志。",
     };
   }
   return null;

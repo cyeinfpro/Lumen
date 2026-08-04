@@ -415,7 +415,7 @@ export function DesktopStream() {
         <div className="page-frame" data-width="media">
           <header className="page-header">
             <div className="page-header-copy">
-              <p className="type-page-kicker">Asset Library</p>
+              <p className="type-page-kicker">素材库</p>
               <h1 className="type-page-title">图库</h1>
               <p className="type-page-subtitle">
                 浏览、筛选并整理最近生成的图片。

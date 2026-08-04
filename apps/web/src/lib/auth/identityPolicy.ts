@@ -35,8 +35,8 @@ function blockedError(session: SessionRuntimeStatus): ApiError {
   return new ApiError({
     code: unauthorized ? "unauthorized" : "identity_degraded",
     message: unauthorized
-      ? "登录状态已失效，请重新登录后再操作"
-      : "正在确认登录状态，写操作已暂时切换为只读",
+      ? "登录状态已失效，重新登录后再操作"
+      : "登录状态确认中，写操作已暂时切换为只读",
     status: unauthorized ? 401 : 409,
   });
 }

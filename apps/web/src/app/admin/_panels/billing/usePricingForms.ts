@@ -180,7 +180,7 @@ export function useImagePricingForm(
   const addTier = () => {
     const tier = newTier.trim().toLowerCase();
     if (!tier) {
-      toast.warning("请填写档位名称");
+      toast.warning("填写档位名称");
       return;
     }
     if (rows.some((row) => row.tier === tier)) {
@@ -264,7 +264,7 @@ export function useVideoPricingForm(
   const applyOfficialPricing = () => {
     const multiplier = Number(officialMultiplier);
     if (!Number.isFinite(multiplier) || multiplier <= 0) {
-      toast.warning("请填写大于 0 的官方价倍率");
+      toast.warning("填写大于 0 的官方价倍率");
       return;
     }
     const nextDrafts = buildOfficialVideoDrafts(multiplier);

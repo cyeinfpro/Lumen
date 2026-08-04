@@ -160,7 +160,7 @@ export async function streamApiErrorFromResponse(
     res.status === 413 && details.message === fallback.message
       ? {
           code: "request_too_large",
-          message: "参考素材过大，请减少素材后重试",
+          message: "参考素材过大，减少素材后重试",
         }
       : details;
   return new ApiError({ ...normalized, status: res.status, payload });
@@ -169,13 +169,13 @@ export async function streamApiErrorFromResponse(
 function promptEnhanceStreamErrorMessage(code: string): string {
   switch (code) {
     case "timeout":
-      return "上游长时间没有返回内容，已自动停止。请稍后重试或减少参考素材。";
+      return "上游长时间没有返回内容，已自动停止。稍后重试或减少参考素材。";
     case "upstream_error":
-      return "上游暂时不可用，请稍后重试。";
+      return "上游暂时不可用，稍后重试。";
     case "billing_failed":
       return "扣费结算失败，已停止本次优化。";
     case "internal":
-      return "服务内部错误，请稍后重试。";
+      return "服务内部错误，稍后重试。";
     default:
       return code;
   }

@@ -251,10 +251,10 @@ export function VolcanoAssetManager({
   const selectedGroupDeleting = Boolean(selectedGroupOperation?.blocksChildren);
   const uploadDisabledReason = selectedGroupOperation
     ? selectedGroupDeleting
-      ? "该素材组正在删除，暂不能上传"
+      ? "该素材组删除中，暂不能上传"
       : "该素材组有后台操作进行中，暂不能上传"
     : assetData.projectAssetTotal == null
-      ? "正在读取当前 Project 的素材总配额"
+      ? "当前项目素材总配额读取中"
       : projectAssetQuota?.reached
         ? `当前 Project 已有 ${projectAssetQuota.used} 个素材，已达到 ${projectAssetQuota.limit} 个上限`
         : effectiveAssetQuota?.reached
@@ -262,7 +262,7 @@ export function VolcanoAssetManager({
           : null;
   const groupCreateDisabledReason =
     assetData.projectGroupTotal == null
-      ? "正在读取当前 Project 的素材组总配额"
+      ? "当前项目素材组总配额读取中"
       : groupQuota?.reached
         ? `当前 Project 已有 ${groupQuota.used} 个素材组，已达到 ${groupQuota.limit} 个上限`
         : pendingOperationsByLock.has(volcanoGroupCreateLockKey())
@@ -319,7 +319,7 @@ export function VolcanoAssetManager({
           item.groupId === form.groupId && uploadBlocksGroupMutation(item),
       )
     ) {
-      setGroupFormError("该素材组仍有上传或后台创建任务，请等待完成后再编辑");
+      setGroupFormError("该素材组仍有上传或后台创建任务，等待完成后再编辑");
       return;
     }
     const lockKey =
@@ -336,7 +336,7 @@ export function VolcanoAssetManager({
             ? `新建素材组「${name}」`
             : `更新素材组「${name}」`,
         pendingLabel:
-          form.mode === "create" ? "正在创建素材组" : "正在更新素材组",
+          form.mode === "create" ? "素材组创建中" : "素材组更新中",
       },
       {
         prepare:
@@ -443,7 +443,7 @@ export function VolcanoAssetManager({
         action: "update_asset",
         lockKey,
         title: `重命名素材「${target.asset.name || "未命名素材"}」`,
-        pendingLabel: "正在重命名素材",
+        pendingLabel: "素材重命名中",
       },
       {
         submit: (signal) =>
@@ -514,7 +514,7 @@ export function VolcanoAssetManager({
     ) {
       setNotice({
         tone: "error",
-        text: "该素材组仍有上传或后台创建任务，请先等待结果或移除未提交文件",
+        text: "该素材组仍有上传或后台创建任务，先等待结果或移除未提交文件",
       });
       setDeleteTarget(null);
       return;
@@ -531,7 +531,7 @@ export function VolcanoAssetManager({
                 target.asset.id,
               ),
               title: `删除素材「${target.asset.name || "未命名素材"}」`,
-              pendingLabel: "正在删除素材",
+              pendingLabel: "素材删除中",
             },
             {
               submit: (signal) =>
@@ -586,7 +586,7 @@ export function VolcanoAssetManager({
               action: "delete_group",
               lockKey: volcanoGroupLockKey(target.group.id),
               title: `删除素材组「${target.group.name}」`,
-              pendingLabel: "正在删除素材组",
+              pendingLabel: "素材组删除中",
               blocksChildren: true,
             },
             {

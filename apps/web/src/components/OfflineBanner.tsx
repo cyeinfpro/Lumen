@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { WifiOff } from "lucide-react";
 
 export function OfflineBanner() {
-  // null 代表 SSR / hydration 初期未确定状态；仅在客户端 effect 运行后切换为 boolean，
+  // null 代表 SSR / hydration 初期状态未知；仅在客户端 effect 运行后切换为 boolean，
   // 避免 SSR 默认 true 与客户端实际 offline 之间的 hydration 闪烁。
   const [online, setOnline] = useState<boolean | null>(null);
   const bannerRef = useRef<HTMLDivElement>(null);

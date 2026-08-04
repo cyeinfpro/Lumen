@@ -25,7 +25,7 @@ export function UpdateConfirmDialog({
         </span>
         ，期间服务会重启并短暂不可用。
       </p>
-      <p className="text-[var(--fg-2)]">请确认目标版本无误后再继续。</p>
+      <p className="text-[var(--fg-2)]">确认目标版本无误后再继续。</p>
     </div>
   ) : null;
   return (

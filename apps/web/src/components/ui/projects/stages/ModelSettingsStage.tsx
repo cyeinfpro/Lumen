@@ -23,7 +23,7 @@ export function ModelSettingsStage({ workflow }: { workflow: WorkflowRun }) {
   const create = useCreateModelCandidatesMutation(workflow.id, {
     onError: (err) => {
       toast.error("生成模特候选失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     },
     onSuccess: () => toast.success("已派发 3 套模特候选生成"),

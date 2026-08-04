@@ -75,7 +75,7 @@ export function RunningState({
       </span>
       <p className="type-card-title">{label}</p>
       <p className="type-caption text-[var(--fg-2)]">
-        Developing
+        处理中
       </p>
     </div>
   );

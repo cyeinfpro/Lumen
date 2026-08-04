@@ -81,7 +81,7 @@ export function assetCredentialSummary({
 }): AssetCredentialSummary {
   if (hasNew && !hasCompleteNew) {
     return {
-      text: "只填写了一项火山资产凭证，请同时填写 Access Key ID 与 Secret Access Key",
+      text: "只填写了一项火山资产凭证，同时填写 Access Key ID 与 Secret Access Key",
       tone: "danger",
       label: "凭证不完整",
     };
@@ -108,7 +108,7 @@ export function assetCredentialSummary({
     };
   }
   return {
-    text: "尚未保存火山资产凭证",
+    text: "未保存火山资产凭证",
     tone: "neutral",
     label: "未保存资产配置",
   };

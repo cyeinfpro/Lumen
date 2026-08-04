@@ -104,7 +104,7 @@ export function LightboxDetailsContent({
                     style.heading,
                   )}
                 >
-                  prompt
+                  提示词
                 </h3>
                 <button
                   type="button"

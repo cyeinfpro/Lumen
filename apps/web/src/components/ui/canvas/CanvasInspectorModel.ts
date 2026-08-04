@@ -30,9 +30,9 @@ export function inspectorVideoRunDisabledReason(
   error: string | null,
 ): string | null {
   if (CANVAS_NODE_SPECS[node.type].family !== "video") return null;
-  if (loading) return "正在加载视频能力";
+  if (loading) return "视频能力加载中";
   if (error) return error;
-  if (!options) return "视频能力尚未加载";
+  if (!options) return "视频能力未加载";
   return canvasVideoCapabilityError(node, options, graph);
 }
 

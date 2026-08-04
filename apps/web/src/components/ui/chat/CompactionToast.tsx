@@ -40,7 +40,7 @@ function descriptionFor(event: CompactionEvent): string {
   }
   if (event.ok) {
     const freed = event.stats?.tokensFreed;
-    return freed != null ? `已释放约 ${formatTokens(freed)} tokens。` : "已释放上下文空间。";
+    return freed != null ? `已释放约 ${formatTokens(freed)} 个令牌。` : "已释放上下文空间。";
   }
   if (event.fallbackReason === "event_timeout") {
     return "事件等待超时，已使用截断模式继续。";
@@ -104,7 +104,7 @@ function StatsLine({ event }: { event: CompactionEvent }) {
         className="text-[var(--fg-1)]"
         format={(v) => formatTokens(v)}
       />{" "}
-      tokens
+      个令牌
     </p>
   );
 }

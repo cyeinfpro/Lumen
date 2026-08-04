@@ -258,7 +258,7 @@ function LoginInner() {
               <div className="type-caption space-y-1 text-center">
                 {byokSignupAvailable && (
                   <p>
-                    有 API Key？{" "}
+                    有 API 密钥？{" "}
                     <Link href="/signup" className="text-[var(--accent)] hover:underline">
                       直接注册
                     </Link>

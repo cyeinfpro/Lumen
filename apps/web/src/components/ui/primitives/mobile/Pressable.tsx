@@ -28,7 +28,7 @@ type BaseProps = {
 };
 
 // onPress 不带 event 参数：键盘 (Enter/Space) / 鼠标 click / 触屏 / 屏幕阅读器
-// 都能触发。需要 event 信息的场景请直接用 onClick / onKeyDown。
+// 都能触发。需要 event 信息的场景直接用 onClick / onKeyDown。
 type PressHandler = () => void;
 
 type AsButton = BaseProps &

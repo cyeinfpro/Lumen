@@ -286,7 +286,7 @@ test("legacy execution config loads but is blocked until corrected", () => {
   };
   assert.deepEqual(validateCanvasNodeExecution(graph, "image-generate-1"), {
     valid: false,
-    reason: "图片比例不受支持，请重新选择",
+    reason: "图片比例不受支持，重新选择",
   });
 
   graph.nodes[1].config = {

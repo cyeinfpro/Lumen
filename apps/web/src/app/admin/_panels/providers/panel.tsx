@@ -266,7 +266,7 @@ function EmptyProvidersState({
           }}
           leftIcon={<Plus className="h-3.5 w-3.5" />}
         >
-          添加首个供应商
+          添加供应商
         </Button>
       </div>
     </div>

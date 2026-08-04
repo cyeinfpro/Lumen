@@ -121,7 +121,7 @@ export function ModelLibraryGenerator({
       await onSubmit(body);
     } catch (err) {
       toast.error("提交失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     }
   };
@@ -462,7 +462,7 @@ function GenerationSubmitControls({
     mode === "reference_image"
       ? `${totalCount} 张（参考图模式）`
       : `${totalCount} 张（每个性别 ${count} 张）`;
-  const disabledMessage = referenceUploading ? "参考图上传中" : "请先上传参考图";
+  const disabledMessage = referenceUploading ? "参考图上传中" : "先上传参考图";
   return (
     <div
       className={cn(

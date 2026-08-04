@@ -44,7 +44,7 @@ function statusLabel(
   if (isCurrent && status === "running") {
     return (
       <p className="mt-0.5 type-caption text-accent">
-        Running
+        运行中
       </p>
     );
   }

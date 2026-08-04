@@ -151,7 +151,7 @@ export function notifyCompletedPromptEnhancement(
 ): void {
   if (recommended.action === "ask_first") {
     toast.success("需要补充信息", {
-      description: "已保留原描述，请根据补问补齐后再优化。",
+      description: "已保留原描述，根据补问补齐后再优化。",
     });
     return;
   }
@@ -252,9 +252,9 @@ function videoConfigurationIssue({
   availableDurations: number[];
   durationS: number;
 }): string | null {
-  if (createPending) return "正在提交";
+  if (createPending) return "提交中";
   if (uploadPending) return "等待素材上传完成";
-  if (optionsLoading) return "正在读取配置";
+  if (optionsLoading) return "配置读取中";
   if (!options?.enabled) {
     return videoUnavailableReasonMessage(options?.unavailable_reason);
   }

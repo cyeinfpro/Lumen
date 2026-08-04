@@ -20,7 +20,7 @@ export function useProductAnalysisStageController(workflow: WorkflowRun) {
   const approve = useApproveProductAnalysisMutation(workflow.id, {
     onError: (err) => {
       toast.error("确认商品约束失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     },
     onSuccess: () => toast.success("商品约束已固定"),

@@ -271,7 +271,7 @@ function CanvasWorkspaceInner({
         activeNodeIds.has(nodeId) ||
         submittingNodeIdsRef.current.has(nodeId)
       ) {
-        toast.error("节点正在运行，请等待当前任务完成");
+        toast.error("节点运行中，等待当前任务完成");
         return;
       }
       submittingNodeIdsRef.current.add(nodeId);
@@ -296,7 +296,7 @@ function CanvasWorkspaceInner({
           } catch (error) {
             toast.error(
               controller.signal.aborted
-                ? "视频能力加载超时，请重试"
+                ? "视频能力加载超时，重试"
                 : error instanceof Error
                   ? error.message
                   : "视频能力加载失败",
@@ -321,7 +321,7 @@ function CanvasWorkspaceInner({
           state.saveState === "conflict" ||
           state.pendingOperations.length > 0
         ) {
-          toast.error("画布尚未保存，暂不能运行");
+          toast.error("画布未保存，暂不能运行");
           return;
         }
         await executeNode.mutateAsync({ nodeId, revision: state.revision });

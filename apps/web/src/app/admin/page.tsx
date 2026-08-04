@@ -146,7 +146,7 @@ const TABS: TabMeta[] = [
     group: "access",
     label: "API 站接入",
     title: "API 站接入",
-    description: "管理用户自带 API Key 的接入、验证和降级策略。",
+    description: "管理用户自带 API 密钥 的接入、验证和降级策略。",
     icon: KeyRound,
   },
   {
@@ -305,7 +305,7 @@ export default function AdminPage() {
   if (meQuery.isError) {
     const redirectPath = adminAuthRedirectPath(meQuery.error);
     if (redirectPath) {
-      return <AdminAccessPending message="登录状态已失效，正在跳转登录…" />;
+      return <AdminAccessPending message="登录状态已失效，跳转登录中…" />;
     }
     return (
       <AdminAccessError
@@ -361,7 +361,7 @@ function AdminAccessError({
         <AlertCircle className="mx-auto h-6 w-6 text-danger" />
         <h1 className="mt-3 type-card-title">无法验证管理员身份</h1>
         <p className="mt-1.5 type-body-sm text-[var(--fg-1)]">
-          登录服务暂时不可用，请重试。为避免误放行，管理内容不会展示。
+          登录服务暂时不可用，重试。为避免误放行，管理内容不会展示。
         </p>
         <button
           type="button"

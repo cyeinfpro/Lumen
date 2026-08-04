@@ -184,7 +184,7 @@ function ProviderConnectionEditor({
           onChange={(baseUrl) => onPatch(baseUrlDraftPatch(draft, baseUrl))}
         />
         <Field
-          label="API Key"
+          label="API 密钥"
           value={draft.api_key}
           onChange={(api_key) => onPatch({ api_key })}
           name={`video-provider-${draft._key}-api-key`}
@@ -352,7 +352,7 @@ function ProviderStateEditor({
           <span className="block">启用此供应商</span>
           {draft.kind === "veo" && (
             <span className="mt-0.5 block type-caption text-warning">
-              Veo 适配器尚未接入 Worker
+              Veo 适配器未接入 Worker
             </span>
           )}
         </span>
@@ -435,7 +435,7 @@ function ProviderModelsEditor({
             onClick={onApplyPreset}
             leftIcon={<Check className="h-3.5 w-3.5" />}
           >
-            套用当前类型预设
+            套用预设
           </Button>
           <Button
             variant="outline"

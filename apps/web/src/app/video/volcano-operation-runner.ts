@@ -121,7 +121,7 @@ export async function runVolcanoOperation({
             `${volcanoAssetErrorMessage(
               error,
               "重试请求结果未知",
-            )}。请查询原任务状态，系统不会再次发送重试。`,
+            )}。查询原任务状态，系统不会再次发送重试。`,
           );
           return;
         }
@@ -148,7 +148,7 @@ export async function runVolcanoOperation({
           !isSessionActive(sessionId, runner.model)
         ) {
           pauseForUnknownResult(
-            "提交请求已发出但结果未知。系统不会自动重发，请检查素材库后再继续。",
+            "提交请求已发出但结果未知。系统不会自动重发，检查素材库后再继续。",
           );
           return;
         }
@@ -158,7 +158,7 @@ export async function runVolcanoOperation({
             `${volcanoAssetErrorMessage(
               error,
               "后台操作提交结果未知",
-            )}。系统不会自动重发，请先检查素材库。`,
+            )}。系统不会自动重发，先检查素材库。`,
           );
           return;
         }
@@ -169,7 +169,7 @@ export async function runVolcanoOperation({
     remoteOperationId = operation.id.trim() || remoteOperationId;
     if (!remoteOperationId) {
       pauseForUnknownResult(
-        "后台已接收请求但没有返回任务标识。请检查素材库，系统不会重复提交。",
+        "后台已接收请求但没有返回任务标识。检查素材库，系统不会重复提交。",
       );
       return;
     }
@@ -202,7 +202,7 @@ export async function runVolcanoOperation({
       if (statusKind === "succeeded") {
         if (!operation.result) {
           pauseForUnknownResult(
-            "后台任务已完成但结果暂不可用。请检查状态，系统不会重复提交。",
+            "后台任务已完成但结果暂不可用。检查状态，系统不会重复提交。",
           );
           return;
         }
@@ -254,7 +254,7 @@ export async function runVolcanoOperation({
       }
       if (statusKind === "unknown") {
         pauseForUnknownResult(
-          "后台返回了未知任务状态。请检查状态，系统不会重复提交。",
+          "后台返回了未知任务状态。检查状态，系统不会重复提交。",
         );
         return;
       }
@@ -322,7 +322,7 @@ export async function runVolcanoOperation({
         remoteOperationId
           ? "状态轮询已暂停，重新打开后会继续确认后台结果。"
           : submissionStartedAt
-            ? "提交请求已发出但结果未知。系统不会自动重发，请检查素材库后再继续。"
+            ? "提交请求已发出但结果未知。系统不会自动重发，检查素材库后再继续。"
             : "后台操作已暂停，重新打开后会继续。",
       );
       return;
@@ -332,7 +332,7 @@ export async function runVolcanoOperation({
         `${volcanoAssetErrorMessage(
           error,
           "后台任务状态读取失败",
-        )}。请检查状态，系统不会重复提交。`,
+        )}。检查状态，系统不会重复提交。`,
       );
       return;
     }

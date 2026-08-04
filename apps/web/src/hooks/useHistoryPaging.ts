@@ -213,7 +213,7 @@ export function useHistoryPaging(
           setFallback({
             convId: currentConvId,
             loading: true,
-            error: errorMessage(err) ?? "消息加载失败，请重试",
+            error: errorMessage(err) ?? "消息加载失败，重试",
           });
         }
       } finally {

@@ -47,7 +47,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
   const create = useCreatePosterMastersMutation(workflow.id, {
     onError: (err) =>
       toast.error("生成母版失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("母版任务已派发"),
   });
@@ -55,7 +55,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
   const approve = useApprovePosterMasterMutation(workflow.id, {
     onError: (err) =>
       toast.error("选定母版失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("母版已选定"),
   });
@@ -88,7 +88,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
             onClick={trigger}
             leftIcon={<Sparkles className="h-4 w-4" />}
           >
-            生成 4 张母版候选
+            生成母版
           </Button>
         </div>
       </StageFrame>
@@ -125,7 +125,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
           leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
           className="w-full sm:w-auto"
         >
-          再生成 4 张
+          再生成
         </Button>
       }
     >

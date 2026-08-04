@@ -85,13 +85,13 @@ function describeCooldownError(err: ApiError): string {
   if (typeof reset === "number" && Number.isFinite(reset) && reset > 0) {
     return `冷却中，${Math.ceil(reset)} 秒后可重试`;
   }
-  return "冷却中，请稍后重试";
+  return "冷却中，稍后重试";
 }
 
 function describeUnavailableError(err: ApiError): string {
   const reason = readUnavailableReason(err);
   const messages: Partial<Record<CompactUnavailableReason, string>> = {
-    lock_busy: "正在压缩中，稍后再试",
+    lock_busy: "压缩中，稍后再试",
     circuit_open: "压缩服务暂不可用",
     upstream_error: "上游服务异常，稍后重试",
   };
@@ -109,7 +109,7 @@ export function describeCompactError(err: unknown): string {
   if (err.status === 429 && err.code === "manual_compact_cooldown") {
     return describeCooldownError(err);
   }
-  if (err.status === 401) return "请重新登录";
+  if (err.status === 401) return "重新登录";
   return err.message || `压缩失败 (HTTP ${err.status})`;
 }
 

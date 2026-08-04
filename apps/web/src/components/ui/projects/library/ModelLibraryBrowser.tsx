@@ -276,14 +276,14 @@ export function ModelLibraryBrowser({
     },
     onError: (err) =>
       toast.error("同步预设失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
   const deleteItem = useDeleteApparelModelLibraryItemMutation({
     onSuccess: () => toast.success("已从当前视图移除"),
     onError: (err) =>
       toast.error("移除失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
   const batchDelete = useDeleteApparelModelLibraryItemsMutation({
@@ -297,7 +297,7 @@ export function ModelLibraryBrowser({
     },
     onError: (err) =>
       toast.error("批量删除失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 

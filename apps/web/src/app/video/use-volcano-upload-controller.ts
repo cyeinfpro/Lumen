@@ -309,7 +309,7 @@ export function useVolcanoUploadController({
         setNotice({
           tone: "error",
           text:
-            "该素材关联的云端操作尚未结束，恢复或确认结果后才能移除记录",
+            "该素材关联的云端操作未结束，恢复或确认结果后才能移除记录",
         });
         return;
       }
@@ -474,7 +474,7 @@ export function useVolcanoUploadController({
         setNotice({
           tone: "error",
           text:
-            "该失败不能直接重试，请刷新素材库或移除后重新选择文件",
+            "该失败不能直接重试，刷新素材库或移除后重新选择文件",
         });
         return;
       }
@@ -510,7 +510,7 @@ export function useVolcanoUploadController({
         );
         setNotice({
           tone: "error",
-          text: `火山限流仍在冷却，请 ${seconds} 秒后重试`,
+          text: `火山限流仍在冷却， ${seconds} 秒后重试`,
         });
         return;
       }

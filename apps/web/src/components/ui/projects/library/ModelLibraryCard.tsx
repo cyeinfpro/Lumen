@@ -144,7 +144,7 @@ export function ModelLibraryCard({
       }),
     onError: (err) =>
       toast.error("识别失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
   const saveLoser = useSaveApparelModelLibraryJobItemMutation(
@@ -154,7 +154,7 @@ export function ModelLibraryCard({
       onSuccess: () => toast.success("已收藏入库"),
       onError: (err) =>
         toast.error("入库失败", {
-          description: err instanceof Error ? err.message : "请稍后重试",
+          description: err instanceof Error ? err.message : "稍后重试",
         }),
     },
   );

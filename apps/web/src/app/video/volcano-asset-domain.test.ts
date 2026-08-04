@@ -342,7 +342,7 @@ test("operation states, progress copy, and timeout handling are forward compatib
   assert.equal(domain.volcanoOperationStatusKind("future_state"), "unknown");
   assert.equal(
     domain.volcanoOperationStageMessage("normalizing_video"),
-    "正在后台转码视频尺寸、帧率与编码",
+    "视频尺寸、帧率与编码后台转码中",
   );
   assert.equal(
     domain.volcanoOperationTimedOut(
@@ -602,7 +602,7 @@ test("create failures distinguish safe retries from unknown submission outcomes"
       { code: "video_asset_operation_not_found" },
       "fallback",
     ),
-    "后台任务记录已过期，请刷新素材库确认结果",
+    "后台任务记录已过期，刷新素材库确认结果",
   );
 });
 
@@ -947,8 +947,8 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /function OperationActivity\(/);
   assert.match(managerSource, /phase: VolcanoManagedOperationPhase/);
   assert.match(managerSource, /setDeleteTarget\(null\)/);
-  assert.match(managerSource, /正在删除素材组/);
-  assert.match(managerSource, /正在删除素材/);
+  assert.match(managerSource, /素材组删除中/);
+  assert.match(managerSource, /素材删除中/);
   assert.doesNotMatch(managerSource, /素材名称默认取原文件名去扩展名/);
   assert.doesNotMatch(
     managerSource,

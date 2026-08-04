@@ -648,7 +648,7 @@ export function analyzeProvider(
   const hasKey = item.kind === "fake" || Boolean(item.api_key_hint.trim());
   const issues: Issue[] = [];
   if (item.enabled && !hasKey) {
-    issues.push({ severity: "error", message: "启用状态下缺少 API Key" });
+    issues.push({ severity: "error", message: "启用状态下缺少 API 密钥" });
   }
   if (item.enabled && modelNames.length === 0) {
     issues.push({ severity: "error", message: "启用状态下缺少模型映射" });
@@ -660,8 +660,8 @@ export function analyzeProvider(
     issues.push({
       severity: item.enabled ? "error" : "warning",
       message: item.enabled
-        ? "Veo 适配器尚未接入 Worker，必须停用"
-        : "Veo 适配器尚未接入 Worker，暂不可启用",
+        ? "Veo 适配器未接入 Worker，必须停用"
+        : "Veo 适配器未接入 Worker，暂不可启用",
     });
   }
   if (isOmniFlashPlaceholderBaseUrl(item.kind, item.base_url)) {
@@ -712,7 +712,7 @@ function draftBaseUrlIssues(draft: Draft): Issue[] {
     if (isOmniFlashPlaceholderBaseUrl(draft.kind, baseUrl)) {
       issues.push({
         severity: "error",
-        message: "Omni Flash 的 Base URL 仍是占位地址，请替换为真实网关",
+        message: "Omni Flash 的 Base URL 仍是占位地址，替换为真实网关",
       });
     }
   } catch {
@@ -743,7 +743,7 @@ function draftEnabledIssues(
   }
   const issues: Issue[] = [];
   if (!hasDraftKey(draft, serverItems)) {
-    issues.push({ severity: "error", message: "启用状态下必须填写 API Key" });
+    issues.push({ severity: "error", message: "启用状态下必须填写 API 密钥" });
   }
   if (modelNames.length === 0) {
     issues.push({ severity: "error", message: "至少需要一个模型映射" });
@@ -766,13 +766,13 @@ function draftKindIssues(
   ) {
     issues.push({
       severity: "error",
-      message: "供应商重命名后必须重新填写 API Key",
+      message: "供应商重命名后必须重新填写 API 密钥",
     });
   }
   if (draft.kind === "veo" && draft.enabled) {
     issues.push({
       severity: "error",
-      message: "Veo 适配器尚未接入 Worker，暂不可启用",
+      message: "Veo 适配器未接入 Worker，暂不可启用",
     });
   }
   if (draft.kind !== "volcano") return issues;

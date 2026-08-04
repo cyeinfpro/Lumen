@@ -21,7 +21,7 @@ export function mutationErrorMessage(error: unknown): string {
     const raw = (error as { message: unknown }).message;
     if (typeof raw === "string" && raw) return raw;
   }
-  return "操作失败，请重试";
+  return "操作失败，重试";
 }
 
 function makeMutationErrorHandler(notify?: MutationErrorNotifier) {
@@ -41,7 +41,7 @@ function makeMutationErrorHandler(notify?: MutationErrorNotifier) {
 }
 
 export function makeQueryClient(notify?: MutationErrorNotifier): QueryClient {
-  // BUG-007: 防御性检查 — SSR 期间 Zustand store 可能尚未初始化。
+  // BUG-007: 防御性检查 — SSR 期间 Zustand store 可能未初始化。
   // 当前实现不依赖 store 状态，但保持工厂函数纯净以兼容 SSR 预取场景。
   return new QueryClient({
     defaultOptions: {

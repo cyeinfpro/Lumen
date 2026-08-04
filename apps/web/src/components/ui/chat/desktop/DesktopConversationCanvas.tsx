@@ -147,7 +147,7 @@ function HistoryLoadControl({
           disabled={!hasMore && !loading}
           className="text-[var(--fg-2)]"
         >
-          {loading ? "正在加载" : "加载更早消息"}
+          {loading ? "加载中" : "加载更早消息"}
         </Button>
       )}
     </div>

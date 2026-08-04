@@ -79,7 +79,7 @@ export const MODE_COPY: Record<
   i2v: {
     title: "首帧生成",
     eyebrow: "从图片开始",
-    description: "用一张图片确定第一帧和构图。",
+    description: "用一张图片锁定第一帧和构图。",
     requirement: "上传首帧",
   },
   reference: {
@@ -117,7 +117,7 @@ const STAGE_COPY: Record<
   },
   submitting: {
     label: "提交中",
-    detail: "正在提交。",
+    detail: "提交中。",
   },
   submitted: {
     label: "已提交",
@@ -125,15 +125,15 @@ const STAGE_COPY: Record<
   },
   rendering: {
     label: "生成中",
-    detail: "正在生成。",
+    detail: "生成中。",
   },
   running: {
     label: "生成中",
-    detail: "正在生成。",
+    detail: "生成中。",
   },
   fetching: {
     label: "取回结果",
-    detail: "正在取回文件。",
+    detail: "文件取回中。",
   },
   finished: {
     label: "已完成",
@@ -222,7 +222,7 @@ export function stageCopy(
   if (isVideoMaterializationPending(item)) {
     return {
       label: "整理中",
-      detail: "任务已完成，正在等待视频文件保存。",
+      detail: "任务已完成，等待视频文件保存。",
     };
   }
   return (
@@ -284,7 +284,7 @@ function nestedVideoErrorText(value: unknown, depth = 0): string | null {
 export function taskErrorSummary(raw: string): string {
   const extracted = nestedVideoErrorText(raw) ?? raw;
   if (/specified asset is not an image/i.test(extracted)) {
-    return "参考素材不是有效图片，请检查素材类型或重新上传后再试。";
+    return "参考素材不是有效图片，检查素材类型或重新上传后再试。";
   }
   const normalized = extracted
     .replace(/\\n/g, " ")
@@ -300,7 +300,7 @@ export function activeVideoTaskSummary(
   historyCount: number,
 ): string {
   return activeCount > 0
-    ? `${activeCount} 个任务正在处理`
+    ? `${activeCount} 个任务处理中`
     : `${historyCount} 条历史记录`;
 }
 
@@ -323,7 +323,7 @@ export function videoHistoryEmptyCopy(
   loading: boolean,
 ): { title: string; description: string } {
   if (loading) {
-    return { title: "读取中", description: "正在读取视频任务记录。" };
+    return { title: "读取中", description: "视频任务记录读取中。" };
   }
   if (activeCount > 0) {
     return {

@@ -100,7 +100,7 @@ function MaskCanvasInner({
     setWarning(null);
     const m = await boardRef.current?.exportMask();
     if (!m) {
-      setWarning("画布尚未就绪或未涂抹任何区域");
+      setWarning("画布未就绪或未涂抹任何区域");
       return;
     }
     if (m.coverage > FULL_COVERAGE_WARN) {

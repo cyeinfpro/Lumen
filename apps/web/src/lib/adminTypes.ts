@@ -197,7 +197,7 @@ export type SystemSettingKey =
   | "image.output_format"
   | "image.job_base_url"
   | "image.primary_route"
-  // DEPRECATED：旧键，worker fallback 仍兼容；新代码请用 image.channel + image.engine。
+  // DEPRECATED：旧键，worker fallback 仍兼容；新代码用 image.channel + image.engine。
   | "image.text_to_image_primary_route"
   | "context.compression_enabled"
   | "context.compression_trigger_percent"

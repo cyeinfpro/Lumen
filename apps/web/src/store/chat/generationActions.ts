@@ -361,7 +361,7 @@ export function createGenerationActions(
         if (!userMsg) return;
 
         // BUG-018: 若用户消息文本为空（仅附件），使用原始消息内容作为 retry 文本。
-        const retryText = userMsg.text.trim() || "(请继续)";
+        const retryText = userMsg.text.trim() || "(继续)";
 
         // 把 composer 临时覆盖为该消息的快照，再 sendMessage。
         // 用 try/finally 确保 sendMessage 抛错时 composer 也能被清理（sendMessage 成功路径会 clearComposer，

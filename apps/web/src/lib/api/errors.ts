@@ -94,7 +94,7 @@ function normalizeLargeError(
   if (status !== 413 || error.message !== fallback.message) return error;
   return {
     code: "request_too_large",
-    message: "上传文件过大，请压缩后重试",
+    message: "上传文件过大，压缩后重试",
   };
 }
 
@@ -110,7 +110,7 @@ export function networkError(error: unknown): ApiError {
 export function timeoutError(error?: unknown): ApiError {
   return new ApiError({
     code: "request_timeout",
-    message: "请求超时，服务器可能仍在处理，请稍后确认结果",
+    message: "请求超时，服务器可能仍在处理，稍后确认结果",
     status: 0,
     payload: error,
   });

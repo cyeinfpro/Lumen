@@ -1064,7 +1064,7 @@ test("large destructive edits are refused when they cannot be undone", () => {
   assert.equal(store.getState().pendingOperations.length, 0);
   assert.equal(
     store.getState().saveMessage,
-    "一次删除范围过大，请缩小选区后重试。",
+    "一次删除范围过大，缩小选区后重试。",
   );
 });
 

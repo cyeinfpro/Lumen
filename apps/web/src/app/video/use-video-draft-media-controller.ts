@@ -344,7 +344,7 @@ export function useVideoDraftMediaController({
       const url = normalizeAssetUrl(assetUrlInput);
       if (!url) {
         if (assetUrlInput.trim()) {
-          toast.error("请输入 asset-* 或 asset://asset-* 官方素材 ID");
+          toast.error("输入 asset-* 或 asset://asset-* 官方素材 ID");
         }
         return;
       }

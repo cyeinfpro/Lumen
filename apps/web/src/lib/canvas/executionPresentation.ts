@@ -26,7 +26,7 @@ const EXECUTION_STATUS_LABELS: Record<CanvasExecutionStatus, string> = {
   queued: "排队中",
   running: "运行中",
   reconciling: "同步结果中",
-  canceling: "正在取消",
+  canceling: "取消中",
   succeeded: "已成功",
   partial_failed: "部分失败",
   failed: "已失败",

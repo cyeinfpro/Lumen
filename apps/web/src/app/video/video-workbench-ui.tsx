@@ -345,7 +345,7 @@ export function PromptEnhanceChooser({
           </span>
           <span className="min-w-0">
             <span className="block type-body-sm font-semibold text-[var(--fg-0)]">
-              {loading ? "正在优化提示词" : "AI 优化结果"}
+              {loading ? "提示词优化中" : "AI 优化结果"}
             </span>
             <span className="block truncate type-caption text-[var(--fg-2)]">
               {promptEnhanceChooserSubtitle({
@@ -589,7 +589,7 @@ function ReferenceMediaPreviewContent({
         </p>
         <p className="max-w-md type-caption leading-5">
           {failed
-            ? "请确认素材仍可访问，或稍后重试。"
+            ? "确认素材仍可访问，或稍后重试。"
             : `官方${referenceNoun}素材可能只有素材 ID，暂时无法在这里直接预览。`}
         </p>
       </div>

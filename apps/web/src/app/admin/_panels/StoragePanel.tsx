@@ -108,7 +108,7 @@ export function StoragePanel() {
   const [form, setForm] = useState<FormState>(() => deriveInitialForm(undefined));
   const lastSyncedSigRef = useRef<string>("");
 
-  // 后端数据回填（只在变化时刷新本地表单，避免覆盖用户正在输入的内容）
+  // 后端数据回填（只在变化时刷新本地表单，避免覆盖用户当前输入的内容）
   useEffect(() => {
     if (!cfg) return;
     const sig = JSON.stringify({
@@ -181,7 +181,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
   const putMut = usePutAdminStorageMutation();
 
   const [confirmOpen, setConfirmOpen] = useState(false);
-  // applying：已 PUT 成功收到 call_id，正在 polling 等终态
+  // applying：已 PUT 成功收到 call_id，轮询终态中
   const [applying, setApplying] = useState<{
     callId: string;
     startedAt: number;
@@ -300,7 +300,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
         // lumen-api 还在重启 / 网络抖动 → 静默重试
       }
       if (Date.now() >= deadline) {
-        finishApply("timeout", "操作可能仍在进行，请刷新页面查看最终状态。");
+        finishApply("timeout", "操作可能仍在进行，刷新页面查看最终状态。");
         return;
       }
       pollingTimerRef.current = window.setTimeout(() => {
@@ -318,7 +318,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
       }, POLL_DELAY_MS);
       // 兜底定时器：到期未结束则 timeout
       timeoutTimerRef.current = window.setTimeout(() => {
-        finishApply("timeout", "等待超时，请刷新页面查看最终状态。");
+        finishApply("timeout", "等待超时，刷新页面查看最终状态。");
       }, POLL_TIMEOUT_MS);
     },
     [finishApply],
@@ -351,8 +351,8 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
       onSuccess: (res) => {
         setConfirmOpen(false);
         // 立即记录 applying；toast 用 0 duration 自管理，结束时手动 dismiss
-        const tid = toast.info("正在切换存储后端", {
-          description: "API 即将重启，约 10–30 秒。请勿关闭页面。",
+        const tid = toast.info("存储后端切换中", {
+          description: "API 即将重启，约 10–30 秒。保持页面开启。",
           durationMs: 0,
         });
         applyToastIdRef.current = tid;
@@ -394,7 +394,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
           });
         } else {
           toast.info("测试已提交", {
-            description: res.message || "正在执行，请稍后查看结果",
+            description: res.message || "执行中，稍后查看结果",
           });
         }
         // 测试完成后刷新 last_test 显示
@@ -481,7 +481,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
                 loading={testMut.isPending}
                 leftIcon={!testMut.isPending ? <Wifi className="h-3.5 w-3.5" /> : undefined}
               >
-                测试 SMB 连接
+                测试连接
               </Button>
             )}
             <Button
@@ -516,7 +516,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
               ，约 10–30 秒不可访问。
             </p>
             <p className="text-[var(--danger-fg)]">
-              切换不会自动迁移已有数据。请确认目标位置上的内容是你需要的。
+              切换不会自动迁移已有数据。确认目标位置上的内容是你需要的。
             </p>
           </div>
         }

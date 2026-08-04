@@ -167,12 +167,12 @@ export default function ApiKeySettingsPage() {
 
   if (shouldShowWalletAccount(Boolean(meQ.data), isByok)) {
     return (
-      <SettingsShell title="API Key" subtitle="Wallet">
+      <SettingsShell title="API 密钥" subtitle="钱包">
         <div className="page-frame" data-width="settings">
           <Card variant="subtle" padding="lg" className="space-y-3">
             <p className="type-card-title">钱包账号</p>
             <p className="type-body">
-              当前账号使用平台供应商和钱包扣费，不支持绑定个人 API Key。
+              当前账号使用平台供应商和钱包扣费，不支持绑定个人 API 密钥。
             </p>
             <Link
               href="/me/wallet"
@@ -187,7 +187,7 @@ export default function ApiKeySettingsPage() {
   }
 
   return (
-    <SettingsShell title="API Key" subtitle="BYOK">
+    <SettingsShell title="API 密钥" subtitle="BYOK">
       <div
         className="page-frame space-y-5 pb-4 sm:space-y-7"
         data-width="settings"
@@ -224,7 +224,7 @@ export default function ApiKeySettingsPage() {
         <ConfirmDialog
           open={revokeOpen}
           onOpenChange={setRevokeOpen}
-          title="撤销 API Key？"
+          title="撤销 API 密钥？"
           description="撤销后任务将失败"
           confirmText={copy.action.confirm}
           cancelText={copy.action.cancel}
@@ -377,7 +377,7 @@ function ApiCredentialForm({
   const supplierControlsDisabled =
     loadingSuppliers || suppliers.length === 0 || saving;
   const keyPlaceholder = selectedSupplier
-    ? `${selectedSupplier.name} API Key`
+    ? `${selectedSupplier.name} API 密钥`
     : "sk-...";
 
   return (
@@ -432,7 +432,7 @@ function ApiCredentialForm({
         </div>
         <Input
           id="api-key-value"
-          label="API Key"
+          label="API 密钥"
           type="password"
           value={apiKey}
           onChange={(event) => onApiKeyChange(event.target.value)}

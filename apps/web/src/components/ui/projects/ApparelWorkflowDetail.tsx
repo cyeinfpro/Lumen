@@ -226,7 +226,7 @@ function DetailHeader({
     <header className="page-header mb-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
       <div className="min-w-0">
         <p className="type-caption text-[var(--fg-2)]">
-          Step {stepNum} / {String(stepTotal).padStart(2, "0")} · Apparel Project
+          步骤 {stepNum} / {String(stepTotal).padStart(2, "0")} · 服饰项目
         </p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
           {editing ? (
@@ -298,12 +298,12 @@ function DetailHeader({
           </span>
           <span aria-hidden className="text-[var(--fg-3)]">·</span>
           <span className="text-[var(--fg-2)]">
-            Updated {formatRelativeTime(workflow.updated_at)}
+            更新于 {formatRelativeTime(workflow.updated_at)}
           </span>
           {refreshing ? (
             <span className="inline-flex items-center gap-1.5 text-[var(--fg-2)]">
               <Loader2 className="h-3 w-3 animate-spin" />
-              Syncing
+              同步中
             </span>
           ) : null}
         </div>
@@ -323,7 +323,7 @@ function DetailHeader({
           className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 type-caption text-[var(--fg-1)] transition-colors hover:border-accent-border hover:text-accent md:min-h-8 xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
-          Constraints
+          项目约束
         </button>
         <div className="relative" ref={menuRef}>
           <button
@@ -444,7 +444,7 @@ function DetailError({ onRetry }: { onRetry: () => void }) {
         项目加载失败
       </h3>
       <p className="mt-1 type-caption text-[var(--fg-1)]">
-        网络错误或服务繁忙，请稍后重试。
+        网络错误或服务繁忙，稍后重试。
       </p>
       <button
         type="button"

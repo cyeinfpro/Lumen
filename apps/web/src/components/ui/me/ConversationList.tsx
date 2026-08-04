@@ -64,7 +64,7 @@ function dayKeyOf(iso: string): Bucket {
 
 function titleOf(c: ConversationSummary): string {
   const t = c.title?.trim();
-  return t || "New Canvas";
+  return t || "新画布";
 }
 
 type TabKind = "active" | "archived";

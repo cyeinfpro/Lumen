@@ -233,6 +233,6 @@ test("runtime recovery login uses the shared safe replace navigation", () => {
     source,
     /if \(!unauthorized && !sessionDegraded && !realtimeDegraded\) return null;/,
   );
-  doesNotMatch(source, /"正在连接"|"正在确认会话"|animate-spin/);
+  doesNotMatch(source, /"连接中"|"会话确认中"|animate-spin/);
   doesNotMatch(source, /location\.assign/);
 });

@@ -178,7 +178,7 @@ export function useVolcanoUploadPolling({
                 ? `${volcanoAssetErrorMessage(
                     result.error,
                     "后台状态刷新失败",
-                  )}。请点“检查状态”后继续，系统不会重复创建素材。`
+                  )}。点“检查状态”后继续，系统不会重复创建素材。`
                 : `状态刷新暂时失败，将自动重试（${failures}/3）`,
             },
             sessionId,
@@ -282,7 +282,7 @@ export function useVolcanoUploadPolling({
                 operationStatus: operation.status,
                 progressStage: operation.progress_stage,
                 error:
-                  "后台返回了未知任务状态，请检查状态后再继续。",
+                  "后台返回了未知任务状态，检查状态后再继续。",
               },
               sessionId,
               item.model,

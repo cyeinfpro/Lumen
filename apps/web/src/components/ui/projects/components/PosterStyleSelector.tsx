@@ -87,7 +87,7 @@ export function PosterStyleSelector({
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">
-              Poster Style
+              海报风格
             </p>
             <h2 className="type-section-title mt-1">选择风格</h2>
           </div>

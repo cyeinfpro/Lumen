@@ -137,7 +137,7 @@ function ReleaseHistoryBody({
   if (error) {
     return (
       <p role="alert" className="px-3 py-3 type-caption text-danger">
-        读取 release 列表失败：{error.message}
+        发布列表读取失败：{error.message}
       </p>
     );
   }
@@ -155,7 +155,7 @@ function ReleaseHistoryBody({
     );
   }
   if (!releases || releases.length === 0) {
-    return <p className="px-3 py-3 type-caption text-[var(--fg-2)]">暂无 release 记录。</p>;
+    return <p className="px-3 py-3 type-caption text-[var(--fg-2)]">暂无发布记录。</p>;
   }
   return (
     <ul className="divide-y divide-[var(--border-subtle)]">
@@ -191,7 +191,7 @@ function ReleaseHistory({
     <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60">
       <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
         <History className="h-3.5 w-3.5 text-[var(--fg-2)]" />
-        <span className="type-caption font-medium text-[var(--fg-1)]">Release 历史</span>
+        <span className="type-caption font-medium text-[var(--fg-1)]">发布历史</span>
         <span className="type-caption text-[var(--fg-2)]">最近 10 个版本</span>
       </div>
       <ReleaseHistoryBody
@@ -446,12 +446,12 @@ function ReleaseRow({
         <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 type-caption text-[var(--fg-2)]">
           <span>{formatDateTime(release.created_at)}</span>
           <span className="font-mono" title={release.sha ?? undefined}>
-            sha {shortSha(release.sha)}
+            SHA {shortSha(release.sha)}
           </span>
           {release.branch && <span>分支 {release.branch}</span>}
           {alembic && (
             <span className="font-mono" title={alembic}>
-              alembic {alembic.slice(0, 12)}
+              迁移 {alembic.slice(0, 12)}
             </span>
           )}
         </div>

@@ -125,8 +125,8 @@ function initialHistorySendError(
   convId: string,
 ): string | null {
   if (state.currentConvId !== convId || state.messages.length > 0) return null;
-  if (state.messagesLoading) return "历史消息仍在加载，请稍候";
-  if (state.messagesError) return "历史消息加载失败，请先重试";
+  if (state.messagesLoading) return "历史消息仍在加载，稍候";
+  if (state.messagesError) return "历史消息加载失败，先重试";
   return null;
 }
 
@@ -161,7 +161,7 @@ function invalidMentionError(labels: string[]): string | null {
   if (labels.length === 0) return null;
   const preview = labels.slice(0, 3).join("、");
   const suffix = labels.length > 3 ? " 等" : "";
-  return `参考图引用无效：${preview}${suffix}，请先移除或补齐附件`;
+  return `参考图引用无效：${preview}${suffix}，先移除或补齐附件`;
 }
 
 function resolveMaskImageId(

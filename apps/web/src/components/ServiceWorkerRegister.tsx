@@ -47,7 +47,7 @@ export function ServiceWorkerRegister() {
         if (cancelled) return;
 
         // 监听新版本：waiting 出现时让它立即激活。当前 SW 不缓存任何页面
-        // 或静态资源，因此接管无需刷新正在创作的页面。
+        // 或静态资源，因此接管无需刷新创作中的页面。
         const promoteWaiting = (worker: ServiceWorker | null) => {
           if (!worker) return;
           worker.addEventListener("statechange", () => {
