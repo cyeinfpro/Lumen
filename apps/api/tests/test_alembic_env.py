@@ -44,6 +44,16 @@ def test_alembic_escapes_percent_encoded_socket_urls() -> None:
     assert config.get_main_option("sqlalchemy.url") == url
 
 
+def test_alembic_preserves_application_loggers_during_programmatic_migrations() -> None:
+    source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "fileConfig(config.config_file_name, disable_existing_loggers=False)" in source
+    )
+
+
 def test_users_active_email_unique_migration_uses_safe_postgres_ordering() -> None:
     source = (
         Path(__file__).resolve().parents[1]
