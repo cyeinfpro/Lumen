@@ -20,6 +20,7 @@ from .asset_ref_service import sync_head_asset_refs
 from .core_adapter import apply_graph_operations, stable_hash
 from .document_service import get_owned_canvas
 from .errors import canvas_http, idempotency_conflict
+from .identity_fence import lock_canvas_write_identity
 
 
 _MAX_CONFLICT_MUTATIONS = 100
@@ -197,6 +198,7 @@ async def apply_mutation(
     if existing is not None:
         return _replay_response(existing, body=body)
 
+    await lock_canvas_write_identity(db, user_id=user_id)
     canvas = await get_owned_canvas(
         db,
         user_id=user_id,

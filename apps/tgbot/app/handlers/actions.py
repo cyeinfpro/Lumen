@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message
 from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 
 from ..api_client import ApiError, LumenApi, make_idempotency_key
+from ..generation_state import resolve_or_stage_generation
 from ..states import GenFlow
 from ..tracker import TaskTrack, tracker
 from ._helpers import (
@@ -21,6 +22,7 @@ from ._helpers import (
     message_prompt,
     require_message,
     resolution_from_size,
+    telegram_user_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,14 +57,16 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
     msg = await require_message(cb)
     if msg is None:
         return
+    actor_id = telegram_user_id(cb)
+    if actor_id is None:
+        await cb.answer("无法确认 Telegram 用户身份", show_alert=True)
+        return
 
     # 同一任务第二次点击 redo：幂等键按 (chat, gen) 固定,服务端只会回放
     # 第一次提交的任务、不会新建 —— 提前查标记,明确告知而不是静默返回旧任务
     # (或重复输出误导性的「已排队 #B」)。
     try:
-        prior_new_gen = await tracker.retry_source_new_gen(
-            "redo", msg.chat.id, gen_id
-        )
+        prior_new_gen = await tracker.retry_source_new_gen("redo", msg.chat.id, gen_id)
     except Exception as exc:  # noqa: BLE001
         # Redis 不可用：宁可放行也不要卡死用户;服务端幂等键仍是第二道防线。
         logger.warning("redo marker lookup failed gen=%s err=%r", gen_id, exc)
@@ -75,7 +79,11 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     try:
-        gen = await api.get_generation(msg.chat.id, gen_id)
+        gen = await api.get_generation(
+            msg.chat.id,
+            gen_id,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -98,7 +106,11 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
     # gen) 作为种子，重复点击就是同一 key。
     payload["idempotency_key"] = make_idempotency_key("redo", msg.chat.id, gen_id)
     try:
-        result = await api.create_generation(msg.chat.id, payload)
+        result = await api.create_generation(
+            msg.chat.id,
+            payload,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"重画提交失败：{exc.message}", show_alert=True)
         return
@@ -120,6 +132,7 @@ async def on_redo(cb: CallbackQuery, api: LumenApi) -> None:
             new_gen,
             TaskTrack(
                 chat_id=msg.chat.id,
+                tg_user_id=actor_id,
                 status_message_id=status.message_id,
                 prompt=prompt,
                 params={k: v for k, v in payload.items() if k != "idempotency_key"},
@@ -144,8 +157,16 @@ async def on_iter_start(cb: CallbackQuery, state: FSMContext, api: LumenApi) -> 
     msg = await require_message(cb)
     if msg is None:
         return
+    actor_id = telegram_user_id(cb)
+    if actor_id is None:
+        await cb.answer("无法确认 Telegram 用户身份", show_alert=True)
+        return
     try:
-        gen = await api.get_generation(msg.chat.id, gen_id)
+        gen = await api.get_generation(
+            msg.chat.id,
+            gen_id,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -189,6 +210,10 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
     if len(text) > 5000:
         await message.answer("指令太长（>5000 字），请精简后重发。")
         return
+    actor_id = telegram_user_id(message)
+    if actor_id is None:
+        await message.answer("无法确认 Telegram 用户身份，请重新发送。")
+        return
 
     data = await state.get_data()
     image_id = str(data.get("source_image_id") or "")
@@ -197,7 +222,7 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
         await message.answer("会话状态丢失，/new 重开。")
         return
 
-    payload = {
+    candidate = {
         "idempotency_key": make_idempotency_key(
             "iter", message.chat.id, message.message_id, image_id
         ),
@@ -212,18 +237,54 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
         "fast": bool(data.get("source_fast", False)),
         "attachment_image_ids": [image_id],
     }
+    payload = await resolve_or_stage_generation(state, candidate)
+    if payload is None:
+        await message.answer(
+            "上一笔迭代提交结果仍未确认。请重新发送同一指令重试，或 /cancel 放弃。"
+        )
+        return
     try:
-        result = await api.create_generation(message.chat.id, payload)
+        result = await api.create_generation(
+            message.chat.id,
+            payload,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
+        if exc.outcome_unknown:
+            await message.answer(
+                "⚠️ 迭代提交结果暂时无法确认。请重新发送同一指令重试；系统会复用原请求。"
+            )
+            return
         await state.clear()
         await message.answer(f"❌ 迭代提交失败：{exc.message}")
         return
-    new_ids = result.get("generation_ids") or []
-    user_id = str(result.get("user_id") or "")
-    if not new_ids:
-        await state.clear()
-        await message.answer("⚠️ 提交成功但没有 generation_id 返回。")
+    except (ConnectionError, OSError) as exc:
+        logger.warning("iteration submission connection lost: %r", exc)
+        await message.answer(
+            "⚠️ 迭代提交连接中断，结果暂时无法确认。请重新发送同一指令重试；"
+            "系统会复用原请求。"
+        )
         return
+    if not isinstance(result, dict):
+        await message.answer(
+            "⚠️ 服务端返回异常，迭代提交结果暂时无法确认。请重试同一指令。"
+        )
+        return
+    raw_ids = result.get("generation_ids")
+    user_id = result.get("user_id")
+    if (
+        not isinstance(raw_ids, list)
+        or not raw_ids
+        or any(not isinstance(value, str) or not value.strip() for value in raw_ids)
+        or not isinstance(user_id, str)
+        or not user_id.strip()
+    ):
+        await message.answer(
+            "⚠️ 服务端返回异常，迭代提交结果暂时无法确认。请重试同一指令。"
+        )
+        return
+    new_ids = [value.strip() for value in raw_ids]
+    user_id = user_id.strip()
 
     new_gen = new_ids[0]
     status = await message.answer(f"⏳ 迭代已排队 #{new_gen[:8]}\n\n📝 {text[:200]}")
@@ -232,6 +293,7 @@ async def on_iter_prompt(message: Message, state: FSMContext, api: LumenApi) -> 
             new_gen,
             TaskTrack(
                 chat_id=message.chat.id,
+                tg_user_id=actor_id,
                 status_message_id=status.message_id,
                 prompt=text,
                 params={k: v for k, v in payload.items() if k != "idempotency_key"},

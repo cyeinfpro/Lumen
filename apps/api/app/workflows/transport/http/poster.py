@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 
 from lumen_core.schemas import (
     CopyAnalysisApproveIn,
@@ -19,7 +19,14 @@ from lumen_core.schemas import (
 )
 
 from ....db import get_db
-from ....deps import CurrentUser, verify_csrf
+from ....deps import CurrentUser, durable_session_id_from_db, verify_csrf
+from ...application.paid_idempotency import (
+    POSTER_CREATE_OPERATION,
+    POSTER_INPAINT_RENDER_OPERATION,
+    POSTER_MASTERS_OPERATION,
+    POSTER_RENDERS_OPERATION,
+    POSTER_REVISE_RENDER_OPERATION,
+)
 from ...composition import WorkflowApplication
 from ...ports.run_creation import (
     CreatePosterRunCommand,
@@ -27,9 +34,20 @@ from ...ports.run_creation import (
 )
 from ...slices import create_workflow_run
 from .dependencies import get_workflow_application
-from .execution import execute_workflow_action
+from .execution import (
+    execute_durable_workflow_action,
+    execute_paid_workflow_action,
+)
 
 router = APIRouter()
+
+
+async def _replay_created_poster_workflow(run: Any) -> PosterDesignWorkflowCreateOut:
+    return PosterDesignWorkflowCreateOut(
+        workflow_run_id=run.id,
+        status=run.status,
+        current_step=run.current_step,
+    )
 
 
 @router.post(
@@ -41,9 +59,20 @@ async def create_poster_design_workflow(
     body: PosterDesignWorkflowCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> PosterDesignWorkflowCreateOut:
-    result = await execute_workflow_action(
+    result = await execute_paid_workflow_action(
         create_workflow_run(db, user).create_poster,
+        operation_namespace=POSTER_CREATE_OPERATION,
+        request_payload={"body": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=_replay_created_poster_workflow,
         command=CreatePosterRunCommand(
             user_id=user.id,
             conversation_id=body.conversation_id,
@@ -79,7 +108,7 @@ async def approve_copy_analysis(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().approve_copy_analysis,
         workflow_run_id=workflow_run_id,
         body=body,
@@ -99,9 +128,27 @@ async def create_poster_masters(
     body: PosterMastersCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().create_poster_masters,
+        operation_namespace=POSTER_MASTERS_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         body=body,
         user=user,
@@ -122,7 +169,7 @@ async def approve_poster_master(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().approve_poster_master,
         workflow_run_id=workflow_run_id,
         master_id=master_id,
@@ -143,9 +190,27 @@ async def create_poster_renders(
     body: PosterRendersCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().create_poster_renders,
+        operation_namespace=POSTER_RENDERS_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         body=body,
         user=user,
@@ -165,9 +230,28 @@ async def revise_poster_render(
     body: PosterReviseIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().revise_poster_render,
+        operation_namespace=POSTER_REVISE_RENDER_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "render_id": render_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         render_id=render_id,
         body=body,
@@ -188,9 +272,28 @@ async def inpaint_poster_render(
     body: PosterInpaintIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().inpaint_poster_render,
+        operation_namespace=POSTER_INPAINT_RENDER_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "render_id": render_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         render_id=render_id,
         body=body,

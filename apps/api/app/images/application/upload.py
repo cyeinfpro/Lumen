@@ -443,7 +443,7 @@ class UploadCommandService:
         )
         await assert_capacity_leases_owned(guards)
         try:
-            return await self.repository.adopt_storage_intent(
+            adopted = await self.repository.adopt_storage_intent(
                 state.image_id,
                 user_id=user_id,
                 token=intent_token,
@@ -452,13 +452,17 @@ class UploadCommandService:
                 session_id=session_id,
             )
         except ActiveUserFenceError as exc:
-            await self._abandon_rejected_storage_intent(
+            abandoned = await self._abandon_rejected_storage_intent(
                 state.image_id,
                 user_id=user_id,
                 token=intent_token,
                 error=exc,
             )
+            if abandoned:
+                state.retain_sources_for_reconcile = False
             raise
+        state.retain_sources_for_reconcile = False
+        return adopted
 
     async def _publish_artifacts_with_timeout(
         self,
@@ -505,7 +509,7 @@ class UploadCommandService:
         user_id: str,
         token: str,
         error: ActiveUserFenceError,
-    ) -> None:
+    ) -> bool:
         try:
             abandoned = await self.repository.abandon_storage_intent(
                 image_id,
@@ -518,11 +522,13 @@ class UploadCommandService:
                     "image storage intent was not abandoned image_id=%s",
                     image_id,
                 )
+            return abandoned
         except Exception:
             logger.exception(
                 "failed to abandon rejected image storage intent image_id=%s",
                 image_id,
             )
+            return False
 
     async def _handle_failure(
         self,
@@ -568,6 +574,8 @@ class UploadCommandService:
             )
 
     async def _cleanup_state(self, state: UploadExecutionState) -> None:
+        if state.retain_sources_for_reconcile:
+            return
         if state.processing_stage is not None:
             await state.processing_stage.cleanup()
         if state.staged is not None:

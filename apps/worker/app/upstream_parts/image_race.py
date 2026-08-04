@@ -4,140 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterable
-from contextlib import aclosing, suppress
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
-from ..provider_runtime.upstream_services import (
-    ImageUpstreamRuntime,
-    UpstreamServices,
-    resolve_image_upstream_services,
-)
 from .image_execution import (
     ImageExecutionRequest,
     ImageResult,
 )
+from ..upstream_clients.image_job_models import (
+    ImageJobCostKnowledge,
+    ImageJobExecutionHandle,
+)
+from .image_race_support import (
+    await_irrevocable_task as _await_irrevocable_task,
+)
+from .image_race_support import cancel_and_wait_tasks as _cancel_and_wait_tasks
+from .image_race_support import cleanup_race_tasks as _cleanup_race_tasks
+from .image_race_support import completed_race_batch as _completed_race_batch
+from .image_race_support import drain_task_group_result as _drain_task_group_result
+from .image_race_support import has_successful_task as _has_successful_task
+from .image_race_support import invoke_progress_callback as _invoke_progress_callback
+from .image_race_support import metadata_only_progress as _metadata_only_progress
+from .image_race_support import runtime_services as _runtime_services
+from .image_race_support import (
+    simultaneous_bonus_tasks as _simultaneous_bonus_tasks,
+)
 from .transport import ImageProgressCallback
 
 
-def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
-    return resolve_image_upstream_services(runtime)
-
-
-def _drain_task_group_result(task_group: asyncio.Future[Any]) -> None:
-    with suppress(BaseException):
-        task_group.result()
-
-
-async def _cancel_and_wait_tasks(
-    tasks: Iterable[asyncio.Task[Any]],
-    *,
-    label: str,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> None:
-    services = _runtime_services(runtime)
-    pending = [task for task in tasks if not task.done()]
-    if not pending:
-        return
-    for task in pending:
-        task.cancel()
-    grouped = asyncio.gather(*pending, return_exceptions=True)
-    try:
-        await asyncio.wait_for(
-            asyncio.shield(grouped),
-            timeout=services.core.RACE_CANCEL_WAIT_S,
-        )
-    except asyncio.TimeoutError:
-        grouped.add_done_callback(services.race.drain_task_group_result)
-        services.infrastructure.logger.warning(
-            "%s cancel cleanup still pending after %.1fs for %d task(s)",
-            label,
-            services.core.RACE_CANCEL_WAIT_S,
-            len(pending),
-        )
-    except asyncio.CancelledError:
-        grouped.add_done_callback(services.race.drain_task_group_result)
-        raise
-
-
-def _completed_race_batch(
-    tasks: list[asyncio.Task[Any]],
-    done: set[asyncio.Task[Any]],
-) -> tuple[list[asyncio.Task[Any]], list[asyncio.Task[Any]]]:
-    ordered = [task for task in tasks if task in done]
-    successful = [
-        task for task in ordered if not task.cancelled() and task.exception() is None
-    ]
-    return ordered, successful
-
-
-def _simultaneous_bonus_tasks(
-    successful: list[asyncio.Task[Any]],
-    winner: asyncio.Task[Any],
-) -> set[asyncio.Task[Any]]:
-    return {task for task in successful if task is not winner}
-
-
-def _metadata_only_progress(
-    progress_callback: ImageProgressCallback | None,
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> ImageProgressCallback:
-    services = _runtime_services(runtime)
-
-    async def _forward(event: dict[str, Any]) -> None:
-        if event.get("type") != "provider_used":
-            return
-        extra = {
-            key: event.get(key)
-            for key in (
-                "attempt",
-                "endpoint_attempt",
-                "duration_ms",
-                "status",
-                "reason",
-                "error_code",
-                "status_code",
-                "byok",
-            )
-            if event.get(key) is not None
-        }
-        await services.transport.emit_image_progress(
-            progress_callback,
-            "provider_used",
-            provider=event.get("provider"),
-            route=event.get("route"),
-            source=event.get("source"),
-            endpoint=event.get("endpoint"),
-            **extra,
-        )
-
-    return _forward
-
-
-async def _cleanup_race_tasks(
-    tasks: Iterable[asyncio.Task[Any]],
-    *,
-    label: str,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> None:
-    services = _runtime_services(runtime)
-    leftovers = [task for task in tasks if not task.done()]
-    if not leftovers:
-        return
-    try:
-        await services.race.cancel_and_wait_tasks(
-            leftovers,
-            label=label,
-            runtime=runtime,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001
-        services.infrastructure.logger.debug(
-            "%s failed", label, exc_info=True
-        )
+_BONUS_NOT_OBSERVED = object()
 
 
 def _responses_race_lane_count(
@@ -289,9 +186,7 @@ async def _run_direct_image2_lane(
                 error_code=services.infrastructure.EC.MISSING_INPUT_IMAGES.value,
                 status_code=400,
             )
-        return await services.direct.direct_edit_image_with_failover(
-            request
-        )
+        return await services.direct.direct_edit_image_with_failover(request)
     return await services.direct.direct_generate_image_with_failover(request)
 
 
@@ -340,6 +235,16 @@ def _dual_race_grace_seconds(
 class _DualRaceWinner:
     results: list[ImageResult]
     pending: set[asyncio.Task[list[ImageResult]]]
+
+
+@dataclass(slots=True)
+class _ImageJobLaneObservation:
+    lane_name: str
+    publish_dispatch_cancel_obligation: bool = False
+    dispatch_ready: bool = False
+    latest_execution: ImageJobExecutionHandle | None = None
+    obligation_published: bool = False
+    obligation_error: Exception | None = None
 
 
 def _raise_dual_race_failure(
@@ -405,9 +310,8 @@ async def _select_dual_race_winner(
                 return _DualRaceWinner(finished.result(), pending)
             if isinstance(exc, services.infrastructure.UpstreamCancelled):
                 raise exc
-            if (
-                abort_result_unknown
-                and services.direct.is_direct_image_result_unknown(exc)
+            if abort_result_unknown and services.direct.is_direct_image_result_unknown(
+                exc
             ):
                 await services.race.cancel_and_wait_tasks(
                     pending,
@@ -433,6 +337,9 @@ async def _await_dual_race_bonus(
     *,
     grace_seconds: float,
     race_name: str,
+    lane_observations: (
+        dict[asyncio.Task[Any], _ImageJobLaneObservation] | None
+    ) = None,
 ) -> list[ImageResult] | None:
     runtime = request.upstream_runtime
     services = _runtime_services(runtime)
@@ -449,6 +356,13 @@ async def _await_dual_race_bonus(
             label=f"{request.action} {race_name} bonus cleanup",
             runtime=runtime,
         )
+        await _publish_dispatch_cancel_obligations(
+            request,
+            still_pending,
+            lane_observations,
+            race_name=race_name,
+        )
+        _raise_obligation_publish_error(lane_observations)
         services.infrastructure.logger.info(
             "%s %s: loser exceeded grace=%.0fs, cancelled silently",
             request.action,
@@ -458,8 +372,18 @@ async def _await_dual_race_bonus(
         return None
     finished = next(iter(done))
     lane_name = lane_names[finished]
+    _raise_obligation_publish_error(lane_observations)
+    if finished.cancelled():
+        return None
     exc = finished.exception()
     if exc is None:
+        await _publish_dual_race_bonus_ready(
+            request,
+            lane_name=lane_name,
+            race_name=race_name,
+            artifact_ready=True,
+            obligation_reason="loser_completed",
+        )
         services.infrastructure.logger.info(
             "%s %s: bonus from %s succeeded",
             request.action,
@@ -479,6 +403,198 @@ async def _await_dual_race_bonus(
     return None
 
 
+async def _publish_dual_race_bonus_ready(
+    request: ImageExecutionRequest,
+    *,
+    lane_name: str,
+    race_name: str,
+    artifact_ready: bool = True,
+    obligation_reason: str = "loser_completed",
+    execution: ImageJobExecutionHandle | None = None,
+) -> None:
+    callback = request.progress_callback
+    if callback is None:
+        return
+
+    async def _publish() -> None:
+        event: dict[str, Any] = {
+            "type": "dual_race_bonus_ready",
+            "lane": lane_name,
+            "race_name": race_name,
+            "size": request.size,
+            "artifact_ready": artifact_ready,
+            "obligation_reason": obligation_reason,
+        }
+        if execution is not None:
+            event["execution"] = execution.to_dict()
+        await _invoke_progress_callback(
+            callback,
+            event,
+        )
+
+    task = asyncio.create_task(
+        _publish(),
+        name=f"{request.action}-dual-race-bonus-obligation",
+    )
+    await _await_irrevocable_task(task)
+
+
+def _cancel_execution_requires_bonus_obligation(
+    execution: ImageJobExecutionHandle,
+) -> bool:
+    return bool(
+        execution.cancel_outcome is not None
+        and execution.cost_knowledge
+        in {
+            ImageJobCostKnowledge.UNKNOWN,
+            ImageJobCostKnowledge.INCURRED,
+        }
+    )
+
+
+def _image_job_lane_progress(
+    request: ImageExecutionRequest,
+    *,
+    lane_name: str,
+    race_name: str,
+    metadata_only: bool,
+) -> tuple[ImageProgressCallback, _ImageJobLaneObservation]:
+    observation = _ImageJobLaneObservation(lane_name=lane_name)
+    downstream = (
+        _metadata_only_progress(
+            request.progress_callback,
+            runtime=request.upstream_runtime,
+        )
+        if metadata_only
+        else request.progress_callback
+    )
+
+    async def _forward(event: dict[str, Any]) -> None:
+        if event.get("type") == "dispatch_ready":
+            observation.dispatch_ready = True
+        execution = ImageJobExecutionHandle.from_mapping(event.get("execution"))
+        if execution is not None:
+            observation.latest_execution = execution
+            if (
+                not observation.obligation_published
+                and _cancel_execution_requires_bonus_obligation(execution)
+            ):
+                try:
+                    await _publish_dual_race_bonus_ready(
+                        request,
+                        lane_name=lane_name,
+                        race_name=race_name,
+                        artifact_ready=False,
+                        obligation_reason="grace_cancel_cost",
+                        execution=execution,
+                    )
+                except Exception as exc:
+                    observation.obligation_error = exc
+                    raise
+                observation.obligation_published = True
+        await _invoke_progress_callback(downstream, event)
+
+    return _forward, observation
+
+
+def _direct_lane_progress(
+    request: ImageExecutionRequest,
+    *,
+    lane_name: str,
+    metadata_only: bool,
+) -> tuple[ImageProgressCallback, _ImageJobLaneObservation]:
+    observation = _ImageJobLaneObservation(
+        lane_name=lane_name,
+        publish_dispatch_cancel_obligation=True,
+    )
+    downstream = (
+        _metadata_only_progress(
+            request.progress_callback,
+            runtime=request.upstream_runtime,
+        )
+        if metadata_only
+        else request.progress_callback
+    )
+
+    async def _forward(event: dict[str, Any]) -> None:
+        if event.get("type") == "dispatch_ready":
+            observation.dispatch_ready = True
+        await _invoke_progress_callback(downstream, event)
+
+    return _forward, observation
+
+
+async def _publish_dispatch_cancel_obligations(
+    request: ImageExecutionRequest,
+    cancelled: set[asyncio.Task[list[ImageResult]]],
+    observations: dict[asyncio.Task[Any], _ImageJobLaneObservation] | None,
+    *,
+    race_name: str,
+) -> None:
+    if not observations:
+        return
+    for task in cancelled:
+        observation = observations.get(task)
+        if (
+            observation is None
+            or not observation.publish_dispatch_cancel_obligation
+            or not observation.dispatch_ready
+            or observation.obligation_published
+        ):
+            continue
+        try:
+            await _publish_dual_race_bonus_ready(
+                request,
+                lane_name=observation.lane_name,
+                race_name=race_name,
+                artifact_ready=False,
+                obligation_reason="grace_cancel_result_unknown",
+            )
+        except Exception as exc:
+            observation.obligation_error = exc
+            raise
+        observation.obligation_published = True
+
+
+def _raise_obligation_publish_error(
+    observations: dict[asyncio.Task[Any], _ImageJobLaneObservation] | None,
+) -> None:
+    if not observations:
+        return
+    for observation in observations.values():
+        if observation.obligation_error is not None:
+            raise observation.obligation_error
+
+
+async def _drain_dual_race_bonus_observer(
+    request: ImageExecutionRequest,
+    observer: asyncio.Task[list[ImageResult] | None] | None,
+    winner: _DualRaceWinner | None,
+    *,
+    race_name: str,
+) -> None:
+    if observer is None:
+        return
+    if (
+        not observer.done()
+        and winner is not None
+        and not _has_successful_task(winner.pending)
+    ):
+        observer.cancel()
+    try:
+        await _await_irrevocable_task(observer)
+    except asyncio.CancelledError:
+        return
+    except Exception:  # noqa: BLE001
+        services = _runtime_services(request.upstream_runtime)
+        services.infrastructure.logger.error(
+            "%s %s: bonus obligation observer failed during cleanup",
+            request.action,
+            race_name,
+            exc_info=True,
+        )
+
+
 async def _iter_dual_race_results(
     request: ImageExecutionRequest,
     tasks: list[asyncio.Task[list[ImageResult]]],
@@ -487,8 +603,15 @@ async def _iter_dual_race_results(
     grace_seconds: float,
     race_name: str,
     abort_result_unknown: bool,
+    lane_observations: (
+        dict[asyncio.Task[Any], _ImageJobLaneObservation] | None
+    ) = None,
 ) -> AsyncIterator[ImageResult]:
     runtime = request.upstream_runtime
+    winner: _DualRaceWinner | None = None
+    bonus_observer: asyncio.Task[list[ImageResult] | None] | None = None
+    bonus_observer_consumed = False
+    observed_bonus: list[ImageResult] | None | object = _BONUS_NOT_OBSERVED
     try:
         winner = await _select_dual_race_winner(
             request,
@@ -498,23 +621,49 @@ async def _iter_dual_race_results(
             race_name=race_name,
             abort_result_unknown=abort_result_unknown,
         )
+        bonus_observer = asyncio.create_task(
+            _await_dual_race_bonus(
+                request,
+                winner,
+                lane_names,
+                grace_seconds=grace_seconds,
+                race_name=race_name,
+                lane_observations=lane_observations,
+            ),
+            name=f"{request.action}-{race_name.replace(' ', '-')}-bonus-observer",
+        )
+        if _has_successful_task(winner.pending):
+            try:
+                observed_bonus = await _await_irrevocable_task(bonus_observer)
+            finally:
+                bonus_observer_consumed = True
         for item in winner.results:
             yield item
-        bonus = await _await_dual_race_bonus(
-            request,
-            winner,
-            lane_names,
-            grace_seconds=grace_seconds,
-            race_name=race_name,
-        )
+        if observed_bonus is _BONUS_NOT_OBSERVED:
+            try:
+                bonus = await bonus_observer
+            finally:
+                bonus_observer_consumed = True
+        else:
+            bonus = observed_bonus
         for item in bonus or []:
             yield item
     finally:
-        await _cleanup_race_tasks(
-            tasks,
-            label=f"{request.action} {race_name} final cleanup",
-            runtime=runtime,
-        )
+        try:
+            await _cleanup_race_tasks(
+                tasks,
+                label=f"{request.action} {race_name} final cleanup",
+                runtime=runtime,
+            )
+        finally:
+            if not bonus_observer_consumed:
+                await _drain_dual_race_bonus_observer(
+                    request,
+                    bonus_observer,
+                    winner,
+                    race_name=race_name,
+                )
+            _raise_obligation_publish_error(lane_observations)
 
 
 async def _dual_race_image_action(
@@ -523,19 +672,24 @@ async def _dual_race_image_action(
     allow_provider_override_race: bool = False,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """Race direct image2 and Responses while allowing a bonus result."""
-    runtime = request.upstream_runtime
     if request.provider_override is not None and not allow_provider_override_race:
         yield await _run_responses_lane(request, use_httpx=False)
         return
-    secondary = request.with_progress(
-        _metadata_only_progress(
-            request.progress_callback,
-            runtime=runtime,
-        )
+    image2_progress, image2_observation = _direct_lane_progress(
+        request,
+        lane_name="image2",
+        metadata_only=False,
     )
+    responses_progress, responses_observation = _direct_lane_progress(
+        request,
+        lane_name="responses",
+        metadata_only=True,
+    )
+    image2 = request.with_progress(image2_progress)
+    secondary = request.with_progress(responses_progress)
     tasks: list[asyncio.Task[list[tuple[str, str | None]]]] = [
         asyncio.create_task(
-            _run_direct_image2_lane(request),
+            _run_direct_image2_lane(image2),
             name=f"{request.action}-dual-image2",
         ),
         asyncio.create_task(
@@ -547,6 +701,10 @@ async def _dual_race_image_action(
         tasks[0]: "image2",
         tasks[1]: "responses",
     }
+    lane_observations = {
+        tasks[0]: image2_observation,
+        tasks[1]: responses_observation,
+    }
     async with aclosing(
         _iter_dual_race_results(
             request,
@@ -555,6 +713,7 @@ async def _dual_race_image_action(
             grace_seconds=_dual_race_grace_seconds(request, image_jobs=False),
             race_name="dual_race",
             abort_result_unknown=True,
+            lane_observations=lane_observations,
         )
     ) as results:
         async for item in results:
@@ -565,20 +724,28 @@ async def _dual_race_image_jobs_action(
     request: ImageExecutionRequest,
 ) -> AsyncIterator[tuple[str, str | None]]:
     """Race image-job generations and Responses endpoints with bonus grace."""
-    runtime = request.upstream_runtime
-    secondary = request.with_progress(
-        _metadata_only_progress(
-            request.progress_callback,
-            runtime=runtime,
-        )
+    race_name = "image_jobs dual_race"
+    generations_progress, generations_observation = _image_job_lane_progress(
+        request,
+        lane_name="image_jobs:generations",
+        race_name=race_name,
+        metadata_only=False,
     )
+    responses_progress, responses_observation = _image_job_lane_progress(
+        request,
+        lane_name="image_jobs:responses",
+        race_name=race_name,
+        metadata_only=True,
+    )
+    generations = request.with_progress(generations_progress)
+    responses = request.with_progress(responses_progress)
     tasks: list[asyncio.Task[list[ImageResult]]] = [
         asyncio.create_task(
-            _run_dual_image_job_lane(request, endpoint="generations"),
+            _run_dual_image_job_lane(generations, endpoint="generations"),
             name=f"{request.action}-image-jobs-dual-generations",
         ),
         asyncio.create_task(
-            _run_dual_image_job_lane(secondary, endpoint="responses"),
+            _run_dual_image_job_lane(responses, endpoint="responses"),
             name=f"{request.action}-image-jobs-dual-responses",
         ),
     ]
@@ -586,14 +753,19 @@ async def _dual_race_image_jobs_action(
         tasks[0]: "image_jobs:generations",
         tasks[1]: "image_jobs:responses",
     }
+    lane_observations = {
+        tasks[0]: generations_observation,
+        tasks[1]: responses_observation,
+    }
     async with aclosing(
         _iter_dual_race_results(
             request,
             tasks,
             lane_names,
             grace_seconds=_dual_race_grace_seconds(request, image_jobs=True),
-            race_name="image_jobs dual_race",
+            race_name=race_name,
             abort_result_unknown=False,
+            lane_observations=lane_observations,
         )
     ) as results:
         async for item in results:

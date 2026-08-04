@@ -44,6 +44,89 @@ lumen_mv_has_T() {
     return 0
 }
 
+lumen_fsync_directory() {
+    local directory="$1"
+    if [ ! -d "${directory}" ] || [ -L "${directory}" ]; then
+        log_error "拒绝 fsync 非普通目录：${directory}"
+        return 1
+    fi
+    if [ -r "${directory}" ]; then
+        python3 - "${directory}" <<'PY'
+import errno
+import os
+import sys
+
+path = os.path.abspath(sys.argv[1])
+flags = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+descriptor = os.open(path, flags)
+try:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+            raise
+finally:
+    os.close(descriptor)
+PY
+        return $?
+    fi
+    if ! command -v lumen_run_as_root >/dev/null 2>&1; then
+        return 1
+    fi
+    lumen_run_as_root python3 - "${directory}" <<'PY'
+import errno
+import os
+import sys
+
+path = os.path.abspath(sys.argv[1])
+flags = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+descriptor = os.open(path, flags)
+try:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+            raise
+finally:
+    os.close(descriptor)
+PY
+}
+
+lumen_replace_symlink_with_python() {
+    local source="$1"
+    local destination="$2"
+    if [ -w "$(dirname "${destination}")" ]; then
+        python3 - "${source}" "${destination}" <<'PY'
+import os
+import sys
+
+source, destination = sys.argv[1:]
+os.replace(source, destination)
+PY
+        return $?
+    fi
+    if ! command -v lumen_run_as_root >/dev/null 2>&1; then
+        return 1
+    fi
+    lumen_run_as_root python3 - "${source}" "${destination}" <<'PY'
+import os
+import sys
+
+source, destination = sys.argv[1:]
+os.replace(source, destination)
+PY
+}
+
 lumen_atomic_replace_symlink() {
     local link_target="$1"
     local link_path="$2"
@@ -53,37 +136,58 @@ lumen_atomic_replace_symlink() {
     link_name="$(basename "${link_path}")"
     local tmp="${link_dir}/.${link_name}.tmp.$$"
 
-    rm -f "${tmp}" 2>/dev/null || true
-    if ! ln -s "${link_target}" "${tmp}"; then
+    if [ ! -d "${link_dir}" ] || [ -L "${link_dir}" ]; then
+        log_error "symlink 父目录不是普通目录：${link_dir}"
         return 1
     fi
 
-    if lumen_mv_has_T; then
+    if [ -w "${link_dir}" ]; then
+        rm -f "${tmp}" 2>/dev/null || true
+    elif command -v lumen_run_as_root >/dev/null 2>&1; then
+        lumen_run_as_root rm -f "${tmp}" 2>/dev/null || true
+    fi
+    if [ -w "${link_dir}" ]; then
+        ln -s "${link_target}" "${tmp}" || return 1
+    elif command -v lumen_run_as_root >/dev/null 2>&1; then
+        lumen_run_as_root ln -s "${link_target}" "${tmp}" || return 1
+    else
+        return 1
+    fi
+
+    if [ -w "${link_dir}" ] && lumen_mv_has_T; then
         if mv -T "${tmp}" "${link_path}"; then
-            return 0
+            lumen_fsync_directory "${link_dir}"
+            return $?
         fi
         rm -f "${tmp}" 2>/dev/null || true
         return 1
     fi
 
-    if command -v python3 >/dev/null 2>&1; then
-        if python3 -c \
-                "import os, sys; os.replace(sys.argv[1], sys.argv[2])" \
-                "${tmp}" "${link_path}" 2>/dev/null; then
-            return 0
-        fi
+    if command -v python3 >/dev/null 2>&1 \
+            && lumen_replace_symlink_with_python "${tmp}" "${link_path}"; then
+        lumen_fsync_directory "${link_dir}"
+        return $?
     fi
 
-    rm -f "${tmp}" 2>/dev/null || true
-    ln -sfn "${link_target}" "${link_path}" 2>/dev/null || return 1
-    return 0
+    if [ -w "${link_dir}" ]; then
+        rm -f "${tmp}" 2>/dev/null || true
+    elif command -v lumen_run_as_root >/dev/null 2>&1; then
+        lumen_run_as_root rm -f "${tmp}" 2>/dev/null || true
+    fi
+    return 1
 }
 
 lumen_release_atomic_switch() {
     local root="$1"
     local new_id="$2"
     local old_id=""
+    local previous_present=0
+    local previous_target=""
     old_id="$(lumen_release_current_id "${root}" || true)"
+    if [ -L "${root}/previous" ]; then
+        previous_present=1
+        previous_target="$(readlink "${root}/previous" 2>/dev/null || true)"
+    fi
 
     if [ -z "${new_id}" ]; then
         log_error "lumen_release_atomic_switch：new_id 为空。"
@@ -94,15 +198,29 @@ lumen_release_atomic_switch() {
         return 1
     fi
 
-    if ! lumen_atomic_replace_symlink "releases/${new_id}" "${root}/current"; then
-        log_error "切换 ${root}/current → releases/${new_id} 失败。"
-        return 1
-    fi
-
     if [ -n "${old_id}" ] && [ "${old_id}" != "${new_id}" ] \
             && [ -d "${root}/releases/${old_id}" ]; then
-        lumen_atomic_replace_symlink \
-            "releases/${old_id}" "${root}/previous" 2>/dev/null || true
+        if ! lumen_atomic_replace_symlink \
+                "releases/${old_id}" "${root}/previous"; then
+            log_error "切换 ${root}/previous → releases/${old_id} 失败。"
+            return 1
+        fi
+    fi
+    if ! lumen_atomic_replace_symlink "releases/${new_id}" "${root}/current"; then
+        log_error "切换 ${root}/current → releases/${new_id} 失败。"
+        if [ "${previous_present}" -eq 1 ]; then
+            lumen_atomic_replace_symlink \
+                "${previous_target}" "${root}/previous" 2>/dev/null || true
+        elif [ -L "${root}/previous" ] \
+                && [ "$(readlink "${root}/previous" 2>/dev/null || true)" \
+                    = "releases/${old_id}" ]; then
+            if rm -f "${root}/previous" 2>/dev/null \
+                    || { command -v lumen_run_as_root >/dev/null 2>&1 \
+                        && lumen_run_as_root rm -f "${root}/previous"; }; then
+                lumen_fsync_directory "${root}" 2>/dev/null || true
+            fi
+        fi
+        return 1
     fi
     return 0
 }
@@ -157,6 +275,84 @@ web-next-cache|apps/web/.next/cache
 ${mapping}
 EOF
     return 0
+}
+
+lumen_release_harden_ownership() {
+    local root="$1"
+    local release_dir="$2"
+    local shared_dir="$3"
+    local runtime_owner="${4:-${LUMEN_APP_UID:-10001}}"
+    local runtime_group="${5:-${LUMEN_APP_GID:-10001}}"
+    local config_group="${6:-root}"
+    local runtime_dir=""
+
+    case "${release_dir}" in
+        "${root}"/releases/*) ;;
+        *)
+            log_error "release ownership 路径越界：${release_dir}"
+            return 1
+            ;;
+    esac
+    if [ "${shared_dir}" != "${root}/shared" ] \
+            || [ ! -d "${root}" ] \
+            || [ ! -d "${root}/releases" ] \
+            || [ ! -d "${release_dir}" ] \
+            || [ ! -d "${shared_dir}" ]; then
+        log_error "release ownership 布局不完整，拒绝 chown。"
+        return 1
+    fi
+
+    lumen_run_as_root chown root:root \
+        "${root}" "${root}/releases" "${shared_dir}" "${release_dir}" \
+        || return 1
+    lumen_run_as_root chmod 0755 \
+        "${root}" "${root}/releases" "${shared_dir}" "${release_dir}" \
+        || return 1
+    lumen_run_as_root chown -R root:root "${release_dir}" "${shared_dir}" \
+        || return 1
+    lumen_run_as_root chmod -R go-w "${release_dir}" "${shared_dir}" \
+        || return 1
+
+    if [ -f "${shared_dir}/.env" ] && [ ! -L "${shared_dir}/.env" ]; then
+        lumen_run_as_root chown "root:${config_group}" "${shared_dir}/.env" \
+            || return 1
+        lumen_run_as_root chmod 0640 "${shared_dir}/.env" || return 1
+    fi
+    if [ -d "${shared_dir}/web-env" ] && [ ! -L "${shared_dir}/web-env" ]; then
+        lumen_run_as_root chown -R root:root "${shared_dir}/web-env" || return 1
+        lumen_run_as_root chmod -R go-w "${shared_dir}/web-env" || return 1
+        if [ -f "${shared_dir}/web-env/.env.local" ]; then
+            lumen_run_as_root chown \
+                "root:${config_group}" "${shared_dir}/web-env/.env.local" \
+                || return 1
+            lumen_run_as_root chmod 0640 "${shared_dir}/web-env/.env.local" \
+                || return 1
+        fi
+    fi
+
+    for runtime_dir in worker-var web-next-cache; do
+        lumen_run_as_root mkdir -p "${shared_dir}/${runtime_dir}" || return 1
+        lumen_run_as_root chown -R \
+            "${runtime_owner}:${runtime_group}" "${shared_dir}/${runtime_dir}" \
+            || return 1
+        lumen_run_as_root chmod -R u+rwX,go-rwx \
+            "${shared_dir}/${runtime_dir}" || return 1
+    done
+
+    for runtime_dir in current previous VERSION .env; do
+        if [ -L "${root}/${runtime_dir}" ]; then
+            lumen_run_as_root chown -h root:root "${root}/${runtime_dir}" \
+                2>/dev/null || true
+        fi
+    done
+    if [ -L "${release_dir}/.env" ]; then
+        lumen_run_as_root chown -h root:root "${release_dir}/.env" \
+            2>/dev/null || true
+    fi
+
+    lumen_fsync_directory "${release_dir}" \
+        && lumen_fsync_directory "${shared_dir}" \
+        && lumen_fsync_directory "${root}"
 }
 
 lumen_release_cleanup_old() {

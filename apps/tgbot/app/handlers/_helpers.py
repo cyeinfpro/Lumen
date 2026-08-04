@@ -31,6 +31,11 @@ def message_prompt(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
 
+def telegram_user_id(event: Message | CallbackQuery) -> int | None:
+    user = event.from_user
+    return user.id if user is not None else None
+
+
 def is_slash_command(text: str) -> bool:
     value = (text or "").strip()
     return value.startswith("/") and not value.startswith("//")

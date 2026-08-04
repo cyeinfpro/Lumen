@@ -24,13 +24,21 @@ from lumen_core.models import (
     ImageVariant,
     Message,
 )
+from lumen_core.upstream_billing import GENERATION_TAKEOVER_CHECKPOINT_KEY
 
 from ...artifact_commit import (
     ArtifactAdoption,
+    ArtifactCommitOutcomeUnknown,
     commit_error_or_default,
     commit_with_adoption_probe,
 )
 from .active_user_fence import lock_active_generation_user
+from .bonus_obligation import (
+    BONUS_ARTIFACT_COMMITTED,
+    BONUS_ARTIFACT_STATE_KEY,
+    BONUS_BILLING_OBLIGATION_KEY,
+    bonus_idempotency_key,
+)
 from .bonus_artifacts import (
     BonusGenerationContext,
     BonusImageArtifact,
@@ -212,6 +220,19 @@ async def handle_dual_race_bonus_image(
     artifact = await prepare_bonus_artifact(context)
     if artifact is None:
         return False
+    if context.bonus_generation_id is not None:
+        adoption = await _probe_bonus_generation_adoption(context, artifact)
+        if adoption is ArtifactAdoption.ADOPTED:
+            return bool(
+                not context.settle_billing
+                or await _settle_bonus_billing(context, artifact)
+            )
+        if adoption is ArtifactAdoption.UNKNOWN:
+            raise ArtifactCommitOutcomeUnknown(
+                "bonus generation artifact conflicts with durable identity "
+                f"parent={context.parent_task_id} "
+                f"bonus={artifact.bonus_generation_id}"
+            )
     created_keys = await _write_bonus_files(context, artifact)
     if created_keys is None:
         return False
@@ -327,7 +348,18 @@ async def _persist_bonus_generation(
             else:
                 await _lock_current_bonus_parent(session, context)
                 upstream_request = _bonus_upstream_request(context, artifact)
-                _add_bonus_rows(session, context, artifact, upstream_request)
+                bonus_row = await _bonus_generation_for_artifact(
+                    session,
+                    context,
+                    artifact,
+                )
+                _add_bonus_rows(
+                    session,
+                    context,
+                    artifact,
+                    upstream_request,
+                    bonus_row=bonus_row,
+                )
                 await _attach_bonus_image_to_message(session, context, artifact)
                 await _record_bonus_model_candidate(
                     session,
@@ -415,28 +447,122 @@ async def _probe_bonus_generation_adoption(
         )
         bonus = await session.get(Generation, artifact.bonus_generation_id)
         image = await session.get(Image, artifact.image_id)
-        if bonus is not None or image is not None:
-            exact_bonus = (
-                bonus is not None
-                and bonus.status == GenerationStatus.SUCCEEDED.value
-                and bonus.user_id == context.user_id
-                and bonus.message_id == context.message_id
-            )
-            exact_image = (
-                image is not None
-                and image.owner_generation_id == artifact.bonus_generation_id
-                and image.user_id == context.user_id
-                and image.storage_key == artifact.key_orig
-                and image.sha256 == artifact.sha256
-            )
-            return (
-                ArtifactAdoption.ADOPTED
-                if exact_bonus and exact_image
-                else ArtifactAdoption.UNKNOWN
-            )
-        if parent is None:
+        exact_bonus = _bonus_row_matches_context(bonus, context, artifact)
+        exact_image = (
+            image is not None
+            and image.owner_generation_id == artifact.bonus_generation_id
+            and image.user_id == context.user_id
+            and image.storage_key == artifact.key_orig
+            and image.sha256 == artifact.sha256
+        )
+        if exact_bonus and exact_image:
+            return ArtifactAdoption.ADOPTED
+        if image is not None:
+            return ArtifactAdoption.UNKNOWN
+        if context.require_precreated_generation and _pending_bonus_obligation_matches(
+            bonus, context
+        ):
+            return ArtifactAdoption.NOT_ADOPTED
+        if bonus is not None:
+            return ArtifactAdoption.UNKNOWN
+        if not _parent_matches_context(parent, context):
             return ArtifactAdoption.UNKNOWN
         return ArtifactAdoption.NOT_ADOPTED
+
+
+def _parent_matches_context(
+    parent: Any,
+    context: BonusGenerationContext,
+) -> bool:
+    return bool(
+        parent is not None
+        and getattr(parent, "user_id", None) == context.user_id
+        and int(getattr(parent, "execution_epoch", -1) or 0) == context.execution_epoch
+        and int(getattr(parent, "attempt", -1) or 0) == context.attempt
+    )
+
+
+def _pending_bonus_obligation_matches(
+    bonus: Any,
+    context: BonusGenerationContext,
+) -> bool:
+    request = (
+        bonus.upstream_request
+        if isinstance(getattr(bonus, "upstream_request", None), dict)
+        else {}
+    )
+    return bool(
+        bonus is not None
+        and getattr(bonus, "user_id", None) == context.user_id
+        and getattr(bonus, "message_id", None) == context.message_id
+        and request.get(BONUS_BILLING_OBLIGATION_KEY) is True
+        and _bonus_request_matches_context(request, context)
+    )
+
+
+def _bonus_row_matches_context(
+    bonus: Any,
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> bool:
+    if (
+        bonus is None
+        or str(getattr(bonus, "id", "")) != artifact.bonus_generation_id
+        or getattr(bonus, "status", None) != GenerationStatus.SUCCEEDED.value
+        or getattr(bonus, "user_id", None) != context.user_id
+        or getattr(bonus, "message_id", None) != context.message_id
+    ):
+        return False
+    request = (
+        bonus.upstream_request
+        if isinstance(getattr(bonus, "upstream_request", None), dict)
+        else {}
+    )
+    return _bonus_request_matches_context(request, context)
+
+
+def _bonus_request_matches_context(
+    request: dict[str, Any],
+    context: BonusGenerationContext,
+) -> bool:
+    parent_id = request.get("parent_generation_id") or request.get(
+        "batch_parent_generation_id"
+    )
+    expected_policy = (
+        context.billing_meta.get("billing_policy")
+        if isinstance(context.billing_meta, dict)
+        else None
+    )
+    if expected_policy and request.get("billing_policy") != expected_policy:
+        return False
+    for key in ("batch_parent_generation_id", "batch_index", "batch_count"):
+        expected = (context.extra_upstream_fields or {}).get(key)
+        if expected is not None and request.get(key) != expected:
+            return False
+    return bool(
+        parent_id == context.parent_task_id
+        and _stored_int(
+            request.get("parent_execution_epoch"),
+            default=-1,
+        )
+        == context.execution_epoch
+        and _stored_int(
+            request.get("parent_attempt"),
+            default=-1,
+        )
+        == _context_source_attempt(context)
+    )
+
+
+def _context_source_attempt(context: BonusGenerationContext) -> int:
+    return max(1, int(context.source_attempt or context.attempt))
+
+
+def _stored_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def _settle_bonus_billing(
@@ -504,15 +630,18 @@ def _bonus_upstream_request(
     artifact: BonusImageArtifact,
 ) -> dict[str, Any]:
     request = dict(context.parent_upstream_request or {})
+    request.pop(GENERATION_TAKEOVER_CHECKPOINT_KEY, None)
     request.update(context.image_request_options)
     request.update(
         {
             "size_actual": f"{artifact.width}x{artifact.height}",
             "mime": artifact.orig_mime,
             **artifact.billing_meta,
+            BONUS_BILLING_OBLIGATION_KEY: True,
+            BONUS_ARTIFACT_STATE_KEY: BONUS_ARTIFACT_COMMITTED,
             "parent_generation_id": context.parent_task_id,
             "parent_execution_epoch": context.execution_epoch,
-            "parent_attempt": context.attempt,
+            "parent_attempt": _context_source_attempt(context),
         }
     )
     if context.extra_upstream_fields:
@@ -561,29 +690,36 @@ def _add_bonus_rows(
     context: BonusGenerationContext,
     artifact: BonusImageArtifact,
     upstream_request: dict[str, Any],
+    *,
+    bonus_row: Any | None = None,
 ) -> Any:
     now = datetime.now(timezone.utc)
-    bonus_row = Generation(
-        id=artifact.bonus_generation_id,
-        message_id=context.message_id,
-        user_id=context.user_id,
-        action=context.action,
-        model=context.model,
-        prompt=context.prompt,
-        size_requested=context.size_requested,
-        aspect_ratio=context.aspect_ratio,
-        input_image_ids=list(context.input_image_ids),
-        primary_input_image_id=context.primary_input_image_id,
-        upstream_request=upstream_request,
-        status=GenerationStatus.SUCCEEDED.value,
-        progress_stage=GenerationStage.FINALIZING.value,
-        attempt=0,
-        idempotency_key=_bonus_idempotency_key(context),
-        started_at=now,
-        finished_at=now,
-        upstream_pixels=artifact.width * artifact.height,
-    )
-    session.add(bonus_row)
+    if bonus_row is None:
+        bonus_row = Generation(
+            id=artifact.bonus_generation_id,
+            message_id=context.message_id,
+            user_id=context.user_id,
+            action=context.action,
+            model=context.model,
+            prompt=context.prompt,
+            size_requested=context.size_requested,
+            aspect_ratio=context.aspect_ratio,
+            input_image_ids=list(context.input_image_ids),
+            primary_input_image_id=context.primary_input_image_id,
+            upstream_request=upstream_request,
+            status=GenerationStatus.SUCCEEDED.value,
+            progress_stage=GenerationStage.FINALIZING.value,
+            attempt=0,
+            idempotency_key=_bonus_idempotency_key(context),
+            started_at=now,
+            finished_at=now,
+            upstream_pixels=artifact.width * artifact.height,
+        )
+        session.add(bonus_row)
+    else:
+        bonus_row.upstream_request = upstream_request
+        bonus_row.finished_at = now
+        bonus_row.upstream_pixels = artifact.width * artifact.height
     session.add(
         Image(
             id=artifact.image_id,
@@ -611,9 +747,45 @@ def _add_bonus_rows(
 
 
 def _bonus_idempotency_key(context: BonusGenerationContext) -> str:
-    suffix = context.idempotency_suffix or ":b"
-    prefix_limit = max(1, 64 - len(suffix))
-    return f"{context.parent_idempotency_key[:prefix_limit]}{suffix}"
+    return bonus_idempotency_key(
+        context.parent_idempotency_key,
+        context.idempotency_suffix,
+    )
+
+
+async def _bonus_generation_for_artifact(
+    session: Any,
+    context: BonusGenerationContext,
+    artifact: BonusImageArtifact,
+) -> Any | None:
+    if context.bonus_generation_id is None:
+        return None
+    bonus = await session.get(
+        Generation,
+        context.bonus_generation_id,
+        with_for_update=True,
+    )
+    if bonus is None:
+        if context.require_precreated_generation:
+            raise LookupError(
+                f"precreated bonus generation missing: {context.bonus_generation_id}"
+            )
+        return None
+    request = (
+        bonus.upstream_request
+        if isinstance(getattr(bonus, "upstream_request", None), dict)
+        else {}
+    )
+    if (
+        str(bonus.id) != artifact.bonus_generation_id
+        or getattr(bonus, "user_id", None) != context.user_id
+        or request.get(BONUS_BILLING_OBLIGATION_KEY) is not True
+        or not _bonus_request_matches_context(request, context)
+    ):
+        raise StaleGenerationAttempt(
+            f"precreated bonus generation conflict: {context.bonus_generation_id}"
+        )
+    return bonus
 
 
 def _add_bonus_variants(

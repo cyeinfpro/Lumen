@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -11,9 +12,331 @@ from fastapi import HTTPException
 from app import main
 from app.routes import storyboards
 from app.routes.storyboard_parts import assembly as storyboard_assembly_commands
+from app.routes.storyboard_parts import image_submission as storyboard_image_submission
 from app.routes.storyboard_parts import queries as storyboard_queries
-from app.routes.storyboard_parts import submission as storyboard_submission
+from app.routes.storyboard_parts import video_submission as storyboard_video_submission
+from app.services.storyboard import idempotency as storyboard_idempotency
+from app.services.storyboard.contracts import StoryboardRunOut
 from app.services.storyboard import tasks as storyboard_tasks
+
+
+def _storyboard_run_out(
+    *,
+    run_id: str = "run-1",
+    current_stage: str = "assets",
+) -> StoryboardRunOut:
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    return StoryboardRunOut.model_validate(
+        {
+            "id": run_id,
+            "conversation_id": "conv-1",
+            "title": "Storyboard",
+            "idea": "Idea",
+            "style": "",
+            "script": "",
+            "script_confirmed": False,
+            "script_revision": 0,
+            "aspect_ratio": "16:9",
+            "resolution": "720p",
+            "model": "seedance-2.0",
+            "generate_audio": True,
+            "seed": None,
+            "status": "in_progress",
+            "current_stage": current_stage,
+            "assets": [],
+            "shots": [],
+            "assembly": None,
+            "thumbnail_url": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+
+class _StoryboardRows:
+    def __init__(self, rows: list[Any]) -> None:
+        self.rows = rows
+
+    def scalars(self) -> "_StoryboardRows":
+        return self
+
+    def all(self) -> list[Any]:
+        return list(self.rows)
+
+
+class _StoryboardIdempotencyDb:
+    def __init__(self, rows: list[Any]) -> None:
+        self.rows = rows
+        self.commits = 0
+        self.rollbacks = 0
+        self.release_lock: Any = None
+
+    async def execute(self, _statement: Any) -> _StoryboardRows:
+        return _StoryboardRows(self.rows)
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self.release_lock is not None and self.release_lock.locked():
+            self.release_lock.release()
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+        if self.release_lock is not None and self.release_lock.locked():
+            self.release_lock.release()
+
+
+def test_storyboard_paid_idempotency_key_normalization() -> None:
+    resolve = storyboard_idempotency.resolve_client_idempotency_key
+
+    assert resolve("request-1") == "request-1"
+    assert resolve(None, "request-1") == "request-1"
+    assert resolve("request-1", "request-1") == "request-1"
+
+    with pytest.raises(HTTPException) as missing:
+        resolve(None)
+    assert missing.value.status_code == 422
+    assert missing.value.detail["error"]["code"] == "idempotency_key_required"
+
+    with pytest.raises(HTTPException) as mismatch:
+        resolve("header-key", "body-key")
+    assert mismatch.value.status_code == 422
+    assert mismatch.value.detail["error"]["code"] == "idempotency_key_mismatch"
+
+    for invalid in ("", " request-1", "request-1 ", "请求-1"):
+        with pytest.raises(HTTPException) as invalid_key:
+            resolve(invalid)
+        assert invalid_key.value.status_code == 422
+        assert invalid_key.value.detail["error"]["code"] == (
+            "idempotency_key_invalid"
+        )
+
+
+@pytest.mark.asyncio
+async def test_storyboard_paid_operation_replays_original_response_and_tasks() -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        metadata_jsonb={},
+    )
+    operation = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="client-request-1",
+        operation_namespace=storyboard_idempotency.ASSET_GENERATE_OPERATION,
+        payload={"run_id": "run-1", "step_id": "asset-1", "body": {}},
+    )
+    response = _storyboard_run_out()
+    storyboard_idempotency.record_paid_operation(
+        run,  # type: ignore[arg-type]
+        operation,
+        response=response,
+        task_ids=["generation-1"],
+        child_task_keys={"asset:asset-1:image": "task-key-1"},
+        created_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+    )
+
+    replay = await storyboard_idempotency.find_paid_operation(
+        _StoryboardIdempotencyDb([run]),  # type: ignore[arg-type]
+        operation,
+    )
+
+    assert replay is not None
+    assert replay.response == response
+    assert replay.task_ids == ("generation-1",)
+    assert replay.child_task_keys == {"asset:asset-1:image": "task-key-1"}
+    assert "client-request-1" not in repr(run.metadata_jsonb)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_namespace", "payload"),
+    (
+        (
+            storyboard_idempotency.ASSET_GENERATE_OPERATION,
+            {"run_id": "run-1", "step_id": "asset-1", "body": {"prompt": "new"}},
+        ),
+        (
+            storyboard_idempotency.KEYFRAME_GENERATE_OPERATION,
+            {"run_id": "run-1", "step_id": "asset-1", "body": {}},
+        ),
+    ),
+)
+async def test_storyboard_paid_operation_rejects_key_reuse_conflicts(
+    operation_namespace: str,
+    payload: dict[str, Any],
+) -> None:
+    run = SimpleNamespace(id="run-1", metadata_jsonb={})
+    original = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="client-request-1",
+        operation_namespace=storyboard_idempotency.ASSET_GENERATE_OPERATION,
+        payload={"run_id": "run-1", "step_id": "asset-1", "body": {}},
+    )
+    storyboard_idempotency.record_paid_operation(
+        run,  # type: ignore[arg-type]
+        original,
+        response=_storyboard_run_out(),
+        task_ids=["generation-1"],
+        child_task_keys={},
+        created_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+    )
+    conflicting = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="client-request-1",
+        operation_namespace=operation_namespace,
+        payload=payload,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await storyboard_idempotency.find_paid_operation(
+            _StoryboardIdempotencyDb([run]),  # type: ignore[arg-type]
+            conflicting,
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+def test_storyboard_batch_child_task_keys_are_deterministic() -> None:
+    operation = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="batch-request-1",
+        operation_namespace=storyboard_idempotency.KEYFRAME_GENERATE_ALL_OPERATION,
+        payload={"run_id": "run-1"},
+    )
+
+    first = storyboard_idempotency.child_task_idempotency_key(
+        operation,
+        "shot:shot-1:keyframe",
+    )
+    replay = storyboard_idempotency.child_task_idempotency_key(
+        operation,
+        "shot:shot-1:keyframe",
+    )
+    sibling = storyboard_idempotency.child_task_idempotency_key(
+        operation,
+        "shot:shot-2:keyframe",
+    )
+
+    assert replay == first
+    assert sibling != first
+    assert first.startswith("sb:")
+    assert len(first) <= 96
+
+
+@pytest.mark.asyncio
+async def test_storyboard_paid_operation_race_executes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(id="run-1", metadata_jsonb={})
+    db = _StoryboardIdempotencyDb([run])
+    transaction_lock = asyncio.Lock()
+    db.release_lock = transaction_lock
+    action_calls = 0
+    response = _storyboard_run_out()
+    operation = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="race-request-1",
+        operation_namespace=storyboard_idempotency.ASSET_GENERATE_OPERATION,
+        payload={"run_id": "run-1", "step_id": "asset-1", "body": {}},
+    )
+
+    async def lock_key(
+        _db: Any,
+        _namespace: str,
+        _user_id: str,
+        _key: str,
+    ) -> None:
+        await transaction_lock.acquire()
+
+    async def action(
+        paid: storyboard_idempotency.PaidStoryboardOperation,
+    ) -> StoryboardRunOut:
+        nonlocal action_calls
+        action_calls += 1
+        await asyncio.sleep(0)
+        storyboard_idempotency.record_paid_operation(
+            run,  # type: ignore[arg-type]
+            paid,
+            response=response,
+            task_ids=["generation-1"],
+            child_task_keys={"asset:asset-1:image": "task-key-1"},
+            created_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        )
+        await db.commit()
+        return response
+
+    monkeypatch.setattr(storyboard_idempotency, "lock_user_key", lock_key)
+
+    first, second = await asyncio.gather(
+        storyboard_idempotency.execute_paid_operation(
+            db,  # type: ignore[arg-type]
+            operation,
+            action,
+        ),
+        storyboard_idempotency.execute_paid_operation(
+            db,  # type: ignore[arg-type]
+            operation,
+            action,
+        ),
+    )
+
+    assert first == response
+    assert second == response
+    assert action_calls == 1
+    assert db.commits == 2
+
+
+@pytest.mark.asyncio
+async def test_storyboard_ambiguous_post_commit_retry_replays_without_new_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(id="run-1", metadata_jsonb={})
+    db = _StoryboardIdempotencyDb([run])
+    response = _storyboard_run_out(current_stage="videos")
+    operation = storyboard_idempotency.paid_storyboard_operation(
+        user_id="user-1",
+        idempotency_key="ambiguous-request-1",
+        operation_namespace=storyboard_idempotency.SHOT_SUBMIT_OPERATION,
+        payload={"run_id": "run-1", "step_id": "shot-1", "body": {}},
+    )
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def committed_then_lost(
+        paid: storyboard_idempotency.PaidStoryboardOperation,
+    ) -> StoryboardRunOut:
+        storyboard_idempotency.record_paid_operation(
+            run,  # type: ignore[arg-type]
+            paid,
+            response=response,
+            task_ids=["video-generation-1"],
+            child_task_keys={"shot:shot-1:video": "video-task-key-1"},
+            created_at=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        )
+        await db.commit()
+        raise TimeoutError("response lost after commit")
+
+    async def must_not_run(
+        _paid: storyboard_idempotency.PaidStoryboardOperation,
+    ) -> StoryboardRunOut:
+        raise AssertionError("retry must replay the committed operation")
+
+    monkeypatch.setattr(storyboard_idempotency, "lock_user_key", no_lock)
+
+    with pytest.raises(TimeoutError):
+        await storyboard_idempotency.execute_paid_operation(
+            db,  # type: ignore[arg-type]
+            operation,
+            committed_then_lost,
+        )
+    replay = await storyboard_idempotency.execute_paid_operation(
+        db,  # type: ignore[arg-type]
+        operation,
+        must_not_run,
+    )
+
+    assert replay == response
+    assert db.commits == 2
 
 
 def test_decode_cursor_requires_timezone_aware_timestamp() -> None:
@@ -598,7 +921,7 @@ def test_storyboard_next_cursor_uses_last_returned_row() -> None:
 
 
 def test_generate_all_keyframes_validates_batch_before_creating_tasks() -> None:
-    source = inspect.getsource(storyboard_submission.generate_all_keyframes)
+    source = inspect.getsource(storyboard_image_submission.generate_all_keyframes)
 
     assert "shots_not_approved" in source
     assert source.index("shots_not_approved") < source.index(
@@ -669,19 +992,52 @@ async def test_storyboard_video_recovery_requires_current_submission_fingerprint
 
 
 def test_storyboard_image_task_helper_does_not_commit_before_step_link() -> None:
-    source = inspect.getsource(storyboard_submission.create_storyboard_image_task)
+    source = inspect.getsource(
+        storyboard_image_submission.create_storyboard_image_task
+    )
 
     assert "await db.commit()" not in source
     assert "StoryboardImageTask(" in source
 
 
 def test_generate_all_keyframes_does_not_call_single_route_handler() -> None:
-    source = inspect.getsource(storyboard_submission.generate_all_keyframes)
+    source = inspect.getsource(storyboard_image_submission.generate_all_keyframes)
     publish_source = inspect.getsource(storyboard_tasks.publish_storyboard_image_tasks)
 
     assert "generate_shot_keyframe(" not in source
     assert "runtime.publish_image_tasks" in source
     assert "Semaphore(STORYBOARD_KEYFRAME_PARALLELISM)" in publish_source
+
+
+def test_paid_storyboard_entrypoints_use_durable_operation_wrapper() -> None:
+    for handler in (
+        storyboard_image_submission.generate_asset,
+        storyboard_image_submission.generate_shot_keyframe,
+        storyboard_image_submission.generate_all_keyframes,
+        storyboard_video_submission.submit_shot,
+        storyboard_video_submission.submit_all_shots,
+    ):
+        source = inspect.getsource(handler)
+        assert "execute_paid_operation" in source
+        assert "resolve_client_idempotency_key" in source
+
+
+def test_storyboard_video_submission_commits_task_and_step_together() -> None:
+    create_source = inspect.getsource(
+        storyboard_video_submission.create_storyboard_video_task
+    )
+    single_source = inspect.getsource(storyboard_video_submission.submit_shot)
+    batch_source = inspect.getsource(storyboard_video_submission.submit_all_shots)
+
+    assert "defer_commit=True" in create_source
+    assert "deferred_publish_payload=publish_payload" in create_source
+    assert single_source.index("_record_operation(") < single_source.index(
+        "await db.commit()"
+    )
+    assert batch_source.index("_record_operation(") < batch_source.index(
+        "await db.commit()"
+    )
+    assert "submit_shot(" not in batch_source
 
 
 def test_storyboards_transport_stays_below_route_ceiling() -> None:
@@ -691,7 +1047,8 @@ def test_storyboards_transport_stays_below_route_ceiling() -> None:
     assert "await db.commit()" not in source
     assert "OutboxEvent(" not in source
     assert "return await commands." in source
-    assert "return await submission." in source
+    assert "return await image_submission." in source
+    assert "return await video_submission." in source
     assert "return await assembly." in source
 
 

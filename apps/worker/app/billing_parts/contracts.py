@@ -57,6 +57,7 @@ class UnknownUpstreamDependencies:
 class UnknownUpstreamSettlement:
     ref_type: str
     ref_id: str
+    billing_obligation: bool
     no_hold_scope: str
     no_hold_extra: dict[str, Any]
     settle_meta: dict[str, Any]

@@ -38,6 +38,14 @@ from lumen_core.schemas import (
 )
 
 from ..idempotency.advisory import lock_user_key
+from ..deps import durable_session_id
+from ..services.active_user import (
+    ActiveUserFenceError,
+    ActiveUserSnapshot,
+    account_mode_from_user,
+    active_user_fence_http_error,
+    lock_active_user_snapshot,
+)
 from ..services.task_submission import (
     create_canvas_image_task,
     create_canvas_video_task,
@@ -836,10 +844,11 @@ async def _submit_video_execution(
     db: AsyncSession,
     *,
     user: User,
+    active_user_snapshot: ActiveUserSnapshot,
     request: Request,
     prepared: PreparedNodeExecution,
 ) -> tuple[CanvasRun, CanvasNodeExecution]:
-    if getattr(user, "account_mode", "wallet") != "wallet":
+    if active_user_snapshot.account_mode != "wallet":
         raise canvas_http(
             "account_mode_forbidden",
             "video generation requires wallet mode",
@@ -858,6 +867,7 @@ async def _submit_video_execution(
         user=user,
         request=request,
         metadata=_prepared_execution_metadata(prepared),
+        active_user_snapshot=active_user_snapshot,
     )
     video_out = video_submission.generation
     actual = (
@@ -899,6 +909,7 @@ async def execute_node(
     header_idempotency_key: str | None,
     request: Request,
 ) -> tuple[CanvasRun, CanvasNodeExecution]:
+    expected_account_mode = account_mode_from_user(user)
     if header_idempotency_key != body.idempotency_key:
         raise canvas_http(
             "idempotency_key_mismatch",
@@ -921,6 +932,16 @@ async def execute_node(
     )
     if replay is not None:
         return replay
+    try:
+        active_user_snapshot = await lock_active_user_snapshot(
+            db,
+            user.id,
+            expected_account_mode,
+            session_id=durable_session_id(request),
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+    user = active_user_snapshot.user
     prepared = await _prepare_node_execution(
         db,
         user=user,
@@ -936,6 +957,7 @@ async def execute_node(
     return await _submit_video_execution(
         db,
         user=user,
+        active_user_snapshot=active_user_snapshot,
         request=request,
         prepared=prepared,
     )

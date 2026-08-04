@@ -13,6 +13,17 @@ from app.routes import conversations, shares
 from lumen_core.models import AuditLog, Share
 
 
+@pytest.fixture(autouse=True)
+def _allow_active_user_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def lock_snapshot(_db, user, **_kwargs):
+        return SimpleNamespace(
+            user=user,
+            account_mode=getattr(user, "account_mode", "wallet"),
+        )
+
+    monkeypatch.setattr(shares, "lock_authenticated_user_snapshot", lock_snapshot)
+
+
 class _ScalarResult:
     def __init__(self, value):
         self.value = value

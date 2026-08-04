@@ -6,6 +6,8 @@
 # 同一 timestamp 两个文件配对，被视为一个"备份点"。
 set -euo pipefail
 
+_LUMEN_BACKUP_INPUT_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT-}"
+_LUMEN_BACKUP_INPUT_MAINT_ROOT="${LUMEN_MAINT_ROOT-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 
@@ -17,8 +19,22 @@ if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
 fi
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=lib/backup_restore_services.sh
+. "${SCRIPT_DIR}/lib/backup_restore_services.sh"
 
-ENV_FILE="$(lumen_find_shared_env "${SCRIPT_ROOT}" 2>/dev/null || true)"
+if ! LUMEN_DEPLOY_ROOT="$(
+        lumen_resolve_deploy_root \
+            "${SCRIPT_DIR}" \
+            "${_LUMEN_BACKUP_INPUT_DEPLOY_ROOT}" \
+            "${_LUMEN_BACKUP_INPUT_MAINT_ROOT}"
+)"; then
+    echo "[backup] ERROR: refusing unsafe or ambiguous deployment root" >&2
+    exit 78
+fi
+export LUMEN_DEPLOY_ROOT
+unset _LUMEN_BACKUP_INPUT_DEPLOY_ROOT _LUMEN_BACKUP_INPUT_MAINT_ROOT
+
+ENV_FILE="$(lumen_find_shared_env "${LUMEN_DEPLOY_ROOT}" 2>/dev/null || true)"
 if [ -n "${ENV_FILE}" ]; then
     export LUMEN_ENV_FILE="${ENV_FILE}"
     for key in DB_USER DB_NAME DB_PASSWORD REDIS_URL REDIS_PASSWORD BACKUP_ROOT LUMEN_BACKUP_ROOT PG_CONTAINER REDIS_CONTAINER; do
@@ -27,6 +43,7 @@ if [ -n "${ENV_FILE}" ]; then
 fi
 
 TS="$(date -u +%Y%m%d-%H%M%S)"
+BACKUP_OPERATION_ID="${LUMEN_BACKUP_OPERATION_ID:-backup-${TS}-$$}"
 BACKUP_ROOT="${BACKUP_ROOT:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
 PG_DIR="$BACKUP_ROOT/pg"
 REDIS_DIR="$BACKUP_ROOT/redis"
@@ -60,9 +77,22 @@ PG_OUT=""
 REDIS_OUT=""
 PG_TMP=""
 REDIS_TMP=""
+PG_ERR=""
+PAIR_MARKER=""
+PG_SHA256=""
+REDIS_SHA256=""
 BACKUP_LOCK_OWNER_TOKEN=""
+WRITERS_STOPPED=0
+ACTIVE_WRITER_SERVICES=()
 
 log() { printf '[backup %s] %s\n' "$(date -u +%FT%TZ)" "$*"; }
+
+if [ ! -f "${SCRIPT_DIR}/lib/backup_journal.sh" ]; then
+    log "ERROR: ${SCRIPT_DIR}/lib/backup_journal.sh missing"
+    exit 1
+fi
+# shellcheck source=lib/backup_journal.sh
+. "${SCRIPT_DIR}/lib/backup_journal.sh"
 
 validate_max_keep() {
     local value="$MAX_KEEP"
@@ -143,15 +173,38 @@ release_lock() {
 
 cleanup() {
     local rc=$?
+    local backup_rc="$rc"
+    trap - EXIT
+    trap '' INT TERM HUP
+    if [ "$WRITERS_STOPPED" -eq 1 ]; then
+        log "restarting quiesced writers: ${ACTIVE_WRITER_SERVICES[*]:-<none>}"
+        if [ "${BACKUP_JOURNAL_ACTIVE:-0}" -eq 1 ]; then
+            lumen_backup_journal_write "writers_starting" || rc=70
+        fi
+        if [ "${#ACTIVE_WRITER_SERVICES[@]}" -gt 0 ] \
+                && ! lumen_start_services_verified "${ACTIVE_WRITER_SERVICES[@]}"; then
+            log "ERROR: failed to restart one or more backup writers"
+            rc=70
+        elif [ "${BACKUP_JOURNAL_ACTIVE:-0}" -eq 1 ] \
+                && ! lumen_backup_journal_clear; then
+            rc=70
+        fi
+        WRITERS_STOPPED=0
+    fi
     mark_backup_pending_if_retriggered
     if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ]; then
         rm -f "$BACKUP_RUNNING_FILE" 2>/dev/null || true
     fi
-    if [ "$rc" -ne 0 ]; then
+    if [ "$backup_rc" -ne 0 ]; then
         [ -n "${PG_TMP:-}" ] && rm -f "$PG_TMP" 2>/dev/null || true
         [ -n "${REDIS_TMP:-}" ] && rm -f "$REDIS_TMP" 2>/dev/null || true
+        [ -n "${PG_ERR:-}" ] && rm -f "$PG_ERR" 2>/dev/null || true
         [ -n "${PG_OUT:-}" ] && rm -f "$PG_OUT" 2>/dev/null || true
         [ -n "${REDIS_OUT:-}" ] && rm -f "$REDIS_OUT" 2>/dev/null || true
+        if [ -n "${PAIR_MARKER:-}" ]; then
+            rm -f "$PAIR_MARKER" 2>/dev/null || true
+            backup_fsync_directory "$BACKUP_ROOT" 2>/dev/null || true
+        fi
     fi
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR" 2>/dev/null || true
@@ -160,15 +213,18 @@ cleanup() {
     if command -v lumen_release_lock >/dev/null 2>&1; then
         lumen_release_lock 2>/dev/null || true
     fi
-    return "$rc"
+    exit "$rc"
 }
 
 on_signal() {
     local sig="$1"
-    local rc=130
-    if [ "$sig" = "TERM" ]; then
-        rc=143
-    fi
+    local rc
+    case "$sig" in
+        HUP) rc=129 ;;
+        INT) rc=130 ;;
+        TERM) rc=143 ;;
+        *) rc=128 ;;
+    esac
     log "ERROR: interrupted by SIG$sig"
     exit "$rc"
 }
@@ -209,6 +265,229 @@ acquire_lock() {
 
 file_size() {
     wc -c < "$1" | tr -d '[:space:]'
+}
+
+backup_failpoint() {
+    local phase="$1"
+    local configured=",${LUMEN_BACKUP_FAILPOINT:-},${LUMEN_BACKUP_FAILPOINTS:-},"
+    case "$configured" in
+        *",${phase},"*)
+            log "ERROR: backup crash failpoint triggered: ${phase}"
+            kill -KILL "$$"
+            sleep 1
+            exit 137
+            ;;
+    esac
+}
+
+backup_fsync_file() {
+    python3 - "$1" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+path = Path(sys.argv[1])
+descriptor = os.open(
+    path,
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0),
+)
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+        raise SystemExit(1)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+backup_fsync_directory() {
+    python3 - "$1" <<'PY'
+import errno
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+descriptor = os.open(
+    path,
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0),
+)
+try:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+            raise
+finally:
+    os.close(descriptor)
+PY
+}
+
+publish_backup_pair_marker() {
+    python3 - \
+            "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<'PY'
+import errno
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+(
+    marker_raw,
+    root_raw,
+    operation_id,
+    timestamp,
+    pg_raw,
+    redis_raw,
+    pg_size_raw,
+    redis_size_raw,
+) = sys.argv[1:]
+marker = Path(marker_raw)
+root = Path(root_raw)
+pg = Path(pg_raw)
+redis = Path(redis_raw)
+if marker.parent != root:
+    raise SystemExit("backup pair marker escaped backup root")
+if pg != root / "pg" / f"{timestamp}.pg.dump.gz":
+    raise SystemExit("postgres backup path does not match pair identity")
+if redis != root / "redis" / f"{timestamp}.redis.tgz":
+    raise SystemExit("redis backup path does not match pair identity")
+try:
+    pg_size = int(pg_size_raw)
+    redis_size = int(redis_size_raw)
+except ValueError:
+    raise SystemExit("backup pair sizes are invalid")
+
+
+def digest_regular(path: Path, expected_size: int) -> str:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != expected_size:
+            raise SystemExit(f"backup payload changed before pair commit: {path}")
+        for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+            digest.update(chunk)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest()
+
+
+pg_hash = digest_regular(pg, pg_size)
+redis_hash = digest_regular(redis, redis_size)
+document = {
+    "committed_at": datetime.now(timezone.utc).isoformat(),
+    "operation_id": operation_id,
+    "pg": {
+        "name": pg.name,
+        "sha256": pg_hash,
+        "size": pg_size,
+    },
+    "redis": {
+        "name": redis.name,
+        "sha256": redis_hash,
+        "size": redis_size,
+    },
+    "schema": 1,
+    "timestamp": timestamp,
+}
+payload = (
+    json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    + "\n"
+).encode("utf-8")
+try:
+    existing = marker.lstat()
+except FileNotFoundError:
+    existing = None
+if existing is not None and not stat.S_ISREG(existing.st_mode):
+    raise SystemExit("backup pair marker destination is unsafe")
+descriptor, temporary_raw = tempfile.mkstemp(
+    prefix=f".{marker.name}.",
+    suffix=".tmp",
+    dir=root,
+)
+temporary = Path(temporary_raw)
+try:
+    os.fchmod(descriptor, 0o600)
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while persisting backup pair marker")
+        view = view[written:]
+    os.fsync(descriptor)
+    os.close(descriptor)
+    descriptor = -1
+    os.replace(temporary, marker)
+    directory_fd = os.open(
+        root,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+                raise
+    finally:
+        os.close(directory_fd)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    temporary.unlink(missing_ok=True)
+print(f"{pg_hash}\t{redis_hash}")
+PY
+}
+
+emit_backup_result() {
+    python3 - \
+            "$TS" "$BACKUP_OPERATION_ID" "$PG_SIZE" "$REDIS_SIZE" \
+            "$PG_SHA256" "$REDIS_SHA256" "$PAIR_MARKER" <<'PY'
+import json
+import sys
+
+(
+    timestamp,
+    operation_id,
+    pg_size,
+    redis_size,
+    pg_sha256,
+    redis_sha256,
+    pair_marker,
+) = sys.argv[1:]
+print(
+    json.dumps(
+        {
+            "operation_id": operation_id,
+            "pair_marker": pair_marker,
+            "pg_sha256": pg_sha256,
+            "pg_size": int(pg_size),
+            "redis_sha256": redis_sha256,
+            "redis_size": int(redis_size),
+            "timestamp": timestamp,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+)
+PY
 }
 
 make_tmp_dir() {
@@ -267,6 +546,7 @@ docker_cp_redis() {
     rc=$?
     err_msg="$(sed -n '1p' "$err_file" 2>/dev/null || true)"
     rm -f "$err_file"
+    rm -rf -- "$dest" 2>/dev/null || true
 
     case "$err_msg" in
         *"Could not find"*|*"not found"*|*"No such container:path"*)
@@ -274,13 +554,14 @@ docker_cp_redis() {
                 log "ERROR: redis $label missing: ${err_msg:-docker cp exit $rc}"
             else
                 log "redis $label not present; skipping"
+                return 2
             fi
             ;;
         *)
-            log "WARN: docker cp failed for redis $label (exit $rc): ${err_msg:-unknown error}"
+            log "ERROR: docker cp failed for redis $label (exit $rc): ${err_msg:-unknown error}"
             ;;
     esac
-    return "$rc"
+    return 1
 }
 
 redis_info_value() {
@@ -317,23 +598,80 @@ redis_bgsave_start() {
     printf '%s' "$out"
 }
 
-wait_for_redis_bgsave() {
-    local last_now in_progress status
+wait_for_redis_bgsave_idle() {
+    local in_progress
     for _ in $(seq 1 60); do
-        in_progress="$(redis_info_value persistence rdb_bgsave_in_progress 2>/dev/null || true)"
-        last_now="$(redis_cli LASTSAVE | tr -d '\r\n')"
+        if ! in_progress="$(
+            redis_info_value persistence rdb_bgsave_in_progress
+        )"; then
+            sleep 1
+            continue
+        fi
+        case "$in_progress" in
+            0) return 0 ;;
+            1) ;;
+            *)
+                log "ERROR: redis rdb_bgsave_in_progress is invalid: ${in_progress}"
+                return 1
+                ;;
+        esac
+        sleep 1
+    done
+    log "ERROR: redis BGSAVE already in progress before the fresh backup did not become idle in 60s"
+    return 1
+}
+
+capture_redis_bgsave_baseline() {
+    LAST_BEFORE="$(redis_cli LASTSAVE | tr -d '\r\n')"
+    if ! [[ "$LAST_BEFORE" =~ ^[0-9]+$ ]]; then
+        log "ERROR: LASTSAVE returned non-numeric: ${LAST_BEFORE}"
+        return 1
+    fi
+    LAST_NOW="$LAST_BEFORE"
+    RDB_SAVES_BEFORE="$(redis_info_value persistence rdb_saves)"
+    if ! [[ "$RDB_SAVES_BEFORE" =~ ^[0-9]+$ ]]; then
+        log "ERROR: redis rdb_saves is unavailable before BGSAVE"
+        return 1
+    fi
+}
+
+wait_for_redis_bgsave_generation() {
+    local saves_before="$1"
+    local last_now in_progress status saves_now
+    for _ in $(seq 1 60); do
+        if ! in_progress="$(
+            redis_info_value persistence rdb_bgsave_in_progress
+        )" || ! status="$(
+            redis_info_value persistence rdb_last_bgsave_status
+        )" || ! saves_now="$(redis_info_value persistence rdb_saves)"; then
+            sleep 1
+            continue
+        fi
+        if ! last_now="$(redis_cli LASTSAVE | tr -d '\r\n')"; then
+            sleep 1
+            continue
+        fi
         if ! [[ "$last_now" =~ ^[0-9]+$ ]]; then
             log "ERROR: LASTSAVE returned non-numeric: ${last_now}"
             return 1
         fi
-        if [ "$in_progress" != "1" ]; then
-            status="$(redis_info_value persistence rdb_last_bgsave_status 2>/dev/null || true)"
-            if [ -n "$status" ] && [ "$status" != "ok" ]; then
-                log "ERROR: redis last BGSAVE status is ${status}"
-                return 1
-            fi
+        if ! [[ "$saves_now" =~ ^[0-9]+$ ]]; then
+            log "ERROR: redis rdb_saves is not numeric: ${saves_now}"
+            return 1
+        fi
+        if [ "$in_progress" = "0" ] \
+                && [ "$status" = "ok" ] \
+                && [ "$saves_now" -gt "$saves_before" ]; then
             LAST_NOW="$last_now"
             return 0
+        fi
+        if [ "$in_progress" != "0" ] && [ "$in_progress" != "1" ]; then
+            log "ERROR: redis rdb_bgsave_in_progress is invalid: ${in_progress}"
+            return 1
+        fi
+        if [ "$status" != "ok" ] && [ "$in_progress" = "0" ]; then
+            log "ERROR: redis last BGSAVE status is ${status}"
+            return 1
         fi
         sleep 1
     done
@@ -341,42 +679,116 @@ wait_for_redis_bgsave() {
     return 1
 }
 
-trap cleanup EXIT
-trap 'on_signal INT' INT
-trap 'on_signal TERM' TERM
+create_fresh_redis_bgsave() {
+    local attempts="${LUMEN_REDIS_BGSAVE_START_ATTEMPTS:-3}"
+    local attempt bgsave_out bgsave_rc
+    case "$attempts" in
+        ''|*[!0-9]*|0)
+            log "ERROR: invalid LUMEN_REDIS_BGSAVE_START_ATTEMPTS: ${attempts}"
+            return 1
+            ;;
+    esac
 
-mark_backup_running
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if ! wait_for_redis_bgsave_idle; then
+            return 1
+        fi
+        if ! capture_redis_bgsave_baseline; then
+            return 1
+        fi
+
+        set +e
+        bgsave_out="$(redis_bgsave_start)"
+        bgsave_rc=$?
+        set -e
+        if [ "$bgsave_rc" -eq 0 ]; then
+            log "redis BGSAVE response: ${bgsave_out}"
+            if wait_for_redis_bgsave_generation "$RDB_SAVES_BEFORE"; then
+                return 0
+            fi
+            return 1
+        fi
+        if [ "$bgsave_rc" -ne 2 ]; then
+            return 1
+        fi
+        log "redis BGSAVE raced with another save after quiesce; waiting before retry ${attempt}/${attempts}"
+    done
+
+    log "ERROR: could not start a backup-owned Redis BGSAVE after ${attempts} attempts"
+    return 1
+}
+
+trap cleanup EXIT
+trap '' INT TERM HUP
 
 # 维护锁：与 install/update/uninstall 互斥；被占用时跳过本次 backup（exit 0，不让 systemd timer 报警）。
-# 受 LUMEN_BACKUP_FORCE=1 控制：强制运行（用于 update.sh 的 backup_preflight）；
-# 此时由调用方持有维护锁，本进程跳过 try-acquire。
-if command -v lumen_try_acquire_lock >/dev/null 2>&1 && [ "${LUMEN_BACKUP_FORCE:-0}" != "1" ]; then
-    LUMEN_MAINT_ROOT="${LUMEN_MAINT_ROOT:-}"
-    if [ -z "${LUMEN_MAINT_ROOT}" ]; then
-        if [ -d "/opt/lumen" ]; then
-            LUMEN_MAINT_ROOT="/opt/lumen"
-        else
-            LUMEN_MAINT_ROOT="${SCRIPT_ROOT}"
-        fi
+# updater 的 preflight 只能通过可验证的 inherited FD/token capability 借用父进程
+# 已持有的同一把锁。环境开关本身不再具有绕过能力。
+if [ -n "${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}" ]; then
+    if ! lumen_verify_borrowed_maintenance_lock "${LUMEN_DEPLOY_ROOT}"; then
+        log "ERROR: invalid borrowed maintenance lock capability"
+        exit 78
     fi
-    if ! lumen_try_acquire_lock "${LUMEN_MAINT_ROOT}" "backup.sh"; then
+    log "using verified borrowed maintenance lock (${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND})"
+elif command -v lumen_try_acquire_lock >/dev/null 2>&1; then
+    if ! lumen_try_acquire_lock "${LUMEN_DEPLOY_ROOT}" "backup.sh"; then
         log "skipped: maintenance lock held (install/update/uninstall in progress); next timer cycle will retry"
         exit 0
     fi
 fi
 
-acquire_lock
-# 注意：lumen_try_acquire_lock（上面的维护锁）会自己 `trap 'lumen_release_lock' EXIT`，
-# 这里再次 `trap cleanup EXIT` 会覆盖它 —— 但 cleanup() 内显式 fall through 调
-# `lumen_release_lock`，所以维护锁仍会被释放。change order/拆函数前请保留这条不变量。
+# Maintenance lock helpers install their own EXIT trap. Keep catchable signals
+# ignored until both locks and owner tokens are fully recorded, then restore the
+# unified cleanup handler before enabling signal exits.
 trap cleanup EXIT
+mark_backup_running
+acquire_lock
+trap cleanup EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+trap 'on_signal HUP' HUP
 mkdir -p "$PG_DIR" "$REDIS_DIR"
+PAIR_MARKER="$BACKUP_ROOT/.backup-pair.$TS.json"
+if ! backup_fsync_directory "$BACKUP_ROOT"; then
+    log "ERROR: failed to fsync backup directory creation"
+    exit 5
+fi
+
+if ! lumen_backup_recover_interrupted; then
+    log "ERROR: interrupted backup service state could not be recovered"
+    exit 70
+fi
+if [ "${BACKUP_JOURNAL_RECOVERED:-0}" -eq 1 ]; then
+    log "backup recovery consumer completed; next timer/trigger will create a new pair"
+    exit 0
+fi
+
+# Freeze every application writer before taking either side of the backup pair.
+if ! writer_snapshot="$(lumen_running_writer_services)"; then
+    log "ERROR: failed to capture the pre-backup writer state"
+    exit 70
+fi
+while IFS= read -r service; do
+    [ -n "$service" ] && ACTIVE_WRITER_SERVICES+=("$service")
+done <<< "$writer_snapshot"
+if ! lumen_backup_journal_write "writers_stopping"; then
+    exit 70
+fi
+WRITERS_STOPPED=1
+log "quiescing writers for paired backup: ${ACTIVE_WRITER_SERVICES[*]:-<none>}"
+if ! lumen_quiesce_all_writer_services; then
+    log "ERROR: failed to stop and verify every writer before backup"
+    exit 6
+fi
+if ! lumen_backup_journal_write "writers_stopped"; then
+    exit 70
+fi
 
 # ---- Postgres ----
 PG_OUT="$PG_DIR/$TS.pg.dump.gz"
 PG_TMP="$PG_OUT.tmp.$$"
 log "dumping postgres → $PG_OUT"
-PG_ERR="$(mktemp "${BACKUP_ROOT}/.pg-dump.XXXXXX.err")" || {
+PG_ERR="$(mktemp "${BACKUP_ROOT}/.pg-dump.err.XXXXXX")" || {
     log "ERROR: failed to create pg_dump error log"
     exit 5
 }
@@ -404,8 +816,18 @@ if ! gzip -t "$PG_TMP" 2>/dev/null || [ ! -s "$PG_TMP" ]; then
     rm -f "$PG_TMP" "$PG_OUT"
     exit 2
 fi
+if ! backup_fsync_file "$PG_TMP"; then
+    log "ERROR: failed to fsync postgres backup payload"
+    exit 2
+fi
+backup_failpoint after_pg_temp_fsync
 mv -f "$PG_TMP" "$PG_OUT"
 PG_TMP=""
+if ! backup_fsync_directory "$PG_DIR"; then
+    log "ERROR: failed to fsync postgres backup rename"
+    exit 2
+fi
+backup_failpoint after_pg_rename
 PG_SIZE="$(file_size "$PG_OUT")"
 log "pg dump ok size=$PG_SIZE"
 
@@ -418,57 +840,81 @@ if ! ping_out="$(redis_cli PING)" || [ "$ping_out" != "PONG" ]; then
     exit 3
 fi
 log "triggering redis BGSAVE"
-# 记录 lastsave 时间戳作为观测字段；真正完成条件看 rdb_bgsave_in_progress。
-# 只看 LASTSAVE 秒级变化不可靠：同一秒内 BGSAVE 完成会被误判超时。
-LAST_BEFORE="$(redis_cli LASTSAVE | tr -d '\r\n')"
-if ! [[ "$LAST_BEFORE" =~ ^[0-9]+$ ]]; then
-    log "ERROR: LASTSAVE returned non-numeric: ${LAST_BEFORE}"
+# A BGSAVE that started before writer quiesce may contain an older Redis view
+# than the later Postgres dump. Wait it out, then record a new generation
+# baseline and require a BGSAVE started after quiesce to complete successfully.
+if ! create_fresh_redis_bgsave; then
     exit 3
 fi
-LAST_NOW="$LAST_BEFORE"
-set +e
-bgsave_out="$(redis_bgsave_start)"
-bgsave_rc=$?
-set -e
-if [ "$bgsave_rc" -eq 0 ]; then
-    log "redis BGSAVE response: ${bgsave_out}"
-elif [ "$bgsave_rc" -eq 2 ]; then
-    log "redis BGSAVE already in progress; waiting for current save"
-else
-    exit 3
-fi
-if ! wait_for_redis_bgsave; then
-    exit 3
-fi
-log "BGSAVE done (lastsave ${LAST_BEFORE} -> ${LAST_NOW}), packaging"
+log "BGSAVE done (lastsave ${LAST_BEFORE} -> ${LAST_NOW}), packaging verified RDB"
 
-# 从 redis 容器里把 dump.rdb 和 appendonly 拷出来打包
+# 新备份只提交已验证的 dump.rdb。Redis 7 multipart AOF 仍可能在 BGSAVE 后继续
+# rotate；复制 live appendonlydir 无法证明 manifest 与 segments 属于同一时点。
 TMP_DIR="$(make_tmp_dir)"
 if ! docker_cp_redis "/data/dump.rdb" "$TMP_DIR/dump.rdb" "dump.rdb" "required"; then
     exit 4
 fi
-# appendonly 在 redis 7 可能是目录 appendonlydir/ 或旧版单文件 appendonly.aof
-if docker_cp_redis "/data/appendonlydir" "$TMP_DIR/appendonlydir" "appendonlydir" "optional"; then
-    :
-elif docker_cp_redis "/data/appendonly.aof" "$TMP_DIR/appendonly.aof" "appendonly.aof" "optional"; then
-    :
-fi
-
-if [ ! -f "$TMP_DIR/dump.rdb" ] && [ ! -d "$TMP_DIR/appendonlydir" ] && [ ! -f "$TMP_DIR/appendonly.aof" ]; then
-    log "ERROR: no redis data files extracted"
+if [ ! -f "$TMP_DIR/dump.rdb" ] || [ -L "$TMP_DIR/dump.rdb" ] \
+        || [ ! -s "$TMP_DIR/dump.rdb" ]; then
+    log "ERROR: redis dump.rdb is missing, unsafe, or empty"
     exit 4
 fi
 
-tar -czf "$REDIS_TMP" -C "$TMP_DIR" .
+tar -czf "$REDIS_TMP" -C "$TMP_DIR" dump.rdb
 if ! tar -tzf "$REDIS_TMP" >/dev/null; then
     log "ERROR: redis archive invalid, removing"
     rm -f "$REDIS_TMP" "$REDIS_OUT"
     exit 4
 fi
+REDIS_VALIDATION_DIR="$TMP_DIR/.archive-validation"
+if ! python3 "${SCRIPT_DIR}/redis_backup_archive.py" \
+        "$REDIS_TMP" "$REDIS_VALIDATION_DIR"; then
+    log "ERROR: redis archive content validation failed"
+    rm -rf "$REDIS_VALIDATION_DIR"
+    exit 4
+fi
+if ! lumen_validate_redis_rdb_file \
+        "$REDIS_CONTAINER" "$REDIS_VALIDATION_DIR/dump.rdb"; then
+    log "ERROR: redis-check-rdb rejected the archived dump.rdb"
+    rm -rf "$REDIS_VALIDATION_DIR"
+    exit 4
+fi
+rm -rf "$REDIS_VALIDATION_DIR"
+if ! backup_fsync_file "$REDIS_TMP"; then
+    log "ERROR: failed to fsync redis backup payload"
+    exit 4
+fi
+backup_failpoint after_redis_temp_fsync
 mv -f "$REDIS_TMP" "$REDIS_OUT"
 REDIS_TMP=""
+if ! backup_fsync_directory "$REDIS_DIR"; then
+    log "ERROR: failed to fsync redis backup rename"
+    exit 4
+fi
+backup_failpoint after_redis_rename
 REDIS_SIZE="$(file_size "$REDIS_OUT")"
-log "redis pack ok size=$REDIS_SIZE"
+log "redis RDB-only pack verified size=$REDIS_SIZE"
+
+if ! pair_hashes="$(
+        publish_backup_pair_marker \
+            "$PAIR_MARKER" \
+            "$BACKUP_ROOT" \
+            "$BACKUP_OPERATION_ID" \
+            "$TS" \
+            "$PG_OUT" \
+            "$REDIS_OUT" \
+            "$PG_SIZE" \
+            "$REDIS_SIZE"
+)"; then
+    log "ERROR: failed to durably commit postgres/redis backup pair"
+    exit 5
+fi
+IFS=$'\t' read -r PG_SHA256 REDIS_SHA256 <<< "$pair_hashes"
+if [ -z "$PG_SHA256" ] || [ -z "$REDIS_SHA256" ]; then
+    log "ERROR: backup pair marker did not return payload hashes"
+    exit 5
+fi
+backup_failpoint after_pair_marker
 
 # ---- Retention ----
 # 严格 YYYYMMDD-HHMMSS timestamp 提取；忽略手工 cp 进来的非时间戳文件（例如
@@ -510,12 +956,12 @@ prune_paired() {
     while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune orphan PG (no redis pair): $ts"
-        rm -f "$pg_dir/$ts.pg.dump.gz"
+        rm -f "$pg_dir/$ts.pg.dump.gz" "$BACKUP_ROOT/.backup-pair.$ts.json"
     done <<< "$orphan_pg"
     while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune orphan Redis (no pg pair): $ts"
-        rm -f "$redis_dir/$ts.redis.tgz"
+        rm -f "$redis_dir/$ts.redis.tgz" "$BACKUP_ROOT/.backup-pair.$ts.json"
     done <<< "$orphan_redis"
 
     local total excess
@@ -527,10 +973,14 @@ prune_paired() {
     printf '%s\n' "$paired" | sort | sed -n "1,${excess}p" | while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune old paired: $ts"
-        rm -f "$pg_dir/$ts.pg.dump.gz" "$redis_dir/$ts.redis.tgz"
+        rm -f \
+            "$pg_dir/$ts.pg.dump.gz" \
+            "$redis_dir/$ts.redis.tgz" \
+            "$BACKUP_ROOT/.backup-pair.$ts.json"
     done
 }
+backup_failpoint before_retention
 prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP"
 
 log "backup $TS complete"
-printf '{"timestamp":"%s","pg_size":%s,"redis_size":%s}\n' "$TS" "${PG_SIZE:-0}" "${REDIS_SIZE:-0}"
+emit_backup_result

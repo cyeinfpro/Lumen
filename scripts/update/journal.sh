@@ -12,6 +12,9 @@ lumen_update_journal_path() {
     fi
 }
 
+# shellcheck source=update/recovery/consumer.sh
+. "${UPDATE_MODULE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/recovery/consumer.sh"
+
 lumen_update_journal_store_path() {
     local module_dir="${UPDATE_MODULE_DIR:-}"
     if [ -z "${module_dir}" ]; then
@@ -35,84 +38,26 @@ print(digest.hexdigest())
 PY
 }
 
+lumen_update_durable_io_path() {
+    local module_dir="${UPDATE_MODULE_DIR:-}"
+    if [ -z "${module_dir}" ]; then
+        module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
+    printf '%s\n' "${module_dir}/durable_io.py"
+}
+
 lumen_update_copy_file_durable() {
-    python3 - "$1" "$2" <<'PY'
-import errno
-import os
-from pathlib import Path
-import stat
-import sys
-import tempfile
-
-source = Path(sys.argv[1])
-target = Path(sys.argv[2])
-
-
-def reject_unsafe_destination() -> None:
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(info.st_mode):
-        raise SystemExit(f"destination symlink is not allowed: {target}")
-    if not stat.S_ISREG(info.st_mode):
-        raise SystemExit(f"destination is not a regular file: {target}")
-
-
-reject_unsafe_destination()
-fd, temporary_raw = tempfile.mkstemp(
-    prefix=f".{target.name}.",
-    suffix=".tmp",
-    dir=target.parent,
-)
-temporary = Path(temporary_raw)
-try:
-    with source.open("rb") as source_handle, os.fdopen(fd, "wb") as target_handle:
-        for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
-            target_handle.write(chunk)
-        os.fchmod(target_handle.fileno(), 0o600)
-        target_handle.flush()
-        os.fsync(target_handle.fileno())
-    reject_unsafe_destination()
-    os.replace(temporary, target)
-    directory_fd = os.open(
-        target.parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        try:
-            os.fsync(directory_fd)
-        except OSError as exc:
-            if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
-                raise
-    finally:
-        os.close(directory_fd)
-finally:
-    temporary.unlink(missing_ok=True)
-PY
+    local helper=""
+    helper="$(lumen_update_durable_io_path)" || return 1
+    [ -f "${helper}" ] && [ ! -L "${helper}" ] || return 1
+    python3 "${helper}" copy-file "$1" "$2"
 }
 
 lumen_update_fsync_directory() {
-    python3 - "$1" <<'PY'
-import errno
-import os
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-directory_fd = os.open(
-    path,
-    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-)
-try:
-    try:
-        os.fsync(directory_fd)
-    except OSError as exc:
-        if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
-            raise
-finally:
-    os.close(directory_fd)
-PY
+    local helper=""
+    helper="$(lumen_update_durable_io_path)" || return 1
+    [ -f "${helper}" ] && [ ! -L "${helper}" ] || return 1
+    python3 "${helper}" fsync-directory "$1"
 }
 
 lumen_update_journal_capture_runtime() {
@@ -178,6 +123,9 @@ lumen_update_journal_exec() {
 
 lumen_update_journal_init() {
     local result resumed
+    if ! lumen_update_recovery_marker_write; then
+        return 1
+    fi
     result="$(
         lumen_update_journal_exec \
             init \
@@ -210,7 +158,7 @@ lumen_update_journal_export_context() {
     export TARGET_IMAGE_OVERRIDE_FILE TARGET_IMAGE_OVERRIDE_SHA256
     export TARGET_ROLLING_DIGEST TGBOT_IMAGE_READY LUMEN_IMAGE_REGISTRY
     export LUMEN_UPDATE_BUILD SKIP_TO_CLEANUP CURRENT_LINK
-    export API_HEALTH_URL WEB_HEALTH_URL UPDATE_STATE_SNAPSHOT_READY
+    export API_READY_URL API_HEALTH_URL WEB_HEALTH_URL UPDATE_STATE_SNAPSHOT_READY
     export UPDATE_ENV_SNAPSHOT UPDATE_HOST_ARTIFACT_SNAPSHOT
     export UPDATE_SNAPSHOT_LINKS_KNOWN UPDATE_SNAPSHOT_ENV_SHA256
     export UPDATE_ORIGINAL_CURRENT_PRESENT UPDATE_ORIGINAL_CURRENT_TARGET
@@ -220,7 +168,7 @@ lumen_update_journal_export_context() {
     export UPDATE_MIGRATION_STARTED UPDATE_MIGRATION_VERIFIED
     export UPDATE_MIGRATION_HEAD
     export UPDATE_RESTORE_POINT_TIMESTAMP UPDATE_RESTORE_POINT_PG
-    export UPDATE_RESTORE_POINT_REDIS
+    export UPDATE_RESTORE_POINT_REDIS UPDATE_RESTORE_POINT_PG_SIZE UPDATE_RESTORE_POINT_REDIS_SIZE UPDATE_RESTORE_POINT_PG_SHA256 UPDATE_RESTORE_POINT_REDIS_SHA256
 }
 lumen_update_journal_refresh_state() {
     lumen_update_journal_capture_runtime
@@ -267,12 +215,6 @@ lumen_update_journal_failed() {
     fi
     lumen_update_journal_refresh_state
     lumen_update_journal_exec failed "${1:-}" "${2:-1}" "${recoverable}"
-}
-
-lumen_update_journal_status() {
-    [ "${LUMEN_UPDATE_JOURNAL_READY}" = "1" ] || return 0
-    lumen_update_journal_refresh_state
-    lumen_update_journal_exec status "$1"
 }
 
 lumen_update_journal_snapshot_state() {

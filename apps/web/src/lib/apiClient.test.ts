@@ -11,6 +11,14 @@ import ts from "typescript";
 
 const source = readFileSync(new URL("./apiClient.ts", import.meta.url), "utf8");
 const http = readFileSync(new URL("./api/http.ts", import.meta.url), "utf8");
+const conversations = readFileSync(
+  new URL("./api/conversations.ts", import.meta.url),
+  "utf8",
+);
+const videoGenerations = readFileSync(
+  new URL("./api/videoGenerations.ts", import.meta.url),
+  "utf8",
+);
 const navigation = readFileSync(
   new URL("./auth/navigation.ts", import.meta.url),
   "utf8",
@@ -34,7 +42,10 @@ test("download and streaming prompt paths no longer own raw fetch calls", () => 
   doesNotMatch(source, /\bfetch\s*\(/);
   doesNotMatch(promptSource, /\bfetch\s*\(/);
   match(source, /downloadClient\.postBlob\("\/me\/export"\)/);
-  match(promptSource, /streamClient\.postJson\(path, body, signal\)/);
+  match(
+    promptSource,
+    /streamClient\.postJson\(\s*path,\s*body,\s*signal,\s*lease\.key,\s*\)/,
+  );
 });
 
 test("safe login navigation is centralized and preserves next with replace", () => {
@@ -44,16 +55,29 @@ test("safe login navigation is centralized and preserves next with replace", () 
   doesNotMatch(navigation, /location\.assign/);
 });
 
-test("video generation create takes the idempotency key per call, not module state", () => {
-  // 幂等键必须按提交操作由调用方显式传入:模块级全局会跨请求/并发/改参数重提
-  // 共享同一 key,后端指纹不同返回 409。key 的复用/释放决策在
-  // video-create-idempotency.ts(行为测试见 video-create-idempotency.test.ts)。
-  const createCall = source.indexOf("export function createVideoGeneration");
+test("video generation commands use persistent semantic idempotency without module pending state", () => {
+  const createCall = videoGenerations.indexOf(
+    "export function createVideoGeneration",
+  );
   ok(createCall >= 0);
-  match(source, /options\.idempotency_key \?\?\s*createIdempotencyKey\(\)/);
-  // 模块级待定 key 已彻底移除,不得复活。
-  doesNotMatch(source, /pendingVideoCreateIdempotencyKey/);
-  doesNotMatch(source, /let pendingVideoCreate/);
+  match(videoGenerations, /withSemanticPostIdempotency/);
+  match(videoGenerations, /video\.generation\.create/);
+  doesNotMatch(videoGenerations, /PendingVideoCreateKey|pendingVideoCreate/);
+});
+
+test("logical idempotent POSTs derive matching headers and bodies centrally", () => {
+  match(
+    videoGenerations,
+    /submitVideoGeneration[\s\S]*?idempotentPostRequest\(\{/,
+  );
+  match(
+    source,
+    /createSilentGeneration[\s\S]*?idempotentPostRequest\(body\)/,
+  );
+  match(
+    conversations,
+    /postMessage[\s\S]*?idempotentPostRequest\(body,\s*\{\s*signal:/,
+  );
 });
 
 test("cookie-changing auth flows notify other tabs before accepting an identity", () => {

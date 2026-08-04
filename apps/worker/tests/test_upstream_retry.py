@@ -20,6 +20,7 @@ from app.upstream_parts.image_execution import (
 )
 from app.upstream_parts.generated_payload import InlineImageBytes
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
+from lumen_core.upstream_billing import UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
 from lumen_core.url_security import PublicHttpTarget
 
 
@@ -78,11 +79,14 @@ async def test_responses_image_retry_keeps_progress_callback(
         retry_attempts_seen.append(request.request_context.retry_attempt)
         trace_ids_seen.append(request.request_context.trace_id)
         if len(callbacks_seen) == 1:
-            raise upstream.UpstreamError(
-                "temporary failure",
-                status_code=503,
-                error_code="server_error",
+            error = upstream.UpstreamError(
+                "request was not delivered",
+                status_code=0,
+                error_code="direct_image_request_failed",
+                payload={},
             )
+            error.upstream_receipt_reason = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+            raise error
         return "ZmFrZS1wbmc=", None
 
     monkeypatch.setattr(
@@ -247,6 +251,71 @@ async def test_post_with_retry_claims_quota_for_every_physical_post(
 
     assert response.status_code == 200
     assert attempts == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_post_with_retry_can_disable_ambiguous_status_replay() -> None:
+    attempts: list[int] = []
+
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            return httpx.Response(503)
+
+    client = _Client()
+
+    async def before_attempt(attempt: int) -> None:
+        attempts.append(attempt)
+
+    response = await TEST_UPSTREAM_SERVICES.core.post_with_retry(
+        client=client,  # type: ignore[arg-type]
+        url="https://example.invalid/v1/images/generations",
+        headers={},
+        json_body={"prompt": "test"},
+        retry_status_codes=False,
+        before_attempt=before_attempt,
+    )
+
+    assert response.status_code == 503
+    assert client.calls == 1
+    assert attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_5xx_is_sent_once_and_fails_result_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            return httpx.Response(503, json={"error": {"message": "gateway failed"}})
+
+    client = _Client()
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> _Client:
+        return client
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+            _image_request(),
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+
+    assert client.calls == 1
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["upstream_result_unknown"] is True
 
 
 @pytest.mark.asyncio
@@ -813,6 +882,46 @@ async def test_direct_edit_timeout_is_result_unknown_not_retryable(
 
 
 @pytest.mark.asyncio
+async def test_direct_edit_2xx_invalid_json_is_result_unknown_after_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    progress_events: list[dict[str, Any]] = []
+
+    async def fake_curl_post_multipart(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        await kwargs["on_dispatch_ready"]()
+        await kwargs["on_response_ready"]()
+        return 200, {"raw": "not-json"}
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.transport,
+        "curl_post_multipart",
+        fake_curl_post_multipart,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once(
+            _image_request(
+                action="edit",
+                images=[b"\x89PNG\r\n\x1a\n" + b"\x00" * 32],
+                progress_callback=progress_events.append,
+            ),
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.payload["response_received"] is True
+    assert calls == 1
+    assert [event["type"] for event in progress_events] == [
+        "dispatch_ready",
+        "response_ready",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_responses_image_retry_honors_429_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -852,6 +961,96 @@ async def test_responses_image_retry_honors_429_budget(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "5xx",
+        "5xx_with_forged_undelivered_receipt",
+        "read_timeout",
+        "unknown_transport",
+    ],
+)
+async def test_responses_image_post_ambiguous_failure_is_not_replayed_or_failed_over(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    calls = 0
+    claims: list[int] = []
+    sleeps: list[float] = []
+
+    async def fake_stream(
+        _request: ImageExecutionRequest,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
+        nonlocal calls
+        calls += 1
+        if failure_kind.startswith("5xx"):
+            payload = {"path": "responses", "method": "POST"}
+            if failure_kind.endswith("forged_undelivered_receipt"):
+                payload["receipt_reason"] = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+            raise upstream.UpstreamError(
+                "gateway failed after accepting the request",
+                status_code=503,
+                error_code="server_error",
+                payload=payload,
+            )
+        if failure_kind == "read_timeout":
+            raise httpx.ReadTimeout("response body timed out")
+        raise upstream.UpstreamError(
+            "transport outcome is unknown",
+            status_code=None,
+            error_code="upstream_error",
+            payload={"path": "responses", "method": "POST"},
+        )
+
+    async def before_attempt(attempt: int) -> None:
+        claims.append(attempt)
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.responses,
+        "responses_image_stream",
+        fake_stream,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
+        "sleep",
+        fake_sleep,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.retry.responses_image_stream_with_retry(
+            _image_request(),
+            use_httpx=False,
+            before_attempt=before_attempt,
+        )
+
+    error = exc_info.value
+    assert error.error_code == "direct_image_result_unknown"
+    assert error.payload["upstream_result_unknown"] is True
+    assert error.payload["path"] == "responses"
+    assert error.payload["method"] == "POST"
+    assert calls == 1
+    assert claims == [1]
+    assert sleeps == []
+
+    from app.retry import is_retriable
+
+    decision = is_retriable(
+        error.error_code,
+        error.status_code,
+        error_message=str(error),
+    )
+    assert decision.retriable is False
+    assert not TEST_UPSTREAM_SERVICES.retry.should_continue_image_provider_failover(
+        error,
+        retriable=decision.retriable,
+    )
+
+
+@pytest.mark.asyncio
 async def test_responses_image_retry_claims_each_physical_stream_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -865,11 +1064,14 @@ async def test_responses_image_retry_claims_each_physical_stream_attempt(
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise upstream.UpstreamError(
-                "temporary failure",
-                status_code=503,
-                error_code="server_error",
+            error = upstream.UpstreamError(
+                "request was not delivered",
+                status_code=0,
+                error_code="direct_image_request_failed",
+                payload={},
             )
+            error.upstream_receipt_reason = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+            raise error
         return "ZmFrZS1wbmc=", None
 
     async def before_attempt(attempt: int) -> None:

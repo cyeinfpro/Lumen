@@ -10,6 +10,12 @@ from typing import Any
 
 import pytest
 from PIL import Image as PILImage
+from lumen_core.upstream_billing import (
+    mark_upstream_dispatch_proven_no_cost,
+    mark_upstream_dispatch_proven_undelivered,
+    mark_upstream_dispatch_started,
+    mark_upstream_response_received,
+)
 
 from app.artifact_commit import ArtifactAdoption
 from app.storage import LocalStorage
@@ -17,8 +23,10 @@ from app.storage_writes import StorageWriteCoordinator
 from app.tasks.completion_parts import default_runtime as completion
 from app.tasks.completion_parts import tool_images
 from app.tasks.completion_parts.image_storage_runtime import (
+    COMPLETION_IMAGE_EVENT_OUTBOX_ID_KEY,
     CompletionToolImageBudget,
     CompletionToolImageCodec,
+    CompletionToolImageEventContext,
     CompletionToolImageEvents,
     CompletionToolImageRepository,
     CompletionToolImageService,
@@ -106,12 +114,38 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         assert kwargs["raw_image"] == b"raw-image"
         assert kwargs["attempt_epoch"] == 2
         assert kwargs["execution_epoch"] == 7
+        kwargs["event_context"].delivery = stage(
+            kwargs["session"],
+            kind="sse",
+            payload={
+                "data": {
+                    "completion_id": "comp-1",
+                    "message_id": "message-1",
+                    "attempt": 2,
+                    "attempt_epoch": 2,
+                    "execution_epoch": 7,
+                    "images": [expected_payload],
+                }
+            },
+        )
         await kwargs["session"].commit()
         return expected_payload
 
-    async def publish(*args: Any, **_kwargs: Any) -> None:
+    def stage(
+        _session: Any,
+        *,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any]]:
+        events.append("outbox_stage")
+        return "event-image-1", kind, payload
+
+    async def deliver(
+        _redis: Any,
+        deliveries: list[tuple[str, str, dict[str, Any]]],
+    ) -> None:
         events.append("sse_publish")
-        published_payloads.append(args[-1])
+        published_payloads.append(deliveries[0][2]["data"])
 
     @asynccontextmanager
     async def cleanup(_keys: list[str]):
@@ -154,11 +188,13 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
             write_files=write_files,
             cleanup_on_error=cleanup,
             delete_files=delete_files,
-        ),
-        events=CompletionToolImageEvents(
-            publish=publish,
-            image_event="completion.image",
-        ),
+            ),
+            events=CompletionToolImageEvents(
+                stage=stage,
+                deliver=deliver,
+                outbox_model=object(),
+                image_event="completion.image",
+            ),
     )
     monkeypatch.setattr(CompletionToolImageService, "store_tool_image", store)
 
@@ -184,6 +220,7 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
         "decode",
         "session_enter",
         "storage_orm_stage",
+        "outbox_stage",
         "commit",
         "session_exit",
         "sse_publish",
@@ -198,6 +235,186 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
             "images": [expected_payload],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_tool_image_publish_failure_keeps_committed_outbox_and_payload() -> None:
+    message = SimpleNamespace(content={})
+    deliver_calls = 0
+
+    class Row:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    class Session:
+        def __init__(self) -> None:
+            self.added: list[Any] = []
+            self.committed = False
+
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def add(self, value: Any) -> None:
+            self.added.append(value)
+
+        async def get(self, model: Any, _row_id: str, **_kwargs: Any) -> Any:
+            return message if model is MessageModel else None
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    class MessageModel:
+        pass
+
+    session = Session()
+
+    async def reserve(**_kwargs: Any) -> int:
+        return 17
+
+    async def record_usage(**_kwargs: Any) -> None:
+        return None
+
+    async def acquire_lock(_session: Any, _task_id: str) -> None:
+        return None
+
+    async def write_files(_files: list[tuple[str, bytes]]) -> list[str]:
+        return ["stored"]
+
+    @asynccontextmanager
+    async def cleanup(_keys: list[str]):
+        yield
+
+    async def delete_files(_keys: list[str]) -> None:
+        return None
+
+    def stage(
+        stage_session: Session,
+        *,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any]]:
+        row = Row(
+            id="outbox-image-1",
+            kind=kind,
+            payload={**payload, "outbox_id": "outbox-image-1"},
+            published_at=None,
+        )
+        stage_session.add(row)
+        return row.id, row.kind, row.payload
+
+    async def fail_delivery(
+        _redis: Any,
+        _deliveries: list[tuple[str, str, dict[str, Any]]],
+    ) -> None:
+        nonlocal deliver_calls
+        deliver_calls += 1
+        raise RuntimeError("redis unavailable")
+
+    service = CompletionToolImageService(
+        budget=CompletionToolImageBudget(reserve=reserve),
+        codec=CompletionToolImageCodec(
+            decode=lambda _value: b"raw-image",
+            format_and_meta=lambda _raw: (
+                "png",
+                "image/png",
+                2,
+                2,
+                None,
+                b"display",
+                (2, 2),
+                b"preview",
+                (2, 2),
+                b"thumb",
+                (2, 2),
+            ),
+            sha256=lambda _raw: "a" * 64,
+            upstream_error_type=RuntimeError,
+            bad_response_error_code="bad_response",
+        ),
+        repository=CompletionToolImageRepository(
+            session_factory=lambda: session,
+            new_id=lambda: "image-1",
+            acquire_task_lock=acquire_lock,
+            completion_model=object(),
+            superseded_error_type=RuntimeError,
+            record_usage=record_usage,
+            image_model=Row,
+            image_variant_model=Row,
+            message_model=MessageModel,
+            public_url=lambda key: f"/media/{key}",
+        ),
+        storage=CompletionToolImageStorage(
+            write_files=write_files,
+            cleanup_on_error=cleanup,
+            delete_files=delete_files,
+        ),
+        events=CompletionToolImageEvents(
+            stage=stage,
+            deliver=fail_delivery,
+            outbox_model=Row,
+            image_event="completion.image",
+        ),
+    )
+
+    payload, reserved = await service.store_and_publish_tool_image(
+        redis=object(),
+        user_id="user-1",
+        channel="task:comp-1",
+        task_id="comp-1",
+        message_id="message-1",
+        attempt=2,
+        attempt_epoch=2,
+        execution_epoch=7,
+        b64_image="encoded",
+        revised_prompt=None,
+    )
+
+    outbox = next(row for row in session.added if getattr(row, "kind", None) == "sse")
+    image = next(row for row in session.added if getattr(row, "id", None) == "image-1")
+    assert session.committed is True
+    assert deliver_calls == 1
+    assert outbox.published_at is None
+    assert payload is not None
+    assert payload[COMPLETION_IMAGE_EVENT_OUTBOX_ID_KEY] == outbox.id
+    assert image.metadata_jsonb["completion_image_event_outbox_id"] == outbox.id
+    assert message.content["images"][0]["image_id"] == "image-1"
+    assert reserved == 17
+
+
+@pytest.mark.asyncio
+async def test_tool_image_commit_before_delivery_exposes_durable_event_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, _reserved, _lease = _tool_image_commit_fixture(
+        Path("/tmp"),
+        monkeypatch,
+        outcome=ArtifactAdoption.ADOPTED,
+    )
+    context = CompletionToolImageEventContext(
+        channel="task:comp-crash",
+        attempt=2,
+    )
+    session = session_type()
+
+    payload = await service.store_tool_image(
+        session=session,
+        task_id="comp-crash",
+        attempt_epoch=2,
+        execution_epoch=7,
+        user_id="user-1",
+        message_id="message-1",
+        raw_image=_png_bytes(32, 24),
+        revised_prompt=None,
+        billing_budget_micro=100,
+        event_context=context,
+    )
+
+    assert context.delivery is not None
+    assert any(getattr(row, "kind", None) == "sse" for row in session.added)
+    assert payload[COMPLETION_IMAGE_EVENT_OUTBOX_ID_KEY] == context.delivery[0]
 
 
 @pytest.mark.asyncio
@@ -255,6 +472,111 @@ async def test_cancel_after_tool_image_settles_partial_image_usage(
     assert completion_row.tokens_in == 7
     assert completion_row.tokens_out == 23
     assert completion_row.image_output_tokens == 23
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_request", "expected"),
+    [
+        ({}, "release"),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            "settle:unknown",
+        ),
+        (
+            mark_upstream_response_received(
+                {},
+                at="2026-08-03T00:00:01+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            "settle:unknown",
+        ),
+        (
+            mark_upstream_dispatch_proven_undelivered(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            "release",
+        ),
+        (
+            mark_upstream_dispatch_proven_no_cost(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            "release",
+        ),
+    ],
+)
+async def test_zero_usage_cancel_uses_dispatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_request: dict[str, object],
+    expected: str,
+) -> None:
+    completion_row = SimpleNamespace(
+        execution_epoch=3,
+        upstream_request=upstream_request,
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+    )
+    calls: list[str] = []
+
+    async def release(_session: Any, _row: Any, *, reason: str) -> None:
+        assert reason == "cancelled"
+        calls.append("release")
+
+    async def settle(
+        _session: Any,
+        _row: Any,
+        *,
+        reason: str,
+        knowledge: str,
+    ) -> None:
+        assert reason == "cancelled"
+        calls.append(f"settle:{knowledge}")
+
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "settle_completion_unknown_upstream",
+        settle,
+    )
+
+    await completion._settle_cancelled_completion_billing(
+        object(),
+        completion_row,
+        has_partial=False,
+        input_list=None,
+        accumulated_text="",
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        tool_images=[],
+        reserved_tool_image_budget_micro=0,
+        reason="cancelled",
+    )
+
+    assert calls == [expected]
 
 
 @pytest.mark.asyncio
@@ -703,6 +1025,34 @@ async def test_tool_image_confirmed_non_adoption_removes_storage_files(
     assert reserved[0] > len(_png_bytes(32, 24))
     assert lease.released == 1
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_commit_failure_preserves_canonical_files_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, session_type, _reserved, _lease = _tool_image_commit_fixture(
+        tmp_path,
+        monkeypatch,
+        outcome=ArtifactAdoption.NOT_ADOPTED,
+    )
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await service.store_tool_image(
+            session=session_type(),
+            task_id="comp-checkpoint-retry",
+            attempt_epoch=1,
+            execution_epoch=4,
+            user_id="user-1",
+            message_id="message-1",
+            raw_image=_png_bytes(32, 24),
+            revised_prompt=None,
+            billing_budget_micro=100,
+            cleanup_created_files_on_failure=False,
+        )
+
+    assert len([path for path in tmp_path.rglob("*") if path.is_file()]) == 4
 
 
 @pytest.mark.asyncio

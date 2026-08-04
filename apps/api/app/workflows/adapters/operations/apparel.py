@@ -51,6 +51,7 @@ from ...application.apparel_workflow_rules import (
 from ...application.errors import WorkflowRequestError
 from ...application.runtime_state import WorkflowRuntimeState
 from ...application.values import dedupe_nonempty as _dedupe_nonempty
+from ..paid_idempotency import record_current_paid_operation
 from ...domain.apparel_library import (
     model_library_folder_for_age as _model_library_folder_for_age,
     normalize_age_segment as _normalize_age_segment,
@@ -302,6 +303,7 @@ async def create_apparel_model_showcase(
     )
     db.add(run)
     await db.flush()
+    record_current_paid_operation(db, run)
     for step in _seed_steps(run, user_prompt=body.user_prompt):
         db.add(step)
     product_step = await _step(db, run.id, "product_analysis")
@@ -539,6 +541,7 @@ async def create_model_candidates(
             "reopen model selection before generating new candidates",
             409,
         )
+    record_current_paid_operation(db, run)
     model_settings.status = "approved"
     model_settings.approved_at = _now()
     model_settings.approved_by = user.id

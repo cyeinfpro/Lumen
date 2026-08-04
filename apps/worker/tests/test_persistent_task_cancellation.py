@@ -418,7 +418,7 @@ async def test_reconciler_defers_cancel_when_lease_state_is_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconciler_settles_unknown_after_upstream_dispatch() -> None:
+async def test_reconciler_settles_ambiguous_dispatch_on_cancel() -> None:
     now = datetime.now(timezone.utc)
     task = SimpleNamespace(
         id="gen-dispatched",
@@ -616,8 +616,9 @@ def _dispatch_marker_state(
 
 
 @pytest.mark.asyncio
-async def test_cancel_commit_between_probe_and_marker_blocks_generation_dispatch(
-) -> None:
+async def test_cancel_commit_between_probe_and_marker_blocks_generation_dispatch() -> (
+    None
+):
     session = _CancellationInterleavingMarkerSession()
     state = _dispatch_marker_state(session)
 
@@ -662,6 +663,27 @@ async def test_proven_undelivered_marker_can_settle_cancelled_generation() -> No
         state.gen_upstream_request_snapshot["upstream_dispatch_delivery"]
         == "proven_undelivered"
     )
+    marker_sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "generations.cancel_requested_at IS NULL" not in marker_sql
+
+
+@pytest.mark.asyncio
+async def test_response_marker_can_settle_cancelled_generation() -> None:
+    session = _CancellationInterleavingMarkerSession()
+    state = _dispatch_marker_state(session)
+
+    await runner_dispatch_phase.record_generation_upstream_marker(
+        state,
+        response_received=True,
+    )
+
+    assert session.commits == 1
+    assert "upstream_response_received_at" in state.gen_upstream_request_snapshot
     marker_sql = str(
         session.statements[0].compile(
             dialect=postgresql.dialect(),
@@ -728,26 +750,23 @@ async def test_deleted_account_blocks_atomic_dispatch_marker_and_provider(
     assert "FOR UPDATE" in user_lock_sql
 
 
-class _DispatchThenUndeliveredStore:
+class _PreDispatchCancellationStore:
     def __init__(self) -> None:
         self.fence = _ActiveDispatchFenceSession()
-        self.undelivered = _TaskOnlyMarkerSession()
         self.calls = 0
 
     def session(self) -> Any:
         self.calls += 1
         if self.calls == 1:
             return self.fence
-        if self.calls == 2:
-            return self.undelivered
         raise AssertionError(f"unexpected generation session {self.calls}")
 
 
 @pytest.mark.asyncio
-async def test_cancel_after_dispatch_marker_is_recorded_as_proven_undelivered(
+async def test_cancel_after_active_user_fence_precedes_dispatch_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _DispatchThenUndeliveredStore()
+    store = _PreDispatchCancellationStore()
     state = SimpleNamespace(
         services=SimpleNamespace(
             store=store,
@@ -797,12 +816,10 @@ async def test_cancel_after_dispatch_marker_is_recorded_as_proven_undelivered(
 
     assert probes == 2
     assert upstream_calls == 0
-    assert store.fence.commits == 1
-    assert store.undelivered.commits == 1
-    assert (
-        state.gen_upstream_request_snapshot["upstream_dispatch_delivery"]
-        == "proven_undelivered"
-    )
+    assert store.calls == 1
+    assert store.fence.commits == 0
+    assert store.fence.exited is True
+    assert state.gen_upstream_request_snapshot == {}
 
 
 class _ActiveDispatchFenceSession:
@@ -840,19 +857,19 @@ class _ProgressGuardSession:
 
 class _DispatchThenProgressStore:
     def __init__(self) -> None:
-        self.fence = _ActiveDispatchFenceSession()
+        self.preflight = _ActiveDispatchFenceSession()
+        self.dispatch = _ActiveDispatchFenceSession()
         self.progress = _ProgressGuardSession()
-        self.response = _TaskOnlyMarkerSession()
         self.calls = 0
 
     def session(self) -> Any:
         self.calls += 1
         if self.calls == 1:
-            return self.fence
+            return self.preflight
         if self.calls == 2:
-            return self.progress
+            return self.dispatch
         if self.calls == 3:
-            return self.response
+            return self.progress
         raise AssertionError(f"unexpected generation session {self.calls}")
 
 
@@ -887,6 +904,11 @@ async def test_generation_dispatch_releases_fence_before_progress_epoch_guard(
         lease_lost=asyncio.Event(),
         redis=object(),
         stage_timer=SimpleNamespace(set_ms=lambda *_args: None),
+        task_deadline=asyncio.get_running_loop().time() + 1,
+        action="generate",
+        inpaint_size_override=None,
+        resolved=SimpleNamespace(size="1024x1024"),
+        reserved_provider_name=None,
     )
     inner_progress = _RecordingProgressPublisher()
     state.progress_publisher = runner_dispatch_phase._EpochGuardedProgressPublisher(
@@ -898,8 +920,11 @@ async def test_generation_dispatch_releases_fence_before_progress_epoch_guard(
         return None
 
     async def image_iter():
-        assert store.fence.commits == 1
-        assert store.fence.exited is True
+        assert store.preflight.commits == 0
+        assert store.preflight.exited is True
+        await state.progress_publisher({"type": "dispatch_ready"})
+        assert store.dispatch.commits == 1
+        assert store.dispatch.exited is True
         await state.progress_publisher(
             {"type": "provider_used", "provider": "test-provider"}
         )
@@ -909,6 +934,9 @@ async def test_generation_dispatch_releases_fence_before_progress_epoch_guard(
         return await iterator.__anext__()
 
     async def no_batch_extras(_state: Any) -> None:
+        return None
+
+    async def no_checkpoint(_state: Any) -> None:
         return None
 
     monkeypatch.setattr(
@@ -936,8 +964,16 @@ async def test_generation_dispatch_releases_fence_before_progress_epoch_guard(
         "consume_batch_extra_pairs",
         no_batch_extras,
     )
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "persist_generation_takeover_checkpoint",
+        no_checkpoint,
+    )
 
-    await asyncio.wait_for(runner_dispatch_phase.call_upstream(state), timeout=0.25)
+    await asyncio.wait_for(
+        runner_dispatch_phase.dispatch_upstream_request(state),
+        timeout=0.25,
+    )
 
     assert store.calls == 3
     assert inner_progress.events == [

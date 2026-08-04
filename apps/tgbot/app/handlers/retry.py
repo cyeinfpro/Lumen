@@ -14,7 +14,7 @@ from lumen_core.constants import MAX_MESSAGE_ATTACHMENTS
 
 from ..api_client import ApiError, LumenApi, make_idempotency_key
 from ..tracker import TaskTrack, tracker
-from ._helpers import require_message, resolution_from_size
+from ._helpers import require_message, resolution_from_size, telegram_user_id
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -29,14 +29,16 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     msg = await require_message(cb)
     if msg is None:
         return
+    actor_id = telegram_user_id(cb)
+    if actor_id is None:
+        await cb.answer("无法确认 Telegram 用户身份", show_alert=True)
+        return
 
     # 同一任务第二次点击 retry：幂等键按 (chat, gen) 固定,服务端只会回放
     # 第一次提交的任务、不会新建 —— 提前查标记,明确告知而不是静默返回旧任务
     # (或重复输出误导性的「已排队 #B」)。
     try:
-        prior_new_gen = await tracker.retry_source_new_gen(
-            "retry", msg.chat.id, gen_id
-        )
+        prior_new_gen = await tracker.retry_source_new_gen("retry", msg.chat.id, gen_id)
     except Exception as exc:  # noqa: BLE001
         # Redis 不可用：宁可放行也不要卡死用户;服务端幂等键仍是第二道防线。
         logger.warning("retry marker lookup failed gen=%s err=%r", gen_id, exc)
@@ -49,7 +51,11 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
         return
 
     try:
-        gen = await api.get_generation(msg.chat.id, gen_id)
+        gen = await api.get_generation(
+            msg.chat.id,
+            gen_id,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"读取原任务失败：{exc.message}", show_alert=True)
         return
@@ -78,7 +84,11 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
     }
 
     try:
-        result = await api.create_generation(msg.chat.id, payload)
+        result = await api.create_generation(
+            msg.chat.id,
+            payload,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"重试提交失败：{exc.message}", show_alert=True)
         return
@@ -112,6 +122,7 @@ async def on_retry(cb: CallbackQuery, api: LumenApi) -> None:
             new_gen,
             TaskTrack(
                 chat_id=msg.chat.id,
+                tg_user_id=actor_id,
                 status_message_id=status.message_id,
                 prompt=prompt,
                 params={k: v for k, v in payload.items() if k != "idempotency_key"},

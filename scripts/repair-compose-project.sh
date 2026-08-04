@@ -110,22 +110,30 @@ log_info "$(c_green '[done] project unified')"
 log_info "stack ps:"
 COMPOSE_PROJECT_NAME="${TARGET_PROJECT}" docker compose ps
 
-# 验证修复是否真的把服务带起来了：probe API healthz；起不来给清晰下一步。
-HEALTH_URL="${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
-log_info "[verify] 探测 API healthz (${HEALTH_URL})..."
-_health_ok=0
+# 验证修复是否真的可提交：API /readyz 与 Worker instance-bound health 都通过。
+READY_URL="${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}"
+log_info "[verify] 探测 API readiness (${READY_URL})..."
+_ready_ok=0
 for _i in 1 2 3 4 5 6; do
-    if curl -fsS --max-time 5 "${HEALTH_URL}" >/dev/null 2>&1; then
-        _health_ok=1
+    if curl --noproxy '*' -fsS --max-time 5 \
+            "${READY_URL}" >/dev/null 2>&1; then
+        _ready_ok=1
         break
     fi
     sleep 5
 done
-if [ "${_health_ok}" = "1" ]; then
-    log_info "$(c_green '[ok] API healthz 已就绪')"
-    log_info "下一步：从 admin 触发一键更新应可以正常完成。"
-else
-    log_warn "API healthz 30s 内未就绪。可能 worker / api 还在 cold-start。"
-    log_warn "  排查：cd ${COMPOSE_DIR} && COMPOSE_PROJECT_NAME=${TARGET_PROJECT} docker compose logs --tail=80 api"
-    log_warn "  如长期不起，参考 docs/.. §18 手动 rollback。"
+if [ "${_ready_ok}" != "1" ]; then
+    log_err "API /readyz 30s 内未就绪；修复事务未提交。"
+    log_err "  排查：cd ${COMPOSE_DIR} && COMPOSE_PROJECT_NAME=${TARGET_PROJECT} docker compose logs --tail=80 api"
+    exit 1
 fi
+if ! (
+    cd "${COMPOSE_DIR}"
+    COMPOSE_PROJECT_NAME="${TARGET_PROJECT}" docker compose exec -T worker \
+        python -m app.worker_health check >/dev/null 2>&1
+); then
+    log_err "Worker python -m app.worker_health check 未通过；修复事务未提交。"
+    exit 1
+fi
+log_info "$(c_green '[ok] API /readyz 与 Worker health 已就绪')"
+log_info "下一步：从 admin 触发一键更新应可以正常完成。"

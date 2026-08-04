@@ -60,6 +60,8 @@ class GenerationRunState:
     gen_idempotency_key: str | None = None
     gen_model: str | None = None
     gen_upstream_request_snapshot: dict[str, Any] | None = None
+    billing_admission_billable: bool | None = None
+    billing_admission_source: str | None = None
     image_request_options: dict[str, Any] = field(default_factory=dict)
 
     raw_image_route: str = "responses"
@@ -72,6 +74,8 @@ class GenerationRunState:
 
     has_partial: bool = False
     image_iter: AsyncIterator[GeneratedImageResult] | None = None
+    dispatch_marker_recorded: bool = False
+    dispatch_marker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     provider_attempt_log: list[dict[str, Any]] = field(default_factory=list)
     upstream_duration_ms: int | None = None
     requested_image_count: int = 1
@@ -100,4 +104,7 @@ class GenerationRunState:
 
     conversation_id_for_title: str | None = None
     parent_upstream_request_for_bonus: dict[str, Any] | None = None
+    dual_race_bonus_obligation_id: str | None = None
+    takeover_checkpoint_storage_key: str | None = None
+    takeover_checkpoint_storage_keys: list[str] = field(default_factory=list)
     resource_lease: Any | None = None

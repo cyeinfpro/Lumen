@@ -61,7 +61,11 @@ services:
     # 不映射到 host：api/worker/tgbot 走 lumen_backend network 即可。
     # 调试用 `docker exec lumen-pg psql ...`；外部 GUI 工具按需 ssh -L 隧道。
     volumes:
-      - ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres:/var/lib/postgresql/data
+      - type: bind
+        source: ${LUMEN_DB_ROOT:-/opt/lumendata}/postgres
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
     networks:
       - lumen_backend
     healthcheck:
@@ -84,7 +88,11 @@ services:
     # 不映射到 host：调试用 `docker exec lumen-redis redis-cli`。
     entrypoint: ["/bin/sh", "/usr/local/bin/lumen-redis-entrypoint"]
     volumes:
-      - ${LUMEN_DB_ROOT:-/opt/lumendata}/redis:/data
+      - type: bind
+        source: ${LUMEN_DB_ROOT:-/opt/lumendata}/redis
+        target: /data
+        bind:
+          create_host_path: false
       - ./deploy/redis/redis-entrypoint.sh:/usr/local/bin/lumen-redis-entrypoint:ro
     networks:
       - lumen_backend
@@ -152,9 +160,22 @@ services:
       # Restore must also run on the host because the API container has neither
       # the Docker CLI nor the socket needed by restore.sh.
       LUMEN_RESTORE_VIA_TRIGGER: "1"
+      # Telegram SSH proxies terminate inside lumen-api. Bind on the container
+      # network and advertise the Compose service name to the separate tgbot
+      # container. The dynamic SOCKS port is intentionally not published.
+      TELEGRAM_PROXY_BIND_HOST: "${TELEGRAM_PROXY_BIND_HOST:-0.0.0.0}"
+      TELEGRAM_PROXY_ADVERTISE_HOST: "${TELEGRAM_PROXY_ADVERTISE_HOST:-api}"
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup:/opt/lumendata/backup
+      - type: bind
+        source: ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage
+        target: /opt/lumendata/storage
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${LUMEN_DATA_ROOT:-/opt/lumendata}/backup
+        target: /opt/lumendata/backup
+        bind:
+          create_host_path: false
       # admin_update / admin_backups 用 _discover_scripts_dir() 定位 update/backup
       # 脚本，做 preflight 校验。镜像里不打包 scripts/，由 release 目录挂载提供。
       - ./scripts:/app/scripts:ro
@@ -163,10 +184,17 @@ services:
       # admin_storage 与 host 上的 lumen-storage-{mount,apply,test} 单元用这个目录
       # 双向通信：API 写 storage.conf / apply.trigger，host 写 status.json / last-*.json。
       # 此目录不在 /opt/lumendata 上，所以 SMB 切换时不会被卸载，避免鸡生蛋。
-      - /var/lib/lumen-storage:/var/lib/lumen-storage
+      - type: bind
+        source: /var/lib/lumen-storage
+        target: /var/lib/lumen-storage
+        bind:
+          create_host_path: false
     networks:
       - lumen_backend
     healthcheck:
+      # Keep /healthz as container liveness only. Install/update/rollback and
+      # backup/restore transaction commits require API /readyz plus the Worker
+      # module health check.
       # 用 stdlib urllib 做健康探测：镜像内不一定装了 curl/wget，依赖外部
       # 二进制会让 worker 的 depends_on: service_healthy 永远阻塞。
       # python 始终在镜像里（runtime 本体），最稳。
@@ -184,23 +212,7 @@ services:
     container_name: lumen-worker
     build: *app-build
     working_dir: /app/apps/worker
-    command:
-      - "python"
-      - "-c"
-      - |
-        import logging.config
-        import os
-
-        from arq.logs import default_log_config
-        from arq.worker import run_worker
-        from app.main import WorkerSettings
-
-        logging.config.dictConfig(default_log_config(False))
-        run_worker(
-            WorkerSettings,
-            health_check_interval=int(os.getenv("LUMEN_WORKER_HEALTH_INTERVAL", "30")),
-            health_check_key=os.getenv("LUMEN_WORKER_HEALTH_KEY", "arq:queue:health-check"),
-        )
+    command: ["python", "-m", "app.worker_health", "run"]
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
     group_add:
       - "${LUMEN_APP_STORAGE_GID:-10001}"
@@ -209,7 +221,8 @@ services:
       <<: *app-runtime-env
       IMAGE_JOB_SIDECAR_TOKEN: "${IMAGE_JOB_SIDECAR_TOKEN:-}"
       LUMEN_WORKER_HEALTH_INTERVAL: "${LUMEN_WORKER_HEALTH_INTERVAL:-30}"
-      LUMEN_WORKER_HEALTH_KEY: "${LUMEN_WORKER_HEALTH_KEY:-arq:queue:health-check}"
+      LUMEN_WORKER_HEALTH_KEY_PREFIX: "${LUMEN_WORKER_HEALTH_KEY_PREFIX:-arq:queue:health-check}"
+      LUMEN_WORKER_HEALTH_STATE_FILE: "${LUMEN_WORKER_HEALTH_STATE_FILE:-/tmp/lumen-worker-health.json}"
     restart: unless-stopped
     stop_signal: SIGTERM
     # 4K long task envelope: arq 1800s task timeout + 30s buffer; do not shorten (see §8.5).
@@ -228,22 +241,15 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage:/opt/lumendata/storage
+      - type: bind
+        source: ${LUMEN_DATA_ROOT:-/opt/lumendata}/storage
+        target: /opt/lumendata/storage
+        bind:
+          create_host_path: false
     networks:
       - lumen_backend
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - |
-          python - <<'PY'
-          import os
-          import sys
-          import redis
-
-          redis_client = redis.from_url(os.environ["REDIS_URL"])
-          key = os.getenv("LUMEN_WORKER_HEALTH_KEY", "arq:queue:health-check")
-          sys.exit(0 if redis_client.get(key) else 1)
-          PY
+      test: ["CMD", "python", "-m", "app.worker_health", "check"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -305,6 +311,10 @@ services:
       DOWNLOAD_TMP_DIR: "${DOWNLOAD_TMP_DIR:-}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       TELEGRAM_ALLOWED_USER_IDS: "${TELEGRAM_ALLOWED_USER_IDS:-}"
+      TGBOT_HEALTH_STATE_FILE: "${TGBOT_HEALTH_STATE_FILE:-/tmp/lumen-tgbot-health.json}"
+      TGBOT_HEALTH_HEARTBEAT_INTERVAL_SECONDS: "${TGBOT_HEALTH_HEARTBEAT_INTERVAL_SECONDS:-5}"
+      TGBOT_HEALTH_MAX_AGE_SECONDS: "${TGBOT_HEALTH_MAX_AGE_SECONDS:-20}"
+      TGBOT_HEALTH_READY_STABILITY_SECONDS: "${TGBOT_HEALTH_READY_STABILITY_SECONDS:-5}"
     restart: unless-stopped
     stop_grace_period: 30s
     cpus: "0.5"
@@ -318,29 +328,8 @@ services:
     networks:
       - lumen_backend
     healthcheck:
-      test:
-        - "CMD-SHELL"
-        - |
-          python - <<'PY'
-          import os
-          import sys
-          import redis
-
-          redis.from_url(os.environ["REDIS_URL"]).ping()
-          needle = b"\x00-m\x00app.main\x00"
-          self_pid = str(os.getpid())
-          for pid in os.listdir("/proc"):
-              if not pid.isdigit() or pid == self_pid:
-                  continue
-              try:
-                  with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                      if needle in fh.read():
-                          sys.exit(0)
-              except OSError:
-                  pass
-          sys.exit(1)
-          PY
-      interval: 30s
+      test: ["CMD", "python", "-m", "app.tgbot_health", "check"]
+      interval: 5s
       timeout: 5s
       retries: 3
       start_period: 20s

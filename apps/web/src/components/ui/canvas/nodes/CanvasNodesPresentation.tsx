@@ -129,7 +129,7 @@ function RunnableNodeAction({
         event.stopPropagation();
         data.onRun?.(data.definition.id);
       }}
-      className="nodrag nopan inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] transition-opacity hover:opacity-[var(--op-hover)] disabled:opacity-50 max-[1199px]:h-11 max-[1199px]:w-11"
+      className="nodrag nopan inline-flex h-8 min-h-11 w-8 min-w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] text-[var(--accent-on)] transition-opacity hover:opacity-[var(--op-hover)] disabled:opacity-50"
     >
       <RunnableNodeActionIcon failed={failed} running={running} />
     </button>

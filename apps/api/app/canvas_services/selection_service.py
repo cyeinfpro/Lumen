@@ -16,6 +16,7 @@ from .api_schemas import CanvasSelectOutputIn
 from ..db import affected_rows
 from .document_service import get_owned_canvas
 from .errors import canvas_http
+from .identity_fence import lock_canvas_write_identity
 from .version_service import selection_dict
 
 
@@ -27,6 +28,7 @@ async def select_execution_output(
     execution_id: str,
     body: CanvasSelectOutputIn,
 ) -> dict[str, Any]:
+    await lock_canvas_write_identity(db, user_id=user_id)
     canvas = await get_owned_canvas(
         db,
         user_id=user_id,

@@ -11,5 +11,5 @@ ExecStart=/usr/local/sbin/lumen-storage-mount apply
 # 2) Restart every watcher whose inotify handle points inside the swapped
 #    backup mount. A mount replacement can leave path units active but attached
 #    to the old inode, so update/warm/backup/restore must all be re-armed.
-ExecStopPost=/bin/sh -c 'rm -f /var/lib/lumen-storage/apply.trigger; for unit in lumen-update.path lumen-update-warm.path lumen-backup.path lumen-restore.path; do if ! systemctl try-restart "$$unit"; then echo "lumen-storage-apply: failed to restart $$unit" >&2; fi; done; exit 0'
+ExecStopPost=/bin/sh -c 'if [ "$SERVICE_RESULT" = success ]; then rm -f /var/lib/lumen-storage/apply.trigger; else echo "lumen-storage-apply: trigger retained after service result=$SERVICE_RESULT" >&2; fi; for unit in lumen-update.path lumen-update-warm.path lumen-backup.path lumen-restore.path; do if ! systemctl try-restart "$$unit"; then echo "lumen-storage-apply: failed to restart $$unit" >&2; fi; done; exit 0'
 TimeoutStartSec=600

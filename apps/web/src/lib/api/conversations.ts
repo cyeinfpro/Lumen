@@ -1,4 +1,5 @@
 import { apiFetch, apiFetchNoContent } from "./http";
+import { idempotentPostRequest } from "./semanticIdempotency";
 import type { NoContent } from "./http";
 import type { Intent, ImageParams, StructuredAttachment } from "../types";
 import type {
@@ -347,11 +348,10 @@ export function postMessage(
   body: PostMessageIn,
   opts: { signal?: AbortSignal } = {},
 ): Promise<PostMessageOut> {
-  return apiFetch<PostMessageOut>(`/conversations/${convId}/messages`, {
-    method: "POST",
-    signal: opts.signal,
-    body: JSON.stringify(body),
-  });
+  return apiFetch<PostMessageOut>(
+    `/conversations/${convId}/messages`,
+    idempotentPostRequest(body, { signal: opts.signal }),
+  );
 }
 
 export interface RegenerateMessageIn {

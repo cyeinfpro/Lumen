@@ -645,6 +645,7 @@ def build_app() -> FastAPI:
         allow_headers=[
             "Content-Type",
             "X-CSRF-Token",
+            "X-Lumen-Expected-User-Id",
             "Authorization",
             "Idempotency-Key",
             "Last-Event-ID",

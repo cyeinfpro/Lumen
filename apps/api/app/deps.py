@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "session"
 CSRF_COOKIE = "csrf"
 CSRF_HEADER = "X-CSRF-Token"
+EXPECTED_USER_ID_HEADER = "X-Lumen-Expected-User-Id"
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+_DURABLE_SESSION_INFO_KEY = "lumen.durable_session_id"
 SESSION_VALIDATION_FAILURE_LIMITER = RateLimiter(
     capacity=30,
     refill_per_sec=30 / 60,
@@ -50,6 +52,42 @@ def _csrf_failed() -> HTTPException:
     )
 
 
+def _identity_mismatch() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": {
+                "code": "identity_mismatch",
+                "message": "confirmed browser identity does not match the session",
+            }
+        },
+    )
+
+
+def _verify_expected_user_id(request: Request, user: User) -> None:
+    expected = request.headers.get(EXPECTED_USER_ID_HEADER)
+    if expected is None:
+        return
+    normalized = expected.strip()
+    actual = str(user.id)
+    if (
+        not normalized
+        or len(normalized) > 128
+        or normalized != actual
+    ):
+        raise _identity_mismatch()
+
+
+def _require_expected_user_id_for_browser_write(request: Request) -> None:
+    if request.method in SAFE_METHODS:
+        return
+    browser_request = bool(request.headers.get("origin")) or bool(
+        request.headers.get("sec-fetch-site")
+    )
+    if browser_request and request.headers.get(EXPECTED_USER_ID_HEADER) is None:
+        raise _identity_mismatch()
+
+
 async def get_current_user(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -62,6 +100,8 @@ async def get_current_user(
     cached_sid = getattr(request.state, "session_id", None)
     cached_user = getattr(request.state, "current_user", None)
     if cached_sid == sid and isinstance(cached_user, User):
+        _verify_expected_user_id(request, cached_user)
+        _bind_durable_session_id(db, sid)
         return cached_user
 
     _session, user = await require_active_session_user(request, db, sid)
@@ -99,9 +139,11 @@ async def require_active_session_user(
     if user.deleted_at is not None:
         await _record_failed_session_validation(request)
         raise _unauthorized("user_deleted", "user account was deleted")
+    _verify_expected_user_id(request, user)
     # attach session state for downstream handlers and avoid duplicate queries
     request.state.session_id = sid
     request.state.current_user = user
+    _bind_durable_session_id(db, sid)
     return session, user
 
 
@@ -140,6 +182,21 @@ def durable_session_id(request: Request | None) -> str | None:
     return session_id if isinstance(session_id, str) and session_id else None
 
 
+def _bind_durable_session_id(db: object, session_id: str) -> None:
+    info = getattr(db, "info", None)
+    if isinstance(info, dict):
+        info[_DURABLE_SESSION_INFO_KEY] = session_id
+
+
+def durable_session_id_from_db(db: object) -> str | None:
+    """Return the cookie-session identity bound by ``get_current_user``."""
+    info = getattr(db, "info", None)
+    if not isinstance(info, dict):
+        return None
+    session_id = info.get(_DURABLE_SESSION_INFO_KEY)
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
 async def _record_failed_session_validation(request: Request) -> None:
     try:
         ip = require_client_ip(request)
@@ -172,6 +229,7 @@ async def verify_csrf(
     if not sid:
         raise _unauthorized()
     await require_active_session_user(request, db, sid)
+    _require_expected_user_id_for_browser_write(request)
     header = request.headers.get(CSRF_HEADER)
     if not header or not verify_csrf_token(sid, header):
         raise _csrf_failed()
@@ -189,6 +247,7 @@ async def verify_csrf_session(
     if not sid:
         raise _unauthorized()
     await require_active_session_user(request, db, sid)
+    _require_expected_user_id_for_browser_write(request)
     header = request.headers.get(CSRF_HEADER)
     if not header:
         raise _csrf_failed()

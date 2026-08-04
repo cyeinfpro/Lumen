@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,6 +113,16 @@ class _Repository:
     ) -> None:
         self.reconcile_failures.append(kwargs)
 
+    @asynccontextmanager
+    async def guard_reconcile_publish_cleanup(
+        self,
+        _image_id: str,
+        *,
+        stale_fence: int,
+    ) -> AsyncIterator[bool]:
+        del stale_fence
+        yield True
+
 
 class _ArtifactStore:
     def __init__(
@@ -210,6 +222,73 @@ class _BlockingPublishArtifactStore(_ArtifactStore):
         await self.finish_publish.wait()
         self.published_keys.add(key)
         return PublishedArtifact(key=key, identity=expected, created=True)
+
+
+class _PublishedBeforeReturnArtifactStore(_ArtifactStore):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path)
+        self.publish_started = asyncio.Event()
+        self.file_published = asyncio.Event()
+        self.return_publish = asyncio.Event()
+
+    async def publish_path(
+        self,
+        _source: Path,
+        key: ArtifactKey,
+        *,
+        expected: ArtifactIdentity,
+    ) -> PublishedArtifact:
+        self.publish_calls += 1
+        self.publish_started.set()
+        self.published_keys.add(key)
+        self.file_published.set()
+        await self.return_publish.wait()
+        return PublishedArtifact(key=key, identity=expected, created=True)
+
+
+class _TakeoverRepository(_Repository):
+    def __init__(self, rows: list[Any]) -> None:
+        super().__init__(rows)
+        self.current_fence = 0
+        self.current_status = ArtifactStatus.PUBLISHING
+
+    async def claim_reconcile(
+        self,
+        _image_id: str,
+        *,
+        expected_status: ArtifactStatus,
+        fence: int,
+        **_kwargs: Any,
+    ) -> bool:
+        self.claim_calls += 1
+        if expected_status != self.current_status or fence <= self.current_fence:
+            return False
+        self.current_fence = fence
+        return True
+
+    async def transition(
+        self,
+        _image_id: str,
+        *,
+        expected: list[ArtifactStatus],
+        target: ArtifactStatus,
+        reconcile_fence: int | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        if self.current_status not in expected or reconcile_fence != self.current_fence:
+            raise AssertionError("stale reconcile transition")
+        self.transition_calls += 1
+        self.current_status = target
+        self.current_fence = 0
+
+    @asynccontextmanager
+    async def guard_reconcile_publish_cleanup(
+        self,
+        _image_id: str,
+        *,
+        stale_fence: int,
+    ) -> AsyncIterator[bool]:
+        yield self.current_fence == stale_fence
 
 
 class _Processor:
@@ -433,6 +512,55 @@ async def test_lease_loss_during_publish_cannot_leave_stale_final_key(
     assert artifacts.delete_calls == 1
     assert artifacts.published_keys == set()
     assert repository.transition_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_owner_does_not_delete_file_adopted_by_newer_ready_owner(
+    tmp_path: Path,
+) -> None:
+    row = _row(ArtifactStatus.PUBLISHING)
+    repository = _TakeoverRepository([row])
+    artifacts = _PublishedBeforeReturnArtifactStore(tmp_path)
+    guard, _renewal = _guard(*([True] * 10))
+    reconciler = ImageArtifactReconciler(
+        repository=repository,  # type: ignore[arg-type]
+        artifacts=artifacts,  # type: ignore[arg-type]
+        storage_capacity=_StorageCapacity(),
+        processor=_Processor(),  # type: ignore[arg-type]
+    )
+
+    stale_owner = asyncio.create_task(
+        reconciler.run_once(
+            now=_NOW,
+            stale_after=timedelta(seconds=0),
+            lease_guard=guard,
+        )
+    )
+    await asyncio.wait_for(artifacts.publish_started.wait(), timeout=1)
+    guard.mark_lost()
+    await asyncio.wait_for(artifacts.file_published.wait(), timeout=1)
+
+    assert await repository.claim_reconcile(
+        row.id,
+        expected_status=ArtifactStatus.PUBLISHING,
+        expected_updated_at=row.updated_at,
+        fence=2,
+    )
+    await repository.transition(
+        row.id,
+        expected=[ArtifactStatus.PUBLISHING],
+        target=ArtifactStatus.READY,
+        reconcile_fence=2,
+    )
+    artifacts.return_publish.set()
+
+    with pytest.raises(ReconcileLeaseLost, match="lost during publish"):
+        await asyncio.wait_for(stale_owner, timeout=1)
+
+    assert repository.current_status == ArtifactStatus.READY
+    assert repository.current_fence == 0
+    assert artifacts.delete_calls == 0
+    assert artifacts.published_keys == {_REFERENCE_ITEM.key}
 
 
 @pytest.mark.asyncio

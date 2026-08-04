@@ -17,11 +17,13 @@ from .credential_migration import (
     migrate_job_credentials,
 )
 from .credential_vault import CredentialVault
+from .durable_files import durable_mkdir
 from .persistence_parts import common as _persistence_common
 from .persistence_parts.references import (
     ReferencePersistenceFacade as ReferencePersistenceFacade,
 )
 from .persistence_parts.retention import RetentionFacade as RetentionFacade
+from .retention_scan_schema import ensure_retention_scan_schema
 
 
 DbAll = _persistence_common.DbAll
@@ -55,6 +57,10 @@ TERMINAL_JOB_STATUSES = frozenset(
     }
 )
 _SQLITE_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+REFERENCE_TIMESTAMP_NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+_REFERENCE_TIMESTAMP_COLUMN_SQL = (
+    "strftime('%Y-%m-%dT%H:%M:%fZ', created_at)"
+)
 
 
 def _sqlite_identifier(value: str) -> str:
@@ -68,7 +74,7 @@ def sqlite_tuning_pragmas(journal_mode: str) -> tuple[str, ...]:
     return (
         f"PRAGMA journal_mode = {mode}",
         "PRAGMA secure_delete = ON",
-        "PRAGMA synchronous = NORMAL",
+        "PRAGMA synchronous = FULL",
         "PRAGMA temp_store = MEMORY",
         "PRAGMA mmap_size = 67108864",
         "PRAGMA cache_size = -16384",
@@ -147,6 +153,30 @@ def _create_refs_table(
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS refs_created_idx ON refs(created_at)")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS refs_created_datetime_idx
+                ON refs(julianday(created_at))
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS refs_token_ext_idx
+                ON refs(token, ext)
+            """
+        )
+
+
+def _normalize_refs_created_at(conn: sqlite3.Connection) -> None:
+    normalized = _REFERENCE_TIMESTAMP_COLUMN_SQL
+    conn.execute(
+        f"""
+        UPDATE refs
+        SET created_at = {normalized}
+        WHERE {normalized} IS NOT NULL
+          AND created_at <> {normalized}
+        """  # nosec B608 - normalized is a package-owned SQL expression.
+    )
 
 
 def _refs_schema_is_current(rows: list[sqlite3.Row]) -> bool:
@@ -231,6 +261,7 @@ def _ensure_refs_auth_schema(conn: sqlite3.Connection) -> None:
                 conn.execute(f"DROP TABLE {_REFS_MIGRATION_TABLE}")
             conn.execute(f"ALTER TABLE {_REFS_REBUILD_TABLE} RENAME TO refs")
             _create_refs_table(conn)
+        _normalize_refs_created_at(conn)
     except BaseException:
         conn.execute(f"ROLLBACK TO {savepoint}")
         conn.execute(f"RELEASE {savepoint}")
@@ -248,9 +279,9 @@ def init_storage(
     auth_hash: Callable[[str], str],
     credential_vault: CredentialVault,
 ) -> None:
-    data_dir.mkdir(parents=True, exist_ok=True)
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    durable_mkdir(data_dir)
+    durable_mkdir(refs_dir)
+    durable_mkdir(db_path.parent)
     db_path.parent.chmod(0o700)
     conn = open_conn()
     try:
@@ -296,6 +327,7 @@ def init_storage(
             """
         )
         _ensure_refs_auth_schema(conn)
+        ensure_retention_scan_schema(conn)
         _ensure_column(conn, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "jobs", "execution_token", "TEXT")
         _ensure_column(conn, "jobs", "error_class", "TEXT")

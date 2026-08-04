@@ -113,6 +113,7 @@ _SENSITIVE_HEADERS = frozenset(
         "cookie",
         "set-cookie",
         "x-csrf-token",
+        "x-lumen-expected-user-id",
         "x-api-key",
         "x-auth-token",
     }

@@ -10,6 +10,8 @@ from typing import Any
 import sys
 
 import pytest
+from arq.connections import job_key_prefix, result_key_prefix
+from arq.constants import in_progress_key_prefix
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -44,6 +46,7 @@ class FakeRedis:
         self.enqueue_args: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
         self.active_job_ids: set[str] = set()
         self.result_job_ids: set[str] = set()
+        self.in_progress_job_ids: set[str] = set()
         self.deduped_job_ids: list[str] = []
         self.keys: dict[str, str] = {}
         self.deleted: list[str] = []
@@ -62,6 +65,21 @@ class FakeRedis:
 
     async def get(self, key: str):
         return self.keys.get(key)
+
+    async def exists(self, *keys: str) -> int:
+        found = 0
+        for key in keys:
+            if key.startswith(job_key_prefix):
+                found += key.removeprefix(job_key_prefix) in self.active_job_ids
+            elif key.startswith(result_key_prefix):
+                found += key.removeprefix(result_key_prefix) in self.result_job_ids
+            elif key.startswith(in_progress_key_prefix):
+                found += (
+                    key.removeprefix(in_progress_key_prefix) in self.in_progress_job_ids
+                )
+            else:
+                found += key in self.keys
+        return found
 
     async def enqueue_job(
         self,
@@ -214,6 +232,10 @@ def _fake_claim_rows(
             event.published_at is not None
             or created_at >= cutoff
             or (event.claim_until is not None and event.claim_until > now)
+            or (
+                getattr(event, "next_attempt_at", None) is not None
+                and event.next_attempt_at > now
+            )
         ):
             continue
         event.claim_owner = owner
@@ -250,6 +272,7 @@ class FakeTransaction:
                         event.published_at,
                         event.claim_owner,
                         event.claim_until,
+                        event.next_attempt_at,
                         event.delivery_attempts,
                         event.last_delivery_error,
                     ),
@@ -275,6 +298,7 @@ class FakeTransaction:
                 event.published_at,
                 event.claim_owner,
                 event.claim_until,
+                event.next_attempt_at,
                 event.delivery_attempts,
                 event.last_delivery_error,
             ) = values
@@ -688,6 +712,31 @@ async def test_publish_outbox_marks_published_only_after_enqueue_success(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_generation_outbox_accepts_enqueue_that_raises_after_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _event(event_id="event-accepted", task_id="gen-accepted")
+    _patch_session_local(monkeypatch, [event])
+
+    class AcceptThenRaiseRedis(FakeRedis):
+        async def enqueue_job(self, *args: Any, **kwargs: Any) -> Any:
+            await super().enqueue_job(*args, **kwargs)
+            raise TimeoutError("enqueue acknowledgement lost")
+
+    redis = AcceptThenRaiseRedis()
+    processed = await outbox.publish_outbox({"redis": redis})
+
+    job_id = "lumen:generation:gen-accepted:attempt:1:dispatch:1"
+    assert processed == 1
+    assert event.published_at is not None
+    assert redis.enqueued == [("run_generation", "gen-accepted")]
+    assert redis.active_job_ids == {job_id}
+    assert redis.keys[
+        generation_dispatch.dispatch_active_key("gen-accepted")
+    ].startswith("1|1|enqueued|")
+
+
+@pytest.mark.asyncio
 async def test_outbox_claim_crash_is_reclaimable_only_after_ttl() -> None:
     event = _event(event_id="event-claim-crash", task_id="gen-claim-crash")
     session = FakeSession([event])
@@ -891,6 +940,7 @@ async def test_memory_extract_enqueue_failure_stays_unpublished_then_replays(
     assert event.published_at is None
 
     redis.fail_enqueue = False
+    event.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     second_processed = await outbox.publish_outbox({"redis": redis})
 
     expected_job_id = "lumen:memory_extract:assistant-1:outbox:memory-outbox-1"
@@ -1474,6 +1524,7 @@ async def test_sse_outbox_xadd_failure_stays_unpublished_then_retries(
         key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
     )
 
+    event.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     second_processed = await outbox.publish_outbox({"redis": redis})
 
     assert second_processed == 1
@@ -1507,19 +1558,85 @@ async def test_publish_outbox_processes_batch_in_one_pass(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_publish_outbox_keeps_event_retryable_when_enqueue_fails(monkeypatch):
+async def test_generation_outbox_failed_before_write_recovers_reserved_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events = [_event(task_id="gen-1")]
     _patch_session_local(monkeypatch, events)
     redis = FakeRedis(fail_enqueue=True)
 
-    processed = await outbox.publish_outbox({"redis": redis})
+    first_processed = await outbox.publish_outbox({"redis": redis})
 
-    assert processed == 0
+    assert first_processed == 0
     assert redis.enqueued == []
     assert events[0].published_at is None
     assert not any(
         key.startswith(outbox._OUTBOX_ENQUEUE_DEDUPE_PREFIX) for key in redis.keys
     )
+
+    redis.fail_enqueue = False
+    events[0].next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    second_processed = await outbox.publish_outbox({"redis": redis})
+
+    job_id = "lumen:generation:gen-1:attempt:1:dispatch:1"
+    assert second_processed == 1
+    assert events[0].published_at is not None
+    assert redis.enqueued == [("run_generation", "gen-1")]
+    assert redis.active_job_ids == {job_id}
+    assert [call[2]["_job_id"] for call in redis.enqueue_calls] == [job_id, job_id]
+
+
+@pytest.mark.asyncio
+async def test_permanent_failures_do_not_starve_newer_outbox_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    poison_events = [
+        OutboxEvent(
+            id=f"poison-event-{index:03d}",
+            kind="completion",
+            payload={"task_id": f"poison-task-{index:03d}"},
+            created_at=now - timedelta(minutes=2) + timedelta(milliseconds=index),
+        )
+        for index in range(outbox._OUTBOX_BATCH)  # noqa: SLF001
+    ]
+    healthy_event = OutboxEvent(
+        id="healthy-event",
+        kind="completion",
+        payload={"task_id": "healthy-task"},
+        created_at=now - timedelta(minutes=1),
+    )
+    session = _patch_session_local(
+        monkeypatch,
+        [*poison_events, healthy_event],
+    )
+
+    class SelectiveFailureRedis(FakeRedis):
+        async def enqueue_job(
+            self,
+            job_name: str,
+            task_id: str,
+            *args: str,
+            **kwargs: object,
+        ) -> Any:
+            if task_id.startswith("poison-task-"):
+                raise RuntimeError("permanent enqueue failure")
+            return await super().enqueue_job(job_name, task_id, *args, **kwargs)
+
+    redis = SelectiveFailureRedis()
+    for event in poison_events:
+        redis.keys[
+            f"{outbox._OUTBOX_FAIL_COUNT_HASH}:{event.id}"  # noqa: SLF001
+        ] = str(outbox._OUTBOX_MAX_FAIL_COUNT - 1)  # noqa: SLF001
+
+    assert await outbox.publish_outbox({"redis": redis}) == 0
+    assert healthy_event.published_at is None
+
+    assert await outbox.publish_outbox({"redis": redis}) == 1
+    assert healthy_event.published_at is not None
+    assert redis.enqueued == [("run_completion", "healthy-task")]
+    assert all(event.published_at is None for event in poison_events)
+    assert len(session.dead_letters) >= 1
 
 
 @pytest.mark.asyncio
@@ -1547,6 +1664,7 @@ async def test_storyboard_outbox_dlq_keeps_redrive_until_enqueue_recovers(
     assert dead_letter.error_class == "OutboxEnqueueFailed"
     assert dead_letter.resolved_at is None
 
+    event.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     second_processed = await outbox.publish_outbox({"redis": redis})
 
     assert second_processed == 0
@@ -1554,6 +1672,7 @@ async def test_storyboard_outbox_dlq_keeps_redrive_until_enqueue_recovers(
     assert len(session.dead_letters) == 1
 
     redis.fail_enqueue = False
+    event.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     recovered_processed = await outbox.publish_outbox({"redis": redis})
 
     assert recovered_processed == 1
@@ -1786,10 +1905,6 @@ async def test_reconcile_enqueue_failure_leaves_durable_outbox_for_publisher(
     assert fake_session.commits >= 1
 
     redis.fail_enqueue = False
-    redis.keys.pop(
-        generation_dispatch.dispatch_active_key("gen-redrive"),
-        None,
-    )
     processed = await outbox.publish_outbox({"redis": redis})
 
     assert processed == 1

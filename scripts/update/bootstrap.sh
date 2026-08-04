@@ -2,19 +2,38 @@
 # Updater environment and shared state initialization.
 
 SCRIPT_ROOT="$(lumen_resolve_repo_root "${SCRIPT_DIR}")"
-ROOT="${LUMEN_UPDATE_ROOT:-${SCRIPT_ROOT}}"
 ROOT_SOURCE="script"
-if [ -z "${LUMEN_UPDATE_ROOT:-}" ] \
-        && [ "${ROOT}" != "${LUMEN_DEPLOY_ROOT}" ] \
-        && [ ! -f "${ROOT}/shared/.env" ] \
-        && [ ! -L "${ROOT}/current" ] \
+_LUMEN_UPDATE_ROOT_CANDIDATE="${_LUMEN_UPDATE_INPUT_DEPLOY_ROOT:-}"
+if [ -z "${_LUMEN_UPDATE_ROOT_CANDIDATE}" ] \
+        && [ -z "${_LUMEN_UPDATE_INPUT_UPDATE_ROOT:-}" ] \
+        && [ "${SCRIPT_ROOT}" != "${LUMEN_DEPLOY_ROOT}" ] \
+        && [ ! -f "${SCRIPT_ROOT}/shared/.env" ] \
+        && [ ! -L "${SCRIPT_ROOT}/current" ] \
         && [ -f "${LUMEN_DEPLOY_ROOT}/shared/.env" ]; then
-    ROOT="${LUMEN_DEPLOY_ROOT}"
+    _LUMEN_UPDATE_ROOT_CANDIDATE="${LUMEN_DEPLOY_ROOT}"
     ROOT_SOURCE="deploy_root"
-    if [ -z "${LUMEN_REPO_DIR:-}" ] && [ -f "${SCRIPT_ROOT}/docker-compose.yml" ]; then
-        LUMEN_REPO_DIR="${SCRIPT_ROOT}"
-        export LUMEN_REPO_DIR
-    fi
+fi
+if ! ROOT="$(
+        lumen_resolve_deploy_root \
+            "${SCRIPT_DIR}" \
+            "${_LUMEN_UPDATE_ROOT_CANDIDATE}" \
+            "${_LUMEN_UPDATE_INPUT_UPDATE_ROOT:-}"
+)"; then
+    log_error "拒绝不安全或有歧义的更新部署根目录。"
+    exit 78
+fi
+if [ "${ROOT}" != "${SCRIPT_ROOT}" ]; then
+    ROOT_SOURCE="deploy_root"
+fi
+LUMEN_DEPLOY_ROOT="${ROOT}"
+LUMEN_UPDATE_ROOT="${ROOT}"
+export LUMEN_DEPLOY_ROOT LUMEN_UPDATE_ROOT
+unset _LUMEN_UPDATE_ROOT_CANDIDATE
+if [ "${ROOT_SOURCE}" = "deploy_root" ] \
+        && [ -z "${LUMEN_REPO_DIR:-}" ] \
+        && [ -f "${SCRIPT_ROOT}/docker-compose.yml" ]; then
+    LUMEN_REPO_DIR="${SCRIPT_ROOT}"
+    export LUMEN_REPO_DIR
 fi
 SHARED_DIR="${ROOT}/shared"
 SHARED_ENV="${SHARED_DIR}/.env"
@@ -83,6 +102,8 @@ UPDATE_RESTORE_POINT_PG=""
 UPDATE_RESTORE_POINT_REDIS=""
 UPDATE_RESTORE_POINT_PG_SIZE=""
 UPDATE_RESTORE_POINT_REDIS_SIZE=""
+UPDATE_RESTORE_POINT_PG_SHA256=""
+UPDATE_RESTORE_POINT_REDIS_SHA256=""
 UPDATE_MIGRATION_STARTED=0
 UPDATE_MIGRATION_VERIFIED=0
 UPDATE_MIGRATION_HEAD=""

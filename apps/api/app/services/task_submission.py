@@ -14,6 +14,7 @@ from lumen_core.models import Conversation, Message, User
 from lumen_core.schemas import ChatParamsIn, ImageParamsIn, VideoCreateIn
 
 from ..redis_client import get_redis
+from .active_user import ActiveUserSnapshot
 from .message_submission import (
     create_assistant_task as _create_assistant_task,
     publish_assistant_task as _publish_assistant_task,
@@ -210,6 +211,7 @@ async def create_canvas_video_task(
     user: User,
     request: Request,
     metadata: dict[str, Any],
+    active_user_snapshot: ActiveUserSnapshot,
 ) -> CanvasVideoSubmission:
     publish_payload: dict[str, Any] = {}
     async with db.begin_nested():
@@ -219,6 +221,8 @@ async def create_canvas_video_task(
             user,
             context=VideoSubmissionContext(
                 request=request,
+                active_user_snapshot=active_user_snapshot,
+                idempotency_serialized=True,
                 workflow_metadata=metadata,
                 defer_commit=True,
                 deferred_publish_payload=publish_payload,

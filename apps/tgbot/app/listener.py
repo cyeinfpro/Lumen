@@ -544,6 +544,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
             bonus_id,
             TaskTrack(
                 chat_id=parent.chat_id,
+                tg_user_id=getattr(parent, "tg_user_id", None),
                 status_message_id=None,
                 prompt=parent.prompt,
                 params=parent.params,
@@ -557,9 +558,7 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
         logger.warning("bonus tracker registration failed gen=%s err=%r", bonus_id, exc)
         return
     try:
-        text = (
-            f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
-        )
+        text = f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
         bonus_status = await bot.send_message(chat_id=parent.chat_id, text=text)
         await tracker.update_status_message(bonus_id, bonus_status.message_id)
     except Exception as exc:  # noqa: BLE001
@@ -613,6 +612,7 @@ async def _resolve_succeeded_image_ids(
     = 再付一次上游的钱。查询失败必须当成可重试错误（lookup_failed=True），
     只有真的拿到空列表才算「没有图」。
     """
+    tg_user_id = getattr(track, "tg_user_id", None) or track.chat_id
     images = data.get("images")
     if isinstance(images, list) and images:
         image_ids = [
@@ -628,7 +628,11 @@ async def _resolve_succeeded_image_ids(
             "succeeded event images unparsable gen=%s raw=%r", gen_id, images
         )
     try:
-        detail = await api.get_generation(track.chat_id, gen_id)
+        detail = await api.get_generation(
+            track.chat_id,
+            gen_id,
+            tg_user_id=tg_user_id,
+        )
     except ApiError as exc:
         logger.warning("succeeded fallback get failed gen=%s err=%s", gen_id, exc)
         return [], None, True
@@ -679,6 +683,7 @@ async def _on_succeeded(
         name=f"tg-upload-heartbeat-{gen_id[:8]}",
     )
     try:
+        tg_user_id = getattr(track, "tg_user_id", None) or track.chat_id
         # 偶尔事件里没带 images（如 attached 之前的 race），fallback 查 API
         image_ids, detail, lookup_failed = await _resolve_succeeded_image_ids(
             api, gen_id, track, data
@@ -706,7 +711,11 @@ async def _on_succeeded(
         else:
             if detail is None:
                 try:
-                    detail = await api.get_generation(track.chat_id, gen_id)
+                    detail = await api.get_generation(
+                        track.chat_id,
+                        gen_id,
+                        tg_user_id=tg_user_id,
+                    )
                 except ApiError as exc:
                     logger.warning(
                         "succeeded link detail get failed gen=%s err=%s", gen_id, exc
@@ -726,7 +735,9 @@ async def _on_succeeded(
             for image_id in pending_ids:
                 try:
                     path, mime, size = await api.download_image_to_file(
-                        track.chat_id, image_id
+                        track.chat_id,
+                        image_id,
+                        tg_user_id=tg_user_id,
                     )
                 except ApiError as exc:
                     logger.warning(

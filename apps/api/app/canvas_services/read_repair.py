@@ -29,6 +29,7 @@ from lumen_core.constants import GenerationStatus, VideoGenerationStatus
 from lumen_core.models import Generation, Image, Video, VideoGeneration
 
 from .graph_resolution import find_node
+from .identity_fence import lock_canvas_write_identity
 from .run_event_service import append_run_event
 
 
@@ -516,6 +517,7 @@ async def repair_canvas_executions(
 ) -> int:
     if limit <= 0:
         return 0
+    await lock_canvas_write_identity(db, user_id=user_id)
     page_size = min(limit, 100)
     cursor_updated_at: datetime | None = None
     cursor_id: str | None = None

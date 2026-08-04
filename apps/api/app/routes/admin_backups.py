@@ -533,12 +533,6 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
                 env={
                     "BACKUP_ROOT": str(backup_root),
                     "LUMEN_BACKUP_ROOT": str(backup_root),
-                    # Manual backups are already guarded by the API operation
-                    # lock and marker files. In the containerized API path
-                    # /opt/lumen is mounted read-only, so backup.sh cannot take
-                    # the host maintenance lock and would otherwise exit 0 as
-                    # "skipped".
-                    "LUMEN_BACKUP_FORCE": "1",
                 },
             )
     except TimeoutError:

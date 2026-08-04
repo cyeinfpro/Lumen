@@ -253,14 +253,28 @@ test("download and stream clients use the typed raw transport adapters", async (
   }) as {
     streamClient: {
       url(path: string): string;
-      postJson(path: string, body: unknown): Promise<Response>;
+      postJson(
+        path: string,
+        body: unknown,
+        signal?: AbortSignal,
+        idempotencyKey?: string,
+      ): Promise<Response>;
     };
   };
 
   const blob = await downloadModule.downloadClient.postBlob("/me/export");
   equal(await blob.text(), "zip");
   equal(streamModule.streamClient.url("/prompts/enhance"), "/api/prompts/enhance");
-  await streamModule.streamClient.postJson("/prompts/enhance", { text: "x" });
+  await streamModule.streamClient.postJson(
+    "/prompts/enhance",
+    { text: "x" },
+    undefined,
+    "stream-key-1",
+  );
+  equal(
+    new Headers(calls[1]?.init.headers as HeadersInit).get("Idempotency-Key"),
+    "stream-key-1",
+  );
   deepStrictEqual(
     calls.map(({ path, init }) => [
       path,

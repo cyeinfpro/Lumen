@@ -39,6 +39,30 @@ def test_put_bytes_rejects_conflicting_existing_key(tmp_path: Path) -> None:
     assert storage.get_bytes("u/user/g/gen/orig.png") == b"first"
 
 
+def test_put_and_delete_fsync_final_directory_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Path] = []
+    original = storage_mod.fsync_directory
+
+    def tracking_fsync(path: Path) -> None:
+        calls.append(path)
+        original(path)
+
+    monkeypatch.setattr(storage_mod, "fsync_directory", tracking_fsync)
+    storage = LocalStorage(tmp_path)
+    key = "u/user/g/gen/orig.png"
+    parent = storage.path_for(key).parent
+
+    storage.put_bytes_result(key, b"image")
+    put_count = calls.count(parent)
+    assert put_count >= 1
+
+    assert storage.delete(key) is True
+    assert calls.count(parent) > put_count
+
+
 def test_put_bytes_falls_back_when_hardlink_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -17,6 +17,20 @@ def test_alembic_commits_timeout_setup_before_migration_transaction() -> None:
     assert timeout_pos < commit_pos < configure_pos
 
 
+def test_alembic_prepares_historical_concurrent_index_retry_before_run() -> None:
+    source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
+        encoding="utf-8"
+    )
+    prepare_pos = source.index("_prepare_concurrent_index_retry()")
+    run_pos = source.index("context.run_migrations()", prepare_pos)
+
+    assert prepare_pos < run_pos
+    assert 'getattr(migration_context, "_migrations_fn", None)' in source
+    assert "migration_context._migrations_fn = cached_migration_fn" in source
+    assert "scripts._upgrade_revs" in source
+    assert "scripts._downgrade_revs" in source
+
+
 def test_alembic_escapes_percent_encoded_socket_urls() -> None:
     source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
         encoding="utf-8"

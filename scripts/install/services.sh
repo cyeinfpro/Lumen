@@ -5,9 +5,44 @@
 # ---------------------------------------------------------------------------
 # F. 拉镜像 / 构建 -> 起 PG/Redis -> migrate -> bootstrap -> api/worker/web (+tgbot)
 # ---------------------------------------------------------------------------
+verify_install_release_source_commit() {
+    local manifest="$1"
+    local tag="$2"
+    local manifest_commit=""
+    manifest_commit="$(
+        lumen_release_manifest_commit "${manifest}" "${tag}" 2>/dev/null \
+            || true
+    )"
+    if [[ ! "${manifest_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+        log_error "release manifest 缺少有效的 40 位 commit_sha。"
+        return 1
+    fi
+    if [[ ! "${INSTALL_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]; then
+        log_error "正式 release 安装无法证明本地源码 commit；拒绝只校验镜像 digest。"
+        return 1
+    fi
+    if [ "${INSTALL_SOURCE_COMMIT_PROOF:-}" != "git-clean" ]; then
+        log_error "正式 release 安装源码不是 clean git commit；proof=${INSTALL_SOURCE_COMMIT_PROOF:-missing}。"
+        return 1
+    fi
+    if [ "${INSTALL_SOURCE_COMMIT}" != "${manifest_commit}" ]; then
+        log_error "安装源码 commit 与 release manifest 不一致：source=${INSTALL_SOURCE_COMMIT} manifest=${manifest_commit} tag=${tag}"
+        return 1
+    fi
+    if [ -n "${LUMEN_INSTALL_RESOLVED_COMMIT:-}" ] \
+            && [ "${LUMEN_INSTALL_RESOLVED_COMMIT}" != "${manifest_commit}" ]; then
+        log_error "raw bootstrap 绑定 commit 与 release manifest 不一致：bootstrap=${LUMEN_INSTALL_RESOLVED_COMMIT} manifest=${manifest_commit}"
+        return 1
+    fi
+    printf '%s\n' "${manifest_commit}" > "${RELEASE_DIR}/.manifest-commit"
+    log_info "安装源码 commit 已绑定 release manifest：${manifest_commit}"
+}
+
 pull_or_build_images() {
     local shared_env="${SHARED_DIR}/.env"
-    local registry current_tag release_manifest="" tgbot_image_ready=0
+    local registry current_tag release_manifest=""
+    local tgbot_enabled=0 tgbot_image_ready=0
+    local verify_release_images=0
     registry="$(env_file_get LUMEN_IMAGE_REGISTRY "${shared_env}")"
     current_tag="$(env_file_get LUMEN_IMAGE_TAG "${shared_env}")"
     if [ "${INSTALL_BUILD_FLAG}" != "1" ] && [ "${current_tag}" = "latest" ] \
@@ -34,11 +69,16 @@ pull_or_build_images() {
             fi
             log_warn "已显式允许未核验的自定义 registry。"
         else
-            release_manifest="${RELEASE_DIR}/release-manifest.json"
-            if ! lumen_fetch_release_manifest "${current_tag}" "${release_manifest}"; then
-                log_error "无法获取或校验 ${current_tag} 的 release-manifest.json。"
-                exit 1
-            fi
+            verify_release_images=1
+        fi
+        release_manifest="${RELEASE_DIR}/release-manifest.json"
+        if ! lumen_fetch_release_manifest "${current_tag}" "${release_manifest}"; then
+            log_error "无法获取或校验 ${current_tag} 的 release-manifest.json。"
+            exit 1
+        fi
+        if ! verify_install_release_source_commit \
+                "${release_manifest}" "${current_tag}"; then
+            exit 1
         fi
     fi
 
@@ -62,6 +102,7 @@ pull_or_build_images() {
                 current_tag="main"
                 export LUMEN_IMAGE_TAG="${current_tag}"
                 release_manifest=""
+                verify_release_images=0
                 if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
                     printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
                 fi
@@ -81,14 +122,18 @@ pull_or_build_images() {
             fi
         fi
         if env_key_present "${shared_env}" "TELEGRAM_BOT_TOKEN"; then
+            tgbot_enabled=1
             if lumen_retry 2 5 "docker compose pull tgbot" \
                     _install_compose --profile tgbot pull tgbot; then
                 tgbot_image_ready=1
+            elif [ "${verify_release_images}" -eq 1 ]; then
+                log_error "正式 release 的 tgbot pull 失败；拒绝复用本地同 tag 未验证镜像。"
+                exit 1
             else
                 log_warn "tgbot pull 失败，跳过 tgbot manifest 校验；主栈安装继续。"
             fi
         fi
-        if [ -n "${release_manifest}" ]; then
+        if [ -n "${release_manifest}" ] && [ "${verify_release_images}" -eq 1 ]; then
             local manifest_args=(
                 --service api
                 --service worker
@@ -96,6 +141,9 @@ pull_or_build_images() {
             )
             if [ "${tgbot_image_ready}" -eq 1 ]; then
                 manifest_args+=(--service tgbot)
+            elif [ "${tgbot_enabled}" -eq 1 ]; then
+                log_error "正式 release 已启用 tgbot，但没有可验证的本地 tgbot 镜像。"
+                exit 1
             fi
             if ! lumen_verify_release_manifest_images \
                     "${release_manifest}" "${current_tag}" "${current_tag}" \
@@ -115,11 +163,11 @@ start_infrastructure() {
     if postgres_data_initialized; then
         INSTALL_POSTGRES_DATA_PREEXISTING=1
     fi
+    INSTALL_STARTED_SERVICES+=("postgres" "redis")
     if ! _install_compose up --pull missing -d --wait postgres redis; then
         log_error "postgres / redis 启动或健康检查失败。"
         exit 1
     fi
-    INSTALL_STARTED_SERVICES+=("postgres" "redis")
     log_info "PG / Redis 已健康。"
     sync_existing_postgres_password
     emit_step_done
@@ -310,25 +358,25 @@ run_bootstrap_admin() {
 
 start_application_services() {
     emit_step_start containers "启动 API / Worker / Web（compose --wait）"
+    INSTALL_STARTED_SERVICES+=("api" "worker" "web")
     if ! _install_compose up --pull missing -d --wait api worker web; then
         log_error "api / worker / web 启动或健康检查失败。"
         exit 1
     fi
-    INSTALL_STARTED_SERVICES+=("api" "worker" "web")
 
     # tgbot 仅在 .env 提供了非空 TELEGRAM_BOT_TOKEN 时启动
     local shared_env="${SHARED_DIR}/.env"
     local bot_token
     bot_token="$(env_file_get TELEGRAM_BOT_TOKEN "${shared_env}")"
     if [ -n "${bot_token}" ]; then
-        log_info "检测到 TELEGRAM_BOT_TOKEN 非空，启动 tgbot service。"
-        if ! _install_compose --profile tgbot up --pull missing -d tgbot; then
-            log_warn "tgbot 启动失败（可能是 token 无效或网络问题）。主栈不受影响。"
+        log_info "检测到 TELEGRAM_BOT_TOKEN 非空，启动 tgbot 并等待健康。"
+        INSTALL_STARTED_SERVICES+=("tgbot")
+        if ! _install_compose --profile tgbot up --pull missing -d --wait tgbot; then
             INSTALL_TGBOT_STATUS="failed"
-        else
-            INSTALL_STARTED_SERVICES+=("tgbot")
-            INSTALL_TGBOT_STATUS="started"
+            log_error "tgbot 启动或健康检查失败（可能是 token 无效、网络问题或进程退出）。"
+            exit 1
         fi
+        INSTALL_TGBOT_STATUS="started"
     else
         log_info "未配置 TELEGRAM_BOT_TOKEN，跳过 tgbot。"
         INSTALL_TGBOT_STATUS="skipped"

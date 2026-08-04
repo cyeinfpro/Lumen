@@ -24,6 +24,14 @@ from lumen_core.schemas import (
     PosterStyleJobsOut,
 )
 
+from ..active_user import (
+    ActiveUserFenceError,
+    account_mode_from_user,
+    active_user_fence_http_error,
+    lock_active_user_snapshot,
+)
+from . import idempotency as poster_style_idempotency
+
 
 def generate_image_params(aspect_ratio: str) -> ImageParamsIn:
     return ImageParamsIn(
@@ -167,12 +175,13 @@ async def enqueue_generate_tasks(
     return task_ids, publish_jobs
 
 
-async def generate_poster_style_samples(
+async def _create_poster_style_samples(
     runtime: Any,
     *,
     body: PosterStyleGenerateIn,
     user: Any,
     db: AsyncSession,
+    operation: poster_style_idempotency.PosterStyleOperation,
     enqueue_fn: Callable[..., Awaitable[Any]] | None = None,
     publish_fn: Callable[..., Awaitable[Any]] | None = None,
 ) -> PosterStyleGenerateOut:
@@ -189,6 +198,7 @@ async def generate_poster_style_samples(
         workflow_type=runtime.WORKFLOW_TYPE_POSTER_STYLE_GENERATE,
     )
     run = WorkflowRun(
+        id=operation.record_id,
         conversation_id=conversation.id,
         user_id=user.id,
         type=runtime.WORKFLOW_TYPE_POSTER_STYLE_GENERATE,
@@ -209,6 +219,7 @@ async def generate_poster_style_samples(
                 "mood": runtime._clean_optional_text(body.mood, max_len=120),
                 "prompt": body.prompt,
             },
+            **poster_style_idempotency.operation_metadata(operation),
         },
     )
     db.add(run)
@@ -248,6 +259,15 @@ async def generate_poster_style_samples(
         body=body,
     )
     conversation.last_activity_at = runtime._now()
+    response = PosterStyleGenerateOut(
+        job_id=run.id,
+        workflow_run_id=run.id,
+        status="running",
+        requested_count=int(body.count),
+        task_ids=task_ids,
+        created_at=run.created_at,
+    )
+    poster_style_idempotency.record_response(run, operation, response)
     await db.commit()
     if publish_jobs:
         if publish_fn is None:
@@ -262,13 +282,48 @@ async def generate_poster_style_samples(
                 outbox_payloads=list(job["outbox_payloads"]),
                 outbox_rows=list(job["outbox_rows"]),
             )
-    return PosterStyleGenerateOut(
-        job_id=run.id,
-        workflow_run_id=run.id,
-        status="running",
-        requested_count=int(body.count),
-        task_ids=task_ids,
-        created_at=run.created_at,
+    return response
+
+
+async def generate_poster_style_samples(
+    runtime: Any,
+    *,
+    body: PosterStyleGenerateIn,
+    user: Any,
+    db: AsyncSession,
+    operation: poster_style_idempotency.PosterStyleOperation,
+    session_id: str | None = None,
+    enqueue_fn: Callable[..., Awaitable[Any]] | None = None,
+    publish_fn: Callable[..., Awaitable[Any]] | None = None,
+) -> PosterStyleGenerateOut:
+    expected_account_mode = account_mode_from_user(user)
+
+    async def create(
+        current_operation: poster_style_idempotency.PosterStyleOperation,
+    ) -> PosterStyleGenerateOut:
+        try:
+            snapshot = await lock_active_user_snapshot(
+                db,
+                user.id,
+                expected_account_mode,
+                session_id=session_id,
+            )
+        except ActiveUserFenceError as exc:
+            raise active_user_fence_http_error(exc) from exc
+        return await _create_poster_style_samples(
+            runtime,
+            body=body,
+            user=snapshot.user,
+            db=db,
+            operation=current_operation,
+            enqueue_fn=enqueue_fn,
+            publish_fn=publish_fn,
+        )
+
+    return await poster_style_idempotency.execute_paid_operation(
+        db,
+        operation,
+        create,
     )
 
 

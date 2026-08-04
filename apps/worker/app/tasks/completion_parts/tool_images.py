@@ -13,6 +13,7 @@ from PIL import Image as PILImage
 
 from lumen_core.context_window import count_tokens
 from lumen_core.pricing import UsageTokens
+from lumen_core.upstream_billing import decide_dispatch_evidence_billing
 
 from ... import billing as worker_billing
 from ... import completion_billing
@@ -369,6 +370,7 @@ class _CompletionUsageAccumulator:
     _round_reasoning_usage_tokens: int = 0
     _round_input_fallback_tokens: int = 0
     _round_tool_output_tokens_start: int = 0
+    _round_dispatched: bool = False
 
     def start_round(
         self,
@@ -383,6 +385,15 @@ class _CompletionUsageAccumulator:
         self._round_reasoning_usage_tokens = 0
         self._round_input_fallback_tokens = max(0, int(input_fallback_tokens or 0))
         self._round_tool_output_tokens_start = max(0, int(tool_output_tokens or 0))
+        self._round_dispatched = False
+
+    def mark_round_dispatched(self) -> None:
+        if self._round_active:
+            self._round_dispatched = True
+
+    def mark_round_proven_no_cost(self) -> None:
+        if self._round_active:
+            self._round_dispatched = False
 
     def record_usage(
         self,
@@ -391,6 +402,7 @@ class _CompletionUsageAccumulator:
         raw_usage: dict[str, Any] | None,
     ) -> None:
         current = usage.normalized()
+        self.mark_round_dispatched()
         (
             input_reported,
             output_reported,
@@ -418,7 +430,7 @@ class _CompletionUsageAccumulator:
     ) -> None:
         if not self._round_active:
             return
-        if not self._round_input_reported:
+        if self._round_dispatched and not self._round_input_reported:
             self.tokens_in += self._round_input_fallback_tokens
         reasoning_fallback = 0
         if not self._round_reasoning_reported:
@@ -438,6 +450,7 @@ class _CompletionUsageAccumulator:
         self._round_reasoning_usage_tokens = 0
         self._round_input_fallback_tokens = 0
         self._round_tool_output_tokens_start = 0
+        self._round_dispatched = False
 
     def values(self) -> tuple[int, ...]:
         return (
@@ -609,6 +622,31 @@ def _persisted_completion_tokens(completion: Any, name: str) -> int:
         return 0
 
 
+async def _settle_zero_usage_completion(
+    session: Any,
+    completion: Any,
+    *,
+    reason: str,
+) -> None:
+    decision = decide_dispatch_evidence_billing(
+        completion,
+        actual_cost_known=False,
+    )
+    if decision.released:
+        await worker_billing.release_completion(
+            session,
+            completion,
+            reason=reason,
+        )
+        return
+    await worker_billing.settle_completion_unknown_upstream(
+        session,
+        completion,
+        reason=reason,
+        knowledge=decision.knowledge.value,
+    )
+
+
 async def _settle_cancelled_completion_billing(
     session: Any,
     completion: Any,
@@ -662,7 +700,7 @@ async def _settle_cancelled_completion_billing(
         and request.input_list is None
         and not any(value > 0 for value in usage_values)
     ):
-        await worker_billing.release_completion(
+        await _settle_zero_usage_completion(
             session,
             completion,
             reason=request.reason,
@@ -718,7 +756,7 @@ async def _settle_cancelled_completion_billing(
     ):
         await worker_billing.charge_completion(session, completion)
         return
-    await worker_billing.release_completion(
+    await _settle_zero_usage_completion(
         session,
         completion,
         reason=request.reason,

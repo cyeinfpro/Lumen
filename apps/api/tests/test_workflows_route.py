@@ -7,9 +7,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
+from app.services.conversations import messages as conversation_messages
 from app.workflows.adapters import (
     apparel_scene_planner as scene_planner,
     apparel_scene_planner as scene_planner_impl,
@@ -17,14 +20,20 @@ from app.workflows.adapters import (
     library_items,
     library_materialization,
     output_sync,
+    paid_idempotency as paid_idempotency_adapter,
     serialization,
     showcase_context,
     showcase_inputs,
     showcase_orchestration,
     showcase_preflight_steps,
+    workflow_assets,
     workflow_runtime,
 )
-from app.workflows.application import model_library_tagging, showcase_prompts
+from app.workflows.application import (
+    model_library_tagging,
+    paid_idempotency,
+    showcase_prompts,
+)
 from app.workflows.application.runtime_state import WorkflowRuntimeState
 from app.workflows.adapters.operations import (
     model_library,
@@ -44,6 +53,7 @@ from app.workflows.domain import (
 )
 from app.workflows.adapters.apparel_library_reference import ReferenceProfile
 from app.workflows.domain.workflow_contracts import PublishBundle
+from app.workflows.transport.http import execution as workflow_http_execution
 from lumen_core.constants import (
     CompletionStatus,
     GenerationStatus,
@@ -88,8 +98,10 @@ class _Db:
         self.responses = responses
         self.statements: list[Any] = []
         self.added: list[Any] = []
+        self.info: dict[str, Any] = {}
         self.flushed = False
         self.committed = False
+        self.rolled_back = False
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
@@ -108,6 +120,9 @@ class _Db:
     async def commit(self) -> None:
         self.committed = True
 
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
 
 class _WorkflowDeleteDb(_Db):
     def __init__(self, responses: list[list[Any]]) -> None:
@@ -124,6 +139,292 @@ class _WorkflowRedis:
 
     async def get(self, _key: str) -> None:
         return None
+
+
+def test_paid_workflow_fingerprint_is_canonical_and_server_namespaced() -> None:
+    first = paid_idempotency.canonical_request_fingerprint(
+        paid_idempotency.POSTER_RENDERS_OPERATION,
+        {"body": {"aspects": ["1:1"], "quality_mode": "premium"}, "run": "run-1"},
+    )
+    reordered = paid_idempotency.canonical_request_fingerprint(
+        paid_idempotency.POSTER_RENDERS_OPERATION,
+        {"run": "run-1", "body": {"quality_mode": "premium", "aspects": ["1:1"]}},
+    )
+    other_operation = paid_idempotency.canonical_request_fingerprint(
+        paid_idempotency.POSTER_MASTERS_OPERATION,
+        {"run": "run-1", "body": {"quality_mode": "premium", "aspects": ["1:1"]}},
+    )
+
+    assert first == reordered
+    assert first != other_operation
+
+
+def test_paid_workflow_marker_and_task_metadata_do_not_store_raw_client_key() -> None:
+    request = paid_idempotency.paid_operation_request(
+        user_id="user-1",
+        idempotency_key="raw-client-key",
+        operation_namespace=paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION,
+        payload={"workflow_run_id": "run-1", "body": {"output_count": 4}},
+    )
+    run = SimpleNamespace(metadata_jsonb={})
+    db = _Db([])
+
+    port = paid_idempotency_adapter.SQLAlchemyPaidOperationPort(  # type: ignore[arg-type]
+        db
+    )
+    port.bind(request)
+    try:
+        paid_idempotency_adapter.record_current_paid_operation(  # type: ignore[arg-type]
+            db,
+            run,
+        )
+        task_metadata = (
+            paid_idempotency_adapter.current_paid_operation_task_metadata(  # type: ignore[arg-type]
+                db
+            )
+        )
+    finally:
+        port.clear(request)
+
+    record = run.metadata_jsonb[paid_idempotency.PAID_OPERATION_RECORDS_KEY][
+        request.client_key_hash
+    ]
+    assert record == {
+        "operation_namespace": paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION,
+        "request_fingerprint": request.request_fingerprint,
+    }
+    assert task_metadata == {
+        paid_idempotency.IDEMPOTENCY_OPERATION_NAMESPACE_KEY: (
+            paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION
+        ),
+        paid_idempotency.IDEMPOTENCY_REQUEST_FINGERPRINT_KEY: (
+            request.request_fingerprint
+        ),
+        paid_idempotency.IDEMPOTENCY_CLIENT_KEY_HASH: request.client_key_hash,
+    }
+    assert "raw-client-key" not in repr(run.metadata_jsonb)
+    assert "raw-client-key" not in repr(task_metadata)
+    assert db.info == {}
+
+
+def test_paid_workflow_session_bindings_are_isolated() -> None:
+    first = paid_idempotency.paid_operation_request(
+        user_id="user-1",
+        idempotency_key="request-1",
+        operation_namespace=paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION,
+        payload={"workflow_run_id": "run-1"},
+    )
+    second = paid_idempotency.paid_operation_request(
+        user_id="user-2",
+        idempotency_key="request-2",
+        operation_namespace=paid_idempotency.POSTER_RENDERS_OPERATION,
+        payload={"workflow_run_id": "run-2"},
+    )
+    first_db = _Db([])
+    second_db = _Db([])
+    first_port = paid_idempotency_adapter.SQLAlchemyPaidOperationPort(  # type: ignore[arg-type]
+        first_db
+    )
+    second_port = paid_idempotency_adapter.SQLAlchemyPaidOperationPort(  # type: ignore[arg-type]
+        second_db
+    )
+
+    first_port.bind(first)
+    second_port.bind(second)
+    first_port.clear(first)
+
+    assert (
+        paid_idempotency_adapter.current_paid_operation_task_metadata(  # type: ignore[arg-type]
+            first_db
+        )
+        == {}
+    )
+    assert paid_idempotency_adapter.current_paid_operation_task_metadata(  # type: ignore[arg-type]
+        second_db
+    ) == paid_idempotency.paid_operation_task_metadata(second)
+    second_port.clear(second)
+
+
+@pytest.mark.asyncio
+async def test_paid_workflow_replays_and_rejects_key_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_lock(*_args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(paid_idempotency_adapter, "lock_user_key", no_lock)
+    db = _Db([])
+    user = SimpleNamespace(id="user-1", account_mode="wallet")
+
+    async def lock_snapshot(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user=user, account_mode="wallet")
+
+    monkeypatch.setattr(
+        workflow_http_execution,
+        "lock_active_user_snapshot",
+        lock_snapshot,
+    )
+    run = SimpleNamespace(
+        id="run-1",
+        user_id=user.id,
+        status="running",
+        current_step="showcase_generation",
+        metadata_jsonb={},
+    )
+    action_calls = 0
+    replay_calls = 0
+
+    async def action() -> dict[str, str]:
+        nonlocal action_calls
+        action_calls += 1
+        paid_idempotency_adapter.record_current_paid_operation(  # type: ignore[arg-type]
+            db,
+            run,
+        )
+        return {"workflow_run_id": run.id, "source": "created"}
+
+    async def replay(existing: Any) -> dict[str, str]:
+        nonlocal replay_calls
+        replay_calls += 1
+        assert existing is run
+        return {"workflow_run_id": existing.id, "source": "replay"}
+
+    common = {
+        "operation_namespace": paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION,
+        "request_payload": {
+            "workflow_run_id": run.id,
+            "body": {"output_count": 4},
+        },
+        "idempotency_key": "workflow-request-1",
+        "idempotency_user": user,
+        "idempotency_db": db,
+        "replay": replay,
+    }
+    first = await workflow_http_execution.execute_paid_workflow_action(
+        action,
+        **common,
+    )
+    db.rows = [run]
+    second = await workflow_http_execution.execute_paid_workflow_action(
+        action,
+        **common,
+    )
+
+    assert first["source"] == "created"
+    assert second["source"] == "replay"
+    assert action_calls == 1
+    assert replay_calls == 1
+    assert db.info == {}
+
+    with pytest.raises(HTTPException) as payload_conflict:
+        await workflow_http_execution.execute_paid_workflow_action(
+            action,
+            **{
+                **common,
+                "request_payload": {
+                    "workflow_run_id": run.id,
+                    "body": {"output_count": 8},
+                },
+            },
+        )
+    assert payload_conflict.value.status_code == 409
+    assert payload_conflict.value.detail["error"]["code"] == "idempotency_conflict"
+
+    with pytest.raises(HTTPException) as operation_conflict:
+        await workflow_http_execution.execute_paid_workflow_action(
+            action,
+            **{
+                **common,
+                "operation_namespace": paid_idempotency.POSTER_RENDERS_OPERATION,
+            },
+        )
+    assert operation_conflict.value.status_code == 409
+    assert operation_conflict.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_paid_workflow_replays_after_ambiguous_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_lock(*_args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(paid_idempotency_adapter, "lock_user_key", no_lock)
+    db = _Db([])
+    user = SimpleNamespace(id="user-1", account_mode="wallet")
+
+    async def lock_snapshot(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user=user, account_mode="wallet")
+
+    monkeypatch.setattr(
+        workflow_http_execution,
+        "lock_active_user_snapshot",
+        lock_snapshot,
+    )
+    run = SimpleNamespace(
+        id="run-ambiguous",
+        user_id=user.id,
+        metadata_jsonb={},
+    )
+    action_calls = 0
+    replay_calls = 0
+
+    async def action() -> None:
+        nonlocal action_calls
+        action_calls += 1
+        paid_idempotency_adapter.record_current_paid_operation(  # type: ignore[arg-type]
+            db,
+            run,
+        )
+        db.rows = [run]
+        raise IntegrityError("INSERT", {}, RuntimeError("duplicate task"))
+
+    async def replay(existing: Any) -> dict[str, str]:
+        nonlocal replay_calls
+        replay_calls += 1
+        return {"workflow_run_id": existing.id}
+
+    result = await workflow_http_execution.execute_paid_workflow_action(
+        action,
+        operation_namespace=paid_idempotency.APPAREL_SHOWCASE_IMAGES_OPERATION,
+        request_payload={
+            "workflow_run_id": run.id,
+            "body": {"output_count": 4},
+        },
+        idempotency_key="ambiguous-request",
+        idempotency_user=user,
+        idempotency_db=db,
+        replay=replay,
+    )
+
+    assert result == {"workflow_run_id": run.id}
+    assert action_calls == 1
+    assert replay_calls == 1
+    assert db.rolled_back is True
+    assert db.info == {}
+
+
+@pytest.mark.asyncio
+async def test_paid_workflow_requires_idempotency_key() -> None:
+    async def action() -> None:
+        raise AssertionError("missing idempotency key must reject before the action")
+
+    async def replay(_run: Any) -> None:
+        raise AssertionError("missing idempotency key must not replay")
+
+    with pytest.raises(HTTPException) as excinfo:
+        await workflow_http_execution.execute_paid_workflow_action(
+            action,
+            operation_namespace=paid_idempotency.APPAREL_CREATE_OPERATION,
+            request_payload={"body": {}},
+            idempotency_key=None,
+            idempotency_user=SimpleNamespace(id="user-1"),
+            idempotency_db=_Db([]),
+            replay=replay,
+        )
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["error"]["code"] == "idempotency_key_required"
 
 
 def test_model_candidates_mvp_requires_three_candidates() -> None:
@@ -5214,6 +5515,113 @@ def test_job_item_out_marks_dual_race_bonus_as_free() -> None:
     assert item.billing_free is True
     assert item.billing_label == "free"
     assert item.billing_exempt_reason == "dual_race_loser"
+
+
+@pytest.mark.parametrize(
+    "serializer",
+    [
+        conversation_messages.image_to_out,
+        workflow_assets.image_to_out,
+    ],
+)
+def test_image_out_preserves_billable_dual_race_bonus(
+    serializer: Any,
+) -> None:
+    image = SimpleNamespace(
+        id="bonus-image-billable",
+        source="generated",
+        parent_image_id=None,
+        owner_generation_id="generation-bonus",
+        width=1024,
+        height=1024,
+        mime="image/png",
+        blurhash=None,
+        metadata_jsonb={
+            "is_dual_race_bonus": True,
+            "billing_free": False,
+            "billing_label": "billable",
+            "billing_exempt_reason": None,
+        },
+    )
+
+    item = serializer(image)
+
+    assert item.is_dual_race_bonus is True
+    assert item.billing_free is False
+    assert item.billing_label == "billable"
+
+
+def test_job_item_out_preserves_billable_dual_race_bonus() -> None:
+    item = model_library._job_item_out(  # noqa: SLF001
+        image_id="bonus-image-billable",
+        image_out=None,
+        saved_item_id=None,
+        age_segment="adult",
+        gender="female",
+        style_tags=[],
+        appearance_direction="east_asian",
+        image_meta={
+            "is_dual_race_bonus": True,
+            "billing_free": False,
+            "billing_label": "billable",
+        },
+    )
+
+    assert item.is_dual_race_bonus is True
+    assert item.billing_free is False
+    assert item.billing_label == "billable"
+
+
+@pytest.mark.parametrize(
+    "serializer",
+    [
+        conversation_messages.image_to_out,
+        workflow_assets.image_to_out,
+    ],
+)
+def test_image_out_preserves_legacy_bonus_free_fallback(
+    serializer: Any,
+) -> None:
+    image = SimpleNamespace(
+        id="legacy-bonus-image",
+        source="generated",
+        parent_image_id=None,
+        owner_generation_id="legacy-generation",
+        width=1024,
+        height=1024,
+        mime="image/png",
+        blurhash=None,
+        metadata_jsonb={
+            "is_dual_race_bonus": True,
+            "billing_label": "free",
+            "billing_exempt_reason": "dual_race_loser",
+        },
+    )
+
+    item = serializer(image)
+
+    assert item.is_dual_race_bonus is True
+    assert item.billing_free is True
+
+
+def test_job_item_out_preserves_legacy_bonus_free_fallback() -> None:
+    item = model_library._job_item_out(  # noqa: SLF001
+        image_id="legacy-bonus-image",
+        image_out=None,
+        saved_item_id=None,
+        age_segment="adult",
+        gender="female",
+        style_tags=[],
+        appearance_direction="east_asian",
+        image_meta={
+            "is_dual_race_bonus": True,
+            "billing_label": "free",
+            "billing_exempt_reason": "dual_race_loser",
+        },
+    )
+
+    assert item.is_dual_race_bonus is True
+    assert item.billing_free is True
 
 
 def test_normalize_tagged_age_recognizes_aliases() -> None:

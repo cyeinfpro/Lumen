@@ -490,6 +490,14 @@ class OutboxEvent(Base, TimestampMixin):
             postgresql_where=text("published_at IS NULL"),
             sqlite_where=text("published_at IS NULL"),
         ),
+        Index(
+            "ix_outbox_due",
+            "next_attempt_at",
+            "created_at",
+            "id",
+            postgresql_where=text("published_at IS NULL"),
+            sqlite_where=text("published_at IS NULL"),
+        ),
         CheckConstraint(
             "delivery_attempts >= 0",
             name="ck_outbox_events_delivery_attempts",
@@ -506,6 +514,9 @@ class OutboxEvent(Base, TimestampMixin):
     )
     claim_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
     claim_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     delivery_attempts: Mapped[int] = mapped_column(

@@ -462,7 +462,7 @@ def test_write_marker_claims_exclusively_while_live(
     """
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
-    started = "2026-08-02T00:00:00+00:00"
+    started = datetime.now(timezone.utc).isoformat()
 
     assert (
         admin_update._write_marker(111, started, unit="lumen-update-runner.service")
@@ -488,7 +488,13 @@ def test_write_marker_replaces_stale_marker(
         encoding="utf-8",
     )
 
-    assert admin_update._write_marker(333, "2026-08-02T00:00:00+00:00") is True
+    assert (
+        admin_update._write_marker(
+            333,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        is True
+    )
     text = marker.read_text(encoding="utf-8")
     assert "pid=333" in text
 
@@ -500,9 +506,10 @@ def test_write_marker_refuses_live_backup_marker(
     backup_root = tmp_path / "backup"
     backup_root.mkdir()
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    started = datetime.now(timezone.utc).isoformat()
     (backup_root / ".backup.running").write_text(
         "pid=0\n"
-        "started_at=2026-08-02T00:00:00+00:00\n"
+        f"started_at={started}\n"
         "unit=lumen-backup-runner.service\n",
         encoding="utf-8",
     )
@@ -510,7 +517,7 @@ def test_write_marker_refuses_live_backup_marker(
     assert (
         admin_update._write_marker(
             333,
-            "2026-08-02T00:01:00+00:00",
+            started,
             unit="lumen-update-runner.service",
         )
         is False

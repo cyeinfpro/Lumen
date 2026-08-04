@@ -6,6 +6,10 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
+import stat
+import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +27,15 @@ from app.images.adapters.filesystem_store import ArtifactStoreError
 from app.images.adapters.filesystem_store import (
     ArtifactConflict,
     FileSystemArtifactStore,
+)
+from app.images.adapters.filesystem_store_parts import (
+    atomic_publish as filesystem_atomic_publish_module,
+)
+from app.images.adapters.filesystem_store_parts import (
+    objects as filesystem_objects_module,
+)
+from app.images.adapters.filesystem_store_parts import (
+    publish as filesystem_publish_module,
 )
 from app.images.adapters.local_capacity import (
     CapacityExceeded,
@@ -99,6 +112,7 @@ class _Capacity:
 class _Repository:
     def __init__(self) -> None:
         self.rows: dict[str, Image] = {}
+        self.adopt_calls = 0
 
     def _touch(self, row: Image) -> Image:
         now = datetime.now(timezone.utc)
@@ -191,6 +205,7 @@ class _Repository:
         session_id: str | None = None,
     ) -> Image:
         del session_id
+        self.adopt_calls += 1
         row = self.rows[image_id]
         intent = (row.artifact_manifest_jsonb or {}).get("storage_intent", {})
         assert row.user_id == user_id
@@ -360,6 +375,71 @@ def _identity_for(payload: bytes) -> ArtifactIdentity:
     )
 
 
+def _publish_temp_paths(destination: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in destination.parent.iterdir()
+        if path.name.startswith(filesystem_publish_module.PUBLISH_TEMP_PREFIX)
+        and path.name.endswith(filesystem_publish_module.PUBLISH_TEMP_SUFFIX)
+    )
+
+
+class _OSProxy:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+class _FailingDirectoryOpenOS(_OSProxy):
+    def __init__(self, directory: Path, error: int = errno.EIO) -> None:
+        self.directory = directory
+        self.error = error
+
+    def open(
+        self,
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None and Path(path) == self.directory:
+            raise OSError(
+                self.error,
+                "injected directory sync open failure",
+                path,
+            )
+        return os.open(path, flags, mode, dir_fd=dir_fd)
+
+
+class _SourceLinkUnsupportedOS(_OSProxy):
+    def __init__(self, source: Path) -> None:
+        self.source = source
+
+    def link(
+        self,
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        if Path(source) == self.source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        os.link(source, destination, *args, **kwargs)
+
+
+def _fail_directory_sync_open(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
+    *,
+    error: int = errno.EIO,
+) -> None:
+    monkeypatch.setattr(
+        filesystem_objects_module,
+        "os",
+        _FailingDirectoryOpenOS(directory, error),
+    )
+
+
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "image_artifact_migration_under_test",
@@ -451,6 +531,159 @@ async def test_artifact_store_rejects_symlink_parent(tmp_path: Path) -> None:
         await store.identity(ArtifactKey("u/user-1/uploads/image.png"))
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        errno.EACCES,
+        errno.EIO,
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    ],
+)
+def test_directory_fsync_open_failure_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: int,
+) -> None:
+    with monkeypatch.context() as failure:
+        _fail_directory_sync_open(failure, tmp_path, error=error)
+        with pytest.raises(OSError) as exc_info:
+            filesystem_objects_module.fsync_directory(tmp_path)
+
+    assert exc_info.value.errno == error
+
+
+def test_directory_fsync_unsupported_uses_syncfs_equivalent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    syncfs_calls: list[int] = []
+
+    def unsupported_directory_fsync(_fd: int) -> None:
+        raise OSError(errno.EINVAL, "directory fsync unsupported")
+
+    monkeypatch.setattr(
+        filesystem_objects_module.os, "fsync", unsupported_directory_fsync
+    )
+    monkeypatch.setattr(
+        filesystem_objects_module,
+        "_sync_filesystem",
+        syncfs_calls.append,
+    )
+
+    filesystem_objects_module.fsync_directory(tmp_path)
+
+    assert len(syncfs_calls) == 1
+
+
+def test_hardlink_publish_requires_directory_durability_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"hardlink durability"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/hardlink.bin")
+    destination = tmp_path / key.value
+    destination.parent.mkdir(parents=True)
+    expected = _identity_for(payload)
+
+    with monkeypatch.context() as failure:
+        _fail_directory_sync_open(failure, destination.parent)
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+        assert destination.read_bytes() == payload
+        assert source.read_bytes() == payload
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+
+    published = store._publish_path_sync(source, key, expected)  # noqa: SLF001
+    assert published.created is False
+    assert source.exists()
+
+
+def test_rename_install_requires_directory_durability_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"rename durability"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/rename.bin")
+    destination = tmp_path / key.value
+    destination.parent.mkdir(parents=True)
+    expected = _identity_for(payload)
+
+    def rename_noreplace(source_path: Path, destination_path: Path) -> bool:
+        source_path.rename(destination_path)
+        return True
+
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            filesystem_publish_module,
+            "os",
+            _SourceLinkUnsupportedOS(source),
+        )
+        failure.setattr(
+            filesystem_atomic_publish_module,
+            "_rename_noreplace",
+            rename_noreplace,
+        )
+        _fail_directory_sync_open(failure, destination.parent)
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+        assert destination.read_bytes() == payload
+        assert source.read_bytes() == payload
+        assert _publish_temp_paths(destination) == []
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+
+    published = store._publish_path_sync(source, key, expected)  # noqa: SLF001
+    assert published.created is False
+    assert source.exists()
+
+
+def test_copy_install_requires_directory_durability_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"copy durability"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/copy.bin")
+    destination = tmp_path / key.value
+    destination.parent.mkdir(parents=True)
+    expected = _identity_for(payload)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            filesystem_publish_module,
+            "os",
+            _SourceLinkUnsupportedOS(source),
+        )
+        failure.setattr(
+            filesystem_atomic_publish_module,
+            "_rename_noreplace",
+            lambda _source, _destination: False,
+        )
+        _fail_directory_sync_open(failure, destination.parent)
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+        assert destination.read_bytes() == payload
+        assert source.read_bytes() == payload
+        assert destination.stat().st_ino != source.stat().st_ino
+        assert _publish_temp_paths(destination) == []
+        with pytest.raises(OSError, match="directory sync open failure"):
+            store._publish_path_sync(source, key, expected)  # noqa: SLF001
+
+    published = store._publish_path_sync(source, key, expected)  # noqa: SLF001
+    assert published.created is False
+    assert source.exists()
+
+
 @pytest.mark.asyncio
 async def test_copy_fallback_concurrent_publish_resolves_identical_winner(
     tmp_path: Path,
@@ -463,20 +696,31 @@ async def test_copy_fallback_concurrent_publish_resolves_identical_winner(
     key = ArtifactKey("u/user-1/uploads/shared.bin")
     barrier = threading.Barrier(2)
     original_copy = FileSystemArtifactStore._copy_exclusive
+    original_link = os.link
     winner_metrics: list[str] = []
 
-    def unsupported_link(_source: Path, _destination: Path) -> None:
-        raise OSError(errno.EXDEV, "cross-device link")
+    def unsupported_source_link(
+        link_source: Path,
+        destination: Path,
+    ) -> None:
+        if Path(link_source) == source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, destination)
 
     def racing_copy(copy_source: Path, destination: Path) -> None:
         barrier.wait(timeout=2)
         original_copy(copy_source, destination)
 
-    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(os, "link", unsupported_source_link)
     monkeypatch.setattr(
         FileSystemArtifactStore,
         "_copy_exclusive",
         staticmethod(racing_copy),
+    )
+    monkeypatch.setattr(
+        filesystem_atomic_publish_module,
+        "RENAME_NOREPLACE_API",
+        None,
     )
     monkeypatch.setattr(
         filesystem_store_module,
@@ -490,8 +734,91 @@ async def test_copy_fallback_concurrent_publish_resolves_identical_winner(
     )
 
     assert sorted((first.created, second.created)) == [False, True]
-    assert (tmp_path / key.value).read_bytes() == payload
+    destination = tmp_path / key.value
+    assert destination.read_bytes() == payload
+    assert _publish_temp_paths(destination) == []
     assert winner_metrics == ["filesystem"]
+
+
+@pytest.mark.asyncio
+async def test_existing_winner_cleans_crash_residual_publish_temp(
+    tmp_path: Path,
+) -> None:
+    payload = b"existing complete winner"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/existing-winner.bin")
+    destination = tmp_path / key.value
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(payload)
+    stale_temp = destination.parent / (
+        f"{filesystem_publish_module.PUBLISH_TEMP_PREFIX}crashed"
+        f"{filesystem_publish_module.PUBLISH_TEMP_SUFFIX}"
+    )
+    stale_temp.write_bytes(payload)
+
+    published = await store.publish_path(
+        source,
+        key,
+        expected=_identity_for(payload),
+    )
+
+    assert published.created is False
+    assert destination.read_bytes() == payload
+    assert not stale_temp.exists()
+
+
+@pytest.mark.asyncio
+async def test_copy_fallback_concurrent_different_publish_preserves_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = (b"first concurrent artifact", b"second concurrent artifact")
+    sources = (tmp_path / "first.bin", tmp_path / "second.bin")
+    for source, payload in zip(sources, payloads, strict=True):
+        source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/concurrent-conflict.bin")
+    barrier = threading.Barrier(2)
+    original_copy = FileSystemArtifactStore._copy_exclusive
+    original_link = os.link
+
+    def unsupported_source_link(
+        link_source: Path,
+        destination: Path,
+    ) -> None:
+        if Path(link_source) in sources:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, destination)
+
+    def racing_copy(copy_source: Path, destination: Path) -> None:
+        barrier.wait(timeout=2)
+        original_copy(copy_source, destination)
+
+    monkeypatch.setattr(os, "link", unsupported_source_link)
+    monkeypatch.setattr(
+        FileSystemArtifactStore,
+        "_copy_exclusive",
+        staticmethod(racing_copy),
+    )
+
+    results = await asyncio.gather(
+        *(
+            store.publish_path(source, key, expected=_identity_for(payload))
+            for source, payload in zip(sources, payloads, strict=True)
+        ),
+        return_exceptions=True,
+    )
+
+    successes = [result for result in results if not isinstance(result, BaseException)]
+    conflicts = [result for result in results if isinstance(result, ArtifactConflict)]
+    destination = tmp_path / key.value
+    assert len(successes) == 1
+    assert successes[0].created is True
+    assert len(conflicts) == 1
+    assert destination.read_bytes() in payloads
+    assert _publish_temp_paths(destination) == []
 
 
 @pytest.mark.asyncio
@@ -508,11 +835,17 @@ async def test_copy_fallback_existing_different_content_is_explicit_conflict(
     store = FileSystemArtifactStore(tmp_path)
     key = ArtifactKey("u/user-1/uploads/conflict.bin")
     conflict_metrics: list[str] = []
+    original_link = os.link
 
-    def unsupported_link(_source: Path, _destination: Path) -> None:
-        raise OSError(errno.EXDEV, "cross-device link")
+    def unsupported_source_link(
+        link_source: Path,
+        destination: Path,
+    ) -> None:
+        if Path(link_source) in {first_source, second_source}:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, destination)
 
-    monkeypatch.setattr(os, "link", unsupported_link)
+    monkeypatch.setattr(os, "link", unsupported_source_link)
     monkeypatch.setattr(
         filesystem_store_module,
         "record_publish_conflict",
@@ -539,7 +872,227 @@ async def test_copy_fallback_existing_different_content_is_explicit_conflict(
     assert conflict_metrics == ["filesystem"]
 
 
-def test_copy_exclusive_closes_destination_fd_when_source_open_fails(
+def test_copy_fallback_fsyncs_temp_before_atomic_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"durable publish"
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/durable.bin")
+    destination = tmp_path / key.value
+    original_fsync = os.fsync
+    original_install = filesystem_publish_module.install_file_noreplace
+    original_link = os.link
+    events: list[str] = []
+
+    def unsupported_source_link(
+        link_source: Path,
+        link_destination: Path,
+    ) -> None:
+        if Path(link_source) == source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, link_destination)
+
+    def tracking_fsync(fd: int) -> None:
+        mode = os.fstat(fd).st_mode
+        events.append("directory_fsync" if stat.S_ISDIR(mode) else "file_fsync")
+        original_fsync(fd)
+
+    def tracking_install(temp_path: Path, final_path: Path) -> None:
+        events.append("install")
+        original_install(temp_path, final_path)
+
+    monkeypatch.setattr(os, "link", unsupported_source_link)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(
+        filesystem_publish_module,
+        "install_file_noreplace",
+        tracking_install,
+    )
+
+    published = store._publish_path_sync(  # noqa: SLF001
+        source,
+        key,
+        _identity_for(payload),
+    )
+
+    assert published.created is True
+    assert events.index("file_fsync") < events.index("install")
+    install_index = events.index("install")
+    assert "directory_fsync" in events[install_index + 1 :]
+    assert destination.read_bytes() == payload
+    assert _publish_temp_paths(destination) == []
+
+
+def test_publish_fsyncs_each_new_ancestor_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/nested/durable.bin")
+    calls: list[Path] = []
+    original = filesystem_objects_module.fsync_directory
+
+    def tracking_fsync(path: Path) -> None:
+        calls.append(path)
+        original(path)
+
+    monkeypatch.setattr(
+        filesystem_objects_module,
+        "fsync_directory",
+        tracking_fsync,
+    )
+
+    store._path(key, create_parent=True)  # noqa: SLF001
+
+    assert tmp_path in calls
+    assert tmp_path / "u" in calls
+    assert tmp_path / "u" / "user-1" in calls
+    assert tmp_path / "u" / "user-1" / "uploads" in calls
+
+
+def test_copy_fallback_interrupt_removes_temp_and_syncs_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"source payload")
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/interrupted.bin")
+    destination = tmp_path / key.value
+    original_link = os.link
+    original_fsync_directory = filesystem_publish_module.fsync_directory
+    synced_directories: list[Path] = []
+
+    def unsupported_source_link(
+        link_source: Path,
+        link_destination: Path,
+    ) -> None:
+        if Path(link_source) == source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, link_destination)
+
+    def interrupted_copy(src: Any, dst: Any, *, length: int) -> None:
+        _ = length
+        dst.write(src.read(4))
+        dst.flush()
+        raise KeyboardInterrupt
+
+    def tracking_fsync_directory(path: Path) -> None:
+        synced_directories.append(path)
+        original_fsync_directory(path)
+
+    monkeypatch.setattr(os, "link", unsupported_source_link)
+    monkeypatch.setattr(shutil, "copyfileobj", interrupted_copy)
+    monkeypatch.setattr(
+        filesystem_publish_module,
+        "fsync_directory",
+        tracking_fsync_directory,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        store._publish_path_sync(  # noqa: SLF001
+            source,
+            key,
+            _identity_for(b"source payload"),
+        )
+
+    assert not destination.exists()
+    assert _publish_temp_paths(destination) == []
+    assert destination.parent in synced_directories
+
+
+def test_copy_fallback_os_exit_never_exposes_partial_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"complete staged source" * 1024
+    source = tmp_path / "source.bin"
+    source.write_bytes(payload)
+    store = FileSystemArtifactStore(tmp_path)
+    key = ArtifactKey("u/user-1/uploads/process-exit.bin")
+    destination = tmp_path / key.value
+    expected = _identity_for(payload)
+    original_link = os.link
+
+    def unsupported_source_link(
+        link_source: Path,
+        link_destination: Path,
+    ) -> None:
+        if Path(link_source) == source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        original_link(link_source, link_destination)
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import errno
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from app.images.adapters.filesystem_store import FileSystemArtifactStore
+from app.images.domain.artifact import ArtifactIdentity, ArtifactKey
+
+source = Path(sys.argv[1])
+root = Path(sys.argv[2])
+key = ArtifactKey(sys.argv[3])
+expected = ArtifactIdentity(sha256=sys.argv[4], size_bytes=int(sys.argv[5]))
+original_link = os.link
+
+def unsupported_source_link(link_source, link_destination):
+    if Path(link_source) == source:
+        raise OSError(errno.EXDEV, "cross-device link")
+    original_link(link_source, link_destination)
+
+def exit_during_copy(src, dst, *, length):
+    del length
+    dst.write(src.read(17))
+    dst.flush()
+    os._exit(73)
+
+os.link = unsupported_source_link
+shutil.copyfileobj = exit_during_copy
+try:
+    FileSystemArtifactStore(root)._publish_path_sync(source, key, expected)
+except BaseException:
+    os._exit(74)
+os._exit(75)
+""",
+            str(source),
+            str(tmp_path),
+            key.value,
+            expected.sha256,
+            str(expected.size_bytes),
+        ],
+        cwd=ROOT / "apps/api",
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert child.returncode == 73, child.stdout + child.stderr
+    assert not destination.exists()
+    stale_temps = _publish_temp_paths(destination)
+    assert len(stale_temps) == 1
+    assert stale_temps[0].read_bytes() == payload[:17]
+
+    with monkeypatch.context() as retry_patch:
+        retry_patch.setattr(os, "link", unsupported_source_link)
+        published = store._publish_path_sync(source, key, expected)  # noqa: SLF001
+
+    assert published.created is True
+    assert destination.read_bytes() == payload
+    assert _publish_temp_paths(destination) == []
+
+
+def test_copy_exclusive_closes_temp_fd_when_source_open_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -548,7 +1101,7 @@ def test_copy_exclusive_closes_destination_fd_when_source_open_fails(
     destination = tmp_path / "destination.bin"
     original_os_open = os.open
     original_path_open = Path.open
-    destination_fds: list[int] = []
+    temp_fds: list[int] = []
 
     def tracking_os_open(
         path: str | os.PathLike[str],
@@ -556,8 +1109,13 @@ def test_copy_exclusive_closes_destination_fd_when_source_open_fails(
         mode: int = 0o777,
     ) -> int:
         fd = original_os_open(path, flags, mode)
-        if Path(path) == destination:
-            destination_fds.append(fd)
+        opened = Path(path)
+        if (
+            opened.parent == destination.parent
+            and opened.name.startswith(filesystem_publish_module.PUBLISH_TEMP_PREFIX)
+            and opened.name.endswith(filesystem_publish_module.PUBLISH_TEMP_SUFFIX)
+        ):
+            temp_fds.append(fd)
         return fd
 
     def failing_source_open(path: Path, *args: Any, **kwargs: Any) -> Any:
@@ -571,9 +1129,10 @@ def test_copy_exclusive_closes_destination_fd_when_source_open_fails(
     with pytest.raises(OSError, match="source open failed"):
         FileSystemArtifactStore._copy_exclusive(source, destination)
 
-    assert destination_fds
+    assert temp_fds
     assert not destination.exists()
-    for fd in destination_fds:
+    assert _publish_temp_paths(destination) == []
+    for fd in temp_fds:
         with pytest.raises(OSError):
             os.fstat(fd)
 
@@ -713,6 +1272,51 @@ async def test_successful_upload_publishes_verified_ready_artifacts(
     assert original.is_file()
     assert Path(tmp_path, normalized_key).is_file()
     assert list((tmp_path / ".upload-tmp").rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_durability_failure_keeps_intent_and_unique_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _png_bytes()
+    repository = _Repository()
+    service = UploadCommandService(
+        artifacts=FileSystemArtifactStore(tmp_path),
+        capacity=_Capacity(),
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
+    )
+    uploads_directory = tmp_path / "u" / "user-1" / "uploads"
+
+    with monkeypatch.context() as failure:
+        _fail_directory_sync_open(failure, uploads_directory)
+        with pytest.raises(OSError, match="directory sync open failure"):
+            await service.execute(
+                user_id="user-1",
+                upload_file=_Upload(payload),
+                filename="upload.png",
+                policy=_policy(),
+            )
+
+    row = next(iter(repository.rows.values()))
+    manifest = row.artifact_manifest_jsonb
+    ticket = manifest["ticket"]
+    ticket_directory = tmp_path / ".upload-tmp" / ticket
+    staged_sources = list(ticket_directory.glob("artifact-v1-*.source"))
+    processed_sources = list(ticket_directory.glob("processed-*"))
+
+    assert repository.adopt_calls == 0
+    assert row.artifact_status == ArtifactStatus.PUBLISHING.value
+    assert row.reconcile_after is not None
+    assert manifest["storage_intent"]["state"] == "pending"
+    assert len(staged_sources) == 1
+    assert staged_sources[0].read_bytes() == payload
+    assert len(processed_sources) == 1
+    assert Path(tmp_path, row.storage_key).read_bytes() == payload
+    normalized_key = row.metadata_jsonb["normalized_ref"]["storage_key"]
+    assert not Path(tmp_path, normalized_key).exists()
 
 
 @pytest.mark.asyncio

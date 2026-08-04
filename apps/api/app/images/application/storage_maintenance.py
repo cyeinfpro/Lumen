@@ -4,12 +4,16 @@ import asyncio
 import os
 import stat
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Awaitable, Callable, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.video_storage_lifecycle import VideoStorageLifecycle
+
+from ..adapters.filesystem_store_parts.publish import artifact_lifecycle_lock
 from .deleted_media_references import known_live_media_storage_keys
 from .orphan_storage_deletion import delete_orphan_candidates
 from .storage_discovery_parts import (
@@ -707,6 +711,29 @@ async def _known_storage_keys(
     return await known_live_media_storage_keys(db, candidates)
 
 
+@asynccontextmanager
+async def _candidate_deletion_fence(
+    candidate: _FileCandidate,
+    timeout_seconds: float,
+    *,
+    video_storage: VideoStorageLifecycle,
+) -> AsyncIterator[None]:
+    parts = PurePosixPath(candidate.key).parts
+    if len(parts) >= 5 and parts[0] == "u" and parts[2] == "vref":
+        async with video_storage.reference_mutation_lock(
+            user_id=parts[1],
+            video_id=parts[3],
+            timeout_seconds=timeout_seconds,
+        ):
+            yield
+        return
+    async with artifact_lifecycle_lock(
+        candidate.path,
+        timeout_seconds=timeout_seconds,
+    ):
+        yield
+
+
 def _remaining_seconds(
     *,
     max_seconds: float,
@@ -851,6 +878,7 @@ async def sweep_orphan_image_files(
     deleted = 0
     deletion_incomplete = False
     if not dry_run and not database_timed_out:
+        video_storage = VideoStorageLifecycle(root)
         deletion = await delete_orphan_candidates(
             db,
             possible_orphans,
@@ -859,6 +887,13 @@ async def sweep_orphan_image_files(
             monotonic=monotonic,
             assert_owned=assert_owned,
             known_storage_keys=_known_storage_keys,
+            deletion_fence=lambda candidate, timeout_seconds: (
+                _candidate_deletion_fence(
+                    candidate,
+                    timeout_seconds,
+                    video_storage=video_storage,
+                )
+            ),
             unlink_if_unchanged=_unlink_if_unchanged,
         )
         orphan_candidates = list(deletion.confirmed)

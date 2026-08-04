@@ -10,6 +10,10 @@ from typing import Any, Callable
 import httpx
 from sqlalchemy import text as sa_text
 
+from lumen_core.upstream_billing import decide_dispatch_evidence_billing
+
+from ....completion_checkpoint import completion_has_trustworthy_persisted_usage
+
 
 class CompletionEpochSuperseded(RuntimeError):
     """Raised when another worker has advanced the completion attempt epoch."""
@@ -92,10 +96,24 @@ async def settle_failed_billing(
     reason: str,
     worker_billing: Any,
 ) -> None:
-    if any(int(value or 0) > 0 for value in usage_values):
+    if any(
+        int(value or 0) > 0 for value in usage_values
+    ) or completion_has_trustworthy_persisted_usage(completion):
         await worker_billing.charge_completion(session, completion)
         return
-    await worker_billing.release_completion(session, completion, reason=reason)
+    decision = decide_dispatch_evidence_billing(
+        completion,
+        actual_cost_known=False,
+    )
+    if decision.released:
+        await worker_billing.release_completion(session, completion, reason=reason)
+        return
+    await worker_billing.settle_completion_unknown_upstream(
+        session,
+        completion,
+        reason=reason,
+        knowledge=decision.knowledge.value,
+    )
 
 
 def classify_exception(

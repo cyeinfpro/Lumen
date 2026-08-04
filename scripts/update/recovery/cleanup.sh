@@ -84,7 +84,7 @@ run_update_cleanup() {
 update_finish_success() {
 log_step "更新完成"
 log_info "release ${NEW_ID} 已上线（previous: ${CURRENT_ID:-<none>}, tag: ${TARGET_TAG}）"
-log_info "  API:    ${API_HEALTH_URL}"
+log_info "  API readiness: ${API_READY_URL:-http://127.0.0.1:8000/readyz}"
+log_info "  Worker readiness: python -m app.worker_health check"
 log_info "  Web:    ${WEB_HEALTH_URL}"
-lumen_update_journal_status complete
 }

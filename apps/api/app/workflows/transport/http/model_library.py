@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query
 
 from lumen_core.schemas import (
     ApparelModelLibraryAutoTagOut,
@@ -17,10 +17,15 @@ from lumen_core.schemas import (
 )
 
 from ....db import get_db
-from ....deps import CurrentUser, verify_csrf
+from ....deps import CurrentUser, durable_session_id_from_db, verify_csrf
+from ...application.paid_idempotency import MODEL_LIBRARY_GENERATE_OPERATION
 from ...composition import WorkflowApplication
 from .dependencies import get_workflow_application
-from .execution import execute_workflow_action
+from .execution import (
+    execute_durable_workflow_action,
+    execute_paid_workflow_action,
+    execute_workflow_action,
+)
 
 router = APIRouter()
 
@@ -35,9 +40,24 @@ async def generate_apparel_model_library_job(
     body: ApparelModelLibraryGenerateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> ApparelModelLibraryJobOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().generate_apparel_model_library_job,
+        operation_namespace=MODEL_LIBRARY_GENERATE_OPERATION,
+        request_payload={"body": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().replay_apparel_model_library_job(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         body=body,
         user=user,
         db=db,
@@ -70,7 +90,7 @@ async def delete_apparel_model_library_job(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> dict[str, bool]:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().delete_apparel_model_library_job,
         workflow_run_id=workflow_run_id,
         user=user,
@@ -88,7 +108,7 @@ async def clear_apparel_model_library_jobs(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> ApparelModelLibraryJobsClearOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().clear_apparel_model_library_jobs, user=user, db=db
     )
 
@@ -107,7 +127,7 @@ async def save_apparel_model_library_job_item(
     db: Annotated[Any, Depends(get_db)],
     background_tasks: BackgroundTasks,
 ) -> ApparelModelLibraryItemOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().save_apparel_model_library_job_item,
         workflow_run_id=workflow_run_id,
         image_id=image_id,
@@ -129,7 +149,7 @@ async def auto_tag_apparel_model_library_item(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> ApparelModelLibraryAutoTagOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().auto_tag_apparel_model_library_item,
         item_id=item_id,
         user=user,

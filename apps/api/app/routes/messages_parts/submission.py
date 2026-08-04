@@ -29,6 +29,11 @@ from ...services.message_request import (
     validate_attachment_ids,
     validate_mask_image,
 )
+from ...services.message_idempotency import (
+    MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
+    idempotency_request_metadata,
+    message_request_fingerprint,
+)
 from ...services.active_user import (
     ActiveUserFenceError,
     active_user_fence_http_error,
@@ -84,11 +89,14 @@ async def submit_user_message(
         raise runtime.http_error("not_found", "conversation not found", 404)
     await runtime.ensure_conversation_visible(db, conv, user)
 
+    request_fingerprint = message_request_fingerprint(body)
     prior = await runtime.lookup_idempotent_post(
         db,
         user.id,
         conv_id,
         body.idempotency_key,
+        operation_namespace=MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
+        request_fingerprint=request_fingerprint,
     )
     if prior is not None:
         return prior
@@ -103,6 +111,8 @@ async def submit_user_message(
             user.id,
             conv_id,
             body.idempotency_key,
+            operation_namespace=MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_fingerprint,
         )
         if prior is not None:
             return prior
@@ -143,11 +153,15 @@ async def submit_user_message(
         )
 
     now = datetime.now(timezone.utc)
-    request_metadata = runtime.message_request_metadata(
-        body,
-        attachment_ids=attachment_ids,
-        mask_image_id=mask_image_id,
-        intent=intent,
+    request_metadata = idempotency_request_metadata(
+        runtime.message_request_metadata(
+            body,
+            attachment_ids=attachment_ids,
+            mask_image_id=mask_image_id,
+            intent=intent,
+        ),
+        operation_namespace=MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
+        request_fingerprint=request_fingerprint,
     )
     fast_default = await runtime.resolve_fast_default(db)
     image_params = runtime.image_params_with_fast_default(
@@ -199,6 +213,8 @@ async def submit_user_message(
                 account_mode=account_mode,
                 now=now,
                 session_id=session_id,
+                idempotency_operation=MESSAGE_CREATE_IDEMPOTENCY_OPERATION,
+                request_fingerprint=request_fingerprint,
             ),
         )
     except ActiveUserFenceError as exc:

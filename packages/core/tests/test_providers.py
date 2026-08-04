@@ -54,10 +54,15 @@ _PROVIDER_PROXY_RUNTIME = proxy_runtime.ProviderProxyRuntime()
 
 async def _resolve_provider_proxy_url(
     proxy: ProviderProxyDefinition,
+    *,
+    bind_host: str = "127.0.0.1",
+    advertise_host: str | None = None,
 ) -> str | None:
     return await provider_mod.resolve_provider_proxy_url(
         proxy,
         runtime=_PROVIDER_PROXY_RUNTIME,
+        bind_host=bind_host,
+        advertise_host=advertise_host,
     )
 
 
@@ -462,9 +467,14 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
         )
         return _FakeSshProcess()
 
-    async def fake_local_port_accepts(port: int) -> bool:
+    async def fake_local_port_accepts(host: str, port: int) -> bool:
+        captured["probe_host"] = host
         captured["port"] = port
         return True
+
+    def fake_free_local_port(bind_host: str) -> int:
+        captured["bind_host"] = bind_host
+        return 41555
 
     monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
     monkeypatch.setattr(
@@ -472,7 +482,7 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
         "create_subprocess_exec",
         fake_create_subprocess_exec,
     )
-    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41555)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", fake_free_local_port)
     monkeypatch.setattr(
         proxy_runtime,
         "_local_port_accepts",
@@ -496,6 +506,10 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     assert url == "socks5h://127.0.0.1:41555"
     assert isinstance(cmd, tuple)
     assert cmd[0] == "/usr/bin/ssh"
+    assert cmd[cmd.index("-D") + 1] == "127.0.0.1:41555"
+    assert captured["bind_host"] == "127.0.0.1"
+    assert captured["probe_host"] == "127.0.0.1"
+    assert "-g" not in cmd
     assert "BatchMode=no" in cmd
     assert "PasswordAuthentication=yes" in cmd
     assert "StrictHostKeyChecking=yes" in cmd
@@ -522,6 +536,225 @@ async def test_resolve_ssh_proxy_supports_password_auth_with_askpass(
     assert not os.path.exists(env["SSH_ASKPASS"])
 
     await _close_provider_proxy_tunnels()
+
+
+@pytest.mark.asyncio
+async def test_resolve_ssh_proxy_keeps_loopback_and_container_tunnels_distinct(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _PROVIDER_PROXY_RUNTIME.clear()
+    bind_hosts: list[str] = []
+    probes: list[tuple[str, int]] = []
+    commands: list[tuple[str, ...]] = []
+    processes: list[_FakeSshProcess] = []
+    ports = iter((41559, 41560))
+
+    async def fake_create_subprocess_exec(
+        *cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        process = _FakeSshProcess()
+        commands.append(cmd)
+        processes.append(process)
+        return process
+
+    def fake_free_local_port(bind_host: str) -> int:
+        bind_hosts.append(bind_host)
+        return next(ports)
+
+    async def fake_local_port_accepts(host: str, port: int) -> bool:
+        probes.append((host, port))
+        return True
+
+    monkeypatch.setattr(
+        proxy_runtime.shutil,
+        "which",
+        lambda name: "/usr/bin/ssh" if name == "ssh" else None,
+    )
+    monkeypatch.setattr(
+        proxy_runtime.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", fake_free_local_port)
+    monkeypatch.setattr(
+        proxy_runtime,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
+
+    proxy = ProviderProxyDefinition(
+        name="ssh-shared",
+        protocol="ssh",
+        host="203.0.113.10",
+        port=22,
+        username="root",
+        known_hosts_path=_write_known_hosts(tmp_path),
+    )
+
+    loopback_url = await _resolve_provider_proxy_url(proxy)
+    container_url = await _resolve_provider_proxy_url(
+        proxy,
+        bind_host="0.0.0.0",
+        advertise_host="api",
+    )
+    reused_loopback_url = await _resolve_provider_proxy_url(proxy)
+
+    assert loopback_url == reused_loopback_url == "socks5h://127.0.0.1:41559"
+    assert container_url == "socks5h://api:41560"
+    assert bind_hosts == ["127.0.0.1", "0.0.0.0"]
+    assert probes == [("127.0.0.1", 41559), ("127.0.0.1", 41560)]
+    assert [cmd[cmd.index("-D") + 1] for cmd in commands] == [
+        "127.0.0.1:41559",
+        "0.0.0.0:41560",
+    ]
+    assert "-g" not in commands[0]
+    assert "-g" in commands[1]
+    assert len(_PROVIDER_PROXY_RUNTIME.tunnels) == 2
+    assert all(process.returncode is None for process in processes)
+
+    await _close_provider_proxy_tunnels()
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_inflight_ssh_start_and_terminates_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = proxy_runtime.ProviderProxyRuntime()
+    process = _FakeSshProcess()
+    spawned = asyncio.Event()
+    allow_ready = asyncio.Event()
+
+    async def fake_create_subprocess_exec(
+        *_cmd: str,
+        **_kwargs: object,
+    ) -> _FakeSshProcess:
+        spawned.set()
+        return process
+
+    async def fake_local_port_accepts(_host: str, _port: int) -> bool:
+        await allow_ready.wait()
+        return True
+
+    monkeypatch.setattr(
+        proxy_runtime.shutil,
+        "which",
+        lambda name: "/usr/bin/ssh" if name == "ssh" else None,
+    )
+    monkeypatch.setattr(
+        proxy_runtime.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        proxy_runtime,
+        "_local_port_accepts",
+        fake_local_port_accepts,
+    )
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda _host: 41561)
+
+    proxy = ProviderProxyDefinition(
+        name="ssh-close-race",
+        protocol="ssh",
+        host="203.0.113.10",
+        port=22,
+        known_hosts_path=_write_known_hosts(tmp_path),
+    )
+    resolve_task = asyncio.create_task(
+        provider_mod.resolve_provider_proxy_url(proxy, runtime=runtime)
+    )
+    await spawned.wait()
+    close_task = asyncio.create_task(
+        provider_mod.close_provider_proxy_tunnels(runtime=runtime)
+    )
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+
+    allow_ready.set()
+    assert await resolve_task == "socks5h://127.0.0.1:41561"
+    await close_task
+
+    assert process.returncode == 0
+    assert runtime.tunnels == {}
+    assert runtime.closed is True
+    with pytest.raises(RuntimeError, match="runtime is closed"):
+        await provider_mod.resolve_provider_proxy_url(proxy, runtime=runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_kind", ["disabled", "socks5"])
+async def test_non_ssh_refresh_retires_named_ssh_tunnels(
+    replacement_kind: str,
+) -> None:
+    runtime = proxy_runtime.ProviderProxyRuntime()
+    stale_process = _FakeSshProcess()
+    other_process = _FakeSshProcess()
+    old_proxy = ProviderProxyDefinition(
+        name="shared-proxy",
+        protocol="ssh",
+        host="203.0.113.10",
+        port=22,
+    )
+    other_proxy = ProviderProxyDefinition(
+        name="other-proxy",
+        protocol="ssh",
+        host="203.0.113.11",
+        port=22,
+    )
+    runtime.tunnels[proxy_runtime._ssh_tunnel_key(old_proxy, "127.0.0.1")] = (  # noqa: SLF001
+        proxy_runtime._SshTunnel(  # noqa: SLF001
+            proxy_name=old_proxy.name,
+            proxy_identity=proxy_runtime._ssh_proxy_identity(old_proxy),  # noqa: SLF001
+            bind_host="127.0.0.1",
+            local_port=41562,
+            process=stale_process,
+        )
+    )
+    runtime.tunnels[proxy_runtime._ssh_tunnel_key(other_proxy, "127.0.0.1")] = (  # noqa: SLF001
+        proxy_runtime._SshTunnel(  # noqa: SLF001
+            proxy_name=other_proxy.name,
+            proxy_identity=proxy_runtime._ssh_proxy_identity(other_proxy),  # noqa: SLF001
+            bind_host="127.0.0.1",
+            local_port=41563,
+            process=other_process,
+        )
+    )
+    replacement = (
+        ProviderProxyDefinition(
+            name=old_proxy.name,
+            protocol="ssh",
+            host=old_proxy.host,
+            port=old_proxy.port,
+            enabled=False,
+        )
+        if replacement_kind == "disabled"
+        else ProviderProxyDefinition(
+            name=old_proxy.name,
+            protocol="socks5",
+            host="127.0.0.1",
+            port=1080,
+        )
+    )
+
+    resolved = await provider_mod.resolve_provider_proxy_url(
+        replacement,
+        runtime=runtime,
+    )
+
+    assert resolved == (
+        None if replacement_kind == "disabled" else "socks5h://127.0.0.1:1080"
+    )
+    assert stale_process.returncode == 0
+    assert other_process.returncode is None
+    assert all(
+        tunnel.proxy_name != old_proxy.name for tunnel in runtime.tunnels.values()
+    )
+    assert any(
+        tunnel.proxy_name == other_proxy.name for tunnel in runtime.tunnels.values()
+    )
+    await provider_mod.close_provider_proxy_tunnels(runtime=runtime)
 
 
 @pytest.mark.asyncio
@@ -678,7 +911,7 @@ async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
         captured["known_hosts_at_spawn"] = Path(path).read_text(encoding="utf-8")
         return _FakeSshProcess()
 
-    async def fake_local_port_accepts(_port: int) -> bool:
+    async def fake_local_port_accepts(_host: str, _port: int) -> bool:
         return True
 
     monkeypatch.setattr(proxy_runtime.shutil, "which", fake_which)
@@ -693,7 +926,7 @@ async def test_resolve_ssh_proxy_pins_configured_host_key_fingerprint(
         "_local_port_accepts",
         fake_local_port_accepts,
     )
-    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41558)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda _host: 41558)
 
     url = await _resolve_provider_proxy_url(
         ProviderProxyDefinition(
@@ -805,7 +1038,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
         captured["env"] = kwargs.get("env")
         return proc
 
-    async def fake_local_port_accepts(_port: int) -> bool:
+    async def fake_local_port_accepts(_host: str, _port: int) -> bool:
         return False
 
     async def fake_sleep(_delay: float) -> None:
@@ -818,7 +1051,7 @@ async def test_resolve_ssh_proxy_terminates_failed_password_process_before_clean
         fake_create_subprocess_exec,
     )
     monkeypatch.setattr(proxy_runtime.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41556)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda _host: 41556)
     monkeypatch.setattr(
         proxy_runtime,
         "_local_port_accepts",
@@ -877,7 +1110,7 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
             captured["askpass_path"] = env.get("SSH_ASKPASS")
         return proc
 
-    async def fake_local_port_accepts(_port: int) -> bool:
+    async def fake_local_port_accepts(_host: str, _port: int) -> bool:
         return False
 
     async def fake_sleep(_delay: float) -> None:
@@ -901,7 +1134,7 @@ async def test_resolve_ssh_proxy_cancel_stops_process_before_secret_cleanup(
         fake_create_subprocess_exec,
     )
     monkeypatch.setattr(proxy_runtime.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda: 41557)
+    monkeypatch.setattr(proxy_runtime, "_free_local_port", lambda _host: 41557)
     monkeypatch.setattr(
         proxy_runtime,
         "_local_port_accepts",

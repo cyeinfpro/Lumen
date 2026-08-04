@@ -35,8 +35,11 @@ from ...images.domain.variants import (
 )
 from ...services.active_user import (
     ActiveUserFenceError,
+    ActiveUserSnapshot,
+    AccountMode,
+    account_mode_from_user,
     active_user_fence_http_error,
-    lock_active_user,
+    lock_active_user_snapshot,
 )
 from ...video_reference_videos import VIDEO_REFERENCE_VIDEO_KIND
 from ..video_publish import publish_video_queued
@@ -53,7 +56,9 @@ from .reference_media import (
     reference_public_base_url,
     validate_provider_reference_media,
 )
-from .reference_snapshots import lock_user_reference_media
+from .reference_snapshots import (
+    lock_user_reference_media,  # noqa: F401 - test-facing monkeypatch hook
+)
 
 
 AsyncCallback = Callable[..., Awaitable[Any]]
@@ -132,6 +137,8 @@ async def _render_idempotent_replay(
 class VideoSubmissionContext:
     request: Request | None = None
     session_id: str | None = None
+    active_user_snapshot: ActiveUserSnapshot | None = None
+    idempotency_serialized: bool = False
     input_image_snapshot: tuple[str | None, str | None, str | None] | None = None
     reference_media_snapshot: list[dict[str, Any]] | None = None
     workflow_metadata: dict[str, Any] | None = None
@@ -151,6 +158,85 @@ class VideoSubmissionServices:
     generation_renderer: AsyncCallback = generation_out
     balance_invalidator: AsyncCallback = invalidate_video_balance_cache
     queued_publisher: AsyncCallback = publish_video_queued
+
+
+async def _lock_video_submission_user(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    expected_account_mode: AccountMode,
+    context: VideoSubmissionContext,
+) -> ActiveUserSnapshot:
+    snapshot = context.active_user_snapshot
+    if snapshot is None:
+        try:
+            snapshot = await lock_active_user_snapshot(
+                db,
+                user_id,
+                expected_account_mode,
+                session_id=context.session_id,
+            )
+        except ActiveUserFenceError as exc:
+            raise active_user_fence_http_error(exc) from exc
+    elif snapshot.user.id != user_id:
+        raise RuntimeError("video submission active-user snapshot does not match user")
+    if snapshot.account_mode != "wallet":
+        raise video_http_error(
+            "account_mode_forbidden",
+            "video generation requires wallet mode",
+            403,
+        )
+    return snapshot
+
+
+async def _find_or_serialize_video_submission(
+    db: AsyncSession,
+    body: VideoCreateIn,
+    *,
+    user_id: str,
+    request_fingerprint_value: str,
+    context: VideoSubmissionContext,
+    services: VideoSubmissionServices,
+) -> VideoGenerationOut | None:
+    winner = await _find_idempotent_generation(
+        db,
+        user_id=user_id,
+        idempotency_key=body.idempotency_key,
+    )
+    if winner is not None:
+        return await _render_idempotent_replay(
+            db,
+            winner,
+            expected_fingerprint=request_fingerprint_value,
+            defer_commit=context.defer_commit,
+            generation_renderer=services.generation_renderer,
+        )
+    if context.idempotency_serialized:
+        if context.active_user_snapshot is None:
+            raise RuntimeError(
+                "serialized video submission requires an active-user snapshot"
+            )
+        return None
+    await lock_user_key(
+        db,
+        "video-generation",
+        user_id,
+        body.idempotency_key,
+    )
+    winner = await _find_idempotent_generation(
+        db,
+        user_id=user_id,
+        idempotency_key=body.idempotency_key,
+    )
+    if winner is None:
+        return None
+    return await _render_idempotent_replay(
+        db,
+        winner,
+        expected_fingerprint=request_fingerprint_value,
+        defer_commit=context.defer_commit,
+        generation_renderer=services.generation_renderer,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,55 +572,27 @@ async def create_video_generation_record(
 ) -> VideoGenerationOut:
     context = context or VideoSubmissionContext()
     services = services or VideoSubmissionServices()
+    expected_account_mode = account_mode_from_user(user)
     request_fingerprint_value = request_fingerprint(body)
-    winner = await _find_idempotent_generation(
+    replay = await _find_or_serialize_video_submission(
         db,
+        body,
         user_id=user.id,
-        idempotency_key=body.idempotency_key,
+        request_fingerprint_value=request_fingerprint_value,
+        context=context,
+        services=services,
     )
-    if winner is not None:
-        return await _render_idempotent_replay(
-            db,
-            winner,
-            expected_fingerprint=request_fingerprint_value,
-            defer_commit=context.defer_commit,
-            generation_renderer=services.generation_renderer,
-        )
-    await lock_user_key(
-        db,
-        "video-generation",
-        user.id,
-        body.idempotency_key,
-    )
-    winner = await _find_idempotent_generation(
-        db,
-        user_id=user.id,
-        idempotency_key=body.idempotency_key,
-    )
-    if winner is not None:
-        return await _render_idempotent_replay(
-            db,
-            winner,
-            expected_fingerprint=request_fingerprint_value,
-            defer_commit=context.defer_commit,
-            generation_renderer=services.generation_renderer,
-        )
+    if replay is not None:
+        return replay
 
-    if context.session_id:
-        try:
-            await lock_active_user(
-                db,
-                user.id,
-                session_id=context.session_id,
-            )
-        except ActiveUserFenceError as exc:
-            raise active_user_fence_http_error(exc) from exc
-
-    await lock_user_reference_media(
+    snapshot = await _lock_video_submission_user(
         db,
         user_id=user.id,
-        http_error=video_http_error,
+        expected_account_mode=expected_account_mode,
+        context=context,
     )
+    user = snapshot.user
+
     admission = await _prepare_video_billing_admission(
         db,
         body,

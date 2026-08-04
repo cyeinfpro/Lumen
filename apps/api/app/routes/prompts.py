@@ -10,9 +10,10 @@ import logging
 import os
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, AsyncIterator, Callable
+from functools import partial
+from typing import Annotated, Any, AsyncIterator, Awaitable, Callable
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,10 +49,13 @@ from ._prompt_enhance_templates import (
     VIDEO_ENHANCE_SYSTEM_PROMPT,
     VIDEO_ENHANCE_VARIANT_SYSTEM_PROMPT_TEMPLATE,
 )
+from .prompt_parts import active_user as _prompt_active_user
 from .prompt_parts import content as _prompt_content
 from .prompt_parts import billing as _prompt_billing
 from .prompt_parts import failover as _prompt_failover
+from .prompt_parts import idempotency as _prompt_idempotency
 from .prompt_parts import keepalive as _prompt_keepalive
+from .prompt_parts import responses as _prompt_responses
 from .prompt_parts import upstream as _prompt_upstream
 from .prompt_parts.enhance_content import (
     PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES as _PROMPT_ENHANCE_MEDIA_TOTAL_MAX_BYTES,  # noqa: F401 - test-facing re-export
@@ -79,6 +83,7 @@ _PROMPT_RUNTIME_STATE_KEY = "_prompt_enhancement_runtime"
 class _PromptRuntime:
     provider_round_robin: RoundRobinState = field(default_factory=RoundRobinState)
     release_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    operation_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     def track_release_task(self, task: asyncio.Task[None]) -> None:
         self.release_tasks.add(task)
@@ -95,11 +100,27 @@ class _PromptRuntime:
 
         task.add_done_callback(_done)
 
+    def track_operation_task(self, task: asyncio.Task[None]) -> None:
+        self.operation_tasks.add(task)
+
+        def _done(completed: asyncio.Task[None]) -> None:
+            self.operation_tasks.discard(completed)
+            with suppress(asyncio.CancelledError):
+                exc = completed.exception()
+                if exc is not None:
+                    logger.error(
+                        "prompt enhancement durable operation failed",
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+        task.add_done_callback(_done)
+
     async def shutdown(self) -> None:
-        tasks = list(self.release_tasks)
+        tasks = list(self.release_tasks | self.operation_tasks)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.release_tasks.difference_update(tasks)
+        self.operation_tasks.difference_update(tasks)
 
 
 def _prompt_runtime(request: Request) -> _PromptRuntime:
@@ -255,11 +276,16 @@ def _prompt_billing_runtime() -> _prompt_billing.BillingRuntime:
 async def _prepare_prompt_enhance_billing(
     db: AsyncSession,
     user: Any,
+    *,
+    request_id: str | None = None,
+    commit: bool = True,
 ) -> _EnhanceBillingContext | None:
     return await _prompt_billing.prepare_prompt_enhance_billing(
         db,
         user,
         runtime=_prompt_billing_runtime(),
+        request_id=request_id,
+        commit=commit,
     )
 
 
@@ -282,8 +308,8 @@ def _capture_enhance_usage(
 async def _charge_prompt_enhance(
     billing: _EnhanceBillingContext,
     capture: _EnhanceUsageCapture,
-) -> None:
-    await _prompt_billing.charge_prompt_enhance(
+) -> bool:
+    return await _prompt_billing.charge_prompt_enhance(
         billing,
         capture,
         runtime=_prompt_billing_runtime(),
@@ -294,8 +320,8 @@ async def _release_prompt_enhance_hold(
     billing: _EnhanceBillingContext | None,
     *,
     reason: str,
-) -> None:
-    await _prompt_billing.release_prompt_enhance_hold(
+) -> bool:
+    return await _prompt_billing.release_prompt_enhance_hold(
         billing,
         reason=reason,
         runtime=_prompt_billing_runtime(),
@@ -306,8 +332,8 @@ async def _settle_prompt_enhance_default_hold(
     billing: _EnhanceBillingContext | None,
     *,
     reason: str,
-) -> None:
-    await _prompt_billing.settle_prompt_enhance_default_hold(
+) -> bool:
+    return await _prompt_billing.settle_prompt_enhance_default_hold(
         billing,
         reason=reason,
         runtime=_prompt_billing_runtime(),
@@ -319,11 +345,12 @@ async def _release_prompt_enhance_hold_detached(
     *,
     reason: str,
 ) -> None:
-    if billing is None or billing.hold_amount_micro <= 0:
-        return
-    async with SessionLocal() as db:
-        detached = replace(billing, db=db)
-        await _release_prompt_enhance_hold(detached, reason=reason)
+    await _prompt_responses.release_hold_detached(
+        billing,
+        reason=reason,
+        session_factory=SessionLocal,
+        release=_release_prompt_enhance_hold,
+    )
 
 
 def _schedule_prompt_enhance_hold_release(
@@ -332,13 +359,12 @@ def _schedule_prompt_enhance_hold_release(
     reason: str,
     runtime: _PromptRuntime,
 ) -> asyncio.Task[None] | None:
-    if billing is None or billing.hold_amount_micro <= 0:
-        return None
-    task = asyncio.create_task(
-        _release_prompt_enhance_hold_detached(billing, reason=reason)
+    return _prompt_responses.schedule_hold_release(
+        billing,
+        reason=reason,
+        release_detached=_release_prompt_enhance_hold_detached,
+        track_task=runtime.track_release_task,
     )
-    runtime.track_release_task(task)
-    return task
 
 
 async def _release_prompt_enhance_hold_after_cancel(
@@ -347,23 +373,16 @@ async def _release_prompt_enhance_hold_after_cancel(
     reason: str,
     runtime: _PromptRuntime,
 ) -> None:
-    task = _schedule_prompt_enhance_hold_release(
+    await _prompt_responses.wait_for_hold_release(
         billing,
         reason=reason,
-        runtime=runtime,
+        schedule_release=lambda value, *, reason: _schedule_prompt_enhance_hold_release(
+            value,
+            reason=reason,
+            runtime=runtime,
+        ),
+        logger=logger,
     )
-    if task is None:
-        return
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        logger.info(
-            "prompt enhance hold release continues after stream cancellation "
-            "request_id=%s reason=%s",
-            billing.request_id if billing is not None else None,
-            reason,
-        )
-        raise
 
 
 async def _settle_prompt_enhance_default_hold_detached(
@@ -386,9 +405,6 @@ def _schedule_prompt_enhance_default_settle(
 ) -> asyncio.Task[None] | None:
     if billing is None or billing.hold_amount_micro <= 0:
         return None
-    # 先置位结算尝试标记再建任务:客户端断流后,链外孤儿兜底释放与 detached
-    # settle 存在竞态——标记可让兜底跳过,hold 只由 settle 消费;若 settle
-    # 落库失败则 hold 留在钱包中由管理端孤儿扫描对账,不 fail-open 退款。
     billing.settle_outcome.attempted = True
     task = asyncio.create_task(
         _settle_prompt_enhance_default_hold_detached(billing, reason=reason)
@@ -422,20 +438,10 @@ async def _settle_prompt_enhance_hold_after_cancel(
         raise
 
 
-def _is_retryable_upstream_error(status_code: int, raw: bytes) -> bool:
-    return _prompt_upstream.is_retryable_upstream_error(status_code, raw)
-
-
-def _extract_error_message(evt: dict[str, Any]) -> str:
-    return _prompt_upstream.extract_error_message(evt)
-
-
-def _extract_response_text(obj: Any) -> str:
-    return _prompt_upstream.extract_response_text(obj)
-
-
-def _iter_sse_payloads_from_buffer(buffer: str) -> tuple[list[str], str]:
-    return _prompt_upstream.iter_sse_payloads_from_buffer(buffer)
+_is_retryable_upstream_error = _prompt_upstream.is_retryable_upstream_error
+_extract_error_message = _prompt_upstream.extract_error_message
+_extract_response_text = _prompt_upstream.extract_response_text
+_iter_sse_payloads_from_buffer = _prompt_upstream.iter_sse_payloads_from_buffer
 
 
 async def _stream_enhance_one(
@@ -447,6 +453,7 @@ async def _stream_enhance_one(
     system_prompt: str = ENHANCE_SYSTEM_PROMPT,
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
+    on_dispatching: Callable[[], Awaitable[None]] | None = None,
     on_dispatched: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     timeouts = _prompt_upstream.StreamTimeouts(
@@ -464,6 +471,7 @@ async def _stream_enhance_one(
         content=content,
         metadata=metadata,
         timeouts=timeouts,
+        on_dispatching=on_dispatching,
         on_dispatched=on_dispatched,
     ):
         yield chunk
@@ -478,6 +486,10 @@ async def _stream_enhance(
     system_prompt: str = ENHANCE_SYSTEM_PROMPT,
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
+    record_dispatch_intent: Callable[[], Awaitable[None]] | None = None,
+    record_candidate_outcome: Callable[[bool], Awaitable[None]] | None = None,
+    checkpoint_finalization: Callable[..., Awaitable[None]] | None = None,
+    require_billing_confirmation: bool = False,
 ) -> AsyncIterator[str]:
     active_runtime = runtime or _PromptRuntime()
 
@@ -510,6 +522,10 @@ async def _stream_enhance(
         release_after_cancel=release_after_cancel,
         settle_default=_settle_prompt_enhance_default_hold,
         settle_default_after_cancel=settle_after_cancel,
+        record_dispatch_intent=record_dispatch_intent,
+        record_candidate_outcome=record_candidate_outcome,
+        checkpoint_finalization=checkpoint_finalization,
+        require_billing_confirmation=require_billing_confirmation,
     )
     stream = _prompt_failover.stream_enhance(
         text,
@@ -529,109 +545,83 @@ async def _stream_enhance(
         await stream.aclose()
 
 
-async def _stream_with_keepalive(
-    source: AsyncIterator[str],
-    *,
-    interval_seconds: float = _PROMPT_ENHANCE_KEEPALIVE_SECONDS,
-) -> AsyncIterator[str]:
-    async for chunk in _prompt_keepalive.stream_with_keepalive(
-        source,
-        interval_seconds=interval_seconds,
-        keepalive_chunk=_PROMPT_ENHANCE_KEEPALIVE_CHUNK,
-    ):
-        yield chunk
+_stream_with_keepalive = partial(
+    _prompt_responses.keepalive_stream,
+    interval_seconds=_PROMPT_ENHANCE_KEEPALIVE_SECONDS,
+    keepalive_chunk=_PROMPT_ENHANCE_KEEPALIVE_CHUNK,
+    implementation=_prompt_keepalive.stream_with_keepalive,
+)
 
 
-class _TrackedStreamIterator:
-    """包装 body 迭代器,记录是否被消费至正常耗尽(StopAsyncIteration)。
-
-    正常耗尽 ⇒ failover 链内已完成 settle/release;未耗尽(从未迭代或
-    中途断流)才可能遗留孤儿 hold,需要链外守卫兜底。
-    """
-
-    def __init__(self, source: AsyncIterator[str]) -> None:
-        self._source = source
-        self.exhausted = False
-
-    def __aiter__(self) -> _TrackedStreamIterator:
-        return self
-
-    async def __anext__(self) -> str:
-        try:
-            return await self._source.__anext__()
-        except StopAsyncIteration:
-            self.exhausted = True
-            raise
-
-    async def aclose(self) -> None:
-        await self._source.aclose()
+def _durability_runtime(
+    runtime: _PromptRuntime,
+) -> _prompt_responses.PromptDurabilityRuntime:
+    return _prompt_responses.PromptDurabilityRuntime(
+        session_factory=SessionLocal,
+        logger=logger,
+        prepare_billing=_prepare_prompt_enhance_billing,
+        charge=_charge_prompt_enhance,
+        settle_default=_settle_prompt_enhance_default_hold,
+        release=_release_prompt_enhance_hold,
+        stream_enhance=_stream_enhance,
+        track_operation_task=runtime.track_operation_task,
+    )
 
 
-class _GuardedEnhanceStreamingResponse(StreamingResponse):
-    """Prompt enhance SSE 的链外计费守卫。
+async def _prepare_reserved_billing(
+    *args: Any,
+    runtime: _PromptRuntime,
+) -> tuple[_EnhanceBillingContext | None, bool]:
+    return await _prompt_responses.prepare_reserved_billing(
+        *args,
+        runtime=_durability_runtime(runtime),
+    )
 
-    客户端在首字节发送窗口断连时,Starlette 可能对从未被迭代的 body
-    生成器直接调用 aclose()(对未启动生成器是 no-op),生成器链内的
-    hold 释放(CancelledError/GeneratorExit 分支)不会执行,hold 永久
-    冻结。本类在 stream_response 的 finally 中触发幂等 release——
-    release 按 ref_id 幂等(已有 settle/release 交易则 no-op),正常
-    计费/释放路径不受影响,孤儿 hold 则被兜底释放。
 
-    守卫仅在 body 未正常耗尽时触发:正常耗尽时 failover 已在链内
-    settle/release,若再调度释放任务,每次成功请求都会凭空开一个
-    fresh-session DB 连接执行幂等 no-op;未耗尽(从未迭代/中途断流)
-    才可能遗留孤儿 hold,需要兜底。结算已被调度或执行
-    (settle_outcome.attempted)时同样跳过——结算失败时 hold 必须留在
-    钱包中由管理端孤儿扫描对账,不得 fail-open 退款。
-    """
+def _durable_prompt_enhance_stream(
+    *args: Any,
+    **kwargs: Any,
+) -> tuple[AsyncIterator[str], asyncio.Task[None]]:
+    runtime = kwargs.pop("runtime")
+    return _prompt_responses.durable_prompt_stream(
+        *args,
+        prompt_runtime=runtime,
+        runtime=_durability_runtime(runtime),
+        system_prompt=kwargs.pop("system_prompt", ENHANCE_SYSTEM_PROMPT),
+        **kwargs,
+    )
 
-    def __init__(
-        self,
-        content: AsyncIterator[str],
-        *,
-        on_teardown: Callable[[], None],
-        **kwargs: Any,
-    ) -> None:
-        self._body = _TrackedStreamIterator(content)
-        super().__init__(self._body, **kwargs)
-        self._on_teardown = on_teardown
 
-    async def stream_response(self, send: Any) -> None:
-        try:
-            await super().stream_response(send)
-        finally:
-            if not self._body.exhausted:
-                self._on_teardown()
+def _durable_prompt_enhance_response(
+    *args: Any,
+    **kwargs: Any,
+) -> StreamingResponse:
+    runtime = kwargs.pop("runtime")
+    return _prompt_responses.durable_prompt_response(
+        *args,
+        prompt_runtime=runtime,
+        runtime=_durability_runtime(runtime),
+        system_prompt=kwargs.pop("system_prompt", ENHANCE_SYSTEM_PROMPT),
+        with_keepalive=_stream_with_keepalive,
+        **kwargs,
+    )
+
+
+_GuardedEnhanceStreamingResponse = _prompt_responses.GuardedEnhanceStreamingResponse
 
 
 def _schedule_orphan_hold_release(
     billing: _EnhanceBillingContext | None,
     runtime: _PromptRuntime,
 ) -> Callable[[], None]:
-    """构造响应兜底:body 未正常耗尽(断连/异常/从未迭代)时调度幂等 hold 释放。
-
-    仅兜底「孤儿 hold」:链内已 settle/charge 时 release 幂等 no-op;结算已被
-    调度或执行(settle_outcome.attempted)时同样跳过——结算成功则 hold 已消费,
-    结算落库失败则 hold 保留在钱包中交由管理端孤儿扫描对账,避免 fail-open
-    退款让平台吸收上游已产生的成本。
-    """
-
-    def release_orphan_hold() -> None:
-        if billing is not None and billing.settle_outcome.attempted:
-            logger.warning(
-                "prompt enhance orphan release skipped settle_attempted "
-                "request_id=%s hold_micro=%d",
-                billing.request_id,
-                billing.hold_amount_micro,
-            )
-            return
-        _schedule_prompt_enhance_hold_release(
-            billing,
-            reason="stream_orphaned",
+    return _prompt_responses.orphan_hold_release_callback(
+        billing,
+        logger=logger,
+        schedule_release=partial(
+            _schedule_prompt_enhance_hold_release,
             runtime=runtime,
-        )
-
-    return release_orphan_hold
+        ),
+    )
 
 
 @router.post("/enhance")
@@ -640,46 +630,80 @@ async def enhance_prompt(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     runtime: _PromptRuntimeDep,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+    request: Request = None,
 ) -> StreamingResponse:
-    await PROMPTS_ENHANCE_LIMITER.check(get_redis(), f"rl:prompt_enhance:{user.id}")
-    providers = [
-        p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
-    ]
-    if not providers:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "code": "not_configured",
-                    "message": "upstream API key not set",
-                },
-            },
+    client_key = _prompt_idempotency.resolve_client_idempotency_key(idempotency_key)
+    operation = _prompt_idempotency.prompt_enhance_operation(
+        user_id=user.id,
+        idempotency_key=client_key,
+        operation_namespace=_prompt_idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload=body.model_dump(mode="json"),
+    )
+    reservation = await _prompt_active_user.reserve_active_prompt_operation(
+        db,
+        operation,
+        user=user,
+        request=request,
+    )
+    replay = await _prompt_active_user.commit_replay_response(
+        db, reservation, client_key, _stream_with_keepalive
+    )
+    if replay is not None:
+        return replay
+    user = _prompt_active_user.reserved_user(reservation)
+
+    if reservation.recovery is None:
+        await PROMPTS_ENHANCE_LIMITER.check(
+            get_redis(),
+            f"rl:prompt_enhance:{user.id}",
         )
-    billing = await _prepare_prompt_enhance_billing(db, user)
+        providers = [
+            p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
+        ]
+        if not providers:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": "not_configured",
+                        "message": "upstream API key not set",
+                    },
+                },
+            )
+    else:
+        providers = []
+    billing, invalidate_hold = await _prepare_reserved_billing(
+        db,
+        user,
+        operation,
+        reservation,
+        runtime=runtime,
+    )
     commit = getattr(db, "commit", None)
     if callable(commit):
         await commit()
+    if invalidate_hold:
+        await invalidate_balance_cache(user.id)
 
-    return _GuardedEnhanceStreamingResponse(
-        _stream_with_keepalive(
-            _stream_enhance(
-                body.text,
-                providers,
-                billing,
-                runtime=runtime,
-            )
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-        on_teardown=_schedule_orphan_hold_release(billing, runtime),
+    return _durable_prompt_enhance_response(
+        operation,
+        reservation,
+        text=body.text,
+        providers=providers,
+        billing=billing,
+        runtime=runtime,
     )
 
 
 resolve_provider_order = _resolve_provider_order
 stream_enhance = _stream_enhance
+prepare_prompt_enhance_billing = _prepare_prompt_enhance_billing
+prepare_reserved_prompt_billing = _prepare_reserved_billing
+durable_prompt_enhance_stream = _durable_prompt_enhance_stream
 PromptRuntime = _PromptRuntime
 get_prompt_runtime = _prompt_runtime
 
@@ -691,52 +715,85 @@ async def enhance_video_prompt(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     runtime: _PromptRuntimeDep,
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> StreamingResponse:
-    await PROMPTS_ENHANCE_LIMITER.check(get_redis(), f"rl:prompt_enhance:{user.id}")
-    providers = [
-        p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
-    ]
-    if not providers:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "code": "not_configured",
-                    "message": "upstream API key not set",
-                },
-            },
-        )
-
-    content, token_changed = await _build_video_enhance_content(
-        body,
-        request=request,
-        db=db,
+    client_key = _prompt_idempotency.resolve_client_idempotency_key(idempotency_key)
+    operation = _prompt_idempotency.prompt_enhance_operation(
         user_id=user.id,
+        idempotency_key=client_key,
+        operation_namespace=_prompt_idempotency.VIDEO_PROMPT_ENHANCE_OPERATION,
+        payload=body.model_dump(mode="json"),
     )
-    if token_changed:
-        commit = getattr(db, "commit", None)
-        if callable(commit):
-            await commit()
-    billing = await _prepare_prompt_enhance_billing(db, user)
+    reservation = await _prompt_active_user.reserve_active_prompt_operation(
+        db,
+        operation,
+        user=user,
+        request=request,
+    )
+    replay = await _prompt_active_user.commit_replay_response(
+        db, reservation, client_key, _stream_with_keepalive
+    )
+    if replay is not None:
+        return replay
+    user = _prompt_active_user.reserved_user(reservation)
+
+    if reservation.recovery is None:
+        await PROMPTS_ENHANCE_LIMITER.check(
+            get_redis(),
+            f"rl:prompt_enhance:{user.id}",
+        )
+        providers = [
+            p for p in await _resolve_provider_order(db, runtime) if p.api_key.strip()
+        ]
+        if not providers:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": "not_configured",
+                        "message": "upstream API key not set",
+                    },
+                },
+            )
+        content, token_changed = await _build_video_enhance_content(
+            body,
+            request=request,
+            db=db,
+            user_id=user.id,
+        )
+    else:
+        providers = []
+        content = None
+        token_changed = False
+    billing, invalidate_hold = await _prepare_reserved_billing(
+        db,
+        user,
+        operation,
+        reservation,
+        runtime=runtime,
+    )
     commit = getattr(db, "commit", None)
     if callable(commit):
         await commit()
+    if invalidate_hold:
+        await invalidate_balance_cache(user.id)
 
-    return _GuardedEnhanceStreamingResponse(
-        _stream_with_keepalive(
-            _stream_enhance(
-                body.text,
-                providers,
-                billing,
-                runtime=runtime,
-                system_prompt=_video_enhance_system_prompt(body.variant_count),
-                content=content,
-            )
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-        on_teardown=_schedule_orphan_hold_release(billing, runtime),
+    if token_changed:
+        logger.debug(
+            "prompt enhancement video reference token committed with operation "
+            "record_id=%s",
+            operation.record_id,
+        )
+    return _durable_prompt_enhance_response(
+        operation,
+        reservation,
+        text=body.text,
+        providers=providers,
+        billing=billing,
+        runtime=runtime,
+        system_prompt=_video_enhance_system_prompt(body.variant_count),
+        content=content,
     )

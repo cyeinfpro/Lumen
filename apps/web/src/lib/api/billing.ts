@@ -1,4 +1,8 @@
 import { API_BASE, apiFetch } from "./http";
+import {
+  idempotentPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 import type {
   AdminBillingBootstrapIn,
   AdminBillingOverviewOut,
@@ -14,6 +18,7 @@ import type {
   BillingSnapshotOut,
   PricingRuleUpsertIn,
   PricingRulesOut,
+  RedemptionOut,
   RedemptionUsageListOut,
   WalletOut,
   WalletTransactionListOut,
@@ -49,6 +54,23 @@ export function listMyRedemptions(
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch<RedemptionUsageListOut>(`/me/redemptions${suffix}`);
+}
+
+export function redeemCode(code: string): Promise<RedemptionOut> {
+  const payload = { code };
+  return withSemanticPostIdempotency(
+    { operation: "billing.redemption.redeem" },
+    payload,
+    async (idempotencyKey) => {
+      const response = await apiFetch<RedemptionOut>("/me/redemptions", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(payload),
+      });
+      validateRedemptionResponse(response);
+      return response;
+    },
+  );
 }
 
 export function getPricing(): Promise<PricingRulesOut> {
@@ -174,10 +196,22 @@ export function createAdminRedemptionCodes(body: {
   expires_at?: string | null;
   note?: string | null;
 }): Promise<AdminRedemptionCodeCreateOut> {
-  return apiFetch<AdminRedemptionCodeCreateOut>("/admin/redemption_codes", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return withSemanticPostIdempotency(
+    { operation: "billing.admin.redemption_codes.create" },
+    body,
+    async (idempotencyKey) => {
+      const response = await apiFetch<AdminRedemptionCodeCreateOut>(
+        "/admin/redemption_codes",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(body),
+        },
+      );
+      validateRedemptionBatchResponse(response);
+      return response;
+    },
+  );
 }
 
 export function revokeAdminRedemptionCode(
@@ -279,14 +313,64 @@ export function adjustAdminWallet(
   reason: string,
   idempotencyKey?: string,
 ): Promise<WalletTransactionOut> {
-  return apiFetch<WalletTransactionOut>(`/admin/wallets/${userId}:adjust`, {
-    method: "POST",
-    body: JSON.stringify({
-      amount_rmb_signed,
-      reason,
-      ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
-    }),
-  });
+  const payload = {
+    amount_rmb_signed,
+    reason,
+  };
+  const submit = (key: string) =>
+    apiFetch<WalletTransactionOut>(
+      `/admin/wallets/${encodeURIComponent(userId)}:adjust`,
+      idempotentPostRequest({
+        ...payload,
+        idempotency_key: key,
+      }),
+    ).then((response) => {
+      validateWalletTransactionResponse(response);
+      return response;
+    });
+  if (idempotencyKey) return submit(idempotencyKey);
+  return withSemanticPostIdempotency(
+    { operation: "billing.admin.wallet.adjust", userId },
+    payload,
+    submit,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function validateRedemptionResponse(value: RedemptionOut): void {
+  if (!isRecord(value) || !isRecord(value.amount) || !isRecord(value.balance)) {
+    throw new TypeError("malformed redemption response");
+  }
+}
+
+function validateRedemptionBatchResponse(
+  value: AdminRedemptionCodeCreateOut,
+): void {
+  if (
+    !isRecord(value) ||
+    typeof value.batch_id !== "string" ||
+    value.batch_id.length === 0 ||
+    typeof value.count !== "number" ||
+    !Number.isInteger(value.count) ||
+    value.count <= 0
+  ) {
+    throw new TypeError("malformed redemption batch response");
+  }
+}
+
+function validateWalletTransactionResponse(
+  value: WalletTransactionOut,
+): void {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0
+  ) {
+    throw new TypeError("malformed wallet transaction response");
+  }
 }
 
 export function setAdminAccountMode(

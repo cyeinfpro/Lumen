@@ -62,6 +62,7 @@ class CanvasCreateIn(BaseModel):
     description: str = Field(default="", max_length=10_000)
     graph: dict[str, Any] = Field(default_factory=empty_graph)
     template: str | None = Field(default=None, max_length=64)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=96)
 
     @field_validator("title")
     @classmethod
@@ -85,6 +86,7 @@ class CanvasDuplicateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, min_length=1, max_length=255)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=96)
 
     @field_validator("title")
     @classmethod

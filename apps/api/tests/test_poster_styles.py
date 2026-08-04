@@ -26,13 +26,15 @@ from pydantic import ValidationError
 
 from app.routes import _poster_library as plib
 from app.routes import poster_styles
+from app.services.poster_styles import idempotency as poster_style_idempotency
+from app.services.poster_styles import generation as poster_style_generation
 from app.services.poster_styles import resources as poster_style_resources
 from app.workflows.adapters import library_sync_operation
 from lumen_core.constants import (
     POSTER_STYLE_CATEGORIES,
     POSTER_STYLE_DEFAULT_ASPECTS,
 )
-from lumen_core.models import PosterStyleHiddenPreset, PosterStyleItem
+from lumen_core.models import PosterStyleHiddenPreset, PosterStyleItem, WorkflowRun
 from lumen_core.schemas import (
     PosterStyleBatchDeleteIn,
     PosterStyleCreateIn,
@@ -124,7 +126,12 @@ def _admin_user() -> SimpleNamespace:
 
 
 def _member_user() -> SimpleNamespace:
-    return SimpleNamespace(id="user-1", role="member", email="m@example.com")
+    return SimpleNamespace(
+        id="user-1",
+        role="member",
+        email="m@example.com",
+        account_mode="wallet",
+    )
 
 
 def _user_item(item_id: str = "user:pstyle-1") -> PosterStyleItem:
@@ -1456,6 +1463,148 @@ def test_generate_prompt_contains_user_intent_at_tail() -> None:
     assert "Mood: 怀旧" in prompt
 
 
+class _PosterIdempotencyDb(_StubDb):
+    def __init__(self) -> None:
+        super().__init__()
+        self.workflow_runs: dict[str, WorkflowRun] = {}
+        self.rollbacks = 0
+
+    def add(self, row: Any) -> None:
+        super().add(row)
+        if isinstance(row, WorkflowRun):
+            self.workflow_runs[row.id] = row
+
+    async def get(self, model: Any, key: Any) -> Any | None:
+        if model is WorkflowRun:
+            return self.workflow_runs.get(str(key))
+        return None
+
+    async def commit(self) -> None:
+        for run in self.workflow_runs.values():
+            record = run.metadata_jsonb.get("paid_poster_style_idempotency")
+            assert isinstance(record, dict)
+            assert record.get("state") == "completed"
+            assert isinstance(record.get("response"), dict)
+        await super().commit()
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_poster_style_paid_idempotency_contract() -> None:
+    resolve = poster_style_idempotency.resolve_client_idempotency_key
+
+    assert resolve("request-1") == "request-1"
+    first = poster_style_idempotency.canonical_request_fingerprint(
+        poster_style_idempotency.POSTER_STYLE_GENERATE_OPERATION,
+        {"title": "Style", "options": {"b": 2, "a": 1}},
+    )
+    reordered = poster_style_idempotency.canonical_request_fingerprint(
+        poster_style_idempotency.POSTER_STYLE_GENERATE_OPERATION,
+        {"options": {"a": 1, "b": 2}, "title": "Style"},
+    )
+    assert first == reordered
+
+    for raw in (None, "", " request-1", "request-1 ", "请求-1"):
+        with pytest.raises(HTTPException) as excinfo:
+            resolve(raw)
+        assert excinfo.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_poster_style_generation_replays_original_job_and_task_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enqueue_calls = 0
+    published: list[dict[str, Any]] = []
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def lock_snapshot(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user=user, account_mode="wallet")
+
+    async def fake_enqueue(**kwargs: Any) -> tuple[list[str], list[dict[str, Any]]]:
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        kwargs["step"].task_ids = ["gen-original"]
+        return ["gen-original"], [
+            {
+                "assistant_msg_id": "msg-original",
+                "outbox_payloads": [
+                    {
+                        "kind": "generation",
+                        "task_id": "gen-original",
+                        "user_id": "user-1",
+                    }
+                ],
+                "outbox_rows": [SimpleNamespace(published_at=None)],
+            }
+        ]
+
+    async def fake_publish(**kwargs: Any) -> None:
+        published.append(kwargs)
+
+    monkeypatch.setattr(poster_style_idempotency, "lock_user_key", no_lock)
+    monkeypatch.setattr(
+        poster_styles,
+        "_enqueue_poster_style_generate_tasks",
+        fake_enqueue,
+    )
+    import app.redis_client as redis_client
+    import app.routes.messages as messages
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: SimpleNamespace())
+    monkeypatch.setattr(messages, "_publish_assistant_task", fake_publish)
+
+    db = _PosterIdempotencyDb()
+    user = _member_user()
+    monkeypatch.setattr(
+        poster_style_generation,
+        "lock_active_user_snapshot",
+        lock_snapshot,
+    )
+    body = PosterStyleGenerateIn(
+        title="复古风格",
+        prompt="生成一张复古促销海报",
+        count=1,
+    )
+
+    first = await poster_styles.generate_poster_style_samples(  # type: ignore[arg-type]
+        body,
+        user,
+        db,
+        "poster-style-request-1",
+    )
+    replay = await poster_styles.generate_poster_style_samples(  # type: ignore[arg-type]
+        body,
+        user,
+        db,
+        "poster-style-request-1",
+    )
+
+    assert replay == first
+    assert replay.task_ids == ["gen-original"]
+    assert replay.job_id == first.job_id
+    assert enqueue_calls == 1
+    assert len(published) == 1
+    assert db.commits == 2
+    assert "poster-style-request-1" not in repr(
+        db.workflow_runs[first.workflow_run_id].metadata_jsonb
+    )
+
+    changed = body.model_copy(update={"prompt": "changed payload"})
+    with pytest.raises(HTTPException) as conflict:
+        await poster_styles.generate_poster_style_samples(  # type: ignore[arg-type]
+            changed,
+            user,
+            db,
+            "poster-style-request-1",
+        )
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail["error"]["code"] == "idempotency_conflict"
+
+
 @pytest.mark.asyncio
 async def test_generate_endpoint_publishes_created_generation_tasks(
     monkeypatch: pytest.MonkeyPatch,
@@ -1480,9 +1629,13 @@ async def test_generate_endpoint_publishes_created_generation_tasks(
     async def fake_publish(**kwargs: Any) -> None:
         published.append(kwargs)
 
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(
         poster_styles, "_enqueue_poster_style_generate_tasks", fake_enqueue
     )
+    monkeypatch.setattr(poster_style_idempotency, "lock_user_key", no_lock)
     import app.redis_client as redis_client
     import app.routes.messages as messages
 
@@ -1491,11 +1644,25 @@ async def test_generate_endpoint_publishes_created_generation_tasks(
 
     db = _StubDb()
     user = _member_user()
+
+    async def lock_snapshot(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user=user, account_mode="wallet")
+
+    monkeypatch.setattr(
+        poster_style_generation,
+        "lock_active_user_snapshot",
+        lock_snapshot,
+    )
     body = PosterStyleGenerateIn(
         title="复古风格", prompt="生成一张复古促销海报", count=1
     )
 
-    out = await poster_styles.generate_poster_style_samples(body, user, db)  # type: ignore[arg-type]
+    out = await poster_styles.generate_poster_style_samples(  # type: ignore[arg-type]
+        body,
+        user,
+        db,
+        "poster-style-request-1",
+    )
 
     assert out.task_ids == ["gen-1"]
     assert db.commits == 1

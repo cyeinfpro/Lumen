@@ -270,7 +270,14 @@ class RecordingApi:
         self.get_error = get_error
         self.download_errors = set(download_errors or ())
 
-    async def get_generation(self, _chat_id: int, gen_id: str) -> dict[str, object]:
+    async def get_generation(
+        self,
+        _chat_id: int,
+        gen_id: str,
+        *,
+        tg_user_id: int,
+    ) -> dict[str, object]:
+        assert tg_user_id == _chat_id
         self.events.append(("get_generation", gen_id))
         if self.get_error is not None:
             raise self.get_error
@@ -279,8 +286,13 @@ class RecordingApi:
         return {"edit_url": "", "project_url": ""}
 
     async def download_image_to_file(
-        self, _chat_id: int, image_id: str
+        self,
+        _chat_id: int,
+        image_id: str,
+        *,
+        tg_user_id: int,
     ) -> tuple[Path, str, int]:
+        assert tg_user_id == _chat_id
         self.events.append(("download", image_id))
         if image_id in self.download_errors:
             raise listener.ApiError("download_failed", "boom")

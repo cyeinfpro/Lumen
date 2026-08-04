@@ -1,4 +1,9 @@
 import { apiFetch } from "./http";
+import {
+  semanticJsonPostRequest,
+  semanticPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 import type { BackendGeneration, BackendImageMeta } from "./tasks";
 
 export interface WorkflowStep {
@@ -350,6 +355,91 @@ export interface ReviseWorkflowImageIn {
   scope: "full_image" | "local_repair";
 }
 
+type SemanticScope = Record<string, string>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function nonEmptyStrings(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is string =>
+          typeof item === "string" && item.length > 0,
+      )
+    : [];
+}
+
+function validateIdField<T>(
+  value: T,
+  field: string,
+  message: string,
+): T {
+  if (
+    !isRecord(value) ||
+    typeof value[field] !== "string" ||
+    value[field].length === 0
+  ) {
+    throw new TypeError(message);
+  }
+  return value;
+}
+
+function validateWorkflowTaskResponse(
+  value: WorkflowRun,
+  stepKey: string,
+  source: "task_ids" | "active_task_ids" = "task_ids",
+): WorkflowRun {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    !Array.isArray(value.steps)
+  ) {
+    throw new TypeError("malformed workflow task response");
+  }
+  const step = value.steps.find(
+    (item) => isRecord(item) && item.step_key === stepKey,
+  );
+  const taskIds =
+    source === "task_ids"
+      ? nonEmptyStrings(step?.task_ids)
+      : nonEmptyStrings(
+          isRecord(step?.input_json)
+            ? step.input_json.active_task_ids
+            : undefined,
+        );
+  if (taskIds.length === 0) {
+    throw new TypeError("malformed workflow task response");
+  }
+  return value;
+}
+
+function semanticWorkflowPost<T>(
+  path: string,
+  scope: SemanticScope,
+  payload: unknown,
+  validate: (value: T) => T,
+): Promise<T> {
+  return withSemanticPostIdempotency(scope, payload, (idempotencyKey) =>
+    apiFetch<T>(
+      path,
+      semanticJsonPostRequest(payload, idempotencyKey),
+    ).then(validate),
+  );
+}
+
+function semanticEmptyWorkflowPost<T>(
+  path: string,
+  scope: SemanticScope,
+  validate: (value: T) => T,
+): Promise<T> {
+  const payload = {};
+  return withSemanticPostIdempotency(scope, payload, (idempotencyKey) =>
+    apiFetch<T>(path, semanticPostRequest(idempotencyKey)).then(validate),
+  );
+}
+
 export function listWorkflows(
   opts: { type?: string; limit?: number } = {},
 ): Promise<WorkflowRunListResponse> {
@@ -381,15 +471,20 @@ export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
 export function createApparelWorkflow(
   body: CreateApparelWorkflowIn,
 ): Promise<CreateApparelWorkflowOut> {
-  return apiFetch<CreateApparelWorkflowOut>(
+  const payload = {
+    quality_mode: "premium" as const,
+    ...body,
+  };
+  return semanticWorkflowPost<CreateApparelWorkflowOut>(
     "/workflows/apparel-model-showcase",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        quality_mode: "premium",
-        ...body,
-      }),
-    },
+    { operation: "workflow.apparel.create" },
+    payload,
+    (value) =>
+      validateIdField(
+        value,
+        "workflow_run_id",
+        "malformed apparel workflow response",
+      ),
   );
 }
 
@@ -410,14 +505,20 @@ export function createModelCandidates(
   workflowId: string,
   body: ModelCandidatesIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/model-candidates`, {
-    method: "POST",
-    body: JSON.stringify({
-      candidate_count: 3,
-      avoid: [],
-      ...body,
-    }),
-  });
+  const payload = {
+    candidate_count: 3 as const,
+    avoid: [],
+    ...body,
+  };
+  return semanticWorkflowPost<WorkflowRun>(
+    `/workflows/${workflowId}/model-candidates`,
+    {
+      operation: "workflow.apparel.model_candidates.create",
+      workflowId,
+    },
+    payload,
+    (value) => validateWorkflowTaskResponse(value, "model_candidates"),
+  );
 }
 
 export function approveModelCandidate(
@@ -452,12 +553,14 @@ export function createAccessoryPreviews(
   workflowId: string,
   body: AccessoryPreviewIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
+  return semanticWorkflowPost<WorkflowRun>(
     `/workflows/${workflowId}/model-candidates/accessory-previews`,
     {
-      method: "POST",
-      body: JSON.stringify(body),
+      operation: "workflow.apparel.accessory_previews.create",
+      workflowId,
     },
+    body,
+    (value) => validateWorkflowTaskResponse(value, "model_approval"),
   );
 }
 
@@ -503,16 +606,21 @@ export function syncApparelModelLibraryPresets(): Promise<ApparelModelLibrarySyn
 export function createApparelModelLibraryItem(
   body: ApparelModelLibraryItemCreateIn,
 ): Promise<ApparelModelLibraryItem> {
-  return apiFetch<ApparelModelLibraryItem>(
+  const payload = {
+    visibility_scope: "user_private" as const,
+    style_tags: [],
+    ...body,
+  };
+  return semanticWorkflowPost<ApparelModelLibraryItem>(
     "/workflows/apparel-model-library/items",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        visibility_scope: "user_private",
-        style_tags: [],
-        ...body,
-      }),
-    },
+    { operation: "workflow.apparel.model_library.item.create" },
+    payload,
+    (value) =>
+      validateIdField(
+        value,
+        "id",
+        "malformed apparel model library item response",
+      ),
   );
 }
 
@@ -552,12 +660,21 @@ export function saveModelCandidateToLibrary(
   candidateId: string,
   body: ModelCandidateSaveToLibraryIn,
 ): Promise<ApparelModelLibraryItem> {
-  return apiFetch<ApparelModelLibraryItem>(
+  const payload = { style_tags: [], ...body };
+  return semanticWorkflowPost<ApparelModelLibraryItem>(
     `/workflows/${workflowId}/model-candidates/${candidateId}/save-to-library`,
     {
-      method: "POST",
-      body: JSON.stringify({ style_tags: [], ...body }),
+      operation: "workflow.apparel.model_candidate.save_to_library",
+      workflowId,
+      candidateId,
     },
+    payload,
+    (value) =>
+      validateIdField(
+        value,
+        "id",
+        "malformed apparel model library item response",
+      ),
   );
 }
 
@@ -669,18 +786,29 @@ export interface ApparelModelLibraryAutoTagOut {
 export function generateApparelModelLibrary(
   body: ApparelModelLibraryGenerateIn,
 ): Promise<ApparelModelLibraryJob> {
-  return apiFetch<ApparelModelLibraryJob>(
+  const payload = {
+    mode: "text" as const,
+    reference_image_id: null,
+    style_tags: [],
+    appearance_direction: null,
+    extra_requirements: null,
+    ...body,
+  };
+  return semanticWorkflowPost<ApparelModelLibraryJob>(
     "/workflows/apparel-model-library/generate",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        mode: "text",
-        reference_image_id: null,
-        style_tags: [],
-        appearance_direction: null,
-        extra_requirements: null,
-        ...body,
-      }),
+    { operation: "workflow.apparel.model_library.generate" },
+    payload,
+    (value) => {
+      validateIdField(
+        value,
+        "job_id",
+        "malformed apparel model library job response",
+      );
+      return validateIdField(
+        value,
+        "workflow_run_id",
+        "malformed apparel model library job response",
+      );
     },
   );
 }
@@ -721,21 +849,39 @@ export function saveApparelModelLibraryJobItem(
   imageId: string,
   body: ApparelModelLibrarySaveJobItemIn,
 ): Promise<ApparelModelLibraryItem> {
-  return apiFetch<ApparelModelLibraryItem>(
+  const payload = { style_tags: [], ...body };
+  return semanticWorkflowPost<ApparelModelLibraryItem>(
     `/workflows/apparel-model-library/jobs/${encodeURIComponent(workflowRunId)}/items/${encodeURIComponent(imageId)}/save`,
     {
-      method: "POST",
-      body: JSON.stringify({ style_tags: [], ...body }),
+      operation: "workflow.apparel.model_library.job_item.save",
+      workflowRunId,
+      imageId,
     },
+    payload,
+    (value) =>
+      validateIdField(
+        value,
+        "id",
+        "malformed apparel model library item response",
+      ),
   );
 }
 
 export function autoTagApparelModelLibraryItem(
   itemId: string,
 ): Promise<ApparelModelLibraryAutoTagOut> {
-  return apiFetch<ApparelModelLibraryAutoTagOut>(
+  return semanticEmptyWorkflowPost<ApparelModelLibraryAutoTagOut>(
     `/workflows/apparel-model-library/items/${encodeURIComponent(itemId)}/auto-tag`,
-    { method: "POST" },
+    {
+      operation: "workflow.apparel.model_library.item.auto_tag",
+      itemId,
+    },
+    (value) =>
+      validateIdField(
+        value,
+        "item_id",
+        "malformed apparel model library auto-tag response",
+      ),
   );
 }
 
@@ -743,10 +889,17 @@ export function createShowcaseImages(
   workflowId: string,
   body: CreateShowcaseImagesIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/showcase-images`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return semanticWorkflowPost<WorkflowRun>(
+    `/workflows/${workflowId}/showcase-images`,
+    { operation: "workflow.apparel.showcase.create", workflowId },
+    body,
+    (value) =>
+      validateWorkflowTaskResponse(
+        value,
+        "showcase_generation",
+        "active_task_ids",
+      ),
+  );
 }
 
 export function reviseWorkflowImage(
@@ -754,12 +907,20 @@ export function reviseWorkflowImage(
   imageId: string,
   body: ReviseWorkflowImageIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
+  return semanticWorkflowPost<WorkflowRun>(
     `/workflows/${workflowId}/images/${imageId}/revise`,
     {
-      method: "POST",
-      body: JSON.stringify(body),
+      operation: "workflow.apparel.showcase.revise",
+      workflowId,
+      imageId,
     },
+    body,
+    (value) =>
+      validateWorkflowTaskResponse(
+        value,
+        "showcase_generation",
+        "active_task_ids",
+      ),
   );
 }
 

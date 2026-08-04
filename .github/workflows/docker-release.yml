@@ -133,6 +133,19 @@ jobs:
               echo "release tag commit is not reachable from origin/main" >&2
               exit 1
             fi
+            if [[ "${release_tag}" != *-* ]]; then
+              newest_stable_tag="$(
+                git tag --merged "${main_commit}" \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+                  | sort -V \
+                  | tail -n1 \
+                  || true
+              )"
+              if [[ "${newest_stable_tag}" != "${release_tag}" ]]; then
+                echo "stable release tag ${release_tag} is not the newest stable tag (${newest_stable_tag:-none})" >&2
+                exit 1
+              fi
+            fi
             previous_tag="$(
               git tag --merged "${commit}" --sort=-version:refname 'v*' \
                 | grep -Fvx "${release_tag}" \
@@ -823,13 +836,13 @@ jobs:
   promote-shared:
     name: Promote stable shared aliases
     runs-on: ubuntu-latest
-    needs: [resolve-ref, promote]
-    if: needs.resolve-ref.outputs.is_release == 'true'
+    needs: [resolve-ref, promote, release]
+    if: needs.resolve-ref.outputs.is_release == 'true' && needs.promote.outputs.is_prerelease == 'false'
     concurrency:
       group: ${{ github.workflow }}-stable-mutable-aliases
       cancel-in-progress: false
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Checkout immutable source
@@ -853,7 +866,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish stable shared aliases
-        if: needs.promote.outputs.is_prerelease == 'false'
         env:
           REGISTRY_NAMESPACE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}
           RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
@@ -875,10 +887,32 @@ jobs:
             --image-digest "tgbot=${TGBOT_DIGEST}" \
             --image-digest "web=${WEB_DIGEST}"
 
+      - name: Mark stable release latest
+        env:
+          RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          newest_stable="$(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n1
+          )"
+          if [[ "${newest_stable}" != "${RELEASE_TAG}" ]]; then
+            echo "refusing to move GitHub latest from newer stable release ${newest_stable:-none} to ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          gh release edit "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --latest
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [resolve-ref, promote, promote-shared]
+    needs: [resolve-ref, promote]
     if: needs.resolve-ref.outputs.is_release == 'true'
     permissions:
       contents: write
@@ -944,3 +978,4 @@ jobs:
           files: release-manifest.json
           draft: false
           prerelease: ${{ needs.promote.outputs.is_prerelease }}
+          make_latest: false

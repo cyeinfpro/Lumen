@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+
+from arq.connections import job_key_prefix, result_key_prefix
+from arq.constants import in_progress_key_prefix
 
 
 DISPATCH_ACTIVE_PREFIX = "generation:dispatch:active:"
@@ -98,6 +102,7 @@ class DispatchIdentity:
 class DispatchBeginResult:
     identity: DispatchIdentity
     created: bool
+    phase: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,12 +110,11 @@ class DispatchEnqueueResult:
     identity: DispatchIdentity
     created: bool
     enqueued: bool
+    durable_evidence: bool
 
     @property
     def accepted(self) -> bool:
-        # ``arq.enqueue_job`` returns None when the stable job id already exists.
-        # In that case the dispatch is still covered by the active reservation.
-        return True
+        return self.durable_evidence
 
 
 def dispatch_active_key(task_id: str) -> str:
@@ -143,6 +147,42 @@ def _identity_from_value(task_id: str, value: Any) -> DispatchIdentity:
     )
 
 
+def _phase_from_value(value: Any) -> str:
+    parts = _redis_text(value).split("|", 3)
+    if len(parts) < 3 or not parts[2]:
+        raise ValueError("invalid generation dispatch state")
+    return parts[2]
+
+
+async def _has_durable_dispatch_evidence(
+    redis: Any,
+    identity: DispatchIdentity,
+) -> bool:
+    raw = await redis.get(dispatch_active_key(identity.generation_id))
+    if raw is not None:
+        value = _redis_text(raw)
+        if value.startswith(identity.value_prefix):
+            phase = _phase_from_value(value)
+            if phase in {"enqueued", "consumed"}:
+                return True
+    return bool(
+        await redis.exists(
+            f"{job_key_prefix}{identity.job_id}",
+            f"{result_key_prefix}{identity.job_id}",
+            f"{in_progress_key_prefix}{identity.job_id}",
+        )
+    )
+
+
+async def _mark_dispatch_enqueued_best_effort(
+    redis: Any,
+    identity: DispatchIdentity,
+) -> None:
+    # The ARQ record is the acceptance proof; this marker accelerates later dedupe.
+    with suppress(Exception):
+        await mark_generation_dispatch_enqueued(redis, identity)
+
+
 async def begin_generation_dispatch(
     redis: Any,
     *,
@@ -173,6 +213,7 @@ async def begin_generation_dispatch(
     return DispatchBeginResult(
         identity=_identity_from_value(task_id, value),
         created=bool(int(created_raw)),
+        phase=_phase_from_value(value),
     )
 
 
@@ -207,13 +248,21 @@ async def enqueue_generation_dispatch(
         attempt=attempt,
         replace=replace,
     )
-    if not begun.created:
+    identity = begun.identity
+    if not begun.created and begun.phase in {"enqueued", "consumed"}:
         return DispatchEnqueueResult(
-            identity=begun.identity,
+            identity=identity,
             created=False,
             enqueued=False,
+            durable_evidence=True,
         )
-    identity = begun.identity
+    if not begun.created and begun.phase != "reserved":
+        return DispatchEnqueueResult(
+            identity=identity,
+            created=False,
+            enqueued=False,
+            durable_evidence=await _has_durable_dispatch_evidence(redis, identity),
+        )
     kwargs: dict[str, Any] = {
         "_job_id": identity.job_id,
     }
@@ -230,15 +279,31 @@ async def enqueue_generation_dispatch(
             **kwargs,
         )
     except Exception:
-        # The enqueue result can be unknown after the Redis command was accepted.
-        # Keep the reservation so another scheduler cannot create queue churn.
-        raise
+        try:
+            durable_evidence = await _has_durable_dispatch_evidence(redis, identity)
+        except Exception:
+            durable_evidence = False
+        if not durable_evidence:
+            raise
+        await _mark_dispatch_enqueued_best_effort(redis, identity)
+        return DispatchEnqueueResult(
+            identity=identity,
+            created=begun.created,
+            enqueued=False,
+            durable_evidence=True,
+        )
     if job is not None:
-        await mark_generation_dispatch_enqueued(redis, identity)
+        await _mark_dispatch_enqueued_best_effort(redis, identity)
+        durable_evidence = True
+    else:
+        durable_evidence = await _has_durable_dispatch_evidence(redis, identity)
+        if durable_evidence:
+            await _mark_dispatch_enqueued_best_effort(redis, identity)
     return DispatchEnqueueResult(
         identity=identity,
-        created=True,
+        created=begun.created,
         enqueued=job is not None,
+        durable_evidence=durable_evidence,
     )
 
 

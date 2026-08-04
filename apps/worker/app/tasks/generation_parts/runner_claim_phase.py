@@ -25,6 +25,7 @@ from ...observability import safe_outcome, task_duration_seconds
 from ...upstream_clients.image_job_models import ImageJobExecutionHandle
 from ..state import is_generation_terminal
 from .active_user_fence import lock_active_generation_user
+from .bonus_obligation import capture_parent_billing_admission
 from .diagnostics import generation_trace_id, queue_wait_ms
 from .errors import TaskCancelled
 from .execution_boundary import (
@@ -49,11 +50,18 @@ from .retry_state import (
 )
 from .run_state import GenerationRunState
 from .runner_phase_services import ClaimGenerationServices
+from .takeover_checkpoint import (
+    generation_has_takeover_checkpoint,
+    generation_takeover_checkpoint_present,
+)
 
 
 logger = logging.getLogger(f"{__package__}.runner")
 RESULT_UNKNOWN_CODE = "result_unknown"
 RESULT_UNKNOWN_MESSAGE = "upstream dispatch has no response receipt; result is unknown"
+CHECKPOINT_UNKNOWN_MESSAGE = (
+    "upstream result checkpoint metadata is invalid; result is unknown"
+)
 
 
 async def load_initial_generation(state: GenerationRunState) -> bool:
@@ -79,6 +87,11 @@ async def load_initial_generation(state: GenerationRunState) -> bool:
         if generation_cannot_start(generation):
             return False
         load_generation_fields(state, generation)
+        await capture_parent_billing_admission(
+            session,
+            generation,
+            state,
+        )
         if not await validate_conversation(state, session, services):
             return False
         if not await validate_primary_input(state, session, services):
@@ -133,23 +146,47 @@ async def fail_nonreplayable_dispatch(
     services: ClaimGenerationServices,
 ) -> bool:
     generation = state.generation
-    if not upstream_dispatch_result_unknown(
-        generation,
-        execution_epoch=getattr(generation, "execution_epoch", None),
-    ):
+    settle_checkpoint_unknown = False
+    if generation_has_takeover_checkpoint(state):
+        logger.info(
+            "generation claim preserving takeover checkpoint task=%s epoch=%s "
+            "attempt=%s",
+            state.task_id,
+            getattr(generation, "execution_epoch", 0),
+            getattr(generation, "attempt", 0),
+        )
         return False
-    logger.warning(
-        "generation replay blocked by unresolved dispatch task=%s epoch=%s attempt=%s",
-        state.task_id,
-        getattr(generation, "execution_epoch", 0),
-        getattr(generation, "attempt", 0),
-    )
+    if generation_takeover_checkpoint_present(state):
+        settle_checkpoint_unknown = True
+        message = CHECKPOINT_UNKNOWN_MESSAGE
+        logger.warning(
+            "generation replay blocked by invalid takeover checkpoint "
+            "task=%s epoch=%s attempt=%s",
+            state.task_id,
+            getattr(generation, "execution_epoch", 0),
+            getattr(generation, "attempt", 0),
+        )
+    else:
+        if not upstream_dispatch_result_unknown(
+            generation,
+            execution_epoch=getattr(generation, "execution_epoch", None),
+        ):
+            return False
+        message = RESULT_UNKNOWN_MESSAGE
+        logger.warning(
+            "generation replay blocked by unresolved dispatch "
+            "task=%s epoch=%s attempt=%s",
+            state.task_id,
+            getattr(generation, "execution_epoch", 0),
+            getattr(generation, "attempt", 0),
+        )
     await fail_queued_generation(
         state,
         session,
         code=RESULT_UNKNOWN_CODE,
-        message=RESULT_UNKNOWN_MESSAGE,
+        message=message,
         next_attempt=None,
+        settle_unknown=settle_checkpoint_unknown,
         services=services,
     )
     return True
@@ -363,6 +400,7 @@ async def fail_queued_generation(
     code: str,
     message: str,
     next_attempt: int | None,
+    settle_unknown: bool = False,
     services: ClaimGenerationServices | None = None,
 ) -> None:
     phase_services = services or ClaimGenerationServices.from_deps(state.services)
@@ -392,7 +430,14 @@ async def fail_queued_generation(
         row.status = MessageStatus.FAILED
     generation = await session.get(Generation, state.task_id)
     if generation is not None:
-        if services is None:
+        if settle_unknown:
+            await phase_services.billing.settle_unknown_upstream(
+                session,
+                generation,
+                reason=code,
+                knowledge="unknown",
+            )
+        elif services is None:
             await release_or_settle_generation(
                 state.services.billing,
                 session,

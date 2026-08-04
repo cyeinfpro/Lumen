@@ -64,6 +64,28 @@ _install_health_compose() {
     done
 }
 
+_install_core_readiness() {
+    local compose_dir="$1"
+    local ready_url="${2:-http://127.0.0.1:8000/readyz}"
+    local attempts="${3:-60}"
+    local interval="${4:-2}"
+    if command -v lumen_require_compose_core_readiness >/dev/null 2>&1; then
+        lumen_require_compose_core_readiness \
+            "${compose_dir}" "${ready_url}" "${attempts}" "${interval}"
+        return $?
+    fi
+    if ! _install_health_http "${ready_url}" "${attempts}" "${interval}"; then
+        return 1
+    fi
+    if command -v lumen_compose_in >/dev/null 2>&1; then
+        lumen_compose_in "${compose_dir}" exec -T worker \
+            python -m app.worker_health check >/dev/null 2>&1
+    else
+        _install_compose exec -T worker \
+            python -m app.worker_health check >/dev/null 2>&1
+    fi
+}
+
 # 阶段记录 wrapper
 # 记录每个 phase 的 wall-clock 起止时间，emit_step_done 时打印耗时摘要给
 # 终端用户（lumen_emit_step 的 dur_ms 仅写入 SSE 协议，终端看不到）。

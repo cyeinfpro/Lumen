@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -8,7 +9,10 @@ from pydantic import ValidationError
 from app.provider_pool import ProviderPool
 from app.provider_pool import ProviderConfig, ProviderHealth, ResolvedProvider
 from app import config as config_mod
+from app import provider_pool
+from app.provider_pool_parts import proxy_lifecycle
 from app.config import BYOK_DEV_MASTER_SECRET, Settings
+from lumen_core.providers import ProviderProxyDefinition
 
 
 def test_worker_settings_ignores_shared_env_fields() -> None:
@@ -173,6 +177,85 @@ def test_provider_dataclass_repr_does_not_include_api_key() -> None:
     assert resolved.api_key == "sk-secret-value"
     assert "sk-secret-value" not in repr(provider)
     assert "sk-secret-value" not in repr(resolved)
+
+
+def test_provider_proxy_runtime_rotates_across_in_process_lifecycles() -> None:
+    proxy = ProviderProxyDefinition(
+        name="restart-proxy",
+        protocol="socks5",
+        host="127.0.0.1",
+        port=1080,
+        enabled=True,
+    )
+    manager = provider_pool._PROVIDER_PROXY_LIFECYCLE  # noqa: SLF001
+    manager.runtime = proxy_lifecycle.proxy_runtime.ProviderProxyRuntime()
+
+    async def run_lifecycle() -> tuple[str | None, object]:
+        runtime = provider_pool._PROVIDER_PROXY_LIFECYCLE.runtime  # noqa: SLF001
+        resolved = await provider_pool.resolve_provider_proxy_url(proxy)
+        await provider_pool.close_provider_proxy_tunnels()
+        return resolved, runtime
+
+    first_url, first_runtime = asyncio.run(run_lifecycle())
+    second_url, second_runtime = asyncio.run(run_lifecycle())
+
+    assert first_url == "socks5h://127.0.0.1:1080"
+    assert second_url == first_url
+    assert second_runtime is not first_runtime
+    assert (
+        provider_pool._PROVIDER_PROXY_LIFECYCLE.runtime is not second_runtime  # noqa: SLF001
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_proxy_resolve_finishes_before_runtime_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = provider_pool._PROVIDER_PROXY_LIFECYCLE  # noqa: SLF001
+    old_runtime = proxy_lifecycle.proxy_runtime.ProviderProxyRuntime()
+    manager.runtime = old_runtime
+    resolve_started = asyncio.Event()
+    allow_resolve = asyncio.Event()
+    resolved_runtimes: list[object] = []
+
+    async def blocking_resolve(
+        _proxy: object,
+        *,
+        runtime: object,
+    ) -> str:
+        async with runtime.lock:
+            resolve_started.set()
+            await allow_resolve.wait()
+            resolved_runtimes.append(runtime)
+            return "socks5h://127.0.0.1:1080"
+
+    async def serialized_close(*, runtime: object) -> None:
+        async with runtime.lock:
+            runtime.closed = True
+
+    monkeypatch.setattr(
+        proxy_lifecycle.proxy_runtime,
+        "resolve_provider_proxy_url",
+        blocking_resolve,
+    )
+    monkeypatch.setattr(
+        proxy_lifecycle.proxy_runtime,
+        "close_provider_proxy_tunnels",
+        serialized_close,
+    )
+
+    resolve_task = asyncio.create_task(provider_pool.resolve_provider_proxy_url(None))
+    await resolve_started.wait()
+    close_task = asyncio.create_task(provider_pool.close_provider_proxy_tunnels())
+    await asyncio.sleep(0)
+    assert manager.runtime is old_runtime
+
+    allow_resolve.set()
+    assert await resolve_task == "socks5h://127.0.0.1:1080"
+    await close_task
+
+    assert resolved_runtimes == [old_runtime]
+    assert manager.runtime is not old_runtime
 
 
 @pytest.mark.asyncio

@@ -6,17 +6,21 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NoReturn
 
 import httpx
 from lumen_core.providers import ProviderProxyDefinition
-from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+from lumen_core.upstream_billing import (
+    IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
+    UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+)
 
 from ..provider_runtime.upstream_services import (
     ImageUpstreamRuntime,
     UpstreamServices,
     resolve_image_upstream_services,
 )
+from .delivery_evidence import transport_error_proves_undelivered
 from .image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
@@ -328,26 +332,132 @@ def _direct_image_result_unknown_error(
     method: str,
     url: str,
     trace_id: str,
-    timeout_s: float,
+    timeout_s: float | None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> BaseException:
     services = _runtime_services(runtime)
-    exc_type = type(exc).__name__
+    detail = (
+        f"timed out after {timeout_s:.0f}s"
+        if timeout_s is not None
+        else f"failed after dispatch ({type(exc).__name__})"
+    )
+    payload: dict[str, Any] = {
+        "path": path,
+        "method": method,
+        "url": url,
+        "x_trace_id": trace_id,
+        "upstream_result_unknown": True,
+        "exception": type(exc).__name__,
+    }
+    if timeout_s is not None:
+        payload["timeout_s"] = timeout_s
     return services.infrastructure.UpstreamError(
         (
-            f"{path} timed out after {timeout_s:.0f}s; upstream result is unknown. "
-            "The request may already have been accepted, so it was not retried automatically."
+            f"{path} {detail}; upstream result is unknown. The request may "
+            "already have been accepted, so it was not retried automatically."
         ),
         status_code=0,
+        error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+        payload=payload,
+    )
+
+
+def _direct_image_undelivered_error(
+    exc: BaseException,
+    *,
+    path: str,
+    method: str,
+    url: str,
+    trace_id: str,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    services = _runtime_services(runtime)
+    reason = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+    error = services.infrastructure.UpstreamError(
+        f"{path} could not connect before the request was delivered: {exc}",
+        status_code=0,
+        error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
+        payload={
+            "path": path,
+            "method": method,
+            "url": url,
+            "x_trace_id": trace_id,
+            "receipt_reason": reason,
+            "upstream_dispatch_delivery": reason,
+            "exception": type(exc).__name__,
+        },
+    )
+    setattr(error, "upstream_receipt_reason", reason)
+    return error
+
+
+def _raise_direct_request_failure(
+    exc: BaseException,
+    *,
+    path: str,
+    log_endpoint: str,
+    description: str,
+    url: str,
+    trace_id: str,
+    started: float,
+    timeout_s: float | None,
+    runtime: ImageUpstreamRuntime | None,
+) -> NoReturn:
+    services = _runtime_services(runtime)
+    services.core.log_upstream_call(
+        endpoint=log_endpoint,
+        status=0,
+        duration_ms=(services.infrastructure.time.monotonic() - started) * 1000.0,
+        trace_id=trace_id,
+        response_headers=None,
+    )
+    if transport_error_proves_undelivered(exc):
+        raise _direct_image_undelivered_error(
+            exc,
+            path=path,
+            method="POST",
+            url=url,
+            trace_id=trace_id,
+            runtime=runtime,
+        ) from exc
+    raise _direct_image_result_unknown_error(
+        exc,
+        path=path,
+        method="POST",
+        url=url,
+        trace_id=trace_id,
+        timeout_s=timeout_s,
+        runtime=runtime,
+    ) from exc
+
+
+def _direct_image_response_result_unknown_error(
+    exc: BaseException,
+    *,
+    path: str,
+    method: str,
+    url: str,
+    trace_id: str,
+    status_code: int,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    services = _runtime_services(runtime)
+    return services.infrastructure.UpstreamError(
+        (
+            f"{path} returned HTTP {status_code}, but the response could not be "
+            "decoded; upstream result is unknown and was not retried automatically"
+        ),
+        status_code=status_code,
         error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
         payload={
             "path": path,
             "method": method,
             "url": url,
             "x_trace_id": trace_id,
-            "timeout_s": timeout_s,
             "upstream_result_unknown": True,
-            "exception": exc_type,
+            "response_received": True,
+            "wrapped_error_code": services.infrastructure.EC.BAD_RESPONSE.value,
+            "exception": type(exc).__name__,
         },
     )
 
@@ -409,6 +519,19 @@ async def _direct_generate_image_once(
         client = await services.lifecycle.get_images_client(pinned_target=pinned_target)
     else:
         client = await services.lifecycle.get_images_client()
+    dispatch_ready_emitted = False
+
+    async def prepare_attempt(attempt: int) -> None:
+        nonlocal dispatch_ready_emitted
+        if before_attempt is not None:
+            await before_attempt(attempt)
+        if not dispatch_ready_emitted:
+            await services.transport.emit_image_progress(
+                request.progress_callback,
+                "dispatch_ready",
+            )
+            dispatch_ready_emitted = True
+
     # Model 显式 pin：UPSTREAM_MODEL 来自 lumen_core.constants（lumen-core wheel 里固化）。
     # 加 runtime assert 防止未来改动把 model 字段隐式置空 / fallback 到上游默认。
     assert services.infrastructure.UPSTREAM_MODEL, "model must be set"
@@ -455,46 +578,33 @@ async def _direct_generate_image_once(
                 json_body=body,
                 timeout=request_timeout,
                 retry_httpx_exceptions=False,
-                before_attempt=before_attempt,
+                retry_status_codes=False,
+                before_attempt=prepare_attempt,
             )
     except (TimeoutError, services.infrastructure.httpx.TimeoutException) as exc:
-        duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-        services.core.log_upstream_call(
-            endpoint="images_generations",
-            status=0,
-            duration_ms=duration_ms,
-            trace_id=trace_id,
-            response_headers=None,
-        )
-        raise _direct_image_result_unknown_error(
+        _raise_direct_request_failure(
             exc,
             path="images/generations",
-            method="POST",
+            log_endpoint="images_generations",
+            description="direct image request",
             url=url,
             trace_id=trace_id,
+            started=started,
             timeout_s=read_timeout_s,
             runtime=runtime,
-        ) from exc
-    except services.core.RETRY_HTTPX_EXC as exc:
-        duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-        services.core.log_upstream_call(
-            endpoint="images_generations",
-            status=0,
-            duration_ms=duration_ms,
-            trace_id=trace_id,
-            response_headers=None,
         )
-        raise services.infrastructure.UpstreamError(
-            f"direct image request failed: {exc}",
-            status_code=0,
-            error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
-            payload={
-                "path": "images/generations",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-            },
-        ) from exc
+    except services.core.RETRY_HTTPX_EXC as exc:
+        _raise_direct_request_failure(
+            exc,
+            path="images/generations",
+            log_endpoint="images_generations",
+            description="direct image request",
+            url=url,
+            trace_id=trace_id,
+            started=started,
+            timeout_s=None,
+            runtime=runtime,
+        )
 
     duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
     services.core.log_upstream_call(
@@ -504,10 +614,40 @@ async def _direct_generate_image_once(
         trace_id=trace_id,
         response_headers=getattr(resp, "headers", None),
     )
+    if 500 <= resp.status_code < 600:
+        raise services.infrastructure.UpstreamError(
+            "direct image POST returned an ambiguous server failure; "
+            "upstream result is unknown and was not replayed",
+            status_code=resp.status_code,
+            error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+            payload={
+                "path": "images/generations",
+                "method": "POST",
+                "url": url,
+                "x_trace_id": trace_id,
+                "upstream_result_unknown": True,
+                "response_received": True,
+            },
+        )
+    if 200 <= resp.status_code < 300:
+        await services.transport.emit_image_progress(
+            request.progress_callback,
+            "response_ready",
+        )
 
     try:
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001
+        if 200 <= resp.status_code < 300:
+            raise _direct_image_response_result_unknown_error(
+                exc,
+                path="images/generations",
+                method="POST",
+                url=url,
+                trace_id=trace_id,
+                status_code=resp.status_code,
+                runtime=runtime,
+            ) from exc
         raise services.infrastructure.UpstreamError(
             "upstream returned invalid JSON",
             status_code=resp.status_code,
@@ -559,6 +699,32 @@ def _wrap_inpaint_prompt(
     """
     services = _runtime_services(runtime)
     return services.requests.wrap_inpaint_prompt(user_intent)
+
+
+def _raise_if_invalid_multipart_json(
+    payload: Any,
+    *,
+    status: int,
+    url: str,
+    trace_id: str,
+    runtime: ImageUpstreamRuntime | None,
+) -> None:
+    if not (
+        200 <= status < 300
+        and isinstance(payload, dict)
+        and isinstance(payload.get("raw"), str)
+    ):
+        return
+    decode_error = ValueError("curl multipart response was not valid JSON")
+    raise _direct_image_response_result_unknown_error(
+        decode_error,
+        path="images/edits",
+        method="POST",
+        url=url,
+        trace_id=trace_id,
+        status_code=status,
+        runtime=runtime,
+    ) from decode_error
 
 
 async def _direct_edit_image_once(
@@ -663,50 +829,51 @@ async def _direct_edit_image_once(
         }
         if pinned_target is not None:
             request_kwargs["pinned_target"] = pinned_target
+
+        async def record_dispatch_ready() -> None:
+            await services.transport.emit_image_progress(
+                request.progress_callback,
+                "dispatch_ready",
+            )
+
+        async def record_response_ready() -> None:
+            await services.transport.emit_image_progress(
+                request.progress_callback,
+                "response_ready",
+            )
+
+        request_kwargs["on_dispatch_ready"] = record_dispatch_ready
+        request_kwargs["on_response_ready"] = record_response_ready
         status, payload = await services.transport.curl_post_multipart(**request_kwargs)
     except services.infrastructure.httpx.TimeoutException as exc:
-        duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-        services.core.log_upstream_call(
-            endpoint="images_edits",
-            status=0,
-            duration_ms=duration_ms,
-            trace_id=trace_id,
-            response_headers=None,
-        )
-        raise _direct_image_result_unknown_error(
+        _raise_direct_request_failure(
             exc,
             path="images/edits",
-            method="POST",
+            log_endpoint="images_edits",
+            description="direct edit request",
             url=url,
             trace_id=trace_id,
+            started=started,
             timeout_s=read_timeout_s,
             runtime=runtime,
-        ) from exc
+        )
     except (
         services.infrastructure.asyncio.CancelledError,
         services.infrastructure.UpstreamCancelled,
     ):
         raise
     except Exception as exc:  # noqa: BLE001
-        duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-        services.core.log_upstream_call(
-            endpoint="images_edits",
-            status=0,
-            duration_ms=duration_ms,
+        _raise_direct_request_failure(
+            exc,
+            path="images/edits",
+            log_endpoint="images_edits",
+            description="direct edit request",
+            url=url,
             trace_id=trace_id,
-            response_headers=None,
+            started=started,
+            timeout_s=None,
+            runtime=runtime,
         )
-        raise services.infrastructure.UpstreamError(
-            f"direct edit request failed: {exc}",
-            status_code=0,
-            error_code=services.infrastructure.EC.DIRECT_IMAGE_REQUEST_FAILED.value,
-            payload={
-                "path": "images/edits",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-            },
-        ) from exc
 
     duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
     services.core.log_upstream_call(
@@ -726,6 +893,13 @@ async def _direct_edit_image_once(
             method="POST",
             url=url,
         )
+    _raise_if_invalid_multipart_json(
+        payload,
+        status=status,
+        url=url,
+        trace_id=trace_id,
+        runtime=runtime,
+    )
     if isinstance(payload, dict):
         services.core.record_usage(payload.get("usage"))
     return await services.core.extract_image_results(
@@ -744,6 +918,8 @@ __all__ = [
     "_select_image_read_timeout",
     "_image_request_timeout",
     "_direct_image_result_unknown_error",
+    "_direct_image_undelivered_error",
+    "_direct_image_response_result_unknown_error",
     "_is_direct_image_result_unknown",
     "_direct_generate_image_once",
     "_wrap_inpaint_prompt",

@@ -1,22 +1,34 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumen_core.constants import VideoGenerationStatus
+from lumen_core.constants import (
+    CompletionStatus,
+    GenerationStatus,
+    VideoGenerationStatus,
+)
 from lumen_core.model_entities import User
 from lumen_core.model_entities.media_workflows import (
     Image,
     ImageVariant,
+    ImageVariantClaim,
     Video,
     WorkflowRun,
     WorkflowStep,
 )
-from lumen_core.model_entities.tasks import VideoGeneration
+from lumen_core.model_entities.tasks import Completion, Generation, VideoGeneration
+
+from ..domain.variants import (
+    DISPLAY_VARIANT,
+    VIDEO_REFERENCE_VARIANT,
+    deterministic_variant_key,
+)
 
 
 _VIDEO_VARIANT_METADATA_KEYS = (
@@ -28,6 +40,14 @@ _VIDEO_TERMINAL_STATUSES = (
     VideoGenerationStatus.FAILED.value,
     VideoGenerationStatus.CANCELED.value,
     VideoGenerationStatus.EXPIRED.value,
+)
+_GENERATION_RECOVERABLE_STATUSES = (
+    GenerationStatus.QUEUED.value,
+    GenerationStatus.RUNNING.value,
+)
+_COMPLETION_RECOVERABLE_STATUSES = (
+    CompletionStatus.QUEUED.value,
+    CompletionStatus.STREAMING.value,
 )
 _STORYBOARD_ASSEMBLY_FILENAMES = frozenset(
     {"output.mp4", "poster.jpg", "commit-recovery.json"}
@@ -127,6 +147,64 @@ def _active_generation_output_candidates(
             continue
         outputs.setdefault((parts[1], parts[3]), set()).add(key)
     return outputs
+
+
+def _generation_artifact_candidates(
+    candidates: set[str],
+) -> dict[tuple[str, str, int, int], set[str]]:
+    outputs: dict[tuple[str, str, int, int], set[str]] = {}
+    for key in candidates:
+        parts = PurePosixPath(key).parts
+        if (
+            len(parts) != 9
+            or parts[0] != "u"
+            or parts[2] != "g"
+            or parts[4] != "executions"
+            or not parts[5].isascii()
+            or not parts[5].isdigit()
+            or parts[6] != "attempts"
+            or not parts[7].isascii()
+            or not parts[7].isdigit()
+        ):
+            continue
+        outputs.setdefault(
+            (parts[1], parts[3], int(parts[5]), int(parts[7])),
+            set(),
+        ).add(key)
+    return outputs
+
+
+def _completion_artifact_candidates(
+    candidates: set[str],
+) -> dict[tuple[str, str, int, int], set[str]]:
+    outputs: dict[tuple[str, str, int, int], set[str]] = {}
+    for key in candidates:
+        parts = PurePosixPath(key).parts
+        if (
+            len(parts) != 10
+            or parts[0] != "u"
+            or parts[2] != "completion-tools"
+            or parts[4] != "executions"
+            or not parts[5].isascii()
+            or not parts[5].isdigit()
+            or parts[6] != "attempts"
+            or not parts[7].isascii()
+            or not parts[7].isdigit()
+        ):
+            continue
+        outputs.setdefault(
+            (parts[1], parts[3], int(parts[5]), int(parts[7])),
+            set(),
+        ).add(key)
+    return outputs
+
+
+def _variant_extension(kind: str) -> str | None:
+    if kind == DISPLAY_VARIANT:
+        return "webp"
+    if kind == VIDEO_REFERENCE_VARIANT:
+        return "jpg"
+    return None
 
 
 def _storyboard_unknown_storage_keys(
@@ -399,6 +477,138 @@ async def known_active_video_generation_storage_keys(
     return known
 
 
+async def known_active_generation_artifact_storage_keys(
+    db: AsyncSession,
+    candidates: set[str],
+) -> set[str]:
+    outputs = _generation_artifact_candidates(candidates)
+    if not outputs:
+        return set()
+    user_ids = sorted({identity[0] for identity in outputs})
+    generation_ids = sorted({identity[1] for identity in outputs})
+    rows = (
+        await db.execute(
+            select(
+                Generation.id,
+                Generation.user_id,
+                Generation.execution_epoch,
+                Generation.attempt,
+            )
+            .join(User, User.id == Generation.user_id)
+            .where(
+                Generation.id.in_(generation_ids),
+                Generation.user_id.in_(user_ids),
+                User.deleted_at.is_(None),
+                Generation.status.in_(_GENERATION_RECOVERABLE_STATUSES),
+            )
+        )
+    ).all()
+    known: set[str] = set()
+    for generation_id, user_id, execution_epoch, attempt in rows:
+        known.update(
+            outputs.get(
+                (
+                    str(user_id),
+                    str(generation_id),
+                    max(0, int(execution_epoch or 0)),
+                    max(0, int(attempt or 0)),
+                ),
+                set(),
+            )
+        )
+    return known
+
+
+async def known_active_completion_artifact_storage_keys(
+    db: AsyncSession,
+    candidates: set[str],
+) -> set[str]:
+    outputs = _completion_artifact_candidates(candidates)
+    if not outputs:
+        return set()
+    user_ids = sorted({identity[0] for identity in outputs})
+    completion_ids = sorted({identity[1] for identity in outputs})
+    rows = (
+        await db.execute(
+            select(
+                Completion.id,
+                Completion.user_id,
+                Completion.execution_epoch,
+                Completion.attempt,
+            )
+            .join(User, User.id == Completion.user_id)
+            .where(
+                Completion.id.in_(completion_ids),
+                Completion.user_id.in_(user_ids),
+                User.deleted_at.is_(None),
+                Completion.status.in_(_COMPLETION_RECOVERABLE_STATUSES),
+            )
+        )
+    ).all()
+    known: set[str] = set()
+    for completion_id, user_id, execution_epoch, attempt in rows:
+        known.update(
+            outputs.get(
+                (
+                    str(user_id),
+                    str(completion_id),
+                    max(0, int(execution_epoch or 0)),
+                    max(0, int(attempt or 0)),
+                ),
+                set(),
+            )
+        )
+    return known
+
+
+async def known_active_variant_claim_storage_keys(
+    db: AsyncSession,
+    candidates: set[str],
+) -> set[str]:
+    candidate_user_ids = sorted(_candidate_user_ids(candidates))
+    if not candidates or not candidate_user_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(
+                ImageVariantClaim.image_id,
+                ImageVariantClaim.kind,
+                ImageVariantClaim.source_key,
+                Image.user_id,
+            )
+            .join(Image, Image.id == ImageVariantClaim.image_id)
+            .join(User, User.id == Image.user_id)
+            .where(
+                Image.user_id.in_(candidate_user_ids),
+                Image.deleted_at.is_(None),
+                User.deleted_at.is_(None),
+                ImageVariantClaim.source_key == Image.storage_key,
+                ImageVariantClaim.source_sha256 == Image.sha256,
+                ImageVariantClaim.lease_until > datetime.now(timezone.utc),
+            )
+        )
+    ).all()
+    known: set[str] = set()
+    for image_id, kind, source_key, user_id in rows:
+        extension = _variant_extension(str(kind))
+        if extension is None:
+            continue
+        storage_key = deterministic_variant_key(
+            image_id=str(image_id),
+            source_key=str(source_key),
+            kind=str(kind),
+            extension=extension,
+        )
+        parts = PurePosixPath(storage_key).parts
+        if (
+            storage_key in candidates
+            and len(parts) >= 2
+            and parts[:2] == ("u", str(user_id))
+        ):
+            known.add(storage_key)
+    return known
+
+
 async def known_storyboard_commit_storage_keys(
     db: AsyncSession,
     candidates: set[str],
@@ -503,21 +713,57 @@ async def known_live_media_storage_keys(
         and PurePosixPath(key).parts[2] in {"v", "vref", "storyboards"}
     }
     image_candidates = candidates - video_candidates
+    checkpoint_candidates = {
+        key
+        for key in candidates
+        if len(PurePosixPath(key).parts) > 2 and PurePosixPath(key).parts[2] == "g"
+    }
     image_keys = await known_live_image_storage_keys(db, image_candidates)
     video_keys = await known_live_video_storage_keys(db, video_candidates)
     active_generation_keys = await known_active_video_generation_storage_keys(
         db,
         candidates,
     )
+    active_image_generation_keys = (
+        await known_active_generation_artifact_storage_keys(
+            db,
+            checkpoint_candidates,
+        )
+    )
+    completion_candidates = {
+        key
+        for key in candidates
+        if len(PurePosixPath(key).parts) > 2
+        and PurePosixPath(key).parts[2] == "completion-tools"
+    }
+    active_completion_keys = await known_active_completion_artifact_storage_keys(
+        db,
+        completion_candidates,
+    )
+    active_variant_keys = await known_active_variant_claim_storage_keys(
+        db,
+        image_candidates,
+    )
     storyboard_commit_keys = await known_storyboard_commit_storage_keys(
         db,
         storyboard_candidates,
     )
-    return image_keys | video_keys | active_generation_keys | storyboard_commit_keys
+    return (
+        image_keys
+        | video_keys
+        | active_generation_keys
+        | active_image_generation_keys
+        | active_completion_keys
+        | active_variant_keys
+        | storyboard_commit_keys
+    )
 
 
 __all__ = [
     "active_video_generation_reference_id",
+    "known_active_completion_artifact_storage_keys",
+    "known_active_generation_artifact_storage_keys",
+    "known_active_variant_claim_storage_keys",
     "known_active_video_generation_storage_keys",
     "known_live_image_storage_keys",
     "known_live_media_storage_keys",

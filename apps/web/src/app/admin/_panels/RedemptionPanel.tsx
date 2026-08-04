@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Download, Slash } from "lucide-react";
 
@@ -37,20 +37,6 @@ import {
 } from "./RedemptionPanelViews";
 
 type Section = "codes" | "wallets" | "all";
-
-/** 每次表单提交生成一个 per-operation 幂等键(UUID)。
- *
- * 后端 adjust 的幂等键决定「这是一次逻辑操作」：同一次提交的重试必须复用
- * 同一个键，否则网络重试会把同一笔补偿/扣款入账两次；两次不同的提交必须
- * 是不同的键，否则两次完全相同的调账（同金额、同 reason）会被后端静默
- * 去重，第二次不生效。
- */
-function newAdjustNonce(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `adjust-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 export function RedemptionPanel({ section = "all" }: { section?: Section }) {
   return (
@@ -320,9 +306,6 @@ function UserWalletsSubpanel() {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [adjustAmount, setAdjustAmount] = useState("");
   const [adjustReason, setAdjustReason] = useState("");
-  // 当前这次表单提交的 per-operation 幂等键：重试复用，成功后清空，
-  // 下次提交（哪怕是完全相同的金额+reason）生成新键。
-  const adjustSubmission = useRef<{ amount: string; reason: string; nonce: string } | null>(null);
   const [nextMode, setNextMode] = useState<AccountMode>("wallet");
   const [residualMode, setResidualMode] = useState<ResidualMode>("freeze");
   const [txKind, setTxKind] = useState("all");
@@ -364,10 +347,8 @@ function UserWalletsSubpanel() {
         selectedUserId,
         adjustAmount,
         adjustReason,
-        adjustSubmission.current?.nonce,
       ),
     onSuccess: async () => {
-      adjustSubmission.current = null;
       toast.success("钱包调账已写入");
       setAdjustAmount("");
       setAdjustReason("");
@@ -436,18 +417,6 @@ function UserWalletsSubpanel() {
         onAdjustReasonChange={setAdjustReason}
         onAdjust={() => {
           if (!window.confirm(`确认调账 ${adjustAmount} RMB？`)) return;
-          const pending = adjustSubmission.current;
-          if (
-            !pending ||
-            pending.amount !== adjustAmount ||
-            pending.reason !== adjustReason
-          ) {
-            adjustSubmission.current = {
-              amount: adjustAmount,
-              reason: adjustReason,
-              nonce: newAdjustNonce(),
-            };
-          }
           adjustMut.mutate();
         }}
         onNextModeChange={setNextMode}

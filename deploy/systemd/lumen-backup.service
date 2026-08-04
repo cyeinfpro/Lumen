@@ -2,6 +2,8 @@
 Description=Lumen periodic backup
 After=docker.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
@@ -13,13 +15,17 @@ Type=oneshot
 User=lumen-backup
 Group=lumen-backup
 SupplementaryGroups=docker
-EnvironmentFile=-/opt/lumen/shared/.env
+Environment=LUMEN_ENV_FILE=/opt/lumen/shared/.env
 Environment=BACKUP_ROOT=/opt/lumendata/backup
 Environment=LUMEN_BACKUP_ROOT=/opt/lumendata/backup
 Environment=LUMEN_BACKUP_RESTORE_LOCKFILE=/opt/lumendata/backup/.backup-restore.lock
+Environment=LUMEN_BACKUP_JOURNAL_FILE=/opt/lumendata/backup/.recovery/backup.json
 Environment=LUMEN_BACKUP_SERVICE_MODE=1
 WorkingDirectory=/opt/lumen/current
-ExecStartPre=+/bin/sh -c 'mkdir -p /opt/lumendata/backup; chgrp lumen-backup /opt/lumendata/backup 2>/dev/null || true; chmod g+rwx /opt/lumendata/backup 2>/dev/null || true; touch /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; chgrp lumen-backup /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; chmod g+rw /opt/lumen/.lumen-maintenance.lock 2>/dev/null || true; log=/opt/lumendata/backup/.backup.log; max=$${LUMEN_BACKUP_LOG_MAX_BYTES:-10485760}; if [ -f "$log" ] && [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max" ]; then rm -f "$log.1"; mv -f "$log" "$log.1"; fi'
+ExecStartPre=/usr/bin/test -r /opt/lumen/shared/.env
+ExecStartPre=/usr/bin/test -w /opt/lumendata/backup
+ExecStartPre=/usr/bin/test -w /opt/lumen/.lumen-maintenance.lock
+ExecStartPre=/bin/sh -c 'log=/opt/lumendata/backup/.backup.log; max=10485760; if [ -f "$log" ] && [ "$(wc -c < "$log" 2>/dev/null || echo 0)" -gt "$max" ]; then rm -f "$log.1"; mv -f "$log" "$log.1"; fi'
 ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh
 StandardOutput=append:/opt/lumendata/backup/.backup.log
 StandardError=append:/opt/lumendata/backup/.backup.log
@@ -28,6 +34,8 @@ TimeoutStartSec=900
 TimeoutStopSec=120
 KillSignal=SIGTERM
 KillMode=mixed
+Restart=on-failure
+RestartSec=5s
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

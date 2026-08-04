@@ -17,6 +17,7 @@ from .core_adapter import stable_hash, validated_graph
 from .asset_ref_service import materialize_version_asset_refs, sync_head_asset_refs
 from .document_service import get_owned_canvas
 from .errors import canvas_http
+from .identity_fence import lock_canvas_write_identity
 
 
 def selection_dict(row: CanvasNodeSelection) -> dict[str, Any]:
@@ -160,6 +161,7 @@ async def create_named_version(
     canvas_id: str,
     name: str,
 ) -> CanvasVersion:
+    await lock_canvas_write_identity(db, user_id=user_id)
     canvas = await get_owned_canvas(
         db,
         user_id=user_id,
@@ -185,6 +187,7 @@ async def restore_version(
     canvas_id: str,
     version_id: str,
 ) -> CanvasVersion:
+    await lock_canvas_write_identity(db, user_id=user_id)
     canvas = await get_owned_canvas(
         db,
         user_id=user_id,
@@ -223,9 +226,7 @@ async def restore_version(
             )
         ).scalars()
     )
-    current_revisions = {
-        row.node_id: int(row.revision) for row in current_selections
-    }
+    current_revisions = {row.node_id: int(row.revision) for row in current_selections}
     await db.execute(
         delete(CanvasNodeSelection).where(CanvasNodeSelection.canvas_id == canvas_id)
     )

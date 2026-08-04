@@ -92,7 +92,7 @@ DIMENSION_CHECKS = {
     "release_update_rollback": (
         "migration_gate",
         "release_tag_main_guard",
-        "stable_alias_before_release",
+        "release_before_stable_alias",
         "updater_health_commit",
         "release_faults",
         "release_proof",
@@ -1001,6 +1001,88 @@ def _ownership_check(root: Path) -> CheckResult:
     )
 
 
+def _workflow_job_block(workflow: str, job_name: str) -> str | None:
+    match = re.search(
+        rf"^  {re.escape(job_name)}:\s*$",
+        workflow,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        return None
+    next_job = re.search(
+        r"^  [A-Za-z0-9_-]+:\s*$",
+        workflow[match.end() :],
+        flags=re.MULTILINE,
+    )
+    end = match.end() + next_job.start() if next_job is not None else len(workflow)
+    return workflow[match.start() : end]
+
+
+def _workflow_job_needs(job: str | None) -> frozenset[str] | None:
+    if job is None:
+        return None
+    match = re.search(r"^    needs:\s*\[([^\]\n]+)\]\s*$", job, re.MULTILINE)
+    if match is None:
+        return None
+    dependencies = frozenset(
+        dependency.strip()
+        for dependency in match.group(1).split(",")
+        if dependency.strip()
+    )
+    return dependencies or None
+
+
+def _workflow_job_condition(job: str | None) -> str:
+    if job is None:
+        return ""
+    match = re.search(r"^    if:\s*(.+?)\s*$", job, re.MULTILINE)
+    return match.group(1) if match is not None else ""
+
+
+def _release_publication_dag_check(workflow: str) -> CheckResult:
+    release_job = _workflow_job_block(workflow, "release")
+    shared_job = _workflow_job_block(workflow, "promote-shared")
+    release_needs = _workflow_job_needs(release_job)
+    shared_needs = _workflow_job_needs(shared_job)
+    shared_condition = _workflow_job_condition(shared_job)
+    release_defers_latest = bool(
+        release_job is not None
+        and re.search(r"^\s+make_latest:\s*false\s*$", release_job, re.MULTILINE)
+    )
+    shared_alias_position = (
+        shared_job.find("--phase mutable") if shared_job is not None else -1
+    )
+    shared_latest_position = (
+        shared_job.find("gh release edit") if shared_job is not None else -1
+    )
+    passed = (
+        release_needs == frozenset({"resolve-ref", "promote"})
+        and shared_needs == frozenset({"resolve-ref", "promote", "release"})
+        and "needs.resolve-ref.outputs.is_release == 'true'" in shared_condition
+        and "needs.promote.outputs.is_prerelease == 'false'" in shared_condition
+        and "always()" not in shared_condition
+        and release_defers_latest
+        and 0 <= shared_alias_position < shared_latest_position
+        and "--latest" in (shared_job or "")
+    )
+    if passed:
+        detail = (
+            "GitHub Release/manifest gates stable aliases; GitHub latest moves "
+            "only after aliases; prereleases skip shared aliases"
+        )
+    else:
+        detail = (
+            "release/shared alias DAG mismatch: "
+            f"release_needs={sorted(release_needs or ())}, "
+            f"shared_needs={sorted(shared_needs or ())}, "
+            f"shared_if={shared_condition!r}, "
+            f"release_defers_latest={release_defers_latest}, "
+            f"shared_alias_position={shared_alias_position}, "
+            f"shared_latest_position={shared_latest_position}"
+        )
+    return CheckResult(passed, "source", detail)
+
+
 def _source_checks(root: Path) -> dict[str, CheckResult]:
     architecture = (root / "scripts/check_architecture.py").read_text(encoding="utf-8")
     runtime = (root / "scripts/module_runtime_state_audit.py").read_text(
@@ -1026,8 +1108,6 @@ def _source_checks(root: Path) -> dict[str, CheckResult]:
             and isinstance(layers.get("packages"), list)
             and isinstance(layers.get("rules"), list)
         )
-    stable_index = release.find("\n  promote-shared:")
-    release_index = release.find("\n  release:")
     checks = {
         "architecture_layers_valid": CheckResult(
             layers_valid,
@@ -1056,11 +1136,7 @@ def _source_checks(root: Path) -> dict[str, CheckResult]:
             "source",
             "release tag ancestry guard",
         ),
-        "stable_alias_before_release": CheckResult(
-            0 <= stable_index < release_index,
-            "source",
-            "stable alias job precedes GitHub Release job",
-        ),
+        "release_before_stable_alias": _release_publication_dag_check(release),
         "updater_health_commit": CheckResult(
             updater_health.find("mark_update_committed")
             < updater_health.find("emit_done health_check 0")

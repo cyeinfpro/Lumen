@@ -116,6 +116,7 @@ class JobService:
             max_retention_days=lambda: settings.max_retention_days,
             job_ttl_days=lambda: settings.job_ttl_days,
             log=LOG,
+            open_db=getattr(repository, "_open", None),
         )
         self.results = ResultService(repository, self.persistence)
         self.stale_jobs = ActiveStalePolicy(settings, repository, LOG)

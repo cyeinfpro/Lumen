@@ -13,6 +13,7 @@ from lumen_core.models import OutboxEvent
 
 from .contracts import ClaimedOutboxEvent
 from .dlq import persist, persist_once, resolve
+from .retry import retry_delay_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,12 @@ async def _finalize_owned_row(
     row.last_delivery_error = result.error
 
     if result.state == "retryable_failure":
+        row.next_attempt_at = now + timedelta(
+            seconds=retry_delay_seconds(
+                delivery_attempts=result.event.delivery_attempts,
+                fail_count=result.fail_count,
+            )
+        )
         if result.fail_count >= max_fail_count:
             record = await persist_once(
                 session,
@@ -84,6 +91,7 @@ async def _finalize_owned_row(
                 accumulator.dlq_records.append(record)
         return
 
+    row.next_attempt_at = None
     row.published_at = now
     accumulator.fail_counts_to_clear.append(event_id)
     if result.state == "published":
@@ -132,6 +140,10 @@ async def claim_outbox_events(
                         (
                             OutboxEvent.claim_until.is_(None)
                             | (OutboxEvent.claim_until <= now)
+                        ),
+                        (
+                            OutboxEvent.next_attempt_at.is_(None)
+                            | (OutboxEvent.next_attempt_at <= now)
                         ),
                     )
                     .order_by(OutboxEvent.created_at, OutboxEvent.id)

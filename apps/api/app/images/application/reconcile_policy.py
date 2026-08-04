@@ -511,6 +511,7 @@ class ImageArtifactReconciler:
                 normalized_ref,
                 reconcile_lease_guard,
                 storage_guard,
+                image_id=row.id,
                 reserved_bytes=reserved_bytes,
             )
             updated_manifest = _replace_manifest_item(
@@ -555,6 +556,7 @@ class ImageArtifactReconciler:
         lease_guard: ReconcileLeaseGuardPort | None,
         storage_guard: CapacityLeaseGuard,
         *,
+        image_id: str,
         reserved_bytes: int,
     ) -> ArtifactIdentity:
         await _assert_lease_owned(lease_guard)
@@ -594,6 +596,7 @@ class ImageArtifactReconciler:
                     (storage_guard,),
                 ),
                 lease_guard=lease_guard,
+                image_id=image_id,
             )
             return published.identity
         finally:
@@ -604,6 +607,7 @@ class ImageArtifactReconciler:
         work: Awaitable[PublishedArtifact],
         *,
         lease_guard: ReconcileLeaseGuardPort | None,
+        image_id: str,
     ) -> PublishedArtifact:
         if lease_guard is None:
             return await work
@@ -624,7 +628,11 @@ class ImageArtifactReconciler:
                     raise ReconcileLeaseLost(
                         "image artifact reconcile lease was lost during publish"
                     ) from exc
-                await self._discard_stale_publish(published)
+                await self._discard_stale_publish(
+                    published,
+                    image_id=image_id,
+                    stale_fence=lease_guard.fence,
+                )
                 raise ReconcileLeaseLost(
                     "image artifact reconcile lease was lost during publish"
                 )
@@ -634,7 +642,11 @@ class ImageArtifactReconciler:
             try:
                 await lease_guard.assert_owned()
             except ReconcileLeaseLost:
-                await self._discard_stale_publish(published)
+                await self._discard_stale_publish(
+                    published,
+                    image_id=image_id,
+                    stale_fence=lease_guard.fence,
+                )
                 raise
             return published
         finally:
@@ -647,14 +659,31 @@ class ImageArtifactReconciler:
     async def _discard_stale_publish(
         self,
         published: PublishedArtifact,
+        *,
+        image_id: str,
+        stale_fence: int,
     ) -> None:
         if not published.created:
             return
         try:
-            await self.artifacts.delete(
-                published.key,
-                expected=published.identity,
-            )
+            async with self.repository.guard_reconcile_publish_cleanup(
+                image_id,
+                stale_fence=stale_fence,
+            ) as can_delete:
+                if not can_delete:
+                    return
+                delete_task = asyncio.create_task(
+                    self.artifacts.delete(
+                        published.key,
+                        expected=published.identity,
+                    ),
+                    name="delete-stale-reconcile-publish",
+                )
+                try:
+                    await asyncio.shield(delete_task)
+                except asyncio.CancelledError:
+                    await delete_task
+                    raise
         except Exception as exc:
             raise ReconcileLeaseLost(
                 "stale reconcile owner could not remove published artifact"

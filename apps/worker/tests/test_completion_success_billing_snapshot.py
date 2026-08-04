@@ -246,7 +246,7 @@ async def test_completion_success_reads_cancel_and_billing_settings_outside_sess
         "flush_balance_cache_refreshes",
         flush_balance_cache_refreshes,
     )
-    monkeypatch.setattr(outcomes, "_final_text", lambda _state: "done")
+    monkeypatch.setattr(outcomes, "completion_final_text", lambda _state: "done")
     monkeypatch.setattr(outcomes, "_stage_success_deliveries", stage_deliveries)
 
     state = _completion_state(session, cancel_probe=cancel_probe)
@@ -307,7 +307,7 @@ async def test_completion_success_conflict_checks_cancel_after_session_exit(
         snapshot,
     )
     monkeypatch.setattr(worker_billing, "charge_completion", fail_charge)
-    monkeypatch.setattr(outcomes, "_final_text", lambda _state: "done")
+    monkeypatch.setattr(outcomes, "completion_final_text", lambda _state: "done")
 
     state = _completion_state(session, cancel_probe=cancel_probe)
     with pytest.raises(Cancelled, match="cancelled during success commit"):

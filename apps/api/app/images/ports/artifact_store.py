@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Set
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Protocol
 
@@ -37,6 +38,13 @@ class ArtifactStorePort(Protocol):
         *,
         expected: ArtifactIdentity,
     ) -> PublishedArtifact: ...
+
+    def artifact_lifecycle_fence(
+        self,
+        key: ArtifactKey,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AbstractAsyncContextManager[None]: ...
 
     async def identity(self, key: ArtifactKey) -> ArtifactIdentity | None: ...
 

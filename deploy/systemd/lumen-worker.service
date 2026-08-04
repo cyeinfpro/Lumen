@@ -1,7 +1,8 @@
 [Unit]
 Description=Lumen Worker
 After=network-online.target docker.service lumen-storage-mount.service
-Wants=network-online.target lumen-storage-mount.service
+Wants=network-online.target
+Requires=docker.service lumen-storage-mount.service
 
 [Service]
 Type=simple
@@ -11,11 +12,11 @@ WorkingDirectory=/opt/lumen/current/apps/worker
 EnvironmentFile=-/opt/lumen/shared/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
-# 同 lumen-api.service：CIFS forceuid remount，确保 lumen 进程能写
-# /opt/lumendata。worker 跑 4K 长任务，写不进 storage 会让所有任务直接 fail。
-# (per feedback_cifs_chmod_eperm.md)
-ExecStartPre=+/bin/sh -c 'if findmnt -T /opt/lumendata >/dev/null 2>&1 && [ "$$(findmnt -T /opt/lumendata -no FSTYPE)" = "cifs" ]; then /bin/mount -o remount,uid=$$(id -u lumen),gid=$$(id -g lumen),forceuid,forcegid,file_mode=0664,dir_mode=0775 /opt/lumendata || true; fi'
-ExecStart=/opt/lumen/current/.venv/bin/python -m arq app.main.WorkerSettings
+Environment=LUMEN_WORKER_HEALTH_STATE_FILE=/opt/lumen/shared/worker-var/worker-health.json
+# Privileged mount repair belongs to lumen-storage-mount.service.
+ExecStartPre=/usr/local/sbin/lumen-storage-mount verify
+ExecStartPre=/usr/bin/test -w /opt/lumendata/storage
+ExecStart=/opt/lumen/current/.venv/bin/python -m app.worker_health run
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
@@ -32,9 +33,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateDevices=true
 CapabilityBoundingSet=
-# worker 的 var/ 在 release 内是软链 → shared/worker-var；ProtectSystem 解引用后落在
-# 物理路径上，所以 ReadWritePaths 必须列 shared 而不是 release 内路径。
-ReadWritePaths=/opt/lumendata /opt/lumen/shared
+# worker var/ is the only writable shared subtree; release code and .env stay
+# read-only even if the worker process is compromised.
+ReadWritePaths=/opt/lumendata/storage /opt/lumen/shared/worker-var
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lumen-worker

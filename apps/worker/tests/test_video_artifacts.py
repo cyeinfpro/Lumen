@@ -195,6 +195,34 @@ def test_copy_video_file_exclusive_is_idempotent_and_never_overwrites(
         == size_bytes
     )
 
+
+def test_copy_video_file_fsyncs_final_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "stored" / "nested" / "output.mp4"
+    source.write_bytes(_mp4_bytes())
+    sha256, size_bytes = hash_video_file(source)
+    calls: list[Path] = []
+    original = video_artifacts.fsync_directory
+
+    def tracking_fsync(path: Path) -> None:
+        calls.append(path)
+        original(path)
+
+    monkeypatch.setattr(video_artifacts, "fsync_directory", tracking_fsync)
+
+    result = copy_video_file_exclusive_result(
+        source,
+        destination,
+        expected_sha256=sha256,
+        expected_size=size_bytes,
+    )
+
+    assert result.created is True
+    assert calls[-1] == destination.parent
+
     changed = tmp_path / "changed.mp4"
     changed.write_bytes(_mp4_bytes() + b"changed")
     changed_sha256, changed_size = hash_video_file(changed)

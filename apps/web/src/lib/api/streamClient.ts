@@ -10,12 +10,16 @@ export const streamClient = {
     path: string,
     body: unknown,
     signal?: AbortSignal,
+    idempotencyKey?: string,
   ): Promise<Response> {
     return apiTransport.requestRaw<Response>(
       path,
       {
         method: "POST",
         body: JSON.stringify(body),
+        headers: idempotencyKey
+          ? { "Idempotency-Key": idempotencyKey }
+          : undefined,
         signal,
         requestClass: "command",
         budget: NO_DEADLINE,

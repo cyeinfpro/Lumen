@@ -256,7 +256,14 @@ async def test_orphan_sweep_skips_leaf_lock_and_temp_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _storage_file(tmp_path, "u/user-1/uploads/a.webp")
-    lock = _storage_file(tmp_path, "u/user-1/uploads/.artifact-publish.lock")
+    publish_lock = _storage_file(
+        tmp_path,
+        "u/user-1/uploads/.artifact-publish.lock",
+    )
+    lifecycle_lock = _storage_file(
+        tmp_path,
+        "u/user-1/uploads/.artifact-lifecycle.lock",
+    )
     atomic_tmp = _storage_file(tmp_path, "u/user-1/uploads/.a.webp.abcd1234.tmp")
     variant_tmp = _storage_file(
         tmp_path,
@@ -284,7 +291,8 @@ async def test_orphan_sweep_skips_leaf_lock_and_temp_files(
 
     assert result["orphans"] == ["u/user-1/uploads/a.webp"]
     assert result["deleted"] == 1
-    assert lock.exists()
+    assert publish_lock.exists()
+    assert lifecycle_lock.exists()
     assert atomic_tmp.exists()
     assert variant_tmp.exists()
 

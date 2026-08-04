@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable
 
@@ -63,6 +64,7 @@ class StreamTimeouts:
 @dataclass
 class _ResponseState:
     emitted: bool = False
+    pending_whitespace: str = ""
 
 
 # 可证明「请求从未送达上游」的传输异常:全部发生在连接/代理/连接池阶段,
@@ -194,6 +196,53 @@ def iter_sse_payloads_from_buffer(buffer: str) -> tuple[list[str], str]:
     return payloads, buffer
 
 
+def sse_payloads(chunk: str) -> list[str]:
+    normalized = chunk.replace("\r\n", "\n")
+    payloads: list[str] = []
+    for raw_event in normalized.split("\n\n"):
+        data_lines = [
+            line.partition(":")[2].lstrip()
+            for line in raw_event.splitlines()
+            if line.startswith("data:")
+        ]
+        if data_lines:
+            payloads.append("\n".join(data_lines).strip())
+    return payloads
+
+
+def text_delta_from_chunk(chunk: str) -> str | None:
+    for payload in sse_payloads(chunk):
+        if payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("text"), str):
+            return event["text"]
+    return None
+
+
+def has_nonempty_text(chunks: list[str] | tuple[str, ...]) -> bool:
+    return any(
+        isinstance(text := text_delta_from_chunk(chunk), str) and bool(text.strip())
+        for chunk in chunks
+    )
+
+
+def terminal_chunk_kind(chunk: str) -> str | None:
+    for payload in sse_payloads(chunk):
+        if payload == "[DONE]":
+            return "succeeded"
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("error"), str):
+            return "failed"
+    return None
+
+
 def capture_enhance_usage(
     capture: EnhanceUsageCapture | None,
     event: dict[str, Any],
@@ -231,8 +280,15 @@ def _text_chunk(text: str) -> str:
 
 def _delta_chunks(evt: dict[str, Any], state: _ResponseState) -> list[str]:
     delta = evt.get("delta", "")
-    if not delta:
+    if not isinstance(delta, str) or not delta:
         return []
+    if not delta.strip():
+        if state.emitted:
+            return [_text_chunk(delta)]
+        state.pending_whitespace += delta
+        return []
+    delta = f"{state.pending_whitespace}{delta}"
+    state.pending_whitespace = ""
     state.emitted = True
     return [_text_chunk(delta)]
 
@@ -241,8 +297,10 @@ def _done_chunks(evt: dict[str, Any], state: _ResponseState) -> list[str]:
     if state.emitted:
         return []
     text_done = evt.get("text")
-    if not isinstance(text_done, str) or not text_done:
+    if not isinstance(text_done, str) or not text_done.strip():
         raise EnhanceProviderError("empty_response", retryable=True)
+    text_done = f"{state.pending_whitespace}{text_done}"
+    state.pending_whitespace = ""
     state.emitted = True
     return [_text_chunk(text_done)]
 
@@ -251,8 +309,10 @@ def _completed_chunks(evt: dict[str, Any], state: _ResponseState) -> list[str]:
     if state.emitted:
         return []
     completed_text = extract_response_text(evt.get("response") or evt)
-    if not completed_text:
+    if not completed_text.strip():
         raise EnhanceProviderError("empty_response", retryable=True)
+    completed_text = f"{state.pending_whitespace}{completed_text}"
+    state.pending_whitespace = ""
     state.emitted = True
     return [_text_chunk(completed_text)]
 
@@ -294,7 +354,9 @@ async def _stream_response(
         payloads, buffer = iter_sse_payloads_from_buffer(buffer + chunk)
         for payload in payloads:
             if payload == "[DONE]":
-                return
+                if state.emitted:
+                    return
+                raise EnhanceProviderError("empty_response", retryable=True)
             try:
                 evt = json.loads(payload)
             except json.JSONDecodeError:
@@ -350,6 +412,7 @@ async def stream_enhance_one(
     content: list[dict[str, Any]] | None = None,
     metadata: dict[str, str] | None = None,
     timeouts: StreamTimeouts,
+    on_dispatching: Callable[[], Awaitable[None]] | None = None,
     on_dispatched: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     body = build_enhance_body(
@@ -373,6 +436,8 @@ async def stream_enhance_one(
             follow_redirects=False,
             trust_env=False,
         ) as client:
+            if on_dispatching is not None:
+                await on_dispatching()
             async with client.stream(
                 "POST",
                 responses_url(provider.base_url),

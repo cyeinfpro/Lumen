@@ -119,8 +119,12 @@ async def lookup_idempotent_post(
     conv_id: str,
     idempotency_key: str,
     *,
+    operation_namespace: str,
+    request_fingerprint: str,
     message_alive_filters_fn: Callable[[], tuple[Any, ...]],
     idempotency_lookup_keys_fn: Callable[[str, str], tuple[str, ...]],
+    require_matching_task_idempotency_fn: Callable[..., None],
+    http_error_fn: Callable[[str, str, int], Exception],
 ) -> PostMessageOut | None:
     alive_filters = message_alive_filters_fn()
     lookup_keys = idempotency_lookup_keys_fn(conv_id, idempotency_key)
@@ -154,6 +158,20 @@ async def lookup_idempotent_post(
             )
         )
     ).scalar_one_or_none()
+    if comp_hit is not None and gen_anchor is not None:
+        raise http_error_fn(
+            "idempotency_conflict",
+            "idempotency_key matched multiple task types",
+            409,
+        )
+    task_hit = comp_hit or gen_anchor
+    if task_hit is not None:
+        require_matching_task_idempotency_fn(
+            [task_hit],
+            operation_namespace=operation_namespace,
+            request_fingerprint=request_fingerprint,
+            http_error=http_error_fn,
+        )
     if comp_hit is not None:
         anchor_msg_id = comp_hit.message_id
     elif gen_anchor is not None:
@@ -186,6 +204,12 @@ async def lookup_idempotent_post(
             )
             .scalars()
             .all()
+        )
+        require_matching_task_idempotency_fn(
+            gen_hits,
+            operation_namespace=operation_namespace,
+            request_fingerprint=request_fingerprint,
+            http_error=http_error_fn,
         )
     user_msg = None
     if assistant_msg.parent_message_id:

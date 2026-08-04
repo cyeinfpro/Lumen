@@ -30,6 +30,7 @@ from ..domain.showcase_model_policy import (
     accessory_age_direction,
     accessory_strength_direction,
 )
+from .paid_idempotency import current_paid_operation_task_metadata
 from ..domain.workflow_contracts import PublishBundle
 from .output_sync import coerce_string_list
 from .serialization import clean_string_list, now
@@ -188,6 +189,7 @@ async def create_workflow_task(
         "workflow_type": DEFAULT_WORKFLOW_TYPE,
         "workflow_step_key": workflow_step_key,
         **(workflow_meta or {}),
+        **current_paid_operation_task_metadata(db),
     }
     if result.completion_id:
         comp = await db.get(Completion, result.completion_id)

@@ -12,19 +12,28 @@ from lumen_core.providers import ProviderDefinition
 
 from ...audit import AuditPersistenceError
 from ...task_billing import EnhanceBillingContext, EnhanceUsageCapture
-from .upstream import EnhanceAttempt, EnhanceProviderError
+from .idempotency import AttemptOwnershipLost
+from .upstream import EnhanceAttempt, EnhanceProviderError, text_delta_from_chunk
 
 logger = logging.getLogger(__name__)
+
+
+class BillingFinalizationError(RuntimeError):
+    """Durable billing action did not reach a committed outcome."""
 
 
 @dataclass(frozen=True)
 class StreamRuntime:
     stream_one: Callable[..., AsyncIterator[str]]
-    charge: Callable[[EnhanceBillingContext, EnhanceUsageCapture], Awaitable[None]]
-    release: Callable[..., Awaitable[None]]
-    release_after_cancel: Callable[..., Awaitable[None]]
-    settle_default: Callable[..., Awaitable[None]]
-    settle_default_after_cancel: Callable[..., Awaitable[None]]
+    charge: Callable[[EnhanceBillingContext, EnhanceUsageCapture], Awaitable[Any]]
+    release: Callable[..., Awaitable[Any]]
+    release_after_cancel: Callable[..., Awaitable[Any]]
+    settle_default: Callable[..., Awaitable[Any]]
+    settle_default_after_cancel: Callable[..., Awaitable[Any]]
+    record_dispatch_intent: Callable[[], Awaitable[None]] | None = None
+    record_candidate_outcome: Callable[[bool], Awaitable[None]] | None = None
+    checkpoint_finalization: Callable[..., Awaitable[None]] | None = None
+    require_billing_confirmation: bool = False
 
 
 @dataclass
@@ -44,8 +53,10 @@ class _FailoverState:
 @dataclass
 class _CandidateState:
     emitted: bool = False
+    valid_text: bool = False
     succeeded: bool = False
     dispatched: bool = False
+    dispatch_checkpoint_failed: bool = False
     provider_error: EnhanceProviderError | None = None
     internal_error: bool = False
 
@@ -80,22 +91,39 @@ async def _candidate_chunks(
     *,
     runtime: StreamRuntime,
     stream_kwargs: dict[str, Any],
+    on_dispatching: Callable[[], Awaitable[None]] | None = None,
     on_dispatched: Callable[[], None] | None = None,
 ) -> AsyncIterator[str]:
     try:
+        dispatch_kwargs: dict[str, Any] = {}
+        if on_dispatching is not None:
+            dispatch_kwargs["on_dispatching"] = on_dispatching
         async for chunk in runtime.stream_one(
             text,
             provider,
             attempt,
             capture,
             on_dispatched=on_dispatched,
+            **dispatch_kwargs,
             **stream_kwargs,
         ):
             candidate.emitted = True
+            text = text_delta_from_chunk(chunk)
+            candidate.valid_text = candidate.valid_text or bool(
+                isinstance(text, str) and text.strip()
+            )
             yield chunk
-        candidate.succeeded = True
+        if candidate.valid_text:
+            candidate.succeeded = True
+        else:
+            candidate.provider_error = EnhanceProviderError(
+                "empty_response",
+                retryable=True,
+            )
     except EnhanceProviderError as exc:
         candidate.provider_error = exc
+    except AttemptOwnershipLost:
+        raise
     except (GeneratorExit, asyncio.CancelledError):
         raise
     except Exception:
@@ -139,12 +167,46 @@ def _candidate_upstream_cost_possible(candidate: _CandidateState) -> bool:
     """
     if candidate.emitted:
         return True
+    if candidate.dispatch_checkpoint_failed and not candidate.dispatched:
+        return False
     if candidate.internal_error:
         return True
     error = candidate.provider_error
     if error is None:
         return True
     return not error.no_upstream_cost
+
+
+async def _checkpoint_terminal(
+    runtime: StreamRuntime,
+    *,
+    terminal_state: str,
+    terminal_chunk: str,
+    billing_action: str,
+    capture: EnhanceUsageCapture | None = None,
+    reason: str | None = None,
+) -> None:
+    if runtime.checkpoint_finalization is None:
+        return
+    await runtime.checkpoint_finalization(
+        terminal_state=terminal_state,
+        terminal_chunk=terminal_chunk,
+        billing_action=billing_action,
+        capture=capture,
+        reason=reason,
+    )
+
+
+def _require_billing_result(
+    runtime: StreamRuntime,
+    result: Any,
+    *,
+    action: str,
+) -> None:
+    if runtime.require_billing_confirmation and result is False:
+        raise BillingFinalizationError(
+            f"prompt enhancement billing action did not commit: {action}"
+        )
 
 
 def _log_provider_failure(
@@ -176,9 +238,25 @@ async def _success_chunk(
     runtime: StreamRuntime,
 ) -> str:
     if billing is None:
-        return "data: [DONE]\n\n"
+        done = "data: [DONE]\n\n"
+        await _checkpoint_terminal(
+            runtime,
+            terminal_state="succeeded",
+            terminal_chunk=done,
+            billing_action="none",
+        )
+        return done
+    done = "data: [DONE]\n\n"
+    await _checkpoint_terminal(
+        runtime,
+        terminal_state="succeeded",
+        terminal_chunk=done,
+        billing_action="charge",
+        capture=capture,
+    )
     try:
-        await runtime.charge(billing, capture)
+        result = await runtime.charge(billing, capture)
+        _require_billing_result(runtime, result, action="charge")
     except AuditPersistenceError:
         # 审计与钱包变更必须同事务。审计失败时回滚待提交结算，且不得走
         # 默认金额降级结算，否则会在缺失审计的同时提交一笔不同金额。
@@ -187,14 +265,61 @@ async def _success_chunk(
         if callable(rollback):
             await rollback()
         logger.exception("prompt enhance billing audit failed")
-        return _error_chunk("billing_failed")
+        error = _error_chunk("billing_failed")
+        await _checkpoint_terminal(
+            runtime,
+            terminal_state="failed",
+            terminal_chunk=error,
+            billing_action="preserve_hold",
+            reason="billing_audit_failed",
+        )
+        return error
+    except AttemptOwnershipLost:
+        raise
     except Exception:
         # 内容已完整交付、上游必然已计费:计费失败不得 fail-open 释放 hold,
         # 改为按默认金额(hold)结算,差额交给对账而不是由平台吸收。
         logger.exception("prompt enhance billing charge failed")
-        await runtime.settle_default(billing, reason="charge_failed")
-        return _error_chunk("billing_failed")
-    return "data: [DONE]\n\n"
+        error = _error_chunk("billing_failed")
+        await _checkpoint_terminal(
+            runtime,
+            terminal_state="failed",
+            terminal_chunk=error,
+            billing_action="settle_default",
+            reason="charge_failed",
+        )
+        result = await runtime.settle_default(billing, reason="charge_failed")
+        _require_billing_result(runtime, result, action="settle_default")
+        return error
+    return done
+
+
+async def _finalize_failure(
+    billing: EnhanceBillingContext | None,
+    *,
+    runtime: StreamRuntime,
+    error: str,
+    settle: bool,
+    reason: str,
+) -> str:
+    chunk = _error_chunk(error)
+    action = "settle_default" if settle else "release"
+    if billing is None:
+        action = "none"
+    await _checkpoint_terminal(
+        runtime,
+        terminal_state="failed",
+        terminal_chunk=chunk,
+        billing_action=action,
+        reason=reason,
+    )
+    if action == "settle_default":
+        result = await runtime.settle_default(billing, reason=reason)
+        _require_billing_result(runtime, result, action=action)
+    elif action == "release":
+        result = await runtime.release(billing, reason=reason)
+        _require_billing_result(runtime, result, action=action)
+    return chunk
 
 
 async def _stream_candidates(
@@ -221,6 +346,19 @@ async def _stream_candidates(
             candidate.dispatched = True
             state.dispatched = True
 
+        async def _mark_dispatching(
+            candidate: _CandidateState = candidate,
+            state: _FailoverState = state,
+        ) -> None:
+            if runtime.record_dispatch_intent is not None:
+                try:
+                    await runtime.record_dispatch_intent()
+                except Exception:
+                    candidate.dispatch_checkpoint_failed = True
+                    raise
+            candidate.dispatched = True
+            state.dispatched = True
+
         async for chunk in _candidate_chunks(
             text,
             provider,
@@ -229,6 +367,11 @@ async def _stream_candidates(
             candidate,
             runtime=runtime,
             stream_kwargs=stream_kwargs,
+            on_dispatching=(
+                _mark_dispatching
+                if runtime.record_dispatch_intent is not None
+                else None
+            ),
             on_dispatched=_mark_dispatched,
         ):
             yield chunk
@@ -238,9 +381,11 @@ async def _stream_candidates(
             yield success_chunk
             return
         state.last_error = _candidate_error(candidate)
-        state.upstream_cost_possible = (
-            state.upstream_cost_possible or _candidate_upstream_cost_possible(candidate)
-        )
+        cost_possible = _candidate_upstream_cost_possible(candidate)
+        state.upstream_cost_possible = state.upstream_cost_possible or cost_possible
+        if runtime.record_candidate_outcome is not None:
+            await runtime.record_candidate_outcome(cost_possible)
+        state.dispatched = False
         _log_provider_failure(
             candidate,
             provider=provider,
@@ -249,19 +394,25 @@ async def _stream_candidates(
         )
         if _candidate_should_stop(candidate):
             reason = _release_reason(candidate)
-            if _candidate_upstream_cost_possible(candidate):
-                await runtime.settle_default(billing, reason=reason)
-            else:
-                await runtime.release(billing, reason=reason)
+            error_chunk = await _finalize_failure(
+                billing,
+                runtime=runtime,
+                error=state.last_error,
+                settle=cost_possible,
+                reason=reason,
+            )
             state.settled = True
-            yield _error_chunk(state.last_error)
+            yield error_chunk
             return
-    if state.upstream_cost_possible:
-        await runtime.settle_default(billing, reason="no_success")
-    else:
-        await runtime.release(billing, reason="no_success")
+    error_chunk = await _finalize_failure(
+        billing,
+        runtime=runtime,
+        error=state.last_error,
+        settle=state.upstream_cost_possible,
+        reason="no_success",
+    )
     state.settled = True
-    yield _error_chunk(state.last_error)
+    yield error_chunk
 
 
 async def stream_enhance(
@@ -313,10 +464,32 @@ async def stream_enhance(
                 billing.request_id,
             )
         elif not state.settled:
+            await _checkpoint_terminal(
+                runtime,
+                terminal_state="failed",
+                terminal_chunk=_error_chunk("upstream_error"),
+                billing_action=(
+                    "settle_default"
+                    if billing is not None
+                    and (state.dispatched or state.upstream_cost_possible)
+                    else "release"
+                    if billing is not None
+                    else "none"
+                ),
+                reason="stream_cancelled",
+            )
             if state.dispatched or state.upstream_cost_possible:
-                await runtime.settle_default_after_cancel(
+                result = await runtime.settle_default_after_cancel(
                     billing, reason="stream_cancelled"
                 )
+                _require_billing_result(
+                    runtime,
+                    result,
+                    action="settle_default",
+                )
             else:
-                await runtime.release_after_cancel(billing, reason="stream_cancelled")
+                result = await runtime.release_after_cancel(
+                    billing, reason="stream_cancelled"
+                )
+                _require_billing_result(runtime, result, action="release")
         raise

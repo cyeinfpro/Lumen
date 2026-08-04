@@ -197,12 +197,14 @@ function CopyButton({
   };
 
   return (
+    // @hit-area-ok: the pseudo-element expands the compact desktop copy control to 44px.
     <button
       type="button"
       onClick={handleCopy}
       aria-label={copied ? "已复制" : "复制"}
       className={cn(
-        "shrink-0 inline-flex items-center gap-1 h-6 rounded-[var(--radius-control)]",
+        "relative shrink-0 inline-flex items-center gap-1 h-6 rounded-[var(--radius-control)]",
+        "after:absolute after:-inset-x-2.5 after:-inset-y-2.5 after:content-['']",
         "transition-all duration-150",
         copied
           ? "opacity-100 px-1.5 text-[var(--ok,#30A46C)] bg-[var(--ok,#30A46C)]/8"
@@ -359,7 +361,7 @@ export const AssistantTurn = memo(function AssistantTurn({
             type="button"
             onClick={() => onRetryText(msg.id)}
             className={cn(
-              "inline-flex h-7 items-center gap-1 rounded-full px-2.5",
+              "inline-flex h-7 min-h-11 items-center gap-1 rounded-full px-2.5",
               "bg-[var(--bg-2)] border border-[var(--border)] text-[11px] text-[var(--fg-0)]",
               "hover:bg-[var(--bg-3)] transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
@@ -581,15 +583,15 @@ export const FinalImage = memo(function FinalImage({
           onClick={handleMoreClick}
           onContextMenu={handleContextMenu}
           className={cn(
-            "absolute top-1.5 right-1.5 inline-flex items-center justify-center",
-            "w-7 h-7 rounded-full",
-            "bg-[rgba(8,8,10,0.65)] backdrop-blur-sm",
-            "border border-[var(--border-subtle)] text-[var(--fg-0)]",
+            "absolute right-0 top-0 inline-flex min-h-11 min-w-11 items-center justify-center",
+            "rounded-full text-[var(--fg-0)]",
             "opacity-0 group-hover:opacity-100 transition-opacity",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 focus-visible:opacity-100",
           )}
         >
-          <MoreHorizontal className="w-4 h-4" aria-hidden />
+          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[rgba(8,8,10,0.65)] backdrop-blur-sm">
+            <MoreHorizontal className="h-4 w-4" aria-hidden />
+          </span>
         </button>
       </div>
 

@@ -160,12 +160,8 @@ async def _consume_json_fallback_event(
     if extracted:
         state.final_b64 = extracted
         state.revised_prompt = _json_payload_revised_prompt(payload)
-        await services.transport.emit_image_progress(
-            progress_callback, "final_image"
-        )
-        await services.transport.emit_image_progress(
-            progress_callback, "completed"
-        )
+        await services.transport.emit_image_progress(progress_callback, "final_image")
+        await services.transport.emit_image_progress(progress_callback, "completed")
         return
 
     error = payload.get("error")
@@ -262,16 +258,11 @@ async def _consume_image_stream_event(
     if extracted:
         state.final_b64 = extracted
         state.revised_prompt = (
-            services.core.extract_response_revised_prompt(event)
-            or state.revised_prompt
+            services.core.extract_response_revised_prompt(event) or state.revised_prompt
         )
-        await services.transport.emit_image_progress(
-            progress_callback, "final_image"
-        )
+        await services.transport.emit_image_progress(progress_callback, "final_image")
     if services.core.is_responses_success_terminal(event_type):
-        await services.transport.emit_image_progress(
-            progress_callback, "completed"
-        )
+        await services.transport.emit_image_progress(progress_callback, "completed")
 
     terminal_error = _terminal_event_error(
         event,
@@ -343,8 +334,7 @@ def _raise_missing_image(
     raise services.infrastructure.UpstreamError(
         upstream_message or "responses image fallback returned no image",
         status_code=200,
-        error_code=upstream_code
-        or services.infrastructure.EC.NO_IMAGE_RETURNED.value,
+        error_code=upstream_code or services.infrastructure.EC.NO_IMAGE_RETURNED.value,
         payload={
             "path": "responses",
             "action": action,
@@ -389,9 +379,7 @@ async def _responses_image_stream(
         sidecar_base_url: str | None = None
         sidecar_token: str | None = None
         try:
-            sidecar_base_url = (
-                await services.direct.resolve_image_job_base_url()
-            )
+            sidecar_base_url = await services.direct.resolve_image_job_base_url()
             sidecar_token = services.image_jobs.image_job_sidecar_token()
         except Exception as exc:  # noqa: BLE001
             services.infrastructure.logger.debug(
@@ -426,12 +414,8 @@ async def _responses_image_stream(
     )
     read_timeout_s = services.direct.select_image_read_timeout(request.size)
     call_trace_id = context.trace_id
-    call_headers = services.core.auth_headers(
-        api_key, trace_id=call_trace_id
-    )
-    proxy_url = await services.infrastructure.resolve_provider_proxy_url(
-        proxy
-    )
+    call_headers = services.core.auth_headers(api_key, trace_id=call_trace_id)
+    proxy_url = await services.infrastructure.resolve_provider_proxy_url(proxy)
     response_url = services.requests.responses_url(base)
     pinned_target = (
         None
@@ -441,6 +425,19 @@ async def _responses_image_stream(
             response_url,
         )
     )
+
+    async def record_dispatch_ready() -> None:
+        await services.transport.emit_image_progress(
+            request.progress_callback,
+            "dispatch_ready",
+        )
+
+    async def record_response_ready() -> None:
+        await services.transport.emit_image_progress(
+            request.progress_callback,
+            "response_ready",
+        )
+
     if use_httpx:
         runtime_kwargs: dict[str, Any] = {
             "base": base,
@@ -450,12 +447,12 @@ async def _responses_image_stream(
             "trace_id": call_trace_id,
             "proxy_url": proxy_url,
             "allow_non_sse_payload": True,
+            "on_dispatch_ready": record_dispatch_ready,
+            "on_response_ready": record_response_ready,
         }
         if pinned_target is not None:
             runtime_kwargs["pinned_target"] = pinned_target
-        sse_source = services.responses.iter_sse_with_runtime(
-            **runtime_kwargs
-        )
+        sse_source = services.responses.iter_sse_with_runtime(**runtime_kwargs)
     else:
         curl_kwargs: dict[str, Any] = {
             "url": response_url,
@@ -464,6 +461,8 @@ async def _responses_image_stream(
             "timeout_s": read_timeout_s,
             "proxy_url": proxy_url,
             "allow_non_sse_payload": True,
+            "on_dispatch_ready": record_dispatch_ready,
+            "on_response_ready": record_response_ready,
         }
         if pinned_target is not None:
             curl_kwargs["pinned_target"] = pinned_target

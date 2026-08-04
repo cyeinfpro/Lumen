@@ -9,7 +9,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
 from sqlalchemy import select
 
 from lumen_core.constants import (
@@ -22,9 +21,11 @@ from lumen_core.models import Generation
 from lumen_core.sizing import resolve_size
 from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
-    NO_UPSTREAM_COST_RECEIPTS,
+    UPSTREAM_DISPATCH_PROVEN_NO_COST,
+    UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
     has_stable_provider_idempotency_key,
     mark_upstream_dispatch_started,
+    mark_upstream_dispatch_proven_no_cost,
     mark_upstream_dispatch_proven_undelivered,
     mark_upstream_response_received,
 )
@@ -33,8 +34,11 @@ from ...observability import get_tracer, upstream_calls_total
 from ...provider_runtime.errors import UpstreamCancelled, UpstreamError
 from ...task_cancellation import force_next_cancellation_check
 from ...upstream_parts import GeneratedImageResult
+from ...upstream_parts.delivery_evidence import dispatch_receipt_reason
 from .active_user_fence import lock_active_generation_user
+from .bonus_obligation import record_dual_race_bonus_obligation
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
+from .execution_boundary import sidecar_executions_from_request
 from .lease import is_cancelled
 from .progress import ImageProgressPublisher
 from .request_options import (
@@ -58,6 +62,7 @@ from .services import (
     GenerationProviderEditRequest,
     GenerationProviderRequest,
 )
+from .takeover_checkpoint import persist_generation_takeover_checkpoint
 
 
 logger = logging.getLogger(f"{__package__}.runner")
@@ -74,6 +79,25 @@ class _EpochGuardedProgressPublisher:
         self._publisher = publisher
 
     async def __call__(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "dispatch_ready":
+            await _record_generation_dispatch_ready(self._state)
+            return
+        if event.get("type") == "response_ready":
+            await record_generation_upstream_marker(
+                self._state,
+                response_received=True,
+            )
+            return
+        if event.get("type") == "dual_race_bonus_ready":
+            # The loser has already succeeded upstream. Persist its billing
+            # obligation even if this worker just lost the parent lease; UI
+            # progress still remains epoch-fenced below.
+            await record_dual_race_bonus_obligation(
+                self._state,
+                event,
+                lock_active_user=lock_active_generation_user,
+            )
+            return
         async with self._state.services.store.session() as session:
             await ensure_generation_attempt_current(
                 session,
@@ -221,6 +245,7 @@ async def publish_stream_started(state: GenerationRunState) -> None:
 async def dispatch_upstream_request(state: GenerationRunState) -> None:
     async with asyncio.timeout_at(state.task_deadline):
         await raise_if_pre_upstream_interrupted(state)
+        await _ensure_generation_user_active(state)
         with tracer.start_as_current_span("upstream.generate_image") as span:
             annotate_upstream_span(state, span)
             try:
@@ -242,10 +267,22 @@ async def _raise_dispatch_failure(
     state: GenerationRunState,
     exc: BaseException,
 ) -> None:
-    if (
-        getattr(state, "image_iter", None) is None
-        and generation_dispatch_requires_unknown_settlement(state)
-    ):
+    if isinstance(exc, TaskCancelled):
+        return
+    receipt_reason = _dispatch_failure_receipt_reason(exc)
+    if receipt_reason is not None:
+        await record_generation_upstream_marker(
+            state,
+            response_received=False,
+            proven_undelivered=(receipt_reason == UPSTREAM_DISPATCH_PROVEN_UNDELIVERED),
+            proven_no_cost=(receipt_reason == UPSTREAM_DISPATCH_PROVEN_NO_COST),
+        )
+        return
+    if getattr(exc, "error_code", None) in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
+        return
+    if getattr(
+        state, "image_iter", None
+    ) is None and generation_dispatch_requires_unknown_settlement(state):
         try:
             await record_generation_upstream_marker(
                 state,
@@ -259,19 +296,10 @@ async def _raise_dispatch_failure(
                 state.attempt,
             )
         return
-    if isinstance(exc, TaskCancelled):
-        return
-    if getattr(exc, "error_code", None) in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
-        return
-    if _dispatch_failure_proves_undelivered(exc):
-        await record_generation_upstream_marker(
-            state,
-            response_received=False,
-            proven_undelivered=True,
-        )
-        return
     if _dispatch_failure_has_response(exc):
         await record_generation_upstream_marker(state, response_received=True)
+        return
+    if not generation_dispatch_requires_unknown_settlement(state):
         return
     if has_stable_provider_idempotency_key(state.gen_upstream_request_snapshot or {}):
         return
@@ -288,18 +316,12 @@ async def _raise_dispatch_failure(
     ) from exc
 
 
+def _dispatch_failure_receipt_reason(exc: BaseException) -> str | None:
+    return dispatch_receipt_reason(exc)
+
+
 def _dispatch_failure_proves_undelivered(exc: BaseException) -> bool:
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-        return True
-    payload = getattr(exc, "payload", None)
-    if not isinstance(payload, dict):
-        return False
-    receipt_reason = payload.get("receipt_reason") or payload.get(
-        "upstream_receipt_reason"
-    )
-    return (
-        isinstance(receipt_reason, str) and receipt_reason in NO_UPSTREAM_COST_RECEIPTS
-    )
+    return _dispatch_failure_receipt_reason(exc) == UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
 
 
 def _dispatch_failure_has_response(exc: BaseException) -> bool:
@@ -341,14 +363,6 @@ def annotate_upstream_span(state: GenerationRunState, span: Any) -> None:
 
 async def call_upstream(state: GenerationRunState) -> None:
     started = time.monotonic()
-    await record_generation_upstream_marker(
-        state,
-        response_received=False,
-        fence_active_user=True,
-    )
-    # The marker commit is the dispatch linearization point. Recheck durable
-    # cancellation after releasing all database locks, immediately before the
-    # provider iterator can perform external I/O.
     await raise_if_pre_upstream_interrupted(state)
     state.image_iter = build_image_iterator(state)
     first_pair = await anext_image_with_guards(
@@ -363,12 +377,38 @@ async def call_upstream(state: GenerationRunState) -> None:
             error_code=EC.NO_IMAGE_RETURNED.value,
             status_code=200,
         )
-    await record_generation_upstream_marker(state, response_received=True)
     state.b64_result, state.revised_prompt = first_pair
     state.upstream_duration_ms = int(max(0.0, time.monotonic() - started) * 1000)
     state.stage_timer.set_ms("render", state.upstream_duration_ms)
     record_winner_provider(state)
+    await persist_generation_takeover_checkpoint(state)
     await consume_batch_extra_pairs(state)
+
+
+async def _ensure_generation_user_active(state: GenerationRunState) -> None:
+    services = DispatchGenerationServices.from_deps(state.services)
+    async with services.store.session() as session:
+        if not await lock_active_generation_user(
+            session,
+            user_id=state.user_id,
+        ):
+            raise TaskCancelled("account deleted before upstream dispatch")
+
+
+async def _record_generation_dispatch_ready(state: GenerationRunState) -> None:
+    lock = getattr(state, "dispatch_marker_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.dispatch_marker_lock = lock
+    async with lock:
+        if getattr(state, "dispatch_marker_recorded", False):
+            return
+        await record_generation_upstream_marker(
+            state,
+            response_received=False,
+            fence_active_user=True,
+        )
+        state.dispatch_marker_recorded = True
 
 
 async def record_generation_upstream_marker(
@@ -376,12 +416,17 @@ async def record_generation_upstream_marker(
     *,
     response_received: bool,
     proven_undelivered: bool = False,
+    proven_no_cost: bool = False,
     fence_active_user: bool = False,
 ) -> None:
     """Persist an upstream receipt in a short, ownership-fenced transaction."""
 
-    if fence_active_user and (response_received or proven_undelivered):
+    if fence_active_user and (
+        response_received or proven_undelivered or proven_no_cost
+    ):
         raise ValueError("active-user fence is only valid for dispatch-start markers")
+    if sum((response_received, proven_undelivered, proven_no_cost)) > 1:
+        raise ValueError("upstream marker outcomes are mutually exclusive")
     services = DispatchGenerationServices.from_deps(state.services)
     recorded_at = datetime.now(timezone.utc).isoformat()
     async with services.store.session() as session:
@@ -398,7 +443,7 @@ async def record_generation_upstream_marker(
         ]
         if fence_active_user:
             ownership_conditions.append(Generation.user_id == state.user_id)
-        if not proven_undelivered:
+        if not response_received and not proven_undelivered and not proven_no_cost:
             ownership_conditions.append(Generation.cancel_requested_at.is_(None))
         current = (
             await session.execute(
@@ -412,6 +457,8 @@ async def record_generation_upstream_marker(
         marker = (
             mark_upstream_response_received
             if response_received
+            else mark_upstream_dispatch_proven_no_cost
+            if proven_no_cost
             else mark_upstream_dispatch_proven_undelivered
             if proven_undelivered
             else mark_upstream_dispatch_started
@@ -431,6 +478,16 @@ def build_image_iterator(state: GenerationRunState) -> Any:
     provider = state.services.provider
     options = state.image_request_options
     provider_override = None if state.is_dual_race else state.reserved_provider
+    persisted_executions = sidecar_executions_from_request(
+        getattr(state, "gen_upstream_request_snapshot", None)
+    )
+    sidecar_execution: Any = (
+        persisted_executions
+        if len(persisted_executions) > 1
+        else persisted_executions[0]
+        if persisted_executions
+        else getattr(state, "sidecar_execution", None)
+    )
     request = GenerationProviderRequest(
         prompt=state.prompt_for_upstream,
         size=state.resolved.size,
@@ -452,7 +509,7 @@ def build_image_iterator(state: GenerationRunState) -> Any:
                 generation_execution_epoch(state),
                 state.attempt,
             ),
-            sidecar_execution=getattr(state, "sidecar_execution", None),
+            sidecar_execution=sidecar_execution,
         ),
     )
     if state.action != GenerationAction.EDIT:
@@ -484,12 +541,22 @@ def record_winner_provider(state: GenerationRunState) -> None:
 
 async def consume_batch_extra_pairs(state: GenerationRunState) -> None:
     if not should_consume_batch_extras(state):
+        if state.requested_image_count > 1:
+            raise UpstreamError(
+                "upstream route cannot durably collect every requested image",
+                status_code=200,
+                error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+                payload={
+                    "upstream_result_unknown": True,
+                    "requested_count": state.requested_image_count,
+                    "actual_count": 1,
+                },
+            )
         return
     for batch_index in range(2, state.requested_image_count + 1):
         extra_pair = await next_batch_extra_pair(state, batch_index)
-        if extra_pair is None:
-            break
         state.batch_extra_pairs.append((batch_index, extra_pair))
+        await persist_generation_takeover_checkpoint(state)
 
 
 def should_consume_batch_extras(state: GenerationRunState) -> bool:
@@ -503,7 +570,7 @@ def should_consume_batch_extras(state: GenerationRunState) -> bool:
 async def next_batch_extra_pair(
     state: GenerationRunState,
     batch_index: int,
-) -> GeneratedImageResult | None:
+) -> GeneratedImageResult:
     try:
         pair = await anext_image_with_guards(
             state.image_iter,
@@ -518,19 +585,26 @@ async def next_batch_extra_pair(
     ):
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "image2 n extra iter failed task=%s index=%s err=%r",
-            state.task_id,
-            batch_index,
-            exc,
-        )
-        return None
+        raise UpstreamError(
+            "image batch failed before every requested result was checkpointed",
+            error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+            payload={
+                "upstream_result_unknown": True,
+                "batch_index": batch_index,
+                "requested_count": state.requested_image_count,
+            },
+        ) from exc
     if pair is None:
-        logger.warning(
-            "image2 n returned fewer images task=%s requested=%s actual=%s",
-            state.task_id,
-            state.requested_image_count,
-            batch_index - 1,
+        raise UpstreamError(
+            "upstream returned fewer images than requested",
+            status_code=200,
+            error_code=EC.NO_IMAGE_RETURNED.value,
+            payload={
+                "upstream_result_unknown": True,
+                "batch_index": batch_index,
+                "requested_count": state.requested_image_count,
+                "actual_count": batch_index - 1,
+            },
         )
     return pair
 

@@ -74,10 +74,14 @@ const [
   { createGenerationActions },
   runtime,
   { makeConversationHistoryCacheEntry },
+  { semanticPostIdempotency },
 ] = await Promise.all([
   import(new URL("./generationActions.ts", import.meta.url).href),
   import(new URL("./runtime.ts", import.meta.url).href),
   import(new URL("./history.ts", import.meta.url).href),
+  import(
+    new URL("../../lib/api/semanticIdempotency.ts", import.meta.url).href
+  ),
 ]);
 
 function deferred<T = unknown>() {
@@ -86,6 +90,47 @@ function deferred<T = unknown>() {
     resolve = nextResolve;
   });
   return { promise, resolve };
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  message: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(message);
+}
+
+function holdNextSemanticAcquire() {
+  const store = semanticPostIdempotency as {
+    acquire: typeof semanticPostIdempotency.acquire;
+  };
+  const originalAcquire = store.acquire;
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  let held = false;
+  store.acquire = async (scope: unknown, payload: unknown) => {
+    const lease = await originalAcquire.call(
+      semanticPostIdempotency,
+      scope,
+      payload,
+    );
+    if (!held) {
+      held = true;
+      entered.resolve(undefined);
+      await release.promise;
+    }
+    return lease;
+  };
+  return {
+    entered: entered.promise,
+    release: () => release.resolve(undefined),
+    restore: () => {
+      store.acquire = originalAcquire;
+    },
+  };
 }
 
 const userMessage: UserMessage = {
@@ -205,6 +250,7 @@ test("regenerateAssistant: 双击在途去重，只发一次 POST /regenerate", 
   // 第二击同步被在途锁吞掉，不再发 POST
   const second = actions.regenerateAssistant("asst-old", "text_to_image");
   await second;
+  await waitFor(() => calls === 1, "regenerate request was not dispatched");
   assert.equal(calls, 1);
 
   gate.resolve(null);
@@ -236,6 +282,7 @@ test("upscaleImage: 双击在途去重，只创建一条放大任务", async () 
   const first = actions.upscaleImage("img-1");
   const second = actions.upscaleImage("img-1");
   await second;
+  await waitFor(() => calls === 1, "upscale request was not dispatched");
   assert.equal(calls, 1);
 
   gate.resolve(null);
@@ -267,6 +314,7 @@ test("rerollImage: 双击在途去重，只创建一条重roll 任务", async ()
   const first = actions.rerollImage("img-1");
   const second = actions.rerollImage("img-1");
   await second;
+  await waitFor(() => calls === 1, "reroll request was not dispatched");
   assert.equal(calls, 1);
 
   gate.resolve(null);
@@ -278,6 +326,424 @@ test("rerollImage: 双击在途去重，只创建一条重roll 任务", async ()
   );
   assert.ok(state.generations["gen-roll-1"], "乐观插入重roll generation");
 });
+
+test("regenerate response loss reuses the same semantic key and matching header", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const accepted = {
+    assistant_message_id: "asst-replayed",
+    completion_id: null,
+    generation_ids: ["gen-replayed"],
+  };
+  const acceptedByKey = new Map<string, typeof accepted>();
+  const requests: Array<{ bodyKey: string; headerKey: string | null }> = [];
+  stub.apiFetch = async (_path, opts) => {
+    const request = opts as RequestInit;
+    const body = JSON.parse(String(request.body)) as {
+      idempotency_key: string;
+    };
+    const headerKey = new Headers(request.headers).get("Idempotency-Key");
+    requests.push({ bodyKey: body.idempotency_key, headerKey });
+    const prior = acceptedByKey.get(body.idempotency_key);
+    if (prior) return prior;
+    acceptedByKey.set(body.idempotency_key, accepted);
+    throw new TypeError("response lost after backend accepted regenerate");
+  };
+
+  const { state, actions } = makeHarness();
+  await assert.rejects(
+    actions.regenerateAssistant("asst-old", "text_to_image"),
+    /response lost/,
+  );
+  assert.ok(state.messages.some((message) => message.id === "asst-old"));
+
+  await actions.regenerateAssistant("asst-old", "text_to_image");
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1]?.bodyKey, requests[0]?.bodyKey);
+  assert.equal(requests[0]?.headerKey, requests[0]?.bodyKey);
+  assert.equal(requests[1]?.headerKey, requests[1]?.bodyKey);
+  assert.equal(acceptedByKey.size, 1);
+  assert.ok(state.messages.some((message) => message.id === "asst-replayed"));
+  await semanticPostIdempotency.clear();
+});
+
+test("image regenerate without generation ids reuses the same semantic key", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const keys: string[] = [];
+  let calls = 0;
+  stub.apiFetch = async (_path, opts) => {
+    calls += 1;
+    const body = JSON.parse(String((opts as RequestInit).body)) as {
+      idempotency_key: string;
+    };
+    keys.push(body.idempotency_key);
+    if (calls === 1) {
+      return {
+        assistant_message_id: "asst-malformed",
+        completion_id: null,
+        generation_ids: ["   "],
+      };
+    }
+    return {
+      assistant_message_id: "asst-reconciled",
+      completion_id: null,
+      generation_ids: ["gen-reconciled"],
+    };
+  };
+
+  const { state, actions } = makeHarness();
+  await assert.rejects(
+    actions.regenerateAssistant("asst-old", "text_to_image"),
+    /malformed regenerate response/,
+  );
+  assert.ok(state.messages.some((message) => message.id === "asst-old"));
+
+  await actions.regenerateAssistant("asst-old", "text_to_image");
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.ok(state.messages.some((message) => message.id === "asst-reconciled"));
+  await semanticPostIdempotency.clear();
+});
+
+test("text regenerate without completion id reuses the same semantic key", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const keys: string[] = [];
+  let calls = 0;
+  stub.apiFetch = async (_path, opts) => {
+    calls += 1;
+    const body = JSON.parse(String((opts as RequestInit).body)) as {
+      idempotency_key: string;
+    };
+    keys.push(body.idempotency_key);
+    return {
+      assistant_message_id:
+        calls === 1 ? "asst-malformed-text" : "asst-reconciled-text",
+      completion_id: calls === 1 ? "   " : "comp-reconciled",
+      generation_ids: [],
+    };
+  };
+
+  const { state, actions } = makeHarness();
+  await assert.rejects(
+    actions.regenerateAssistant("asst-old", "chat"),
+    /malformed regenerate response/,
+  );
+  assert.ok(state.messages.some((message) => message.id === "asst-old"));
+
+  await actions.regenerateAssistant("asst-old", "chat");
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.ok(
+    state.messages.some((message) => message.id === "asst-reconciled-text"),
+  );
+  await semanticPostIdempotency.clear();
+});
+
+test("upscale response loss reuses the same semantic key on manual retry", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const accepted = silentGenerationOut("asst-up-replayed", "gen-up-replayed");
+  const acceptedByKey = new Map<string, typeof accepted>();
+  const keys: string[] = [];
+  stub.createSilentGeneration = async (_convId, body) => {
+    const request = body as { idempotency_key: string };
+    keys.push(request.idempotency_key);
+    const prior = acceptedByKey.get(request.idempotency_key);
+    if (prior) return prior;
+    acceptedByKey.set(request.idempotency_key, accepted);
+    throw new TypeError("response lost after backend accepted upscale");
+  };
+
+  const { state, actions } = makeHarness();
+  state.imagesById = {
+    "img-1": generatedImage("img-1", "gen-old"),
+  };
+
+  await assert.rejects(actions.upscaleImage("img-1"), /response lost/);
+  await actions.upscaleImage("img-1");
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.equal(acceptedByKey.size, 1);
+  assert.ok(state.generations["gen-up-replayed"]);
+  await semanticPostIdempotency.clear();
+});
+
+test("upscale malformed 2xx reuses the same semantic key", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const keys: string[] = [];
+  let calls = 0;
+  stub.createSilentGeneration = async (_convId, body) => {
+    calls += 1;
+    keys.push((body as { idempotency_key: string }).idempotency_key);
+    if (calls === 1) {
+      return { assistant_message: {}, generation_ids: [] };
+    }
+    return silentGenerationOut("asst-up-valid", "gen-up-valid");
+  };
+
+  const { state, actions } = makeHarness();
+  state.imagesById = {
+    "img-1": generatedImage("img-1", "gen-old"),
+  };
+
+  await assert.rejects(
+    actions.upscaleImage("img-1"),
+    /malformed silent generation response/,
+  );
+  await actions.upscaleImage("img-1");
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.ok(state.generations["gen-up-valid"]);
+  await semanticPostIdempotency.clear();
+});
+
+test("reroll response loss reuses the same semantic key on manual retry", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  const accepted = silentGenerationOut(
+    "asst-roll-replayed",
+    "gen-roll-replayed",
+  );
+  const acceptedByKey = new Map<string, typeof accepted>();
+  const keys: string[] = [];
+  stub.createSilentGeneration = async (_convId, body) => {
+    const request = body as { idempotency_key: string };
+    keys.push(request.idempotency_key);
+    const prior = acceptedByKey.get(request.idempotency_key);
+    if (prior) return prior;
+    acceptedByKey.set(request.idempotency_key, accepted);
+    throw new TypeError("response lost after backend accepted reroll");
+  };
+
+  const { state, actions } = makeHarness();
+  state.imagesById = {
+    "img-1": generatedImage("img-1", "gen-old"),
+  };
+
+  await assert.rejects(actions.rerollImage("img-1"), /response lost/);
+  await actions.rerollImage("img-1");
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.equal(acceptedByKey.size, 1);
+  assert.ok(state.generations["gen-roll-replayed"]);
+  await semanticPostIdempotency.clear();
+});
+
+test("conversation switch during regenerate acquire prevents POST and mutation", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  let calls = 0;
+  stub.apiFetch = async () => {
+    calls += 1;
+    return {
+      assistant_message_id: "asst-should-not-post",
+      completion_id: null,
+      generation_ids: ["gen-should-not-post"],
+    };
+  };
+  const heldAcquire = holdNextSemanticAcquire();
+  const { state, actions } = makeHarness();
+  const pending = actions.regenerateAssistant(
+    "asst-old",
+    "text_to_image",
+  );
+
+  try {
+    await heldAcquire.entered;
+    const nextMessages: ChatState["messages"] = [];
+    const nextGenerations: ChatState["generations"] = {};
+    state.currentConvId = "conv-2";
+    state.messages = nextMessages;
+    state.generations = nextGenerations;
+    runtime._conversationMutationFence.advance();
+    runtime.abortAllSendRequests();
+    heldAcquire.release();
+    await pending;
+
+    assert.equal(calls, 0);
+    assert.equal(state.currentConvId, "conv-2");
+    assert.strictEqual(state.messages, nextMessages);
+    assert.strictEqual(state.generations, nextGenerations);
+  } finally {
+    heldAcquire.release();
+    heldAcquire.restore();
+    await semanticPostIdempotency.clear();
+  }
+});
+
+for (const actionName of ["upscaleImage", "rerollImage"] as const) {
+  test(`identity switch during ${actionName} acquire prevents POST and mutation`, async () => {
+    await semanticPostIdempotency.clear();
+    const stub = stubHost.__apiClientStub ?? {};
+    stubHost.__apiClientStub = stub;
+    let calls = 0;
+    stub.createSilentGeneration = async () => {
+      calls += 1;
+      return silentGenerationOut("asst-should-not-post", "gen-should-not-post");
+    };
+    const heldAcquire = holdNextSemanticAcquire();
+    const { state, actions } = makeHarness();
+    state.imagesById = {
+      "img-1": generatedImage("img-1", "gen-old"),
+    };
+    const pending = actions[actionName]("img-1");
+
+    try {
+      await heldAcquire.entered;
+      const nextMessages: ChatState["messages"] = [];
+      const nextGenerations: ChatState["generations"] = {};
+      const nextImages: ChatState["imagesById"] = {};
+      state.currentUserId = "user-2";
+      state.currentConvId = "conv-2";
+      state.messages = nextMessages;
+      state.generations = nextGenerations;
+      state.imagesById = nextImages;
+      runtime._userSessionFence.advance();
+      runtime._conversationMutationFence.advance();
+      runtime.abortAllSendRequests();
+      heldAcquire.release();
+      await pending;
+
+      assert.equal(calls, 0);
+      assert.equal(state.currentUserId, "user-2");
+      assert.equal(state.currentConvId, "conv-2");
+      assert.strictEqual(state.messages, nextMessages);
+      assert.strictEqual(state.generations, nextGenerations);
+      assert.strictEqual(state.imagesById, nextImages);
+    } finally {
+      heldAcquire.release();
+      heldAcquire.restore();
+      await semanticPostIdempotency.clear();
+    }
+  });
+}
+
+test("controller cancellation during regenerate acquire prevents POST", async () => {
+  await semanticPostIdempotency.clear();
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  let calls = 0;
+  stub.apiFetch = async () => {
+    calls += 1;
+    throw new Error("canceled generation must not post");
+  };
+  const heldAcquire = holdNextSemanticAcquire();
+  const { state, actions } = makeHarness();
+  const initialMessages = state.messages;
+  const initialGenerations = state.generations;
+  const pending = actions.regenerateAssistant(
+    "asst-old",
+    "text_to_image",
+  );
+
+  try {
+    await heldAcquire.entered;
+    runtime.abortAllSendRequests();
+    heldAcquire.release();
+    await pending;
+
+    assert.equal(calls, 0);
+    assert.strictEqual(state.messages, initialMessages);
+    assert.strictEqual(state.generations, initialGenerations);
+  } finally {
+    heldAcquire.release();
+    heldAcquire.restore();
+    await semanticPostIdempotency.clear();
+  }
+});
+
+test("conversation switch suppresses stale regenerate UI after confirming its response", async () => {
+  await semanticPostIdempotency.clear();
+  const firstResponse = deferred<unknown>();
+  const keys: string[] = [];
+  let calls = 0;
+  const stub = stubHost.__apiClientStub ?? {};
+  stubHost.__apiClientStub = stub;
+  stub.apiFetch = async (_path, opts) => {
+    calls += 1;
+    const body = JSON.parse(String((opts as RequestInit).body)) as {
+      idempotency_key: string;
+    };
+    keys.push(body.idempotency_key);
+    if (calls === 1) return firstResponse.promise;
+    return {
+      assistant_message_id: "asst-second",
+      completion_id: null,
+      generation_ids: ["gen-second"],
+    };
+  };
+
+  const { state, actions } = makeHarness();
+  const first = actions.regenerateAssistant("asst-old", "text_to_image");
+  await waitFor(() => calls === 1, "first regenerate was not dispatched");
+  state.currentConvId = "conv-2";
+  runtime._conversationMutationFence.advance();
+  firstResponse.resolve({
+    assistant_message_id: "asst-first",
+    completion_id: null,
+    generation_ids: ["gen-first"],
+  });
+  await first;
+
+  state.currentConvId = "conv-1";
+  state.messages = [userMessage, oldAssistant];
+  state.generations = { "gen-old": oldGeneration };
+  await actions.regenerateAssistant("asst-old", "text_to_image");
+
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[1], keys[0]);
+  assert.ok(state.messages.some((message) => message.id === "asst-second"));
+  await semanticPostIdempotency.clear();
+});
+
+for (const actionName of ["upscaleImage", "rerollImage"] as const) {
+  test(`identity switch suppresses stale ${actionName} UI after confirming its response`, async () => {
+    await semanticPostIdempotency.clear();
+    const firstResponse = deferred<unknown>();
+    const keys: string[] = [];
+    let calls = 0;
+    const stub = stubHost.__apiClientStub ?? {};
+    stubHost.__apiClientStub = stub;
+    stub.createSilentGeneration = async (_convId, body) => {
+      calls += 1;
+      keys.push((body as { idempotency_key: string }).idempotency_key);
+      if (calls === 1) return firstResponse.promise;
+      return silentGenerationOut(`asst-${actionName}-second`, "gen-second");
+    };
+
+    const { state, actions } = makeHarness();
+    state.imagesById = {
+      "img-1": generatedImage("img-1", "gen-old"),
+    };
+    const first = actions[actionName]("img-1");
+    await waitFor(() => calls === 1, `first ${actionName} was not dispatched`);
+    state.currentUserId = "user-2";
+    runtime._conversationMutationFence.advance();
+    firstResponse.resolve(
+      silentGenerationOut(`asst-${actionName}-first`, "gen-first"),
+    );
+    await first;
+
+    state.currentUserId = "user-1";
+    await actions[actionName]("img-1");
+
+    assert.equal(keys.length, 2);
+    assert.notEqual(keys[1], keys[0]);
+    assert.ok(state.generations["gen-second"]);
+    await semanticPostIdempotency.clear();
+  });
+}
 
 test("regenerateAssistant 乐观变更后会话历史缓存失效", async () => {
   const stub = stubHost.__apiClientStub ?? {};

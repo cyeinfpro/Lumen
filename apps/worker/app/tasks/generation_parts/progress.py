@@ -18,7 +18,10 @@ from .diagnostics import (
     sanitize_provider_progress_payload,
 )
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
-from .execution_boundary import SIDECAR_EXECUTION_KEY
+from .execution_boundary import (
+    sidecar_execution_from_request,
+    upsert_sidecar_execution,
+)
 from .lease import is_cancelled
 from .queue import classify_inflight_lane, inflight_set_fields, redis_text
 from .retry_state import RUNNING_GENERATION_STATUSES, generation_execution_epoch
@@ -68,8 +71,6 @@ class ImageProgressPublisher:
         execution = ImageJobExecutionHandle.from_mapping(event.get("execution"))
         if execution is None:
             return
-        payload = execution.to_dict()
-        self.state.sidecar_execution = execution
         async with self.deps.store.session() as session:
             current = (
                 await session.execute(
@@ -94,12 +95,18 @@ class ImageProgressPublisher:
                 if isinstance(current.upstream_request, dict)
                 else {}
             )
-            current_request[SIDECAR_EXECUTION_KEY] = payload
+            current_request = upsert_sidecar_execution(
+                current_request,
+                execution,
+            )
             current.upstream_request = current_request
             await session.commit()
-        request = dict(self.state.gen_upstream_request_snapshot or {})
-        request[SIDECAR_EXECUTION_KEY] = payload
+        request = upsert_sidecar_execution(
+            self.state.gen_upstream_request_snapshot,
+            execution,
+        )
         self.state.gen_upstream_request_snapshot = request
+        self.state.sidecar_execution = sidecar_execution_from_request(request)
 
     async def _raise_if_interrupted(self) -> None:
         state = self.state

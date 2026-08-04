@@ -55,6 +55,10 @@ from ...application.poster_design import (
     poster_revision_prompt as _poster_revision_prompt,
     poster_style_summary as _poster_style_summary,
 )
+from ..paid_idempotency import (
+    current_paid_operation_task_metadata,
+    record_current_paid_operation,
+)
 from ...domain.workflow_contracts import PublishBundle
 from ...ports.poster_generation import (
     PosterGenerationPort,
@@ -176,6 +180,7 @@ async def _create_poster_workflow_task(
         "workflow_type": POSTER_WORKFLOW_TYPE,
         "workflow_step_key": request.workflow_step_key,
         **(request.workflow_meta or {}),
+        **current_paid_operation_task_metadata(context.db),
     }
     if result.completion_id:
         comp = await context.db.get(Completion, result.completion_id)
@@ -385,6 +390,7 @@ async def create_poster_design_workflow(
     )
     db.add(run)
     await db.flush()
+    record_current_paid_operation(db, run)
     for step in _poster_seed_steps(run):
         db.add(step)
     copy_step = await _step(db, run.id, "copy_analysis")
@@ -463,6 +469,7 @@ async def create_poster_masters(
     master_step = await _step(db, run.id, "master_generation")
     if master_step.status == "running":
         raise _http("already_running", "master generation already running", 409)
+    record_current_paid_operation(db, run)
     style_summary = (run.metadata_jsonb or {}).get("style_summary") or {}
     brand_assets = (run.metadata_jsonb or {}).get("brand_assets") or {}
     brand_attachment_ids = _poster_brand_attachment_ids(run)
@@ -655,6 +662,7 @@ async def create_poster_renders(
     aspects = list(dict.fromkeys(body.aspects))
     if not aspects:
         raise _http("missing_aspects", "at least one aspect ratio required", 422)
+    record_current_paid_operation(db, run)
     style_summary = (run.metadata_jsonb or {}).get("style_summary") or {}
     copy_step = await _step(db, run.id, "copy_analysis")
     copy_analysis = copy_step.output_json or {}
@@ -813,6 +821,7 @@ async def revise_poster_render(
             instruction=body.instruction,
             mask_image_id=body.mask_image_id or "",
         )
+    record_current_paid_operation(db, run)
     master = await _poster_selected_master(db, run.id)
     style_summary = (run.metadata_jsonb or {}).get("style_summary") or {}
     copy_step = await _step(db, run.id, "copy_analysis")
@@ -896,6 +905,7 @@ async def _do_poster_inpaint(
         min_count=1,
         max_count=1,
     )
+    record_current_paid_operation(db, run)
     conv = await _get_owned_conversation(
         db, user_id=user.id, conversation_id=run.conversation_id or ""
     )

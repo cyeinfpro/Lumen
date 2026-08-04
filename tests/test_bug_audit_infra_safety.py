@@ -134,14 +134,15 @@ def test_compose_healthchecks_are_local_and_hardened() -> None:
     assert web is not None
     assert "wget" not in web.group("body")
     assert "path: '/healthz', method: 'HEAD'" in compose
-    assert "health_check_interval=int(os.getenv" in compose
+    assert 'command: ["python", "-m", "app.worker_health", "run"]' in compose
     assert (
-        'LUMEN_WORKER_HEALTH_KEY: "${LUMEN_WORKER_HEALTH_KEY:-arq:queue:health-check}"'
+        'LUMEN_WORKER_HEALTH_KEY_PREFIX: "${LUMEN_WORKER_HEALTH_KEY_PREFIX:-arq:queue:health-check}"'
         in compose
     )
-    assert "redis_client.get(key)" in compose
-    assert 'needle = b"\\x00-m\\x00app.main\\x00"' in compose
-    assert 'redis.from_url(os.environ["REDIS_URL"]).ping()' in compose
+    assert 'test: ["CMD", "python", "-m", "app.worker_health", "check"]' in compose
+    assert "LUMEN_WORKER_HEALTH_KEY:" not in compose
+    assert 'test: ["CMD", "python", "-m", "app.tgbot_health", "check"]' in compose
+    assert "TGBOT_HEALTH_READY_STABILITY_SECONDS:" in compose
     assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' not in compose
     assert '"${LUMEN_WORKER_DNS_SECONDARY:-8.8.8.8}"' not in compose
     assert '"${LUMEN_WORKER_DNS_PRIMARY:-1.1.1.1}"' in public_dns_compose
@@ -181,6 +182,29 @@ def test_compose_tgbot_starts_python_before_validating_runtime_secret() -> None:
         tgbot["environment"]["TELEGRAM_BOT_SHARED_SECRET"]
         == "${TELEGRAM_BOT_SHARED_SECRET:-}"
     )
+
+
+def test_compose_telegram_ssh_proxy_is_reachable_only_on_backend_network() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    api = compose["services"]["api"]
+    tgbot = compose["services"]["tgbot"]
+
+    assert (
+        api["environment"]["TELEGRAM_PROXY_BIND_HOST"]
+        == "${TELEGRAM_PROXY_BIND_HOST:-0.0.0.0}"
+    )
+    assert (
+        api["environment"]["TELEGRAM_PROXY_ADVERTISE_HOST"]
+        == "${TELEGRAM_PROXY_ADVERTISE_HOST:-api}"
+    )
+    assert api["networks"] == ["lumen_backend"]
+    assert tgbot["networks"] == ["lumen_backend"]
+    assert tgbot["environment"]["LUMEN_API_BASE"] == "http://api:8000"
+    # Only the HTTP API port is host-published. The SSH SOCKS port is allocated
+    # dynamically inside the API container and remains reachable by service DNS.
+    assert api["ports"] == [
+        "${API_BIND_HOST:-127.0.0.1}:${API_BIND_PORT:-8000}:8000"
+    ]
 
 
 def test_storage_mount_cleans_smb_credentials_on_hard_failures() -> None:
@@ -238,6 +262,128 @@ def test_privileged_trigger_services_do_not_load_api_writable_environment_files(
         assert "EnvironmentFile=-/opt/lumendata/backup/.update.env" not in text
         assert "EnvironmentFile=-/var/lib/lumen-storage/apply.env" not in text
         assert "EnvironmentFile=-/var/lib/lumen-storage/test.env" not in text
+
+
+def test_service_units_do_not_cross_privilege_writable_runtime_state() -> None:
+    root = Path(__file__).resolve().parents[1]
+    api = (root / "deploy/systemd/lumen-api.service").read_text(encoding="utf-8")
+    worker = (root / "deploy/systemd/lumen-worker.service").read_text(
+        encoding="utf-8"
+    )
+    backup = (root / "deploy/systemd/lumen-backup.service").read_text(
+        encoding="utf-8"
+    )
+    restore = (root / "deploy/systemd/lumen-restore-runner.service").read_text(
+        encoding="utf-8"
+    )
+
+    for unit in (api, worker, backup):
+        assert "ExecStartPre=+" not in unit
+    assert "ReadWritePaths=/opt/lumendata /opt/lumen/shared" not in api
+    assert "ReadWritePaths=/opt/lumendata /opt/lumen/shared" not in worker
+    assert "/opt/lumen/shared/worker-var" in worker
+    assert (
+        "Environment=LUMEN_WORKER_HEALTH_STATE_FILE="
+        "/opt/lumen/shared/worker-var/worker-health.json"
+    ) in worker
+    assert (
+        "ExecStart=/opt/lumen/current/.venv/bin/python "
+        "-m app.worker_health run"
+    ) in worker
+    assert "EnvironmentFile=" not in backup
+    assert "EnvironmentFile=" not in restore
+    assert "Environment=LUMEN_ENV_FILE=/opt/lumen/shared/.env" in backup
+    assert "Environment=LUMEN_ENV_FILE=/opt/lumen/shared/.env" in restore
+
+
+def test_release_migration_does_not_delegate_code_or_secrets_to_service_user() -> (
+    None
+):
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "scripts/migrate_to_releases.sh").read_text(encoding="utf-8")
+    runtime = (root / "scripts/lib/runtime.sh").read_text(encoding="utf-8")
+
+    assert 'chown -R lumen:lumen "${ROOT}/releases" "${ROOT}/shared"' not in source
+    assert "lumen_release_harden_ownership" in source
+    assert 'config_group="${LUMEN_BACKUP_SERVICE_GROUP:-lumen-backup}"' in source
+    assert 'chgrp "${config_group}" "${shared_env}"' in runtime
+    assert 'usermod -aG "${config_group}" lumen' in runtime
+    release_layout = (root / "scripts/lib/release_layout.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'chown "root:${config_group}" "${shared_dir}/.env"' in release_layout
+    assert 'chmod 0640 "${shared_dir}/.env"' in release_layout
+    assert 'chmod 0600 "${shared_dir}/.env"' not in release_layout
+
+
+def test_direct_nonroot_install_keeps_env_readable_via_existing_operator_group(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    release = tmp_path / "releases" / "new"
+    shared.mkdir()
+    release.mkdir(parents=True)
+    env_file = shared / ".env"
+    env_file.write_text("SECRET=value\n", encoding="utf-8")
+    operator_group = subprocess.run(
+        ["id", "-gn"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    captured_group = tmp_path / "group"
+    operations = ROOT / "scripts" / "install" / "operations.sh"
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(operations))}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        log_info() {{ :; }}
+        lumen_ensure_backup_service_user() {{ :; }}
+        lumen_release_harden_ownership() {{
+          printf '%s\\n' "$6" > {shlex.quote(str(captured_group))}
+          chmod 0640 {shlex.quote(str(env_file))}
+        }}
+        install_transaction_harden_journal() {{ :; }}
+        DEPLOY_ROOT={shlex.quote(str(tmp_path))}
+        RELEASE_DIR={shlex.quote(str(release))}
+        SHARED_DIR={shlex.quote(str(shared))}
+        LUMEN_DATA_ROOT={shlex.quote(str(tmp_path / "data"))}
+        LUMEN_APP_UID="$(id -u)"
+        LUMEN_APP_GID="$(id -g)"
+        LUMEN_INSTALL_CONFIG_GROUP={shlex.quote(operator_group)}
+        harden_install_release_ownership
+        test -r {shlex.quote(str(env_file))}
+        test "$(stat -f '%Lp' {shlex.quote(str(env_file))} 2>/dev/null \
+          || stat -c '%a' {shlex.quote(str(env_file))})" = 640
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert captured_group.read_text(encoding="utf-8").strip() == operator_group
+    assert env_file.stat().st_mode & 0o007 == 0
+
+
+def test_direct_install_rejects_config_group_operator_does_not_have(
+    tmp_path: Path,
+) -> None:
+    operations = ROOT / "scripts" / "install" / "operations.sh"
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(operations))}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        LUMEN_INSTALL_OPERATOR_USER="$(id -un)"
+        LUMEN_INSTALL_CONFIG_GROUP=lumen-no-such-operator-group
+        if install_config_read_group; then
+          exit 91
+        fi
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "当前不属于配置读取组" in result.stderr
 
 
 def test_fix_redis_password_parses_quoted_env_values(tmp_path: Path) -> None:

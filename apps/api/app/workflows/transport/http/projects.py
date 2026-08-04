@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Header
 
 from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility exports
     AccessoryPlanIn,  # noqa: F401 - showcase facade dependency
@@ -57,13 +57,22 @@ from lumen_core.schemas import (  # noqa: F401 - workflow facade compatibility e
 )
 
 from ....db import get_db
-from ....deps import CurrentUser, verify_csrf
+from ....deps import CurrentUser, durable_session_id_from_db, verify_csrf
 from ...application.http_contracts import WorkflowAssetsAddIn
+from ...application.paid_idempotency import (
+    APPAREL_ACCESSORY_PREVIEWS_OPERATION,
+    APPAREL_REVISE_IMAGE_OPERATION,
+    APPAREL_SHOWCASE_IMAGES_OPERATION,
+)
 from ...application.upsert_project import UpsertWorkflowProjectCommand
 from ...composition import WorkflowApplication
 from ...slices import project_lifecycle, upsert_workflow_project
 from .dependencies import get_workflow_application
-from .execution import execute_workflow_action
+from .execution import (
+    execute_durable_workflow_action,
+    execute_paid_workflow_action,
+    execute_workflow_action,
+)
 
 actions_router = APIRouter()
 core_router = APIRouter()
@@ -95,7 +104,7 @@ async def reconcile_workflow(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().reconcile_workflow,
         workflow_run_id=workflow_run_id,
         user=user,
@@ -114,8 +123,10 @@ async def patch_workflow(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    result = await execute_workflow_action(
+    result = await execute_durable_workflow_action(
         upsert_workflow_project(db).upsert_project,
+        identity_user=user,
+        identity_db=db,
         command=UpsertWorkflowProjectCommand(
             user_id=user.id,
             run_id=workflow_run_id,
@@ -131,8 +142,10 @@ async def delete_workflow(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> dict[str, bool]:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         project_lifecycle(db).delete,
+        identity_user=user,
+        identity_db=db,
         user_id=user.id,
         run_id=workflow_run_id,
         account_mode=getattr(user, "account_mode", "wallet"),
@@ -151,7 +164,7 @@ async def add_workflow_assets(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().add_workflow_assets,
         workflow_run_id=workflow_run_id,
         body=body,
@@ -174,7 +187,7 @@ async def save_model_candidate_to_library(
     db: Annotated[Any, Depends(get_db)],
     background_tasks: BackgroundTasks,
 ) -> ApparelModelLibraryItemOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().save_model_candidate_to_library,
         workflow_run_id=workflow_run_id,
         candidate_id=candidate_id,
@@ -198,7 +211,7 @@ async def approve_model_candidate(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().approve_model_candidate,
         workflow_run_id=workflow_run_id,
         candidate_id=candidate_id,
@@ -219,7 +232,7 @@ async def reopen_model_selection(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().reopen_model_selection,
         workflow_run_id=workflow_run_id,
         user=user,
@@ -238,9 +251,27 @@ async def create_accessory_previews(
     body: AccessoryPreviewCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().create_accessory_previews,
+        operation_namespace=APPAREL_ACCESSORY_PREVIEWS_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         body=body,
         user=user,
@@ -260,7 +291,7 @@ async def save_accessory_selection(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().save_accessory_selection,
         workflow_run_id=workflow_run_id,
         body=body,
@@ -280,9 +311,27 @@ async def create_showcase_images(
     body: ShowcaseImagesCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().create_showcase_images,
+        operation_namespace=APPAREL_SHOWCASE_IMAGES_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         body=body,
         user=user,
@@ -302,9 +351,28 @@ async def revise_showcase_image(
     body: ImageRevisionIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().revise_showcase_image,
+        operation_namespace=APPAREL_REVISE_IMAGE_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "image_id": image_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         image_id=image_id,
         body=body,
@@ -324,7 +392,7 @@ async def complete_delivery(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().complete_delivery,
         workflow_run_id=workflow_run_id,
         user=user,

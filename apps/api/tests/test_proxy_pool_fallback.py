@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app import proxy_pool
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.providers_parts.proxy_runtime import ProviderProxyRuntime
 
 
 def _make_proxy(name: str) -> ProviderProxyDefinition:
@@ -19,9 +22,11 @@ def _make_proxy(name: str) -> ProviderProxyDefinition:
 
 
 @pytest.fixture(autouse=True)
-def _clear_local_cooldown():
+def _reset_proxy_pool_state():
     proxy_pool._proxy_pool_state.local_cooldown.clear()
+    proxy_pool._proxy_pool_state.provider_proxy = ProviderProxyRuntime()
     yield
+    proxy_pool._proxy_pool_state.provider_proxy = ProviderProxyRuntime()
     proxy_pool._proxy_pool_state.local_cooldown.clear()
 
 
@@ -144,3 +149,37 @@ async def test_local_cooldown_capped_to_short_window() -> None:
 
     remaining = expiry - _t.monotonic()
     assert remaining <= proxy_pool._LOCAL_COOLDOWN_TTL_SECONDS + 1
+
+
+@pytest.mark.asyncio
+async def test_close_rotates_runtime_for_the_next_application_lifecycle() -> None:
+    old_runtime = proxy_pool._proxy_pool_state.provider_proxy
+
+    await proxy_pool.close_provider_proxy_tunnels()
+
+    next_runtime = proxy_pool._proxy_pool_state.provider_proxy
+    assert old_runtime.closed is True
+    assert next_runtime is not old_runtime
+    assert next_runtime.closed is False
+    assert await proxy_pool.resolve_provider_proxy_url(_make_proxy("next")) == (
+        "socks5h://127.0.0.1:1080"
+    )
+
+
+def test_runtime_rotation_supports_concurrent_resolves_on_a_new_event_loop() -> None:
+    async def lifecycle(name: str) -> list[str | None]:
+        values = await asyncio.gather(
+            proxy_pool.resolve_provider_proxy_url(_make_proxy(name)),
+            proxy_pool.resolve_provider_proxy_url(_make_proxy(name)),
+        )
+        await proxy_pool.close_provider_proxy_tunnels()
+        return values
+
+    assert asyncio.run(lifecycle("first")) == [
+        "socks5h://127.0.0.1:1080",
+        "socks5h://127.0.0.1:1080",
+    ]
+    assert asyncio.run(lifecycle("second")) == [
+        "socks5h://127.0.0.1:1080",
+        "socks5h://127.0.0.1:1080",
+    ]

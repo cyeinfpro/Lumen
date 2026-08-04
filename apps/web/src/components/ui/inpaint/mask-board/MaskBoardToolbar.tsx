@@ -110,7 +110,7 @@ function ToolSegment({
       role="group"
       aria-label="工具"
       className={cn(
-        "shrink-0 inline-flex items-center h-9 p-px rounded-full",
+        "inline-flex h-12 shrink-0 items-center rounded-full p-px",
         "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
       )}
     >
@@ -129,7 +129,7 @@ function ToolSegment({
             aria-label={`${label} (${hint})`}
             title={`${label} (${hint})`}
             className={cn(
-              "inline-flex items-center gap-1.5 h-8 px-3 rounded-full",
+              "inline-flex h-8 min-h-11 items-center gap-1.5 rounded-full px-3",
               "text-[11px] transition-colors disabled:opacity-50",
               active
                 ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"

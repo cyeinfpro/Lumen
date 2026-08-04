@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
 import json
 import re
 import shlex
 import subprocess
+import tarfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,13 +40,61 @@ def _function_source(name: str) -> str:
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
+    helper = ROOT / "scripts" / "restore_journal.py"
     return subprocess.run(
-        ["/bin/bash", "-c", script],
+        [
+            "/bin/bash",
+            "-c",
+            f"export LUMEN_BACKUP_PAIR_HELPER={shlex.quote(str(helper))}\n{script}",
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
     )
+
+
+def _pair_result(
+    backup_root: Path,
+    timestamp: str,
+    *,
+    operation_id: str = "backup-test-operation",
+) -> dict[str, object]:
+    pg = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
+    redis = backup_root / "redis" / f"{timestamp}.redis.tgz"
+    pg_hash = hashlib.sha256(pg.read_bytes()).hexdigest()
+    redis_hash = hashlib.sha256(redis.read_bytes()).hexdigest()
+    marker = backup_root / f".backup-pair.{timestamp}.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": operation_id,
+                "timestamp": timestamp,
+                "pg": {
+                    "name": pg.name,
+                    "size": pg.stat().st_size,
+                    "sha256": pg_hash,
+                },
+                "redis": {
+                    "name": redis.name,
+                    "size": redis.stat().st_size,
+                    "sha256": redis_hash,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "operation_id": operation_id,
+        "pair_marker": str(marker),
+        "pg_sha256": pg_hash,
+        "pg_size": pg.stat().st_size,
+        "redis_sha256": redis_hash,
+        "redis_size": redis.stat().st_size,
+        "timestamp": timestamp,
+    }
 
 
 def test_current_backup_pair_is_recorded_as_the_round_restore_point(
@@ -59,13 +111,7 @@ def test_current_backup_pair_is_recorded_as_the_round_restore_point(
     output = tmp_path / "backup.out"
     output.write_text(
         "backup log\n"
-        + json.dumps(
-            {
-                "timestamp": timestamp,
-                "pg_size": pg.stat().st_size,
-                "redis_size": redis.stat().st_size,
-            }
-        )
+        + json.dumps(_pair_result(backup_root, timestamp))
         + "\n",
         encoding="utf-8",
     )
@@ -82,6 +128,14 @@ def test_current_backup_pair_is_recorded_as_the_round_restore_point(
         UPDATE_RESTORE_POINT_REDIS=""
         UPDATE_RESTORE_POINT_PG_SIZE=""
         UPDATE_RESTORE_POINT_REDIS_SIZE=""
+        lumen_update_file_sha256() {{
+            python3 - "$1" <<'PY'
+import hashlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+        }}
         verify_update_restore_point \
             {shlex.quote(str(output))} \
             {shlex.quote(str(backup_root))} \
@@ -100,6 +154,47 @@ def test_current_backup_pair_is_recorded_as_the_round_restore_point(
     assert f"redis={redis}" in result.stdout
 
 
+def test_unmarked_backup_pair_cannot_satisfy_update_preflight(
+    tmp_path: Path,
+) -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup_root = tmp_path / "backup"
+    pg = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
+    redis = backup_root / "redis" / f"{timestamp}.redis.tgz"
+    pg.parent.mkdir(parents=True)
+    redis.parent.mkdir(parents=True)
+    pg.write_bytes(b"current-pg")
+    redis.write_bytes(b"current-redis")
+    result_payload = _pair_result(backup_root, timestamp)
+    Path(str(result_payload["pair_marker"])).unlink()
+    output = tmp_path / "backup.out"
+    output.write_text(json.dumps(result_payload) + "\n", encoding="utf-8")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("{}", encoding="utf-8")
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("verify_update_restore_point")}
+        UPDATE_RESTORE_POINT_TIMESTAMP=""
+        UPDATE_RESTORE_POINT_PG=""
+        UPDATE_RESTORE_POINT_REDIS=""
+        UPDATE_RESTORE_POINT_PG_SIZE=""
+        UPDATE_RESTORE_POINT_REDIS_SIZE=""
+        if verify_update_restore_point \
+                {shlex.quote(str(output))} \
+                {shlex.quote(str(backup_root))} \
+                "$(( $(date +%s) - 1 ))" \
+                {shlex.quote(str(baseline))}; then
+            exit 91
+        fi
+        test -z "$UPDATE_RESTORE_POINT_TIMESTAMP"
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_stale_manual_backup_cannot_satisfy_the_current_update_round(
     tmp_path: Path,
 ) -> None:
@@ -113,13 +208,7 @@ def test_stale_manual_backup_cannot_satisfy_the_current_update_round(
     redis.write_bytes(b"old-redis")
     output = tmp_path / "backup.out"
     output.write_text(
-        json.dumps(
-            {
-                "timestamp": timestamp,
-                "pg_size": pg.stat().st_size,
-                "redis_size": redis.stat().st_size,
-            }
-        )
+        json.dumps(_pair_result(backup_root, timestamp))
         + "\n",
         encoding="utf-8",
     )
@@ -162,13 +251,7 @@ def test_unchanged_current_timestamp_files_cannot_masquerade_as_new_backup(
     redis.write_bytes(b"manual-redis")
     output = tmp_path / "backup.out"
     output.write_text(
-        json.dumps(
-            {
-                "timestamp": timestamp,
-                "pg_size": pg.stat().st_size,
-                "redis_size": redis.stat().st_size,
-            }
-        )
+        json.dumps(_pair_result(backup_root, timestamp))
         + "\n",
         encoding="utf-8",
     )
@@ -206,20 +289,69 @@ def test_backup_preflight_pipeline_creates_and_verifies_restore_point(
     scripts_dir = tmp_path / "scripts"
     backup_root = tmp_path / "backup"
     shared_env = tmp_path / "shared.env"
+    journal_capture = tmp_path / "update-journal-path"
     scripts_dir.mkdir()
     shared_env.write_text("", encoding="utf-8")
     backup_script = scripts_dir / "backup.sh"
     backup_script.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
+. "${TEST_LIB:?}"
+lumen_verify_borrowed_maintenance_lock "${LUMEN_DEPLOY_ROOT:?}"
 timestamp="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "${BACKUP_ROOT}/pg" "${BACKUP_ROOT}/redis"
 pg="${BACKUP_ROOT}/pg/${timestamp}.pg.dump.gz"
 redis="${BACKUP_ROOT}/redis/${timestamp}.redis.tgz"
-printf 'new-pg' > "${pg}"
-printf 'new-redis' > "${redis}"
-printf '{"timestamp":"%s","pg_size":%s,"redis_size":%s}\\n' \
-    "${timestamp}" "$(wc -c < "${pg}")" "$(wc -c < "${redis}")"
+    printf 'new-pg' > "${pg}"
+    printf 'new-redis' > "${redis}"
+    printf '%s\\n' "${LUMEN_BACKUP_JOURNAL_FILE:?}" > "${TEST_JOURNAL_CAPTURE:?}"
+    python3 - \
+        "${BACKUP_ROOT}" "${timestamp}" "${pg}" "${redis}" \
+        "${LUMEN_BACKUP_OPERATION_ID:?}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+timestamp = sys.argv[2]
+pg = Path(sys.argv[3])
+redis = Path(sys.argv[4])
+operation_id = sys.argv[5]
+pg_hash = hashlib.sha256(pg.read_bytes()).hexdigest()
+redis_hash = hashlib.sha256(redis.read_bytes()).hexdigest()
+marker = root / f".backup-pair.{timestamp}.json"
+marker.write_text(
+    json.dumps(
+        dict(
+            schema=1,
+            operation_id=operation_id,
+            timestamp=timestamp,
+            pg=dict(name=pg.name, size=pg.stat().st_size, sha256=pg_hash),
+            redis=dict(
+                name=redis.name,
+                size=redis.stat().st_size,
+                sha256=redis_hash,
+            ),
+        )
+    )
+    + "\\n",
+    encoding="utf-8",
+)
+print(
+    json.dumps(
+        dict(
+            timestamp=timestamp,
+            operation_id=operation_id,
+            pair_marker=str(marker),
+            pg_size=pg.stat().st_size,
+            redis_size=redis.stat().st_size,
+            pg_sha256=pg_hash,
+            redis_sha256=redis_hash,
+        )
+    )
+)
+PY
 """,
         encoding="utf-8",
     )
@@ -236,17 +368,33 @@ printf '{"timestamp":"%s","pg_size":%s,"redis_size":%s}\\n' \
     result = _run_bash(
         f"""
         set -euo pipefail
+        . {shlex.quote(str(ROOT / "scripts" / "lib.sh"))}
         {functions}
+        LUMEN_DEPLOY_ROOT={shlex.quote(str(tmp_path / "deploy"))}
+        mkdir -p "$LUMEN_DEPLOY_ROOT"
+        export LUMEN_DEPLOY_ROOT
+        lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" update-preflight-test
         SCRIPT_DIR={shlex.quote(str(scripts_dir))}
         CURRENT_RELEASE=""
         UPDATE_LOG_DIR={shlex.quote(str(backup_root))}
         OPERATION_ID=test-operation
         SHARED_ENV={shlex.quote(str(shared_env))}
+        TEST_JOURNAL_CAPTURE={shlex.quote(str(journal_capture))}
+        TEST_LIB={shlex.quote(str(ROOT / "scripts" / "lib.sh"))}
+        export TEST_JOURNAL_CAPTURE TEST_LIB
         UPDATE_RESTORE_POINT_TIMESTAMP=""
         UPDATE_RESTORE_POINT_PG=""
         UPDATE_RESTORE_POINT_REDIS=""
         UPDATE_RESTORE_POINT_PG_SIZE=""
         UPDATE_RESTORE_POINT_REDIS_SIZE=""
+        lumen_update_file_sha256() {{
+            python3 - "$1" <<'PY'
+import hashlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+        }}
         lumen_env_value() {{ printf ''; }}
         log_info() {{ :; }}
         log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
@@ -262,6 +410,18 @@ printf '{"timestamp":"%s","pg_size":%s,"redis_size":%s}\\n' \
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "EMIT:backup_preflight:restore_point:" in result.stdout
+    update_journal = journal_capture.read_text(encoding="utf-8").strip()
+    assert update_journal == str(
+        shared_env.parent / ".backup-recovery" / "test-operation.json"
+    )
+    service = (
+        ROOT / "deploy" / "systemd" / "lumen-backup.service"
+    ).read_text(encoding="utf-8")
+    assert (
+        "LUMEN_BACKUP_JOURNAL_FILE=/opt/lumendata/backup/.recovery/backup.json"
+        in service
+    )
+    assert update_journal != "/opt/lumendata/backup/.recovery/backup.json"
 
 
 def test_noninteractive_fast_update_requires_restore_point_before_stop() -> None:
@@ -494,3 +654,107 @@ def test_precommit_restore_has_no_side_effects_when_schema_guard_rejects(
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "schema capability guard" in result.stderr
+
+
+def test_resume_revalidates_bound_restore_point_before_any_phase(tmp_path: Path) -> None:
+    completed = tmp_path / "completed"
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        {_function_source("validate_resumed_update_state")}
+        lumen_update_journal_validate_resume() {{ return 0; }}
+        validate_bound_update_restore_point() {{ return 1; }}
+        lumen_configure_proxy_env() {{ return 1; }}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        UPDATE_RESTORE_POINT_TIMESTAMP=20260803-010203
+        UPDATE_MIGRATION_VERIFIED=0
+        UPDATE_MIGRATION_HEAD=""
+        NEW_RELEASE=""
+        SHARED_ENV={shlex.quote(str(tmp_path / "shared.env"))}
+        if validate_resumed_update_state; then
+            : > {shlex.quote(str(completed))}
+        fi
+        test ! -e {shlex.quote(str(completed))}
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_bound_restore_point_revalidation_rejects_same_size_tampering(
+    tmp_path: Path,
+) -> None:
+    timestamp = "20260803-010203"
+    backup_root = tmp_path / "backup"
+    pg = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
+    redis = backup_root / "redis" / f"{timestamp}.redis.tgz"
+    pg.parent.mkdir(parents=True)
+    redis.parent.mkdir(parents=True)
+    with gzip.open(pg, "wb") as handle:
+        handle.write(b"postgres-restore-point")
+    with tarfile.open(redis, "w:gz") as archive:
+        payload = b"redis-restore-point"
+        info = tarfile.TarInfo("dump.rdb")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    pg_hash = hashlib.sha256(pg.read_bytes()).hexdigest()
+    redis_hash = hashlib.sha256(redis.read_bytes()).hexdigest()
+    _pair_result(backup_root, timestamp)
+    script = f"""
+        set -euo pipefail
+        {_function_source("validate_bound_update_restore_point")}
+        LUMEN_BACKUP_ROOT={shlex.quote(str(backup_root))}
+        UPDATE_RESTORE_POINT_TIMESTAMP={timestamp}
+        UPDATE_RESTORE_POINT_PG={shlex.quote(str(pg))}
+        UPDATE_RESTORE_POINT_REDIS={shlex.quote(str(redis))}
+        UPDATE_RESTORE_POINT_PG_SIZE={pg.stat().st_size}
+        UPDATE_RESTORE_POINT_REDIS_SIZE={redis.stat().st_size}
+        UPDATE_RESTORE_POINT_PG_SHA256={pg_hash}
+        UPDATE_RESTORE_POINT_REDIS_SHA256={redis_hash}
+        validate_bound_update_restore_point
+    """
+    valid = _run_bash(script)
+    assert valid.returncode == 0, valid.stderr + valid.stdout
+
+    tampered = bytearray(pg.read_bytes())
+    tampered[len(tampered) // 2] ^= 0x01
+    pg.write_bytes(tampered)
+    rejected = _run_bash(script)
+    assert rejected.returncode != 0
+
+
+def test_update_rollback_masks_second_signal_until_restore_finishes(
+    tmp_path: Path,
+) -> None:
+    completed = tmp_path / "completed"
+    result = _run_bash(
+        f"""
+        set -u
+        {_function_source("on_err")}
+        log_error() {{ :; }}
+        discard_release_source_manifest_cache() {{ :; }}
+        lumen_step_finalize_failure() {{ :; }}
+        log_update_restore_boundary() {{ :; }}
+        lumen_update_journal_status() {{ :; }}
+        lumen_update_journal_failed() {{ :; }}
+        restore_uncommitted_update_state() {{
+            kill -TERM "$$"
+            : > {shlex.quote(str(completed))}
+        }}
+        trap 'exit 143' TERM
+        UPDATE_ERROR_HANDLED=0
+        UPDATE_RESTORE_POINT_TIMESTAMP=""
+        UPDATE_MIGRATION_STARTED=0
+        ROLLBACK_DONE=0
+        UPDATE_STATE_COMMITTED=0
+        UPDATE_STATE_COMMIT_UNKNOWN=0
+        UPDATE_STATE_SNAPSHOT_READY=1
+        UPDATE_SNAPSHOT_LINKS_KNOWN=1
+        _UPDATE_LAST_PHASE=test
+        on_err 1
+        """
+    )
+
+    assert result.returncode != 143, result.stderr + result.stdout
+    assert completed.exists()

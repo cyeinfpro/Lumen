@@ -7,8 +7,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import httpx
-
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.upstream_billing import IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
 
@@ -17,6 +15,11 @@ from ..provider_runtime.upstream_services import (
     UpstreamServices,
     resolve_image_upstream_services,
 )
+from ..upstream_clients.image_job_models import (
+    ImageJobCostKnowledge,
+    ImageJobExecutionHandle,
+)
+from .delivery_evidence import transport_error_proves_undelivered
 from .image_execution import (
     ImageExecutionRequest,
     ImageResult,
@@ -43,15 +46,67 @@ def _image_job_error_class(exc: BaseException) -> str | None:
     return None
 
 
+def _sidecar_execution_from_error(
+    exc: BaseException,
+) -> ImageJobExecutionHandle | None:
+    payload = getattr(exc, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    return ImageJobExecutionHandle.from_mapping(payload.get("sidecar_execution"))
+
+
 def _sidecar_execution_accepted(exc: BaseException) -> bool:
     payload = getattr(exc, "payload", None)
     return bool(
         isinstance(payload, dict)
         and (
             payload.get("sidecar_execution_accepted") is True
-            or isinstance(payload.get("sidecar_execution"), dict)
+            or _sidecar_execution_from_error(exc) is not None
         )
     )
+
+
+def _accepted_execution_result_unknown(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    services = _runtime_services(runtime)
+    if (
+        isinstance(exc, services.infrastructure.UpstreamError)
+        and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+    ):
+        return exc
+    execution = _sidecar_execution_from_error(exc)
+    if (
+        execution is None
+        or execution.cost_knowledge == ImageJobCostKnowledge.NONE
+    ):
+        return exc
+    payload = (
+        dict(exc.payload)
+        if isinstance(exc, services.infrastructure.UpstreamError)
+        and isinstance(exc.payload, dict)
+        else {}
+    )
+    payload.update(
+        {
+            "upstream_result_unknown": True,
+            "sidecar_execution_accepted": True,
+            "sidecar_execution": execution.to_dict(),
+            "recovery_only": execution.recovery_outcome.value != "terminal",
+            "wrapped_error_code": getattr(exc, "error_code", None),
+        }
+    )
+    error = services.infrastructure.UpstreamError(
+        "image job execution was accepted, but its result state is unknown; "
+        "recover the original execution instead of submitting another job",
+        status_code=getattr(exc, "status_code", None),
+        error_code=services.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        payload=payload,
+    )
+    error.__cause__ = exc
+    return error
 
 
 def submit_failure_result_unknown(exc: BaseException) -> bool:
@@ -67,19 +122,19 @@ def submit_failure_result_unknown(exc: BaseException) -> bool:
     if getattr(exc, "operation", None) != "submit":
         return False
     status_code = getattr(exc, "status_code", None)
-    if status_code is not None and 200 <= status_code < 300:
-        # 2xx 已接受并创建作业，只是响应畸形拿不到 job_id：成本必然发生。
+    if isinstance(status_code, int) and status_code > 0:
+        if 300 <= status_code < 500:
+            return False
+        # 1xx / 2xx 畸形响应或任意 5xx 都无法证明 sidecar 未创建真实上游作业。
+        # 即使 body 为空、非 JSON，收到响应本身也只证明请求到达了 sidecar。
         return True
-    if status_code is not None and status_code < 500:
-        # 非 5xx 显式拒绝（4xx / 408 / 425 / 429）：sidecar 明确没有接受请求，
-        # 可证明未产生上游成本，允许 failover 重投（与上游 4xx 决策一致）。
+    if transport_error_proves_undelivered(exc.__cause__):
         return False
+    if getattr(exc, "result_unknown", False):
+        return True
     if not getattr(exc, "transient", False):
         return False
-    return not isinstance(
-        exc.__cause__,
-        (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
-    )
+    return True
 
 
 def image_job_submit_unknown_error(
@@ -132,9 +187,15 @@ def _upstream_cost_already_incurred(
       与 lumen_core.upstream_billing 的 IMAGE_UPSTREAM_RESULT_UNKNOWN 对齐）。
     """
     services = _runtime_services(runtime)
-    return (
+    execution = _sidecar_execution_from_error(exc)
+    return submit_failure_result_unknown(exc) or (
         isinstance(exc, services.infrastructure.UpstreamError)
         and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+    ) or bool(
+        execution is not None
+        and execution.cost_knowledge != ImageJobCostKnowledge.NONE
+    ) or bool(
+        execution is None and _sidecar_execution_accepted(exc)
     )
 
 
@@ -444,6 +505,7 @@ async def _run_image_job_endpoint(
     ):
         raise
     except Exception as exc:  # noqa: BLE001
+        exc = _accepted_execution_result_unknown(exc, runtime=runtime)
         if not _upstream_cost_already_incurred(exc, runtime=runtime):
             # 失败未产生上游成本（非 result-unknown）：释放本次尝试链的全部
             # 预留。结果未知类失败（可能已在上游创建作业/扣费）保留预留。

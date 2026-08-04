@@ -25,6 +25,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 from lumen_core.constants import (
@@ -42,7 +43,6 @@ from lumen_core.models import Completion
 from lumen_core.upstream_billing import has_stable_provider_idempotency_key
 
 from ...reconciliation.task_domains import (
-    COMPLETION_EXECUTION_EPOCH_KEY as _EXECUTION_EPOCH_KEY,
     COMPLETION_RESULT_UNKNOWN_MESSAGE,
     CompletionDispatchResultUnknown,
     bind_completion_execution_fence,
@@ -54,6 +54,17 @@ from ...reconciliation.task_domains import (
 )
 from ...task_cancellation import bind_task_cancellation
 from ..generation_parts.lease import bind_task_lease_execution_epoch
+from ...completion_checkpoint import (
+    COMPLETION_EXECUTION_EPOCH_KEY as _EXECUTION_EPOCH_KEY,
+    persist_completed_event_checkpoint,
+)
+from ...completion_checkpoint_takeover import (
+    bind_completion_claim_identity,
+    completion_checkpoint_claim_action,
+    take_over_completion_checkpoint,
+)
+from ...completion_text import completion_text_or_empty
+from .outcomes import completion_actual_text
 
 
 _STABLE_PROVIDER_IDEMPOTENCY_KEY = "_stable_provider_idempotency"
@@ -137,8 +148,7 @@ async def claim_completion(state: CompletionExecution) -> bool:
                     state.ports.persistence.select(
                         state.ports.persistence.Completion.execution_epoch
                     ).where(
-                        state.ports.persistence.Completion.id
-                        == state.request.task_id
+                        state.ports.persistence.Completion.id == state.request.task_id
                     )
                 )
             ).scalar_one_or_none()
@@ -151,6 +161,7 @@ async def claim_completion(state: CompletionExecution) -> bool:
     await bind_task_lease_execution_epoch(state, expected_execution_epoch)
     bind_completion_execution_fence(state, expected_execution_epoch)
 
+    checkpoint_row: Completion | None = None
     async with state.ports.persistence.SessionLocal() as session:
         await state.ports.persistence._acquire_completion_xact_lock(
             session, state.request.task_id
@@ -188,81 +199,81 @@ async def claim_completion(state: CompletionExecution) -> bool:
             state.settlement.task_outcome = "terminal"
             return False
 
-        state.preparation.was_restarted = (completion.attempt or 0) > 0 and bool(
-            completion.text
-        )
-        state.preparation.user_id = completion.user_id
-        state.preparation.message_id = completion.message_id
-        state.preparation.system_prompt = completion.system_prompt
-        state.preparation.user_api_credential_id = getattr(
-            completion,
-            "user_api_credential_id",
-            None,
-        )
-        user = await session.get(
-            state.ports.persistence.User, state.preparation.user_id
-        )
-        state.preparation.account_mode = getattr(user, "account_mode", "wallet")
-        state.preparation.chat_model = (
-            completion.model or state.ports.context.DEFAULT_CHAT_MODEL
-        )
+        bind_completion_claim_identity(state, completion)
         if getattr(completion, "cancel_requested_at", None) is not None:
             state.settlement.task_outcome = CompletionOutcome.CANCELLED.value
             return False
-        (
-            state.preparation.attempt,
-            preflight_failure,
-        ) = await state.ports.retry._completion_preflight_failure(
-            session,
-            completion,
-        )
-        state.preparation.attempt_epoch = state.preparation.attempt
-        if state.settlement.lease_lost.is_set():
-            raise state.ports.retry._LeaseLost("lease lost during completion preflight")
-        if preflight_failure is not None:
-            err_code, err_msg = preflight_failure
-            await _stage_preflight_failure(
-                state,
+        checkpoint_action = completion_checkpoint_claim_action(completion)
+        if checkpoint_action.required:
+            state.preparation.attempt = int(completion.attempt or 0)
+            state.preparation.attempt_epoch = state.preparation.attempt
+            checkpoint_row = completion
+        else:
+            user = await session.get(
+                state.ports.persistence.User,
+                state.preparation.user_id,
+            )
+            state.preparation.account_mode = getattr(
+                user,
+                "account_mode",
+                "wallet",
+            )
+            (
+                state.preparation.attempt,
+                preflight_failure,
+            ) = await state.ports.retry._completion_preflight_failure(
                 session,
                 completion,
-                err_code=err_code,
-                err_msg=err_msg,
             )
-            state.settlement.task_outcome = "failed"
-            return False
+            state.preparation.attempt_epoch = state.preparation.attempt
+            if state.settlement.lease_lost.is_set():
+                raise state.ports.retry._LeaseLost(
+                    "lease lost during completion preflight"
+                )
+            if preflight_failure is not None:
+                err_code, err_msg = preflight_failure
+                await _stage_preflight_failure(
+                    state,
+                    session,
+                    completion,
+                    err_code=err_code,
+                    err_msg=err_msg,
+                )
+                state.settlement.task_outcome = "failed"
+                return False
 
-        completion.status = CompletionStatus.STREAMING.value
-        completion.progress_stage = CompletionStage.STREAMING
-        started_at = datetime.now(timezone.utc)
-        completion.started_at = started_at
-        completion.attempt = state.preparation.attempt
-        upstream_request = dict(completion.upstream_request or {})
-        state.preparation.queue_metadata_payload = (
-            state.ports.retry.completion_queue_metadata(
-                upstream_request=upstream_request,
-                created_at=completion.created_at,
-                started_at=started_at,
-                finished_at=completion.finished_at,
-                now=started_at,
+            completion.status = CompletionStatus.STREAMING.value
+            completion.progress_stage = CompletionStage.STREAMING
+            started_at = datetime.now(timezone.utc)
+            completion.started_at = started_at
+            completion.attempt = state.preparation.attempt
+            upstream_request = dict(completion.upstream_request or {})
+            state.preparation.queue_metadata_payload = (
+                state.ports.retry.completion_queue_metadata(
+                    upstream_request=upstream_request,
+                    created_at=completion.created_at,
+                    started_at=started_at,
+                    finished_at=completion.finished_at,
+                    now=started_at,
+                )
             )
-        )
-        state.preparation.queue_metadata_payload[_EXECUTION_EPOCH_KEY] = (
-            expected_execution_epoch
-        )
-        state.preparation.queue_metadata_payload[_STABLE_PROVIDER_IDEMPOTENCY_KEY] = (
-            has_stable_provider_idempotency_key(completion)
-        )
-        completion.upstream_request = state.ports.retry.merge_queue_metadata(
-            upstream_request,
-            state.preparation.queue_metadata_payload,
-        )
-        if state.preparation.was_restarted:
-            completion.text = ""
-        if state.settlement.lease_lost.is_set():
-            raise state.ports.retry._LeaseLost(
-                "lease lost before completion claim commit"
+            state.preparation.queue_metadata_payload[_EXECUTION_EPOCH_KEY] = (
+                expected_execution_epoch
             )
-        await session.commit()
+            state.preparation.queue_metadata_payload[
+                _STABLE_PROVIDER_IDEMPOTENCY_KEY
+            ] = has_stable_provider_idempotency_key(completion)
+            completion.upstream_request = state.ports.retry.merge_queue_metadata(
+                upstream_request,
+                state.preparation.queue_metadata_payload,
+            )
+            if state.preparation.was_restarted:
+                completion.text = ""
+            if state.settlement.lease_lost.is_set():
+                raise state.ports.retry._LeaseLost(
+                    "lease lost before completion claim commit"
+                )
+            await session.commit()
 
         message = await session.get(
             state.ports.persistence.Message, state.preparation.message_id
@@ -271,6 +282,9 @@ async def claim_completion(state: CompletionExecution) -> bool:
             message.conversation_id if message is not None else None
         )
 
+    if checkpoint_row is not None:
+        await take_over_completion_checkpoint(state, checkpoint_row)
+        return False
     return True
 
 
@@ -530,7 +544,9 @@ async def _handle_completed(
         ),
         raw_usage=raw_usage if isinstance(raw_usage, dict) else None,
     )
-    completed_text = state.ports.upstream._extract_completed_output_text(response)
+    completed_text = completion_text_or_empty(
+        state.ports.upstream._extract_completed_output_text(response)
+    )
     if append_completed_text:
         if completed_text and not state.streaming.accumulated_text.endswith(
             completed_text
@@ -542,13 +558,20 @@ async def _handle_completed(
             )
     elif not state.streaming.accumulated_text:
         state.streaming.accumulated_text = completed_text
+    image_events = list(state.ports.tools._extract_image_events_from_response(response))
+    checkpoint_text = completion_actual_text(state)
+    await persist_completed_event_checkpoint(
+        state,
+        response,
+        raw_usage,
+        final_text=checkpoint_text,
+        image_events=image_events,
+    )
     if not state.streaming.accumulated_thinking:
         await _publish_thinking(
             state,
             state.ports.upstream._extract_reasoning_text_from_response(response),
         )
-    for image_event in state.ports.tools._extract_image_events_from_response(response):
-        await _store_image_event(state, image_event, mark_partial=False)
     await state.ports.tools._publish_completion_tool_updates(
         redis=state.request.redis,
         user_id=state.preparation.user_id,
@@ -638,14 +661,23 @@ async def _consume_round(
     state.usage.active_round_dispatch_started = False
     state.usage.active_round_response_received = False
     state.usage.active_round_dispatch_proven_undelivered = False
-    if not state.usage.dispatch_started_recorded:
-        await record_completion_upstream_marker(state, response_received=False)
-        state.usage.dispatch_started_recorded = True
-    round_receipt.dispatch_started_recorded = True
-    state.usage.active_round_dispatch_started = True
+
+    record_dispatch_ready = partial(
+        _record_round_dispatch_ready,
+        state,
+        round_receipt,
+    )
+    record_response_ready = partial(
+        _record_round_response_ready,
+        state,
+        round_receipt,
+    )
+
     stream = state.ports.upstream.stream_completion(
         body,
         runtime_override=state.preparation.runtime_override,
+        on_dispatch_ready=record_dispatch_ready,
+        on_response_ready=record_response_ready,
     )
     try:
         async for event in state.ports.retry._iter_completion_stream_with_abort(
@@ -655,10 +687,12 @@ async def _consume_round(
             tool_tracker=state.usage.tool_tracker,
             tool_idle_timeout_s=state.streaming.tool_idle_timeout_s,
         ):
+            event_type = event.get("type", "")
+            if event_type.startswith("response."):
+                await record_dispatch_ready()
             await _ensure_completion_execution_current(state)
             if state.settlement.lease_lost.is_set():
                 raise state.ports.retry._LeaseLost(f"lease lost during {phase} stream")
-            event_type = event.get("type", "")
             if event_type == "provider_used":
                 provider_event = (
                     state.ports.upstream._completion_upstream_provider_event(event)
@@ -676,10 +710,7 @@ async def _consume_round(
                 event_type.startswith("response.")
                 and not round_receipt.response_received
             ):
-                await record_completion_upstream_marker(state, response_received=True)
-                round_receipt.response_received = True
-                state.usage.response_receipt_recorded = True
-                state.usage.active_round_response_received = True
+                await record_response_ready()
             if track_tool_calls and await handle_completion_tool_call(
                 state,
                 event,
@@ -709,6 +740,39 @@ async def _consume_round(
     except Exception as exc:
         await _raise_completion_round_failure(state, exc, round_receipt)
         raise
+
+
+async def _record_round_dispatch_ready(
+    state: CompletionExecution,
+    round_receipt: _CompletionRoundReceipt,
+) -> None:
+    if round_receipt.dispatch_started_recorded:
+        return
+    if not state.usage.dispatch_started_recorded:
+        await record_completion_upstream_marker(
+            state,
+            response_received=False,
+        )
+        state.usage.dispatch_started_recorded = True
+    usage_totals = getattr(state.usage, "usage_totals", None)
+    if usage_totals is not None:
+        usage_totals.mark_round_dispatched()
+    state.usage.request_sent = True
+    round_receipt.dispatch_started_recorded = True
+    state.usage.active_round_dispatch_started = True
+
+
+async def _record_round_response_ready(
+    state: CompletionExecution,
+    round_receipt: _CompletionRoundReceipt,
+) -> None:
+    if round_receipt.response_received:
+        return
+    await _record_round_dispatch_ready(state, round_receipt)
+    await record_completion_upstream_marker(state, response_received=True)
+    round_receipt.response_received = True
+    state.usage.response_receipt_recorded = True
+    state.usage.active_round_response_received = True
 
 
 async def _raise_completion_round_failure(
@@ -780,7 +844,6 @@ async def consume_completion_stream(state: CompletionExecution) -> None:
             poll_interval_s=state.streaming.cancel_poll_interval_s,
         )
     )
-    state.usage.request_sent = True
     state.usage.round_text_start = len(state.streaming.accumulated_text)
     state.usage.round_thinking_start = len(state.streaming.accumulated_thinking)
     state.usage.usage_totals.start_round(
@@ -802,6 +865,7 @@ async def consume_completion_stream(state: CompletionExecution) -> None:
         finalize_tools=False,
     )
     if state.streaming.tool_loop_truncated:
+        state.usage.completed_usage_exact = False
         state.usage.usage_totals.finish_round(
             output_text=state.streaming.accumulated_text[
                 state.usage.round_text_start :

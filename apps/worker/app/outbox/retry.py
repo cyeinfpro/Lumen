@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .contracts import OUTBOX_FAIL_COUNT_HASH, OUTBOX_FAIL_COUNT_TTL_S
+from .contracts import (
+    OUTBOX_DLQ_RETRY_DELAY_S,
+    OUTBOX_FAIL_COUNT_HASH,
+    OUTBOX_FAIL_COUNT_TTL_S,
+    OUTBOX_MAX_FAIL_COUNT,
+    OUTBOX_RETRY_BASE_DELAY_S,
+    OUTBOX_RETRY_MAX_DELAY_S,
+)
 from .metrics import outbox_retry_total
 
 logger = logging.getLogger(__name__)
@@ -15,6 +22,22 @@ local val = redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return val
 """
+
+
+def retry_delay_seconds(
+    *,
+    delivery_attempts: int,
+    fail_count: int,
+) -> int:
+    attempt = max(1, int(delivery_attempts or 0), int(fail_count or 0))
+    exponent = min(attempt - 1, 8)
+    delay = min(
+        OUTBOX_RETRY_MAX_DELAY_S,
+        OUTBOX_RETRY_BASE_DELAY_S * (2**exponent),
+    )
+    if fail_count >= OUTBOX_MAX_FAIL_COUNT:
+        return max(delay, OUTBOX_DLQ_RETRY_DELAY_S)
+    return delay
 
 
 async def increment_fail_count(

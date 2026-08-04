@@ -11,6 +11,26 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    _LUMEN_ENTRY_LOCK_HELPER="${SCRIPT_DIR}/update/entry_lock.py"
+    _LUMEN_ENTRY_LOCK_SCRIPTS_DIR="$(cd "${SCRIPT_DIR}" && pwd -P)"
+    _LUMEN_ENTRY_LOCK_PATH="${_LUMEN_ENTRY_LOCK_SCRIPTS_DIR}.lumen-self-update.lock"
+    if [ ! -f "${_LUMEN_ENTRY_LOCK_HELPER}" ] \
+            || [ -L "${_LUMEN_ENTRY_LOCK_HELPER}" ]; then
+        printf '[ERROR] lumenctl 脚本单元缺少安全入口锁 helper。\n' >&2
+        exit 78
+    fi
+    if ! python3 "${_LUMEN_ENTRY_LOCK_HELPER}" verify \
+            "${LUMEN_SCRIPT_UNIT_LOCK_FD:-}" \
+            "${_LUMEN_ENTRY_LOCK_PATH}" >/dev/null 2>&1; then
+        exec python3 "${_LUMEN_ENTRY_LOCK_HELPER}" exec \
+            "${_LUMEN_ENTRY_LOCK_PATH}" \
+            "${LUMEN_SELF_UPDATE_LOCK_TIMEOUT:-60}" \
+            -- bash "${BASH_SOURCE[0]}" "$@"
+    fi
+    unset _LUMEN_ENTRY_LOCK_HELPER _LUMEN_ENTRY_LOCK_SCRIPTS_DIR \
+        _LUMEN_ENTRY_LOCK_PATH
+fi
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
@@ -26,6 +46,32 @@ _LUMENCTL_MODULE_FILES=(
     lumenctl/compose.sh
     lumenctl/systemd_image_job.sh
     lumenctl/nginx.sh
+)
+_LUMEN_UPDATE_DEPENDENCY_FILES=(
+    lib/system.sh lib/environment.sh
+    lib/step_protocol.sh lib/runtime.sh
+    lib/locking.sh lib/container_release.sh
+    lib/release_layout.sh lib/self_update.sh
+    lib/backup_restore_services.sh lib/backup_journal.sh lib/restore_journal.sh
+    release_manifest_guard.py update_runner.py restore_runner.py
+    redis_backup_archive.py backup_permissions.py restore_journal.py
+    update/backup/storage_identity.sh update/backup/migration_helpers.sh
+    update/backup/phases.sh
+    update/backup/preflight.sh update/backup/restore_points.sh
+    update/bootstrap.sh update/common.sh
+    update/journal.sh update/durable_io.py update/journal_store.py
+    update/journal_validation.py update/phase_contract.sh
+    update/recovery/blue_green.sh update/recovery/cleanup.sh
+    update/recovery/state.sh update/release/activate.sh
+    update/release/check.sh update/release/digest.sh
+    update/entry_lock.py
+    update/release/fetch.sh update/release/image_proof_store.py
+    update/release/manifest.sh update/release/runner_units.sh
+    update/release/self_update.sh update/release/source_helpers.sh
+    update/services/compose.sh update/services/health.sh
+    update/services/release_activation.sh update/services/restart.sh
+    update/services/switch.sh
+    update/phases.sh update/runner.sh
 )
 _LUMENCTL_MODULES_LOADED=0
 
@@ -157,11 +203,16 @@ run_lumen_script() {
         log_error "如果这是新机器，请先从 GitHub 拉完整仓库：git clone ${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git} ${ROOT}"
         exit 1
     fi
+    if [ "${script_name}" = "update.sh" ] \
+            && ! lumenctl_prepare_update_script_unit "${script_path}"; then
+        return 1
+    fi
     # 全栈 docker 化后 install.sh / update.sh / uninstall.sh 都接受透传 flag。
     # 不再强制塞 --install；让上游传什么就传什么。
     case "${script_name}" in
         install.sh|update.sh|uninstall.sh|backup.sh|restore.sh)
             if [ "$(detect_os)" = "linux" ] && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+                lumenctl_release_script_unit_lock
                 ensure_cmd sudo "请安装 sudo，或切换到 root 后重试"
                 # sudo 默认 env_reset 会把 LUMEN_UPDATE_GIT_PULL 等 inline env vars 全部 strip。
                 # 用 env KEY=val 显式重建，确保 update.sh / install.sh 能读到调用方的 LUMEN_*。
@@ -184,6 +235,18 @@ run_lumen_script() {
             bash "${script_path}" "$@"
             ;;
     esac
+}
+
+lumenctl_release_script_unit_lock() {
+    local fd="${LUMEN_SCRIPT_UNIT_LOCK_FD:-}"
+    case "${fd}" in
+        ''|*[!0-9]*) ;;
+        *)
+            eval "exec ${fd}>&-" 2>/dev/null || true
+            LUMENCTL_SCRIPT_UNIT_LOCK_RELEASED=1
+            ;;
+    esac
+    unset LUMEN_SCRIPT_UNIT_LOCK_FD LUMEN_SCRIPT_UNIT_LOCK_PATH
 }
 
 run_lumen_install_script() {
@@ -240,12 +303,16 @@ lumenctl_load_modules() {
 
 lumenctl_sync_script_unit() {
     local ttl_sec="$1"
-    lumen_self_update_scripts_from_github_branch "${SCRIPT_DIR}" \
+    local scripts_dir="${2:-${SCRIPT_DIR}}"
+    # Dependencies are staged before update.sh, and the lower-level installer
+    # commits or rolls back the complete list as one transaction.
+    lumen_self_update_scripts_from_github_branch "${scripts_dir}" \
         "${LUMEN_SELF_UPDATE_BRANCH:-main}" \
         "${ttl_sec}" \
         lib.sh \
         backup.sh \
         restore.sh \
+        "${_LUMEN_UPDATE_DEPENDENCY_FILES[@]}" \
         update.sh \
         lumenctl.sh \
         "${_LUMENCTL_MODULE_FILES[@]}"
@@ -307,6 +374,9 @@ menu_action() {
             IFS= read -r _ </dev/tty 2>/dev/null || true
             printf '\n' >&2
         fi
+    fi
+    if [ "${LUMENCTL_SCRIPT_UNIT_LOCK_RELEASED:-0}" = "1" ]; then
+        exec bash "${SCRIPT_DIR}/lumenctl.sh" menu
     fi
     return 0
 }

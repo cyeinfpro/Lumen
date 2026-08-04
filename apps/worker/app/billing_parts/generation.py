@@ -9,11 +9,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.model_entities import Generation
 
+from .common import (
+    billing_obligation_is_unsettleable,
+    mark_billing_obligation_unsettleable,
+    terminal_billing_applies,
+)
 from .contracts import (
     GenerationDependencies,
     UnknownUpstreamDependencies,
     UnknownUpstreamSettlement,
 )
+from .helpers import task_pricing_snapshot
+
+BONUS_BILLING_OBLIGATION_KEY = "bonus_billing_obligation"
+
+
+def _generation_billing_obligation(generation: Generation) -> bool:
+    request = getattr(generation, "upstream_request", None)
+    return bool(
+        task_pricing_snapshot(generation) is not None
+        or (
+            isinstance(request, dict)
+            and request.get(BONUS_BILLING_OBLIGATION_KEY) is True
+            and request.get("billing_free") is not True
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -195,6 +215,12 @@ async def settle_generation(
     deps: GenerationDependencies,
 ) -> None:
     billing_ref_id = deps.generation_billing_ref_id(generation)
+    request = getattr(generation, "upstream_request", None)
+    if isinstance(request, dict) and request.get("billing_free") is True:
+        return
+    if billing_obligation_is_unsettleable(generation):
+        return
+    billing_obligation = _generation_billing_obligation(generation)
     if not await deps.wallet_billing_applies(
         session,
         user_id=generation.user_id,
@@ -202,7 +228,15 @@ async def settle_generation(
         ref_id=billing_ref_id,
     ):
         return
-    if not await deps.billing_enabled():
+    if not await terminal_billing_applies(
+        session,
+        user_id=generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+        billing_enabled=deps.billing_enabled,
+        billing_obligation=billing_obligation,
+        billing_core=deps.billing_core,
+    ):
         return
     idempotency_key = f"settle:{billing_ref_id}"
     existing = await deps.existing_wallet_tx(
@@ -228,6 +262,15 @@ async def settle_generation(
         deps=deps,
     )
     if resolved.tier_source == "unresolved":
+        if billing_obligation:
+            mark_billing_obligation_unsettleable(
+                generation,
+                reason=(
+                    "pricing_missing_without_hold"
+                    if resolved.pricing_error is not None
+                    else "non_positive_pricing_without_hold"
+                ),
+            )
         return
     cost = resolved.cost
     tier = resolved.tier
@@ -324,7 +367,15 @@ async def release_generation(
         ref_id=billing_ref_id,
     ):
         return
-    if not await deps.billing_enabled():
+    if not await terminal_billing_applies(
+        session,
+        user_id=generation.user_id,
+        ref_type="generation",
+        ref_id=billing_ref_id,
+        billing_enabled=deps.billing_enabled,
+        billing_obligation=task_pricing_snapshot(generation) is not None,
+        billing_core=deps.billing_core,
+    ):
         return
     idempotency_key = f"release:{billing_ref_id}"
     existing = await deps.existing_wallet_tx(
@@ -388,7 +439,15 @@ async def settle_unknown_upstream_hold(
         ref_id=settlement.ref_id,
     ):
         return
-    if not await deps.billing_enabled():
+    if not await terminal_billing_applies(
+        session,
+        user_id=user_id,
+        ref_type=settlement.ref_type,
+        ref_id=settlement.ref_id,
+        billing_enabled=deps.billing_enabled,
+        billing_obligation=settlement.billing_obligation,
+        billing_core=deps.billing_core,
+    ):
         return
     idempotency_key = f"settle:{settlement.ref_id}"
     existing = await deps.existing_wallet_tx(session, user_id, idempotency_key)

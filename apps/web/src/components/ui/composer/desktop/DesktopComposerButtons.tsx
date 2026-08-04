@@ -34,7 +34,7 @@ export function IconBtn({
       aria-label={label}
       title={label}
       className={cn(
-        "relative shrink-0 inline-flex items-center justify-center w-10 h-10 rounded-[var(--radius-control)]",
+        "relative shrink-0 inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)]",
         "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
         "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
         "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",

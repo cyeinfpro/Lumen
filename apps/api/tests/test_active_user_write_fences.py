@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -11,17 +12,31 @@ from sqlalchemy.dialects import postgresql
 from starlette.requests import Request
 
 from app import deps
+from app.canvas_services.api_schemas import CanvasPatchIn
+from app.canvas_services import document_service as canvas_document_service
 from app.images.adapters.sqlalchemy_repository import SQLAlchemyImageRepository
 from app.images.application import http_routes
 from app.images.domain.artifact import ArtifactStatus
-from app.routes import conversations, me, messages, regenerate, tasks
+from app.routes import (
+    byok,
+    conversations,
+    me,
+    messages,
+    regenerate,
+    shares,
+    tasks,
+    videos,
+)
+from app.routes.billing_parts import redemptions
 from app.services.active_user import (
     ActiveSessionRevoked,
     ActiveUserDeleted,
     lock_active_user,
+    lock_active_user_snapshot,
 )
 from app.services.message_request import AssistantContextRuntime
 from app.services.video import submission as video_submission
+from app.workflows.transport.http import execution as workflow_http_execution
 from lumen_core.schemas import VideoCreateIn
 
 
@@ -60,6 +75,7 @@ class _SharedSessionState(_SharedUserState):
 class _AuthDb:
     def __init__(self, user: Any) -> None:
         self.user = user
+        self.info: dict[str, Any] = {}
 
     async def execute(self, _statement: Any) -> _Result:
         session = SimpleNamespace(
@@ -129,7 +145,7 @@ class _PausedActiveUserDb:
             self.active_user_lock_requested.set()
             await self.allow_active_user_lock.wait()
             return _Result(
-                scalar=None if self.state.deleted else self.state.user_id,
+                scalar=None if self.state.deleted else _active_user(self.state),
             )
         if not self.results:
             raise AssertionError(f"unexpected statement: {statement}")
@@ -155,6 +171,7 @@ class _PausedActiveSessionDb:
         self.results = results
         self.statements: list[Any] = []
         self.added: list[Any] = []
+        self.info = {"lumen.durable_session_id": state.session_id}
         self.committed = False
         self.rolled_back = False
         self.active_session_lock_requested = asyncio.Event()
@@ -165,7 +182,7 @@ class _PausedActiveSessionDb:
         rendered = str(statement).lower()
         if "from users" in rendered:
             return _Result(
-                scalar=None if self.state.deleted else self.state.user_id,
+                scalar=None if self.state.deleted else _active_user(self.state),
             )
         if "from auth_sessions" in rendered:
             self.active_session_lock_requested.set()
@@ -293,6 +310,41 @@ async def _authenticate_request_with_session(user: Any) -> tuple[Request, Any]:
         "session-1",
     )
     return request, authenticated_user
+
+
+@pytest.mark.parametrize(
+    ("route", "commit_marker"),
+    [
+        (shares.create_share, "db.add(share)"),
+        (shares.create_multi_image_share, "db.add(share)"),
+        (shares.revoke_share, "select(Share)"),
+        (redemptions.redeem_code, "commands.lock_redemption_idempotency_key"),
+        (byok.probe_my_api_credential, "row = ("),
+        (byok.put_my_api_credential, "update_result = await db.execute"),
+        (byok.revoke_my_api_credential, "select(UserApiCredential)"),
+    ],
+)
+def test_adjacent_durable_routes_fence_before_database_mutation(
+    route: Any,
+    commit_marker: str,
+) -> None:
+    source = inspect.getsource(route)
+    fence_index = source.index("lock_authenticated_user_snapshot")
+
+    assert fence_index < source.rindex(commit_marker)
+
+
+@pytest.mark.asyncio
+async def test_authentication_binds_durable_session_id_to_request_db() -> None:
+    db = _AuthDb(SimpleNamespace(deleted_at=None))
+
+    await deps.require_active_session_user(
+        _request(),
+        db,  # type: ignore[arg-type]
+        "session-1",
+    )
+
+    assert deps.durable_session_id_from_db(db) == "session-1"
 
 
 async def _commit_account_deletion(
@@ -812,6 +864,36 @@ async def test_sessionless_active_user_lock_keeps_legacy_user_only_fence() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("account_mode", ["wallet", "byok"])
+async def test_lock_active_user_snapshot_refreshes_canonical_user_when_mode_matches(
+    account_mode: str,
+) -> None:
+    user = _active_user(_SharedUserState())
+    user.account_mode = account_mode
+
+    class _SnapshotDb:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
+        async def execute(self, statement: Any) -> _Result:
+            self.statements.append(statement)
+            return _Result(scalar=user)
+
+    db = _SnapshotDb()
+    snapshot = await lock_active_user_snapshot(
+        db,  # type: ignore[arg-type]
+        user.id,
+        account_mode,  # type: ignore[arg-type]
+    )
+
+    assert snapshot.user is user
+    assert snapshot.account_mode == account_mode
+    assert len(db.statements) == 1
+    _assert_active_user_lock(db.statements[0])
+    assert db.statements[0].get_execution_options().get("populate_existing") is True
+
+
+@pytest.mark.asyncio
 async def test_revoked_session_upload_never_starts_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -989,9 +1071,10 @@ async def test_video_submit_fences_durable_session_before_chargeable_work(
     async def revoked_session_fence(
         _db: Any,
         user_id: str,
+        _expected_account_mode: str,
         *,
         session_id: str | None = None,
-    ) -> None:
+    ) -> Any:
         calls.append(("session_fence", (user_id, session_id)))
         raise ActiveSessionRevoked()
 
@@ -1009,7 +1092,7 @@ async def test_video_submit_fences_durable_session_before_chargeable_work(
     monkeypatch.setattr(video_submission, "lock_user_key", no_idempotency_lock)
     monkeypatch.setattr(
         video_submission,
-        "lock_active_user",
+        "lock_active_user_snapshot",
         revoked_session_fence,
     )
     monkeypatch.setattr(
@@ -1063,4 +1146,130 @@ async def test_revoked_session_wins_before_conversation_create_commit(
     _assert_active_session_lock_order(db.statements)
     assert len(db.statements) == 2
     assert db.added == []
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_revoked_session_wins_before_canvas_patch_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _SharedSessionState()
+    request, user = await _authenticate_request_with_session(_active_user(state))
+    db = _PausedActiveSessionDb(state, [])
+
+    patch = asyncio.create_task(
+        canvas_document_service.patch_canvas(
+            db,  # type: ignore[arg-type]
+            user_id=user.id,
+            canvas_id="canvas-1",
+            body=CanvasPatchIn(title="stale write"),
+        )
+    )
+    await db.active_session_lock_requested.wait()
+    await _commit_session_revocation(monkeypatch, state, request, user)
+    db.allow_active_session_lock.set()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await patch
+
+    _assert_session_revoked(excinfo.value)
+    _assert_active_session_lock_order(db.statements)
+    assert len(db.statements) == 2
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_revoked_session_wins_before_plain_workflow_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _SharedSessionState()
+    request, user = await _authenticate_request_with_session(_active_user(state))
+    db = _PausedActiveSessionDb(state, [])
+    action_calls = 0
+
+    async def action(*, user: Any, db: Any) -> None:
+        nonlocal action_calls
+        _ = user, db
+        action_calls += 1
+
+    write = asyncio.create_task(
+        workflow_http_execution.execute_durable_workflow_action(
+            action,
+            user=user,
+            db=db,
+        )
+    )
+    await db.active_session_lock_requested.wait()
+    await _commit_session_revocation(monkeypatch, state, request, user)
+    db.allow_active_session_lock.set()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await write
+
+    _assert_session_revoked(excinfo.value)
+    _assert_active_session_lock_order(db.statements)
+    assert action_calls == 0
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_kind", ["generation", "completion"])
+async def test_revoked_session_wins_before_task_cancel_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    task_kind: str,
+) -> None:
+    state = _SharedSessionState()
+    request, user = await _authenticate_request_with_session(_active_user(state))
+    db = _PausedActiveSessionDb(state, [])
+    cancel = (
+        tasks.cancel_generation
+        if task_kind == "generation"
+        else tasks.cancel_completion
+    )
+
+    cancellation = asyncio.create_task(
+        cancel(
+            f"{task_kind}-1",
+            user,  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+    )
+    await db.active_session_lock_requested.wait()
+    await _commit_session_revocation(monkeypatch, state, request, user)
+    db.allow_active_session_lock.set()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await cancellation
+
+    _assert_session_revoked(excinfo.value)
+    _assert_active_session_lock_order(db.statements)
+    assert len(db.statements) == 2
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_revoked_session_wins_before_video_cancel_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _SharedSessionState()
+    request, user = await _authenticate_request_with_session(_active_user(state))
+    db = _PausedActiveSessionDb(state, [])
+
+    cancellation = asyncio.create_task(
+        videos.cancel_video_generation(
+            "video-generation-1",
+            user,  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+    )
+    await db.active_session_lock_requested.wait()
+    await _commit_session_revocation(monkeypatch, state, request, user)
+    db.allow_active_session_lock.set()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await cancellation
+
+    _assert_session_revoked(excinfo.value)
+    _assert_active_session_lock_order(db.statements)
+    assert len(db.statements) == 2
     assert db.committed is False

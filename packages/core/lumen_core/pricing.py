@@ -46,11 +46,27 @@ class PricingOverflowError(ValueError):
         self.limit = limit
 
 
-def _nonnegative(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
+def parse_canonical_nonnegative_int(value: Any) -> int | None:
+    """Parse only real ints or canonical ASCII decimal strings."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if not isinstance(value, str) or not value:
+        return None
+    if value == "0":
         return 0
+    if value[0] == "0" or any(character not in "0123456789" for character in value):
+        return None
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _nonnegative(value: Any) -> int:
+    parsed = parse_canonical_nonnegative_int(value)
+    return parsed if parsed is not None else 0
 
 
 def _nested(mapping: dict[str, Any], *keys: str) -> Any:
@@ -82,14 +98,14 @@ class UsageTokens:
 
     def normalized(self) -> "UsageTokens":
         return UsageTokens(
-            input_tokens=max(0, int(self.input_tokens)),
-            output_tokens=max(0, int(self.output_tokens)),
-            cache_read_tokens=max(0, int(self.cache_read_tokens)),
-            cache_creation_tokens=max(0, int(self.cache_creation_tokens)),
-            cache_creation_5m_tokens=max(0, int(self.cache_creation_5m_tokens)),
-            cache_creation_1h_tokens=max(0, int(self.cache_creation_1h_tokens)),
-            reasoning_tokens=max(0, int(self.reasoning_tokens)),
-            image_output_tokens=max(0, int(self.image_output_tokens)),
+            input_tokens=_nonnegative(self.input_tokens),
+            output_tokens=_nonnegative(self.output_tokens),
+            cache_read_tokens=_nonnegative(self.cache_read_tokens),
+            cache_creation_tokens=_nonnegative(self.cache_creation_tokens),
+            cache_creation_5m_tokens=_nonnegative(self.cache_creation_5m_tokens),
+            cache_creation_1h_tokens=_nonnegative(self.cache_creation_1h_tokens),
+            reasoning_tokens=_nonnegative(self.reasoning_tokens),
+            image_output_tokens=_nonnegative(self.image_output_tokens),
         )
 
     def model_dump(self) -> dict[str, int]:
@@ -119,28 +135,22 @@ class ModelPricing:
         return asdict(self)
 
     def with_defaults(self) -> "ModelPricing":
-        input_rate = max(0, int(self.input_per_1k_micro))
-        output_rate = max(0, int(self.output_per_1k_micro))
+        input_rate = _nonnegative(self.input_per_1k_micro)
+        output_rate = _nonnegative(self.output_per_1k_micro)
+        cache_creation_rate = _nonnegative(self.cache_creation_per_1k_micro)
+        cache_read_rate = _nonnegative(self.cache_read_per_1k_micro)
+        cache_5m_rate = _nonnegative(self.cache_creation_5m_per_1k_micro)
+        cache_1h_rate = _nonnegative(self.cache_creation_1h_per_1k_micro)
+        image_output_rate = _nonnegative(self.image_output_per_1k_micro)
+        reasoning_rate = _nonnegative(self.reasoning_per_1k_micro)
         cache_creation = (
-            int(self.cache_creation_per_1k_micro)
-            if self.cache_creation_per_1k_micro > 0
+            cache_creation_rate
+            if cache_creation_rate > 0
             else (input_rate * 125) // 100
         )
-        cache_read = (
-            int(self.cache_read_per_1k_micro)
-            if self.cache_read_per_1k_micro > 0
-            else input_rate
-        )
-        cache_5m = (
-            int(self.cache_creation_5m_per_1k_micro)
-            if self.cache_creation_5m_per_1k_micro > 0
-            else cache_creation
-        )
-        cache_1h = (
-            int(self.cache_creation_1h_per_1k_micro)
-            if self.cache_creation_1h_per_1k_micro > 0
-            else (cache_creation * 160) // 100
-        )
+        cache_read = cache_read_rate if cache_read_rate > 0 else input_rate
+        cache_5m = cache_5m_rate if cache_5m_rate > 0 else cache_creation
+        cache_1h = cache_1h_rate if cache_1h_rate > 0 else (cache_creation * 160) // 100
         return ModelPricing(
             input_per_1k_micro=input_rate,
             output_per_1k_micro=output_rate,
@@ -149,28 +159,26 @@ class ModelPricing:
             cache_creation_5m_per_1k_micro=cache_5m,
             cache_creation_1h_per_1k_micro=cache_1h,
             image_output_per_1k_micro=(
-                int(self.image_output_per_1k_micro)
-                if self.image_output_per_1k_micro > 0
-                else output_rate
+                image_output_rate if image_output_rate > 0 else output_rate
             ),
             reasoning_per_1k_micro=(
-                int(self.reasoning_per_1k_micro)
-                if self.reasoning_per_1k_micro > 0
-                else output_rate
+                reasoning_rate if reasoning_rate > 0 else output_rate
             ),
-            input_priority_per_1k_micro=max(0, int(self.input_priority_per_1k_micro)),
-            output_priority_per_1k_micro=max(0, int(self.output_priority_per_1k_micro)),
-            cache_read_priority_per_1k_micro=max(
-                0, int(self.cache_read_priority_per_1k_micro)
+            input_priority_per_1k_micro=_nonnegative(self.input_priority_per_1k_micro),
+            output_priority_per_1k_micro=_nonnegative(
+                self.output_priority_per_1k_micro
             ),
-            long_context_threshold_tokens=max(
-                0, int(self.long_context_threshold_tokens)
+            cache_read_priority_per_1k_micro=_nonnegative(
+                self.cache_read_priority_per_1k_micro
             ),
-            long_context_input_multiplier_x10000=max(
-                0, int(self.long_context_input_multiplier_x10000 or 10_000)
+            long_context_threshold_tokens=_nonnegative(
+                self.long_context_threshold_tokens
             ),
-            long_context_output_multiplier_x10000=max(
-                0, int(self.long_context_output_multiplier_x10000 or 10_000)
+            long_context_input_multiplier_x10000=(
+                _nonnegative(self.long_context_input_multiplier_x10000) or 10_000
+            ),
+            long_context_output_multiplier_x10000=(
+                _nonnegative(self.long_context_output_multiplier_x10000) or 10_000
             ),
             supports_cache_breakdown=bool(self.supports_cache_breakdown),
             pricing_source=self.pricing_source,
@@ -319,8 +327,8 @@ def _guard_factor(field: str, value: int, limit: int) -> int:
 
 
 def _cost(tokens: int, rate_per_1k_micro: int) -> int:
-    normalized_tokens = max(0, int(tokens))
-    normalized_rate = max(0, int(rate_per_1k_micro))
+    normalized_tokens = _nonnegative(tokens)
+    normalized_rate = _nonnegative(rate_per_1k_micro)
     if normalized_tokens <= 0 or normalized_rate <= 0:
         return 0
     # 先校验因子再相乘（F-4）：越界直接拒绝，不做任何封顶。
@@ -330,8 +338,8 @@ def _cost(tokens: int, rate_per_1k_micro: int) -> int:
 
 
 def _apply_multiplier(value: int, multiplier_x10000: int) -> int:
-    normalized_value = max(0, int(value))
-    normalized_multiplier = max(0, int(multiplier_x10000))
+    normalized_value = _nonnegative(value)
+    normalized_multiplier = _nonnegative(multiplier_x10000)
     if normalized_multiplier > 0:
         _guard_factor("multiplier_x10000", normalized_multiplier, MAX_MULTIPLIER_X10000)
     return (normalized_value * normalized_multiplier) // 10_000
@@ -489,7 +497,7 @@ def compute_breakdown(
         + image_cost
         + reasoning_cost
     )
-    multiplier = max(0, int(rate_multiplier_x10000))
+    multiplier = _nonnegative(rate_multiplier_x10000)
     actual = _apply_multiplier(total, multiplier)
     if total > 0 and multiplier > 0:
         actual = max(1, actual)

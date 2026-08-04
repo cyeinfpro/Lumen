@@ -106,27 +106,65 @@ stage_image_job_package() {
     printf '%s\n' "${stage_dir}"
 }
 
+IMAGE_JOB_PACKAGE_BACKUP=""
+
 replace_image_job_package() {
     local app_dir="$1"
     local stage_dir="$2"
     local old_dir="${app_dir}/.image_job.previous.$$"
 
     as_sudo rm -rf "${old_dir}"
+    IMAGE_JOB_PACKAGE_BACKUP=""
     if as_sudo test -e "${app_dir}/image_job" \
             || as_sudo test -L "${app_dir}/image_job"; then
         if ! as_sudo mv "${app_dir}/image_job" "${old_dir}"; then
             as_sudo rm -rf "${stage_dir}"
             return 1
         fi
+        IMAGE_JOB_PACKAGE_BACKUP="${old_dir}"
     fi
     if ! as_sudo mv "${stage_dir}" "${app_dir}/image_job"; then
         if as_sudo test -e "${old_dir}"; then
             as_sudo mv "${old_dir}" "${app_dir}/image_job" || true
         fi
+        IMAGE_JOB_PACKAGE_BACKUP=""
         as_sudo rm -rf "${stage_dir}"
         return 1
     fi
-    as_sudo rm -rf "${old_dir}"
+}
+
+rollback_image_job_package() {
+    local app_dir="$1"
+    as_sudo rm -rf "${app_dir}/image_job"
+    if [ -n "${IMAGE_JOB_PACKAGE_BACKUP}" ] \
+            && as_sudo test -e "${IMAGE_JOB_PACKAGE_BACKUP}"; then
+        as_sudo mv "${IMAGE_JOB_PACKAGE_BACKUP}" "${app_dir}/image_job" \
+            || return 1
+    fi
+    IMAGE_JOB_PACKAGE_BACKUP=""
+}
+
+finalize_image_job_package() {
+    if [ -n "${IMAGE_JOB_PACKAGE_BACKUP}" ]; then
+        as_sudo rm -rf "${IMAGE_JOB_PACKAGE_BACKUP}" || return 1
+    fi
+    IMAGE_JOB_PACKAGE_BACKUP=""
+}
+
+image_job_wait_healthy() {
+    local url="$1"
+    local attempts="${LUMEN_IMAGE_JOB_HEALTH_ATTEMPTS:-30}"
+    local interval="${LUMEN_IMAGE_JOB_HEALTH_INTERVAL_SECONDS:-1}"
+    local attempt=0
+    command -v curl >/dev/null 2>&1 || return 1
+    while [ "${attempt}" -lt "${attempts}" ]; do
+        attempt=$((attempt + 1))
+        if curl --noproxy '*' -fsS --max-time 5 "${url}" >/dev/null 2>&1; then
+            return 0
+        fi
+        [ "${attempt}" -ge "${attempts}" ] || sleep "${interval}"
+    done
+    return 1
 }
 
 image_job_env_value() {
@@ -258,7 +296,7 @@ install_image_job() {
 
     local app_dir data_dir state_dir db_path upstream_base public_base listen_host listen_port
     local concurrency python_bin service_user service_group
-    local config_dir env_file sidecar_token tmp_env package_stage
+    local config_dir env_file sidecar_token tmp_env package_stage local_health_url
     local service_was_active=0
 
     log_step "安装 image-job sidecar"
@@ -406,15 +444,29 @@ EOF
     fi
 
     log_step "image-job 健康检查"
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fsS "http://${listen_host}:${listen_port}/health" >/dev/null; then
-            log_info "image-job 本机健康检查通过：http://${listen_host}:${listen_port}/health"
-        else
-            log_warn "本机健康检查未通过，请查看：journalctl -u image-job -n 160 --no-pager"
+    local_health_url="http://${listen_host}:${listen_port}/health"
+    if ! image_job_wait_healthy "${local_health_url}"; then
+        log_error "image-job 启动或健康检查失败，正在恢复上一版包。"
+        as_sudo systemctl stop image-job >/dev/null 2>&1 || true
+        if ! rollback_image_job_package "${app_dir}"; then
+            log_error "image-job 包回滚失败，请立即人工恢复 ${app_dir}/image_job。"
+            exit 1
         fi
-    else
-        log_info "未安装 curl，跳过 HTTP 健康检查。"
+        if [ "${service_was_active}" -eq 1 ]; then
+            as_sudo systemctl restart image-job || true
+            if ! image_job_wait_healthy "${local_health_url}"; then
+                log_error "上一版 image-job 包已恢复，但服务 readiness 仍失败。"
+            fi
+        else
+            as_sudo systemctl disable --now image-job >/dev/null 2>&1 || true
+        fi
+        exit 1
     fi
+    finalize_image_job_package || {
+        log_error "image-job 新包已健康，但清理上一版包失败。"
+        exit 1
+    }
+    log_info "image-job 本机健康检查通过：${local_health_url}"
 
     cat <<EOF
 

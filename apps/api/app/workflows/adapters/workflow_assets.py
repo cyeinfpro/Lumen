@@ -219,8 +219,9 @@ def image_to_out(img: Image, variant_kinds: set[str] | None = None) -> ImageOut:
     is_dual_race_bonus = metadata.get("is_dual_race_bonus") is True
     billing_free = (
         metadata.get("billing_free") is True
-        or is_dual_race_bonus
-        or billing_label == "free"
+        if "billing_free" in metadata
+        else billing_label == "free"
+        or (is_dual_race_bonus and billing_label is None)
     )
     return ImageOut(
         id=img.id,

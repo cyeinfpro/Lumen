@@ -34,7 +34,6 @@ from lumen_core.providers import (
     build_effective_provider_config,
     endpoint_kind_allowed,
 )
-from lumen_core.providers_parts import proxy_runtime as provider_proxy_runtime
 from lumen_core.providers_parts.selection import (
     provider_supports_route,
     route_to_purpose,
@@ -56,6 +55,7 @@ from .provider_runtime.probe_runtime import (
 from .provider_runtime.probes import ProviderProbeMixin
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from .provider_pool_parts import image_selection as _image_selection
+from .provider_pool_parts.proxy_lifecycle import ProviderProxyLifecycle
 from .validation import validate_provider_base_url
 
 logger = logging.getLogger(__name__)
@@ -865,20 +865,20 @@ class ProviderPoolRuntime:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_probe_at: float = 0.0
     last_image_probe_at: float = 0.0
-    provider_proxy: provider_proxy_runtime.ProviderProxyRuntime = field(default_factory=provider_proxy_runtime.ProviderProxyRuntime)
 
 
 _RUNTIME = ProviderPoolRuntime()
+_PROVIDER_PROXY_LIFECYCLE = ProviderProxyLifecycle()
 
 
 async def resolve_provider_proxy_url(
     proxy: ProviderProxyDefinition | None,
 ) -> str | None:
-    return await provider_proxy_runtime.resolve_provider_proxy_url(proxy, runtime=_RUNTIME.provider_proxy)
+    return await _PROVIDER_PROXY_LIFECYCLE.resolve(proxy)
 
 
 async def close_provider_proxy_tunnels() -> None:
-    await provider_proxy_runtime.close_provider_proxy_tunnels(runtime=_RUNTIME.provider_proxy)
+    await _PROVIDER_PROXY_LIFECYCLE.close()
 
 
 async def get_pool() -> ProviderPool:

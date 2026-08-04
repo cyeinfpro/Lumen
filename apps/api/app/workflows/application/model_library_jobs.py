@@ -311,12 +311,14 @@ def resolve_model_library_job_item(
         values.image_meta.get("billing_label") or values.image_billing_label,
         max_len=32,
     )
-    billing_free = bool(
-        values.image_meta.get("billing_free")
-        or values.image_billing_free
-        or is_dual_race_bonus
-        or billing_label == "free"
-    )
+    if "billing_free" in values.image_meta:
+        billing_free = values.image_meta.get("billing_free") is True
+    else:
+        billing_free = bool(
+            values.image_billing_free
+            or billing_label == "free"
+            or (is_dual_race_bonus and billing_label is None)
+        )
     if billing_free and not billing_label:
         billing_label = "free"
     billing_exempt_reason = clean_optional_text(

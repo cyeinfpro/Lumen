@@ -267,6 +267,28 @@ def test_library_service_direct_runtime_honors_module_monkeypatch(
     assert excinfo.value.detail["error"]["code"] == "invalid_index"
 
 
+def test_library_binary_write_fsyncs_each_new_ancestor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "apparel-model-library" / "users" / "user-1" / "item.bin"
+    calls: list[Path] = []
+    original = library_storage._fsync_dir  # noqa: SLF001
+
+    def tracking_fsync(path: Path) -> None:
+        calls.append(path)
+        original(path)
+
+    monkeypatch.setattr(library_storage, "_fsync_dir", tracking_fsync)
+
+    library_storage._write_bytes_replace(target, b"durable")  # noqa: SLF001
+
+    assert tmp_path in calls
+    assert tmp_path / "apparel-model-library" in calls
+    assert tmp_path / "apparel-model-library" / "users" in calls
+    assert calls[-1] == target.parent
+
+
 @pytest.mark.asyncio
 async def test_library_sync_service_direct_entry_uses_patched_collaborators(
     monkeypatch: pytest.MonkeyPatch,

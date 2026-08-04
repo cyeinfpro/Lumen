@@ -23,7 +23,12 @@ from aiogram.types import (
 
 from ..api_client import ApiError, LumenApi
 from ..keyboards import post_success_keyboard
-from ._helpers import mime_extension, require_message, truncate_text
+from ._helpers import (
+    mime_extension,
+    require_message,
+    telegram_user_id,
+    truncate_text,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -41,8 +46,16 @@ _STATUS_ICON = MappingProxyType(
 
 @router.message(Command("tasks", "list"))
 async def cmd_tasks(message: Message, api: LumenApi) -> None:
+    actor_id = telegram_user_id(message)
+    if actor_id is None:
+        await message.answer("无法确认 Telegram 用户身份，请重新发送。")
+        return
     try:
-        data = await api.list_tasks(message.chat.id, limit=10)
+        data = await api.list_tasks(
+            message.chat.id,
+            limit=10,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await message.answer(f"读取任务列表失败：{exc.message}")
         return
@@ -98,9 +111,17 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
     msg = await require_message(cb)
     if msg is None:
         return
+    actor_id = telegram_user_id(cb)
+    if actor_id is None:
+        await cb.answer("无法确认 Telegram 用户身份", show_alert=True)
+        return
     gen_id = parts[2]
     try:
-        gen = await api.get_generation(msg.chat.id, gen_id)
+        gen = await api.get_generation(
+            msg.chat.id,
+            gen_id,
+            tg_user_id=actor_id,
+        )
     except ApiError as exc:
         await cb.answer(f"读取任务失败：{exc.message}", show_alert=True)
         return
@@ -117,7 +138,9 @@ async def on_task_send(cb: CallbackQuery, api: LumenApi) -> None:
         for idx, image_id in enumerate(image_ids):
             try:
                 path, mime, size = await api.download_image_to_file(
-                    msg.chat.id, image_id
+                    msg.chat.id,
+                    image_id,
+                    tg_user_id=actor_id,
                 )
             except ApiError as exc:
                 logger.warning(

@@ -65,6 +65,7 @@ from ..ratelimit import MESSAGES_LIMITER
 from ..redis_client import get_redis
 from ..runtime_settings import embedding_provider_available, get_setting
 from ..services import message_submission as _message_submission
+from ..services import message_idempotency as _message_idempotency
 from ..services.message_request import (
     AssistantContextRuntime,
     MessageTransactionRuntime,
@@ -95,6 +96,21 @@ _stored_idempotency_key = _message_submission.stored_idempotency_key
 _generation_child_idempotency_key = _message_submission.generation_child_idempotency_key
 _image_multi_generation_defer_s = _message_submission.image_multi_generation_defer_s
 _idempotency_lookup_keys = _message_submission.idempotency_lookup_keys
+_message_request_fingerprint = _message_idempotency.message_request_fingerprint
+_regenerate_request_fingerprint = _message_idempotency.regenerate_request_fingerprint
+_idempotency_request_metadata = _message_idempotency.idempotency_request_metadata
+_require_matching_task_idempotency = (
+    _message_idempotency.require_matching_task_idempotency
+)
+_MESSAGE_CREATE_IDEMPOTENCY_OPERATION = (
+    _message_idempotency.MESSAGE_CREATE_IDEMPOTENCY_OPERATION
+)
+_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION = (
+    _message_idempotency.MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION
+)
+_SILENT_GENERATION_IDEMPOTENCY_OPERATION = (
+    _message_idempotency.SILENT_GENERATION_IDEMPOTENCY_OPERATION
+)
 _image_params_with_fast_default = _message_submission.image_params_with_fast_default
 _chat_params_with_fast_default = _message_submission.chat_params_with_fast_default
 _wants_transparent_background = _message_submission.wants_transparent_background
@@ -445,14 +461,21 @@ async def _lookup_idempotent_post(
     user_id: str,
     conv_id: str,
     idempotency_key: str,
+    *,
+    operation_namespace: str,
+    request_fingerprint: str,
 ) -> PostMessageOut | None:
     return await _queries.lookup_idempotent_post(
         db,
         user_id,
         conv_id,
         idempotency_key,
+        operation_namespace=operation_namespace,
+        request_fingerprint=request_fingerprint,
         message_alive_filters_fn=_message_alive_filters,
         idempotency_lookup_keys_fn=_idempotency_lookup_keys,
+        require_matching_task_idempotency_fn=_require_matching_task_idempotency,
+        http_error_fn=_http,
     )
 
 

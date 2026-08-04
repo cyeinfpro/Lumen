@@ -701,19 +701,19 @@ async def _mark_message_and_release_billing(
             ),
             SIDECAR_EXECUTION_KEY: dict(state_execution),
         }
-    decision = decide_image_failure_billing(error_code)
+    if release_would_absorb_upstream_cost(exc, generation):
+        await g.billing.settle_unknown_upstream(
+            session,
+            generation,
+            reason=error_code,
+            knowledge="incurred",
+        )
+        return
+    decision = decide_image_failure_billing(
+        error_code,
+        task_or_request=generation,
+    )
     if decision.released:
-        # 决策表 release 前提「非 unknown 码 = 适配层已证明上游未计费」只对
-        # UpstreamError 成立;本地失败(artifact commit 未被采纳、存储/DB 错误等)
-        # 已收到当前 dispatch 的响应时上游必然已计费,必须结算而不是退款。
-        if release_would_absorb_upstream_cost(exc, generation):
-            await g.billing.settle_unknown_upstream(
-                session,
-                generation,
-                reason=error_code,
-                knowledge="incurred",
-            )
-            return
         await release_or_settle_generation(
             g.billing,
             session,

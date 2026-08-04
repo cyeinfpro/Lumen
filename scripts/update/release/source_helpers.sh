@@ -1,6 +1,63 @@
 #!/usr/bin/env bash
 # Release source synchronization, image extraction, and registry fallback helpers.
 
+_LUMEN_UPDATE_SCRIPT_UNIT_FILES=(
+    lib.sh
+    lib/system.sh
+    lib/environment.sh
+    lib/step_protocol.sh
+    lib/runtime.sh
+    lib/locking.sh
+    lib/container_release.sh
+    lib/release_layout.sh
+    lib/self_update.sh
+    lib/backup_restore_services.sh
+    lib/backup_journal.sh
+    lib/restore_journal.sh
+    release_manifest_guard.py
+    update_runner.py
+    restore_runner.py
+    redis_backup_archive.py
+    backup_permissions.py
+    restore_journal.py
+    backup.sh
+    restore.sh
+    update.sh
+    update/entry_lock.py
+    update/runner.sh
+    update/phases.sh
+    update/bootstrap.sh
+    update/common.sh
+    update/phase_contract.sh
+    update/journal.sh
+    update/durable_io.py
+    update/journal_store.py
+    update/journal_validation.py
+    update/release/manifest.sh
+    update/release/runner_units.sh
+    update/release/source_helpers.sh
+    update/release/self_update.sh
+    update/release/check.sh
+    update/release/fetch.sh
+    update/release/digest.sh
+    update/release/image_proof_store.py
+    update/release/activate.sh
+    update/backup/restore_points.sh
+    update/backup/storage_identity.sh
+    update/backup/migration_helpers.sh
+    update/backup/preflight.sh
+    update/backup/phases.sh
+    update/services/compose.sh
+    update/services/switch.sh
+    update/services/release_activation.sh
+    update/services/restart.sh
+    update/services/health.sh
+    update/recovery/cleanup.sh
+    update/recovery/consumer.sh
+    update/recovery/state.sh
+    update/recovery/blue_green.sh
+)
+
 rsync_repo_to_release() {
     local src="$1"
     local dst="$2"

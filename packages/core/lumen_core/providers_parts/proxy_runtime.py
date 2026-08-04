@@ -40,7 +40,10 @@ def socks_proxy_url(proxy: ProviderProxyDefinition) -> str | None:
 
 @dataclass
 class _SshTunnel:
-    url: str
+    proxy_name: str
+    proxy_identity: str
+    bind_host: str
+    local_port: int
     process: asyncio.subprocess.Process
 
 
@@ -48,16 +51,47 @@ class ProviderProxyRuntime:
     def __init__(self) -> None:
         self.tunnels: dict[str, _SshTunnel] = {}
         self.lock = asyncio.Lock()
+        self.closed = False
+        self._resolution_revision = 0
+        self._desired_proxies: dict[str, tuple[int, str | None]] = {}
 
     def clear(self) -> None:
         self.tunnels.clear()
+        self.closed = False
+        self._resolution_revision += 1
+        self._desired_proxies.clear()
+
+    def begin_resolution(self) -> int:
+        self._resolution_revision += 1
+        return self._resolution_revision
+
+    def current_resolution_revision(self) -> int:
+        return self._resolution_revision
+
+    def accept_resolution(
+        self,
+        proxy_name: str,
+        revision: int,
+        proxy_identity: str | None,
+    ) -> bool:
+        current = self._desired_proxies.get(proxy_name)
+        if (
+            current is not None
+            and current[0] > revision
+            and current[1] != proxy_identity
+        ):
+            return False
+        if current is None or revision >= current[0]:
+            self._desired_proxies[proxy_name] = (revision, proxy_identity)
+        return True
 
 
 _SSH_TUNNEL_START_ATTEMPTS = 3
 _SSH_TUNNEL_READY_CHECKS = 30
+_DEFAULT_SSH_BIND_HOST = "127.0.0.1"
 
 
-def _ssh_tunnel_key(proxy: ProviderProxyDefinition) -> str:
+def _ssh_proxy_identity(proxy: ProviderProxyDefinition) -> str:
     password_digest = (
         hashlib.sha256(proxy.password.encode("utf-8")).hexdigest()
         if proxy.password
@@ -77,15 +111,60 @@ def _ssh_tunnel_key(proxy: ProviderProxyDefinition) -> str:
     )
 
 
-def _free_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _ssh_tunnel_key(proxy: ProviderProxyDefinition, bind_host: str) -> str:
+    return f"{_ssh_proxy_identity(proxy)}\x1f{bind_host}"
 
 
-async def _local_port_accepts(port: int) -> bool:
+def _normalize_ssh_endpoint_host(value: str | None, *, default: str) -> str:
+    host = (value or "").strip() or default
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if (
+        not host
+        or any(ord(char) < 32 or char.isspace() for char in host)
+        or any(char in host for char in "/?#@")
+    ):
+        raise ValueError(f"invalid SSH SOCKS endpoint host: {value!r}")
+    return host
+
+
+def _free_local_port(bind_host: str) -> int:
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+        bind_host,
+        0,
+        type=socket.SOCK_STREAM,
+    ):
+        try:
+            with socket.socket(family, socktype, proto) as sock:
+                sock.bind(sockaddr)
+                return int(sock.getsockname()[1])
+        except OSError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"unable to resolve SSH SOCKS bind host: {bind_host}")
+
+
+def _probe_host_for_bind(bind_host: str) -> str:
+    if bind_host == "0.0.0.0":
+        return "127.0.0.1"
+    if bind_host == "::":
+        return "::1"
+    return bind_host
+
+
+def _ssh_socks_url(advertise_host: str, port: int) -> str:
+    return f"socks5h://{_proxy_host_for_url(advertise_host)}:{port}"
+
+
+def _ssh_bind_is_loopback(bind_host: str) -> bool:
+    return bind_host.lower() in {"127.0.0.1", "::1", "localhost"}
+
+
+async def _local_port_accepts(host: str, port: int) -> bool:
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection(host, port)
     except OSError:
         return False
     try:
@@ -434,6 +513,24 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
 
 
+async def _terminate_tunnels(tunnels: list[_SshTunnel]) -> None:
+    if not tunnels:
+        return
+
+    async def _terminate_all() -> None:
+        await asyncio.gather(
+            *(_terminate_process(tunnel.process) for tunnel in tunnels),
+            return_exceptions=True,
+        )
+
+    cleanup = asyncio.create_task(_terminate_all())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        await cleanup
+        raise
+
+
 def _running_ssh_tunnel(
     runtime: ProviderProxyRuntime,
     key: str,
@@ -449,17 +546,47 @@ async def _close_stale_ssh_tunnels(
     proxy: ProviderProxyDefinition,
     current_key: str,
 ) -> None:
+    current_identity = _ssh_proxy_identity(proxy)
     for old_key, tunnel in list(runtime.tunnels.items()):
-        if old_key == current_key or not old_key.startswith(f"{proxy.name}\x1f"):
+        if old_key == current_key or tunnel.proxy_name != proxy.name:
+            continue
+        # The same SSH proxy may intentionally have both a process-local
+        # loopback listener and a Docker-network listener. Only retire tunnels
+        # whose underlying SSH credentials or trust configuration changed.
+        if tunnel.proxy_identity == current_identity:
             continue
         runtime.tunnels.pop(old_key, None)
         await _terminate_process(tunnel.process)
+
+
+async def _retire_named_ssh_tunnels(
+    runtime: ProviderProxyRuntime,
+    *,
+    proxy_name: str,
+    resolution_revision: int,
+) -> None:
+    async with runtime.lock:
+        if runtime.closed:
+            raise RuntimeError("provider proxy runtime is closed")
+        if not runtime.accept_resolution(
+            proxy_name,
+            resolution_revision,
+            None,
+        ):
+            return
+        tunnels = [
+            runtime.tunnels.pop(key)
+            for key, tunnel in list(runtime.tunnels.items())
+            if tunnel.proxy_name == proxy_name
+        ]
+        await _terminate_tunnels(tunnels)
 
 
 def _ssh_tunnel_command(
     ssh_bin: str,
     proxy: ProviderProxyDefinition,
     *,
+    bind_host: str,
     local_port: int,
     known_hosts_path: str,
 ) -> list[str]:
@@ -467,25 +594,33 @@ def _ssh_tunnel_command(
     command = [
         ssh_bin,
         "-N",
-        "-D",
-        f"127.0.0.1:{local_port}",
-        "-p",
-        str(proxy.port),
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts_path}",
-        "-o",
-        f"GlobalKnownHostsFile={os.devnull}",
-        "-o",
-        "UpdateHostkeys=no",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ServerAliveCountMax=3",
     ]
+    if not _ssh_bind_is_loopback(bind_host):
+        # -g makes the explicit non-loopback dynamic forward reachable from
+        # peer containers; the default loopback path never enables it.
+        command.append("-g")
+    command.extend(
+        [
+            "-D",
+            f"{_proxy_host_for_url(bind_host)}:{local_port}",
+            "-p",
+            str(proxy.port),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            f"GlobalKnownHostsFile={os.devnull}",
+            "-o",
+            "UpdateHostkeys=no",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+        ]
+    )
     if proxy.password:
         command.extend(
             [
@@ -541,16 +676,18 @@ def _ssh_password_command(
 async def _wait_for_ssh_tunnel(
     proc: asyncio.subprocess.Process,
     local_port: int,
-) -> tuple[str | None, str]:
+    *,
+    probe_host: str,
+) -> tuple[bool, str]:
     for _ in range(_SSH_TUNNEL_READY_CHECKS):
         if proc.returncode is not None:
             stderr = await _read_process_stderr(proc)
-            return None, f"exited with {proc.returncode}: {stderr}".strip()
-        if await _local_port_accepts(local_port):
-            return f"socks5h://127.0.0.1:{local_port}", ""
+            return False, f"exited with {proc.returncode}: {stderr}".strip()
+        if await _local_port_accepts(probe_host, local_port):
+            return True, ""
         await asyncio.sleep(0.1)
     stderr = await _read_process_stderr(proc)
-    return None, f"timed out waiting for local SOCKS port: {stderr}".strip()
+    return False, f"timed out waiting for local SOCKS port: {stderr}".strip()
 
 
 async def _start_ssh_tunnel_attempt(
@@ -559,6 +696,9 @@ async def _start_ssh_tunnel_attempt(
     *,
     ssh_bin: str,
     key: str,
+    proxy_identity: str,
+    bind_host: str,
+    advertise_host: str,
 ) -> tuple[str | None, str]:
     (
         known_hosts_path,
@@ -569,10 +709,11 @@ async def _start_ssh_tunnel_attempt(
     askpass_path = None
     password_file = None
     try:
-        local_port = _free_local_port()
+        local_port = _free_local_port(bind_host)
         command = _ssh_tunnel_command(
             ssh_bin,
             proxy,
+            bind_host=bind_host,
             local_port=local_port,
             known_hosts_path=known_hosts_path,
         )
@@ -587,11 +728,22 @@ async def _start_ssh_tunnel_attempt(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        url, error = await _wait_for_ssh_tunnel(proc, local_port)
-        if url is not None:
-            runtime.tunnels[key] = _SshTunnel(url=url, process=proc)
+        ready, error = await _wait_for_ssh_tunnel(
+            proc,
+            local_port,
+            probe_host=_probe_host_for_bind(bind_host),
+        )
+        if ready:
+            runtime.tunnels[key] = _SshTunnel(
+                proxy_name=proxy.name,
+                proxy_identity=proxy_identity,
+                bind_host=bind_host,
+                local_port=local_port,
+                process=proc,
+            )
             tunnel_started = True
-        return url, error
+            return _ssh_socks_url(advertise_host, local_port), ""
+        return None, error
     finally:
         if proc is not None and not tunnel_started:
             await _terminate_process(proc)
@@ -603,19 +755,32 @@ async def _start_ssh_tunnel_attempt(
 async def _ensure_ssh_socks_proxy(
     runtime: ProviderProxyRuntime,
     proxy: ProviderProxyDefinition,
+    *,
+    bind_host: str = _DEFAULT_SSH_BIND_HOST,
+    advertise_host: str | None = None,
 ) -> str:
+    resolution_revision = runtime.current_resolution_revision()
+    effective_advertise_host = advertise_host or bind_host
     ssh_bin = shutil.which("ssh")
     if not ssh_bin:
         raise RuntimeError("ssh binary not found; cannot start ssh proxy")
-    key = _ssh_tunnel_key(proxy)
-    existing = _running_ssh_tunnel(runtime, key)
-    if existing is not None:
-        return existing.url
+    proxy_identity = _ssh_proxy_identity(proxy)
+    key = _ssh_tunnel_key(proxy, bind_host)
 
     async with runtime.lock:
+        if runtime.closed:
+            raise RuntimeError("provider proxy runtime is closed")
+        if not runtime.accept_resolution(
+            proxy.name,
+            resolution_revision,
+            proxy_identity,
+        ):
+            raise RuntimeError(
+                f"ssh proxy {proxy.name} configuration changed during startup"
+            )
         existing = _running_ssh_tunnel(runtime, key)
         if existing is not None:
-            return existing.url
+            return _ssh_socks_url(effective_advertise_host, existing.local_port)
         await _close_stale_ssh_tunnels(runtime, proxy, key)
 
         last_error = ""
@@ -625,6 +790,9 @@ async def _ensure_ssh_socks_proxy(
                 proxy,
                 ssh_bin=ssh_bin,
                 key=key,
+                proxy_identity=proxy_identity,
+                bind_host=bind_host,
+                advertise_host=effective_advertise_host,
             )
             if url is not None:
                 return url
@@ -639,18 +807,64 @@ async def resolve_provider_proxy_url(
     proxy: ProviderProxyDefinition | None,
     *,
     runtime: ProviderProxyRuntime,
+    bind_host: str = _DEFAULT_SSH_BIND_HOST,
+    advertise_host: str | None = None,
 ) -> str | None:
-    if proxy is None or not proxy.enabled:
+    if proxy is None:
+        return None
+    resolution_revision = runtime.begin_resolution()
+    if not proxy.enabled:
+        await _retire_named_ssh_tunnels(
+            runtime,
+            proxy_name=proxy.name,
+            resolution_revision=resolution_revision,
+        )
         return None
     if proxy.protocol == "socks5":
-        return socks_proxy_url(proxy)
-    if proxy.protocol == "ssh":
-        return await _ensure_ssh_socks_proxy(runtime, proxy)
-    raise RuntimeError(f"unsupported proxy protocol: {proxy.protocol}")
+        await _retire_named_ssh_tunnels(
+            runtime,
+            proxy_name=proxy.name,
+            resolution_revision=resolution_revision,
+        )
+        url = socks_proxy_url(proxy)
+    elif proxy.protocol == "ssh":
+        normalized_bind_host = _normalize_ssh_endpoint_host(
+            bind_host,
+            default=_DEFAULT_SSH_BIND_HOST,
+        )
+        normalized_advertise_host = _normalize_ssh_endpoint_host(
+            advertise_host,
+            default=normalized_bind_host,
+        )
+        if (
+            normalized_bind_host == _DEFAULT_SSH_BIND_HOST
+            and normalized_advertise_host == _DEFAULT_SSH_BIND_HOST
+        ):
+            # Preserve the original two-argument default call contract for
+            # ordinary provider paths and their failure-injection hooks.
+            url = await _ensure_ssh_socks_proxy(runtime, proxy)
+        else:
+            url = await _ensure_ssh_socks_proxy(
+                runtime,
+                proxy,
+                bind_host=normalized_bind_host,
+                advertise_host=normalized_advertise_host,
+            )
+    else:
+        await _retire_named_ssh_tunnels(
+            runtime,
+            proxy_name=proxy.name,
+            resolution_revision=resolution_revision,
+        )
+        raise RuntimeError(f"unsupported proxy protocol: {proxy.protocol}")
+    return url
 
 
 async def close_provider_proxy_tunnels(*, runtime: ProviderProxyRuntime) -> None:
-    tunnels = list(runtime.tunnels.values())
-    runtime.clear()
-    for tunnel in tunnels:
-        await _terminate_process(tunnel.process)
+    async with runtime.lock:
+        runtime.closed = True
+        runtime._resolution_revision += 1
+        runtime._desired_proxies.clear()
+        tunnels = list(runtime.tunnels.values())
+        runtime.tunnels.clear()
+        await _terminate_tunnels(tunnels)

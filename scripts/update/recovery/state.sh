@@ -1,6 +1,76 @@
 #!/usr/bin/env bash
 # Transactional updater snapshots, rollback, and error recovery.
 
+lumen_update_original_service_state_file() {
+    [ -n "${UPDATE_ENV_SNAPSHOT:-}" ] || return 1
+    printf '%s\n' "${UPDATE_ENV_SNAPSHOT}.services"
+}
+
+lumen_update_load_original_service_state() {
+    if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN:-0}" -eq 1 ]; then
+        case "${UPDATE_ORIGINAL_TGBOT_ACTIVE:-}" in
+            0|1) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    local state_file=""
+    local key="" value="" schema="" tgbot_active=""
+    local seen_schema=0 seen_tgbot=0
+    state_file="$(lumen_update_original_service_state_file)" || return 1
+    if [ -L "${state_file}" ] || [ ! -f "${state_file}" ]; then
+        return 1
+    fi
+    while IFS='=' read -r key value; do
+        case "${key}" in
+            schema)
+                [ "${seen_schema}" -eq 0 ] || return 1
+                schema="${value}"
+                seen_schema=1
+                ;;
+            tgbot_active)
+                [ "${seen_tgbot}" -eq 0 ] || return 1
+                tgbot_active="${value}"
+                seen_tgbot=1
+                ;;
+            "")
+                [ -z "${value}" ] || return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done < "${state_file}"
+    if [ "${schema}" != "1" ] \
+            || { [ "${tgbot_active}" != "0" ] && [ "${tgbot_active}" != "1" ]; }; then
+        return 1
+    fi
+    UPDATE_ORIGINAL_TGBOT_ACTIVE="${tgbot_active}"
+    UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN=1
+    return 0
+}
+
+lumen_update_restore_original_services() {
+    local compose_dir="$1"
+    shift
+    if ! lumen_update_load_original_service_state; then
+        log_error "无法证明更新前 tgbot 是否 active，拒绝猜测恢复服务集合。"
+        return 1
+    fi
+    if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" -eq 1 ]; then
+        if ! lumen_compose_in "${compose_dir}" --profile tgbot \
+                up --pull missing -d --wait --force-recreate "$@" tgbot; then
+            return 1
+        fi
+    else
+        if ! lumen_compose_in "${compose_dir}" \
+                up --pull missing -d --wait --force-recreate "$@"; then
+            return 1
+        fi
+    fi
+    lumen_update_wait_for_core_ready "${compose_dir}"
+}
+
 snapshot_update_state() {
     if [ "${UPDATE_STATE_SNAPSHOT_READY}" -eq 1 ]; then
         return 0
@@ -126,6 +196,13 @@ restore_update_symlink_snapshot() {
 }
 
 discard_update_state_snapshot() {
+    local service_state_file=""
+    service_state_file="$(
+        lumen_update_original_service_state_file 2>/dev/null || true
+    )"
+    if [ -n "${service_state_file}" ]; then
+        rm -f "${service_state_file}" 2>/dev/null || true
+    fi
     if [ -n "${UPDATE_ENV_SNAPSHOT}" ]; then
         rm -f "${UPDATE_ENV_SNAPSHOT}" 2>/dev/null || true
     fi
@@ -135,6 +212,8 @@ discard_update_state_snapshot() {
     UPDATE_HOST_ARTIFACT_SNAPSHOT=""
     UPDATE_SNAPSHOT_LINKS_KNOWN=0
     UPDATE_STATE_SNAPSHOT_READY=0
+    UPDATE_ORIGINAL_TGBOT_ACTIVE=0
+    UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN=0
 }
 
 mark_update_committed() {
@@ -163,6 +242,11 @@ validate_resumed_update_state() {
     fi
     if ! lumen_update_journal_validate_resume; then
         log_error "resume invariant 校验失败，拒绝自动续跑且不执行 rollback。"
+        return 1
+    fi
+    if [ -n "${UPDATE_RESTORE_POINT_TIMESTAMP:-}" ] \
+            && ! validate_bound_update_restore_point; then
+        log_error "resume 校验失败：已绑定恢复点缺失、被替换或归档无效。"
         return 1
     fi
 
@@ -203,17 +287,37 @@ restore_uncommitted_update_state() {
     fi
     if [ "${UPDATE_RELEASE_SWITCHED}" -eq 1 ] \
             || [ "${UPDATE_OLD_SERVICES_STOPPED}" -eq 1 ]; then
-        log_warn "rollback：重新拉起更新前 release 的 worker/web/api。"
-        if ! lumen_compose_in "${ROOT}/current" \
-                up --pull missing -d worker web api; then
-            log_error "rollback：更新前 release 核心服务恢复失败。"
-            rc=1
+        if lumen_update_load_original_service_state; then
+            if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" -eq 1 ]; then
+                log_warn "rollback：重新拉起更新前 release 的 worker/web/api/tgbot。"
+            else
+                log_warn "rollback：重新拉起更新前 release 的 worker/web/api；tgbot 原本未运行。"
+            fi
         else
-            UPDATE_RELEASE_SWITCHED=0
-            UPDATE_OLD_SERVICES_STOPPED=0
+            log_error "rollback：更新前 tgbot active 状态未知；仅恢复核心服务并要求人工确认 bot。"
+            rc=1
+        fi
+        if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN:-0}" -eq 1 ]; then
+            if ! lumen_update_restore_original_services \
+                    "${ROOT}/current" worker web api; then
+                log_error "rollback：更新前 release 服务恢复失败。"
+                rc=1
+            else
+                UPDATE_RELEASE_SWITCHED=0
+                UPDATE_OLD_SERVICES_STOPPED=0
+            fi
+        else
+            if ! lumen_compose_in "${ROOT}/current" \
+                    up --pull missing -d --wait --force-recreate \
+                    worker web api \
+                    || ! lumen_update_wait_for_core_ready "${ROOT}/current"; then
+                log_error "rollback：更新前 release 核心服务未通过 API/Worker readiness。"
+                rc=1
+            fi
         fi
     fi
-    if [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
+    if [ "${rc}" -eq 0 ] \
+            && [ -n "${NEW_RELEASE}" ] && [ -d "${NEW_RELEASE}" ]; then
         if ! lumen_release_remove_unused "${ROOT}" "${NEW_ID}"; then
             log_warn "rollback：未能删除未启用 release ${NEW_ID}。"
             rc=1
@@ -221,6 +325,8 @@ restore_uncommitted_update_state() {
     fi
     if [ "${rc}" -eq 0 ]; then
         discard_update_state_snapshot
+    else
+        log_error "rollback：readiness 或恢复步骤失败，保留 update snapshot/journal 与 release 证据。"
     fi
     return "${rc}"
 }
@@ -233,6 +339,7 @@ on_err() {
         return 0
     fi
     UPDATE_ERROR_HANDLED=1
+    trap '' INT TERM HUP
     discard_release_source_manifest_cache
     lumen_step_finalize_failure "${rc}"
     log_error "更新失败：返回码 ${rc}"

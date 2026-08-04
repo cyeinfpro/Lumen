@@ -5,7 +5,7 @@ Why Redis：
 - listener 收 PubSub 事件后用 gen_id 在这里查归属 chat，跨进程一致。
 
 Schema：
-  HSET  tg:track:{gen_id}   user_id / chat_id / status_message_id / prompt / params_json / is_bonus
+  HSET  tg:track:{gen_id}   user_id / chat_id / tg_user_id / status_message_id / prompt / params_json / is_bonus
   EXPIRE tg:track:{gen_id}  48h
   ZADD  tg:track:active-users <expires_at> <user_id>
   SET   tg:track:delivering:{gen_id} 1 NX EX 5m  ← crash 后可重试的发送锁
@@ -28,6 +28,16 @@ from typing import Any, Awaitable, Callable, cast
 from redis import asyncio as aioredis
 
 from .config import settings
+from .generation_journal import (
+    finish_generation_submission as finish_journal_submission,
+)
+from .generation_journal import (
+    stage_generation_submission as stage_journal_submission,
+)
+from .generation_state import (
+    DurableGenerationSubmission,
+    SubmissionJournalStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +131,6 @@ redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
 return 1
 """
 
-
 @dataclass
 class TaskTrack:
     chat_id: int
@@ -130,6 +139,8 @@ class TaskTrack:
     # 之后由 update_status_message 补上。
     status_message_id: int | None
     prompt: str
+    # 发起任务的 Telegram 用户。旧的私聊 tracker 没有此字段时回退到 chat_id。
+    tg_user_id: int | None = None
     params: dict[str, object] = field(default_factory=dict)
     is_bonus: bool = False
     # 当一次提交多张图（count>1）时，所有 gens 共享同一 batch_id（取首个 gen_id）。
@@ -169,6 +180,7 @@ class Tracker:
             _key(gen_id),
             mapping={
                 "chat_id": str(track.chat_id),
+                "tg_user_id": str(track.tg_user_id or ""),
                 "user_id": user_id,
                 "status_message_id": str(track.status_message_id or ""),
                 "prompt": track.prompt,
@@ -277,6 +289,7 @@ class Tracker:
         }
         try:
             chat_raw = d.get("chat_id")
+            tg_user_raw = d.get("tg_user_id")
             msg_raw = d.get("status_message_id")
             # status_message_id 允许为空：bonus 先注册后发消息（listener.
             # _on_attached），send 成功前 track 就是「无消息 id」的合法中间态。
@@ -284,12 +297,16 @@ class Tracker:
                 await self._drop_dirty(client, gen_id, "missing_ids", d)
                 return None
             chat_id = int(chat_raw)
+            tg_user_id = int(tg_user_raw) if tg_user_raw else None
             msg_id = int(msg_raw) if msg_raw else 0
         except ValueError:
             await self._drop_dirty(client, gen_id, "bad_ints", d)
             return None
-        if chat_id <= 0:
-            await self._drop_dirty(client, gen_id, "non_positive_ids", d)
+        if chat_id == 0:
+            await self._drop_dirty(client, gen_id, "zero_chat_id", d)
+            return None
+        if tg_user_id is not None and tg_user_id <= 0:
+            await self._drop_dirty(client, gen_id, "non_positive_tg_user_id", d)
             return None
         try:
             params: dict[str, object] = json.loads(d.get("params") or "{}")
@@ -297,6 +314,7 @@ class Tracker:
             params = {}
         return TaskTrack(
             chat_id=chat_id,
+            tg_user_id=tg_user_id,
             status_message_id=msg_id or None,
             prompt=d.get("prompt") or "",
             params=params if isinstance(params, dict) else {},
@@ -310,9 +328,9 @@ class Tracker:
 
         Uses Redis SET NX so that even when two coroutines race on the same
         callback (e.g. double-click on「使用优化版」) only the first caller
-        proceeds to submit.  The lock is intentionally not released — its
-        short TTL is the cleanup mechanism.  After TTL expiry a fresh /new
-        flow will generate a different idempotency_key anyway.
+        proceeds to submit. Successful or definitively rejected submissions
+        leave the short-lived guard in place. Ambiguous HTTP outcomes release
+        it explicitly so the same payload and idempotency key can be retried.
 
         Returns True iff the caller should proceed with submission.
         """
@@ -322,6 +340,34 @@ class Tracker:
         lock_key = f"{_SUBMIT_ONCE_PREFIX}{idempotency_key}"
         result = await client.set(lock_key, b"1", nx=True, ex=_SUBMIT_ONCE_TTL_SECONDS)
         return bool(result)
+
+    async def release_submit_once(self, idempotency_key: str) -> None:
+        if not idempotency_key:
+            return
+        await self._client().delete(f"{_SUBMIT_ONCE_PREFIX}{idempotency_key}")
+
+    async def stage_generation_submission(
+        self,
+        *,
+        chat_id: int,
+        tg_user_id: int,
+        update_token: str,
+        payload: dict[str, Any],
+    ) -> DurableGenerationSubmission:
+        return await stage_journal_submission(
+            self._client(),
+            chat_id=chat_id,
+            tg_user_id=tg_user_id,
+            update_token=update_token,
+            payload=payload,
+        )
+
+    async def finish_generation_submission(
+        self,
+        submission: DurableGenerationSubmission,
+        status: SubmissionJournalStatus,
+    ) -> None:
+        await finish_journal_submission(self._client(), submission, status)
 
     async def mark_retry_submitted(
         self,

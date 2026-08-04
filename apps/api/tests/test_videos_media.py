@@ -153,6 +153,7 @@ async def test_reference_video_dedupe_repairs_missing_storage(
                 Result(),
                 Result(),
                 Result(),
+                Result(SimpleNamespace(id="user-1", account_mode="wallet")),
                 Result("user-1"),
                 Result(existing),
                 Result(existing),
@@ -1815,7 +1816,11 @@ async def test_video_wallet_admission_rejects_before_reference_transcode(
 
     class Db:
         def __init__(self) -> None:
-            self.results = [None, None, "user-1"]
+            self.results = [
+                None,
+                None,
+                SimpleNamespace(id="user-1", account_mode="wallet"),
+            ]
 
         async def execute(self, _statement: Any) -> Result:
             return Result(self.results.pop(0))
@@ -1846,7 +1851,7 @@ async def test_video_wallet_admission_rejects_before_reference_transcode(
         await video_submission.create_video_generation_record(
             Db(),  # type: ignore[arg-type]
             body,
-            SimpleNamespace(id="user-1"),
+            SimpleNamespace(id="user-1", account_mode="wallet"),
             services=video_submission.VideoSubmissionServices(
                 require_ready=lambda *_args, **_kwargs: _async_value((provider, {})),
                 public_base_loader=fail_expensive,
@@ -1897,7 +1902,11 @@ async def test_video_wallet_preflight_runs_before_transcode_and_hold_after(
 
     class Db:
         def __init__(self) -> None:
-            self.results = [None, None, "user-1"]
+            self.results = [
+                None,
+                None,
+                SimpleNamespace(id="user-1", account_mode="wallet"),
+            ]
             self.added: list[Any] = []
 
         async def execute(self, _statement: Any) -> Result:
@@ -1949,7 +1958,7 @@ async def test_video_wallet_preflight_runs_before_transcode_and_hold_after(
     await video_submission.create_video_generation_record(
         Db(),  # type: ignore[arg-type]
         body,
-        SimpleNamespace(id="user-1"),
+        SimpleNamespace(id="user-1", account_mode="wallet"),
         services=video_submission.VideoSubmissionServices(
             require_ready=lambda *_args, **_kwargs: _async_value((provider, {})),
             public_base_loader=lambda *_args, **_kwargs: _async_value(None),
@@ -2043,6 +2052,55 @@ async def test_video_idempotent_lock_recheck_skips_expensive_preparation() -> No
     assert result is rendered
     assert db.connection_calls == 1
     assert db.results == []
+
+
+@pytest.mark.asyncio
+async def test_parent_serialized_video_submission_skips_inner_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="nested-video",
+    )
+    lookup_calls = 0
+
+    async def no_winner(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return None
+
+    async def must_not_lock(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("parent-serialized submission must not invert lock order")
+
+    monkeypatch.setattr(
+        video_submission,
+        "_find_idempotent_generation",
+        no_winner,
+    )
+    monkeypatch.setattr(video_submission, "lock_user_key", must_not_lock)
+
+    replay = await video_submission._find_or_serialize_video_submission(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        body,
+        user_id="user-1",
+        request_fingerprint_value=video_submission.request_fingerprint(body),
+        context=video_submission.VideoSubmissionContext(
+            active_user_snapshot=SimpleNamespace(
+                user=SimpleNamespace(id="user-1", account_mode="wallet"),
+                account_mode="wallet",
+            ),
+            idempotency_serialized=True,
+        ),
+        services=video_submission.VideoSubmissionServices(),
+    )
+
+    assert replay is None
+    assert lookup_calls == 1
 
 
 def test_video_route_submission_wrapper_preserves_patch_hooks() -> None:
@@ -2729,7 +2787,11 @@ async def test_cancel_video_generation_rolls_back_when_hold_release_missing(
             self.rolled_back = False
             self.refreshed = False
 
-        async def execute(self, _statement: Any) -> Result:
+        async def execute(self, statement: Any) -> Result:
+            if "from users" in str(statement).lower():
+                return Result(
+                    SimpleNamespace(id=self.row.user_id, account_mode="wallet")
+                )
             return Result(self.row)
 
         async def commit(self) -> None:
@@ -2809,7 +2871,11 @@ async def test_cancel_queued_ambiguous_submit_settles_default_not_release(
             self.added: list[Any] = []
             self.committed = False
 
-        async def execute(self, _statement: Any) -> Result:
+        async def execute(self, statement: Any) -> Result:
+            if "from users" in str(statement).lower():
+                return Result(
+                    SimpleNamespace(id=self.row.user_id, account_mode="wallet")
+                )
             return Result(self.row)
 
         def add(self, value: Any) -> None:
@@ -2917,12 +2983,13 @@ async def test_cancel_queued_ambiguous_submit_settles_default_not_release(
 def test_retry_video_generation_reuses_only_valid_reference_snapshots() -> None:
     source = inspect.getsource(videos._video_generation_routes.retry_video_generation)
 
-    assert "account_mode_forbidden" in source
+    assert "account_mode_forbidden" not in source
     assert "video_retry_not_terminal" in source
-    assert ".with_for_update()" in source
+    assert ".with_for_update()" not in source
     assert "row.updated_at.isoformat()" in source
     assert "valid_reference_snapshots.append(item)" in source
     assert "reference_media_snapshot=valid_reference_snapshots" in source
+    assert "return await deps.create_record(" in source
 
 
 def test_list_video_generations_batches_video_lookup() -> None:

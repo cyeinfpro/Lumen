@@ -8,16 +8,24 @@ from __future__ import annotations
 import sys
 from logging.config import fileConfig
 from pathlib import Path
+from typing import Any
 
 from alembic import context
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import make_url
 
 # 让 alembic 能 import app.* 与 lumen_core.*
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+ALEMBIC_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ALEMBIC_ROOT))
 
 from app.config import settings  # noqa: E402
+from concurrent_index_retry import (  # noqa: E402
+    prepare_concurrent_index_retry_boundary,
+)
 from lumen_core.models import Base  # noqa: E402
 
 config = context.config
@@ -34,6 +42,104 @@ sync_url = _db_url.render_as_string(hide_password=False)
 config.set_main_option("sqlalchemy.url", sync_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
+
+
+def _configured_revision_steps(
+    migration_context: Any,
+    current_heads: tuple[str, ...],
+) -> tuple[Any, ...] | None:
+    migration_fn = getattr(migration_context, "_migrations_fn", None)
+    if migration_fn is None:
+        return None
+
+    steps = tuple(migration_fn(current_heads, migration_context))
+
+    def cached_migration_fn(
+        heads: tuple[str, ...],
+        active_context: Any,
+    ) -> tuple[Any, ...]:
+        if tuple(heads) == current_heads and active_context is migration_context:
+            return steps
+        return tuple(migration_fn(heads, active_context))
+
+    # Alembic's documented command API installs this work function for both
+    # CLI and programmatic invocations. Cache the evaluated plan so the normal
+    # run does not resolve or import the revision sequence a second time.
+    migration_context._migrations_fn = cached_migration_fn
+    return steps
+
+
+def _revision_plan_from_steps(
+    steps: tuple[Any, ...],
+) -> tuple[str, set[str]]:
+    commands: set[str] = set()
+    revision_ids: set[str] = set()
+    for step in steps:
+        info = getattr(step, "info", None)
+        if info is None or getattr(info, "is_stamp", False):
+            return "", set()
+        commands.add("upgrade" if info.is_upgrade else "downgrade")
+        revision_ids.update(info.up_revision_ids)
+    if len(commands) != 1:
+        return "", set()
+    return commands.pop(), revision_ids
+
+
+def _cli_revision_plan(
+    current_revision: str,
+) -> tuple[str, set[str]]:
+    options = getattr(config, "cmd_opts", None)
+    command_spec = getattr(options, "cmd", None)
+    target_revision = getattr(options, "revision", None)
+    if (
+        not isinstance(command_spec, tuple)
+        or not command_spec
+        or not isinstance(target_revision, str)
+    ):
+        return "", set()
+    command = getattr(command_spec[0], "__name__", "")
+    scripts = ScriptDirectory.from_config(config)
+    if command == "upgrade":
+        steps = scripts._upgrade_revs(target_revision, current_revision)
+    elif command == "downgrade":
+        steps = scripts._downgrade_revs(target_revision, current_revision)
+    else:
+        return "", set()
+    return command, {
+        step.revision.revision
+        for step in steps
+        if getattr(step, "revision", None) is not None
+    }
+
+
+def _pending_revision_ids(
+    migration_context: Any,
+    current_heads: tuple[str, ...],
+) -> tuple[str, set[str]]:
+    steps = _configured_revision_steps(migration_context, current_heads)
+    if steps is not None:
+        return _revision_plan_from_steps(steps)
+    return _cli_revision_plan(current_heads[0])
+
+
+def _prepare_concurrent_index_retry() -> None:
+    migration_context = context.get_context()
+    current_heads = tuple(migration_context.get_current_heads())
+    if len(current_heads) != 1:
+        return
+    current_revision = current_heads[0]
+    command, pending_revision_ids = _pending_revision_ids(
+        migration_context,
+        current_heads,
+    )
+    if not command or not pending_revision_ids:
+        return
+    prepare_concurrent_index_retry_boundary(
+        Operations(migration_context),
+        command=command,
+        current_revision=current_revision,
+        pending_revision_ids=pending_revision_ids,
+    )
 
 
 def run_migrations_offline() -> None:
@@ -69,6 +175,7 @@ def run_migrations_online() -> None:
         connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
+            _prepare_concurrent_index_retry()
             context.run_migrations()
 
 

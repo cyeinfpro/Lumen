@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql import operators, visitors
@@ -57,7 +58,12 @@ class _Savepoint:
 
 
 class _Db:
-    def __init__(self, results: list[_Result]) -> None:
+    def __init__(
+        self,
+        results: list[_Result],
+        *,
+        locked_account_mode: str = "wallet",
+    ) -> None:
         self.results = results
         self.statements: list[Any] = []
         self.added: list[Any] = []
@@ -66,12 +72,20 @@ class _Db:
         self._id_seq = 0
         self._conversation: Any | None = None
         self.locked_conversation_override: Any = _NO_CONVERSATION_OVERRIDE
+        self.locked_account_mode = locked_account_mode
+        self.locked_user = SimpleNamespace(
+            id="user-1",
+            email="user@example.test",
+            account_mode=locked_account_mode,
+            default_system_prompt_id=None,
+        )
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
         rendered = str(statement).lower()
         if "from users" in rendered:
-            return _Result("user-1")
+            self.locked_user.account_mode = self.locked_account_mode
+            return _Result(self.locked_user)
         if (
             "from conversations" in rendered
             and getattr(statement, "_for_update_arg", None) is not None
@@ -797,6 +811,98 @@ async def test_create_assistant_task_chat_caller_without_preflight_still_holds(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authenticated_mode", "committed_mode"),
+    [("wallet", "byok"), ("byok", "wallet")],
+)
+async def test_post_message_rejects_concurrent_account_mode_change_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    authenticated_mode: str,
+    committed_mode: str,
+) -> None:
+    conversation = _conv()
+    current_account_mode = authenticated_mode
+    task_calls: list[dict[str, Any]] = []
+
+    class _ModeRaceDb(_Db):
+        def __init__(self) -> None:
+            super().__init__(
+                [_Result(conversation)],
+                locked_account_mode=authenticated_mode,
+            )
+            self.user_lock_requested = asyncio.Event()
+            self.allow_user_lock = asyncio.Event()
+
+        async def execute(self, statement: Any) -> _Result:
+            rendered = str(statement).lower()
+            if "from users" in rendered:
+                self.statements.append(statement)
+                self.user_lock_requested.set()
+                await self.allow_user_lock.wait()
+                self.locked_user.account_mode = current_account_mode
+                return _Result(self.locked_user)
+            return await super().execute(statement)
+
+    async def no_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def no_lookup(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def no_idempotency_lock(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def no_fast_default(_db: Any) -> bool:
+        return False
+
+    async def create_task(**kwargs: Any) -> Any:
+        task_calls.append(kwargs)
+        raise AssertionError("mode-raced request must not create paid work")
+
+    monkeypatch.setattr(messages.MESSAGES_LIMITER, "check", no_op)
+    monkeypatch.setattr(messages, "get_redis", lambda: object())
+    monkeypatch.setattr(
+        messages,
+        "_ensure_conversation_visible_to_user",
+        no_op,
+    )
+    monkeypatch.setattr(messages, "_lookup_idempotent_post", no_lookup)
+    monkeypatch.setattr(messages, "_lock_idempotency_key", no_idempotency_lock)
+    monkeypatch.setattr(messages, "_resolve_fast_default", no_fast_default)
+    monkeypatch.setattr(messages, "_create_assistant_task", create_task)
+
+    authenticated_user = (
+        _wallet_user() if authenticated_mode == "wallet" else _user()
+    )
+    db = _ModeRaceDb()
+    request_task = asyncio.create_task(
+        messages.post_message(
+            conversation.id,
+            PostMessageIn(
+                idempotency_key=f"{authenticated_mode}-mode-race",
+                text="draw a poster",
+                intent="text_to_image",
+            ),
+            authenticated_user,  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        ),
+    )
+    await db.user_lock_requested.wait()
+    current_account_mode = committed_mode
+    db.allow_user_lock.set()
+
+    with pytest.raises(HTTPException) as excinfo:
+        await request_task
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "account_mode_changed"
+    assert db.added == []
+    assert db.committed is False
+    assert db.rolled_back is True
+    assert task_calls == []
+
+
+@pytest.mark.asyncio
 async def test_create_assistant_task_splits_image_count_into_wallet_holds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1026,12 +1132,15 @@ def test_silent_generation_request_hash_uses_normalized_image_params() -> None:
 @pytest.mark.asyncio
 async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
     db = _Db([_Result(None), _Result(None)])
+    body = PostMessageIn(idempotency_key="same-key", text="hello")
 
     prior = await messages._lookup_idempotent_post(  # noqa: SLF001
         db,  # type: ignore[arg-type]
         "user-1",
         "conv-1",
         "same-key",
+        operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+        request_fingerprint=messages._message_request_fingerprint(body),  # noqa: SLF001
     )
 
     assert prior is None
@@ -1061,13 +1170,23 @@ async def test_lookup_idempotent_post_filters_by_conversation_id() -> None:
 
 @pytest.mark.asyncio
 async def test_lookup_idempotent_post_never_substitutes_latest_user_message() -> None:
+    body = PostMessageIn(idempotency_key="same-key", text="hello")
+    request_fingerprint = messages._message_request_fingerprint(body)  # noqa: SLF001
     assistant = _message(
         id="assistant-1",
         role=messages.Role.ASSISTANT.value,
         parent_message_id="deleted-parent",
         status=messages.MessageStatus.PENDING.value,
     )
-    completion = SimpleNamespace(id="completion-1", message_id=assistant.id)
+    completion = SimpleNamespace(
+        id="completion-1",
+        message_id=assistant.id,
+        upstream_request=messages._idempotency_request_metadata(  # noqa: SLF001
+            None,
+            operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+            request_fingerprint=request_fingerprint,
+        ),
+    )
     db = _Db(
         [
             _Result(completion),
@@ -1082,10 +1201,123 @@ async def test_lookup_idempotent_post_never_substitutes_latest_user_message() ->
         "user-1",
         "conv-1",
         "same-key",
+        operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+        request_fingerprint=request_fingerprint,
     )
 
     assert prior is None
     assert len(db.statements) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_operation", "stored_fingerprint"),
+    [
+        ("conversation.message.regenerate", "f" * 64),
+        ("conversation.message.create", "0" * 64),
+    ],
+)
+async def test_lookup_idempotent_post_rejects_cross_operation_or_changed_body(
+    stored_operation: str,
+    stored_fingerprint: str,
+) -> None:
+    body = PostMessageIn(idempotency_key="same-key", text="new body")
+    completion = SimpleNamespace(
+        id="completion-1",
+        message_id="assistant-1",
+        upstream_request=messages._idempotency_request_metadata(  # noqa: SLF001
+            None,
+            operation_namespace=stored_operation,
+            request_fingerprint=stored_fingerprint,
+        ),
+    )
+    db = _Db([_Result(completion), _Result(None)])
+
+    with pytest.raises(HTTPException) as excinfo:
+        await messages._lookup_idempotent_post(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "conv-1",
+            "same-key",
+            operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+            request_fingerprint=messages._message_request_fingerprint(body),  # noqa: SLF001
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+    assert len(db.statements) == 2
+
+
+def test_task_idempotency_accepts_only_fully_legacy_missing_contract() -> None:
+    messages._require_matching_task_idempotency(  # noqa: SLF001
+        [SimpleNamespace(upstream_request={})],
+        operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+        request_fingerprint="f" * 64,
+        http_error=messages._http,  # noqa: SLF001
+    )
+
+    partial_contracts = (
+        {
+            "idempotency_operation_namespace": (
+                messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION  # noqa: SLF001
+            )
+        },
+        {"idempotency_request_fingerprint": "f" * 64},
+    )
+    for upstream_request in partial_contracts:
+        with pytest.raises(HTTPException) as excinfo:
+            messages._require_matching_task_idempotency(  # noqa: SLF001
+                [SimpleNamespace(upstream_request=upstream_request)],
+                operation_namespace=(
+                    messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION  # noqa: SLF001
+                ),
+                request_fingerprint="f" * 64,
+                http_error=messages._http,  # noqa: SLF001
+            )
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_lookup_idempotent_post_replays_fully_legacy_task() -> None:
+    body = PostMessageIn(idempotency_key="same-key", text="hello")
+    assistant = _message(
+        id="assistant-1",
+        role=messages.Role.ASSISTANT.value,
+        parent_message_id="user-message-1",
+        status=messages.MessageStatus.PENDING.value,
+    )
+    user_message = _message(
+        id="user-message-1",
+        role=messages.Role.USER.value,
+    )
+    completion = SimpleNamespace(
+        id="completion-1",
+        message_id=assistant.id,
+        upstream_request={},
+    )
+    db = _Db(
+        [
+            _Result(completion),
+            _Result(None),
+            _Result(assistant),
+            _Result(user_message),
+        ]
+    )
+
+    prior = await messages._lookup_idempotent_post(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        "user-1",
+        "conv-1",
+        "same-key",
+        operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+        request_fingerprint=messages._message_request_fingerprint(body),  # noqa: SLF001
+    )
+
+    assert prior is not None
+    assert prior.completion_id == "completion-1"
+    assert prior.user_message.id == "user-message-1"
+    assert prior.assistant_message.id == "assistant-1"
 
 
 @pytest.mark.asyncio
@@ -1264,13 +1496,17 @@ async def test_silent_generation_legacy_replay_requires_exact_original_parent(
     requested_parent: str,
     expected_status: int | None,
 ) -> None:
+    request_hash = "legacy-request-hash"
     assistant = _message(
         id="assistant-1",
         role=messages.Role.ASSISTANT.value,
         parent_message_id="parent-1",
         status=messages.MessageStatus.PENDING.value,
     )
-    generation = _silent_generation_row("generation-1")
+    generation = _silent_generation_row(
+        "generation-1",
+        request_hash=request_hash,
+    )
     db = _Db(
         [
             _Result(generation),
@@ -1288,7 +1524,7 @@ async def test_silent_generation_legacy_replay_requires_exact_original_parent(
             conv_id="conv-1",
             idempotency_key="same-key",
             parent_message_id=requested_parent,
-            request_hash="new-request-hash",
+            request_hash=request_hash,
             retention_policy=None,
         )
         assert prior is not None
@@ -1301,7 +1537,7 @@ async def test_silent_generation_legacy_replay_requires_exact_original_parent(
                 conv_id="conv-1",
                 idempotency_key="same-key",
                 parent_message_id=requested_parent,
-                request_hash="new-request-hash",
+                request_hash=request_hash,
                 retention_policy=None,
             )
         assert getattr(excinfo.value, "status_code", None) == expected_status
@@ -1427,11 +1663,17 @@ async def test_silent_generation_unique_conflict_replays_concurrent_winner(
     assert out == prior
     assert db.rolled_back is True
     assert captured_metadata == [
-        {
-            "request_hash": messages._silent_generation_request_hash(  # noqa: SLF001
+        messages._idempotency_request_metadata(  # noqa: SLF001
+            {
+                "request_hash": messages._silent_generation_request_hash(  # noqa: SLF001
+                    body
+                )
+            },
+            operation_namespace=messages._SILENT_GENERATION_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+            request_fingerprint=messages._silent_generation_request_hash(  # noqa: SLF001
                 body
-            )
-        }
+            ),
+        )
     ]
 
 
@@ -1483,6 +1725,16 @@ async def test_silent_generation_creation_persists_request_hash_on_every_generat
         generation.upstream_request["request_hash"] == expected_hash
         for generation in generations
     )
+    assert all(
+        generation.upstream_request["idempotency_operation_namespace"]
+        == messages._SILENT_GENERATION_IDEMPOTENCY_OPERATION  # noqa: SLF001
+        for generation in generations
+    )
+    assert all(
+        generation.upstream_request["idempotency_request_fingerprint"]
+        == expected_hash
+        for generation in generations
+    )
     assert db.committed is True
 
 
@@ -1514,7 +1766,16 @@ async def test_post_message_rechecks_idempotency_after_postgres_advisory_lock(
         parent_message_id=user_msg.id,
         status=messages.MessageStatus.PENDING.value,
     )
-    completion = SimpleNamespace(id="comp-1", message_id=assistant_msg.id)
+    body = PostMessageIn(idempotency_key="same-key", text="hello")
+    completion = SimpleNamespace(
+        id="comp-1",
+        message_id=assistant_msg.id,
+        upstream_request=messages._idempotency_request_metadata(  # noqa: SLF001
+            None,
+            operation_namespace=messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+            request_fingerprint=messages._message_request_fingerprint(body),  # noqa: SLF001
+        ),
+    )
     db = _PgDb(
         [
             _Result(_conv()),
@@ -1533,7 +1794,7 @@ async def test_post_message_rechecks_idempotency_after_postgres_advisory_lock(
 
     out = await messages.post_message(
         "conv-1",
-        PostMessageIn(idempotency_key="same-key", text="hello"),
+        body,
         _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
@@ -1736,15 +1997,16 @@ async def test_post_message_persists_web_search_chat_param(
         messages, "_publish_assistant_task", fake_publish_assistant_task
     )
 
+    body = PostMessageIn(
+        idempotency_key="idem-web",
+        text="今天有什么新闻？",
+        intent="chat",
+        chat_params=ChatParamsIn(reasoning_effort="none", web_search=True),
+    )
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
         "conv-1",
-        PostMessageIn(
-            idempotency_key="idem-web",
-            text="今天有什么新闻？",
-            intent="chat",
-            chat_params=ChatParamsIn(reasoning_effort="none", web_search=True),
-        ),
+        body,
         _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
@@ -1753,7 +2015,15 @@ async def test_post_message_persists_web_search_chat_param(
     comp = next(item for item in db.added if item.__class__.__name__ == "Completion")
     assert user_msg.content["reasoning_effort"] == "none"
     assert user_msg.content["web_search"] is True
-    assert comp.upstream_request == {"web_search": True}
+    assert comp.upstream_request["web_search"] is True
+    assert (
+        comp.upstream_request["idempotency_operation_namespace"]
+        == messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION  # noqa: SLF001
+    )
+    assert (
+        comp.upstream_request["idempotency_request_fingerprint"]
+        == messages._message_request_fingerprint(body)  # noqa: SLF001
+    )
 
 
 @pytest.mark.asyncio
@@ -1776,20 +2046,21 @@ async def test_post_message_persists_chat_tool_params(
         messages, "_publish_assistant_task", fake_publish_assistant_task
     )
 
+    body = PostMessageIn(
+        idempotency_key="idem-tools",
+        text="分析这个数据并生成一张图",
+        intent="chat",
+        chat_params=ChatParamsIn(
+            file_search=True,
+            vector_store_ids=["vs_1", "vs_1", "vs_2"],
+            code_interpreter=True,
+            image_generation=True,
+        ),
+    )
     db = _Db([_Result(_conv()), _Result(None), _Result(None)])
     await messages.post_message(
         "conv-1",
-        PostMessageIn(
-            idempotency_key="idem-tools",
-            text="分析这个数据并生成一张图",
-            intent="chat",
-            chat_params=ChatParamsIn(
-                file_search=True,
-                vector_store_ids=["vs_1", "vs_1", "vs_2"],
-                code_interpreter=True,
-                image_generation=True,
-            ),
-        ),
+        body,
         _wallet_user(),  # type: ignore[arg-type]
         db,  # type: ignore[arg-type]
     )
@@ -1800,12 +2071,18 @@ async def test_post_message_persists_chat_tool_params(
     assert user_msg.content["code_interpreter"] is True
     assert user_msg.content["image_generation"] is True
     assert user_msg.content["vector_store_ids"] == ["vs_1", "vs_1", "vs_2"]
-    assert comp.upstream_request == {
-        "file_search": True,
-        "vector_store_ids": ["vs_1", "vs_2"],
-        "code_interpreter": True,
-        "image_generation": True,
-    }
+    assert comp.upstream_request["file_search"] is True
+    assert comp.upstream_request["vector_store_ids"] == ["vs_1", "vs_2"]
+    assert comp.upstream_request["code_interpreter"] is True
+    assert comp.upstream_request["image_generation"] is True
+    assert (
+        comp.upstream_request["idempotency_operation_namespace"]
+        == messages._MESSAGE_CREATE_IDEMPOTENCY_OPERATION  # noqa: SLF001
+    )
+    assert (
+        comp.upstream_request["idempotency_request_fingerprint"]
+        == messages._message_request_fingerprint(body)  # noqa: SLF001
+    )
 
 
 @pytest.mark.asyncio
@@ -1855,7 +2132,8 @@ async def test_post_message_pins_chat_task_to_active_user_api_credential(
             _Result(None),
             _Result(None),
             _Result((_credential(), _supplier(purposes=["chat"]))),
-        ]
+        ],
+        locked_account_mode="byok",
     )
     await messages.post_message(
         "conv-1",
@@ -1910,7 +2188,8 @@ async def test_post_message_pins_image_task_to_active_user_api_credential(
             _Result(None),
             _Result(None),
             _Result((_credential(), _supplier(purposes=["image"]))),
-        ]
+        ],
+        locked_account_mode="byok",
     )
     await messages.post_message(
         "conv-1",
@@ -1992,7 +2271,8 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
             _Result(None),
             _Result(None),
             _Result((_credential(), image_supplier)),
-        ]
+        ],
+        locked_account_mode="byok",
     )
     await messages.post_message(
         "conv-1",
@@ -2026,7 +2306,8 @@ async def test_post_message_image_task_uses_supplier_default_image_model(
             _Result(None),
             _Result(None),
             _Result((_credential(), chat_supplier)),
-        ]
+        ],
+        locked_account_mode="byok",
     )
     await messages.post_message(
         "conv-1",

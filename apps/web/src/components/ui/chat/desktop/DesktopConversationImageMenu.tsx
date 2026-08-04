@@ -194,7 +194,7 @@ export function ImageContextMenuInner({
             onClose();
           }}
           className={cn(
-            "w-full text-left px-3 h-8 flex items-center gap-2",
+            "flex h-8 min-h-11 w-full items-center gap-2 px-3 text-left",
             "text-[13px] text-[var(--fg-0)]",
             "hover:bg-[var(--bg-2)] transition-colors duration-100",
             "focus-visible:outline-none focus-visible:bg-[var(--bg-2)]",

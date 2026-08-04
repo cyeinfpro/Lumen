@@ -25,7 +25,7 @@ from lumen_core.canvas_models import (
     CanvasRunEvent,
     CanvasVersion,
 )
-from lumen_core.models import Base, Image, Video
+from lumen_core.models import Base, Image, User, Video
 
 from app.canvas_services import read_repair, selection_service
 from app.canvas_services.api_schemas import CanvasSelectOutputIn
@@ -37,6 +37,7 @@ from app.canvas_services.graph_resolution import resolve_node
 async def _session() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
+        User.__table__,
         CanvasDocument.__table__,
         CanvasVersion.__table__,
         CanvasRun.__table__,
@@ -58,6 +59,14 @@ async def _session() -> AsyncIterator[AsyncSession]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session:
+            session.add(
+                User(
+                    id="user-1",
+                    email="user@example.com",
+                    account_mode="wallet",
+                )
+            )
+            await session.commit()
             yield session
     finally:
         await engine.dispose()

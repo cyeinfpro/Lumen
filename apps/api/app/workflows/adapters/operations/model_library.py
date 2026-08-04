@@ -73,6 +73,7 @@ from ...domain.apparel_library import (
     model_library_folder_for_age as _model_library_folder_for_age,
     normalize_age_segment as _normalize_age_segment,
 )
+from ..paid_idempotency import record_current_paid_operation
 from ...domain.showcase_model_policy import (
     model_diversity_anchor as _model_diversity_anchor,
 )
@@ -132,19 +133,29 @@ _runtime = ModelLibraryRuntimeAdapter(
     MODEL_LIBRARY_GENERATE_STEP_KEY=lambda: MODEL_LIBRARY_GENERATE_STEP_KEY,
     ModelLibraryItem=lambda: ModelLibraryItem,
     ModelLibraryJobItemValues=lambda: ModelLibraryJobItemValues,
+    WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE=(
+        lambda: WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE
+    ),
     WorkflowStep=lambda: WorkflowStep,
     _clean_optional_text=lambda: _clean_optional_text,
     _clean_style_tags=lambda: _clean_style_tags,
     _dedupe_nonempty=lambda: _dedupe_nonempty,
+    _ensure_legacy_user_library_migrated=(
+        lambda: _ensure_legacy_user_library_migrated
+    ),
     _extract_bonus_ids=lambda: _extract_bonus_ids,
     _gather_job_image_outs=lambda: _gather_job_image_outs,
+    _get_run=lambda: _get_run,
+    _http=lambda: _http,
     _image_out_map=lambda: _image_out_map,
     _image_url=lambda: _image_url,
+    _job_from_library_run=lambda: _job_from_library_run,
     _job_item_out=lambda: _job_item_out,
     _model_library_image_meta_by_id=lambda: _model_library_image_meta_by_id,
     _model_library_job_status=lambda: _model_library_job_status,
     _model_library_run_inputs=lambda: _model_library_run_inputs,
     _normalize_age_segment=lambda: _normalize_age_segment,
+    _saved_image_id_set=lambda: _saved_image_id_set,
     _task_error_summary=lambda: _task_error_summary,
     _workflow_generation_rows_from_task_ids=(
         lambda: _workflow_generation_rows_from_task_ids
@@ -156,20 +167,6 @@ _runtime = ModelLibraryRuntimeAdapter(
     select=lambda: select,
 )
 
-
-# ---------------------------------------------------------------------------
-# 模特库独立生成 + 任务中心聚合 + vision 自动打标签
-#
-# 设计要点：
-# 1. 每次"生成 N 张模特"请求 = 一条隐藏的 WorkflowRun(type=
-#    apparel_model_library_generate) + 1 个 step(step_key=
-#    model_library_generate) + N 个 worker generation task。每张产出一张独立
-#    模特肖像；不创建 ModelCandidate（不和项目里的"候选 4 视图"逻辑混淆）。
-# 2. 任务中心同时聚合两类来源：模特库独立生成 + 项目里的 model_candidates
-#    step（origin 字段区分）。
-# 3. 自动打标签走 worker tasks/model_library_tagging.py 调 vision provider；
-#    解析失败 graceful，不影响主流程。
-# ---------------------------------------------------------------------------
 def _model_library_generate_genders(body: ApparelModelLibraryGenerateIn) -> list[str]:
     return generate_model_library_genders(
         getattr(body, "genders", None) or [],
@@ -548,6 +545,7 @@ async def generate_apparel_model_library_job(
     )
     db.add(run)
     await db.flush()
+    record_current_paid_operation(db, run)
     step = WorkflowStep(
         workflow_run_id=run.id,
         step_key=MODEL_LIBRARY_GENERATE_STEP_KEY,
@@ -590,6 +588,20 @@ async def generate_apparel_model_library_job(
     job = await _job_from_library_run(db, run=run, saved_map=saved_map)
     await db.commit()
     return job
+
+
+async def replay_apparel_model_library_job(
+    *,
+    workflow_run_id: str,
+    user: CurrentUser,
+    db: AsyncSession,
+) -> ApparelModelLibraryJobOut:
+    return await _jobs.replay_apparel_model_library_job(
+        db,
+        workflow_run_id=workflow_run_id,
+        user=user,
+        runtime=_runtime,
+    )
 
 
 async def list_apparel_model_library_jobs(

@@ -42,9 +42,10 @@ from ..byok_service import (
     validate_api_key_with_supplier,
 )
 from ..db import get_db
-from ..deps import CurrentUser, require_account_mode, verify_csrf
+from ..deps import CurrentUser, durable_session_id, require_account_mode, verify_csrf
 from ..ratelimit import RateLimiter, require_client_ip
 from ..redis_client import get_redis
+from ..services.active_user import lock_authenticated_user_snapshot
 from . import byok_admin as _byok_admin
 
 
@@ -385,6 +386,12 @@ async def probe_my_api_credential(
         validation_model=settings_out.validation_model,
         timeout_ms=settings_out.validation_timeout_ms,
     )
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
+    user = snapshot.user
     row = (
         await db.execute(
             select(UserApiCredential, ApiSupplierTemplate)
@@ -515,6 +522,12 @@ async def put_my_api_credential(
             400,
         )
 
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
+    user = snapshot.user
     key_ciphertext, key_hash, key_hint = encrypt_pending_key(body.api_key)
     now = datetime.now(timezone.utc)
     # Why: single UPDATE ... RETURNING flips every active credential to
@@ -587,6 +600,12 @@ async def revoke_my_api_credential(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
+    user = snapshot.user
     credential = (
         await db.execute(
             select(UserApiCredential)

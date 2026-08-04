@@ -124,6 +124,14 @@ async def _session() -> AsyncIterator[AsyncSession]:
         )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
+        session.add(
+            User(
+                id="user-1",
+                email="user@example.com",
+                account_mode="wallet",
+            )
+        )
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -1107,6 +1115,10 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
         user=user,  # type: ignore[arg-type]
         request=request,
         metadata=metadata,
+        active_user_snapshot=SimpleNamespace(
+            user=user,
+            account_mode="wallet",
+        ),
     )
     await task_submission.publish_canvas_video_task(submission=submission)
 
@@ -1295,20 +1307,24 @@ async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
         idempotency_key="canvas-video-transaction",
     )
     async with _session() as db:
-        db.add(User(id="user-1", email="user@example.com"))
-        await db.flush()
         commit = AsyncMock(wraps=db.commit)
         monkeypatch.setattr(db, "commit", commit)
+        user = await db.get(User, "user-1")
+        assert user is not None
 
         submission = await task_submission.create_canvas_video_task(
             db,
             body=body,
-            user=SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+            user=user,
             request=_request(),
             metadata={
                 "workflow_type": "infinite_canvas",
                 "canvas_node_type": "video_generate",
             },
+            active_user_snapshot=SimpleNamespace(
+                user=user,
+                account_mode="wallet",
+            ),
         )
 
         commit.assert_not_awaited()

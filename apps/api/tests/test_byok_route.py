@@ -13,6 +13,17 @@ from lumen_core.byok import ByokCryptoError
 from lumen_core.schemas import UserApiCredentialUpdateIn
 
 
+@pytest.fixture(autouse=True)
+def _allow_active_user_fence(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def lock_snapshot(_db: Any, user: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            user=user,
+            account_mode=getattr(user, "account_mode", "wallet"),
+        )
+
+    monkeypatch.setattr(byok, "lock_authenticated_user_snapshot", lock_snapshot)
+
+
 class _Result:
     def __init__(self, row: Any):
         self._row = row

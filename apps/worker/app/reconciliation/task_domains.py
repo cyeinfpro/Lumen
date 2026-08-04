@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
 from sqlalchemy import and_, or_, select
 
 from lumen_core.constants import (
@@ -14,63 +13,80 @@ from lumen_core.constants import (
     CompletionStatus,
     EV_COMP_FAILED,
     EV_GEN_FAILED,
+    GenerationErrorCode as EC,
     GenerationStage,
     GenerationStatus,
     MessageStatus,
+    task_channel,
     user_channel,
 )
 from lumen_core.models import Completion, Generation, Message
 from lumen_core.upstream_billing import (
-    NO_UPSTREAM_COST_RECEIPTS,
-    has_proven_undelivered_dispatch,
-    has_upstream_dispatch_receipt,
-    has_upstream_response_receipt,
-    mark_upstream_dispatch_proven_undelivered,
-    mark_upstream_dispatch_started,
-    mark_upstream_response_received,
     upstream_dispatch_result_unknown,
 )
 
+from ..completion_checkpoint import (
+    COMPLETION_CHECKPOINT_QUARANTINED,
+    COMPLETION_CHECKPOINT_STATE_KEY,
+    apply_completed_checkpoint,
+    completion_checkpoint_has_no_usable_output,
+    completion_checkpoint_requires_recovery,
+    completion_checkpoint_validation_error,
+    completion_execution_epoch as completion_execution_epoch,
+    completion_has_completed_checkpoint,
+    completion_has_trustworthy_persisted_usage,
+    recover_completion_checkpoint_images,
+)
+from ..completion_checkpoint_payloads import CompletionCheckpointCorrupt
+from ..completion_execution_settlement import (
+    COMPLETION_RESULT_UNKNOWN_CODE as COMPLETION_RESULT_UNKNOWN_CODE,
+    COMPLETION_RESULT_UNKNOWN_MESSAGE as COMPLETION_RESULT_UNKNOWN_MESSAGE,
+    CompletionDispatchResultUnknown as CompletionDispatchResultUnknown,
+    completion_cancel_requires_unknown_settlement as completion_cancel_requires_unknown_settlement,
+    ensure_completion_execution_current as ensure_completion_execution_current,
+    raise_completion_dispatch_failure as _raise_completion_dispatch_failure,
+    record_completion_upstream_marker as _record_completion_upstream_marker,
+    settle_completion_actual_or_unknown,
+    settle_completion_cancel_unknown as settle_completion_cancel_unknown,
+    settle_completion_result_unknown as settle_completion_result_unknown,
+    stage_completion_preflight_failure as stage_completion_preflight_failure,
+)
+from ..completion_tool_image_runtime import build_completion_tool_image_service
 from .completion_execution_fence import (
     bind_completion_execution_fence as bind_completion_execution_fence,
 )
 from .contracts import LeaseState, ReconcileContext, ReconcileResult
 from .lease import read_lease_states
 from .metrics import reconciliation_rows_total
+from .upstream_evidence import (
+    dispatch_cost_requires_settlement as _dispatch_cost_requires_settlement,
+    generation_has_takeover_checkpoint as _generation_has_takeover_checkpoint,
+    generation_sidecar_cost_requires_settlement as _generation_sidecar_cost_requires_settlement,
+)
 
 RECON_STUCK_AFTER = timedelta(minutes=5)
 RECON_TIMEOUT_CODE = "timeout"
 RECON_TIMEOUT_MESSAGE = "task stuck; reconciler timed out"
 RECON_RESULT_UNKNOWN_CODE = "result_unknown"
-RECON_RESULT_UNKNOWN_MESSAGE = (
-    "upstream dispatch has no response receipt; result is unknown"
-)
+RECON_RESULT_UNKNOWN_MESSAGE = "upstream dispatch has no response receipt; result is unknown"
 RECON_CANCEL_CODE = "cancelled"
 RECON_CANCEL_MESSAGE = "cancelled by user"
+COMPLETION_CHECKPOINT_CORRUPT_CODE = "completion_checkpoint_corrupt"
+COMPLETION_CHECKPOINT_CORRUPT_MESSAGE = (
+    "completion checkpoint image payload is corrupt and was quarantined"
+)
 EV_GEN_REQUEUED = "generation.requeued"
 EV_COMP_REQUEUED = "completion.requeued"
-COMPLETION_EXECUTION_EPOCH_KEY = "execution_epoch"
-COMPLETION_RESULT_UNKNOWN_CODE = "completion_result_unknown"
-COMPLETION_RESULT_UNKNOWN_MESSAGE = (
-    "upstream dispatch completed without a response receipt; result is unknown"
-)
-COMPLETION_USAGE_EXECUTION_EPOCH_KEY = "completion_usage_execution_epoch"
-_COMPLETION_USAGE_FIELDS = (
-    "tokens_in",
-    "tokens_out",
-    "cache_read_tokens",
-    "cache_creation_tokens",
-    "cache_creation_5m_tokens",
-    "cache_creation_1h_tokens",
-    "reasoning_tokens",
-    "image_output_tokens",
-)
 RECON_BATCH_LIMIT = 100
 
 
-class CompletionDispatchResultUnknown(RuntimeError):
-    error_code = COMPLETION_RESULT_UNKNOWN_CODE
-    status_code = None
+async def _recover_completion_checkpoint(context: ReconcileContext, completion: Any) -> bool:
+    return await recover_completion_checkpoint_images(
+        completion,
+        redis=context.redis,
+        channel=task_channel(str(completion.id)),
+        tool_image_service=build_completion_tool_image_service(),
+    )
 
 
 def _aware_utc(value: Any) -> datetime | None:
@@ -81,365 +97,27 @@ def _aware_utc(value: Any) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def completion_execution_epoch(state: Any) -> int:
-    try:
-        return max(
-            0,
-            int(
-                state.preparation.queue_metadata_payload.get(
-                    COMPLETION_EXECUTION_EPOCH_KEY,
-                    0,
-                )
-                or 0
-            ),
-        )
-    except (TypeError, ValueError):
-        return 0
-
-
-def completion_has_trustworthy_persisted_usage(completion: Any) -> bool:
-    request = (
-        completion.upstream_request
-        if isinstance(getattr(completion, "upstream_request", None), dict)
-        else {}
-    )
-    try:
-        usage_epoch = max(
-            0,
-            int(request.get(COMPLETION_USAGE_EXECUTION_EPOCH_KEY)),
-        )
-        execution_epoch = max(
-            0,
-            int(getattr(completion, "execution_epoch", 0) or 0),
-        )
-    except (TypeError, ValueError):
-        return False
-    if usage_epoch != execution_epoch:
-        return False
-    for field in _COMPLETION_USAGE_FIELDS:
-        try:
-            if int(getattr(completion, field, 0) or 0) > 0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
-
-async def settle_completion_actual_or_unknown(
-    billing: Any,
-    session: Any,
-    completion: Any,
-    *,
-    reason: str,
-    knowledge: str,
-) -> None:
-    if completion_has_trustworthy_persisted_usage(completion):
-        await billing.charge_completion(session, completion)
-        return
-    await billing.settle_completion_unknown_upstream(
-        session,
-        completion,
-        reason=reason,
-        knowledge=knowledge,
-    )
-
-
-async def stage_completion_preflight_failure(
-    state: Any,
-    session: Any,
-    completion: Completion,
-    *,
-    err_code: str,
-    err_msg: str,
-) -> None:
-    completion.status = CompletionStatus.FAILED.value
-    completion.progress_stage = CompletionStage.FINALIZING
-    completion.attempt = state.preparation.attempt
-    completion.finished_at = datetime.now(timezone.utc)
-    completion.error_code = err_code
-    completion.error_message = err_msg
-    message = await session.get(
-        state.ports.persistence.Message,
-        state.preparation.message_id,
-    )
-    if message is not None and message.status != MessageStatus.CANCELED:
-        message.status = MessageStatus.FAILED
-    failed = await session.get(
-        state.ports.persistence.Completion,
-        state.request.task_id,
-    )
-    if failed is not None:
-        await state.ports.billing.worker_billing.release_completion(
-            session,
-            failed,
-            reason=err_code,
-        )
-    if state.settlement.lease_lost.is_set():
-        raise state.ports.retry._LeaseLost("lease lost before preflight failure commit")
-    delivery = state.ports.events._stage_completion_event(
-        session,
-        state.preparation.user_id,
-        state.request.channel,
-        EV_COMP_FAILED,
-        state.ports.events._completion_event_payload(
-            state.request.task_id,
-            state.preparation.message_id,
-            state.preparation.attempt,
-            state.preparation.attempt_epoch,
-            execution_epoch=completion_execution_epoch(state),
-            code=err_code,
-            message=err_msg,
-            retriable=False,
-        ),
-    )
-    await session.commit()
-    await state.ports.billing.worker_billing.flush_balance_cache_refreshes(session)
-    await state.ports.events._deliver_completion_event(state.request.redis, delivery)
-
-
 async def record_completion_upstream_marker(
     state: Any,
     *,
     response_received: bool,
     proven_undelivered: bool = False,
+    proven_no_cost: bool = False,
 ) -> None:
-    async with state.ports.persistence.SessionLocal() as session:
-        completion = (
-            await session.execute(
-                state.ports.persistence.select(state.ports.persistence.Completion)
-                .where(
-                    state.ports.persistence.Completion.id == state.request.task_id,
-                    state.ports.persistence.Completion.attempt
-                    == state.preparation.attempt,
-                    state.ports.persistence.Completion.execution_epoch
-                    == completion_execution_epoch(state),
-                    state.ports.persistence.Completion.status
-                    == CompletionStatus.STREAMING.value,
-                    state.ports.persistence.Completion.cancel_requested_at.is_(None),
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if completion is None:
-            raise state.ports.retry._CompletionEpochSuperseded(
-                f"completion marker stale task={state.request.task_id} "
-                f"attempt={state.preparation.attempt}"
-            )
-        marker = (
-            mark_upstream_response_received
-            if response_received
-            else mark_upstream_dispatch_proven_undelivered
-            if proven_undelivered
-            else mark_upstream_dispatch_started
-        )
-        completion.upstream_request = marker(
-            completion,
-            at=datetime.now(timezone.utc).isoformat(),
-            attempt=state.preparation.attempt,
-            execution_epoch=completion_execution_epoch(state),
-        )
-        await session.commit()
-
-
-async def ensure_completion_execution_current(state: Any) -> None:
-    async with state.ports.persistence.SessionLocal() as session:
-        current = (
-            await session.execute(
-                state.ports.persistence.select(
-                    state.ports.persistence.Completion.id
-                ).where(
-                    state.ports.persistence.Completion.id == state.request.task_id,
-                    state.ports.persistence.Completion.attempt
-                    == state.preparation.attempt_epoch,
-                    state.ports.persistence.Completion.execution_epoch
-                    == completion_execution_epoch(state),
-                    state.ports.persistence.Completion.status.in_(
-                        state.ports.retry._RUNNING_COMPLETION_STATUSES
-                    ),
-                )
-            )
-        ).scalar_one_or_none()
-    if current is None:
-        raise state.ports.retry._CompletionEpochSuperseded(
-            f"completion execution superseded task={state.request.task_id} "
-            f"execution_epoch={completion_execution_epoch(state)} "
-            f"attempt={state.preparation.attempt_epoch}"
-        )
+    await _record_completion_upstream_marker(
+        state,
+        response_received=response_received,
+        proven_undelivered=proven_undelivered,
+        proven_no_cost=proven_no_cost,
+    )
 
 
 async def raise_completion_dispatch_failure(state: Any, exc: Exception) -> None:
-    terminal_exceptions = (
-        CompletionDispatchResultUnknown,
-        state.ports.retry._CompletionEpochSuperseded,
-        state.ports.retry._TaskCancelled,
-    )
-    if isinstance(exc, terminal_exceptions) or state.usage.response_receipt_recorded:
-        return
-    if _completion_dispatch_failure_proves_undelivered(exc):
-        state.usage.active_round_dispatch_proven_undelivered = True
-        await record_completion_upstream_marker(
-            state,
-            response_received=False,
-            proven_undelivered=True,
-        )
-        return
-    status_code = getattr(exc, "status_code", None)
-    if isinstance(status_code, int) and status_code > 0:
-        state.usage.active_round_response_received = True
-        await record_completion_upstream_marker(state, response_received=True)
-        state.usage.response_receipt_recorded = True
-        return
-    if (
-        state.preparation.queue_metadata_payload.get("_stable_provider_idempotency")
-        is True
-    ):
-        return
-    raise CompletionDispatchResultUnknown(COMPLETION_RESULT_UNKNOWN_MESSAGE) from exc
-
-
-def _completion_dispatch_failure_proves_undelivered(exc: Exception) -> bool:
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-        return True
-    payload = getattr(exc, "payload", None)
-    if not isinstance(payload, dict):
-        return False
-    receipt_reason = payload.get("receipt_reason") or payload.get(
-        "upstream_receipt_reason"
-    )
-    return (
-        isinstance(receipt_reason, str) and receipt_reason in NO_UPSTREAM_COST_RECEIPTS
-    )
-
-
-async def completion_cancel_requires_unknown_settlement(state: Any) -> bool:
-    usage = state.usage
-    if getattr(usage, "active_round_dispatch_started", False):
-        return not (
-            getattr(usage, "active_round_response_received", False)
-            or getattr(usage, "active_round_dispatch_proven_undelivered", False)
-        )
-    if usage.response_receipt_recorded:
-        return False
-    async with state.ports.persistence.SessionLocal() as session:
-        completion = await session.get(
-            state.ports.persistence.Completion,
-            state.request.task_id,
-        )
-    if completion is None:
-        return False
-    execution_epoch = completion_execution_epoch(state)
-    return bool(
-        int(getattr(completion, "execution_epoch", 0) or 0) == execution_epoch
-        and has_upstream_dispatch_receipt(
-            completion,
-            execution_epoch=execution_epoch,
-        )
-        and not has_proven_undelivered_dispatch(
-            completion,
-            execution_epoch=execution_epoch,
-        )
-    )
-
-
-async def settle_completion_result_unknown(state: Any) -> None:
-    await _settle_completion_unknown(
+    await _raise_completion_dispatch_failure(
         state,
-        status=CompletionStatus.FAILED.value,
-        code=COMPLETION_RESULT_UNKNOWN_CODE,
-        message=COMPLETION_RESULT_UNKNOWN_MESSAGE,
-        require_no_cancel=True,
+        exc,
+        record_marker=record_completion_upstream_marker,
     )
-
-
-async def settle_completion_cancel_unknown(state: Any) -> None:
-    await _settle_completion_unknown(
-        state,
-        status=CompletionStatus.CANCELED.value,
-        code="cancelled",
-        message="cancelled by user",
-        require_no_cancel=False,
-    )
-
-
-async def _settle_completion_unknown(
-    state: Any,
-    *,
-    status: str,
-    code: str,
-    message: str,
-    require_no_cancel: bool,
-) -> None:
-    async with state.ports.persistence.SessionLocal() as session:
-        conditions = [
-            state.ports.persistence.Completion.id == state.request.task_id,
-            state.ports.persistence.Completion.attempt
-            == state.preparation.attempt_epoch,
-            state.ports.persistence.Completion.execution_epoch
-            == completion_execution_epoch(state),
-            state.ports.persistence.Completion.status.in_(
-                state.ports.retry._RUNNING_COMPLETION_STATUSES
-            ),
-        ]
-        if require_no_cancel:
-            conditions.append(
-                state.ports.persistence.Completion.cancel_requested_at.is_(None)
-            )
-        result = await session.execute(
-            state.ports.persistence.update(state.ports.persistence.Completion)
-            .where(*conditions)
-            .values(
-                status=status,
-                progress_stage=CompletionStage.FINALIZING,
-                finished_at=datetime.now(timezone.utc),
-                error_code=code,
-                error_message=message,
-            )
-        )
-        if state.ports.persistence.affected_rows(result) == 0:
-            raise state.ports.retry._CompletionEpochSuperseded(
-                f"completion unknown settlement superseded "
-                f"task={state.request.task_id} "
-                f"execution_epoch={completion_execution_epoch(state)}"
-            )
-        row = await session.get(
-            state.ports.persistence.Message,
-            state.preparation.message_id,
-        )
-        if row is not None and row.status != MessageStatus.CANCELED:
-            row.status = MessageStatus.FAILED
-        completion = await session.get(
-            state.ports.persistence.Completion,
-            state.request.task_id,
-        )
-        if completion is None:
-            raise LookupError(f"completion missing: {state.request.task_id}")
-        await settle_completion_actual_or_unknown(
-            state.ports.billing.worker_billing,
-            session,
-            completion,
-            reason=code,
-            knowledge="unknown",
-        )
-        delivery = state.ports.events._stage_completion_event(
-            session,
-            state.preparation.user_id,
-            state.request.channel,
-            EV_COMP_FAILED,
-            state.ports.events._completion_event_payload(
-                state.request.task_id,
-                state.preparation.message_id,
-                state.preparation.attempt,
-                state.preparation.attempt_epoch,
-                execution_epoch=completion_execution_epoch(state),
-                code=code,
-                message=message,
-                retriable=False,
-            ),
-        )
-        await session.commit()
-        await state.ports.billing.worker_billing.flush_balance_cache_refreshes(session)
-    await state.ports.events._deliver_completion_event(state.request.redis, delivery)
-    state.settlement.task_outcome = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,18 +187,24 @@ class TaskDomainReconciler:
         context: ReconcileContext,
         candidate: Any,
         cutoff: datetime,
+        *,
+        allow_fresh: bool = False,
     ) -> Any | None:
         model = self.spec.model
-        query = (
-            select(model)
-            .where(
-                model.id == str(candidate.id),
-                model.status.in_(self.spec.active_statuses),
+        conditions = [
+            model.id == str(candidate.id),
+            model.status.in_(self.spec.active_statuses),
+        ]
+        if not allow_fresh:
+            conditions.append(
                 or_(
                     model.cancel_requested_at.is_not(None),
                     model.updated_at < cutoff,
-                ),
+                )
             )
+        query = (
+            select(model)
+            .where(*conditions)
             .with_for_update(skip_locked=True)
             .execution_options(populate_existing=True)
         )
@@ -529,7 +213,9 @@ class TaskDomainReconciler:
             (row for row in rows if str(row.id) == str(candidate.id)),
             None,
         )
-        if task is None or not self._candidate_eligible(task, cutoff):
+        if task is None or (
+            not allow_fresh and not self._candidate_eligible(task, cutoff)
+        ):
             return None
         lease_state = (
             await read_lease_states(
@@ -665,12 +351,9 @@ class TaskDomainReconciler:
                 reason=reason,
             )
             return
-        # A current-epoch dispatch without a response is still potentially
-        # billable. Release only when there is no dispatch or the runner
-        # persisted proof that the request never reached the provider.
-        if has_upstream_response_receipt(task) or (
-            has_upstream_dispatch_receipt(task)
-            and not has_proven_undelivered_dispatch(task)
+        if _dispatch_cost_requires_settlement(task) or (
+            self.spec.name == "generation"
+            and _generation_sidecar_cost_requires_settlement(task)
         ):
             await self._settle_unknown_billing(
                 context,
@@ -708,7 +391,7 @@ class TaskDomainReconciler:
         context: ReconcileContext,
         task: Any,
     ) -> tuple[str, str, dict[str, Any]]:
-        await self._settle_unknown_billing(
+        await self._settle_timeout_billing(
             context,
             task,
             reason=RECON_RESULT_UNKNOWN_CODE,
@@ -729,6 +412,71 @@ class TaskDomainReconciler:
             message=RECON_RESULT_UNKNOWN_MESSAGE,
         )
 
+    async def _apply_checkpoint_corruption(
+        self,
+        context: ReconcileContext,
+        task: Any,
+        *,
+        validation_error: str,
+    ) -> tuple[str, str, dict[str, Any]]:
+        await self._settle_unknown_billing(
+            context,
+            task,
+            reason=COMPLETION_CHECKPOINT_CORRUPT_CODE,
+        )
+        request = (
+            dict(task.upstream_request)
+            if isinstance(task.upstream_request, dict)
+            else {}
+        )
+        request[COMPLETION_CHECKPOINT_STATE_KEY] = COMPLETION_CHECKPOINT_QUARANTINED
+        request["completion_checkpoint_quarantine_reason"] = validation_error[:500]
+        task.upstream_request = request
+        task.status = self.spec.failed_status
+        task.progress_stage = self.spec.finalizing_stage
+        task.error_code = COMPLETION_CHECKPOINT_CORRUPT_CODE
+        task.error_message = COMPLETION_CHECKPOINT_CORRUPT_MESSAGE
+        task.finished_at = context.now
+        task.updated_at = context.now
+        message = await context.session.get(Message, task.message_id)
+        if message is not None:
+            message.status = MessageStatus.FAILED.value
+        return self._stage_failure_event(
+            context,
+            task,
+            code=COMPLETION_CHECKPOINT_CORRUPT_CODE,
+            message=COMPLETION_CHECKPOINT_CORRUPT_MESSAGE,
+        )
+
+    async def _apply_checkpoint_no_output(
+        self,
+        context: ReconcileContext,
+        task: Any,
+    ) -> tuple[str, str, dict[str, Any]]:
+        code = EC.NO_TEXT_RETURNED.value
+        message = "upstream returned empty completion"
+        await self._settle_unknown_billing(
+            context,
+            task,
+            reason=code,
+        )
+        task.status = self.spec.failed_status
+        task.progress_stage = self.spec.finalizing_stage
+        task.error_code = code
+        task.error_message = message
+        task.text = ""
+        task.finished_at = context.now
+        task.updated_at = context.now
+        row = await context.session.get(Message, task.message_id)
+        if row is not None:
+            row.status = MessageStatus.FAILED.value
+        return self._stage_failure_event(
+            context,
+            task,
+            code=code,
+            message=message,
+        )
+
     async def _apply_cancel(
         self,
         context: ReconcileContext,
@@ -739,10 +487,10 @@ class TaskDomainReconciler:
                 self.spec.name == "completion"
                 and completion_has_trustworthy_persisted_usage(task)
             )
-            or has_upstream_response_receipt(task)
+            or _dispatch_cost_requires_settlement(task)
             or (
-                has_upstream_dispatch_receipt(task)
-                and not has_proven_undelivered_dispatch(task)
+                self.spec.name == "generation"
+                and _generation_sidecar_cost_requires_settlement(task)
             )
         ):
             await self._settle_unknown_billing(
@@ -797,6 +545,110 @@ class TaskDomainReconciler:
             },
         )
 
+    async def _recover_or_quarantine_completion_checkpoint(
+        self,
+        context: ReconcileContext,
+        candidate: Any,
+        cutoff: datetime,
+    ) -> tuple[bool, tuple[str, str, dict[str, Any]] | None]:
+        validation_error = completion_checkpoint_validation_error(candidate)
+        if validation_error is not None:
+            task = await self._lock_candidate(context, candidate, cutoff)
+            if task is None:
+                return False, None
+            return False, await self._apply_checkpoint_corruption(
+                context,
+                task,
+                validation_error=validation_error,
+            )
+        if not completion_checkpoint_requires_recovery(candidate):
+            return False, None
+        try:
+            return await _recover_completion_checkpoint(context, candidate), None
+        except CompletionCheckpointCorrupt as exc:
+            task = await self._lock_candidate(
+                context,
+                candidate,
+                cutoff,
+                allow_fresh=True,
+            )
+            if task is None:
+                return False, None
+            return False, await self._apply_checkpoint_corruption(
+                context,
+                task,
+                validation_error=str(exc),
+            )
+
+    async def _reconcile_expired_candidate(
+        self,
+        context: ReconcileContext,
+        candidate: Any,
+        cutoff: datetime,
+    ) -> tuple[str, list[tuple[str, str, dict[str, Any]]]] | None:
+        cancel_requested = getattr(candidate, "cancel_requested_at", None) is not None
+        recovered_checkpoint = False
+        checkpoint_failure = None
+        if self.spec.name == "completion" and not cancel_requested:
+            (
+                recovered_checkpoint,
+                checkpoint_failure,
+            ) = await self._recover_or_quarantine_completion_checkpoint(
+                context,
+                candidate,
+                cutoff,
+            )
+        if checkpoint_failure is not None:
+            return "checkpoint_corrupt", [checkpoint_failure]
+        task = await self._lock_candidate(
+            context,
+            candidate,
+            cutoff,
+            allow_fresh=recovered_checkpoint,
+        )
+        if task is None:
+            return None
+        if getattr(task, "cancel_requested_at", None) is not None:
+            return "canceled", [await self._apply_cancel(context, task)]
+        if not self._eligible(task, cutoff):
+            reconciliation_rows_total.labels(
+                domain=self.name,
+                action="ineligible",
+            ).inc()
+            return None
+
+        has_takeover_checkpoint = (
+            self.spec.name == "generation"
+            and _generation_has_takeover_checkpoint(task)
+        )
+        if (
+            self.spec.name == "completion"
+            and completion_checkpoint_has_no_usable_output(task)
+        ):
+            return "checkpoint_no_output", [
+                await self._apply_checkpoint_no_output(context, task)
+            ]
+        if (
+            self.spec.name == "completion"
+            and completion_has_completed_checkpoint(task)
+        ):
+            return "completed_checkpoint", [
+                await apply_completed_checkpoint(context, task)
+            ]
+        if (
+            upstream_dispatch_result_unknown(task)
+            and not has_takeover_checkpoint
+        ):
+            return "result_unknown", [
+                await self._apply_result_unknown(context, task)
+            ]
+        if has_takeover_checkpoint or int(task.attempt or 0) < self.spec.max_attempts:
+            task.status = self.spec.queued_status
+            task.progress_stage = self.spec.queued_stage
+            task.updated_at = context.now
+            return "requeued", self._stage_requeue_events(context, task)
+        return "timed_out", [await self._apply_timeout(context, task)]
+
     async def reconcile(self, context: ReconcileContext) -> ReconcileResult:
         cutoff = context.now - RECON_STUCK_AFTER
         result = ReconcileResult()
@@ -834,49 +686,15 @@ class TaskDomainReconciler:
                         action=f"{action}_{lease_state.value}",
                     ).inc()
                     continue
-                task = await self._lock_candidate(context, candidate, cutoff)
-                if task is None:
-                    continue
-                cancel_requested = (
-                    getattr(task, "cancel_requested_at", None) is not None
+                outcome = await self._reconcile_expired_candidate(
+                    context,
+                    candidate,
+                    cutoff,
                 )
-                if cancel_requested:
-                    result.pending_outbox.append(
-                        await self._apply_cancel(context, task)
-                    )
-                    result.touched += 1
-                    reconciliation_rows_total.labels(
-                        domain=self.name,
-                        action="canceled",
-                    ).inc()
-                    if result.touched >= RECON_BATCH_LIMIT:
-                        break
+                if outcome is None:
                     continue
-                if not self._eligible(task, cutoff):
-                    reconciliation_rows_total.labels(
-                        domain=self.name,
-                        action="ineligible",
-                    ).inc()
-                    continue
-
-                if upstream_dispatch_result_unknown(task):
-                    result.pending_outbox.append(
-                        await self._apply_result_unknown(context, task)
-                    )
-                    action = "result_unknown"
-                elif int(task.attempt or 0) < self.spec.max_attempts:
-                    task.status = self.spec.queued_status
-                    task.progress_stage = self.spec.queued_stage
-                    task.updated_at = context.now
-                    result.pending_outbox.extend(
-                        self._stage_requeue_events(context, task)
-                    )
-                    action = "requeued"
-                else:
-                    result.pending_outbox.append(
-                        await self._apply_timeout(context, task)
-                    )
-                    action = "timed_out"
+                action, pending_outbox = outcome
+                result.pending_outbox.extend(pending_outbox)
                 result.touched += 1
                 reconciliation_rows_total.labels(
                     domain=self.name,

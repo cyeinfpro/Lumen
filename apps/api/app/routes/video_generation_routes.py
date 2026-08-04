@@ -29,13 +29,18 @@ from lumen_core.schema_models import (
 from ..images.application.deleted_media_references import (
     active_video_generation_reference_id,
 )
+from ..deps import durable_session_id_from_db
+from ..services.active_user import (
+    ActiveUserFenceError,
+    account_mode_from_user,
+    active_user_fence_http_error,
+    lock_active_user_snapshot,
+)
 from ..services.video_storage_lifecycle import VideoStorageLifecycle
 from . import video_cleanup_routes as _video_cleanup_routes
 
 _locked_owned_video = _video_cleanup_routes._locked_owned_video
-_detach_video_cleanup_if_owned = (
-    _video_cleanup_routes.detach_video_cleanup_if_owned
-)
+_detach_video_cleanup_if_owned = _video_cleanup_routes.detach_video_cleanup_if_owned
 _record_video_cleanup_result = _video_cleanup_routes.record_video_cleanup_result
 
 
@@ -228,6 +233,16 @@ async def cancel_video_generation(
     db: AsyncSession,
     deps: GenerationRouteDependencies,
 ) -> VideoGenerationOut:
+    try:
+        snapshot = await lock_active_user_snapshot(
+            db,
+            user.id,
+            account_mode_from_user(user),
+            session_id=durable_session_id_from_db(db),
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+    user = snapshot.user
     row = (
         await db.execute(
             select(VideoGeneration)
@@ -379,20 +394,12 @@ async def retry_video_generation(
     db: AsyncSession,
     deps: GenerationRouteDependencies,
 ) -> VideoGenerationOut:
-    if getattr(user, "account_mode", "wallet") != "wallet":
-        raise deps.http_error(
-            "account_mode_forbidden",
-            "video generation requires wallet mode",
-            403,
-        )
     row = (
         await db.execute(
-            select(VideoGeneration)
-            .where(
+            select(VideoGeneration).where(
                 VideoGeneration.id == generation_id,
                 VideoGeneration.user_id == user.id,
             )
-            .with_for_update()
         )
     ).scalar_one_or_none()
     if row is None:

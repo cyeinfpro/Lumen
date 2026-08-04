@@ -15,6 +15,13 @@ for module_name in list(sys.modules):
 from app import proxy_manager  # noqa: E402
 
 
+def test_normalize_proxy_url_preserves_compose_service_hostname() -> None:
+    assert (
+        proxy_manager.normalize_proxy_url("socks5h://api:41560")
+        == "socks5://api:41560"
+    )
+
+
 class FakeApi:
     def __init__(self, names: list[str] | None = None) -> None:
         self.names = list(names or [])
@@ -31,6 +38,41 @@ class FakeApi:
         self.avoids.append(list(avoid or []))
         name = self.names.pop(0)
         return {"proxy": {"name": name, "url": f"socks5://{name}"}}
+
+
+class EndpointRefreshApi(FakeApi):
+    def __init__(self, refreshed_url: str) -> None:
+        super().__init__()
+        self.refreshed_url = refreshed_url
+
+    async def get_runtime_config(
+        self, avoid: list[str] | None = None
+    ) -> dict[str, Any]:
+        requested_avoid = list(avoid or [])
+        self.avoids.append(requested_avoid)
+        if requested_avoid:
+            return {"proxy": None}
+        return {
+            "proxy": {
+                "name": "proxy-a",
+                "url": self.refreshed_url,
+            }
+        }
+
+
+class ProxySessionSpy:
+    def __init__(self, proxy: str) -> None:
+        self._proxy = proxy
+        self.assignments: list[str] = []
+
+    @property
+    def proxy(self) -> str:
+        return self._proxy
+
+    @proxy.setter
+    def proxy(self, value: str) -> None:
+        self.assignments.append(value)
+        self._proxy = value
 
 
 @pytest.mark.asyncio
@@ -76,3 +118,39 @@ async def test_report_success_clears_current_failed_name(
 
     assert mgr._failed_names == {}
     assert api.reports == [("proxy-a", True)]
+
+
+@pytest.mark.asyncio
+async def test_pool_exhaustion_retries_without_avoid_and_refreshes_endpoint() -> None:
+    session = ProxySessionSpy("socks5://proxy.internal:41000")
+    api = EndpointRefreshApi("socks5h://proxy.internal:42000")
+    mgr = proxy_manager.ProxyManager(api)  # type: ignore[arg-type]
+    mgr.current_name = "proxy-a"
+    mgr.current_url = "socks5://proxy.internal:41000"
+    mgr._session = session  # type: ignore[assignment]
+
+    assert await mgr.failover() is True
+    assert mgr.current_name == "proxy-a"
+    assert mgr.current_url == "socks5://proxy.internal:42000"
+    assert session.proxy == "socks5://proxy.internal:42000"
+    assert session.assignments == ["socks5://proxy.internal:42000"]
+    assert api.avoids == [["proxy-a"], []]
+    assert api.reports == [("proxy-a", False)]
+
+
+@pytest.mark.asyncio
+async def test_pool_exhaustion_does_not_retry_same_endpoint() -> None:
+    session = ProxySessionSpy("socks5://proxy.internal:41000")
+    api = EndpointRefreshApi("socks5h://proxy.internal:41000")
+    mgr = proxy_manager.ProxyManager(api)  # type: ignore[arg-type]
+    mgr.current_name = "proxy-a"
+    mgr.current_url = "socks5://proxy.internal:41000"
+    mgr._session = session  # type: ignore[assignment]
+
+    assert await mgr.failover() is False
+    assert mgr.current_name == "proxy-a"
+    assert mgr.current_url == "socks5://proxy.internal:41000"
+    assert session.proxy == "socks5://proxy.internal:41000"
+    assert session.assignments == []
+    assert api.avoids == [["proxy-a"], []]
+    assert api.reports == [("proxy-a", False)]

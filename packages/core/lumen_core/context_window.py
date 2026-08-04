@@ -306,7 +306,11 @@ class _TokenCounterRuntime:
                 self._load_thread.start()
             thread = self._load_thread
 
-        timeout = _tiktoken_load_timeout(0.05 if timeout_sec is None else timeout_sec)
+        timeout = _tiktoken_load_timeout(
+            _DEFAULT_TIKTOKEN_LOAD_TIMEOUT_SEC
+            if timeout_sec is None
+            else timeout_sec
+        )
         if thread is not None and timeout > 0:
             thread.join(timeout)
 
@@ -324,6 +328,7 @@ class _TokenCounterRuntime:
 
 
 _TOKEN_COUNTER_RUNTIME = _TokenCounterRuntime()
+_DEFAULT_TIKTOKEN_LOAD_TIMEOUT_SEC = 0.15
 
 
 def _tiktoken_load_timeout(default: float) -> float:

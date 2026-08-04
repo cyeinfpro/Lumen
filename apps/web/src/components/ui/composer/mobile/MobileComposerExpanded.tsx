@@ -26,6 +26,7 @@ import type {
 import { DURATION, EASE } from "@/lib/motion";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { cn } from "@/lib/utils";
+import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { attachmentRoleLabel } from "../shared/attachmentRoles";
@@ -320,14 +321,12 @@ export function MobileComposerExpanded({
               )}
             >
               <span className="flex-1 break-words">{composerError}</span>
-              <button
-                type="button"
-                aria-label="关闭错误提示"
-                onClick={onClearComposerError}
-                className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] active:bg-[var(--bg-2)]"
-              >
-                <X className="w-3 h-3" />
-              </button>
+              <MobileIconButton
+                label="关闭错误提示"
+                onPress={onClearComposerError}
+                icon={<X className="h-4 w-4" />}
+                className="shrink-0 rounded-[var(--radius-control)] active:bg-[var(--bg-2)]"
+              />
             </div>
           </motion.div>
         ))}

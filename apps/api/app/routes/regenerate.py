@@ -47,11 +47,18 @@ from ..redis_client import get_redis
 from ..runtime_settings import get_setting
 from ..services.active_user import (
     ActiveUserFenceError,
+    account_mode_from_user,
     active_user_fence_http_error,
-    lock_active_user,
+    lock_active_user_snapshot,
 )
 from ..services.generation_queue import (
     release_generation_queue_state,
+)
+from ..services.message_idempotency import (
+    MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION as _MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+    idempotency_request_metadata as _idempotency_request_metadata,
+    regenerate_request_fingerprint as _regenerate_request_fingerprint,
+    require_matching_task_idempotency as _require_matching_task_idempotency,
 )
 from ..services.regenerate_task_cleanup import (
     cancel_regenerate_target_active_tasks as _cancel_regenerate_target_active_tasks_service,
@@ -175,7 +182,12 @@ async def _default_image_output_format(db: AsyncSession) -> str:
 
 
 async def _lookup_idempotent_regenerate(
-    db: AsyncSession, user_id: str, conv_id: str, idempotency_key: str
+    db: AsyncSession,
+    user_id: str,
+    conv_id: str,
+    idempotency_key: str,
+    *,
+    request_fingerprint: str,
 ) -> RegenerateOut | None:
     alive_filters = _message_alive_filters()
     lookup_keys = _idempotency_lookup_keys(conv_id, idempotency_key)
@@ -209,6 +221,20 @@ async def _lookup_idempotent_regenerate(
             )
         )
     ).scalar_one_or_none()
+    if comp_hit is not None and gen_anchor is not None:
+        raise _http(
+            "idempotency_conflict",
+            "idempotency_key matched multiple task types",
+            409,
+        )
+    task_hit = comp_hit or gen_anchor
+    if task_hit is not None:
+        _require_matching_task_idempotency(
+            [task_hit],
+            operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_fingerprint,
+            http_error=_http,
+        )
     if comp_hit is not None:
         anchor_msg_id = comp_hit.message_id
     elif gen_anchor is not None:
@@ -230,6 +256,12 @@ async def _lookup_idempotent_regenerate(
             )
             .scalars()
             .all()
+        )
+        _require_matching_task_idempotency(
+            gen_hits,
+            operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_fingerprint,
+            http_error=_http,
         )
     return RegenerateOut(
         assistant_message_id=anchor_msg_id,
@@ -521,6 +553,7 @@ async def regenerate_message(
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request = None,
 ) -> RegenerateOut:
+    expected_account_mode = account_mode_from_user(user)
     redis = get_redis()
     await MESSAGES_LIMITER.check(redis, f"rl:msg:{user.id}")
 
@@ -530,11 +563,19 @@ async def regenerate_message(
         conv_id=conv_id,
         message_id=message_id,
     )
+    request_fingerprint = _regenerate_request_fingerprint(
+        target_message_id=message_id,
+        intent=body.intent,
+    )
 
     # ---- idempotency short-circuit ---------------------------------------
     # If the same idempotency_key was already used by this user, return its result.
     prior = await _lookup_idempotent_regenerate(
-        db, user.id, conv.id, body.idempotency_key
+        db,
+        user.id,
+        conv.id,
+        body.idempotency_key,
+        request_fingerprint=request_fingerprint,
     )
     if prior is not None:
         return prior
@@ -557,12 +598,15 @@ async def regenerate_message(
     # ---- transactional: cancel old assistant + sub-tasks, then create new ---
     try:
         session_id = durable_session_id(request)
-        if session_id:
-            await lock_active_user(db, user.id, session_id=session_id)
-        else:
-            await lock_active_user(db, user.id)
+        snapshot = await lock_active_user_snapshot(
+            db,
+            user.id,
+            expected_account_mode,
+            session_id=session_id,
+        )
     except ActiveUserFenceError as exc:
         raise active_user_fence_http_error(exc) from exc
+    user = snapshot.user
     conv = (
         await db.execute(
             select(Conversation)
@@ -582,7 +626,7 @@ async def regenerate_message(
         target_msg_id=target.id,
         user_id=user.id,
         canceled_at=now,
-        account_mode=getattr(user, "account_mode", "wallet"),
+        account_mode=snapshot.account_mode,
         queue_redis=redis,
     )
 
@@ -621,7 +665,7 @@ async def regenerate_message(
     result = await _create_assistant_task(
         db=db,
         user_id=user.id,
-        account_mode=getattr(user, "account_mode", "wallet"),
+        account_mode=snapshot.account_mode,
         conv=conv,
         user_msg=user_msg,
         intent=intent,
@@ -633,6 +677,11 @@ async def regenerate_message(
         text=text,
         default_image_output_format=default_image_output_format,
         mask_image_id=mask_image_id,
+        request_metadata=_idempotency_request_metadata(
+            None,
+            operation_namespace=_MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_fingerprint,
+        ),
     )
 
     conv.last_activity_at = now
@@ -643,7 +692,11 @@ async def regenerate_message(
         # rely on the unique constraint and return prior result.
         await db.rollback()
         prior = await _lookup_idempotent_regenerate(
-            db, user.id, conv.id, body.idempotency_key
+            db,
+            user.id,
+            conv.id,
+            body.idempotency_key,
+            request_fingerprint=request_fingerprint,
         )
         if prior is not None:
             return prior

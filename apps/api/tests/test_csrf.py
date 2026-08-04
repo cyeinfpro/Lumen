@@ -7,7 +7,13 @@ from types import SimpleNamespace
 from fastapi import Request
 from starlette.responses import Response
 
-from app.deps import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, verify_csrf
+from app.deps import (
+    CSRF_COOKIE,
+    CSRF_HEADER,
+    EXPECTED_USER_ID_HEADER,
+    SESSION_COOKIE,
+    verify_csrf,
+)
 from app.routes.auth import refresh_csrf
 from app.security import make_csrf_token, make_session_cookie, verify_csrf_token
 
@@ -26,7 +32,7 @@ class _Db:
             revoked_at=None,
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
-        user = SimpleNamespace(deleted_at=None)
+        user = SimpleNamespace(id="user-1", deleted_at=None)
         return _ScalarResult((session, user))
 
 
@@ -35,13 +41,26 @@ class _EmptyDb:
         return _ScalarResult(None)
 
 
-def _request(*, session_id: str = "session-1", csrf: str | None = None, header: str | None = None) -> Request:
+def _request(
+    *,
+    session_id: str = "session-1",
+    csrf: str | None = None,
+    header: str | None = None,
+    expected_user_id: str | None = None,
+    browser_request: bool = False,
+) -> Request:
     csrf = csrf if csrf is not None else make_csrf_token(session_id)
     raw_session = make_session_cookie(session_id)
     cookies = f"{SESSION_COOKIE}={raw_session}; {CSRF_COOKIE}={csrf}"
     headers = [(b"cookie", cookies.encode())]
     if header is not None:
         headers.append((CSRF_HEADER.lower().encode(), header.encode()))
+    if expected_user_id is not None:
+        headers.append(
+            (EXPECTED_USER_ID_HEADER.lower().encode(), expected_user_id.encode())
+        )
+    if browser_request:
+        headers.append((b"origin", b"https://lumen.example"))
     return Request({"type": "http", "method": "POST", "path": "/", "headers": headers})
 
 
@@ -55,6 +74,58 @@ async def test_verify_csrf_accepts_token_bound_to_session() -> None:
 async def test_verify_csrf_accepts_valid_header_when_cookie_is_stale() -> None:
     token = make_csrf_token("session-1")
     await verify_csrf(_request(session_id="session-1", csrf="stale-cookie", header=token), _Db())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_accepts_browser_write_bound_to_confirmed_user() -> None:
+    token = make_csrf_token("session-1")
+    await verify_csrf(
+        _request(
+            session_id="session-1",
+            csrf=token,
+            header=token,
+            expected_user_id="user-1",
+            browser_request=True,
+        ),
+        _Db(),  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_rejects_browser_write_for_another_confirmed_user() -> None:
+    token = make_csrf_token("session-1")
+    with pytest.raises(Exception) as excinfo:
+        await verify_csrf(
+            _request(
+                session_id="session-1",
+                csrf=token,
+                header=token,
+                expected_user_id="user-a",
+                browser_request=True,
+            ),
+            _Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_verify_csrf_rejects_browser_write_without_identity_fence() -> None:
+    token = make_csrf_token("session-1")
+    with pytest.raises(Exception) as excinfo:
+        await verify_csrf(
+            _request(
+                session_id="session-1",
+                csrf=token,
+                header=token,
+                browser_request=True,
+            ),
+            _Db(),  # type: ignore[arg-type]
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "identity_mismatch"
 
 
 @pytest.mark.asyncio

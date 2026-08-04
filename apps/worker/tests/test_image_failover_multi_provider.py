@@ -17,6 +17,7 @@ import pytest
 from PIL import Image as _PILImage
 
 from app import provider_pool
+from app.upstream_clients.image_job_models import ImageJobExecutionHandle
 from app.upstream_parts import entrypoints as upstream
 from app.upstream_parts.image_execution import ImageExecutionRequest
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
@@ -680,6 +681,68 @@ async def test_image_jobs_unknown_submit_does_not_failover_endpoint_or_provider(
 
     assert excinfo.value.error_code == "image_job_result_unknown"
     # 只碰了 acc1 的第一个 endpoint：既没换 endpoint 也没换 provider。
+    assert attempts == [("acc1", "generations")]
+    assert not [e for e in progress_events if e.get("type") == "provider_failover"]
+    assert not [e for e in progress_events if e.get("type") == "endpoint_failover"]
+
+
+@pytest.mark.asyncio
+async def test_image_jobs_accepted_unknown_state_attempts_one_endpoint_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = RecordingPool(["acc1", "acc2"])
+    execution = ImageJobExecutionHandle(
+        job_id="job-accepted",
+        provider_id="acc1",
+        endpoint="generations",
+        base_url="https://image-job.example",
+        idempotency_key="lumen-image-job-stable",
+    )
+
+    async def fake_get_pool() -> RecordingPool:
+        return pool
+
+    attempts: list[tuple[str, str]] = []
+
+    async def fake_run_once(
+        _request: ImageExecutionRequest,
+        *,
+        endpoint: str,
+        api_key: str,
+        **_kwargs: Any,
+    ) -> tuple[str, str | None]:
+        attempts.append((api_key.removeprefix("sk-"), endpoint))
+        raise upstream.UpstreamError(
+            "accepted image job returned an unknown state",
+            status_code=200,
+            error_code="bad_response",
+            payload={
+                "sidecar_execution_accepted": True,
+                "sidecar_execution": execution.to_dict(),
+            },
+        )
+
+    monkeypatch.setattr(provider_pool, "get_pool", fake_get_pool)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.image_jobs,
+        "image_job_run_once",
+        fake_run_once,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.direct,
+        "resolve_image_job_base_url",
+        _resolved_job_base,
+    )
+
+    progress_events: list[dict[str, Any]] = []
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.image_jobs.image_job_with_failover(
+            _image_request(progress_callback=progress_events.append)
+        )
+
+    assert exc_info.value.error_code == "image_job_result_unknown"
+    assert exc_info.value.payload["recovery_only"] is True
+    assert exc_info.value.payload["sidecar_execution"] == execution.to_dict()
     assert attempts == [("acc1", "generations")]
     assert not [e for e in progress_events if e.get("type") == "provider_failover"]
     assert not [e for e in progress_events if e.get("type") == "endpoint_failover"]

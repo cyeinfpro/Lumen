@@ -21,6 +21,7 @@ from enum import StrEnum
 
 from .constants import GenerationErrorCode
 
+GENERATION_TAKEOVER_CHECKPOINT_KEY = "generation_takeover_checkpoint"
 UPSTREAM_DISPATCH_STARTED_AT = "upstream_dispatch_started_at"
 UPSTREAM_RESPONSE_RECEIVED_AT = "upstream_response_received_at"
 UPSTREAM_DISPATCH_ATTEMPT = "upstream_dispatch_attempt"
@@ -29,6 +30,7 @@ UPSTREAM_DISPATCH_EXECUTION_EPOCH = "upstream_dispatch_execution_epoch"
 UPSTREAM_RESPONSE_EXECUTION_EPOCH = "upstream_response_execution_epoch"
 UPSTREAM_DISPATCH_DELIVERY = "upstream_dispatch_delivery"
 UPSTREAM_DISPATCH_PROVEN_UNDELIVERED = "proven_undelivered"
+UPSTREAM_DISPATCH_PROVEN_NO_COST = "proven_no_cost"
 PROVIDER_IDEMPOTENCY_KEY = "provider_idempotency_key"
 PROVIDER_IDEMPOTENCY_STABLE = "provider_idempotency_stable"
 UPSTREAM_TRACE_ID = "trace_id"
@@ -52,6 +54,7 @@ _UPSTREAM_EXECUTION_IDENTITY_KEYS = frozenset(
         PROVIDER_IDEMPOTENCY_STABLE,
         UPSTREAM_TRACE_ID,
         UPSTREAM_SIDECAR_EXECUTION,
+        GENERATION_TAKEOVER_CHECKPOINT_KEY,
         "execution_epoch",
         "provider",
         "actual_provider",
@@ -99,6 +102,9 @@ class LocalBillingAction(StrEnum):
 # 白名单之外的一切原因——哪怕上游说没扣费——都按 UNKNOWN 处理并结算。
 NO_UPSTREAM_COST_RECEIPTS: frozenset[str] = frozenset(
     {
+        # 持久化 dispatch 收据已明确证明请求未送达或送达后上游未产生费用。
+        UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+        UPSTREAM_DISPATCH_PROVEN_NO_COST,
         # 提交前用户主动取消，HTTP 请求尚未发出。
         "pre_submit_cancel",
         # 提交前任务已过期，同上。
@@ -216,6 +222,21 @@ def clear_upstream_execution_state(
     """Remove receipts and provider identity before a new manual execution."""
 
     request = clear_upstream_execution_receipts(task_or_request)
+    for key in (
+        "billing_pricing_snapshot",
+        "billing_rate_multiplier_x10000",
+        "billing_admission_billable",
+        "billing_admission_source",
+        "billing_admission_ref_id",
+        "billing_free",
+        "billing_label",
+        "billing_exempt_reason",
+        "bonus_billing_obligation",
+        "billing_obligation_state",
+        "billing_obligation_terminal_at",
+        "billing_obligation_terminal_reason",
+    ):
+        request.pop(key, None)
     for key in tuple(request):
         if key in _UPSTREAM_EXECUTION_IDENTITY_KEYS or key.startswith(
             _UPSTREAM_EXECUTION_IDENTITY_PREFIXES
@@ -259,6 +280,29 @@ def mark_upstream_dispatch_proven_undelivered(
         execution_epoch=execution_epoch,
     )
     request[UPSTREAM_DISPATCH_DELIVERY] = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+    request.pop(UPSTREAM_RESPONSE_RECEIVED_AT, None)
+    request.pop(UPSTREAM_RESPONSE_ATTEMPT, None)
+    request.pop(UPSTREAM_RESPONSE_EXECUTION_EPOCH, None)
+    return request
+
+
+def mark_upstream_dispatch_proven_no_cost(
+    task_or_request: object,
+    *,
+    at: str,
+    attempt: int,
+    execution_epoch: int | None = None,
+) -> dict[str, object]:
+    request = mark_upstream_dispatch_started(
+        task_or_request,
+        at=at,
+        attempt=attempt,
+        execution_epoch=execution_epoch,
+    )
+    request[UPSTREAM_DISPATCH_DELIVERY] = UPSTREAM_DISPATCH_PROVEN_NO_COST
+    request.pop(UPSTREAM_RESPONSE_RECEIVED_AT, None)
+    request.pop(UPSTREAM_RESPONSE_ATTEMPT, None)
+    request.pop(UPSTREAM_RESPONSE_EXECUTION_EPOCH, None)
     return request
 
 
@@ -329,6 +373,21 @@ def has_proven_undelivered_dispatch(
     )
 
 
+def has_proven_no_cost_dispatch(
+    task_or_request: object,
+    *,
+    execution_epoch: int | None = None,
+) -> bool:
+    request = upstream_request_dict(task_or_request)
+    return bool(
+        has_upstream_dispatch_receipt(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+        and request.get(UPSTREAM_DISPATCH_DELIVERY) == UPSTREAM_DISPATCH_PROVEN_NO_COST
+    )
+
+
 def has_stable_provider_idempotency_key(task_or_request: object) -> bool:
     request = upstream_request_dict(task_or_request)
     key = request.get(PROVIDER_IDEMPOTENCY_KEY)
@@ -346,10 +405,17 @@ def upstream_dispatch_can_replay(
         execution_epoch=execution_epoch,
     ):
         return True
-    return has_proven_undelivered_dispatch(
-        task_or_request,
-        execution_epoch=execution_epoch,
-    ) or has_stable_provider_idempotency_key(task_or_request)
+    return (
+        has_proven_undelivered_dispatch(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+        or has_proven_no_cost_dispatch(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        )
+        or has_stable_provider_idempotency_key(task_or_request)
+    )
 
 
 def upstream_dispatch_result_unknown(
@@ -461,25 +527,109 @@ def decide_upstream_billing(
     )
 
 
-def decide_image_failure_billing(error_code: str | None) -> UpstreamBillingDecision:
+def decide_dispatch_evidence_billing(
+    task_or_request: object,
+    *,
+    actual_cost_known: bool,
+    execution_epoch: int | None = None,
+) -> UpstreamBillingDecision:
+    """Resolve billing from durable dispatch evidence for one execution.
+
+    A response or ambiguous dispatch may have incurred provider cost, so both
+    fail closed to settlement. Release is allowed only before dispatch or when
+    durable delivery evidence proves the request was undelivered/no-cost.
+    """
+
+    if has_proven_undelivered_dispatch(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ):
+        return decide_upstream_billing(
+            upstream_billable=False,
+            actual_cost_known=actual_cost_known,
+            receipt_reasons=(UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,),
+        )
+    if has_proven_no_cost_dispatch(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ):
+        return decide_upstream_billing(
+            upstream_billable=False,
+            actual_cost_known=actual_cost_known,
+            receipt_reasons=(UPSTREAM_DISPATCH_PROVEN_NO_COST,),
+        )
+    if has_upstream_response_receipt(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ) or has_upstream_dispatch_receipt(
+        task_or_request,
+        execution_epoch=execution_epoch,
+    ):
+        return decide_upstream_billing(
+            upstream_billable=None,
+            actual_cost_known=actual_cost_known,
+        )
+    return decide_upstream_billing(
+        upstream_billable=False,
+        actual_cost_known=actual_cost_known,
+        receipt_reasons=("submit_failed_before_upstream_cost",),
+    )
+
+
+def decide_image_failure_billing(
+    error_code: str | None,
+    *,
+    task_or_request: object | None = None,
+    execution_epoch: int | None = None,
+) -> UpstreamBillingDecision:
     """图片生成失败时该 release 还是 settle。
 
-    上游结果不可知或已在 2xx 后失败时按 UNKNOWN 走默认结算；只有适配层能
-    证明失败发生在上游计费前，才允许释放 hold。
+    error code 只能描述失败类型，不能证明请求是否到达或上游是否计费。只有
+    当前 execution 没有 dispatch 收据，或已有 durable 的 undelivered/no-cost
+    收据时才允许释放 hold；其余一律按 UNKNOWN 默认结算。
     """
+    if task_or_request is not None:
+        if has_proven_undelivered_dispatch(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        ):
+            return decide_upstream_billing(
+                upstream_billable=False,
+                actual_cost_known=False,
+                receipt_reasons=(UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,),
+            )
+        if has_proven_no_cost_dispatch(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        ):
+            return decide_upstream_billing(
+                upstream_billable=False,
+                actual_cost_known=False,
+                receipt_reasons=(UPSTREAM_DISPATCH_PROVEN_NO_COST,),
+            )
     if (error_code or "").strip() in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
         return decide_upstream_billing(
             upstream_billable=None,
             actual_cost_known=False,
         )
+    if task_or_request is not None:
+        if not has_upstream_dispatch_receipt(
+            task_or_request,
+            execution_epoch=execution_epoch,
+        ):
+            return decide_upstream_billing(
+                upstream_billable=False,
+                actual_cost_known=False,
+                receipt_reasons=(IMAGE_FAILED_BEFORE_UPSTREAM_COST,),
+            )
     return decide_upstream_billing(
-        upstream_billable=False,
+        upstream_billable=None,
         actual_cost_known=False,
-        receipt_reasons=(IMAGE_FAILED_BEFORE_UPSTREAM_COST,),
     )
 
 
 __all__ = [
+    "GENERATION_TAKEOVER_CHECKPOINT_KEY",
     "IMAGE_FAILED_BEFORE_UPSTREAM_COST",
     "IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES",
     "NO_UPSTREAM_COST_RECEIPTS",
@@ -489,6 +639,7 @@ __all__ = [
     "UPSTREAM_DISPATCH_DELIVERY",
     "UPSTREAM_DISPATCH_EXECUTION_EPOCH",
     "UPSTREAM_DISPATCH_PROVEN_UNDELIVERED",
+    "UPSTREAM_DISPATCH_PROVEN_NO_COST",
     "UPSTREAM_DISPATCH_STARTED_AT",
     "UPSTREAM_RESPONSE_ATTEMPT",
     "UPSTREAM_RESPONSE_EXECUTION_EPOCH",
@@ -501,15 +652,18 @@ __all__ = [
     "classify_upstream_cost",
     "clear_upstream_execution_receipts",
     "clear_upstream_execution_state",
+    "decide_dispatch_evidence_billing",
     "decide_image_failure_billing",
     "decide_upstream_billing",
     "has_proven_undelivered_dispatch",
+    "has_proven_no_cost_dispatch",
     "has_stable_provider_idempotency_key",
     "has_upstream_dispatch_receipt",
     "has_upstream_response_receipt",
     "is_no_upstream_cost_receipt",
     "mark_upstream_dispatch_started",
     "mark_upstream_dispatch_proven_undelivered",
+    "mark_upstream_dispatch_proven_no_cost",
     "mark_upstream_response_received",
     "receipt_execution_identity",
     "resolve_billing_action",

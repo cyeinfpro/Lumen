@@ -40,12 +40,13 @@ class _Db:
         self.rolled_back = False
         self._conversation: Any | None = None
         self.locked_conversation_override: Any = _NO_CONVERSATION_OVERRIDE
+        self.locked_user = _user()
 
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
         rendered = str(statement).lower()
         if "from users" in rendered:
-            return _Result("user-1")
+            return _Result(self.locked_user)
         if (
             "from conversations" in rendered
             and getattr(statement, "_for_update_arg", None) is not None
@@ -126,6 +127,64 @@ def _parent_user(content: dict[str, Any]) -> SimpleNamespace:
         role="user",
         content=content,
     )
+
+
+def test_regenerate_fingerprint_changes_with_target_or_intent() -> None:
+    original = regenerate._regenerate_request_fingerprint(  # noqa: SLF001
+        target_message_id="assistant-old",
+        intent="chat",
+    )
+    changed_target = regenerate._regenerate_request_fingerprint(  # noqa: SLF001
+        target_message_id="assistant-other",
+        intent="chat",
+    )
+    changed_intent = regenerate._regenerate_request_fingerprint(  # noqa: SLF001
+        target_message_id="assistant-old",
+        intent="text_to_image",
+    )
+
+    assert original != changed_target
+    assert original != changed_intent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_operation", "stored_fingerprint"),
+    [
+        ("conversation.message.create", "f" * 64),
+        ("conversation.message.regenerate", "0" * 64),
+    ],
+)
+async def test_regenerate_lookup_rejects_cross_operation_or_changed_target(
+    stored_operation: str,
+    stored_fingerprint: str,
+) -> None:
+    completion = SimpleNamespace(
+        id="completion-1",
+        message_id="assistant-new",
+        upstream_request=regenerate._idempotency_request_metadata(  # noqa: SLF001
+            None,
+            operation_namespace=stored_operation,
+            request_fingerprint=stored_fingerprint,
+        ),
+    )
+    db = _Db([_Result(completion), _Result(None)])
+    request_fingerprint = regenerate._regenerate_request_fingerprint(  # noqa: SLF001
+        target_message_id="assistant-old",
+        intent="chat",
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        await regenerate._lookup_idempotent_regenerate(  # noqa: SLF001
+            db,  # type: ignore[arg-type]
+            "user-1",
+            "conv-1",
+            "same-key",
+            request_fingerprint=request_fingerprint,
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 409
+    assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
 
 
 @pytest.mark.asyncio
@@ -537,6 +596,15 @@ async def test_regenerate_uses_current_image_output_format_setting(
     assert out.generation_ids == ["gen-new"]
     assert captured["default_image_output_format"] == "png"
     assert captured["image_params"].output_format is None
+    expected_fingerprint = regenerate._regenerate_request_fingerprint(  # noqa: SLF001
+        target_message_id="assistant-old",
+        intent="text_to_image",
+    )
+    assert captured["request_metadata"] == regenerate._idempotency_request_metadata(  # noqa: SLF001
+        None,
+        operation_namespace=regenerate._MESSAGE_REGENERATE_IDEMPOTENCY_OPERATION,  # noqa: SLF001
+        request_fingerprint=expected_fingerprint,
+    )
 
 
 @pytest.mark.asyncio

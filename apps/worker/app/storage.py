@@ -6,6 +6,7 @@ key 规范（对齐 DESIGN §6.6）：`u/{user_id}/g/{generation_id}/{kind}.{ext
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
 import logging
 import os
@@ -44,6 +45,62 @@ _LINK_UNSUPPORTED_ERRNOS = frozenset(
     }
 )
 _LINK_FALLBACK_MAX_ATTEMPTS = 3
+_DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+)
+
+
+def _sync_filesystem(fd: int) -> None:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syncfs = libc.syncfs
+    except (AttributeError, OSError) as exc:
+        raise OSError(
+            errno.ENOTSUP,
+            "syncfs is unavailable for directory durability fallback",
+        ) from exc
+    syncfs.argtypes = [ctypes.c_int]
+    syncfs.restype = ctypes.c_int
+    if syncfs(fd) != 0:
+        code = ctypes.get_errno() or errno.EIO
+        raise OSError(code, os.strerror(code))
+
+
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
+                raise
+            _sync_filesystem(fd)
+    finally:
+        os.close(fd)
+
+
+def mkdir_parents_durable(path: Path) -> None:
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+        else:
+            fsync_directory(directory.parent)
 
 
 class StorageDiskFullError(OSError):
@@ -74,7 +131,7 @@ class LocalStorage:
 
     def ensure_ready(self) -> Path:
         """Create and validate the configured root during worker startup."""
-        self.root.mkdir(parents=True, exist_ok=True)
+        mkdir_parents_durable(self.root)
         if not self.root.is_dir():
             raise NotADirectoryError(f"storage root is not a directory: {self.root}")
         return self.root
@@ -103,7 +160,7 @@ class LocalStorage:
             raise StorageDiskFullError(key)
         p = self.path_for(key)
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_parents_durable(p.parent)
             tmp = p.with_name(f".{p.name}.{secrets.token_hex(8)}.tmp")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
@@ -116,13 +173,16 @@ class LocalStorage:
                 except OSError as exc:
                     if isinstance(exc, FileExistsError):
                         if p.read_bytes() == data:
+                            fsync_directory(p.parent)
                             return StoragePutResult(size=len(data), created=False)
                         raise
                     if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
                         raise
                     created = self._put_bytes_without_link(p, data)
                     if not created:
+                        fsync_directory(p.parent)
                         return StoragePutResult(size=len(data), created=False)
+                fsync_directory(p.parent)
             finally:
                 self._discard_tmp(tmp, key)
             return StoragePutResult(size=len(data), created=True)
@@ -212,8 +272,10 @@ class LocalStorage:
         return await asyncio.to_thread(self.get_bytes, key)
 
     def delete(self, key: str) -> bool:
+        path = self.path_for(key)
         try:
-            self.path_for(key).unlink()
+            path.unlink()
+            fsync_directory(path.parent)
             return True
         except FileNotFoundError:
             return False
@@ -229,4 +291,11 @@ class LocalStorage:
 storage = LocalStorage(create_root=False)
 
 
-__all__ = ["LocalStorage", "StorageDiskFullError", "StoragePutResult", "storage"]
+__all__ = [
+    "LocalStorage",
+    "StorageDiskFullError",
+    "StoragePutResult",
+    "fsync_directory",
+    "mkdir_parents_durable",
+    "storage",
+]

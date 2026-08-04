@@ -55,6 +55,7 @@ from ..services.video import options as video_options_service
 from ..services.video import presentation as video_presentation
 from ..services.video import reference_media as video_reference_service
 from ..services.video import submission as video_submission_service
+from ..services.active_user import ActiveUserSnapshot
 from ..services.video.errors import video_http_error
 from ..services.video_file_durability import (
     fsync_directory as _durability_fsync_directory,
@@ -543,6 +544,8 @@ async def _create_video_generation_record(
     workflow_metadata: dict[str, Any] | None = None,
     defer_commit: bool = False,
     deferred_publish_payload: dict[str, Any] | None = None,
+    active_user_snapshot: ActiveUserSnapshot | None = None,
+    idempotency_serialized: bool = False,
 ) -> VideoGenerationOut:
     return await video_submission_service.create_video_generation_record(
         db,
@@ -551,6 +554,8 @@ async def _create_video_generation_record(
         context=video_submission_service.VideoSubmissionContext(
             request=request,
             session_id=durable_session_id(request),
+            active_user_snapshot=active_user_snapshot,
+            idempotency_serialized=idempotency_serialized,
             input_image_snapshot=input_image_snapshot,
             reference_media_snapshot=reference_media_snapshot,
             workflow_metadata=workflow_metadata,
@@ -582,10 +587,6 @@ async def create_video_generation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> VideoGenerationOut:
-    if getattr(user, "account_mode", "wallet") != "wallet":
-        raise _http(
-            "account_mode_forbidden", "video generation requires wallet mode", 403
-        )
     existing = (
         await db.execute(
             select(VideoGeneration).where(

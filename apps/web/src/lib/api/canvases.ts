@@ -1,4 +1,8 @@
 import { apiFetch, apiFetchNoContent } from "./http";
+import {
+  idempotentPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 import { normalizeCanvasGraph } from "../canvas/graph";
 import type {
   CanvasDocument,
@@ -64,10 +68,20 @@ export function listCanvases(
 }
 
 export function createCanvas(input: CreateCanvasInput): Promise<CanvasDocument> {
-  return apiFetch<unknown>("/canvases", {
-    method: "POST",
-    body: JSON.stringify(input),
-  }).then(normalizeCanvasDocument);
+  return withSemanticPostIdempotency(
+    { operation: "canvas.document.create" },
+    input,
+    async (idempotencyKey) =>
+      validateCanvasDocumentResponse(
+        await apiFetch<unknown>(
+          "/canvases",
+          idempotentPostRequest({
+            ...input,
+            idempotency_key: idempotencyKey,
+          }),
+        ),
+      ),
+  );
 }
 
 export function getCanvas(canvasId: string): Promise<CanvasDocument> {
@@ -93,10 +107,18 @@ export function deleteCanvas(canvasId: string): Promise<void> {
 }
 
 export function duplicateCanvas(canvasId: string): Promise<CanvasDocument> {
-  return apiFetch<unknown>(
-    `/canvases/${encodeURIComponent(canvasId)}/duplicate`,
-    { method: "POST" },
-  ).then(normalizeCanvasDocument);
+  const payload = {};
+  return withSemanticPostIdempotency(
+    { operation: "canvas.document.duplicate", canvasId },
+    payload,
+    async (idempotencyKey) =>
+      validateCanvasDocumentResponse(
+        await apiFetch<unknown>(
+          `/canvases/${encodeURIComponent(canvasId)}/duplicate`,
+          idempotentPostRequest({ idempotency_key: idempotencyKey }),
+        ),
+      ),
+  );
 }
 
 export function applyCanvasMutations(
@@ -118,17 +140,22 @@ export function executeCanvasNode(
   nodeId: string,
   documentRevision: number,
 ): Promise<{ run?: CanvasRun; execution?: CanvasNodeExecution }> {
-  const idempotencyKey = randomId();
-  return apiFetch(
-    `/canvases/${encodeURIComponent(canvasId)}/nodes/${encodeURIComponent(nodeId)}/execute`,
-    {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({
-        document_revision: documentRevision,
-        idempotency_key: idempotencyKey,
-        auto_select_on_success: true,
-      }),
+  const payload = {
+    document_revision: documentRevision,
+    auto_select_on_success: true,
+  };
+  return withSemanticPostIdempotency(
+    { operation: "canvas.node.execute", canvasId, nodeId },
+    payload,
+    async (idempotencyKey) => {
+      const response = await apiFetch<unknown>(
+        `/canvases/${encodeURIComponent(canvasId)}/nodes/${encodeURIComponent(nodeId)}/execute`,
+        idempotentPostRequest({
+          ...payload,
+          idempotency_key: idempotencyKey,
+        }),
+      );
+      return validateCanvasExecutionResponse(response);
     },
   );
 }
@@ -224,6 +251,29 @@ function normalizeCanvasDocument(value: unknown): CanvasDocument {
     recent_executions: executions,
     active_runs: activeRuns,
   };
+}
+
+function validateCanvasDocumentResponse(value: unknown): CanvasDocument {
+  const raw = asRecord(value);
+  if (typeof raw.id !== "string" || raw.id.length === 0) {
+    throw new TypeError("malformed canvas document response");
+  }
+  return normalizeCanvasDocument(value);
+}
+
+function validateCanvasExecutionResponse(
+  value: unknown,
+): { run?: CanvasRun; execution?: CanvasNodeExecution } {
+  const raw = asRecord(value);
+  const run = asRecord(raw.run);
+  const execution = asRecord(raw.execution);
+  const hasRun = typeof run.id === "string" && run.id.length > 0;
+  const hasExecution =
+    typeof execution.id === "string" && execution.id.length > 0;
+  if (!hasRun && !hasExecution) {
+    throw new TypeError("malformed canvas execution response");
+  }
+  return value as { run?: CanvasRun; execution?: CanvasNodeExecution };
 }
 
 function normalizeExecution(value: unknown): CanvasNodeExecution {
@@ -337,10 +387,4 @@ function number(value: unknown, fallback: number): number {
 
 function optionalNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function randomId(): string {
-  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `canvas-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }

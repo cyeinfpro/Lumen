@@ -297,6 +297,20 @@ def test_model_library_sync_proxy_settings_are_registered_and_validated():
     assert parse_value(proxy_name, "s5-us") == "s5-us"
 
 
+def test_telegram_proxy_endpoint_settings_are_registered() -> None:
+    bind_host = get_spec("telegram.proxy_bind_host")
+    advertise_host = get_spec("telegram.proxy_advertise_host")
+
+    assert bind_host is not None
+    assert advertise_host is not None
+    assert bind_host.parser is str
+    assert advertise_host.parser is str
+    assert bind_host.env_fallback == "TELEGRAM_PROXY_BIND_HOST"
+    assert advertise_host.env_fallback == "TELEGRAM_PROXY_ADVERTISE_HOST"
+    assert parse_value(bind_host, "0.0.0.0") == "0.0.0.0"
+    assert parse_value(advertise_host, "api") == "api"
+
+
 def test_video_providers_setting_allows_shared_proxy_reference() -> None:
     spec = get_spec("video.providers")
     assert spec is not None

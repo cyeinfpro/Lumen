@@ -269,11 +269,17 @@ async def test_failed_image_job_stays_refundable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_image_job_status_is_bad_response() -> None:
-    # 既不是终态也不是 uncertain 的状态仍按协议错误处理。
+async def test_unknown_image_job_status_requires_original_job_recovery() -> None:
+    # 已拿到 accepted handle 后的未知状态只能恢复原 job，不能按协议错误重投。
     exc = await _finish_job_with_status("weird")
 
-    assert exc.error_code == TEST_UPSTREAM_SERVICES.infrastructure.EC.BAD_RESPONSE.value
+    assert (
+        exc.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
+    )
+    assert exc.payload["upstream_result_unknown"] is True
+    assert exc.payload["recovery_only"] is True
+    assert exc.payload["sidecar_execution"]["job_id"] == "job-1"
 
 
 @pytest.mark.asyncio

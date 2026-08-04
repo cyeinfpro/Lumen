@@ -25,6 +25,11 @@ import { toast } from "@/components/ui/primitives/Toast";
 import { useCreateApparelWorkflowMutation } from "@/lib/queries";
 import { API_BASE } from "@/lib/apiClient";
 import { ensureCsrfToken, refreshCsrfToken } from "@/lib/api/http";
+import {
+  assertConfirmedIdentityResponse,
+  bindConfirmedIdentityXhr,
+  coordinateIdentityMismatchResponse,
+} from "@/lib/auth/identityPolicy";
 import { OnlineBanner } from "./components/OnlineBanner";
 import { ProjectMobileTabBar, ProjectMobileTopBar, ProjectTopBar } from "./components/ProjectTopBar";
 import { InfoPanel } from "./components/StageFrame";
@@ -127,6 +132,7 @@ async function uploadWithProgress(
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE.replace(/\/$/, "")}/images/upload`);
       xhr.withCredentials = true;
+      const identity = bindConfirmedIdentityXhr(xhr, "/images/upload");
       if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
 
       const fd = new FormData();
@@ -138,11 +144,16 @@ async function uploadWithProgress(
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
+            assertConfirmedIdentityResponse(identity);
             const data = JSON.parse(xhr.responseText) as UploadResult;
             resolve(data);
           } catch {
             reject(new Error("响应解析失败"));
           }
+        } else if (
+          coordinateIdentityMismatchResponse(xhr.status, xhr.responseText)
+        ) {
+          reject(new Error("登录身份已变化，请重新操作"));
         } else if (xhr.status === 403 && xhr.responseText.includes("csrf_failed")) {
           reject(new Error("csrf_failed"));
         } else if (xhr.status === 401) {

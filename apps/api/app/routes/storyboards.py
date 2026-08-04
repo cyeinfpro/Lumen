@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.models import (
@@ -19,10 +19,11 @@ from lumen_core.models import (
 
 from ..arq_pool import get_arq_pool
 from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..redis_client import get_redis
 from ..services.storyboard import assembly as storyboard_assembly
 from ..services.storyboard import common as storyboard_common
+from ..services.storyboard import idempotency as storyboard_idempotency
 from ..services.storyboard import output_sync as storyboard_output_sync
 from ..services.storyboard import patching as storyboard_patching
 from ..services.storyboard import repository as storyboard_repository
@@ -63,7 +64,14 @@ from ..services.storyboard.contracts import (
 )
 from ..sse_publish import publish_sse_event
 from .messages import publish_message_appended
-from .storyboard_parts import assembly, commands, publish, queries, submission
+from .storyboard_parts import (
+    assembly,
+    commands,
+    image_submission,
+    publish,
+    queries,
+    video_submission,
+)
 from .storyboard_parts.runtime import StoryboardRuntimeAdapter
 from .videos import video_out
 
@@ -116,6 +124,15 @@ _assembly_lease_expiry = storyboard_assembly.assembly_lease_expiry
 _assembly_attempt_is_stale = storyboard_assembly.assembly_attempt_is_stale
 _assembly_request_is_replay = storyboard_assembly.assembly_request_is_replay
 _assembly_status_for_response = storyboard_assembly.assembly_status_for_response
+_canonical_storyboard_request_fingerprint = (
+    storyboard_idempotency.canonical_request_fingerprint
+)
+_storyboard_child_task_idempotency_key = (
+    storyboard_idempotency.child_task_idempotency_key
+)
+_resolve_storyboard_client_idempotency_key = (
+    storyboard_idempotency.resolve_client_idempotency_key
+)
 _get_owned_conversation = storyboard_repository.get_owned_conversation
 _get_or_create_storyboard_conversation = (
     storyboard_repository.get_or_create_storyboard_conversation
@@ -225,8 +242,10 @@ async def _create_storyboard_image_task(
     prompt: str,
     attachment_ids: list[str],
     purpose: Literal["asset", "keyframe"],
+    task_idempotency_key: str,
+    idempotency_metadata: dict[str, str],
 ) -> StoryboardImageTask:
-    return await submission.create_storyboard_image_task(
+    return await image_submission.create_storyboard_image_task(
         db=db,
         user=user,
         run=run,
@@ -234,6 +253,8 @@ async def _create_storyboard_image_task(
         prompt=prompt,
         attachment_ids=attachment_ids,
         purpose=purpose,
+        task_idempotency_key=task_idempotency_key,
+        idempotency_metadata=idempotency_metadata,
         runtime=_runtime,
     )
 
@@ -423,14 +444,21 @@ async def generate_asset(
     body: StoryboardGenerateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+    request: Request = None,
 ) -> StoryboardRunOut:
-    return await submission.generate_asset(
+    return await image_submission.generate_asset(
         db=db,
         user=user,
         run_id=run_id,
         step_id=step_id,
         body=body,
+        idempotency_key=idempotency_key,
         runtime=_runtime,
+        session_id=durable_session_id(request),
     )
 
 
@@ -567,14 +595,21 @@ async def generate_shot_keyframe(
     body: StoryboardGenerateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+    request: Request = None,
 ) -> StoryboardRunOut:
-    return await submission.generate_shot_keyframe(
+    return await image_submission.generate_shot_keyframe(
         db=db,
         user=user,
         run_id=run_id,
         step_id=step_id,
         body=body,
+        idempotency_key=idempotency_key,
         runtime=_runtime,
+        session_id=durable_session_id(request),
     )
 
 
@@ -587,12 +622,19 @@ async def generate_all_keyframes(
     run_id: str,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+    request: Request = None,
 ) -> StoryboardRunOut:
-    return await submission.generate_all_keyframes(
+    return await image_submission.generate_all_keyframes(
         db=db,
         user=user,
         run_id=run_id,
+        idempotency_key=idempotency_key,
         runtime=_runtime,
+        session_id=durable_session_id(request),
     )
 
 
@@ -628,14 +670,19 @@ async def submit_shot(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> StoryboardRunOut:
-    return await submission.submit_shot(
+    return await video_submission.submit_shot(
         db=db,
         user=user,
         run_id=run_id,
         step_id=step_id,
         body=body,
         request=request,
+        idempotency_key=idempotency_key,
         runtime=_runtime,
     )
 
@@ -650,12 +697,17 @@ async def submit_all_shots(
     request: Request,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> StoryboardRunOut:
-    return await submission.submit_all_shots(
+    return await video_submission.submit_all_shots(
         db=db,
         user=user,
         run_id=run_id,
         request=request,
+        idempotency_key=idempotency_key,
         runtime=_runtime,
     )
 

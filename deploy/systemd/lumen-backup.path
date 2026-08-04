@@ -6,6 +6,7 @@ After=multi-user.target
 # Template default; install.sh/update.sh render this to the effective
 # LUMEN_BACKUP_ROOT before installing under /etc/systemd/system.
 PathChanged=/opt/lumendata/backup/.backup.trigger
+PathExists=/opt/lumendata/backup/.recovery/backup.json
 Unit=lumen-backup.service
 TriggerLimitIntervalSec=30s
 TriggerLimitBurst=3

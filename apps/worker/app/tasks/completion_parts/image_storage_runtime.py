@@ -6,13 +6,23 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, AsyncContextManager
 
-from lumen_core.constants import ImageSource
-
 from ...artifact_commit import (
     ArtifactAdoption,
     commit_error_or_default,
     commit_with_adoption_probe,
     rollback_artifact_transaction,
+)
+from ...outbox.contracts import PendingOutboxDelivery
+from .image_storage_persistence import (
+    COMPLETION_IMAGE_EVENT_METADATA_KEY,
+    COMPLETION_IMAGE_EVENT_OUTBOX_ID_KEY,
+    COMPLETION_IMAGE_EVENT_PUBLISHED_KEY,
+    CompletionToolImageKeys,
+    CompletionToolImageMetadata,
+    CompletionToolImageVariantSizes,
+    CompletionToolImageWrite,
+    PreparedCompletionToolImage,
+    stage_completion_tool_image,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,8 +68,20 @@ class CompletionToolImageStorage:
 
 @dataclass(frozen=True, slots=True)
 class CompletionToolImageEvents:
-    publish: Callable[..., Awaitable[None]]
     image_event: str
+    stage: Callable[..., PendingOutboxDelivery] | None = None
+    deliver: (
+        Callable[[Any, list[PendingOutboxDelivery]], Awaitable[None]] | None
+    ) = None
+    outbox_model: Any = None
+    publish: Callable[..., Awaitable[None]] | None = None
+
+
+@dataclass(slots=True)
+class CompletionToolImageEventContext:
+    channel: str
+    attempt: int
+    delivery: PendingOutboxDelivery | None = None
 
 
 def _tool_image_delivery_payload(
@@ -107,6 +129,8 @@ class CompletionToolImageService:
         raw_image: bytes,
         revised_prompt: str | None,
         billing_budget_micro: int,
+        event_context: CompletionToolImageEventContext | None = None,
+        cleanup_created_files_on_failure: bool = True,
     ) -> dict[str, Any]:
         (
             orig_ext,
@@ -131,17 +155,39 @@ class CompletionToolImageService:
         key_display = f"{key_prefix}/display2048.webp"
         key_preview = f"{key_prefix}/preview1024.webp"
         key_thumb = f"{key_prefix}/thumb256.jpg"
-        delivery_payload = _tool_image_delivery_payload(
+        prepared = PreparedCompletionToolImage(
             image_id=image_id,
-            task_id=task_id,
-            attempt_epoch=attempt_epoch,
-            execution_epoch=execution_epoch,
-            mime=orig_mime,
-            key_orig=key_orig,
-            revised_prompt=revised_prompt,
-            public_url=self.repository.public_url,
+            metadata=CompletionToolImageMetadata(
+                extension=orig_ext,
+                mime=orig_mime,
+                width=width,
+                height=height,
+                size_bytes=len(raw_image),
+                sha256=sha,
+                blurhash=blurhash_str,
+            ),
+            keys=CompletionToolImageKeys(
+                original=key_orig,
+                display=key_display,
+                preview=key_preview,
+                thumbnail=key_thumb,
+            ),
+            variant_sizes=CompletionToolImageVariantSizes(
+                display=display_size,
+                preview=preview_size,
+                thumbnail=thumb_size,
+            ),
+            delivery_payload=_tool_image_delivery_payload(
+                image_id=image_id,
+                task_id=task_id,
+                attempt_epoch=attempt_epoch,
+                execution_epoch=execution_epoch,
+                mime=orig_mime,
+                key_orig=key_orig,
+                revised_prompt=revised_prompt,
+                public_url=self.repository.public_url,
+            ),
         )
-
         created_storage_keys = await self.storage.write_files(
             [
                 (key_orig, raw_image),
@@ -153,82 +199,21 @@ class CompletionToolImageService:
         cleanup_allowed = True
         non_adoption_confirmed = False
         try:
-            image = self.repository.image_model(
-                id=image_id,
-                user_id=user_id,
-                owner_generation_id=None,
-                source=ImageSource.GENERATED,
-                parent_image_id=None,
-                storage_key=key_orig,
-                mime=orig_mime,
-                width=width,
-                height=height,
-                size_bytes=len(raw_image),
-                sha256=sha,
-                blurhash=blurhash_str,
-                visibility="private",
-                metadata_jsonb={
-                    "source": "completion_tool",
-                    "completion_id": task_id,
-                    "completion_attempt_epoch": attempt_epoch,
-                    "completion_execution_epoch": execution_epoch,
-                    **({"revised_prompt": revised_prompt} if revised_prompt else {}),
-                },
+            image_payload = await stage_completion_tool_image(
+                self,
+                session,
+                prepared=prepared,
+                write=CompletionToolImageWrite(
+                    task_id=task_id,
+                    attempt_epoch=attempt_epoch,
+                    execution_epoch=execution_epoch,
+                    user_id=user_id,
+                    message_id=message_id,
+                    revised_prompt=revised_prompt,
+                    billing_budget_micro=billing_budget_micro,
+                    event_context=event_context,
+                ),
             )
-            session.add(image)
-            session.add(
-                self.repository.image_variant_model(
-                    image_id=image_id,
-                    kind="display2048",
-                    storage_key=key_display,
-                    width=display_size[0],
-                    height=display_size[1],
-                )
-            )
-            session.add(
-                self.repository.image_variant_model(
-                    image_id=image_id,
-                    kind="preview1024",
-                    storage_key=key_preview,
-                    width=preview_size[0],
-                    height=preview_size[1],
-                )
-            )
-            session.add(
-                self.repository.image_variant_model(
-                    image_id=image_id,
-                    kind="thumb256",
-                    storage_key=key_thumb,
-                    width=thumb_size[0],
-                    height=thumb_size[1],
-                )
-            )
-
-            message = await session.get(self.repository.message_model, message_id)
-            if message is not None:
-                content = dict(message.content or {})
-                images_list = list(content.get("images") or [])
-                images_list.append(
-                    {
-                        **delivery_payload,
-                        "width": width,
-                        "height": height,
-                    }
-                )
-                content["images"] = images_list
-                message.content = content
-
-            await self.repository.record_usage(
-                session=session,
-                task_id=task_id,
-                attempt_epoch=attempt_epoch,
-                execution_epoch=execution_epoch,
-                budget_micro=billing_budget_micro,
-            )
-            image_payload = {
-                **delivery_payload,
-                "actual_size": f"{width}x{height}",
-            }
             commit_result = await commit_with_adoption_probe(
                 session,
                 probe=lambda: self._probe_tool_image_adoption(
@@ -276,9 +261,9 @@ class CompletionToolImageService:
                         ),
                     )
                 )
-                if rolled_back:
+                if rolled_back and cleanup_created_files_on_failure:
                     await self.storage.delete_files(created_storage_keys)
-                else:
+                elif not rolled_back:
                     logger.error(
                         "completion tool image cleanup deferred because rollback "
                         "was not confirmed task=%s epoch=%s attempt=%s image=%s",
@@ -288,6 +273,30 @@ class CompletionToolImageService:
                         image_id,
                     )
             raise
+
+    async def deliver_tool_image_event(
+        self,
+        *,
+        redis: Any,
+        event_context: CompletionToolImageEventContext,
+        image_payload: dict[str, Any],
+        task_id: str,
+    ) -> None:
+        if event_context.delivery is None:
+            return
+        try:
+            if self.events.deliver is None:
+                raise RuntimeError(
+                    "completion image durable event delivery is not configured"
+                )
+            await self.events.deliver(redis, [event_context.delivery])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "completion image outbox fast path failed task=%s image=%s err=%s",
+                task_id,
+                image_payload.get("image_id"),
+                exc,
+            )
 
     async def _probe_tool_image_adoption(
         self,
@@ -325,6 +334,11 @@ class CompletionToolImageService:
                     and metadata.get("completion_attempt_epoch") == attempt_epoch
                     and metadata.get("completion_execution_epoch") == execution_epoch
                 )
+                event_id = metadata.get(COMPLETION_IMAGE_EVENT_METADATA_KEY)
+                if exact and isinstance(event_id, str) and event_id:
+                    exact = (
+                        await session.get(self.events.outbox_model, event_id)
+                    ) is not None
                 return ArtifactAdoption.ADOPTED if exact else ArtifactAdoption.UNKNOWN
             return ArtifactAdoption.NOT_ADOPTED
 
@@ -348,6 +362,10 @@ class CompletionToolImageService:
             task_id=task_id,
             reserved_micro=reserved_tool_image_micro,
         )
+        event_context = CompletionToolImageEventContext(
+            channel=channel,
+            attempt=attempt,
+        )
         try:
             raw_image = self.codec.decode(b64_image)
         except binascii.Error as exc:
@@ -367,21 +385,14 @@ class CompletionToolImageService:
                 raw_image=raw_image,
                 revised_prompt=revised_prompt,
                 billing_budget_micro=budget_reserved_micro,
+                event_context=event_context,
             )
 
-        await self.events.publish(
-            redis,
-            user_id,
-            channel,
-            self.events.image_event,
-            {
-                "completion_id": task_id,
-                "message_id": message_id,
-                "attempt": attempt,
-                "attempt_epoch": attempt_epoch,
-                "execution_epoch": execution_epoch,
-                "images": [image_payload],
-            },
+        await self.deliver_tool_image_event(
+            redis=redis,
+            event_context=event_context,
+            image_payload=image_payload,
+            task_id=task_id,
         )
         return image_payload, budget_reserved_micro
 
@@ -389,8 +400,12 @@ class CompletionToolImageService:
 __all__ = [
     "CompletionToolImageBudget",
     "CompletionToolImageCodec",
+    "CompletionToolImageEventContext",
     "CompletionToolImageEvents",
     "CompletionToolImageRepository",
     "CompletionToolImageService",
     "CompletionToolImageStorage",
+    "COMPLETION_IMAGE_EVENT_METADATA_KEY",
+    "COMPLETION_IMAGE_EVENT_OUTBOX_ID_KEY",
+    "COMPLETION_IMAGE_EVENT_PUBLISHED_KEY",
 ]

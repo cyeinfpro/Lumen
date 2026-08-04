@@ -3,9 +3,11 @@
 # 用法：bash scripts/install.sh [--install] [--build] [--image-tag=vX.Y.Z]
 #      [--data-root=/data] [--db-root=/var/lib/lumen-data]
 # 入口负责 bootstrap、参数解析和流程编排；安装职责位于 scripts/install/*.sh。
-# 重复执行安全。失败时清理已启动容器但不删除数据卷。
+# 已有部署必须走 update；fresh install 失败时清理已启动容器但不删除数据卷。
 # LUMEN_NONINTERACTIVE=1 时从 LUMEN_ADMIN_EMAIL/LUMEN_ADMIN_PASSWORD 读取凭据。
 set -euo pipefail
+
+_LUMEN_INSTALL_INPUT_DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT-}"
 
 # `curl | bash` 下 BASH_SOURCE 可为空，set -u 会让访问 [0] 报
 # unbound variable 噪音；用 :- 兜底，dirname "" 返回 "." 落到 cwd。
@@ -18,6 +20,26 @@ if SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"; the
     :
 else
     SCRIPT_DIR="$(pwd)"
+fi
+if [ "${BASH_SOURCE[0]:-}" = "${0}" ] && [ -f "${SCRIPT_DIR}/lib.sh" ]; then
+    _LUMEN_ENTRY_LOCK_HELPER="${SCRIPT_DIR}/update/entry_lock.py"
+    _LUMEN_ENTRY_LOCK_SCRIPTS_DIR="$(cd "${SCRIPT_DIR}" && pwd -P)"
+    _LUMEN_ENTRY_LOCK_PATH="${_LUMEN_ENTRY_LOCK_SCRIPTS_DIR}.lumen-self-update.lock"
+    if [ ! -f "${_LUMEN_ENTRY_LOCK_HELPER}" ] \
+            || [ -L "${_LUMEN_ENTRY_LOCK_HELPER}" ]; then
+        printf '[ERROR] installer 脚本单元缺少安全入口锁 helper。\n' >&2
+        exit 78
+    fi
+    if ! python3 "${_LUMEN_ENTRY_LOCK_HELPER}" verify \
+            "${LUMEN_SCRIPT_UNIT_LOCK_FD:-}" \
+            "${_LUMEN_ENTRY_LOCK_PATH}" >/dev/null 2>&1; then
+        exec python3 "${_LUMEN_ENTRY_LOCK_HELPER}" exec \
+            "${_LUMEN_ENTRY_LOCK_PATH}" \
+            "${LUMEN_SELF_UPDATE_LOCK_TIMEOUT:-60}" \
+            -- bash "${BASH_SOURCE[0]}" "$@"
+    fi
+    unset _LUMEN_ENTRY_LOCK_HELPER _LUMEN_ENTRY_LOCK_SCRIPTS_DIR \
+        _LUMEN_ENTRY_LOCK_PATH
 fi
 
 raw_have_cmd() {
@@ -58,6 +80,8 @@ raw_install_packages() {
         raw_run_as_root zypper --non-interactive install "$@"
     elif raw_have_cmd apk; then
         raw_run_as_root apk add --no-cache "$@"
+    elif raw_have_cmd brew; then
+        brew install "$@"
     else
         return 1
     fi
@@ -89,265 +113,259 @@ raw_install_git() {
 }
 
 raw_drain_bootstrap_stdin() {
-    # In `curl .../install.sh | bash`, bootstrap execs into the freshly cloned
-    # local script before curl has always finished writing the rest of this
-    # file. Drain the script pipe first so curl does not report rc=23.
+    # Drain curl's script pipe before exec so curl does not report rc=23.
     if [ "${RAW_INSTALL_FROM_STDIN:-0}" = "1" ] && [ ! -t 0 ]; then
         cat >/dev/null 2>/dev/null || true
     fi
 }
 
-# 检测 install_dir 当前状态，返回字符串：
-#   empty   不存在或确实是空目录
-#   git     已经是 git checkout（有 .git/）
-#   release release 布局已就位（current 是 symlink，或 releases/ + shared/）
-#   inplace 旧 in-place 部署 / rsync 部署（看到 scripts/lib.sh 或 apps/api 但无 .git）
-#   mixed   既不像 Lumen 部署也不是空（杂乱目录，需要保留备份后重建）
-detect_install_state() {
-    local d="$1"
-    if [ ! -e "${d}" ]; then
-        printf 'empty'
-        return 0
-    fi
-    if [ -d "${d}/.git" ]; then
-        printf 'git'
-        return 0
-    fi
-    if [ -L "${d}/current" ] || { [ -d "${d}/releases" ] && [ -d "${d}/shared" ]; }; then
-        printf 'release'
-        return 0
-    fi
-    if [ -f "${d}/scripts/lib.sh" ] || [ -d "${d}/apps/api" ] || [ -d "${d}/packages/core" ]; then
-        printf 'inplace'
-        return 0
-    fi
-    if [ ! -d "${d}" ]; then
-        printf 'mixed'
-        return 0
-    fi
-    # 真正的空目录也归 empty；无法读取目录时保守视为 mixed，避免 clone 报错或覆盖未知内容。
-    if find "${d}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-        printf 'mixed'
-        return 0
-    fi
-    if [ -r "${d}" ] && [ -x "${d}" ]; then
-        printf 'empty'
-        return 0
-    fi
-    # 兜底分支：上面所有判断都没命中（罕见，例如 stat 失败 / 异常 ACL），
-    # 视为 mixed 让调用方走"备份后重建"分支，绝不让函数无 stdout 让调用方拿空。
-    printf 'mixed'
-    return 0
-}
-
-# 把最新 main 的代码合并到已有部署目录，保留运行时数据（.env / shared / releases /
-# current / var 等）。Docker 全栈版本下 .venv / node_modules / .next 都在镜像里，
-# 但保留 exclude 是为了兼容残留的旧 in-place 部署目录。
-overlay_repo_into_existing() {
-    local repo_url="$1"
-    local branch="$2"
-    local install_dir="$3"
-    local tmp_dir
-    tmp_dir="$(mktemp -d)" || return 1
-    # shellcheck disable=SC2064
-    trap "rm -rf '${tmp_dir}'" RETURN
-    printf '[INFO] 在临时目录 clone 最新 %s\n' "${branch}"
-    if ! git clone --quiet --depth 1 --branch "${branch}" "${repo_url}" "${tmp_dir}/repo"; then
-        printf '[ERROR] git clone 失败。\n' >&2
-        return 1
-    fi
-    if ! raw_have_cmd rsync; then
-        printf '[INFO] 缺少 rsync，尝试自动安装。\n'
-        raw_install_packages rsync || true
-    fi
-    if ! raw_have_cmd rsync; then
-        printf '[ERROR] 没有 rsync，无法非破坏性合并代码到 %s。\n' "${install_dir}" >&2
-        return 1
-    fi
-    printf '[INFO] 把最新代码合并到 %s（保留 .env / shared / releases / var 等运行时数据）\n' "${install_dir}"
-    rsync -a --delete-after \
-        --exclude='/.git/' \
-        --exclude='/.env' \
-        --exclude='/.env.*' \
-        --exclude='/shared/' \
-        --exclude='/releases/' \
-        --exclude='/current' \
-        --exclude='/previous' \
-        --exclude='/var/' \
-        --exclude='/.venv/' \
-        --exclude='/node_modules/' \
-        --exclude='/apps/worker/var/' \
-        --exclude='/apps/web/.next/' \
-        --exclude='/apps/web/.env.local' \
-        --exclude='/apps/web/node_modules/' \
-        --exclude='/.lumen-script.lock/' \
-        --exclude='/.update.log' \
-        "${tmp_dir}/repo/" "${install_dir}/"
-}
-
-overlay_release_scripts() {
-    local repo_url="$1"
-    local branch="$2"
-    local release_dir="$3"
-    local tmp_dir
-    tmp_dir="$(mktemp -d)" || return 1
-    # shellcheck disable=SC2064
-    trap "rm -rf '${tmp_dir}'" RETURN
-    printf '[INFO] 在临时目录 clone 最新 %s scripts/\n' "${branch}"
-    if ! git clone --quiet --depth 1 --branch "${branch}" \
-            "${repo_url}" "${tmp_dir}/repo"; then
-        printf '[ERROR] git clone 失败。\n' >&2
-        return 1
-    fi
-    if ! raw_have_cmd rsync; then
-        printf '[INFO] 缺少 rsync，尝试自动安装。\n'
-        raw_install_packages rsync || true
-    fi
-    if ! raw_have_cmd rsync; then
-        printf '[ERROR] 没有 rsync，无法同步 release scripts/。\n' >&2
-        return 1
-    fi
-    if [ ! -f "${tmp_dir}/repo/scripts/install.sh" ] \
-            || [ ! -f "${tmp_dir}/repo/scripts/lib.sh" ]; then
-        printf '[ERROR] 远端仓库缺少 scripts/install.sh 或 scripts/lib.sh。\n' >&2
-        return 1
-    fi
-    mkdir -p "${release_dir}/scripts"
-    printf '[INFO] 只同步 scripts/ 到 %s；release 其余源码保持不变。\n' \
-        "${release_dir}"
-    rsync -a "${tmp_dir}/repo/scripts/" "${release_dir}/scripts/"
-}
-
-bootstrap_from_raw_script() {
-    local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
-    local branch="${LUMEN_BRANCH:-main}"
-    # root 用户走 /opt/lumen（系统级部署，update.sh / lumen-storage-* systemd unit
-    # 都期望 LUMEN_DEPLOY_ROOT=/opt/lumen）；非 root 才回 $HOME/Lumen 个人目录。
-    local default_dir
-    if [ "${EUID:-$(id -u)}" = "0" ]; then
-        default_dir="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
-    else
-        default_dir="${HOME:-$PWD}/Lumen"
-    fi
-    local install_dir="${LUMEN_INSTALL_DIR:-${default_dir}}"
-
-    printf '[INFO] 当前脚本不是在完整 Lumen 仓库内运行，将进入远程 bootstrap 模式。\n'
-    printf '[INFO] 仓库：%s\n' "${repo_url}"
-    printf '[INFO] 分支：%s\n' "${branch}"
-    printf '[INFO] 目录：%s\n' "${install_dir}"
-
-    if ! raw_have_cmd git; then
-        if ! raw_install_git || ! raw_have_cmd git; then
-            printf '[ERROR] 缺少 git，且自动安装失败，无法从 GitHub 拉取 Lumen。\n' >&2
-            printf '        请确认当前用户有 sudo 权限，或手动安装 git 后重试。\n' >&2
-            printf '        手动拉取命令：git clone %s\n' "${repo_url}" >&2
-            exit 1
-        fi
-        printf '[INFO] git 已安装。\n'
-    fi
-
-    local state
-    state="$(detect_install_state "${install_dir}")"
-    printf '[INFO] 检测到目标目录状态：%s\n' "${state}"
-
-    case "${state}" in
-        git)
-            # 标准 git checkout：fetch + reset，确保 worktree 干净指向 origin/branch。
-            printf '[INFO] 已是 git checkout，拉取最新 %s 并 reset。\n' "${branch}"
-            git -C "${install_dir}" fetch --quiet origin "${branch}"
-            git -C "${install_dir}" checkout --quiet "${branch}"
-            git -C "${install_dir}" reset --hard "origin/${branch}"
-            export LUMEN_BOOTSTRAP_MODE="auto"
+raw_github_repo_slug() {
+    local repo_url="$1" owner="" repository=""
+    case "${repo_url}" in
+        https://github.com/*)
+            repo_url="${repo_url#https://github.com/}"
+            repo_url="${repo_url%.git}"
             ;;
-        release)
-            # release 布局：current 软链 + shared/releases。代码升级走 update.sh，
-            # 这里只把 update.sh / lib.sh 等 scripts 同步到最新，让 update.sh 有新逻辑。
-            printf '[INFO] 已是 release 布局，先同步 scripts/ 到最新再交给 update.sh。\n'
-            local current_release="${install_dir}/current"
-            if [ -L "${current_release}" ]; then
-                if ! overlay_release_scripts \
-                        "${repo_url}" "${branch}" "${current_release}"; then
-                    printf '[ERROR] release scripts/ 同步失败。\n' >&2
-                    exit 1
-                fi
-            else
-                printf '[WARN] %s 不是 symlink，跳过 scripts 同步，直接交给 update.sh。\n' "${current_release}" >&2
-            fi
-            export LUMEN_BOOTSTRAP_MODE="update"
-            ;;
-        inplace)
-            # 老 in-place 部署 / rsync 落地。把代码合并进去（保护运行时数据）。
-            # 之后让 update.sh 的 auto-migrate 把 in-place 切到 release 布局。
-            printf '[INFO] 检测到旧 in-place 部署，合并最新代码并交给 update.sh 自动迁移。\n'
-            if ! overlay_repo_into_existing "${repo_url}" "${branch}" "${install_dir}"; then
-                printf '[ERROR] 合并代码失败。\n' >&2
-                exit 1
-            fi
-            export LUMEN_BOOTSTRAP_MODE="update"
-            ;;
-        mixed)
-            # 杂乱目录：备份后重新 clone，避免误删用户数据。
-            local backup
-            backup="${install_dir}.bak.$(date -u +%Y%m%d%H%M%S 2>/dev/null || date +%s)"
-            printf '[WARN] %s 已存在但不像 Lumen 部署，备份到 %s 后重新 clone。\n' "${install_dir}" "${backup}"
-            mv "${install_dir}" "${backup}"
-            git clone --branch "${branch}" "${repo_url}" "${install_dir}"
-            export LUMEN_BOOTSTRAP_MODE="install"
-            ;;
-        empty|*)
-            git clone --branch "${branch}" "${repo_url}" "${install_dir}"
-            export LUMEN_BOOTSTRAP_MODE="install"
+        *)
+            return 1
             ;;
     esac
+    case "${repo_url}" in
+        */*/*|/*|*/) return 1 ;;
+    esac
+    owner="${repo_url%%/*}"
+    repository="${repo_url#*/}"
+    case "${owner}:${repository}" in
+        :*|*:|*[!A-Za-z0-9_.:-]*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "${repo_url}"
+}
 
-    # 决定 exec 时传给 install.sh 的参数。调用方没传时保留菜单入口；
-    # 需要无人值守更新时显式传 --auto 或 --update，避免脚本一运行就跳过菜单。
+raw_ensure_stable_resolver_tools() {
+    local missing=()
+    raw_have_cmd curl || missing+=(curl ca-certificates)
+    raw_have_cmd python3 || missing+=(python3)
+    if [ "${#missing[@]}" -gt 0 ]; then
+        printf '[INFO] stable bootstrap 需要 curl/python3，尝试自动安装。\n'
+        raw_install_packages "${missing[@]}" || true
+    fi
+    raw_have_cmd curl && raw_have_cmd python3
+}
+
+raw_resolve_stable_source() {
+    local repo_url="$1"
+    local requested_tag="$2"
+    local tmp_dir="$3"
+    local slug="" tag="${requested_tag}" manifest="" latest=""
+    slug="$(raw_github_repo_slug "${repo_url}")" || {
+        printf '[ERROR] stable bootstrap 仅支持 https://github.com/<owner>/<repo>.git。\n' >&2
+        return 1
+    }
+    raw_ensure_stable_resolver_tools || {
+        printf '[ERROR] 缺少 curl/python3，无法在 clone 前绑定 stable release。\n' >&2
+        return 1
+    }
+    mkdir -p "${tmp_dir}"
+    if [ -z "${tag}" ] || [ "${tag}" = "latest" ]; then
+        latest="${tmp_dir}/latest.json"
+        if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+                --connect-timeout 10 --max-time 60 \
+                "https://api.github.com/repos/${slug}/releases/latest" \
+                -o "${latest}"; then
+            printf '[ERROR] 无法解析 GitHub latest Release。\n' >&2
+            return 1
+        fi
+        tag="$(
+            python3 - "${latest}" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+tag = payload.get("tag_name") if isinstance(payload, dict) else None
+if not isinstance(tag, str) or not re.fullmatch(
+    r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?",
+    tag,
+):
+    raise SystemExit(1)
+print(tag)
+PY
+        )" || {
+            printf '[ERROR] latest Release tag 无效。\n' >&2
+            return 1
+        }
+    fi
+    case "${tag}" in
+        v[0-9]*.[0-9]*.[0-9]*) ;;
+        *)
+            printf '[ERROR] stable bootstrap tag 无效：%s\n' "${tag}" >&2
+            return 1
+            ;;
+    esac
+    manifest="${tmp_dir}/release-manifest.json"
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 \
+            "https://github.com/${slug}/releases/download/${tag}/release-manifest.json" \
+            -o "${manifest}"; then
+        printf '[ERROR] 无法下载 %s 的 release-manifest.json。\n' "${tag}" >&2
+        return 1
+    fi
+    local commit=""
+    commit="$(
+        python3 - "${manifest}" "${tag}" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+commit = payload.get("commit_sha") if isinstance(payload, dict) else None
+if (
+    not isinstance(payload, dict)
+    or not re.fullmatch(
+        r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?",
+        sys.argv[2],
+    )
+    or payload.get("schema_version") != 1
+    or payload.get("version") != sys.argv[2]
+    or not isinstance(payload.get("images"), dict)
+    or not isinstance(commit, str)
+    or not re.fullmatch(r"[0-9a-f]{40}", commit)
+):
+    raise SystemExit(1)
+print(commit)
+PY
+    )" || {
+        printf '[ERROR] %s release manifest 无效。\n' "${tag}" >&2
+        return 1
+    }
+    printf '%s\t%s\n' "${tag}" "${commit}"
+}
+
+raw_select_bootstrap_source() {
+    local repo_url="$1"
+    shift
+    local channel="${LUMEN_INSTALL_CHANNEL:-${LUMEN_UPDATE_CHANNEL:-stable}}"
+    local image_tag="${LUMEN_IMAGE_TAG:-}"
+    local arg="" resolver_tmp="" resolved=""
+    for arg in "$@"; do
+        case "${arg}" in
+            --image-tag=*) image_tag="${arg#*=}" ;;
+        esac
+    done
+    if [ -z "${LUMEN_INSTALL_CHANNEL+x}" ] \
+            && [ -z "${LUMEN_UPDATE_CHANNEL+x}" ] \
+            && [ -z "${image_tag}" ] \
+            && [ -n "${LUMEN_BRANCH+x}" ]; then
+        channel="main"
+    fi
+
+    RAW_BOOTSTRAP_SOURCE_MODE="stable"
+    RAW_BOOTSTRAP_SOURCE_REF=""
+    RAW_BOOTSTRAP_SOURCE_TAG=""
+    RAW_BOOTSTRAP_SOURCE_COMMIT=""
+    case "${image_tag}" in
+        v[0-9]*.[0-9]*.[0-9]*) channel="stable" ;;
+    esac
+    if [ "${channel}" = "main" ] || [ "${image_tag}" = "main" ]; then
+        RAW_BOOTSTRAP_SOURCE_MODE="rolling"
+        RAW_BOOTSTRAP_SOURCE_REF="${LUMEN_BRANCH:-main}"
+        export LUMEN_IMAGE_TAG="main"
+        return 0
+    fi
+    if [ "${channel}" != "stable" ]; then
+        printf '[ERROR] raw install 只接受 stable 或显式 main channel：%s\n' \
+            "${channel}" >&2
+        return 1
+    fi
+    if [ -n "${image_tag}" ] && [ "${image_tag}" != "latest" ]; then
+        case "${image_tag}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+                printf '[ERROR] stable raw install 的 image tag 必须是 latest 或 vX.Y.Z。\n' >&2
+                return 1
+                ;;
+        esac
+    fi
+    resolver_tmp="$(mktemp -d)" || return 1
+    resolved="$(
+        raw_resolve_stable_source \
+            "${repo_url}" "${image_tag:-latest}" "${resolver_tmp}"
+    )" || {
+        rm -rf "${resolver_tmp}" 2>/dev/null || true
+        return 1
+    }
+    rm -rf "${resolver_tmp}" 2>/dev/null || true
+    IFS=$'\t' read -r RAW_BOOTSTRAP_SOURCE_TAG \
+        RAW_BOOTSTRAP_SOURCE_COMMIT <<< "${resolved}"
+    RAW_BOOTSTRAP_SOURCE_REF="${RAW_BOOTSTRAP_SOURCE_TAG}"
+    export LUMEN_INSTALL_RESOLVED_TAG="${RAW_BOOTSTRAP_SOURCE_TAG}"
+    export LUMEN_INSTALL_RESOLVED_COMMIT="${RAW_BOOTSTRAP_SOURCE_COMMIT}"
+}
+
+raw_load_bootstrap_helper() {
+    local repo_url="$1" helper="${SCRIPT_DIR}/install/raw_bootstrap.sh"
+    local slug="" ref="" tmp=""
+    if [ -f "${helper}" ] && [ ! -L "${helper}" ]; then
+        bash -n "${helper}" || return 1
+        # shellcheck source=/dev/null
+        . "${helper}"
+        return 0
+    fi
+    raw_have_cmd curl || raw_install_packages curl ca-certificates || return 1
+    slug="$(raw_github_repo_slug "${repo_url}")" || return 1
+    ref="${RAW_BOOTSTRAP_SOURCE_COMMIT:-${RAW_BOOTSTRAP_SOURCE_REF}}"
+    tmp="$(mktemp)" || return 1
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 60 \
+            "https://raw.githubusercontent.com/${slug}/${ref}/scripts/install/raw_bootstrap.sh" \
+            -o "${tmp}" \
+            || ! bash -n "${tmp}"; then
+        rm -f "${tmp}" 2>/dev/null || true
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    . "${tmp}"
+    rm -f "${tmp}" 2>/dev/null || true
+}
+
+raw_bootstrap_entry() {
+    local repo_url="${LUMEN_REPO_URL:-https://github.com/cyeinfpro/Lumen.git}"
     local args=("$@")
-    if [ "${#args[@]}" -eq 0 ]; then
-        args=("menu")
+    [ "${#args[@]}" -gt 0 ] || args=("menu")
+    if ! raw_have_cmd git \
+            && { ! raw_install_git || ! raw_have_cmd git; }; then
+        printf '[ERROR] 缺少 git，且自动安装失败。\n' >&2
+        return 1
     fi
-
-    # 选 install.sh 路径：release 布局下 scripts/ 在 current 内（${ROOT}/current/scripts），
-    # 而不是 ${ROOT}/scripts；其它布局都在 ${ROOT}/scripts。fallback 到 inplace 路径
-    # 兼容奇怪情况（current symlink 失效）。
-    local script_path=""
-    if [ "${state}" = "release" ] && [ -L "${install_dir}/current" ] \
-            && [ -f "${install_dir}/current/scripts/install.sh" ]; then
-        script_path="${install_dir}/current/scripts/install.sh"
-    elif [ -f "${install_dir}/scripts/install.sh" ]; then
-        script_path="${install_dir}/scripts/install.sh"
-    elif [ -f "${install_dir}/current/scripts/install.sh" ]; then
-        script_path="${install_dir}/current/scripts/install.sh"
-    else
-        printf '[ERROR] 找不到 install.sh：既不在 %s/scripts/ 也不在 %s/current/scripts/\n' \
-            "${install_dir}" "${install_dir}" >&2
-        exit 1
-    fi
-
-    # 优先用 /dev/tty 接管 stdin（让交互菜单能读键），没 tty 就直接 exec。
-    # --auto / --update 都是非交互的，没 tty 也能跑通。
-    raw_drain_bootstrap_stdin
-    if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
-        exec bash "${script_path}" "${args[@]}" </dev/tty
-    fi
-    exec bash "${script_path}" "${args[@]}"
+    raw_select_bootstrap_source "${repo_url}" "${args[@]}" || return 1
+    raw_load_bootstrap_helper "${repo_url}" || {
+        printf '[ERROR] 无法加载已绑定 source 的 raw bootstrap helper。\n' >&2
+        return 1
+    }
+    bootstrap_from_raw_script "${repo_url}" "${args[@]}"
 }
 
 if [ ! -f "${SCRIPT_DIR}/lib.sh" ]; then
-    bootstrap_from_raw_script "$@"
+    # Preserve the menu default，避免脚本一运行就跳过菜单。
+    raw_bootstrap_entry "$@"
 fi
 
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
-ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 OS="$(detect_os)"
 
 # Full-repository install modules. Raw curl|bash bootstrap above must stay
 # self-contained because these files do not exist until the repository lands.
 INSTALL_MODULE_DIR="${SCRIPT_DIR}/install"
 for install_module in \
-        state.sh environment.sh runtime.sh prerequisites.sh layout.sh services.sh operations.sh; do
+        state.sh environment.sh runtime.sh prerequisites.sh layout.sh \
+        services.sh operations.sh entrypoint.sh; do
     if [ ! -f "${INSTALL_MODULE_DIR}/${install_module}" ]; then
         log_error "缺少安装模块：${INSTALL_MODULE_DIR}/${install_module}"
         exit 1
@@ -356,153 +374,12 @@ for install_module in \
     . "${INSTALL_MODULE_DIR}/${install_module}"
 done
 unset install_module
-
-# ---------------------------------------------------------------------------
-# 入口：菜单 / auto / install / update / uninstall 分发
-# 这一段保持向后兼容，逻辑没变。docker 化只影响 install 主流程。
-# ---------------------------------------------------------------------------
-usage() {
-    cat <<EOF
-Lumen 安装入口（Docker Compose 全栈版）
-
-用法：
-  bash scripts/install.sh                    打开运维菜单
-  bash scripts/install.sh --auto             自动：有部署走 update，新机器走 install
-  bash scripts/install.sh --install [opts]   直接安装 Lumen（docker compose）
-  bash scripts/install.sh --update           更新 Lumen
-  bash scripts/install.sh --uninstall        卸载 Lumen
-
---install 可选参数：
-  --image-tag=vX.Y.Z      钉死镜像 tag（默认探测 GHCR latest，不自动回退 main）
-  --data-root=/path       LUMEN_DATA_ROOT 文件/备份根目录（默认 /opt/lumendata）
-  --db-root=/path         LUMEN_DB_ROOT 数据库根目录（默认跟随 LUMEN_DATA_ROOT）
-  --build                 用本地 Dockerfile 构建而不是 pull GHCR（等价 LUMEN_INSTALL_BUILD=1）
-
-环境变量：
-  LUMEN_DEPLOY_ROOT       部署根目录（默认 /opt/lumen 或脚本所在父目录）
-  LUMEN_NONINTERACTIVE=1  非交互模式：从 LUMEN_ADMIN_EMAIL / LUMEN_ADMIN_PASSWORD 读管理员
-  LUMEN_IMAGE_REGISTRY    镜像 registry 前缀（默认 ghcr.io/cyeinfpro）
-  LUMEN_INSTALL_BUILD=1   等价 --build
-
-EOF
-}
-
-# --auto：根据当前机器状态自动选 update / install。
-#   release 布局或 in-place 部署或已有 systemd active → update（无人值守）
-#   否则                                              → fresh install（如有 tty 进交互菜单）
-dispatch_auto() {
-    local has_release=0 has_inplace=0 has_systemd=0
-    [ -L "${ROOT}/current" ] && has_release=1
-    [ -d "${ROOT}/apps/api" ] && has_inplace=1
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl is-active --quiet lumen-api.service 2>/dev/null \
-           || systemctl is-active --quiet lumen-worker.service 2>/dev/null \
-           || systemctl is-active --quiet lumen-web.service 2>/dev/null; then
-            has_systemd=1
-        fi
-    fi
-    if [ "${has_release}" = "1" ] || [ "${has_inplace}" = "1" ] || [ "${has_systemd}" = "1" ]; then
-        log_info "[auto] 检测到已有 Lumen 部署 (release=${has_release} inplace=${has_inplace} systemd=${has_systemd})，转入 update 流程。"
-        exec bash "${SCRIPT_DIR}/update.sh"
-    fi
-    log_info "[auto] 未检测到已有部署，进入全新安装流程。"
-    if [ ! -r /dev/tty ] && [ -t 0 ]; then
-        : # 有交互输入
-    elif [ ! -r /dev/tty ] && [ "${LUMEN_NONINTERACTIVE:-}" != "1" ]; then
-        log_warn "[auto] 当前没有 tty，全新安装会卡在交互输入。"
-        log_warn "[auto] 请改用：LUMEN_NONINTERACTIVE=1 bash ${SCRIPT_DIR}/install.sh --install   或在 SSH 终端里重跑。"
-        exit 2
-    fi
-    # fall through 到 install path
-}
-
-# 解析 --image-tag / --data-root / --db-root / --build；其它参数报错。
-# 调用方：dispatch_entrypoint 在收到 install/--install 后调用本函数。
-INSTALL_IMAGE_TAG_OVERRIDE=""
-INSTALL_DATA_ROOT_OVERRIDE=""
-INSTALL_DB_ROOT_OVERRIDE=""
-INSTALL_BUILD_FLAG="${LUMEN_INSTALL_BUILD:-0}"
-
-parse_install_args() {
-    local arg
-    for arg in "$@"; do
-        case "${arg}" in
-            --image-tag=*) INSTALL_IMAGE_TAG_OVERRIDE="${arg#*=}" ;;
-            --data-root=*) INSTALL_DATA_ROOT_OVERRIDE="${arg#*=}" ;;
-            --db-root=*)   INSTALL_DB_ROOT_OVERRIDE="${arg#*=}" ;;
-            --build)       INSTALL_BUILD_FLAG=1 ;;
-            *)
-                usage
-                log_error "未知 install 参数：${arg}"
-                exit 1
-                ;;
-        esac
-    done
-}
-
-dispatch_entrypoint() {
-    local command="${1:-menu}"
-    case "${command}" in
-        menu|--menu)
-            exec bash "${SCRIPT_DIR}/lumenctl.sh" menu
-            ;;
-        auto|--auto)
-            shift || true
-            dispatch_auto
-            # dispatch_auto 没退出说明要走 install path
-            ;;
-        install|--install)
-            shift || true
-            parse_install_args "$@"
-            ;;
-        update|--update)
-            exec bash "${SCRIPT_DIR}/update.sh"
-            ;;
-        uninstall|--uninstall)
-            exec bash "${SCRIPT_DIR}/uninstall.sh"
-            ;;
-        repair|--repair|repair-compose-project|--repair-compose-project)
-            # self-heal: 把跑在非 lumen project 的 lumen-* 容器迁回 project=lumen
-            # idempotent — 没冲突就秒退。详细文档见 scripts/lib.sh 的
-            # lumen_compose_project_unify 注释。
-            if ! command -v lumen_compose_project_unify >/dev/null 2>&1; then
-                log_error "lib.sh 未提供 lumen_compose_project_unify；请确认 install.sh 与 lib.sh 同版本。"
-                exit 1
-            fi
-            log_step "[repair] 检查并修复 lumen-* 容器 compose project 名漂移"
-            lumen_compose_project_unify
-            local _root="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
-            if [ ! -f "${_root}/docker-compose.yml" ]; then
-                log_error "未找到 ${_root}/docker-compose.yml；无法重新启动 stack。"
-                exit 1
-            fi
-            log_step "[repair] 重新启动 stack 到 project=${LUMEN_COMPOSE_PROJECT:-lumen}"
-            if ! lumen_compose_in "${_root}" up --pull missing -d --wait --force-recreate; then
-                log_error "[repair] docker compose up 失败；请检查 docker / compose 状态。"
-                exit 1
-            fi
-            log_info "[repair] 完成。当前 stack:"
-            lumen_compose_in "${_root}" ps
-            exit 0
-            ;;
-        help|-h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            usage
-            log_error "未知命令：${command}"
-            exit 1
-            ;;
-    esac
-}
-
 dispatch_entrypoint "$@"
 
 # ---------------------------------------------------------------------------
 # 失败处理 / 锁
-# 锁机制：使用 lib.sh 的 lumen_acquire_lock（${ROOT}/.lumen-maintenance.lock），
-# 与 update.sh / uninstall.sh 互斥。lumen_release_lock 由 EXIT trap 自动调用。
+# 锁机制：先解析受信任的目标 DEPLOY_ROOT，再使用目标根的维护锁与
+# update.sh / backup.sh / restore.sh / uninstall.sh 互斥。
 # ---------------------------------------------------------------------------
 INSTALL_PHASE=""               # 当前阶段名（用于错误时报告 + step protocol）
 INSTALL_STARTED_SERVICES=()    # 已启动的 compose service 列表（失败时 stop）
@@ -516,7 +393,12 @@ INSTALL_ORIGINAL_PREVIOUS_TARGET=""
 INSTALL_ORIGINAL_RUNNING_SERVICES=""
 INSTALL_HOST_ARTIFACT_SNAPSHOT=""
 INSTALL_GHCR_PROBE_FILE=""
+INSTALL_SOURCE_COMMIT=""
+INSTALL_SOURCE_COMMIT_PROOF=""
 INSTALL_PHASE_START_TS=""
+INSTALL_JOURNAL_DIR=""
+INSTALL_TRANSACTION_COMMITTED=0
+INSTALL_RECOVERED_COMPLETE=0
 
 # ---------------------------------------------------------------------------
 # 主流程
@@ -533,28 +415,39 @@ INSTALL_PHASE_START_TS=""
 trap 'on_error ${LINENO}' ERR
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
+trap 'on_signal SIGHUP 129' HUP
 
-# 全局维护锁：与 update.sh / uninstall.sh 互斥（共用 ${ROOT}/.lumen-maintenance.lock）。
-lumen_acquire_lock "${ROOT}" "install.sh"
+# 解析并准备最终部署根。显式 LUMEN_DEPLOY_ROOT 必须是绝对、无 traversal、
+# 无 symlink 歧义的路径；未设置时，release 内运行解析回部署根，开发 checkout
+# 保持使用自己的物理根目录。只允许在该目标根拿锁后接受 bootstrap transaction。
+if ! DEPLOY_ROOT="$(
+        lumen_resolve_install_deploy_root \
+            "${SCRIPT_DIR}" "${_LUMEN_INSTALL_INPUT_DEPLOY_ROOT}"
+)"; then
+    log_error "拒绝不安全或有歧义的安装部署根目录。"
+    exit 78
+fi
+LUMEN_DEPLOY_ROOT="${DEPLOY_ROOT}"
+export LUMEN_DEPLOY_ROOT
+unset _LUMEN_INSTALL_INPUT_DEPLOY_ROOT
+
+# 全局维护锁：所有部署操作共用目标根的 .lumen-maintenance.lock。
+lumen_acquire_lock "${DEPLOY_ROOT}" "install.sh"
 
 # 锁拿到后再装 cleanup_on_failure，覆盖 lumen_acquire_lock 内层的 release_lock
 # trap。cleanup 内 chain 调 release_lock 幂等。
 trap cleanup_on_failure EXIT
 
-# 解析最终的部署目录与数据目录（命令行 / 环境变量 / 默认值优先级）
-DEPLOY_ROOT="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
-# 当前脚本若是从 /opt/lumen/* 内部运行，优先尊重它的根目录
-case "${ROOT}" in
-    "${DEPLOY_ROOT}"|"${DEPLOY_ROOT}"/*)
-        # ROOT 在 deploy_root 下：保留 deploy_root 不变
-        ;;
-    *)
-        # 否则：如果用户没显式设置 LUMEN_DEPLOY_ROOT，回退到 ROOT（开发模式 / 本地仓库）
-        if [ -z "${LUMEN_DEPLOY_ROOT:-}" ]; then
-            DEPLOY_ROOT="${ROOT}"
-        fi
-        ;;
-esac
+if [ -n "${LUMEN_RAW_BOOTSTRAP_TRANSACTION:-}" ]; then
+    if [ ! -f "${SCRIPT_DIR}/install/bootstrap_transaction.py" ] \
+            || [ -L "${SCRIPT_DIR}/install/bootstrap_transaction.py" ]; then
+        log_error "bootstrap transaction helper 缺失，拒绝接受新脚本单元。"
+        exit 70
+    fi
+    python3 "${SCRIPT_DIR}/install/bootstrap_transaction.py" accept \
+        "${LUMEN_RAW_BOOTSTRAP_TRANSACTION}"
+    unset LUMEN_RAW_BOOTSTRAP_TRANSACTION
+fi
 
 LUMEN_DATA_ROOT="${INSTALL_DATA_ROOT_OVERRIDE:-${LUMEN_DATA_ROOT:-/opt/lumendata}}"
 LUMEN_DB_ROOT="${INSTALL_DB_ROOT_OVERRIDE:-${LUMEN_DB_ROOT:-${LUMEN_DATA_ROOT}}}"
@@ -573,28 +466,79 @@ COMPOSE_LABEL="COMPOSE_PROJECT_NAME=lumen docker compose"
 
 log_step "Lumen Docker Compose 全栈安装（OS=${OS}, deploy=${DEPLOY_ROOT}, data=${LUMEN_DATA_ROOT}, db=${LUMEN_DB_ROOT}）"
 
+if ! recover_stale_install_transaction; then
+    log_error "无法恢复 stale fresh-install journal，拒绝覆盖现场。"
+    exit 70
+fi
+if [ "${INSTALL_RECOVERED_COMPLETE}" -eq 1 ]; then
+    trap - ERR EXIT INT TERM HUP
+    lumen_release_lock 2>/dev/null || true
+    exit 0
+fi
+
+guard_install_target_is_fresh
 check_prerequisites
 prepare_data_dirs
 prepare_release_layout
+install_transaction_set_phase snapshot
+install_transaction_failpoint snapshot
 if ! snapshot_install_state; then
     log_error "无法创建安装事务快照，拒绝继续。"
     exit 1
 fi
+install_transaction_set_phase prepare_env
+install_transaction_failpoint prepare_env
 prepare_env_file
+install_transaction_set_phase probe_images
+install_transaction_failpoint probe_images
 probe_ghcr_image_tag
+install_transaction_set_phase pull_images
+install_transaction_failpoint pull_images
 pull_or_build_images
+install_transaction_set_phase start_infrastructure
+install_transaction_failpoint start_infrastructure
 start_infrastructure
+install_transaction_set_phase migrate_db
+install_transaction_failpoint migrate_db
 run_migration
+install_transaction_set_phase bootstrap_admin
+install_transaction_failpoint bootstrap_admin
 run_bootstrap_admin
+install_transaction_set_phase metadata
+install_transaction_failpoint metadata
+write_install_release_metadata
+install_transaction_set_phase ownership
+harden_install_release_ownership
+install_transaction_failpoint ownership
+install_transaction_set_phase start_services
+install_transaction_failpoint start_services
+if ! lumen_verify_backup_service_layout_binding; then
+    log_error "backup/maintenance root binding 在应用服务激活前失效。"
+    exit 70
+fi
 start_application_services
+install_transaction_set_phase switch
+install_transaction_failpoint switch
 switch_current_symlink
+install_transaction_set_phase host_operations
+install_transaction_failpoint host_operations
 install_update_runner_units
 install_storage_control_plane
+install_transaction_set_phase health
+install_transaction_failpoint health
 run_health_checks
 warn_about_legacy_systemd
+install_transaction_set_phase summary
 print_summary
 
-trap - ERR EXIT
+install_transaction_mark_complete
+trap - ERR EXIT INT TERM HUP
+install_transaction_failpoint complete
+if ! install_transaction_cleanup; then
+    log_error "安装已完成，但 durable journal 清理失败；下次重跑只会 finalize cleanup。"
+    lumen_release_lock 2>/dev/null || true
+    exit 1
+fi
 discard_install_state_snapshot
 lumen_release_lock 2>/dev/null || true
 exit 0
