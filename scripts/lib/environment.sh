@@ -15,8 +15,85 @@ lumen_read_dotenv_value() {
     printf '%s' "${raw}"
 }
 
+lumen_regular_file_path_safe() {
+    local file="$1"
+    if [ -L "${file}" ] \
+            || { [ -e "${file}" ] && [ ! -f "${file}" ]; }; then
+        log_error "路径不是可信普通文件：${file}"
+        return 1
+    fi
+    return 0
+}
+
+lumen_env_file_append_line_if_missing() {
+    local file="$1"
+    local line="$2"
+    case "${line}" in
+        *$'\n'*|*$'\r'*) return 1 ;;
+    esac
+    lumen_regular_file_path_safe "${file}" || return 1
+    python3 - "${file}" "${line}" <<'PY'
+import os
+import stat
+import sys
+
+path = os.path.abspath(sys.argv[1])
+line = sys.argv[2]
+if "\n" in line or "\r" in line or "\0" in line:
+    raise SystemExit(1)
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+if not nofollow:
+    raise SystemExit(1)
+flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | nofollow
+descriptor = os.open(path, flags)
+try:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > 16 * 1024 * 1024
+    ):
+        raise SystemExit(1)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    remaining = before.st_size
+    while remaining:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    content = b"".join(chunks)
+    encoded = line.encode("utf-8")
+    if encoded not in content.splitlines():
+        payload = (b"" if not content or content.endswith(b"\n") else b"\n")
+        payload += encoded + b"\n"
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+        os.fsync(descriptor)
+    after_fd = os.fstat(descriptor)
+    after_path = os.stat(path, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(after_fd.st_mode)
+        or not stat.S_ISREG(after_path.st_mode)
+        or after_fd.st_nlink != 1
+        or after_path.st_nlink != 1
+        or (after_fd.st_dev, after_fd.st_ino)
+        != (after_path.st_dev, after_path.st_ino)
+    ):
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
+PY
+}
+
 lumen_ensure_compose_db_env_vars() {
     local file="$1"
+    lumen_regular_file_path_safe "${file}" || return 1
     if [ ! -f "${file}" ]; then
         log_error "${file} 不存在，无法为 docker compose 读取 DB_USER/DB_PASSWORD/DB_NAME。"
         return 1
@@ -89,6 +166,7 @@ lumen_migrate_container_urls() {
         log_error "lumen_migrate_container_urls 需要 python3 来安全解析 URL。"
         return 1
     fi
+    lumen_regular_file_path_safe "${file}" || return 1
     if [ ! -f "${file}" ]; then
         log_error "${file} 不存在，无法迁移容器内 URL。"
         return 1
@@ -255,13 +333,36 @@ else:
 PY
 }
 
+lumen_release_shared_env_path_safe() {
+    local root="$1"
+    local shared_dir="${root%/}/shared"
+    local shared_env="${shared_dir}/.env"
+
+    if [ -L "${shared_dir}" ] \
+            || { [ -e "${shared_dir}" ] && [ ! -d "${shared_dir}" ]; }; then
+        log_error "shared 不是可信普通目录：${shared_dir}"
+        return 1
+    fi
+    if [ -L "${shared_env}" ] \
+            || { [ -e "${shared_env}" ] && [ ! -f "${shared_env}" ]; }; then
+        log_error "shared/.env 不是可信普通文件：${shared_env}"
+        return 1
+    fi
+}
+
 lumen_release_ensure_shared_env() {
     local root="$1"
-    local shared_env="${root}/shared/.env"
+    local shared_dir="${root}/shared"
+    local shared_env="${shared_dir}/.env"
     local root_env="${root}/.env"
     local current_env="${root}/current/.env"
 
-    mkdir -p "${root}/shared" 2>/dev/null || true
+    lumen_release_shared_env_path_safe "${root}" || return 1
+    if ! mkdir -p "${shared_dir}" 2>/dev/null; then
+        log_error "无法创建 shared 目录：${shared_dir}"
+        return 1
+    fi
+    lumen_release_shared_env_path_safe "${root}" || return 1
 
     if [ -f "${shared_env}" ]; then
         return 0
@@ -277,6 +378,10 @@ lumen_release_ensure_shared_env() {
         return 0
     fi
 
+    if [ -L "${current_env}" ]; then
+        log_error "current/.env 是不可信符号链接，拒绝复制到 shared/.env：${current_env}"
+        return 1
+    fi
     if [ -f "${current_env}" ]; then
         log_warn "shared/.env 缺失，检测到 current/.env；自动复制到 shared/.env。"
         if ! cp "${current_env}" "${shared_env}"; then

@@ -37,6 +37,14 @@ if [ "${ROOT_SOURCE}" = "deploy_root" ] \
 fi
 SHARED_DIR="${ROOT}/shared"
 SHARED_ENV="${SHARED_DIR}/.env"
+if ! lumen_release_shared_env_path_safe "${ROOT}"; then
+    log_error "拒绝从不安全的 shared/.env 启动更新。"
+    exit 78
+fi
+if ! lumen_require_systemd_flock; then
+    log_error "Linux systemd 更新路径需要 flock；请安装 util-linux 后重试。"
+    exit 78
+fi
 shared_data_root=""
 shared_db_root=""
 shared_backup_root=""

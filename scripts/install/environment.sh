@@ -44,6 +44,7 @@ env_file_set() {
     local file="$1"
     local key="$2"
     local value="$3"
+    lumen_regular_file_path_safe "${file}" || return 1
     validate_dotenv_value "${key}" "${value}" || return 1
     local tmp dir
     dir="$(dirname "${file}")"

@@ -204,7 +204,8 @@ _auto_install_docker() {
 
 # ---------------------------------------------------------------------------
 # A. 前置检查
-# 必装：docker / docker compose v2 / openssl / curl / python3 >= 3.8
+# 必装：docker / docker compose v2 / openssl / curl / python3 >= 3.8；
+# Linux 额外要求 util-linux 提供 flock。
 # 可选：systemd（仅 update-runner 路径用）
 # 磁盘：/opt 至少 10GB
 # ---------------------------------------------------------------------------
@@ -225,19 +226,26 @@ check_prerequisites() {
     command -v curl    >/dev/null 2>&1 || basics_missing+=("curl")
     command -v rsync   >/dev/null 2>&1 || basics_missing+=("rsync")
     command -v python3 >/dev/null 2>&1 || basics_missing+=("python3")
+    if [ "${OS}" = "linux" ] && ! command -v flock >/dev/null 2>&1; then
+        basics_missing+=("util-linux")
+    fi
     if [ "${#basics_missing[@]}" -gt 0 ]; then
         if ! _auto_install_basics "${basics_missing[@]}"; then
             log_error "缺少必备命令：${basics_missing[*]}（自动安装失败）"
             log_error "  请通过系统包管理器手动安装（apt/dnf/brew）后重跑。"
             exit 1
         fi
-        # 装完 re-check（PATH 可能没刷新）
-        for cmd in "${basics_missing[@]}"; do
+        # 装完 re-check（PATH 可能没刷新）。
+        for cmd in openssl curl rsync python3; do
             if ! command -v "${cmd}" >/dev/null 2>&1; then
                 log_error "${cmd} 自动安装后仍未在 PATH 中，请重新登录或手动安装后重跑。"
                 exit 1
             fi
         done
+        if [ "${OS}" = "linux" ] && ! command -v flock >/dev/null 2>&1; then
+            log_error "util-linux 安装后仍未检测到 flock；请检查 PATH 或手动安装后重跑。"
+            exit 1
+        fi
     fi
 
     if ! lumen_require_python_min_version python3 3 8; then

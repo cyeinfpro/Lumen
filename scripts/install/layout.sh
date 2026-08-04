@@ -211,11 +211,19 @@ prepare_release_layout() {
     RELEASE_DIR="${DEPLOY_ROOT}/releases/${release_id}"
     SHARED_DIR="${DEPLOY_ROOT}/shared"
 
+    if ! lumen_release_shared_env_path_safe "${DEPLOY_ROOT}"; then
+        log_error "shared 路径不安全，拒绝准备 release 布局。"
+        exit 78
+    fi
     # 创建顶层 + releases + shared
     lumen_run_as_root mkdir -p "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" || {
         log_error "无法创建部署目录 ${DEPLOY_ROOT}。请确认 sudo 权限。"
         exit 1
     }
+    if ! lumen_release_shared_env_path_safe "${DEPLOY_ROOT}"; then
+        log_error "shared 路径在创建后发生变化，拒绝继续安装。"
+        exit 78
+    fi
     if ! install_transaction_begin; then
         log_error "无法创建 durable fresh-install journal。"
         exit 1
@@ -307,6 +315,10 @@ prepare_env_file() {
     local shared_env="${SHARED_DIR}/.env"
     local example="${RELEASE_DIR}/.env.example"
 
+    if ! lumen_release_shared_env_path_safe "${DEPLOY_ROOT}"; then
+        log_error "shared/.env 不安全，拒绝生成或修改安装配置。"
+        exit 78
+    fi
     if [ ! -f "${example}" ]; then
         log_error "找不到 ${example}（仓库 .env.example 缺失？）"
         exit 1
@@ -494,10 +506,12 @@ probe_ghcr_image_tag() {
         if [ "${LUMEN_INSTALL_FALLBACK_MAIN:-0}" = "1" ] \
                 && printf '%s' "${resp}" | grep -q '"main"'; then
             log_warn "GHCR 上未找到 tag=${tag}，回退到 main。v1.0.0 发布后请改回 latest。"
-            env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
-            # 在 .env 顶部追加一行注释（如果还没加过）
-            if ! grep -q '^# install.sh: fallback to main' "${shared_env}"; then
-                printf '\n# install.sh: fallback to main; v1.0.0 发布后改回 latest\n' >> "${shared_env}"
+            if ! env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main" \
+                    || ! lumen_env_file_append_line_if_missing \
+                        "${shared_env}" \
+                        "# install.sh: fallback to main; v1.0.0 发布后改回 latest"; then
+                log_error "无法安全记录 fallback main 配置，拒绝继续安装。"
+                exit 1
             fi
         else
             log_warn "GHCR 上未找到 tag=${tag}。stable 安装不会自动回退 main；保留配置，pull 时可能失败。"

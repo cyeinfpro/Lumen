@@ -981,6 +981,7 @@ def _install_pull_run(
             [ "$2" = "TELEGRAM_BOT_TOKEN" ]
         }}
         env_file_set() {{ return 0; }}
+        lumen_env_file_append_line_if_missing() {{ return 0; }}
         lumen_release_manifest_required() {{
             [ "$1" = "v1.2.3" ]
         }}

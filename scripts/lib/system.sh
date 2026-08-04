@@ -395,7 +395,7 @@ lumen_find_shared_env() {
         "${script_root:+${script_root}/shared/.env}" \
         "${LUMEN_DEPLOY_ROOT:-/opt/lumen}/shared/.env"; do
         [ -n "${candidate}" ] || continue
-        if [ -f "${candidate}" ]; then
+        if [ -f "${candidate}" ] && [ ! -L "${candidate}" ]; then
             printf '%s' "${candidate}"
             return 0
         fi
@@ -410,7 +410,7 @@ lumen_dotenv_export_if_unset() {
     if [ -n "${!key:-}" ]; then
         return 0
     fi
-    if [ ! -f "${file}" ]; then
+    if [ -L "${file}" ] || [ ! -f "${file}" ]; then
         return 0
     fi
     value="$(lumen_env_value "${key}" "${file}")"

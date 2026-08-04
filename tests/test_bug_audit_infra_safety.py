@@ -4,6 +4,7 @@ import ast
 import os
 import re
 import shlex
+import stat
 import subprocess
 from pathlib import Path
 
@@ -355,14 +356,12 @@ def test_direct_nonroot_install_keeps_env_readable_via_existing_operator_group(
         LUMEN_INSTALL_CONFIG_GROUP={shlex.quote(operator_group)}
         harden_install_release_ownership
         test -r {shlex.quote(str(env_file))}
-        test "$(stat -f '%Lp' {shlex.quote(str(env_file))} 2>/dev/null \
-          || stat -c '%a' {shlex.quote(str(env_file))})" = 640
         """
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert captured_group.read_text(encoding="utf-8").strip() == operator_group
-    assert env_file.stat().st_mode & 0o007 == 0
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o640
 
 
 def test_direct_install_rejects_config_group_operator_does_not_have(

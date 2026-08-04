@@ -227,6 +227,7 @@ PY
 lumen_write_flock_lock_owner() {
     local fd="$1"
     local script_name="$2"
+    local lock_path="$3"
     local start_token=""
     local capability_pair=""
     local capability=""
@@ -244,17 +245,39 @@ PY
     IFS=$'\t' read -r capability capability_sha256 <<< "${capability_pair}"
     [ -n "${capability}" ] && [ -n "${capability_sha256}" ] || return 1
     python3 - "${fd}" "$$" "${start_token}" "${script_name}" \
-            "${capability_sha256}" <<'PY' || return 1
+            "${capability_sha256}" "${lock_path}" <<'PY' || return 1
 import os
 import stat
 import sys
 
 fd = int(sys.argv[1])
 metadata = os.fstat(fd)
-if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+path = sys.argv[6]
+current = os.stat(path, follow_symlinks=False)
+if (
+    not stat.S_ISREG(metadata.st_mode)
+    or not stat.S_ISREG(current.st_mode)
+    or metadata.st_nlink != 1
+    or current.st_nlink != 1
+    or (metadata.st_dev, metadata.st_ino)
+    != (current.st_dev, current.st_ino)
+):
     raise SystemExit(1)
 mode = stat.S_IMODE(metadata.st_mode)
-if mode & stat.S_IWOTH or not mode & (stat.S_IWUSR | stat.S_IWGRP):
+if mode in {0o640, 0o644, 0o664}:
+    if metadata.st_uid not in {0, os.geteuid()}:
+        raise SystemExit(1)
+    os.fchmod(fd, 0o600)
+    metadata = os.fstat(fd)
+    current = os.stat(path, follow_symlinks=False)
+    if (
+        stat.S_IMODE(metadata.st_mode) != 0o600
+        or stat.S_IMODE(current.st_mode) != 0o600
+        or (metadata.st_dev, metadata.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        raise SystemExit(1)
+elif mode not in {0o600, 0o660}:
     raise SystemExit(1)
 payload = (
     f"pid={sys.argv[2]}\n"
@@ -267,6 +290,14 @@ os.ftruncate(fd, 0)
 os.lseek(fd, 0, os.SEEK_SET)
 os.write(fd, payload)
 os.fsync(fd)
+after = os.stat(path, follow_symlinks=False)
+if (
+    not stat.S_ISREG(after.st_mode)
+    or after.st_nlink != 1
+    or (metadata.st_dev, metadata.st_ino)
+    != (after.st_dev, after.st_ino)
+):
+    raise SystemExit(1)
 PY
     LUMEN_LOCK_OWNER_TOKEN="flock"
     LUMEN_LOCK_OWNER_CAPABILITY="${capability}"
@@ -386,19 +417,30 @@ flags = (
     | getattr(os, "O_NOFOLLOW", 0)
 )
 parent_before = os.stat(parent, follow_symlinks=False)
-if not stat.S_ISDIR(parent_before.st_mode):
+trusted_uids = {0, os.geteuid()}
+
+
+def secure_directory(metadata):
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid in trusted_uids
+        and stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+    )
+
+
+if not secure_directory(parent_before):
     raise SystemExit(1)
 parent_fd = os.open(parent, flags)
 try:
     parent_opened = os.fstat(parent_fd)
     if (
-        not stat.S_ISDIR(parent_opened.st_mode)
+        not secure_directory(parent_opened)
         or (parent_before.st_dev, parent_before.st_ino)
         != (parent_opened.st_dev, parent_opened.st_ino)
     ):
         raise SystemExit(1)
     root_before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(root_before.st_mode):
+    if stat.S_ISLNK(root_before.st_mode) or not secure_directory(root_before):
         raise SystemExit(1)
     root_fd = os.open(name, flags, dir_fd=parent_fd)
     try:
@@ -406,7 +448,10 @@ try:
         root_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         parent_after = os.stat(parent, follow_symlinks=False)
         if (
-            (root_before.st_dev, root_before.st_ino)
+            not secure_directory(root_opened)
+            or not secure_directory(root_after)
+            or not secure_directory(parent_after)
+            or (root_before.st_dev, root_before.st_ino)
             != (root_opened.st_dev, root_opened.st_ino)
             or (root_before.st_dev, root_before.st_ino)
             != (root_after.st_dev, root_after.st_ino)
@@ -544,6 +589,26 @@ if not valid_type or (
 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 print(f"{opened.st_dev}\t{opened.st_ino}")
 PY
+}
+
+lumen_open_maintenance_flock_fd() {
+    local path="$1"
+    local saved_umask=""
+    saved_umask="$(umask)" || return 1
+    case "${saved_umask}" in
+        [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+        *) return 1 ;;
+    esac
+    umask 0077
+    if ! exec 6<>"${path}"; then
+        umask "${saved_umask}" 2>/dev/null || true
+        return 1
+    fi
+    if ! umask "${saved_umask}"; then
+        exec 6>&- 2>/dev/null || true
+        return 1
+    fi
+    return 0
 }
 
 lumen_maintenance_lock_path_safe() {
@@ -1235,7 +1300,7 @@ lumen_acquire_lock() {
             log_error "maintenance parent/root entry 在加锁期间发生替换：${root}"
             exit 1
         fi
-        if ! exec 6<>"${lock_file}"; then
+        if ! lumen_open_maintenance_flock_fd "${lock_file}"; then
             flock -u 9 2>/dev/null || true
             exec 9>&- 2>/dev/null || true
             log_error "无法创建 root-local maintenance 锁文件：${lock_file}"
@@ -1257,7 +1322,8 @@ lumen_acquire_lock() {
             log_error "root-local maintenance 锁或 root entry 发生替换：${root}"
             exit 1
         fi
-        if ! lumen_write_flock_lock_owner 6 "${script_name}"; then
+        if ! lumen_write_flock_lock_owner 6 "${script_name}" "${lock_file}" \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
             flock -u 6 2>/dev/null || true
             exec 6>&- 2>/dev/null || true
             flock -u 9 2>/dev/null || true
@@ -1383,7 +1449,7 @@ lumen_try_acquire_lock() {
             exec 9>&- || true
             return 1
         fi
-        if ! exec 6<>"${lock_file}"; then
+        if ! lumen_open_maintenance_flock_fd "${lock_file}"; then
             flock -u 9 2>/dev/null || true
             exec 9>&- || true
             return 1
@@ -1402,7 +1468,8 @@ lumen_try_acquire_lock() {
             exec 9>&- || true
             return 1
         fi
-        if ! lumen_write_flock_lock_owner 6 "${script_name}"; then
+        if ! lumen_write_flock_lock_owner 6 "${script_name}" "${lock_file}" \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
             flock -u 6 2>/dev/null || true
             exec 6>&- || true
             flock -u 9 2>/dev/null || true

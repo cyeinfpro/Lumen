@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import shlex
-import shutil
 import signal
 import subprocess
 import tarfile
@@ -20,6 +19,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESTORE = ROOT / "scripts" / "restore.sh"
 TS = "20260802-010203"
+SYSTEMD_WRITER_UNITS = (
+    "lumen-api.service",
+    "lumen-worker.service",
+    "lumen-tgbot.service",
+)
+APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
 
 
 def _wait_for_file(path: Path, timeout: float = 8.0) -> None:
@@ -318,6 +323,32 @@ def _write_fake_docker(path: Path) -> None:
     path.chmod(0o755)
 
 
+def _write_fake_systemctl(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            printf '%s\n' "$*" >> "${TEST_SYSTEMCTL_LOG:?}"
+            if [ "${1:-}" != "is-active" ] || [ "$#" -ne 2 ]; then
+                printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+                exit 64
+            fi
+            case " ${TEST_ACTIVE_SYSTEMD_UNITS:-} " in
+                *" $2 "*)
+                    printf 'active\n'
+                    exit 0
+                    ;;
+            esac
+            printf 'inactive\n'
+            exit 3
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _write_curl_wrapper(path: Path) -> None:
     path.write_text(
         textwrap.dedent(
@@ -342,34 +373,34 @@ def _write_curl_wrapper(path: Path) -> None:
 
 
 def _write_command_wrappers(fakebin: Path) -> None:
-    real_mv = shutil.which("mv")
-    real_cp = shutil.which("cp")
-    assert real_mv is not None
-    assert real_cp is not None
-
     (fakebin / "mv").write_text(
         textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            set -u
-            src="${{@: -2:1}}"
-            dst="${{@: -1}}"
-            item="$(basename -- "$src")"
-            if [ -n "${{TEST_FAIL_ROLLBACK_ITEM:-}}" ] \
-                    && [ "$item" = "$TEST_FAIL_ROLLBACK_ITEM" ] \
-                    && [[ "$src" == *".lumen-restore-old."* ]]; then
-                exit 91
-            fi
-            {shlex.quote(real_mv)} "$@"
-            rc=$?
-            if [ "$rc" -eq 0 ] \
-                    && [ -n "${{TEST_BLOCK_AFTER_STASH_ITEM:-}}" ] \
-                    && [ "$item" = "$TEST_BLOCK_AFTER_STASH_ITEM" ] \
-                    && [[ "$dst" == *".lumen-restore-old."* ]]; then
-                printf 'ready\\n' > "${{TEST_PHASE_MARKER:?}}"
-                sleep 60
-            fi
-            exit "$rc"
+            """\
+            #!/usr/bin/env python3
+            import os
+            from pathlib import Path
+            import sys
+            import time
+
+            source = Path(sys.argv[-2])
+            destination = Path(sys.argv[-1])
+            item = source.name
+            if (
+                os.environ.get("TEST_FAIL_ROLLBACK_ITEM", "") == item
+                and ".lumen-restore-old." in str(source)
+            ):
+                raise SystemExit(91)
+            target = destination / item if destination.is_dir() else destination
+            os.replace(source, target)
+            if (
+                os.environ.get("TEST_BLOCK_AFTER_STASH_ITEM", "") == item
+                and ".lumen-restore-old." in str(destination)
+            ):
+                Path(os.environ["TEST_PHASE_MARKER"]).write_text(
+                    "ready\\n",
+                    encoding="utf-8",
+                )
+                time.sleep(60)
             """
         ),
         encoding="utf-8",
@@ -378,22 +409,28 @@ def _write_command_wrappers(fakebin: Path) -> None:
 
     (fakebin / "cp").write_text(
         textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            set -u
-            src="${{@: -2:1}}"
-            dst="${{@: -1}}"
-            item="$(basename -- "$src")"
-            {shlex.quote(real_cp)} "$@"
-            rc=$?
-            if [ "$rc" -eq 0 ] \
-                    && [ -n "${{TEST_BLOCK_AFTER_COPY_ITEM:-}}" ] \
-                    && [ "$item" = "$TEST_BLOCK_AFTER_COPY_ITEM" ] \
-                    && [[ "$dst" == "${{TEST_REDIS_HOST_DIR:?}}"* ]]; then
-                printf 'ready\\n' > "${{TEST_PHASE_MARKER:?}}"
-                sleep 60
-            fi
-            exit "$rc"
+            """\
+            #!/usr/bin/env python3
+            import os
+            from pathlib import Path
+            import shutil
+            import sys
+            import time
+
+            source = Path(sys.argv[-2])
+            destination = Path(sys.argv[-1])
+            item = source.name
+            target = destination / item if destination.is_dir() else destination
+            shutil.copy2(source, target)
+            if (
+                os.environ.get("TEST_BLOCK_AFTER_COPY_ITEM", "") == item
+                and str(destination).startswith(os.environ["TEST_REDIS_HOST_DIR"])
+            ):
+                Path(os.environ["TEST_PHASE_MARKER"]).write_text(
+                    "ready\\n",
+                    encoding="utf-8",
+                )
+                time.sleep(60)
             """
         ),
         encoding="utf-8",
@@ -479,15 +516,19 @@ def _prepare_restore(
     db_dir.mkdir(parents=True)
     if initial_active:
         (db_dir / "lumen").write_text("old-active\n", encoding="utf-8")
+    for service in APPLICATION_SERVICES:
+        (state / f"service-{service}").write_text("true", encoding="utf-8")
 
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
     _write_fake_docker(fakebin / "docker")
+    _write_fake_systemctl(fakebin / "systemctl")
     _write_curl_wrapper(fakebin / "curl")
     _write_command_wrappers(fakebin)
 
     marker = tmp_path / "phase.ready"
     docker_log = tmp_path / "docker.log"
+    systemctl_log = tmp_path / "systemctl.log"
     temp_dir = tmp_path / "tmp"
     maint_root = tmp_path / "maint"
     deploy_root = maint_root
@@ -509,6 +550,8 @@ def _prepare_restore(
             "DB_NAME": "lumen",
             "TEST_STATE_DIR": str(state),
             "TEST_DOCKER_LOG": str(docker_log),
+            "TEST_SYSTEMCTL_LOG": str(systemctl_log),
+            "TEST_ACTIVE_SYSTEMD_UNITS": "",
             "TEST_CURL_LOG": str(tmp_path / "curl.log"),
             "TEST_REDIS_HOST_DIR": str(redis_host),
             "TEST_PHASE_MARKER": str(marker),
@@ -529,6 +572,7 @@ def _prepare_restore(
             "TEST_AOF_VALID": "1" if aof_valid else "0",
             "TEST_PG_BACKUP_PATH": str(pg_path),
             "LUMEN_RESTORE_FAILPOINT": failpoint,
+            "LUMEN_SYSTEMD_RUNTIME_AVAILABLE": "1",
             "LUMEN_CORE_READINESS_ATTEMPTS": "1",
             "LUMEN_CORE_READINESS_INTERVAL_SECONDS": "0",
             "LUMEN_SERVICE_STATE_INTERVAL_SECONDS": "0",
@@ -557,6 +601,12 @@ command() {
         start_new_session=True,
     )
     return process, marker, redis_host, db_dir, docker_log
+
+
+def _assert_systemd_writer_units_checked(tmp_path: Path) -> None:
+    calls = (tmp_path / "systemctl.log").read_text(encoding="utf-8").splitlines()
+    for unit in SYSTEMD_WRITER_UNITS:
+        assert f"is-active {unit}" in calls
 
 
 def _recover_before_missing_restore(
@@ -665,6 +715,19 @@ def test_writer_quiesce_rechecks_and_stops_transient_restart(
     helper = ROOT / "scripts/lib/backup_restore_services.sh"
     stop_log = tmp_path / "stop.log"
     api_calls = tmp_path / "api.calls"
+    systemctl_log = tmp_path / "systemctl.log"
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    _write_fake_systemctl(fakebin / "systemctl")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "TEST_SYSTEMCTL_LOG": str(systemctl_log),
+            "TEST_ACTIVE_SYSTEMD_UNITS": "",
+            "LUMEN_SYSTEMD_RUNTIME_AVAILABLE": "1",
+        }
+    )
     result = subprocess.run(
         [
             "/bin/bash",
@@ -698,6 +761,7 @@ def test_writer_quiesce_rechecks_and_stops_transient_restart(
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=env,
         check=False,
     )
 
@@ -705,6 +769,10 @@ def test_writer_quiesce_rechecks_and_stops_transient_restart(
     assert stop_log.read_text(encoding="utf-8").splitlines() == [
         "api worker tgbot",
         "api worker tgbot",
+    ]
+    assert systemctl_log.read_text(encoding="utf-8").splitlines() == [
+        *(f"is-active {unit}" for unit in SYSTEMD_WRITER_UNITS),
+        *(f"is-active {unit}" for unit in SYSTEMD_WRITER_UNITS),
     ]
 
 
@@ -789,6 +857,11 @@ def test_old_legal_archive_restores_only_verified_rdb_and_clears_journal(
     calls = docker_log.read_text(encoding="utf-8")
     assert "compose --ansi=never --profile tgbot start api worker tgbot web" in calls
     assert "exec -T worker python -m app.worker_health check" in calls
+    for service in APPLICATION_SERVICES:
+        assert (
+            tmp_path / "state" / f"service-{service}"
+        ).read_text(encoding="utf-8") == "true"
+    _assert_systemd_writer_units_checked(tmp_path)
 
 
 def test_generated_aof_missing_segment_is_rejected_before_redis_restart(
