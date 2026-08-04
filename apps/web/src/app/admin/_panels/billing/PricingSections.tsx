@@ -2,7 +2,12 @@
 
 import { Plus, RefreshCw, Save } from "lucide-react";
 
-import { Button, Card } from "@/components/ui/primitives";
+import {
+  Button,
+  Card,
+  Input,
+  StatusBadge,
+} from "@/components/ui/primitives";
 import {
   RedemptionSecretControl,
   SwitchField,
@@ -75,28 +80,20 @@ export function GlobalSettingsSection({
             form.setValue("showEstimate", checked ? "1" : "0")
           }
         />
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">
-            低余额提示 (¥)
-          </span>
-          <input
-            value={values.lowBalanceRmb}
-            onChange={(event) =>
-              form.setValue("lowBalanceRmb", event.target.value)
-            }
-            inputMode="decimal"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">USD→RMB</span>
-          <input
-            value={values.rate}
-            onChange={(event) => form.setValue("rate", event.target.value)}
-            inputMode="decimal"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
+        <Input
+          label="低余额提示 (¥)"
+          value={values.lowBalanceRmb}
+          onChange={(event) =>
+            form.setValue("lowBalanceRmb", event.target.value)
+          }
+          inputMode="decimal"
+        />
+        <Input
+          label="USD→RMB"
+          value={values.rate}
+          onChange={(event) => form.setValue("rate", event.target.value)}
+          inputMode="decimal"
+        />
       </div>
       <RedemptionSecretControl
         configured={values.secretConfigured}
@@ -135,55 +132,42 @@ export function BulkPricingSection({
         </Button>
       </div>
       <div className="grid gap-3 md:grid-cols-[1fr_180px_140px]">
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">模型</span>
-          <input
-            value={form.model}
-            onChange={(event) =>
-              form.setIdentityField("model", event.target.value)
-            }
-            placeholder="claude-sonnet-4-6"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">Channel</span>
-          <input
-            value={form.channel}
-            onChange={(event) =>
-              form.setIdentityField("channel", event.target.value)
-            }
-            placeholder="可空"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">匹配优先级</span>
-          <input
-            value={form.priority}
-            onChange={(event) =>
-              form.setIdentityField("priority", event.target.value)
-            }
-            inputMode="numeric"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
+        <Input
+          label="模型"
+          value={form.model}
+          onChange={(event) =>
+            form.setIdentityField("model", event.target.value)
+          }
+          placeholder="claude-sonnet-4-6"
+        />
+        <Input
+          label="Channel"
+          value={form.channel}
+          onChange={(event) =>
+            form.setIdentityField("channel", event.target.value)
+          }
+          placeholder="可空"
+        />
+        <Input
+          label="匹配优先级"
+          value={form.priority}
+          onChange={(event) =>
+            form.setIdentityField("priority", event.target.value)
+          }
+          inputMode="numeric"
+        />
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {BULK_RATE_FIELDS.map((field) => (
-          <label key={field.key} className="space-y-1.5">
-            <span className="type-caption text-[var(--fg-2)]">
-              {field.label}
-            </span>
-            <input
-              value={form.rates[field.key] ?? ""}
-              onChange={(event) =>
-                form.setRate(field.key, event.target.value)
-              }
-              inputMode="decimal"
-              className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-            />
-          </label>
+          <Input
+            key={field.key}
+            label={field.label}
+            value={form.rates[field.key] ?? ""}
+            onChange={(event) =>
+              form.setRate(field.key, event.target.value)
+            }
+            inputMode="decimal"
+          />
         ))}
       </div>
     </Card>
@@ -193,7 +177,7 @@ export function BulkPricingSection({
 function ImagePricingTable({ form }: { form: ImagePricingFormState }) {
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
-      <table className="w-full text-sm md:min-w-[680px]">
+      <table className="w-full type-body-sm md:min-w-[640px]">
         <thead className="text-left text-[var(--fg-2)]">
           <tr className="border-b border-[var(--border-subtle)]">
             <th className="px-3 py-2">档位</th>
@@ -206,34 +190,36 @@ function ImagePricingTable({ form }: { form: ImagePricingFormState }) {
           {form.rows.map(({ tier, row, threshold }) => (
             <tr
               key={tier}
-              className="border-b border-[var(--border-subtle)]"
+              className="border-b border-[var(--border-subtle)] odd:bg-[var(--bg-0)]/35 transition-colors hover:bg-[var(--bg-2)]/70"
             >
               <td data-label="档位" className="px-3 py-2 font-mono">
                 {tier}
               </td>
               <td data-label="像素下界" className="px-3 py-2">
-                <input
+                <Input
                   value={form.thresholds[tier] ?? String(threshold)}
                   onChange={(event) =>
                     form.setThreshold(tier, event.target.value)
                   }
                   inputMode="numeric"
-                  className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+                  className="h-9"
                 />
               </td>
               <td data-label="单价 (¥/张)" className="px-3 py-2">
-                <input
+                <Input
                   value={form.prices[tier] ?? row?.price.rmb ?? ""}
                   onChange={(event) =>
                     form.setPrice(tier, event.target.value)
                   }
                   inputMode="decimal"
                   placeholder="0.20"
-                  className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+                  className="h-9"
                 />
               </td>
               <td data-label="状态" className="px-3 py-2">
-                {row?.enabled === false ? "停用" : "启用"}
+                <StatusBadge
+                  status={row?.enabled === false ? "disabled" : "enabled"}
+                />
               </td>
             </tr>
           ))}
@@ -269,17 +255,15 @@ export function ImagePricingSection({
       </div>
       <ImagePricingTable form={form} />
       <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 sm:grid-cols-[1fr_1fr_auto]">
-        <input
+        <Input
           value={form.newTier}
           onChange={(event) => form.setNewTier(event.target.value)}
           placeholder="新增档位，如 8k"
-          className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
         />
-        <input
+        <Input
           value={form.newTierThreshold}
           onChange={(event) => form.setNewTierThreshold(event.target.value)}
           placeholder="像素下界，如 33177600"
-          className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
         />
         <Button
           variant="outline"
@@ -315,13 +299,13 @@ function VideoPriceInput({
     "";
   return (
     <td data-label={videoRuleLabel(variant)} className="px-3 py-2">
-      <input
+      <Input
         value={value}
         onChange={(event) =>
           form.setDraft(row.model, variant, resolution, event.target.value)
         }
         inputMode="decimal"
-        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+        className="h-9"
       />
     </td>
   );
@@ -344,7 +328,7 @@ function VideoPricingRow({
   const updatedAt = videoRowResolutionUpdatedAt(row, resolution);
   const status = resolutionEnabled ? "启用" : modelEnabled ? "继承" : "停用";
   return (
-    <tr className="border-b border-[var(--border-subtle)]">
+    <tr className="border-b border-[var(--border-subtle)] odd:bg-[var(--bg-0)]/35 transition-colors hover:bg-[var(--bg-2)]/70">
       <td
         data-label="模型"
         className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]"
@@ -364,7 +348,17 @@ function VideoPricingRow({
         />
       ))}
       <td data-label="状态" className="px-3 py-2">
-        {status}
+        <StatusBadge
+          status={
+            resolutionEnabled
+              ? "enabled"
+              : modelEnabled
+                ? "unknown"
+                : "disabled"
+          }
+          tone={status === "继承" ? "info" : undefined}
+          label={status}
+        />
       </td>
       <td data-label="更新于" className="px-3 py-2 text-[var(--fg-2)]">
         {updatedAt ? new Date(updatedAt).toLocaleString() : "-"}
@@ -414,7 +408,7 @@ function VideoPricingTable({
 }) {
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
-      <table className="w-full text-sm md:min-w-[1320px]">
+      <table className="w-full type-body-sm md:min-w-[1120px]">
         <thead className="text-left text-[var(--fg-2)]">
           <tr className="border-b border-[var(--border-subtle)]">
             <th className="px-3 py-2">模型</th>
@@ -478,7 +472,7 @@ function NewVideoModelForm({ form }: { form: VideoPricingFormState }) {
   return (
     <div className="grid gap-3 border-t border-[var(--border-subtle)] pt-4 md:grid-cols-[1fr_120px_120px_140px_140px_150px_1fr]">
       {fields.map((field) => (
-        <input
+        <Input
           key={field.key}
           value={form.newModel[field.key]}
           onChange={(event) =>
@@ -486,7 +480,6 @@ function NewVideoModelForm({ form }: { form: VideoPricingFormState }) {
           }
           placeholder={field.placeholder}
           inputMode={field.decimal ? "decimal" : undefined}
-          className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
         />
       ))}
     </div>
@@ -512,14 +505,15 @@ export function VideoPricingSection({
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <input
+          <Input
             value={form.officialMultiplier}
             onChange={(event) =>
               form.setOfficialMultiplier(event.target.value)
             }
             placeholder="官方价倍率"
             inputMode="decimal"
-            className="h-9 w-28 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            wrapperClassName="w-28"
+            className="h-9"
           />
           <Button
             variant="outline"
@@ -556,7 +550,7 @@ function ModelPricingRow({
 }) {
   const enabled = Boolean(row.input?.enabled || row.output?.enabled);
   return (
-    <tr className="border-b border-[var(--border-subtle)]">
+    <tr className="border-b border-[var(--border-subtle)] odd:bg-[var(--bg-0)]/35 transition-colors hover:bg-[var(--bg-2)]/70">
       <td
         data-label="模型"
         className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]"
@@ -564,27 +558,27 @@ function ModelPricingRow({
         {row.model}
       </td>
       <td data-label="输入 ¥/1K" className="px-3 py-2">
-        <input
+        <Input
           value={form.drafts[`${row.model}:in`] ?? row.input?.price.rmb ?? ""}
           disabled={!row.input}
           onChange={(event) =>
             form.setDraft(row.model, "in", event.target.value)
           }
-          className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
+          className="h-9"
         />
       </td>
       <td data-label="输出 ¥/1K" className="px-3 py-2">
-        <input
+        <Input
           value={form.drafts[`${row.model}:out`] ?? row.output?.price.rmb ?? ""}
           disabled={!row.output}
           onChange={(event) =>
             form.setDraft(row.model, "out", event.target.value)
           }
-          className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50 disabled:opacity-50"
+          className="h-9"
         />
       </td>
       <td data-label="状态" className="px-3 py-2">
-        {enabled ? "启用" : "停用"}
+        <StatusBadge status={enabled ? "enabled" : "disabled"} />
       </td>
       <td data-label="更新于" className="px-3 py-2 text-[var(--fg-2)]">
         {row.updated_at ? new Date(row.updated_at).toLocaleString() : "-"}
@@ -612,7 +606,7 @@ function ModelPricingTable({
 }) {
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
-      <table className="w-full text-sm md:min-w-[840px]">
+      <table className="w-full type-body-sm md:min-w-[760px]">
         <thead className="text-left text-[var(--fg-2)]">
           <tr className="border-b border-[var(--border-subtle)]">
             <th className="px-3 py-2">模型</th>
@@ -688,15 +682,12 @@ export function ModelPricingSection({
             className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm outline-none focus:border-[var(--accent)]/50"
           />
         </label>
-        <label className="space-y-1.5">
-          <span className="type-caption text-[var(--fg-2)]">USD→RMB</span>
-          <input
-            value={rate}
-            onChange={(event) => onRateChange(event.target.value)}
-            inputMode="decimal"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
-          />
-        </label>
+        <Input
+          label="USD→RMB"
+          value={rate}
+          onChange={(event) => onRateChange(event.target.value)}
+          inputMode="decimal"
+        />
         <Button
           variant="outline"
           size="md"

@@ -3,6 +3,7 @@
 // Scene NN 分隔条（桌面版）：左侧 meta label + 单条延伸线。
 
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/primitives";
 
 interface DesktopSceneDividerProps {
   index: number;
@@ -19,9 +20,10 @@ export function DesktopSceneDivider({
 }: DesktopSceneDividerProps) {
   const label = `Scene ${String(index).padStart(2, "0")}`;
   return (
-    <button
-      type="button"
-      className="mx-auto my-3 flex w-full max-w-[var(--content-composer)] items-center gap-3 select-none"
+    <Button
+      variant="ghost"
+      size="sm"
+      className="mx-auto my-3 h-auto w-full max-w-[var(--content-composer)] justify-start gap-3 px-0 select-none hover:bg-transparent"
       onClick={onToggle}
       aria-label={
         collapsed ? `${label}（已折叠，点击展开）` : `${label}（点击折叠）`
@@ -43,6 +45,6 @@ export function DesktopSceneDivider({
         aria-hidden="true"
         className="h-px flex-1 bg-[var(--border-subtle)]"
       />
-    </button>
+    </Button>
   );
 }

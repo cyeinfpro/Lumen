@@ -1,8 +1,8 @@
 "use client";
 
-import { useId } from "react";
 import { AlertCircle, Check } from "lucide-react";
 
+import { Input, Switch } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 
 import { clampInt } from "./ByokPanel.model";
@@ -69,36 +69,17 @@ export function FieldText({
   error?: string | null;
   isPassword?: boolean;
 }) {
-  const id = useId();
   return (
-    <label htmlFor={id} className="flex flex-col gap-1">
-      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">
-        {label}
-      </span>
-      <input
-        id={id}
+    <Input
+        label={label}
+        hint={hint}
+        error={error ?? undefined}
         type={isPassword ? "password" : "text"}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         onBlur={onBlur ? (event) => onBlur(event.target.value) : undefined}
         placeholder={placeholder}
-        className={
-          "h-10 rounded-[var(--radius-control)] bg-[var(--bg-0)] px-3 text-sm border focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25 placeholder:text-[var(--fg-3)] transition-colors " +
-          (error ? "border-danger-border" : "border-[var(--border)]")
-        }
       />
-      {error ? (
-        <span
-          role="alert"
-          aria-live="assertive"
-          className="text-[11px] text-danger"
-        >
-          {error}
-        </span>
-      ) : hint ? (
-        <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>
-      ) : null}
-    </label>
   );
 }
 
@@ -117,25 +98,16 @@ export function FieldNumber({
   max: number;
   onChange: (value: number) => void;
 }) {
-  const id = useId();
   return (
-    <label htmlFor={id} className="flex flex-col gap-1">
-      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">
-        {label}
-      </span>
-      <input
-        id={id}
+    <Input
+        label={label}
+        hint={hint}
         type="number"
         min={min}
         max={max}
         value={value}
         onChange={(event) => onChange(clampInt(event.target.value, min, max))}
-        className="h-10 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
       />
-      {hint && (
-        <span className="text-[11px] text-[var(--fg-2)]">{hint}</span>
-      )}
-    </label>
   );
 }
 
@@ -153,27 +125,26 @@ export function ToggleRow({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <label
+    <div
       className={
-        "flex items-start justify-between gap-3 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 " +
+        "flex items-start justify-between gap-3 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 " +
         (disabled ? "opacity-50" : "")
       }
     >
       <span className="flex flex-col">
-        <span className="text-sm text-[var(--fg-0)]">{label}</span>
+        <span className="type-body-sm text-[var(--fg-0)]">{label}</span>
         {hint && (
-          <span className="text-[11px] text-[var(--fg-2)] mt-0.5">
+          <span className="mt-0.5 type-caption text-[var(--fg-2)]">
             {hint}
           </span>
         )}
       </span>
-      <input
-        type="checkbox"
+      <Switch
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="mt-1"
+        onCheckedChange={onChange}
+        aria-label={label}
       />
-    </label>
+    </div>
   );
 }

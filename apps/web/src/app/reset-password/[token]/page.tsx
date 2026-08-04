@@ -93,7 +93,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
         } else if (err.status === 422) {
           setError(err.message || "提交内容不合法");
         } else if (err.status === 429) {
-          setError("请求过于频繁，请稍后再试");
+          setError("请求过于频繁，稍后再试");
         } else {
           setError(errorToText(err));
         }
@@ -137,7 +137,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
               >
                 <div className="flex items-start gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-                  密码已更新，请重新登录。
+                  密码已更新，可重新登录。
                 </div>
               </div>
               <Link
@@ -171,7 +171,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                     onClick={() => setShowPwd((value) => !value)}
                     disabled={submitting}
                     aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                    className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+                    className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
                   >
                     {showPwd ? (
                       <EyeOff className="h-4 w-4" />
@@ -183,7 +183,7 @@ function ResetPasswordConfirm({ token }: { token: string }) {
                 <PasswordStrength strength={strength} show={password.length > 0} />
                 <p
                   className={
-                    "mt-1.5 text-[11px] " +
+                    "type-caption mt-1.5 " +
                     (password.length > 0 && passwordTooShort
                       ? "text-danger"
                       : "text-[var(--fg-2)]")
@@ -336,7 +336,7 @@ function PasswordStrength({
           />
         ))}
       </div>
-      <p className="text-[11px] text-[var(--fg-2)]">
+      <p className="type-caption">
         强度：<span className="text-[var(--fg-1)]">{strength.label}</span>
       </p>
     </div>

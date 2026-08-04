@@ -92,7 +92,7 @@ export function ModelLibraryGenerator({
   const [extra, setExtra] = useState("");
   const [count, setCount] = useState<ApparelModelLibraryGenerateCount>(4);
   const [autoTag, setAutoTag] = useState(true);
-  const submitDisabled = mode === "reference_image" && (!referenceImage || referenceUploading);
+  const submitBlocked = mode === "reference_image" && (!referenceImage || referenceUploading);
   const totalCount = count * Math.max(1, genders.length);
 
   const submit = async () => {
@@ -167,7 +167,7 @@ export function ModelLibraryGenerator({
           <p className="type-page-kicker">
             生成器
           </p>
-          <h2 className="type-page-title mt-1 md:text-[28px]">
+          <h2 className="type-page-title mt-1 ">
             新建模特
           </h2>
         </div>
@@ -178,7 +178,7 @@ export function ModelLibraryGenerator({
       </header>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] pb-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           N°00
         </span>
         <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -189,16 +189,16 @@ export function ModelLibraryGenerator({
               onClick={() => switchMode(value)}
               aria-pressed={mode === value}
               className={cn(
-                "group relative inline-flex min-h-11 flex-col items-start justify-center px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
+                "group relative inline-flex min-h-11 flex-col items-start justify-center px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:min-h-8",
                 mode === value
                   ? "text-[var(--fg-0)]"
                   : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
               )}
             >
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.14em]">
+              <span className="type-caption">
                 {label}
               </span>
-              <span className="text-[11px] leading-[1.35] text-[var(--fg-3)]">
+              <span className="type-caption leading-[1.35] text-[var(--fg-3)]">
                 {hint}
               </span>
               <span
@@ -206,7 +206,7 @@ export function ModelLibraryGenerator({
                 className={cn(
                   "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
                   mode === value
-                    ? "bg-[var(--amber-400)]"
+                    ? "bg-accent"
                     : "bg-transparent group-hover:bg-[var(--border-strong)]",
                 )}
               />
@@ -390,18 +390,18 @@ export function ModelLibraryGenerator({
                   className={cn(
                     "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
                     autoTag
-                      ? "border-[var(--border-amber)] bg-[var(--accent)]"
+                      ? "border-accent-border bg-[var(--accent)]"
                       : "border-[var(--border-strong)] bg-transparent",
                   )}
                 >
                   <span
                     className={cn(
-                      "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
+                      "ml-0.5 h-3 w-3 rounded-full bg-[var(--fg-0)] transition-transform",
                       autoTag ? "translate-x-3" : "",
                     )}
                   />
                 </span>
-                <span className="font-mono text-[10.5px] uppercase tracking-[0.15em] text-[var(--fg-1)]">
+                <span className="type-caption text-[var(--fg-1)]">
                   {autoTag ? "自动识别 · 开" : "自动识别 · 关"}
                 </span>
               </button>
@@ -414,7 +414,7 @@ export function ModelLibraryGenerator({
               mobile={false}
               mode={mode}
               referenceUploading={referenceUploading}
-              submitDisabled={submitDisabled}
+              submitBlocked={submitBlocked}
               totalCount={totalCount}
               onSubmit={submit}
             />
@@ -429,7 +429,7 @@ export function ModelLibraryGenerator({
         mobile
         mode={mode}
         referenceUploading={referenceUploading}
-        submitDisabled={submitDisabled}
+        submitBlocked={submitBlocked}
         totalCount={totalCount}
         onSubmit={submit}
       />
@@ -444,7 +444,7 @@ function GenerationSubmitControls({
   mobile,
   mode,
   referenceUploading,
-  submitDisabled,
+  submitBlocked,
   totalCount,
   onSubmit,
 }: {
@@ -454,7 +454,7 @@ function GenerationSubmitControls({
   mobile: boolean;
   mode: ApparelModelLibraryGenerateMode;
   referenceUploading: boolean;
-  submitDisabled: boolean;
+  submitBlocked: boolean;
   totalCount: number;
   onSubmit: () => Promise<void>;
 }) {
@@ -473,21 +473,21 @@ function GenerationSubmitControls({
           : "",
       )}
     >
-      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         {summary}
       </p>
       <Button
         variant="primary"
         loading={generating}
-        disabled={submitDisabled}
+        disabled={submitBlocked}
         onClick={onSubmit}
         leftIcon={<Sparkles className="h-4 w-4" />}
         className="w-full md:w-auto"
       >
         开始生成
       </Button>
-      {submitDisabled ? (
-        <p className="text-[12px] leading-[1.5] text-[var(--danger)]">
+      {submitBlocked ? (
+        <p className="type-caption leading-[1.5] text-[var(--danger)]">
           {disabledMessage}
         </p>
       ) : null}
@@ -510,10 +510,10 @@ function Section({
   return (
     <div className={cn("grid gap-3 border-t border-[var(--border)] pt-3 md:pt-4", className)}>
       <div className="flex items-baseline gap-2.5">
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {eyebrow}
         </span>
-        <h3 className="text-[16px] font-semibold leading-none tracking-tight text-[var(--fg-0)] md:text-[17px]">
+        <h3 className="type-body font-semibold leading-none tracking-tight text-[var(--fg-0)] ">
           {title}
         </h3>
       </div>
@@ -534,13 +534,13 @@ function Field({
   return (
     <div className="grid gap-1.5">
       {label ? (
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {label}
         </span>
       ) : null}
       {children}
       {hint ? (
-        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-3)]">
+        <p className="type-caption text-[var(--fg-3)]">
           {hint}
         </p>
       ) : null}
@@ -552,7 +552,7 @@ function ChipRow({ children }: { children: React.ReactNode }) {
   return <div className="flex flex-wrap gap-x-3.5 gap-y-1">{children}</div>;
 }
 
-// Filter chip：去 border / bg；mono uppercase + underline-on-active
+// Filter chip：去 border / bg；mono + underline-on-active
 function Chip({
   children,
   active,
@@ -567,7 +567,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
+        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 type-caption transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:min-h-8",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -577,7 +577,7 @@ function Chip({
         className={cn(
           "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
           active
-            ? "bg-[var(--amber-400)]"
+            ? "bg-accent"
             : "bg-transparent group-hover:bg-[var(--border-strong)]",
         )}
       />
@@ -605,7 +605,7 @@ function UnderlineTextarea({
       placeholder={placeholder}
       rows={rows}
       maxLength={maxLength}
-      className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-1.5 text-[15px] leading-[1.45] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-sm"
+      className="control-shell w-full resize-none px-3 py-2 type-body leading-[1.45] text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
     />
   );
 }

@@ -6,7 +6,6 @@ import {
   Check,
   ImageIcon,
   Loader2,
-  Power,
   PowerOff,
 } from "lucide-react";
 import type {
@@ -15,6 +14,7 @@ import type {
   ProviderPurpose,
   ProviderStatsItem,
 } from "@/lib/types";
+import { StatusBadge, Switch } from "@/components/ui/primitives";
 import {
   PROVIDER_PURPOSES,
   editTransportDisplayLabel,
@@ -61,7 +61,7 @@ export function ProviderCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, delay: Math.min(index * 0.04, 0.2) }}
       className={
-        "group rounded-[var(--radius-dialog)] border p-5 backdrop-blur-sm transition-colors " +
+        "surface-card group p-5 transition-colors " +
         (provider.enabled
           ? "border-[var(--border)] bg-[var(--bg-1)]/60 hover:border-[var(--border)]"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/30")
@@ -114,15 +114,17 @@ function ProviderCardHeader({
           >
             {provider.name}
           </span>
-          {!provider.enabled && (
-            <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--fg-2)]/10 px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]">
-              <PowerOff className="h-2.5 w-2.5" /> 已禁用
-            </span>
-          )}
+          {!provider.enabled && <StatusBadge status="disabled" />}
           {provider.image_jobs_enabled && (
-            <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-info-border bg-info-soft px-1.5 py-0.5 text-[10px] text-info">
-              <ImageIcon className="h-2.5 w-2.5" /> 异步生图
-            </span>
+            <StatusBadge
+              status="unknown"
+              tone="info"
+              label={
+                <>
+                  <ImageIcon className="h-3 w-3" /> 异步生图
+                </>
+              }
+            />
           )}
         </div>
         <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
@@ -130,30 +132,18 @@ function ProviderCardHeader({
         </code>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onToggleEnabled(provider.name, !provider.enabled)}
+        <Switch
+          checked={provider.enabled}
+          onCheckedChange={(checked) => onToggleEnabled(provider.name, checked)}
           disabled={quickSaving}
-          className={
-            "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border transition-colors max-sm:min-h-11 max-sm:min-w-11 " +
-            (provider.enabled
-              ? "border-success-border bg-success-soft text-success hover:bg-success/20"
-              : "border-[var(--border-strong)] bg-[var(--bg-3)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
-          }
           aria-label={provider.enabled ? "停用供应商" : "启用供应商"}
           title={provider.enabled ? "停用供应商" : "启用供应商"}
-        >
-          {provider.enabled ? (
-            <Power className="h-3 w-3" />
-          ) : (
-            <PowerOff className="h-3 w-3" />
-          )}
-        </button>
+        />
         <button
           type="button"
           onClick={() => onProbeSingle(provider.name)}
           disabled={probing || !provider.enabled}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] opacity-0 transition-all hover:bg-[var(--bg-3)] focus:opacity-100 group-hover:opacity-100 disabled:opacity-30 max-sm:min-h-11 max-sm:min-w-11"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-30 max-sm:min-h-11 max-sm:min-w-11"
           aria-label="探活此供应商"
           title="探活此供应商"
         >
@@ -186,9 +176,9 @@ function ProviderPurposeSelector({
             onClick={() => onToggle(option.value)}
             disabled={disabled}
             className={
-              "inline-flex items-center gap-1.5 rounded-[var(--radius-card)] border px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+              "inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border px-2 py-1 type-caption transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
               (checked
-                ? "border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
+                ? "border-accent-border bg-accent-soft text-accent"
                 : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
             }
             title={
@@ -201,7 +191,7 @@ function ProviderPurposeSelector({
               className={
                 "flex h-3 w-3 items-center justify-center rounded border " +
                 (checked
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-black"
+                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-on)]"
                   : "border-[var(--border-strong)]")
               }
               aria-hidden
@@ -323,7 +313,7 @@ function ProviderProbeMetadata({
     probe.latency_ms < 500
       ? "text-success"
       : probe.latency_ms < 2000
-        ? "text-[var(--accent)]"
+      ? "text-warning"
         : "text-danger";
   return (
     <>
@@ -348,7 +338,7 @@ function ProviderStatsMetadata({
     stats.success_rate >= 0.95
       ? "text-success"
       : stats.success_rate >= 0.8
-        ? "text-[var(--accent)]"
+        ? "text-warning"
         : "text-danger";
   return (
     <>
@@ -408,53 +398,41 @@ function ProbeStatusBadge({
   probing: boolean;
 }) {
   if (probing) {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-2 py-0.5 text-xs text-[var(--accent)]">
-        <Loader2 className="h-3 w-3 animate-spin" />
-      </span>
-    );
+    return <StatusBadge status="probing" label={<><Loader2 className="h-3 w-3 animate-spin" /> 探活中</>} />;
   }
   if (!probe) {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--fg-2)]/10 px-2 py-0.5 text-xs text-[var(--fg-2)]">
-        <span className="h-1.5 w-1.5 rounded-full bg-[var(--fg-2)]" />
-        未探测
-      </span>
-    );
+    return <StatusBadge status="unknown" label="未探测" />;
   }
   if (probe.status === "disabled") {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--fg-2)]/10 px-2 py-0.5 text-xs text-[var(--fg-2)]">
-        <PowerOff className="h-3 w-3" /> 跳过
-      </span>
-    );
+    return <StatusBadge status="disabled" label={<><PowerOff className="h-3 w-3" /> 跳过</>} />;
   }
   if (probe.ok) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--radius-control)] border border-success-border bg-success-soft px-2 py-0.5 text-xs text-success">
-        <span className="h-1.5 w-1.5 rounded-full bg-success shadow-[var(--shadow-2)]" />
-        健康
-        {probe.latency_ms != null && (
-          <span className="tabular-nums text-success/80">
-            {probe.latency_ms}ms
-          </span>
-        )}
-      </span>
+      <StatusBadge
+        status="ok"
+        label={
+          <>
+            健康
+            {probe.latency_ms != null && (
+              <span className="tabular-nums"> {probe.latency_ms} ms</span>
+            )}
+          </>
+        }
+      />
     );
   }
   return (
-    <span
+    <StatusBadge
       role="alert"
-      className="inline-flex max-w-[260px] shrink-0 items-center gap-1.5 truncate rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-2 py-0.5 text-xs text-danger"
+      className="max-w-[260px] truncate"
       title={probe.error ?? undefined}
-    >
-      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger shadow-[var(--shadow-2)]" />
-      异常
-      {probe.error ? (
-        <span role="alert" className="truncate text-danger/85">
-          {probe.error}
-        </span>
-      ) : null}
-    </span>
+      status="error"
+      label={
+        <>
+          异常
+          {probe.error ? <span className="truncate"> {probe.error}</span> : null}
+        </>
+      }
+    />
   );
 }

@@ -114,13 +114,13 @@ function HistoryLoadControl({
   if (!hasMore && !loading && !error) return null;
 
   return (
-    <div ref={sentinelRef} className="relative z-[1] flex justify-center pb-2">
+    <div ref={sentinelRef} className="relative z-[var(--z-base)] flex justify-center pb-2">
       {error ? (
         <div
           role="alert"
           className={cn(
             "flex max-w-full items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-1.5",
-            "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-xs text-[var(--fg-0)]",
+            "border-danger-border bg-danger-soft type-caption text-[var(--fg-0)]",
           )}
         >
           <AlertTriangle
@@ -418,7 +418,7 @@ function JumpToLatestButton({
 
   return (
     <div
-      className="pointer-events-none fixed bottom-[calc(84px+env(safe-area-inset-bottom,0px))] z-30 -translate-x-1/2"
+      className="pointer-events-none fixed bottom-[calc(84px+env(safe-area-inset-bottom,0px))] z-[var(--z-tray)] -translate-x-1/2"
       style={{
         left: "calc(50% + var(--studio-sidebar-offset, 0px) / 2)",
       }}

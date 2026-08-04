@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { Loader2 } from "lucide-react";
 
+import { Button, Select } from "@/components/ui/primitives";
 import type { ModelLibraryItemAgeSegment } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -40,29 +40,25 @@ export function GalleryActionButton({
   onClick?: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      size="sm"
+      variant="secondary"
       onClick={onClick}
       disabled={disabled || loading}
+      loading={loading}
+      leftIcon={icon}
       title={title}
       className={cn(
-        "inline-flex h-7 min-h-11 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
-        "border transition-colors disabled:cursor-not-allowed disabled:opacity-55",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "h-8 rounded-[var(--radius-control)] px-2.5",
         tone === "accent"
-          ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.15)] text-[var(--amber-300)] hover:bg-[rgba(242,169,58,0.22)]"
+          ? "border-accent-border bg-accent-soft text-accent hover:bg-accent-soft"
           : tone === "danger"
             ? "border-danger-border bg-danger-soft text-danger hover:brightness-110"
             : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
       )}
     >
-      {loading ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-      ) : (
-        icon
-      )}
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -81,50 +77,48 @@ export function FavoriteOptionsForm({
 }) {
   return (
     <div className="mt-3 space-y-3">
-      <p className="text-[12px] leading-5 text-[var(--fg-1)]">
+      <p className="type-caption text-[var(--fg-1)]">
         将 {count} 张图片加入用户收藏，并自动识别气质标签。
       </p>
       <label className="block">
-        <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        <span className="mb-1 block type-caption text-[var(--fg-2)]">
           年龄段
         </span>
-        <select
+        <Select
           value={ageSegment}
           onChange={(event) =>
             onAgeSegmentChange(event.target.value as ModelLibraryItemAgeSegment)
           }
-          className={cn(
-            "h-9 w-full rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-2.5",
-            "text-[13px] text-[var(--fg-0)] focus:border-[var(--border-amber)] focus:outline-none",
-          )}
+          className="h-9 min-h-9 bg-[var(--bg-0)] type-body-sm text-[var(--fg-0)]"
         >
           {FAVORITE_AGE_OPTIONS.map(([value, label]) => (
             <option key={value} value={value}>
               {label}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
       <div>
-        <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        <span className="mb-1 block type-caption text-[var(--fg-2)]">
           性别
         </span>
         <div className="flex gap-2">
           {FAVORITE_GENDER_OPTIONS.map(([value, label]) => (
-            <button
+            <Button
               key={value}
-              type="button"
+              size="sm"
+              variant="secondary"
               aria-pressed={gender === value}
               onClick={() => onGenderChange(value)}
               className={cn(
-                "inline-flex h-8 min-h-11 items-center rounded-[var(--radius-card)] border px-3 text-[12px] transition-colors",
+                "h-8 px-3",
                 gender === value
-                  ? "border-[var(--border-amber)] bg-accent-soft text-[var(--amber-300)]"
+                  ? "border-accent-border bg-accent-soft text-accent"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >
               {label}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -144,21 +138,21 @@ export function FilterButton({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      size="sm"
+      variant="ghost"
       role="tab"
       aria-selected={active}
       onClick={onClick}
       className={cn(
-        "inline-flex h-7 min-h-11 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[11px] transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "h-8 gap-1 px-2.5",
         active
           ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
           : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
       )}
     >
       {label}
-      <span className="font-mono text-[10px] text-current/65">{count}</span>
-    </button>
+      <span className="type-overline text-current">{count}</span>
+    </Button>
   );
 }

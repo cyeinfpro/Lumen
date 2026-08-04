@@ -21,7 +21,7 @@ import {
   ImagePlus,
   RefreshCw,
 } from "lucide-react";
-import { toast } from "@/components/ui/primitives";
+import { Button, toast } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import { tryCopyTextToClipboard } from "@/lib/clipboard";
 import { imageBinaryUrl } from "@/lib/apiClient";
@@ -137,7 +137,7 @@ export function ImageContextMenuInner({
         const url = imageBinaryUrl(info.imageId);
         const filename = `lumen-${info.imageId}.png`;
         void triggerImageDownload(url, filename).catch(() => {
-          toast.error("下载失败,已在新标签页打开");
+          toast.error("下载失败，已在新标签页打开");
           window.open(url, "_blank", "noopener,noreferrer");
         });
       },
@@ -178,31 +178,30 @@ export function ImageContextMenuInner({
       role="menu"
       aria-label="图片操作"
       className={cn(
-        "fixed z-[1000] min-w-[172px] py-1",
+        "fixed z-[var(--z-tray)] min-w-[172px] py-1",
         "rounded-[var(--radius-panel)] border border-[var(--border)]",
-        "bg-[var(--bg-1)]/90 backdrop-blur-xl shadow-[var(--shadow-3)]",
+        "bg-[var(--bg-1)]/90 backdrop-blur-xl shadow-[var(--shadow-2)]",
       )}
       style={style}
     >
       {actions.map((a) => (
-        <button
+        <Button
           key={a.key}
-          type="button"
+          variant="ghost"
+          size="sm"
           role="menuitem"
           onClick={() => {
             a.onSelect();
             onClose();
           }}
           className={cn(
-            "flex h-8 min-h-11 w-full items-center gap-2 px-3 text-left",
-            "text-[13px] text-[var(--fg-0)]",
-            "hover:bg-[var(--bg-2)] transition-colors duration-100",
-            "focus-visible:outline-none focus-visible:bg-[var(--bg-2)]",
+            "h-8 w-full justify-start gap-2 px-3 text-left type-body-sm text-[var(--fg-0)]",
+            "hover:bg-[var(--bg-2)] focus-visible:bg-[var(--bg-2)]",
           )}
         >
           <span className="text-[var(--fg-2)] shrink-0">{a.icon}</span>
           {a.label}
-        </button>
+        </Button>
       ))}
     </div>,
     document.body,

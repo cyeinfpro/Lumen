@@ -1,6 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
+import { Button } from "@/components/ui/primitives";
 import type { AspectRatio } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -86,20 +87,15 @@ export function AspectRatioPicker({
         )}
       >
         <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              "font-semibold text-[var(--fg-0)]",
-              isSheet ? "text-[15px]" : "text-[12px]",
-            )}
-          >
+          <span className={isSheet ? "type-card-title" : "type-label"}>
             宽高比
           </span>
-          <span className="h-1 w-1 rounded-full bg-[var(--amber-400)]/80" aria-hidden />
+          <span className="h-1 w-1 rounded-full bg-[var(--fg-3)]" aria-hidden />
         </span>
         <span
           className={cn(
             "inline-flex h-6 min-w-12 items-center justify-center rounded-full border border-[var(--border-subtle)]",
-            "bg-[var(--bg-2)] px-2 text-[11px] text-[var(--fg-1)] tabular-nums",
+            "bg-[var(--bg-2)] px-2 type-caption text-[var(--fg-1)] tabular-nums",
           )}
           style={{ fontFamily: "var(--font-mono)" }}
         >
@@ -113,7 +109,7 @@ export function AspectRatioPicker({
             <div
               id={`aspect-ratio-${group.key}`}
               className={cn(
-                "mb-2 flex items-center gap-2 px-1 text-[11px] font-medium text-[var(--fg-2)]",
+                "mb-2 flex items-center gap-2 px-1 type-caption text-[var(--fg-2)]",
                 isSheet ? "mb-1.5" : "mb-2",
               )}
             >
@@ -129,9 +125,10 @@ export function AspectRatioPicker({
               {group.options.map((option) => {
                 const selected = option.value === value;
                 return (
-                  <button
+                  <Button
                     key={option.value}
-                    type="button"
+                    variant="ghost"
+                    size="md"
                     aria-pressed={selected}
                     aria-label={`${group.label} ${option.value}`}
                     onClick={() => {
@@ -139,12 +136,11 @@ export function AspectRatioPicker({
                       onClose?.();
                     }}
                     className={cn(
-                      "group relative cursor-pointer overflow-hidden rounded-[var(--radius-card)] border px-2.5 text-left",
+                      "group relative cursor-pointer justify-start overflow-hidden rounded-[var(--radius-card)] border px-2.5 text-left",
                       isSheet ? "h-11" : "h-12",
                       "transition-[background-color,border-color,color,box-shadow] duration-200",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                       selected
-                        ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                        ? "border-accent-border bg-accent-soft text-accent"
                         : "border-[var(--border-subtle)] bg-[var(--bg-2)]/80 text-[var(--fg-0)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)]",
                     )}
                   >
@@ -157,31 +153,31 @@ export function AspectRatioPicker({
                     <span className="relative flex h-full items-center gap-2">
                       <span
                         className={cn(
-                          "flex h-8 w-9 shrink-0 items-center justify-center rounded-[7px] border transition-[background-color,border-color] duration-200",
+                          "flex h-8 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border transition-[background-color,border-color] duration-200",
                           selected
-                            ? "border-[var(--amber-400)]/45 bg-[var(--amber-400)]/12"
-                            : "border-[var(--border-subtle)] bg-[var(--bg-0)]/35 group-hover:border-[var(--border-amber)]",
+                            ? "border-accent-border bg-accent-soft"
+                            : "border-[var(--border-subtle)] bg-[var(--bg-0)]/35 group-hover:border-[var(--border-strong)]",
                         )}
                         aria-hidden
                       >
                         <span
                           className={cn(
-                            "block rounded-[3px] border transition-[background-color,border-color] duration-200",
+                            "block rounded-[var(--radius-control)] border transition-[background-color,border-color] duration-200",
                             selected
-                              ? "border-[var(--amber-400)] bg-[var(--amber-400)]/28"
-                              : "border-[var(--fg-2)]/70 bg-[var(--fg-3)]/45 group-hover:border-[var(--fg-1)]/80",
+                              ? "border-accent-border bg-accent-soft"
+                              : "border-[var(--border-strong)] bg-[var(--bg-3)] group-hover:border-[var(--fg-1)]",
                           )}
                           style={previewStyle(option)}
                         />
                       </span>
                       <span
-                        className="block min-w-0 text-[15px] font-semibold leading-none tabular-nums"
+                        className="type-body block min-w-0 leading-none tabular-nums text-[var(--fg-0)]"
                         style={{ fontFamily: "var(--font-mono)" }}
                       >
                         {option.value}
                       </span>
                     </span>
-                  </button>
+                  </Button>
                 );
               })}
             </div>

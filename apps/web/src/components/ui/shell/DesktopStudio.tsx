@@ -19,7 +19,12 @@ import { DesktopTopNav } from "@/components/ui/shell/DesktopTopNav";
 import { Sidebar } from "@/components/ui/Sidebar";
 import { Onboarding } from "@/components/Onboarding";
 import { DesktopComposerPill } from "@/components/ui/composer/desktop";
-import { ErrorState, IconButton, Spinner } from "@/components/ui/primitives";
+import {
+  Button,
+  ErrorState,
+  IconButton,
+  Spinner,
+} from "@/components/ui/primitives";
 import {
   ConversationImageGallery,
   DesktopConversationCanvas,
@@ -455,7 +460,7 @@ function DesktopStudioContent({
         className="flex min-h-[320px] items-center justify-center gap-2 text-body-sm text-[var(--fg-2)]"
       >
         <Spinner size={20} />
-        正在载入历史消息…
+        历史消息载入中…
       </motion.div>
     );
   } else if (studioView === "images") {
@@ -643,13 +648,13 @@ function DesktopSidebarDrawer({
             ref={panelRef}
             key="drawer-panel"
             tabIndex={-1}
-            className="fixed bottom-0 left-0 z-[var(--z-dialog)] w-72 overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] pb-[env(safe-area-inset-bottom,0px)] min-[1440px]:hidden"
+            className="fixed bottom-0 left-0 z-[var(--z-dialog)] w-[var(--sidebar-panel-w)] overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)] pb-[env(safe-area-inset-bottom,0px)] min-[1440px]:hidden"
             style={{
               top: "calc(var(--top-banner-stack-height, 0px) + env(safe-area-inset-top, 0px))",
             }}
-            initial={{ x: -288 }}
+            initial={{ x: "-100%" }}
             animate={{ x: 0 }}
-            exit={{ x: -288 }}
+            exit={{ x: "-100%" }}
             transition={SPRING.drawer}
             role="dialog"
             aria-modal="true"
@@ -663,7 +668,7 @@ function DesktopSidebarDrawer({
               variant="ghost"
               onClick={onClose}
               aria-label="关闭会话侧栏"
-              className="absolute right-3 top-3 z-10 rounded-[var(--radius-control)]"
+              className="absolute right-3 top-3 z-[var(--z-header)] rounded-[var(--radius-control)]"
             >
               <X className="h-4 w-4" aria-hidden />
             </IconButton>
@@ -717,16 +722,17 @@ function DesktopSidebarDock({
         >
           <PanelLeftOpen className="h-[18px] w-[18px]" aria-hidden />
         </IconButton>
-        <IconButton
+        <Button
           size="md"
           variant="primary"
           onClick={onCreate}
           disabled={creating}
-          aria-label="新建对话"
-          tooltip="新建对话"
+          aria-label="新建会话"
+          title="新建会话"
+          className="h-10 w-10 px-0"
         >
           <Plus className="h-4 w-4" aria-hidden />
-        </IconButton>
+        </Button>
       </div>
     </aside>
   );

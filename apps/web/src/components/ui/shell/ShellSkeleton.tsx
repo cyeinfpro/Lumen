@@ -3,7 +3,7 @@
 import { LumenMark } from "@/components/ui/brand/LumenMark";
 
 /**
- * 首次 render（useMediaQuery 尚未 resolve）时渲染，避免 hydration mismatch。
+ * 首次 render（useMediaQuery 仍未 resolve）时渲染，避免 hydration mismatch。
  * 结构与真实 App Shell 对齐，避免从独立品牌页跳到工作台。
  */
 export function ShellSkeleton() {
@@ -11,12 +11,12 @@ export function ShellSkeleton() {
     <div
       className="fixed inset-0 flex min-h-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]"
       role="status"
-      aria-label="正在加载 Lumen"
+      aria-label="Lumen 加载中"
     >
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/92 px-4 md:px-6">
         <div className="flex items-center gap-2">
           <LumenMark className="text-[var(--accent)]" />
-          <span className="hidden text-[15px] font-semibold sm:inline">Lumen</span>
+          <span className="hidden type-card-title sm:inline">Lumen</span>
         </div>
         <div className="flex items-center gap-2">
           <SkeletonLine className="hidden h-8 w-56 md:block" />

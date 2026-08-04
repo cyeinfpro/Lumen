@@ -81,7 +81,7 @@ function ConversationMeta({
 }) {
   if (!meta && !timeIso) return null;
   return (
-    <span className="flex items-center gap-1.5 text-[12px] text-[var(--fg-2)]">
+    <span className="flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
       {meta ? <span className="truncate">{meta}</span> : null}
       {meta && timeIso ? <span aria-hidden>·</span> : null}
       {timeIso ? (
@@ -165,13 +165,13 @@ export function ConversationRowMobile({
             "relative w-full min-h-[68px] flex items-stretch",
             "border-b border-[var(--border-subtle)]",
             "transition-colors",
-            active && "bg-[var(--amber-400)]/[0.05]",
+            active && "bg-accent-soft",
           )}
         >
           {active && (
             <span
               aria-hidden
-              className="absolute left-0 top-3 bottom-3 w-[3px] rounded-r bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
+              className="absolute bottom-3 left-0 top-3 w-[3px] rounded-r bg-accent shadow-[var(--shadow-amber)]"
             />
           )}
 
@@ -191,7 +191,7 @@ export function ConversationRowMobile({
               className={cn(
                 "inline-flex items-center justify-center w-11 h-11 rounded-[var(--radius-panel)] shrink-0",
                 isImageConv
-                  ? "bg-[var(--amber-400)]/12 text-[var(--amber-400)]"
+                  ? "bg-[var(--bg-3)] text-[var(--fg-1)]"
                   : "bg-[var(--bg-2)] text-[var(--fg-2)]",
               )}
             >
@@ -201,10 +201,10 @@ export function ConversationRowMobile({
             <span className="flex-1 min-w-0 flex flex-col gap-1">
               <span
                 className={cn(
-                  "line-clamp-2 break-words text-[15px] leading-snug",
+                  "type-body line-clamp-2 break-words",
                   active
-                    ? "font-semibold text-[var(--fg-0)]"
-                    : "font-medium text-[var(--fg-0)]",
+                    ? "text-[var(--fg-0)]"
+                    : "text-[var(--fg-1)]",
                 )}
               >
                 {titleOf(conv)}
@@ -226,7 +226,7 @@ export function ConversationRowMobile({
               "shrink-0 inline-flex items-center justify-center w-11 mr-1 my-2 rounded-full",
               "text-[var(--fg-2)] active:bg-[var(--bg-3)] active:scale-95",
               "transition-[background-color,transform] duration-150",
-              "outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/40",
+              "outline-none focus-visible:shadow-[var(--ring)]",
             )}
           >
             <MoreHorizontal className="w-4 h-4" />
@@ -291,10 +291,9 @@ export function ConversationRowMobile({
             autoComplete="off"
             enterKeyHint="done"
             className={cn(
-              "w-full h-11 px-3 rounded-[var(--radius-control)] text-[15px]",
-              "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
+              "control-shell type-body-sm h-10 w-full px-3 max-sm:min-h-11",
               "text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
-              "outline-none focus:border-[var(--amber-400)]/60",
+              "outline-none focus:border-accent-border focus:shadow-[var(--ring)]",
             )}
           />
           <div className="mt-4 flex gap-2 pb-[max(0px,env(safe-area-inset-bottom,0px))]">

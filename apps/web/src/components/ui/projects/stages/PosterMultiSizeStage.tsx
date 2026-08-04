@@ -152,7 +152,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
       subtitle="基于选定母版生成 1:1 / 9:16 / 16:9 / 3:4 等多版本，可逐张返修。"
     >
       <section className="border-t border-[var(--border)] py-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           目标尺寸
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -165,9 +165,9 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
                 type="button"
                 onClick={() => toggleAspect(value)}
                 className={cn(
-                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 text-[12px] transition-colors",
+                  "inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-full border px-3 type-caption transition-colors",
                   active
-                    ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
+                    ? "border-accent-border bg-[var(--accent-soft)] text-accent"
                     : existed
                       ? "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]"
                       : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
@@ -175,7 +175,7 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
               >
                 {label}
                 {existed ? (
-                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                  <span className="type-caption text-[var(--fg-3)]">
                     已生成
                   </span>
                 ) : null}
@@ -285,10 +285,10 @@ export function PosterMultiSizeStage({ workflow }: { workflow: WorkflowRun }) {
         <div className="mt-8 border-t border-[var(--border)] pt-5">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
             <div className="min-w-0">
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              <p className="type-caption text-[var(--fg-2)]">
                 Delivery Ready
               </p>
-              <p className="mt-1 text-[13px] leading-[1.7] text-[var(--fg-1)]">
+              <p className="mt-1 type-body-sm leading-[1.7] text-[var(--fg-1)]">
                 {readyRenderCount} 个尺寸已就绪。完成后会进入交付页，并把海报成品写入项目素材。
               </p>
             </div>
@@ -335,14 +335,14 @@ function ReviseDialog({
       role="dialog"
       aria-modal="true"
       aria-label="返修"
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/55 backdrop-blur-sm md:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <div className="mobile-dialog-panel relative flex w-full max-w-md flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:max-h-[var(--mobile-dialog-max-height)] max-md:rounded-t-[var(--radius-sheet)] md:rounded-[var(--radius-dialog)] md:border md:border-[var(--border)]">
         <header className="border-b border-[var(--border)] px-5 py-4">
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             Revise · {render.aspect_ratio}
           </p>
           <h2 className="type-section-title mt-1">单张返修</h2>
@@ -354,9 +354,9 @@ function ReviseDialog({
               type="button"
               onClick={() => onScopeChange("background")}
               className={cn(
-                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                 scope === "background"
-                  ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
+                  ? "bg-accent text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
               )}
             >
@@ -367,9 +367,9 @@ function ReviseDialog({
               type="button"
               onClick={() => onScopeChange("style")}
               className={cn(
-                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                 scope === "style"
-                  ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
+                  ? "bg-accent text-[var(--accent-on)]"
                   : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
               )}
             >
@@ -379,7 +379,7 @@ function ReviseDialog({
           </div>
 
           <label className="mt-4 block">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <span className="type-caption text-[var(--fg-2)]">
               返修指令
             </span>
             <textarea
@@ -392,7 +392,7 @@ function ReviseDialog({
                   ? "例如：背景改成浅米色棚拍，去掉道具"
                   : "例如：色调更冷一点，留白多一些"
               }
-              className="mt-2 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[14px] leading-6 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+              className="control-shell mt-2 w-full resize-y px-3 py-2 type-body-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
             />
           </label>
         </div>

@@ -211,7 +211,7 @@ function CanvasTitleInput({
         if (next && next !== title) onRename(next);
         else setDraftTitle(title);
       }}
-      className="min-w-0 max-w-[360px] flex-1 border-0 bg-transparent px-2 type-card-title text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)]"
+      className="min-w-0 max-w-[360px] flex-1 rounded-[var(--radius-control)] border border-transparent bg-transparent px-2 py-1 type-card-title text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] transition-[border-color,background-color,box-shadow] duration-[var(--dur-quick)] hover:border-[var(--border)] hover:bg-[var(--bg-2)] focus:border-[var(--border-strong)] focus:bg-[var(--bg-1)] focus:shadow-[var(--ring)]"
     />
   );
 }

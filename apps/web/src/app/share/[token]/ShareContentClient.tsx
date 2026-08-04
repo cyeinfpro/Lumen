@@ -147,7 +147,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
       showNotice(
         {
           kind: "info",
-          text: isWeChat ? "正在打开原图" : "正在准备原图",
+          text: isWeChat ? "打开原图中" : "准备原图中",
         },
         3600,
       );
@@ -214,12 +214,12 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
   }, [images.length, showNotice]);
 
   return (
-    <div className="mx-auto flex w-full max-w-[1320px] flex-col items-center gap-5 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
+    <div className="mx-auto flex w-full flex-col items-center gap-5 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
       <section className="page-header w-full">
         <div className="page-header-copy">
-          <p className="type-page-kicker">公开画廊</p>
+          <p className="type-caption">公开画廊</p>
           <h1 className="type-page-title">图片分享</h1>
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono tabular-nums text-[var(--fg-2)]">
+          <div className="type-caption flex flex-wrap items-center gap-x-2.5 gap-y-1 tabular-nums">
             <span className="inline-flex items-center gap-1.5">
               <Images className="h-3.5 w-3.5" />
               {images.length} 张图片
@@ -236,7 +236,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             <p className="type-caption inline-flex min-h-10 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-[var(--fg-1)]">
               <Clock className="h-3.5 w-3.5" />
               <span>过期</span>
-              <span className="font-mono tabular-nums text-[var(--fg-0)]">
+              <span className="tabular-nums text-[var(--fg-0)]">
                 {expiresLabel}
               </span>
             </p>
@@ -249,7 +249,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
             className="type-control inline-flex min-h-10 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-[var(--fg-1)] transition-[transform,background-color,border-color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:scale-[var(--press-scale-soft)]"
           >
             {linkShared ? (
-              <Check className="h-3.5 w-3.5 text-[var(--accent)]" />
+              <Check className="h-3.5 w-3.5 text-[var(--success)]" />
             ) : (
               <Share2 className="h-3.5 w-3.5" />
             )}
@@ -258,7 +258,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
         </div>
 
         {isWeChat && (
-          <div className="type-caption border-l-2 border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[var(--fg-1)] md:col-span-2">
+          <div className="type-caption border-l-2 border-info-border bg-info-soft px-3 py-2 text-[var(--info-fg)] md:col-span-2">
             微信内保存：打开大图后长按图片；需要最高分辨率时点「原图」。
           </div>
         )}
@@ -301,14 +301,14 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
       <div className="grid w-full max-w-4xl gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
         {data.show_prompt && prompts.length > 0 ? (
           <details className="group overflow-hidden border-y border-[var(--border-subtle)] bg-transparent transition-colors hover:border-[var(--border-strong)]">
-            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-xs uppercase text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
+            <summary className="type-caption flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]">
               <span className="inline-flex items-center gap-2">
-                <Sparkles className="h-3.5 w-3.5 text-[var(--accent)]" />
+                <Sparkles className="h-3.5 w-3.5 text-[var(--info)]" />
                 提示词
               </span>
               <ArrowRight className="h-3.5 w-3.5 text-[var(--fg-2)] transition-transform group-open:rotate-90" />
             </summary>
-            <div className="space-y-3 border-t border-[var(--border)] px-4 pb-4 pt-3 text-sm leading-relaxed text-[var(--fg-0)]">
+            <div className="type-body-sm space-y-3 border-t border-[var(--border)] px-4 pb-4 pt-3 text-[var(--fg-0)]">
               {prompts.map((prompt, index) => (
                 <p
                   key={`${index}-${prompt.slice(0, 24)}`}
@@ -357,16 +357,16 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
 function ShareNotice({ notice }: { notice: Notice | null }) {
   if (!notice) return null;
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[calc(var(--z-lightbox,80)+5)] flex justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
+    <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[var(--z-toast)] flex justify-center px-4 pb-[env(safe-area-inset-bottom,0px)]">
       <div
         className={cn(
-          "rounded-full border px-4 py-2 text-sm shadow-[var(--shadow-3)] backdrop-blur-xl",
+          "type-body-sm rounded-full border px-4 py-2 shadow-[var(--shadow-3)] backdrop-blur-xl",
           notice.kind === "success" &&
-            "border-[var(--accent)]/25 bg-[var(--accent)]/18 text-[var(--fg-0)]",
+            "border-success-border bg-success-soft text-[var(--success-fg)]",
           notice.kind === "error" &&
-            "border-danger-border bg-danger-soft text-danger",
+            "border-danger-border bg-danger-soft text-[var(--danger-fg)]",
           notice.kind === "info" &&
-            "border-white/[0.12] bg-black/[0.68] text-white/[0.86]",
+            "border-info-border bg-info-soft text-[var(--info-fg)]",
         )}
       >
         {notice.text}

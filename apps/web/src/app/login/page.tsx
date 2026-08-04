@@ -87,10 +87,10 @@ function LoginInner() {
       if (err instanceof ApiError) {
         if (err.code === "secure_cookie_requires_https") {
           setError(
-            "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。请改用 HTTPS 地址后重新登录。",
+            "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。改用 HTTPS 地址后重新登录。",
           );
         } else if (err.code === "session_unverified") {
-          setError("密码验证成功，但登录会话未能确认。请检查 Cookie 或反向代理配置后重试。");
+          setError("密码验证成功，但登录会话未能确认。检查 Cookie 或反向代理配置后重试。");
         } else if (
           err.status === 401 ||
           err.status === 403 ||
@@ -100,7 +100,7 @@ function LoginInner() {
         } else if (err.status === 422) {
           setError("提交内容不合法");
         } else if (err.status === 429) {
-          setError("尝试次数过多，请稍后再试");
+          setError("尝试次数过多，稍后再试");
         } else {
           // 兜底使用统一错误映射，避免暴露原始 ApiError code
           setError(errorToText(err));
@@ -153,7 +153,7 @@ function LoginInner() {
                     disabled={submitting}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="name@示例.com"
+                    placeholder="name@example.com"
                     autoComplete="email"
                     inputMode="email"
                     autoCapitalize="none"
@@ -187,7 +187,7 @@ function LoginInner() {
                       onClick={() => setShowPwd((v) => !v)}
                       disabled={submitting}
                       aria-label={showPwd ? "隐藏密码" : "显示密码"}
-                      className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+                      className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
                     >
                       {showPwd ? (
                         <EyeOff className="w-4 h-4" />
@@ -250,7 +250,7 @@ function LoginInner() {
                 </div>
                 <div className="relative flex justify-center">
                   <span className="type-caption bg-[var(--bg-0)] px-3">
-                    还没有账号?
+                    还没有账号？
                   </span>
                 </div>
               </div>
@@ -273,7 +273,7 @@ function LoginInner() {
         </section>
       </main>
 
-      <footer className="px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center text-xs text-[var(--fg-2)]">
+      <footer className="type-caption px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center">
         <Link href="/" className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors">
           返回首页
         </Link>

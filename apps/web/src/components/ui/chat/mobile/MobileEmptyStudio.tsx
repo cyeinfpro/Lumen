@@ -106,12 +106,12 @@ export function MobileEmptyStudio({
           <span
             className={cn(
               "inline-flex items-center justify-center w-9 h-9 rounded-[var(--radius-panel)]",
-              "bg-[var(--amber-400)]/12",
+              "bg-accent-soft",
             )}
           >
-            <Sparkles className="w-[18px] h-[18px] text-[var(--amber-400)]" />
+            <Sparkles className="h-[18px] w-[18px] text-accent" />
           </span>
-          <h1 className="type-page-title text-[28px]">
+          <h1 className="type-display-lg">
             Lumen
           </h1>
         </div>
@@ -125,7 +125,7 @@ export function MobileEmptyStudio({
           role="alert"
           className={cn(
             "mb-4 flex items-center gap-2 rounded-[var(--radius-panel)] border px-3 py-2.5",
-            "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-body-sm text-[var(--fg-0)]",
+            "border-danger-border bg-danger-soft type-body-sm text-[var(--fg-0)]",
           )}
         >
           <AlertTriangle
@@ -140,36 +140,36 @@ export function MobileEmptyStudio({
             onClick={() => {
               void handleRetryHistory();
             }}
-            className="h-8 shrink-0 px-3 text-xs"
+            className="h-8 shrink-0 px-3"
           >
             重试
           </Button>
         </div>
       ) : loading && currentConvId ? (
-        <div className="mb-4 text-center text-body-sm text-[var(--fg-2)]">
-          正在载入历史消息…
+        <div className="mb-4 text-center type-body-sm text-[var(--fg-2)]">
+          历史消息加载中…
         </div>
       ) : null}
 
       {/* 生图建议 — 2 列网格 */}
       <div className="mb-5">
-        <div className="mb-2.5 text-caption tracking-[0.08em] uppercase text-[var(--fg-2)] font-semibold flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-[var(--amber-400)]" aria-hidden />
+        <div className="mb-2.5 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--fg-3)]" aria-hidden />
           图片
         </div>
         <div className="grid grid-cols-2 gap-2.5">
           {imageSuggestions.map((s) => (
-            <button
+            <Button
               key={`img:${s.text}`}
-              type="button"
+              variant="secondary"
+              size="md"
               onClick={() => handlePick(s)}
               className={cn(
-                "group relative w-full text-left px-3 py-3",
-                "rounded-[var(--radius-lg)] border border-[var(--border-subtle)]",
-                "bg-[var(--bg-1)] text-body-sm text-[var(--fg-0)]",
+                "group relative h-auto w-full justify-start px-3 py-3 text-left",
+                "rounded-[var(--radius-card)] border border-[var(--border-subtle)]",
+                "bg-[var(--bg-1)] type-body-sm text-[var(--fg-0)]",
                 "active:scale-[0.98] transition-[transform,border-color,background-color] duration-150",
-                "hover:border-[var(--border-amber)]/40 hover:bg-[var(--bg-1)]/80",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]/80",
               )}
               style={{ fontFamily: "var(--font-zh-body)" }}
             >
@@ -177,41 +177,41 @@ export function MobileEmptyStudio({
                 <span
                   className={cn(
                     "shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-[var(--radius-card)]",
-                    "bg-[var(--amber-400)]/10 text-[var(--amber-400)]",
+                    "bg-[var(--bg-2)] text-[var(--fg-1)]",
                   )}
                 >
-                  <span className="text-[10px] font-bold uppercase tracking-wide">IMG</span>
+                  <span className="type-overline">IMG</span>
                 </span>
-                <span className="min-w-0 break-words text-body-sm leading-snug text-[var(--fg-1)]">{s.text}</span>
+                <span className="min-w-0 break-words type-body-sm leading-snug text-[var(--fg-1)]">{s.text}</span>
               </span>
               <ArrowRight
                 aria-hidden
-                className="absolute top-3 right-2.5 w-3 h-3 text-[var(--fg-3)] group-hover:text-[var(--amber-300)] transition-colors"
+                className="absolute top-3 right-2.5 h-3 w-3 text-[var(--fg-3)] transition-colors group-hover:text-[var(--fg-1)]"
               />
-            </button>
+            </Button>
           ))}
         </div>
       </div>
 
       {/* 对话建议 — 单列 */}
       <div>
-        <div className="mb-2.5 text-caption tracking-[0.08em] uppercase text-[var(--fg-2)] font-semibold flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-[var(--info)]" aria-hidden />
+        <div className="mb-2.5 flex items-center gap-1.5 type-caption text-[var(--fg-2)]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[var(--fg-3)]" aria-hidden />
           对话
         </div>
         <ul className="flex flex-col gap-2">
           {chatSuggestions.map((s) => (
             <li key={`ask:${s.text}`}>
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="md"
                 onClick={() => handlePick(s)}
                 className={cn(
-                  "group relative w-full text-left px-3.5 py-3",
-                  "rounded-[var(--radius-lg)] border border-[var(--border-subtle)]",
-                  "bg-[var(--bg-1)] text-body-md text-[var(--fg-0)]",
+                  "group relative h-auto w-full justify-start px-3.5 py-3 text-left",
+                  "rounded-[var(--radius-card)] border border-[var(--border-subtle)]",
+                  "bg-[var(--bg-1)] type-body text-[var(--fg-0)]",
                   "active:scale-[0.995] transition-[transform,border-color] duration-150",
                   "hover:border-[var(--border)]",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
                 )}
                 style={{ fontFamily: "var(--font-zh-body)" }}
               >
@@ -219,18 +219,18 @@ export function MobileEmptyStudio({
                   <span
                     className={cn(
                       "shrink-0 inline-flex items-center justify-center w-8 h-8 rounded-[var(--radius-card)]",
-                      "bg-[var(--info)]/10 text-[var(--info)]",
+                      "bg-[var(--bg-2)] text-[var(--fg-1)]",
                     )}
                   >
-                    <span className="text-caption font-semibold uppercase">ASK</span>
+                    <span className="type-overline">ASK</span>
                   </span>
-                  <span className="flex-1 min-w-0 break-words text-body-sm leading-snug">{s.text}</span>
+                  <span className="flex-1 min-w-0 break-words type-body-sm leading-snug">{s.text}</span>
                   <ArrowRight
                     aria-hidden
-                    className="w-3.5 h-3.5 shrink-0 text-[var(--fg-3)] group-hover:text-[var(--amber-300)] transition-colors"
+                    className="h-3.5 w-3.5 shrink-0 text-[var(--fg-3)] transition-colors group-hover:text-[var(--fg-1)]"
                   />
                 </span>
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

@@ -186,13 +186,13 @@ export function shareSizeLabel(
 ): string {
   if (images.length === 1) {
     const image = images[0];
-    return `${image.width} x ${image.height} · ${shareMimeLabel(image.mime)}`;
+    return `${image.width} × ${image.height} · ${shareMimeLabel(image.mime)}`;
   }
   const first = images[0];
   const sameSize = images.every(
     (image) => image.width === first.width && image.height === first.height,
   );
-  return sameSize ? `${first.width} x ${first.height}` : "多尺寸";
+  return sameSize ? `${first.width} × ${first.height}` : "多尺寸";
 }
 
 export function shareImageAlt(image: PublicShareImageOut): string {

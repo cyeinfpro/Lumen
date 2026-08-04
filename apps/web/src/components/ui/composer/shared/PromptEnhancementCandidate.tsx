@@ -2,7 +2,7 @@
 
 import { Check, Loader2, Sparkles, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/primitives/Button";
+import { Badge, Button } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import type { HapticKind } from "@/hooks/useHaptic";
 import { enhancePrompt } from "@/lib/apiClient";
@@ -190,10 +190,10 @@ export function PromptEnhancementCandidate({
     <section
       aria-label="润色候选"
       aria-busy={streaming}
-      className="mx-3 mt-2 overflow-hidden rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--bg-0)] shadow-[var(--shadow-1)]"
+      className="mx-3 mt-2 overflow-hidden rounded-[var(--radius-card)] border border-accent-border bg-[var(--bg-0)] shadow-[var(--shadow-1)]"
     >
-      <header className="flex items-start gap-2.5 bg-[var(--accent-soft)] px-3 py-2.5">
-        <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--bg-0)] text-[var(--accent)]">
+      <header className="flex items-start gap-2.5 bg-accent-soft px-3 py-2.5">
+        <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-accent-border bg-[var(--bg-0)] text-accent">
           {streaming ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
           ) : (
@@ -204,20 +204,23 @@ export function PromptEnhancementCandidate({
           <span
             role="status"
             aria-live="polite"
-            className="block text-[13px] font-semibold text-[var(--fg-0)]"
+            className="type-label block text-[var(--fg-0)]"
           >
-            {streaming ? "正在生成润色候选" : "润色候选已就绪"}
+            {streaming ? "润色候选生成中" : "润色候选已就绪"}
           </span>
-          <span className="mt-0.5 block text-[11px] leading-4 text-[var(--fg-2)]">
+          <span className="mt-0.5 block type-caption text-[var(--fg-2)]">
             原文保留在输入框中，只有应用后才会替换。
           </span>
         </span>
-        <span className="shrink-0 rounded-full border border-[var(--accent-border)] bg-[var(--bg-0)] px-2 py-1 text-[10px] font-medium text-[var(--accent)]">
+        <Badge
+          tone={streaming ? "accent" : "info"}
+          className="shrink-0 type-overline"
+        >
           {streaming ? "生成中" : "待确认"}
-        </span>
+        </Badge>
       </header>
 
-      <div className="min-h-[72px] max-h-40 overflow-y-auto whitespace-pre-wrap break-words border-y border-[var(--border-subtle)] px-3 py-2.5 text-[13px] leading-6 text-[var(--fg-1)]">
+      <div className="min-h-[72px] max-h-40 overflow-y-auto whitespace-pre-wrap break-words border-y border-[var(--border-subtle)] px-3 py-2.5 type-body-sm text-[var(--fg-1)]">
         {candidate || "等待模型返回候选内容…"}
       </div>
 

@@ -18,7 +18,7 @@ import {
   setAdminAccountMode,
 } from "@/lib/apiClient";
 import type { AdminRedemptionCodeOut, AdminRedemptionCodeCreateOut } from "@/lib/types";
-import { toast } from "@/components/ui/primitives";
+import { ConfirmDialog, toast } from "@/components/ui/primitives";
 import { ActionSheet, type ActionItem } from "@/components/ui/primitives/mobile";
 import {
   CodeBatchForm,
@@ -37,6 +37,39 @@ import {
 } from "./RedemptionPanelViews";
 
 type Section = "codes" | "wallets" | "all";
+type ConfirmRequest = {
+  title: string;
+  description: string;
+  confirmText: string;
+  tone?: "default" | "danger";
+  onConfirm: () => void;
+};
+
+function PendingConfirmationDialog({
+  request,
+  onClear,
+}: {
+  request: ConfirmRequest | null;
+  onClear: () => void;
+}) {
+  return (
+    <ConfirmDialog
+      open={request !== null}
+      onOpenChange={(open) => {
+        if (!open) onClear();
+      }}
+      title={request?.title ?? "确认操作"}
+      description={request?.description}
+      confirmText={request?.confirmText}
+      tone={request?.tone}
+      onConfirm={() => {
+        const action = request?.onConfirm;
+        onClear();
+        action?.();
+      }}
+    />
+  );
+}
 
 export function RedemptionPanel({ section = "all" }: { section?: Section }) {
   return (
@@ -72,6 +105,7 @@ function CodesSubpanel() {
   const [usageCodeId, setUsageCodeId] = useState("");
   const [modal, setModal] = useState<NewCodesModalState | null>(null);
   const [actionsCode, setActionsCode] = useState<AdminRedemptionCodeOut | null>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
 
   const codesQ = useQuery({
     queryKey: ["admin", "redemption-codes", status, q, cursor],
@@ -195,7 +229,13 @@ function CodesSubpanel() {
         icon: <Slash className="h-4 w-4" />,
         destructive: true,
         onSelect: () => {
-          if (window.confirm("确认撤销这张兑换码？")) revokeMut.mutate(code.id);
+          setConfirmRequest({
+            title: "撤销兑换码",
+            description: "撤销后这张兑换码将无法继续使用。",
+            confirmText: "撤销",
+            tone: "danger",
+            onConfirm: () => revokeMut.mutate(code.id),
+          });
         },
       });
     }
@@ -206,7 +246,13 @@ function CodesSubpanel() {
         label: "撤销批次",
         destructive: true,
         onSelect: () => {
-          if (window.confirm("确认撤销整个批次？")) revokeBatchMut.mutate(batchId);
+          setConfirmRequest({
+            title: "撤销批次",
+            description: "该批次内未使用的兑换码都将失效。",
+            confirmText: "撤销",
+            tone: "danger",
+            onConfirm: () => revokeBatchMut.mutate(batchId),
+          });
         },
       });
     }
@@ -214,10 +260,13 @@ function CodesSubpanel() {
   }, [actionsCode, redownloadMut, revokeBatchMut, revokeMut]);
 
   const createCodes = () => {
-    if (
-      (Number(count) || 1) > 200 &&
-      !window.confirm("将生成超过 200 张明文 code，确认继续？")
-    ) {
+    if ((Number(count) || 1) > 200) {
+      setConfirmRequest({
+        title: "生成大量兑换码",
+        description: "本次将生成超过 200 张明文兑换码。",
+        confirmText: "继续",
+        onConfirm: () => createMut.mutate(),
+      });
       return;
     }
     createMut.mutate();
@@ -263,8 +312,22 @@ function CodesSubpanel() {
         actions={{
           onCopy: (text, label) => void copyText(text, label),
           onRedownloadBatch: redownloadMut.mutate,
-          onRevokeCode: revokeMut.mutate,
-          onRevokeBatch: revokeBatchMut.mutate,
+          onRevokeCode: (codeId) =>
+            setConfirmRequest({
+              title: "撤销兑换码",
+              description: "撤销后这张兑换码将无法继续使用。",
+              confirmText: "撤销",
+              tone: "danger",
+              onConfirm: () => revokeMut.mutate(codeId),
+            }),
+          onRevokeBatch: (batchId) =>
+            setConfirmRequest({
+              title: "撤销批次",
+              description: "该批次内未使用的兑换码都将失效。",
+              confirmText: "撤销",
+              tone: "danger",
+              onConfirm: () => revokeBatchMut.mutate(batchId),
+            }),
           onOpenUsage: setUsageCodeId,
           onOpenMobileActions: setActionsCode,
           redownloadPending: redownloadMut.isPending,
@@ -294,6 +357,10 @@ function CodesSubpanel() {
         title={actionsCode?.code_prefix ?? "兑换码"}
         actions={actionSheetActions}
       />
+      <PendingConfirmationDialog
+        request={confirmRequest}
+        onClear={() => setConfirmRequest(null)}
+      />
     </>
   );
 }
@@ -309,6 +376,7 @@ function UserWalletsSubpanel() {
   const [nextMode, setNextMode] = useState<AccountMode>("wallet");
   const [residualMode, setResidualMode] = useState<ResidualMode>("freeze");
   const [txKind, setTxKind] = useState("all");
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -380,54 +448,70 @@ function UserWalletsSubpanel() {
   const transactions = txQ.data?.items ?? selected?.transactions ?? [];
 
   return (
-    <WalletsCard>
-      <WalletSearchForm
-        query={walletQText}
-        mode={walletMode}
-        onQueryChange={setWalletQText}
-        onModeChange={setWalletMode}
-        onSubmit={() => setWalletSearch(walletQText.trim())}
+    <>
+      <WalletsCard>
+        <WalletSearchForm
+          query={walletQText}
+          mode={walletMode}
+          onQueryChange={setWalletQText}
+          onModeChange={setWalletMode}
+          onSubmit={() => setWalletSearch(walletQText.trim())}
+        />
+        <WalletList
+          items={walletItems}
+          selectedUserId={selectedUserId}
+          isLoading={walletsQ.isLoading}
+          isError={walletsQ.isError}
+          errorMessage={walletsQ.error?.message ?? "用户钱包加载失败"}
+          onRetry={() => void walletsQ.refetch()}
+          onSelect={(item) => {
+            setSelectedUserId(item.user_id);
+            setNextMode(item.account_mode === "wallet" ? "byok" : "wallet");
+          }}
+        />
+        <WalletDetailSection
+          selected={selected}
+          adjustAmount={adjustAmount}
+          adjustReason={adjustReason}
+          nextMode={nextMode}
+          residualMode={residualMode}
+          txKind={txKind}
+          transactions={transactions}
+          transactionsLoading={txQ.isLoading}
+          transactionsError={txQ.isError}
+          transactionsErrorMessage={txQ.error?.message ?? "流水加载失败"}
+          adjustPending={adjustMut.isPending}
+          modePending={modeMut.isPending}
+          onAdjustAmountChange={setAdjustAmount}
+          onAdjustReasonChange={setAdjustReason}
+          onAdjust={() =>
+            setConfirmRequest({
+              title: "确认调账",
+              description: `将写入 ${adjustAmount} RMB 的管理员调账。`,
+              confirmText: "调账",
+              onConfirm: () => adjustMut.mutate(),
+            })
+          }
+          onNextModeChange={setNextMode}
+          onResidualModeChange={setResidualMode}
+          onChangeMode={() =>
+            setConfirmRequest({
+              title: "切换账号模式",
+              description: `账号将切换为${
+                nextMode === "wallet" ? "钱包模式" : "自带密钥模式"
+              }。`,
+              confirmText: "切换",
+              onConfirm: () => modeMut.mutate(),
+            })
+          }
+          onTxKindChange={setTxKind}
+          onRetryTransactions={() => void txQ.refetch()}
+        />
+      </WalletsCard>
+      <PendingConfirmationDialog
+        request={confirmRequest}
+        onClear={() => setConfirmRequest(null)}
       />
-      <WalletList
-        items={walletItems}
-        selectedUserId={selectedUserId}
-        isLoading={walletsQ.isLoading}
-        isError={walletsQ.isError}
-        errorMessage={walletsQ.error?.message ?? "用户钱包加载失败"}
-        onRetry={() => void walletsQ.refetch()}
-        onSelect={(item) => {
-          setSelectedUserId(item.user_id);
-          setNextMode(item.account_mode === "wallet" ? "byok" : "wallet");
-        }}
-      />
-      <WalletDetailSection
-        selected={selected}
-        adjustAmount={adjustAmount}
-        adjustReason={adjustReason}
-        nextMode={nextMode}
-        residualMode={residualMode}
-        txKind={txKind}
-        transactions={transactions}
-        transactionsLoading={txQ.isLoading}
-        transactionsError={txQ.isError}
-        transactionsErrorMessage={txQ.error?.message ?? "流水加载失败"}
-        adjustPending={adjustMut.isPending}
-        modePending={modeMut.isPending}
-        onAdjustAmountChange={setAdjustAmount}
-        onAdjustReasonChange={setAdjustReason}
-        onAdjust={() => {
-          if (!window.confirm(`确认调账 ${adjustAmount} RMB？`)) return;
-          adjustMut.mutate();
-        }}
-        onNextModeChange={setNextMode}
-        onResidualModeChange={setResidualMode}
-        onChangeMode={() => {
-          if (!window.confirm(`确认切换为 ${nextMode}？`)) return;
-          modeMut.mutate();
-        }}
-        onTxKindChange={setTxKind}
-        onRetryTransactions={() => void txQ.refetch()}
-      />
-    </WalletsCard>
+    </>
   );
 }

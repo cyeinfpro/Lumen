@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 
 import { ApiError, getMe, type AuthUser } from "@/lib/apiClient";
+import { Select } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import { BackupsPanel } from "./_panels/BackupsPanel";
 import { InvitesPanel } from "./_panels/InvitesPanel";
@@ -487,11 +488,11 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
             aria-hidden="true"
             className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-accent"
           />
-          <select
+          <Select
             id="admin-mobile-navigation"
             value={tab}
             onChange={(event) => onChange(event.target.value as Tab)}
-            className="h-11 w-full appearance-none rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] pl-10 pr-10 text-base font-medium text-[var(--fg-0)] shadow-[var(--shadow-1)] outline-none focus:border-accent-border focus:ring-2 focus:ring-accent/20"
+            className="h-11 pl-10 font-medium shadow-[var(--shadow-1)]"
           >
             {TAB_GROUPS.map((group) => (
               <optgroup key={group.key} label={group.label}>
@@ -502,11 +503,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                 ))}
               </optgroup>
             ))}
-          </select>
-          <SlidersHorizontal
-            aria-hidden="true"
-            className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]"
-          />
+          </Select>
         </div>
       </div>
 

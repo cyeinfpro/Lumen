@@ -14,6 +14,7 @@ import { useCreateConversationMutation } from "@/lib/queries";
 import { useChatStore } from "@/store/useChatStore";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
+import { Avatar } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 
@@ -89,23 +90,17 @@ export function MobileMe() {
               onPress={openSettings}
               aria-label="打开账户与设置"
               className={cn(
-                "min-h-16 w-full flex items-center gap-3 p-3 rounded-[var(--radius-dialog)]",
+                "min-h-16 w-full flex items-center gap-3 p-3 rounded-[var(--radius-card)]",
                 "bg-[var(--bg-1)] border border-[var(--border-subtle)]",
                 "shadow-[var(--shadow-1)]",
                 "text-left",
               )}
             >
-              <div
-                className={cn(
-                  "w-12 h-12 rounded-[var(--radius-panel)] shrink-0",
-                  "bg-gradient-to-br from-[var(--amber-300)] via-[var(--amber-400)] to-[var(--amber-600)]",
-                  "flex items-center justify-center",
-                  "text-[18px] font-bold text-[var(--bg-0)]",
-                  "shadow-[var(--shadow-1)]",
-                )}
-              >
-                {avatarChar}
-              </div>
+              <Avatar
+                size="lg"
+                name={userLabel || "Lumen 用户"}
+                initials={avatarChar}
+              />
               <div className="flex-1 min-w-0">
                 {meQuery.isLoading ? (
                   <>
@@ -114,11 +109,11 @@ export function MobileMe() {
                   </>
                 ) : (
                   <>
-                    <p className="text-[16px] font-semibold text-[var(--fg-0)] truncate leading-tight">
+                    <p className="truncate type-card-title text-[var(--fg-0)]">
                       {meQuery.data?.name || "Lumen 用户"}
                     </p>
                     {meQuery.data?.email && (
-                      <p className="flex items-center gap-1.5 text-[12.5px] text-[var(--fg-2)] truncate mt-0.5">
+                      <p className="mt-0.5 flex items-center gap-1.5 truncate type-body-sm text-[var(--fg-2)]">
                         <Mail className="w-3 h-3 shrink-0" />
                         {meQuery.data.email}
                       </p>

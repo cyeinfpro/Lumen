@@ -14,13 +14,16 @@ import {
   ChevronDown,
   ChevronUp,
   GripVertical,
-  ImageIcon,
-  Power,
-  PowerOff,
   Trash2,
 } from "lucide-react";
 import type { ProviderProxyOut } from "@/lib/types";
-import { Button } from "@/components/ui/primitives";
+import {
+  Button,
+  Input,
+  Select,
+  StatusBadge,
+  Switch,
+} from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import {
   PROVIDER_PURPOSES,
@@ -83,7 +86,7 @@ export const DraftCard = forwardRef<HTMLDivElement, DraftCardProps>(
         layout="position"
         transition={{ duration: 0.18 }}
         className={
-          "overflow-hidden rounded-[var(--radius-dialog)] border backdrop-blur-sm transition-colors " +
+          "surface-card overflow-hidden transition-colors " +
           (expanded
             ? hasErrors
               ? "border-danger-border bg-danger-soft"
@@ -156,19 +159,13 @@ function DraftCardSummary({
             {draft.name || "(未命名)"}
           </span>
           {!draft.enabled && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--fg-2)]/10 px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]">
-              <PowerOff className="h-2.5 w-2.5" /> 禁用
-            </span>
+            <StatusBadge status="disabled" />
           )}
           {hasErrors && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] border border-danger-border bg-danger-soft px-1.5 py-0.5 text-[10px] text-danger">
-              <AlertCircle className="h-2.5 w-2.5" />
-            </span>
+            <StatusBadge status="error" label={<AlertCircle className="h-3 w-3" />} />
           )}
           {!isExisting && draft.name.trim() !== "" && (
-            <span className="inline-flex shrink-0 items-center rounded-[var(--radius-control)] border border-info-border bg-info-soft px-1.5 py-0.5 text-[10px] text-info">
-              新增
-            </span>
+            <StatusBadge status="info" label="新增" />
           )}
         </div>
         {draft.base_url && (
@@ -276,13 +273,13 @@ function DraftIdentityFields({
     <>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Field label="名称" required error={errors?.name} hint="唯一标识">
-          <input
-            ref={nameRef}
-            type="text"
-            value={draft.name}
-            onChange={(event) => onUpdate({ name: event.target.value })}
-            placeholder="例如：主供应商"
-            className={fieldCls(Boolean(errors?.name))}
+        <Input
+          ref={nameRef}
+          type="text"
+          value={draft.name}
+          onChange={(event) => onUpdate({ name: event.target.value })}
+          placeholder="例如：主供应商"
+          className={fieldCls(Boolean(errors?.name))}
           />
         </Field>
         <Field
@@ -291,7 +288,7 @@ function DraftIdentityFields({
           error={errors?.base_url}
           hint="支持 HTTP/HTTPS，可填内网地址"
         >
-          <input
+          <Input
             type="url"
             value={draft.base_url}
             onChange={(event) => onUpdate({ base_url: event.target.value })}
@@ -306,7 +303,7 @@ function DraftIdentityFields({
         hint={providerApiKeyHint(isExisting, hasExistingKey)}
         required={!isExisting || !hasExistingKey}
       >
-        <input
+        <Input
           type="password"
           value={draft.api_key}
           onChange={(event) => onUpdate({ api_key: event.target.value })}
@@ -319,7 +316,7 @@ function DraftIdentityFields({
       <PurposeField draft={draft} onUpdate={onUpdate} />
 
       <Field label="代理" hint="供应商可直连或使用一个代理">
-        <select
+        <Select
           value={draft.proxy ?? ""}
           onChange={(event) =>
             onUpdate({ proxy: event.target.value || null })
@@ -337,7 +334,7 @@ function DraftIdentityFields({
               {proxy.type === "ssh" ? "SSH" : "S5"}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
     </>
   );
@@ -371,7 +368,7 @@ function PurposeField({
               className={
                 "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (checked
-                  ? "border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
+          ? "border-accent-border bg-accent-soft text-accent"
                   : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
               }
             >
@@ -379,7 +376,7 @@ function PurposeField({
                 className={
                   "flex h-3.5 w-3.5 items-center justify-center rounded border " +
                   (checked
-                    ? "border-[var(--accent)] bg-[var(--accent)] text-black"
+                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-on)]"
                     : "border-[var(--border-strong)]")
                 }
                 aria-hidden
@@ -405,7 +402,7 @@ function DraftExecutionFields({
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
       <Field label="优先级" hint="越大越优先">
-        <input
+          <Input
           type="number"
           value={draft.priority}
           onChange={(event) =>
@@ -418,7 +415,7 @@ function DraftExecutionFields({
         />
       </Field>
       <Field label="权重" hint="轮询比例">
-        <input
+        <Input
           type="number"
           min={1}
           value={draft.weight}
@@ -432,7 +429,7 @@ function DraftExecutionFields({
         />
       </Field>
       <Field label="并发数" hint="该供应商同时跑的任务上限">
-        <input
+        <Input
           type="number"
           min={1}
           max={32}
@@ -452,22 +449,16 @@ function DraftExecutionFields({
       <DraftToggleField
         label="状态"
         enabled={draft.enabled}
-        onClick={() => onUpdate({ enabled: !draft.enabled })}
+        onCheckedChange={(enabled) => onUpdate({ enabled })}
         enabledLabel="已启用"
         disabledLabel="已禁用"
-        enabledIcon={<Power className="h-3 w-3" />}
-        disabledIcon={<PowerOff className="h-3 w-3" />}
       />
       <DraftToggleField
         label="异步生图"
         enabled={Boolean(draft.image_jobs_enabled)}
-        onClick={() =>
-          onUpdate({ image_jobs_enabled: !draft.image_jobs_enabled })
-        }
+        onCheckedChange={(enabled) => onUpdate({ image_jobs_enabled: enabled })}
         enabledLabel="支持"
         disabledLabel="不支持"
-        enabledIcon={<ImageIcon className="h-3 w-3" />}
-        disabledIcon={<ImageIcon className="h-3 w-3" />}
         hint="勾选后，图片任务路由才会使用这个供应商。"
         infoTone
       />
@@ -478,46 +469,45 @@ function DraftExecutionFields({
 function DraftToggleField({
   label,
   enabled,
-  onClick,
+  onCheckedChange,
   enabledLabel,
   disabledLabel,
-  enabledIcon,
-  disabledIcon,
   hint,
   infoTone = false,
 }: {
   label: string;
   enabled: boolean;
-  onClick: () => void;
+  onCheckedChange: (enabled: boolean) => void;
   enabledLabel: string;
   disabledLabel: string;
-  enabledIcon: ReactNode;
-  disabledIcon: ReactNode;
   hint?: string;
   infoTone?: boolean;
 }) {
   return (
     <div className="flex flex-col">
-      <span className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
+      <span className="mb-1.5 type-caption font-medium text-[var(--fg-1)]">
         {label}
       </span>
-      <button
-        type="button"
-        onClick={onClick}
-        className={
-          "inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-3 text-xs transition-colors sm:h-9 " +
-          (enabled
+      <div
+        className={`flex min-h-10 flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] border px-3 ${
+          enabled
             ? infoTone
-              ? "border-info-border bg-info-soft text-info hover:bg-info/20"
-              : "border-success-border bg-success-soft text-success hover:bg-success/20"
-            : "border-[var(--border-strong)] bg-[var(--bg-3)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
-        }
+              ? "border-info-border bg-info-soft"
+              : "border-success-border bg-success-soft"
+            : "border-[var(--border-strong)] bg-[var(--bg-3)]"
+        }`}
       >
-        {enabled ? enabledIcon : disabledIcon}
-        {enabled ? enabledLabel : disabledLabel}
-      </button>
+        <span className="type-caption text-[var(--fg-1)]">
+          {enabled ? enabledLabel : disabledLabel}
+        </span>
+        <Switch
+          checked={enabled}
+          onCheckedChange={onCheckedChange}
+          aria-label={`${label}${enabled ? "关闭" : "开启"}`}
+        />
+      </div>
       {hint && (
-        <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+        <span className="mt-1 type-caption leading-4 text-[var(--fg-2)]">
           {hint}
         </span>
       )}
@@ -540,7 +530,7 @@ function DraftImageJobFields({
         <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
           接口偏好
         </label>
-        <select
+        <Select
           value={endpoint}
           onChange={(event) =>
             onUpdate({
@@ -558,8 +548,8 @@ function DraftImageJobFields({
           <option value="responses">
             响应接口（/v1/responses + image_generation）
           </option>
-        </select>
-        <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+        </Select>
+        <span className="mt-1 type-caption leading-4 text-[var(--fg-2)]">
           适用于异步与同步生图：自动时按健康度在两种接口间切换；锁定后该号只服务对应接口，由其他号兜底对端。
         </span>
         {endpointSelected && (
@@ -582,27 +572,23 @@ function EndpointLockField({
 }) {
   return (
     <>
-      <button
-        type="button"
-        onClick={() =>
-          onUpdate({
-            image_jobs_endpoint_lock: !draft.image_jobs_endpoint_lock,
-          })
-        }
-        className={
-          "mt-2 inline-flex min-h-[36px] items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-3 text-xs transition-colors sm:h-8 " +
-          (draft.image_jobs_endpoint_lock
-            ? "border-warning-border bg-warning-soft text-warning hover:bg-warning/20"
-            : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:bg-[var(--bg-3)]")
-        }
-      >
-        {draft.image_jobs_endpoint_lock
-          ? `已锁定 · 仅服务 ${endpointDisplayLabel(
-              draft.image_jobs_endpoint,
-            )}`
-          : "锁定到该接口"}
-      </button>
-      <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+      <div className="mt-2 flex items-center justify-between gap-2 rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-3 py-2">
+        <span className="type-caption text-warning">
+          {draft.image_jobs_endpoint_lock
+            ? `已锁定 · 仅服务 ${endpointDisplayLabel(
+                draft.image_jobs_endpoint,
+              )}`
+            : "锁定到该接口"}
+        </span>
+        <Switch
+          checked={Boolean(draft.image_jobs_endpoint_lock)}
+          onCheckedChange={(checked) =>
+            onUpdate({ image_jobs_endpoint_lock: checked })
+          }
+          aria-label="锁定生图接口"
+        />
+      </div>
+      <span className="mt-1 type-caption leading-4 text-[var(--fg-2)]">
         锁定后该号不再服务另一个接口：选号阶段直接被过滤，失败也不再回退到对端，由其它号兜底。
       </span>
     </>
@@ -622,7 +608,7 @@ function ProviderJobOverrides({
         <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
           旁路服务地址（可选）
         </label>
-        <input
+        <Input
           type="url"
           placeholder="留空 = 使用全局任务旁路地址"
           value={draft.image_jobs_base_url ?? ""}
@@ -639,7 +625,7 @@ function ProviderJobOverrides({
         <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
           编辑接口输入
         </label>
-        <select
+        <Select
           value={draft.image_edit_input_transport ?? "url"}
           onChange={(event) =>
             onUpdate({
@@ -651,8 +637,8 @@ function ProviderJobOverrides({
         >
           <option value="url">链接（JSON image_url）</option>
           <option value="file">文件（multipart image[]）</option>
-        </select>
-        <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+        </Select>
+        <span className="mt-1 type-caption leading-4 text-[var(--fg-2)]">
           只影响图片任务转发 /v1/images/edits；未启用图片任务时直连始终是 multipart 文件。
         </span>
       </div>
@@ -745,12 +731,11 @@ function providerApiKeyPlaceholder(
 }
 
 function fieldCls(hasError: boolean): string {
-  const base =
-    "w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border text-sm font-mono text-[var(--fg-0)] focus:outline-none focus:ring-2 placeholder:text-[var(--fg-2)] transition-colors";
+  const base = "font-mono";
   if (hasError) {
     return `${base} border-danger-border focus:border-danger-border focus:ring-danger/25`;
   }
-  return `${base} border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-[var(--accent)]/25`;
+  return `${base} border-[var(--border)] focus:border-accent-border focus:ring-accent/20`;
 }
 
 function Field({
@@ -774,11 +759,11 @@ function Field({
           {required && <span className="ml-0.5 text-danger">*</span>}
         </span>
         {hint && !error && (
-          <span className="text-[10px] text-[var(--fg-3)]">{hint}</span>
+          <span className="type-caption text-[var(--fg-2)]">{hint}</span>
         )}
         {error && (
-          <span className="flex items-center gap-0.5 text-[10px] text-danger">
-            <AlertCircle className="h-2.5 w-2.5" /> {error}
+          <span className="flex items-center gap-0.5 type-caption text-danger">
+            <AlertCircle className="h-3 w-3" /> {error}
           </span>
         )}
       </div>

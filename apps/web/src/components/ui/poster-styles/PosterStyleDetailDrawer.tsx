@@ -91,7 +91,7 @@ export function PosterStyleDetailDrawer({
       }),
     onError: (err) =>
       toast.error("识别失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 
@@ -102,7 +102,7 @@ export function PosterStyleDetailDrawer({
     },
     onError: (err) =>
       toast.error("移除失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 
@@ -156,13 +156,13 @@ export function PosterStyleDetailDrawer({
 
   const handleCopyPrompt = async () => {
     if (!item?.prompt_template) {
-      toast.warning("当前风格没有 prompt 模板");
+      toast.warning("当前风格没有提示词模板");
       return;
     }
     try {
       await navigator.clipboard.writeText(item.prompt_template);
       setCopied(true);
-      toast.success("已复制 prompt 模板");
+      toast.success("已复制提示词模板");
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error("复制失败");
@@ -179,7 +179,7 @@ export function PosterStyleDetailDrawer({
 
   return (
     <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-black/60 backdrop-blur-md"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex justify-end bg-[var(--surface-scrim)] backdrop-blur-md"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -258,14 +258,14 @@ function PosterStyleDetailHeader({
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
       <div className="min-w-0">
-        <p className="type-page-kicker">风格详情</p>
+        <p className="type-caption">风格详情</p>
         <h2 id={titleId} className="type-page-title-sm mt-2 truncate">
           {title}
         </h2>
         {item ? (
           <p
             id={descriptionId}
-            className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]"
+            className="type-caption mt-1"
           >
             {POSTER_STYLE_CATEGORY_LABEL[item.category]}
             {item.mood ? ` · ${item.mood}` : ""}
@@ -276,7 +276,7 @@ function PosterStyleDetailHeader({
         type="button"
         onClick={onClose}
         aria-label="关闭"
-        className="inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)] md:h-9 md:w-9"
+        className="inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:w-9"
       >
         <X className="h-4 w-4" />
       </button>
@@ -345,7 +345,7 @@ function PosterStyleDetailBodyContent({
 }) {
   if (pending) {
     return (
-      <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <div className="type-body-sm flex h-40 items-center justify-center gap-2">
         <Spinner size={20} />
         加载中
       </div>
@@ -353,7 +353,7 @@ function PosterStyleDetailBodyContent({
   }
   if (!item) {
     return (
-      <p className="border-y border-[var(--border)] py-12 text-center font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-body-sm border-y border-[var(--border)] py-12 text-center">
         该风格已不可用
       </p>
     );
@@ -400,7 +400,7 @@ function PosterStyleMedia({
       <button
         type="button"
         onClick={onOpenLightbox}
-        className="relative aspect-square w-full cursor-zoom-in overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+        className="relative aspect-square w-full cursor-zoom-in overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
       >
         {previewUrl ? (
           <Image
@@ -412,7 +412,7 @@ function PosterStyleMedia({
             className="object-cover"
           />
         ) : null}
-        <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur">
+        <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)]">
           <Maximize2 className="h-3.5 w-3.5" />
         </span>
       </button>
@@ -430,7 +430,7 @@ function PosterStyleMedia({
                 className={cn(
                   "relative aspect-square min-h-11 min-w-11 overflow-hidden rounded-[var(--radius-card)] border bg-[var(--bg-2)] transition-colors",
                   active
-                    ? "border-[var(--border-amber)]"
+                    ? "border-[var(--accent-border)]"
                     : "border-[var(--border)] hover:border-[var(--border-strong)]",
                 )}
               >
@@ -460,7 +460,7 @@ function PosterStyleMetadata({ item }: { item: PosterStyleItem }) {
       </MetaCell>
       {item.preset_id ? (
         <MetaCell label="预设 ID">
-          <span className="block truncate font-mono text-[11px] normal-case">
+          <span className="type-caption block truncate font-mono text-[var(--fg-0)]">
             {item.preset_id}
             {item.version ? ` · v${item.version}` : ""}
           </span>
@@ -485,14 +485,12 @@ function PosterStyleTags({ tags }: { tags: string[] }) {
   if (tags.length === 0) return null;
   return (
     <section className="grid gap-2 border-t border-[var(--border)] pt-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-        风格标签
-      </p>
+      <p className="type-label">风格标签</p>
       <div className="flex flex-wrap gap-1.5">
         {tags.map((tag) => (
           <span
             key={tag}
-            className="inline-flex max-w-full items-center break-words border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] min-[390px]:tracking-[0.14em]"
+            className="type-caption inline-flex max-w-full items-center break-words rounded-[var(--radius-control)] border border-[var(--border)] px-2 py-0.5 text-[var(--fg-1)]"
           >
             {tag}
           </span>
@@ -506,9 +504,7 @@ function PosterStylePalette({ colors }: { colors: string[] }) {
   if (colors.length === 0) return null;
   return (
     <section className="grid gap-2 border-t border-[var(--border)] pt-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-        色板
-      </p>
+      <p className="type-label">色板</p>
       <div className="flex flex-wrap items-center gap-2">
         {colors.map((hex, idx) => (
           <div key={`${hex}-${idx}`} className="flex items-center gap-2">
@@ -518,7 +514,7 @@ function PosterStylePalette({ colors }: { colors: string[] }) {
               className="h-5 w-5 rounded-[var(--radius-card)] border border-[var(--border)]"
               style={{ backgroundColor: hex }}
             />
-            <span className="font-mono text-[11px] uppercase text-[var(--fg-2)]">
+            <span className="type-caption font-mono">
               {hex}
             </span>
           </div>
@@ -541,13 +537,11 @@ function PosterStylePromptTemplate({
   return (
     <section className="grid gap-2 border-t border-[var(--border)] pt-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          Prompt 模板
-        </p>
+        <p className="type-label">提示词模板</p>
         <button
           type="button"
           onClick={onCopy}
-          className="inline-flex min-h-11 items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:text-[var(--amber-300)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:min-h-0"
+          className="type-control inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] px-2 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-7 md:min-h-0"
         >
           {copied ? (
             <Check className="h-3 w-3 text-[var(--success)]" />
@@ -557,7 +551,7 @@ function PosterStylePromptTemplate({
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <p className="whitespace-pre-wrap break-words rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-[13px] leading-relaxed text-[var(--fg-1)]">
+      <p className="type-body-sm whitespace-pre-wrap break-words rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-[var(--fg-1)]">
         {prompt}
       </p>
     </section>
@@ -594,7 +588,7 @@ function PosterStyleDetailActions({
         type="button"
         onClick={onAutoTag}
         disabled={autoTagPending}
-        className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em] md:h-9 md:min-h-0"
+        className="type-control inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:min-h-0"
       >
         {autoTagPending ? <Spinner size={12} /> : <Sparkles className="h-3.5 w-3.5" />}
         重新识别
@@ -614,10 +608,10 @@ function PosterStyleDetailActions({
         onClick={onDelete}
         disabled={deleting}
         className={cn(
-          "inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 border px-3 font-mono text-[11px] uppercase tracking-[0.12em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 min-[390px]:tracking-[0.16em] md:h-9 md:min-h-0",
+          "type-control inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border px-3 transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-9 md:min-h-0",
           isUserItem ? "min-[380px]:col-span-2 md:col-span-1" : "",
           confirmingDelete
-            ? "border-[var(--danger)] text-[var(--danger)]"
+            ? "border-danger-border bg-danger-soft text-[var(--danger-fg)]"
             : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--danger)]",
         )}
       >
@@ -637,10 +631,10 @@ function MetaCell({
 }) {
   return (
     <div className="grid min-w-0 gap-1">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        {label}
+      <p className="type-label">{label}</p>
+      <p className="type-body-sm min-w-0 break-words text-[var(--fg-0)]">
+        {children}
       </p>
-      <p className="min-w-0 break-words font-mono text-[12px] text-[var(--fg-0)]">{children}</p>
     </div>
   );
 }

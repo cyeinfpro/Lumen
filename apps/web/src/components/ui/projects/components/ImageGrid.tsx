@@ -35,7 +35,7 @@ export function ImageGrid({
         )}
       >
         <ImageIcon className="h-4 w-4" />
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+        <span className="type-caption">
           {emptyLabel}
         </span>
       </div>
@@ -64,14 +64,14 @@ export function ImageGrid({
               onPreview && "group-hover:scale-[1.02]",
             )}
           />
-          <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">
+          <span className="type-caption absolute left-2 top-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
             {String(index + 1).padStart(2, "0")}
           </span>
           </>
         );
         const className = cn(
           "group relative aspect-[4/5] overflow-hidden bg-[var(--bg-2)]",
-          onPreview && "cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          onPreview && "cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
         );
         if (!onPreview) {
           return (
@@ -109,7 +109,7 @@ export function ReferenceBlock({
   return (
     <section className="border-t border-[var(--border)] py-3">
       <header className="mb-2 flex items-center justify-between gap-2">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           {title}
         </p>
         {trailing}

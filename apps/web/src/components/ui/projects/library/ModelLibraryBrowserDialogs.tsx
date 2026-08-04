@@ -5,6 +5,8 @@ import { ImagePlus, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { Select } from "@/components/ui/primitives/Select";
+import { Switch } from "@/components/ui/primitives/Switch";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import {
@@ -148,7 +150,7 @@ function UploadDialog({
     style_tags: "",
   });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadTagsEnabled, setUploadTagsEnabled] = useState(false);
+  const [manualTags, setManualTags] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const uploadImage = useUploadImageMutation();
@@ -204,7 +206,7 @@ function UploadDialog({
       age_segment: form.age_segment,
       gender: form.gender,
       appearance_direction: appearanceDirection,
-      style_tags: uploadTagsEnabled ? splitTags(form.style_tags) : embeddedTags,
+      style_tags: manualTags ? splitTags(form.style_tags) : embeddedTags,
     });
   };
 
@@ -212,7 +214,7 @@ function UploadDialog({
 
   return (
     <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -230,7 +232,7 @@ function UploadDialog({
         <header className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
             <p className="type-page-kicker">上传到模特库</p>
-            <h3 className="type-page-title mt-2 md:text-[28px]">
+            <h3 className="type-page-title mt-2 ">
               上传到模特库
             </h3>
           </div>
@@ -252,11 +254,11 @@ function UploadDialog({
                 setForm((prev) => ({ ...prev, title: event.target.value }))
               }
               placeholder="我的高级简洁女模特"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body h-11 w-full px-3 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="年龄段">
-            <select
+            <Select
               value={form.age_segment}
               onChange={(event) =>
                 setForm((prev) => ({
@@ -264,7 +266,6 @@ function UploadDialog({
                   age_segment: event.target.value as ModelLibraryItemAgeSegment,
                 }))
               }
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
             >
               {AGE_TABS.filter(([value]) => value !== "all").map(
                 ([value, label]) => (
@@ -277,10 +278,10 @@ function UploadDialog({
                   </option>
                 ),
               )}
-            </select>
+            </Select>
           </UnderlineLabeled>
           <UnderlineLabeled label="性别">
-            <select
+            <Select
               value={form.gender}
               onChange={(event) =>
                 setForm((prev) => ({
@@ -288,20 +289,19 @@ function UploadDialog({
                   gender: event.target.value as ModelLibraryGender,
                 }))
               }
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
             >
               {GENDER_OPTIONS.map(([value, label]) => (
                 <option key={value} value={value} className="bg-[var(--bg-0)]">
                   {label}
                 </option>
               ))}
-            </select>
+            </Select>
           </UnderlineLabeled>
           <div className="md:col-span-2">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-              Target folder
+            <p className="type-caption text-[var(--fg-2)]">
+              目标目录
             </p>
-            <p className="mt-1.5 border-b border-[var(--border)] py-2 font-mono text-[12px] text-[var(--fg-1)]">
+            <p className="control-shell mt-1.5 px-3 py-2 type-caption text-[var(--fg-1)]">
               {AGE_FOLDER_BY_SEGMENT[form.age_segment]}/{form.gender}
             </p>
           </div>
@@ -334,35 +334,20 @@ function UploadDialog({
               ))}
             </div>
           </UnderlineLabeled>
-          <UnderlineLabeled label="气质方向">
-            <button
-              type="button"
-              onClick={() => setUploadTagsEnabled((value) => !value)}
-              className="group flex h-11 w-full items-center gap-3 border-b border-[var(--border)] px-1 text-left transition-colors hover:border-[var(--border-strong)] md:h-10"
-              aria-pressed={uploadTagsEnabled}
-            >
-              <span
-                aria-hidden
-                className={cn(
-                  "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
-                  uploadTagsEnabled
-                    ? "border-[var(--border-amber)] bg-[var(--accent)]"
-                    : "border-[var(--border-strong)] bg-transparent",
-                )}
-              >
-                <span
-                  className={cn(
-                    "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
-                    uploadTagsEnabled ? "translate-x-3" : "",
-                  )}
-                />
+          <div className="grid gap-2">
+            <span className="type-caption text-[var(--fg-2)]">气质方向</span>
+            <div className="control-shell flex min-h-11 items-center gap-3 px-3">
+              <Switch
+                checked={manualTags}
+                onCheckedChange={setManualTags}
+                aria-label="手动填写气质标签"
+              />
+              <span className="type-caption text-[var(--fg-1)]">
+                {manualTags ? "手动填写" : "自动识别"}
               </span>
-              <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
-                {uploadTagsEnabled ? "手动填写" : "自动识别"}
-              </span>
-            </button>
-          </UnderlineLabeled>
-          {uploadTagsEnabled ? (
+            </div>
+          </div>
+          {manualTags ? (
             <UnderlineLabeled label="气质标签">
               <input
                 value={form.style_tags}
@@ -373,14 +358,14 @@ function UploadDialog({
                   }))
                 }
                 placeholder="清冷高级、知性通勤"
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+                className="control-shell type-body h-11 w-full px-3 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
               />
             </UnderlineLabeled>
           ) : (
             <div className="hidden md:block" />
           )}
           <div className="md:col-span-2">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               模特图
             </p>
             <input
@@ -395,10 +380,10 @@ function UploadDialog({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="mt-1.5 flex min-h-11 w-full items-center gap-3 border-b border-[var(--border)] py-3 text-left transition-colors hover:border-[var(--border-strong)]"
+              className="control-shell mt-1.5 flex min-h-11 w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:border-[var(--border-strong)]"
             >
               <ImagePlus className="h-4 w-4 text-[var(--fg-2)]" />
-              <span className="truncate text-[14px] text-[var(--fg-0)]">
+              <span className="truncate type-body-sm text-[var(--fg-0)]">
                 {uploadFile ? uploadFile.name : "选图"}
               </span>
             </button>
@@ -439,7 +424,7 @@ function UnderlineLabeled({
 }) {
   return (
     <label className={cn("grid gap-2", wrapperClass)}>
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         {label}
       </span>
       {children}
@@ -477,7 +462,7 @@ function MobileFilterSheet({
 
   return (
     <div
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end bg-black/60 backdrop-blur-sm md:hidden"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end bg-[var(--surface-scrim)] md:hidden"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -508,7 +493,7 @@ function MobileFilterSheet({
         </header>
         <div className="mobile-dialog-scroll flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto overscroll-contain px-5 py-5">
           <div className="grid gap-2">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               年龄段
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
@@ -524,7 +509,7 @@ function MobileFilterSheet({
             </div>
           </div>
           <div className="grid gap-2">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               外貌方向
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
@@ -540,7 +525,7 @@ function MobileFilterSheet({
             </div>
           </div>
           <div className="grid gap-2">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               来源
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1">

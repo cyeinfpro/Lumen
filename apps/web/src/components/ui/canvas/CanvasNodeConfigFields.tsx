@@ -6,6 +6,8 @@ import {
 
 import {
   Input,
+  Slider,
+  Switch,
   Textarea,
 } from "@/components/ui/primitives";
 
@@ -71,7 +73,7 @@ export function SelectField({
   );
 }
 
-export function RangeField({
+export function SliderField({
   label,
   value,
   min,
@@ -90,7 +92,7 @@ export function RangeField({
 }) {
   const boundedValue = Math.min(Math.max(value, min), Math.max(min, max));
   return (
-    <RangeFieldControl
+    <SliderFieldControl
       key={`${boundedValue}:${min}:${max}:${step}`}
       label={label}
       value={boundedValue}
@@ -103,7 +105,7 @@ export function RangeField({
   );
 }
 
-function RangeFieldControl({
+function SliderFieldControl({
   label,
   value,
   min,
@@ -136,20 +138,19 @@ function RangeFieldControl({
           {suffix}
         </span>
       </span>
-      <input
-        type="range"
+      <Slider
         min={min}
         max={Math.max(min, max)}
         step={step}
         value={draft}
         onChange={(event) => setDraft(Number(event.currentTarget.value))}
         onPointerUp={commit}
+        aria-label={label}
         // I-5：移动端手指滑出滑轨 / 被浏览器手势接管时只有 pointercancel，
         // 没有 pointerup —— 不补这一路，拖到一半的值会显示成已改但从未提交。
         onPointerCancel={commit}
         onKeyUp={commit}
         onBlur={commit}
-        className="h-11 w-full cursor-pointer accent-[var(--accent)]"
       />
     </label>
   );
@@ -167,20 +168,15 @@ export function ToggleField({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3">
+    <div className="flex min-h-11 items-center justify-between gap-3">
       <span className="type-body-sm text-[var(--fg-1)]">{label}</span>
-      <span className="relative inline-flex h-6 w-10 shrink-0">
-        <input
-          type="checkbox"
-          checked={checked}
-          disabled={disabled}
-          onChange={(event) => onChange(event.currentTarget.checked)}
-          className="peer sr-only"
-        />
-        <span className="absolute inset-0 rounded-full border border-[var(--border-strong)] bg-[var(--bg-2)] transition-colors peer-checked:border-[var(--accent-border)] peer-checked:bg-[var(--accent)] peer-disabled:cursor-not-allowed peer-disabled:opacity-50" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--fg-0)] shadow-[var(--shadow-1)] transition-transform peer-checked:translate-x-4" />
-      </span>
-    </label>
+      <Switch
+        aria-label={label}
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onChange}
+      />
+    </div>
   );
 }
 

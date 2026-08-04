@@ -29,9 +29,9 @@ export function LightboxNotice({
       aria-live={isError ? "assertive" : "polite"}
       className={cn(
         "pointer-events-none absolute left-1/2 top-[calc(env(safe-area-inset-top)+4.25rem)]",
-        "-translate-x-1/2 rounded-full border px-3 py-1.5",
-        "bg-black/62 text-[12px] text-white/86 shadow-lg",
-        isError ? "border-danger-border" : "border-white/12",
+        "type-caption -translate-x-1/2 rounded-full border px-3 py-1.5",
+        "bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)]",
+        isError ? "border-danger-border" : "border-[var(--border)]",
       )}
     >
       {text}

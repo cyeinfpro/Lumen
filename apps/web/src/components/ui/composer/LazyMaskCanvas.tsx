@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 
+import { Spinner } from "@/components/ui/primitives";
 import type { MaskCanvasProps } from "./MaskCanvas";
 
 const MaskCanvasImpl = dynamic(
@@ -10,14 +11,11 @@ const MaskCanvasImpl = dynamic(
     ssr: false,
     loading: () => (
       <div
-        className="fixed inset-0 z-[var(--z-dialog)] grid place-items-center bg-black/72 backdrop-blur-md"
+        className="fixed inset-0 z-[var(--z-dialog)] grid place-items-center bg-[var(--surface-scrim)] backdrop-blur-md"
         aria-busy="true"
         aria-label="加载局部修改画布"
       >
-        <div
-          className="h-8 w-8 animate-spin rounded-full border-2 border-white/30 border-t-white"
-          aria-hidden
-        />
+        <Spinner size={24} />
       </div>
     ),
   },

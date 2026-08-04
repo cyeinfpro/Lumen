@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, MetricCard, Select } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
 export type EventKindFilter = "all" | "generation" | "completion";
@@ -97,22 +97,21 @@ function StatTile({
   }[tone];
 
   return (
-    <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-[11px] text-[var(--fg-2)]">{label}</span>
+    <MetricCard
+      label={label}
+      value={value}
+      icon={
         <span
           className={cn(
-            "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--radius-card)] border",
+            "inline-flex h-6 w-6 items-center justify-center rounded-[var(--radius-card)] border",
             toneClass,
           )}
         >
           <Icon className="h-3.5 w-3.5" />
         </span>
-      </div>
-      <div className="mt-1 font-mono text-lg font-semibold leading-tight tabular-nums text-[var(--fg-0)]">
-        {value}
-      </div>
-    </div>
+      }
+      className="bg-[var(--bg-2)]/70 p-3"
+    />
   );
 }
 
@@ -232,7 +231,7 @@ export function RequestEventsHeader({
   onRefresh: () => void;
 }) {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 p-4 backdrop-blur-sm md:p-5">
+    <div className="surface-card p-4 md:p-5">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
         <div className="min-w-0">
           <h2
@@ -310,33 +309,33 @@ export function RequestEventsHeader({
           <label htmlFor="request-event-status" className="sr-only">
             请求状态
           </label>
-          <select
+          <Select
             id="request-event-status"
             value={status}
             onChange={(event) => onStatusChange(event.target.value as StatusFilter)}
-            className="h-10 min-w-28 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
+            wrapperClassName="min-w-28"
           >
             {STATUS_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
-          </select>
+          </Select>
           <label htmlFor="request-event-range" className="sr-only">
             查询时间
           </label>
-          <select
+          <Select
             id="request-event-range"
             value={range}
             onChange={(event) => onRangeChange(event.target.value as TimeRangeFilter)}
-            className="h-10 min-w-24 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-0)] transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25"
+            wrapperClassName="min-w-24"
           >
             {RANGE_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
-          </select>
+          </Select>
           <Button
             variant={autoRefresh ? "primary" : "secondary"}
             size="sm"

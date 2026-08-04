@@ -19,6 +19,7 @@ import {
   userBillingQueryKeys,
   useUserQueryScope,
 } from "@/components/QueryProvider";
+import { Avatar } from "@/components/ui/primitives";
 import {
   getMe,
   getMyWallet,
@@ -158,15 +159,19 @@ export function DesktopAccountMenu() {
         aria-expanded={open}
         aria-label="打开账户菜单"
         className={cn(
-          "inline-flex h-9 w-9 items-center justify-center rounded-full",
-          "border border-[var(--border)] bg-[var(--bg-2)] text-[12px] font-semibold text-[var(--fg-0)]",
-          "transition-[background-color,border-color] duration-[var(--dur-quick)]",
-          "hover:border-[var(--border-strong)] hover:bg-[var(--bg-3)]",
+          "group inline-flex h-10 w-10 items-center justify-center rounded-full",
           "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-          active && "border-[var(--border-strong)] bg-[var(--surface-selected)]",
         )}
       >
-        {avatar}
+        <Avatar
+          size="sm"
+          name={label}
+          initials={avatar}
+          className={cn(
+            "transition-[background-color,border-color,color] duration-[var(--dur-quick)] group-hover:border-[var(--border-strong)] group-hover:bg-[var(--bg-3)]",
+            active && "border-accent-border bg-accent-soft text-accent",
+          )}
+        />
       </button>
 
       <DesktopPopover
@@ -178,10 +183,10 @@ export function DesktopAccountMenu() {
         className="w-64 p-1.5"
       >
         <div className="border-b border-[var(--border-subtle)] px-3 py-2.5">
-          <p className="truncate text-[13px] font-medium text-[var(--fg-0)]">
+          <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">
             {label}
           </p>
-          <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-[var(--fg-2)]">
+          <div className="mt-1 flex items-center justify-between gap-3 type-caption text-[var(--fg-2)]">
             <span className="truncate">
               {meQuery.data?.email || "Lumen 账户"}
             </span>
@@ -202,7 +207,7 @@ export function DesktopAccountMenu() {
                 onClick={() => setOpen(false)}
                 className={cn(
                   "flex min-h-10 items-center gap-3 rounded-[var(--radius-control)] px-3",
-                  "text-[13px] text-[var(--fg-1)] transition-colors duration-[var(--dur-quick)]",
+                  "type-body-sm text-[var(--fg-1)] transition-colors duration-[var(--dur-quick)]",
                   "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
                   "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
                 )}

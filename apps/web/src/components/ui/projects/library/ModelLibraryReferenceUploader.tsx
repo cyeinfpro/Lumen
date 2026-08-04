@@ -99,13 +99,13 @@ export function ModelLibraryReferenceUploader({
           onClick={openPicker}
           disabled={disabled || uploading}
           className={cn(
-            "relative aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+            "relative aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
             value ? "cursor-pointer" : "cursor-pointer border border-dashed border-[var(--border)]",
           )}
           aria-label={value ? "替换参考图" : "上传参考图"}
         >
           {uploading ? (
-            <span className="flex h-full w-full items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <span className="flex h-full w-full items-center justify-center gap-2 type-caption text-[var(--fg-2)]">
               <Loader2 className="h-4 w-4 animate-spin" />
               上传中
             </span>
@@ -121,17 +121,17 @@ export function ModelLibraryReferenceUploader({
           ) : (
             <span className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
               <ImagePlus className="h-5 w-5 text-[var(--fg-2)]" />
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
+              <span className="type-caption text-[var(--fg-1)]">
                 上传参考图
               </span>
-              <span className="max-w-[220px] text-[12px] leading-[1.5] text-[var(--fg-3)]">
+              <span className="max-w-[220px] type-caption leading-[1.5] text-[var(--fg-3)]">
                 单人清晰人像，PNG/JPG/WebP，10MB 内
               </span>
             </span>
           )}
         </button>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-3)]">
+          <p className="type-caption text-[var(--fg-3)]">
             {value ? value.imageId : "未上传"}
           </p>
           <div className="flex items-center gap-2">

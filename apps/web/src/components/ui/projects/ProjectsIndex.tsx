@@ -24,6 +24,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 
 import { Button } from "@/components/ui/primitives/Button";
 import { EmptyState } from "@/components/ui/primitives/EmptyState";
+import { MediaControlButton } from "@/components/ui/primitives/MediaControlButton";
 import { toast } from "@/components/ui/primitives/Toast";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { useIsMobile } from "@/hooks/useMediaQuery";
@@ -185,7 +186,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
   const summary =
     counts.all > 0
       ? active > 0
-        ? `${active} 个项目正在路上，${counts.completed} 个已交付。`
+        ? `${active} 个项目进行中，${counts.completed} 个已交付。`
         : "所有项目都已收束，可以开启下一组棚拍。"
       : "管理模特库、商品图分析、模特候选、展示图生成与交付。";
   return (
@@ -203,7 +204,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
       <div className="page-header-actions">
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 text-[12px] font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
+          className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 type-caption font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建项目
@@ -257,10 +258,10 @@ function ModelLibraryEntry() {
             )}
           </div>
           <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               模特库
             </p>
-            <h2 className="type-card-title mt-0.5 md:text-[18px]">
+            <h2 className="type-card-title mt-0.5 ">
               模特库
             </h2>
             <p className="type-page-subtitle mt-0.5 hidden max-w-md truncate sm:block">
@@ -272,16 +273,16 @@ function ModelLibraryEntry() {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <div className="text-right">
-            <p className="hidden font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)] sm:block">
+            <p className="hidden type-caption text-[var(--fg-2)] sm:block">
               Models
             </p>
-            <p className="type-metric md:text-[24px]">
+            <p className="type-metric ">
               {String(total).padStart(2, "0")}
             </p>
           </div>
           <span
             aria-hidden
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--fg-2)] transition-all duration-[var(--dur-base)] group-hover:border-[var(--border-amber)] group-hover:bg-[var(--accent-soft)] group-hover:text-[var(--amber-300)]"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border-subtle)] text-[var(--fg-2)] transition-all duration-[var(--dur-base)] group-hover:border-accent-border group-hover:bg-[var(--accent-soft)] group-hover:text-accent"
           >
             <ChevronRight className="h-4 w-4 transition-transform duration-[var(--dur-base)] group-hover:translate-x-0.5" />
           </span>
@@ -374,12 +375,12 @@ function Toolbar({
               type="button"
               onClick={() => onFilterChange(option.key)}
               className={cn(
-                "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-baseline gap-1.5 px-2.5 py-1.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "group relative inline-flex min-h-9 shrink-0 cursor-pointer items-baseline gap-1.5 px-2.5 py-1.5 type-body-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
                 active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
               )}
             >
               <span>{option.label}</span>
-              <span className="text-[11px] tabular-nums opacity-60">
+              <span className="type-caption tabular-nums opacity-60">
                 {count}
               </span>
               <span
@@ -387,7 +388,7 @@ function Toolbar({
                 className={cn(
                   "absolute inset-x-3 bottom-1 h-px transition-all duration-[var(--dur-base)]",
                   active
-                    ? "bg-[var(--amber-400)]"
+                    ? "bg-accent"
                     : "bg-transparent group-hover:bg-[var(--border-strong)]",
                 )}
               />
@@ -401,7 +402,7 @@ function Toolbar({
           value={keyword}
           onChange={(event) => onKeywordChange(event.target.value)}
           placeholder="搜索标题或基础需求"
-          className="h-10 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-9 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-[var(--amber-400)] md:h-9 md:text-sm"
+          className="control-shell h-10 w-full pl-7 pr-9 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-2)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-9"
           aria-label="搜索项目"
         />
         {keyword ? (
@@ -431,9 +432,9 @@ function ProjectsGrid({ items }: { items: WorkflowRunListItem[] }) {
 
 function projectStatusDotTone(status: WorkflowRunListItem["status"]) {
   if (status === "running") {
-    return "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
+    return "bg-accent animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
   }
-  if (status === "needs_review") return "bg-[var(--amber-300)]";
+  if (status === "needs_review") return "bg-accent";
   if (status === "completed") return "bg-[var(--success)]";
   if (status === "failed") return "bg-[var(--danger)]";
   return "bg-[var(--fg-3)]";
@@ -462,24 +463,24 @@ function ProjectCardMedia({
           className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
       ) : (
-        <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
+        <div className="flex h-full items-center justify-center type-caption text-[var(--fg-3)]">
           暂无图片
         </div>
       )}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
+        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[var(--media-control-bg)] via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
       />
-      <span className="absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+      <span className="type-caption absolute left-3 top-3 inline-flex max-w-[calc(100%-5rem)] items-center gap-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
         N°{String(order + 1).padStart(2, "0")}
       </span>
       {running ? (
-        <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)] backdrop-blur">
+        <span className="type-caption absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-accent">
           <span className="relative flex h-1.5 w-1.5">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
-            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
           </span>
-          Running
+          运行中
         </span>
       ) : null}
     </div>
@@ -594,17 +595,17 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
 
         <div className="mt-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="line-clamp-2 text-[15px] font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
+            <p className="line-clamp-2 type-body font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-accent">
               {item.title || "服饰模特图"}
             </p>
-            <p className="mt-1.5 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <p className="mt-1.5 flex items-center gap-2 type-caption text-[var(--fg-2)]">
               <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", dotTone)} />
               <span className="truncate">{STATUS_LABEL[item.status] ?? item.status}</span>
               <span aria-hidden className="text-[var(--fg-3)]">·</span>
               <span className="truncate">{formatRelativeTime(item.updated_at)}</span>
             </p>
             {item.next_action ? (
-              <p className="mt-1.5 line-clamp-1 text-[12px] text-[var(--amber-300)]">
+              <p className="mt-1.5 line-clamp-1 type-caption text-accent">
                 {item.next_action}
               </p>
             ) : null}
@@ -612,21 +613,17 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         </div>
       </Link>
 
-      {/* @ui-governance-allow media: action control sits on the project thumbnail. */}
-      <button
+      <MediaControlButton
         ref={actionButtonRef}
-        type="button"
+        size="sm"
         aria-label="项目操作"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         onClick={openMenu}
-        className={cn(
-          // @ui-governance-allow media
-          "absolute right-1 top-1 inline-flex h-11 min-h-11 w-11 min-w-11 cursor-pointer items-center justify-center rounded-full bg-black/35 text-white/90 opacity-100 backdrop-blur-sm transition-all duration-[var(--dur-base)] hover:bg-black/50 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-9 md:w-9 md:bg-transparent md:text-white/80 md:opacity-0 md:group-hover:opacity-100",
-        )}
+        className="absolute right-1 top-1 opacity-100 md:opacity-0 md:group-hover:opacity-100"
       >
         <MoreHorizontal className="h-4 w-4" />
-      </button>
+      </MediaControlButton>
 
       {menuOpen && isMobile === false ? (
         <div
@@ -647,7 +644,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 onChange={(event) => setTitle(event.target.value)}
                 maxLength={120}
                 autoFocus
-                className="h-9 border-b border-[var(--border)] bg-transparent px-1 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)]"
+                className="control-shell h-10 px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)]"
               />
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="ghost" size="sm" onClick={cancelRename}>
@@ -685,7 +682,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 type="button"
                 onClick={() => setRenaming(true)}
                 role="menuitem"
-                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
+                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]"
               >
                 <Pencil className="h-3.5 w-3.5" />
                 重命名
@@ -694,7 +691,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
                 type="button"
                 onClick={() => setConfirmingDelete(true)}
                 role="menuitem"
-                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
+                className="flex min-h-9 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)]"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 删除

@@ -37,10 +37,7 @@ import {
 } from "@/lib/auth/privateIdentityEpoch";
 import { useInpaintStore } from "@/store/useInpaintStore";
 import { useLightboxGestures } from "./LightboxGestures";
-import {
-  MobileLightboxView,
-  type ImgStatus,
-} from "./MobileLightboxView";
+import { MobileLightboxView, type ImgStatus } from "./MobileLightboxView";
 import {
   mobileLightboxThumbnailItems,
   mobileLightboxVisibleSlides,
@@ -51,10 +48,7 @@ import {
   mobileLightboxOpenStateMatchesIdentity,
   type MobileLightboxOpenState,
 } from "./mobileLightboxIdentity";
-import {
-  preloadImage,
-  preloadLightboxItem,
-} from "./mobileLightboxMedia";
+import { preloadImage, preloadLightboxItem } from "./mobileLightboxMedia";
 import { useMobileLightboxChrome } from "./useMobileLightboxChrome";
 import { useMobileLightboxDialog } from "./useMobileLightboxDialog";
 import { useMobileLightboxMediaActions } from "./useMobileLightboxMediaActions";
@@ -85,7 +79,9 @@ export function MobileLightbox() {
   const gestureTargetRef = useRef<HTMLDivElement | null>(null);
   const downloadAnchorRef = useRef<HTMLAnchorElement | null>(null);
   const items = state?.items ?? EMPTY_LIGHTBOX_ITEMS;
-  const idx = state ? items.findIndex((item) => item.id === state.currentId) : -1;
+  const idx = state
+    ? items.findIndex((item) => item.id === state.currentId)
+    : -1;
   const current = idx >= 0 ? items[idx] : null;
   const total = items.length;
   const isFirst = idx <= 0;
@@ -430,17 +426,14 @@ export function MobileLightbox() {
     setParamsOpen(false);
     showChromeAfterClosingParams();
   }, [showChromeAfterClosingParams]);
-  const {
-    dialogRootRef,
-    closeButtonRef,
-    dialogTitleId,
-  } = useMobileLightboxDialog({
-    open: isOpen,
-    paramsOpen,
-    onClose: close,
-    onGoto: goto,
-    onCloseParams: handleCloseParams,
-  });
+  const { dialogRootRef, closeButtonRef, dialogTitleId } =
+    useMobileLightboxDialog({
+      open: isOpen,
+      paramsOpen,
+      onClose: close,
+      onGoto: goto,
+      onCloseParams: handleCloseParams,
+    });
 
   const handleIterate = useCallback(() => {
     if (!state) return;
@@ -461,7 +454,7 @@ export function MobileLightbox() {
     const id = state.currentId;
     close();
     void useChatStore.getState().upscaleImage(id);
-    pushMobileToast("正在以中等质量放大…", "success");
+    pushMobileToast("中等质量放大中…", "success");
   }, [state, close]);
 
   const handleReroll = useCallback(() => {
@@ -471,7 +464,7 @@ export function MobileLightbox() {
     const id = state.currentId;
     close();
     void useChatStore.getState().rerollImage(id);
-    pushMobileToast("正在重新生成…", "success");
+    pushMobileToast("重新生成中…", "success");
   }, [state, close]);
 
   const handleInpaint = useCallback(() => {
@@ -517,10 +510,7 @@ export function MobileLightbox() {
 
       void warm
         .then((usedFallback) => {
-          if (
-            disposed ||
-            !isPrivateIdentitySnapshotCurrent(identity)
-          ) {
+          if (disposed || !isPrivateIdentitySnapshotCurrent(identity)) {
             return;
           }
           if (usedFallback) markItemFallback(item.id);

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Brain, ChevronDown, Power, SlidersHorizontal } from "lucide-react";
 
 import type { MemoryScopeOut } from "@/lib/apiClient";
-import { Button } from "@/components/ui/primitives";
+import { Button, IconButton, Select } from "@/components/ui/primitives";
 
 type UsedMemory = {
   id: string;
@@ -45,29 +45,36 @@ function MemoryTrigger({
 }: MemoryTriggerProps) {
   const label = disabled ? "记忆关" : activeScopeName ?? "记忆";
 
+  const title = disabled ? "本会话未使用记忆" : "本会话记忆";
+  if (compact) {
+    return (
+      <IconButton
+        size="sm"
+        disabled={!canQueryConversation}
+        onClick={onToggleOpen}
+        aria-label="本会话记忆"
+        tooltip={title}
+        className={disabled ? "text-[var(--fg-3)]" : "text-[var(--fg-2)]"}
+      >
+        <Brain className="h-4 w-4" aria-hidden />
+      </IconButton>
+    );
+  }
+
   return (
-    <button
-      type="button"
+    <Button
+      size="sm"
+      variant="ghost"
       disabled={!canQueryConversation}
       onClick={onToggleOpen}
-      className={[
-        "inline-flex max-sm:min-h-11 max-sm:min-w-11 items-center justify-center gap-1 rounded-full transition-colors disabled:opacity-40",
-        compact ? "h-9 w-9" : "h-7 px-2",
-        disabled
-          ? "text-[var(--fg-3)] hover:bg-[var(--bg-3)]"
-          : "text-[var(--fg-2)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",
-      ].join(" ")}
       aria-label="本会话记忆"
-      title={disabled ? "本会话未使用记忆" : "本会话记忆"}
+      title={title}
+      className={disabled ? "h-8 px-2 text-[var(--fg-3)]" : "h-8 px-2 text-[var(--fg-2)]"}
+      leftIcon={<Brain className="h-4 w-4" aria-hidden />}
+      rightIcon={<ChevronDown className="h-3 w-3" aria-hidden />}
     >
-      <Brain className={compact ? "h-4.5 w-4.5" : "h-4 w-4"} />
-      {!compact && (
-        <>
-          <span className="hidden type-caption lg:inline">{label}</span>
-          <ChevronDown className="h-3 w-3" />
-        </>
-      )}
-    </button>
+      <span className="hidden type-caption lg:inline">{label}</span>
+    </Button>
   );
 }
 
@@ -100,8 +107,8 @@ function MemoryPanelHeader({
           leftIcon={<Power className="h-3.5 w-3.5" />}
           className={
             disabled
-              ? "h-8 text-xs text-[var(--fg-2)]"
-              : "h-8 text-xs border-[var(--accent)]/35 bg-[var(--accent)]/10 text-[var(--accent)]"
+              ? "h-8 text-[var(--fg-2)]"
+              : "h-8 border-accent-border bg-accent-soft text-accent"
           }
         >
           {disabled ? "已关闭" : "已开启"}
@@ -133,11 +140,11 @@ function MemoryScopeControl({
         <SlidersHorizontal className="h-3.5 w-3.5" />
         作用域
       </div>
-      <select
+      <Select
         value={activeScopeId ?? ""}
         disabled={scopePending || scopes.length === 0 || !canQueryConversation}
         onChange={(event) => onScopeChange(event.target.value || null)}
-        className="h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60"
+        className="h-9 min-h-9 bg-[var(--bg-2)] type-body-sm text-[var(--fg-0)]"
       >
         <option value="">默认</option>
         {scopes
@@ -148,7 +155,7 @@ function MemoryScopeControl({
               {scope.name}
             </option>
           ))}
-      </select>
+      </Select>
     </div>
   );
 }
@@ -214,7 +221,7 @@ function MemoryPanel({
   onClose,
 }: MemoryPanelProps) {
   return (
-    <div className="absolute right-0 top-full z-50 mt-2 w-[310px] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/95 shadow-[var(--shadow-3)] backdrop-blur-xl">
+    <div className="absolute right-0 top-full z-[var(--z-tray)] mt-2 w-[310px] overflow-hidden rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/95 shadow-[var(--shadow-2)] backdrop-blur-xl">
       <MemoryPanelHeader
         disabled={disabled}
         togglePending={togglePending}

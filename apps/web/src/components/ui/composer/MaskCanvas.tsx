@@ -21,7 +21,7 @@ import {
   useState,
 } from "react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, IconButton } from "@/components/ui/primitives";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
@@ -121,7 +121,7 @@ function MaskCanvasInner({
         transition={{ duration: 0.16 }}
         className={cn(
           "fixed inset-0 z-[var(--z-dialog)]",
-          "bg-black/72 backdrop-blur-md mobile-perf-surface",
+          "bg-[var(--surface-scrim)] backdrop-blur-md mobile-perf-surface",
           "mobile-dialog-shell flex items-end justify-center sm:items-center",
           "px-3 sm:p-6",
         )}
@@ -139,7 +139,7 @@ function MaskCanvasInner({
             "h-[var(--mobile-dialog-max-height)] sm:h-auto sm:max-h-[calc(100dvh-3rem)]",
             "flex flex-col overflow-hidden",
             "rounded-t-[var(--radius-sheet)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] sm:rounded-[var(--radius-dialog)] sm:border-b",
-            "shadow-[var(--shadow-2)]",
+            "shadow-[var(--shadow-3)]",
           )}
         >
           {/* Header */}
@@ -150,38 +150,34 @@ function MaskCanvasInner({
                 涂抹要被重画的区域；红色高亮即 mask
               </p>
             </div>
-            <button
-              type="button"
+            <IconButton
+              size="sm"
               onClick={() => {
                 if (submitting) return;
                 onClose();
               }}
               disabled={submitting}
               aria-label="关闭"
-              className={cn(
-                "shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-full",
-                "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-                "disabled:opacity-40 disabled:cursor-not-allowed",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-              )}
+              tooltip="关闭"
+              className="shrink-0 text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
             >
               <X className="w-4 h-4" />
-            </button>
+            </IconButton>
           </div>
 
           {/* 画板（hasStroke 状态由 MaskBoard 的 onStatsChange 回调同步） */}
           <div className="mobile-dialog-scroll flex-1 min-h-0 overflow-auto p-3 sm:p-4 bg-[var(--bg-1)]">
             {!imageSrc ? (
-              <div className="flex items-center gap-2 text-sm text-[var(--fg-1)]">
+              <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                正在载入图片…
+                图片加载中…
               </div>
             ) : (
               <Suspense
                 fallback={
-                  <div className="flex min-h-[280px] items-center justify-center gap-2 text-sm text-[var(--fg-1)]">
+                  <div className="flex min-h-[280px] items-center justify-center gap-2 type-body-sm text-[var(--fg-1)]">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    正在载入画布…
+                    画布加载中…
                   </div>
                 }
               >
@@ -219,8 +215,8 @@ function MaskCanvasInner({
               >
                 <div
                   className={cn(
-                    "px-4 py-2 text-xs",
-                    "bg-[var(--amber-400)]/10 text-[var(--amber-400)]",
+                    "px-4 py-2 type-caption",
+                    "bg-warning-soft text-warning",
                   )}
                 >
                   {warning}

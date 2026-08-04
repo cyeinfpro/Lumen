@@ -62,7 +62,7 @@ export function ScoreRing({
       </svg>
       {showLabel ? (
         <span
-          className="absolute inset-0 flex items-center justify-center font-mono text-[10px] tabular-nums"
+          className="absolute inset-0 flex items-center justify-center type-caption tabular-nums"
           style={{ color }}
         >
           {Math.round(clamped)}

@@ -378,12 +378,12 @@ export function SettingsPanel() {
               onRetry={() => void q.refetch()}
             />
           ) : items.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 py-14 text-center type-body-sm text-[var(--fg-2)] backdrop-blur-sm">
+            <div className="surface-card flex flex-col items-center gap-3 py-14 text-center type-body-sm text-[var(--fg-2)]">
               <Sparkles className="h-5 w-5 text-[var(--fg-2)]" />
               没有可配置项
             </div>
           ) : visibleCount === 0 ? (
-            <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-4 py-12 text-center type-body-sm text-[var(--fg-2)]">
+            <div className="surface-card px-4 py-12 text-center type-body-sm text-[var(--fg-2)]">
               没有找到匹配的设置
             </div>
           ) : (
@@ -436,7 +436,7 @@ export function SettingsPanel() {
             transition={{ duration: 0.2 }}
             className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4"
           >
-            <div className="grid grid-cols-2 items-stretch gap-2 rounded-[var(--radius-dialog)] border border-accent-border bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:flex sm:items-center sm:gap-3 sm:px-4">
+            <div className="surface-panel grid grid-cols-2 items-stretch gap-2 px-3 py-2.5 sm:flex sm:items-center sm:gap-3 sm:px-4">
               <span className="col-span-2 inline-flex items-center gap-1.5 type-caption text-[var(--fg-1)] sm:col-span-1 sm:whitespace-nowrap">
                 <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[var(--shadow-amber)]" />
                 <span className="font-mono tabular-nums">{dirtyCount}</span>

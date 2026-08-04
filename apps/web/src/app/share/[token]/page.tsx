@@ -201,7 +201,7 @@ function errorMessageFromPayload(payload: unknown, fallback: string): string {
 function ShareShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="page-shell">
-      <header className="sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+      <header className="sticky top-0 z-[var(--z-header)] border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="safe-x-page-wide mx-auto flex min-h-14 max-w-6xl items-center justify-between gap-3">
           <Link
             href="/"
@@ -262,7 +262,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
           )}
         </div>
         <div className="space-y-1.5">
-          <p className="text-lg text-[var(--fg-0)] font-medium">
+          <p className="type-card-title">
             {isNotFound
               ? "分享不存在"
               : isGone
@@ -270,12 +270,12 @@ function ShareError({ error }: { error: ShareLoadError }) {
                 : "加载失败"}
           </p>
           {isNotFound && (
-            <p className="text-xs text-[var(--fg-2)]">
+            <p className="type-caption">
               链接可能被删除，或从未存在。
             </p>
           )}
           {isGone && (
-            <p className="text-xs text-[var(--fg-2)]">
+            <p className="type-caption">
               可以联系分享者重新生成一条链接。
             </p>
           )}
@@ -288,7 +288,7 @@ function ShareError({ error }: { error: ShareLoadError }) {
         </div>
         <Link
           href="/"
-        className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)]"
+          className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-5 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[transform,background-color] hover:bg-[var(--accent-hover)] active:scale-[var(--press-scale-soft)]"
         >
           <Sparkles className="w-3.5 h-3.5" /> 打开主页
         </Link>

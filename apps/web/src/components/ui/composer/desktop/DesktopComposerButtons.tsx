@@ -12,6 +12,7 @@ import {
   SegmentedControl,
 } from "@/components/ui/primitives/mobile";
 import { Pressable } from "@/components/ui/primitives/mobile/Pressable";
+import { IconButton } from "@/components/ui/primitives";
 import type { ComposerMode } from "@/store/chat/types";
 import { cn } from "@/lib/utils";
 
@@ -27,22 +28,20 @@ export function IconBtn({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
+    <IconButton
+      size="md"
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      title={label}
+      tooltip={label}
       className={cn(
-        "relative shrink-0 inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)]",
+        "relative",
         "text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-2)]",
-        "active:opacity-[var(--op-press)] transition-[background-color,color,opacity] duration-[var(--dur-quick)]",
-        "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
-        "disabled:opacity-40 disabled:cursor-not-allowed",
+        "active:opacity-[var(--op-press)]",
       )}
     >
       {children}
-    </button>
+    </IconButton>
   );
 }
 
@@ -75,10 +74,10 @@ export function SendButton({
         "shrink-0 inline-flex items-center justify-center rounded-full",
         dim,
         "transition-[background-color,box-shadow,opacity] duration-[var(--dur-normal)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/70",
+        "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
         isActive
           ? [
-              "bg-[var(--amber-400)] text-[var(--bg-0)]",
+              "bg-accent text-[var(--accent-on)]",
               burst
                 ? "shadow-[var(--shadow-amber)]"
                 : "shadow-[var(--shadow-1)]",

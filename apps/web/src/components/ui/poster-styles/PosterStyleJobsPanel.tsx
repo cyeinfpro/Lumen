@@ -64,8 +64,7 @@ export function PosterStyleJobsPanel({
       <header className="border-b border-[var(--border)] pb-3">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           <div className="min-w-0 flex-1">
-            <p className="type-page-kicker">任务中心</p>
-            <h2 className="type-page-title mt-1.5 md:text-[28px]">任务中心</h2>
+            <h2 className="type-page-title">任务中心</h2>
             <p className="type-page-subtitle mt-2 max-w-xl">
               风格库生成任务的进度跟踪
             </p>
@@ -77,8 +76,8 @@ export function PosterStyleJobsPanel({
               onClick={() => jobs.refetch()}
               disabled={jobs.isFetching}
               className={cn(
-                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "type-control inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-2.5 text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0",
+                "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
               )}
             >
               <RefreshCw
@@ -105,7 +104,7 @@ export function PosterStyleJobsPanel({
       </header>
 
       {jobs.isPending ? (
-        <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <div className="type-body-sm flex h-40 items-center justify-center gap-2">
           <Spinner size={20} />
           加载中
         </div>
@@ -113,7 +112,7 @@ export function PosterStyleJobsPanel({
         <EmptyJobs />
       ) : (
         <>
-          <Section title="进行中" eyebrow="进行中" count={running.length}>
+          <Section title="进行中" count={running.length}>
             {running.length === 0 ? (
               <EmptyLine label="目前没有进行中的任务" />
             ) : (
@@ -126,7 +125,6 @@ export function PosterStyleJobsPanel({
           </Section>
           <Section
             title="已完成 / 失败"
-            eyebrow="归档"
             count={finished.length}
           >
             {finished.length === 0 ? (
@@ -156,16 +154,14 @@ function Stat({
 }) {
   return (
     <div className="bg-[var(--bg-0)] px-3 py-3 md:px-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-        {label}
-      </p>
+      <p className="type-caption">{label}</p>
       <p
         className={cn(
-          "type-metric mt-1 md:text-[22px]",
-          accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+          "type-metric mt-1",
+          accent ? "text-[var(--accent)]" : "text-[var(--fg-0)]",
         )}
       >
-        {String(value).padStart(2, "0")}
+        {value}
       </p>
     </div>
   );
@@ -173,27 +169,18 @@ function Stat({
 
 function Section({
   title,
-  eyebrow,
   count,
   children,
 }: {
   title: string;
-  eyebrow: string;
   count: number;
   children: React.ReactNode;
 }) {
   return (
     <section className="grid gap-3">
       <div className="flex items-baseline gap-3 border-t border-[var(--border)] pt-3">
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          {eyebrow}
-        </span>
-        <h3 className="text-[16px] font-semibold leading-tight text-[var(--fg-0)] md:text-[18px]">
-          {title}
-        </h3>
-        <span className="font-mono text-[11px] tabular-nums text-[var(--fg-2)]">
-          {String(count).padStart(2, "0")}
-        </span>
+        <h3 className="type-section-title">{title}</h3>
+        <span className="type-caption tabular-nums">{count}</span>
       </div>
       {children}
     </section>
@@ -202,7 +189,7 @@ function Section({
 
 function EmptyLine({ label }: { label: string }) {
   return (
-    <p className="border-y border-[var(--border)] py-8 text-center font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+    <p className="type-body-sm border-y border-[var(--border)] py-8 text-center">
       {label}
     </p>
   );
@@ -234,17 +221,17 @@ function JobCard({
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <div className="type-caption flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <StatusBadge status={job.status} />
             <span aria-hidden className="text-[var(--fg-3)]">
               ·
             </span>
             <span>{POSTER_STYLE_CATEGORY_LABEL[job.category]}</span>
           </div>
-          <p className="mt-2 min-w-0 truncate text-[14px] font-medium text-[var(--fg-0)]">
+          <p className="type-card-title mt-2 min-w-0 truncate">
             {job.title || "未命名风格"}
           </p>
-          <p className="mt-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="type-caption mt-1.5">
             <span className="tabular-nums text-[var(--fg-1)]">
               {job.finished_count}
             </span>
@@ -260,7 +247,7 @@ function JobCard({
           <button
             type="button"
             onClick={() => onOpenItem(job.saved_item_id!)}
-            className="inline-flex min-h-11 items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--amber-300)] md:h-8 md:min-h-0"
+            className="type-control inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-2.5 text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:h-8 md:min-h-0"
           >
             查看入库
             <ArrowRight className="h-3 w-3" />
@@ -269,12 +256,12 @@ function JobCard({
       </header>
 
       {job.error_message ? (
-        <p role="alert" className="max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]">
+        <p role="alert" className="type-caption max-w-xl text-[var(--danger-fg)]">
           {job.error_message}
         </p>
       ) : null}
       {job.prompt ? (
-        <p className="line-clamp-2 max-w-xl break-words text-[12px] leading-[1.6] text-[var(--fg-2)]">
+        <p className="type-caption line-clamp-2 max-w-xl break-words">
           {job.prompt}
         </p>
       ) : null}
@@ -285,7 +272,7 @@ function JobCard({
           {job.style_tags.map((tag) => (
             <span
               key={tag}
-              className="inline-flex max-w-full items-center break-words border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] min-[390px]:tracking-[0.14em]"
+              className="type-caption inline-flex max-w-full items-center break-words rounded-[var(--radius-control)] border border-[var(--border)] px-2 py-0.5 text-[var(--fg-1)]"
             >
               {tag}
             </span>
@@ -301,27 +288,32 @@ function StatusBadge({ status }: { status: PosterStyleJobStatus }) {
     status === "queued"
       ? "bg-[var(--fg-3)]"
       : status === "running"
-        ? "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
+        ? "bg-[var(--accent)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
         : status === "succeeded"
           ? "bg-[var(--success)]"
           : status === "failed"
             ? "bg-[var(--danger)]"
-            : "bg-[var(--amber-300)]";
+            : "bg-[var(--warning)]";
   const tone =
-    status === "running" ||
-    status === "succeeded" ||
-    status === "failed" ||
-    status === "partial"
-      ? "text-[var(--fg-1)]"
-      : "text-[var(--fg-2)]";
+    status === "running"
+      ? "text-[var(--accent)]"
+      : status === "succeeded"
+        ? "text-[var(--success-fg)]"
+        : status === "failed"
+          ? "text-[var(--danger-fg)]"
+          : status === "partial"
+            ? "text-[var(--warning-fg)]"
+            : "text-[var(--fg-2)]";
   return (
     <span className={cn("inline-flex items-center gap-1.5", tone)}>
       {status === "running" ? (
         <Spinner size={12} />
       ) : status === "succeeded" ? (
         <CheckCircle2 className="h-3 w-3 text-[var(--success)]" />
-      ) : status === "failed" || status === "partial" ? (
+      ) : status === "failed" ? (
         <AlertTriangle className="h-3 w-3 text-[var(--danger)]" />
+      ) : status === "partial" ? (
+        <AlertTriangle className="h-3 w-3 text-[var(--warning)]" />
       ) : (
         <span
           aria-hidden
@@ -338,12 +330,12 @@ function ProgressBar({ value }: { value: number }) {
     <div className="grid gap-1.5">
       <div className="h-px overflow-hidden bg-[var(--border)]">
         <div
-          className="h-full bg-[var(--amber-400)] transition-[width] duration-300"
+          className="h-full bg-[var(--accent)] transition-[width] duration-300"
           style={{ width: `${value}%` }}
         />
       </div>
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
-        {String(value).padStart(2, "0")}%
+      <p className="type-caption tabular-nums">
+        {value}%
       </p>
     </div>
   );
@@ -354,11 +346,11 @@ function EmptyJobs() {
     <section className="border-y border-[var(--border)] py-14 md:py-16">
       <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+          <p className="type-caption">
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
             空队列
           </p>
-          <h4 className="type-page-title mt-3 md:text-[28px]">还没有任务</h4>
+          <h4 className="type-page-title mt-3">还没有任务</h4>
           <p className="type-body mt-3 max-w-xl">
             {`从"新建风格"提交一次 prompt，就会派发风格生成任务，进度会实时聚合到这里。`}
           </p>

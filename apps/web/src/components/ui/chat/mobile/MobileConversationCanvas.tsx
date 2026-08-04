@@ -19,12 +19,16 @@ import {
   Check,
   RotateCcw,
 } from "lucide-react";
-import { Button } from "@/components/ui/primitives";
+import { Button, IconButton } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { Markdown } from "@/components/ui/Markdown";
 import { cn } from "@/lib/utils";
 import { tryCopyTextToClipboard } from "@/lib/clipboard";
 import { CompletionStatusLine } from "@/components/ui/chat/CompletionStatusLine";
+import {
+  ConversationTurn,
+  ConversationUserTurn,
+} from "@/components/ui/chat/ConversationVisualAtoms";
 import { generationRenderSignature } from "@/components/ui/chat/generationRenderSignature";
 import { useHistoryPaging } from "@/hooks/useHistoryPaging";
 
@@ -129,13 +133,13 @@ function HistoryLoadControl({
   if (!hasMore && !loading && !error) return null;
 
   return (
-    <div ref={sentinelRef} className="relative z-[1] flex justify-center pb-1.5">
+    <div ref={sentinelRef} className="relative z-[var(--z-base)] flex justify-center pb-1.5">
       {error ? (
         <div
           role="alert"
           className={cn(
             "flex max-w-full items-center gap-2 rounded-[var(--radius-control)] border px-2.5 py-2",
-            "border-[var(--danger)]/25 bg-[var(--danger-soft)] text-xs text-[var(--fg-0)]",
+            "border-danger-border bg-danger-soft type-caption text-[var(--fg-0)]",
           )}
         >
           <AlertTriangle
@@ -148,7 +152,7 @@ function HistoryLoadControl({
             variant="outline"
             loading={loading}
             onClick={onRetry}
-            className="min-h-11 shrink-0 px-3 text-xs"
+            className="min-h-11 shrink-0 px-3"
           >
             重试
           </Button>
@@ -160,9 +164,9 @@ function HistoryLoadControl({
           loading={loading}
           onClick={onLoadMore}
           disabled={!hasMore && !loading}
-          className="min-h-11 text-xs text-[var(--fg-2)]"
+          className="min-h-11 text-[var(--fg-2)]"
         >
-          {loading ? "正在加载" : "加载更早消息"}
+          {loading ? "加载中" : "加载更早消息"}
         </Button>
       )}
     </div>
@@ -420,7 +424,7 @@ function JumpToLatestButton({
 
   return (
     <div
-      className="fixed left-1/2 z-30 -translate-x-1/2"
+      className="fixed left-1/2 z-[var(--z-tray)] -translate-x-1/2"
       style={{ bottom: "calc(var(--bottom-overlay-stack, 120px) + 4px)" }}
     >
       <Button
@@ -428,7 +432,7 @@ function JumpToLatestButton({
         variant="secondary"
         leftIcon={<ArrowDownToLine className="h-3.5 w-3.5" aria-hidden />}
         onClick={onClick}
-        className="min-h-11 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 text-xs shadow-[var(--shadow-2)] backdrop-blur-xl"
+        className="min-h-11 border-[var(--border)] bg-[var(--bg-1)]/90 px-3 shadow-[var(--shadow-2)] backdrop-blur-xl"
       >
         最新
       </Button>
@@ -437,7 +441,7 @@ function JumpToLatestButton({
 }
 
 // ———————————————————————————————————————————————————
-// 用户 turn：右对齐，霞鹜文楷，左侧 2px × 40% 琥珀竖条
+// 用户 turn：与桌面共用同一内容轴、附件、描边和复制操作。
 // ———————————————————————————————————————————————————
 const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
   const [copied, setCopied] = useState(false);
@@ -453,66 +457,7 @@ const UserTurn = memo(function UserTurn({ msg }: { msg: UserMessage }) {
     });
   };
 
-  return (
-    <div id={`msg-${msg.id}`} className="relative flex flex-col items-end gap-2">
-      <span
-        aria-hidden
-        className="absolute bg-[var(--amber-400)] shadow-[var(--shadow-amber)]"
-        style={{
-          left: "-15px",
-          top: "25%",
-          height: "50%",
-          width: "2px",
-          borderRadius: "1px",
-        }}
-      />
-
-      {msg.attachments.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 justify-end">
-          {msg.attachments.map((att, idx) => (
-            <div
-              key={att.id}
-              className={cn(
-                "relative w-11 h-11 rounded-[var(--radius-card)] overflow-hidden",
-                "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-                idx === 0 && "ring-1 ring-[var(--amber-400)]/60",
-              )}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={att.data_url}
-                alt=""
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {msg.text && (
-        <div className="flex items-start gap-2 w-full">
-          <p
-            className={cn(
-              "text-right text-[15px] font-medium leading-[1.55] flex-1 min-w-0",
-              "text-[var(--fg-0)] whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
-            )}
-            style={{ fontFamily: "var(--font-zh-display)" }}
-          >
-            {msg.text}
-          </p>
-          <button
-            type="button"
-            onClick={copy}
-            aria-label="复制"
-            className="mt-0.5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-3)] hover:text-[var(--fg-1)] active:scale-[0.96] active:bg-[var(--bg-2)] transition-[background-color,color,transform] motion-reduce:transition-none shrink-0"
-          >
-            {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
-          </button>
-        </div>
-      )}
-    </div>
-  );
+  return <ConversationUserTurn msg={msg} copied={copied} onCopy={copy} />;
 });
 
 // ———————————————————————————————————————————————————
@@ -586,7 +531,11 @@ const AssistantTurn = memo(function AssistantTurn({
   } = deriveAssistantTurnState(msg, generations);
 
   return (
-    <div id={`msg-${msg.id}`} className="flex flex-col gap-2">
+    <ConversationTurn
+      id={`msg-${msg.id}`}
+      side="assistant"
+      className="flex flex-col gap-2"
+    >
       <CompletionStatusLine msg={msg} compact />
 
       {/* 助手正文 */}
@@ -594,7 +543,7 @@ const AssistantTurn = memo(function AssistantTurn({
         <div className="flex items-start gap-2">
           <div
             className={cn(
-              "text-[15px] leading-[1.55] min-w-0 break-words [overflow-wrap:anywhere] flex-1",
+              "type-body min-w-0 flex-1 break-words [overflow-wrap:anywhere]",
               "text-[var(--fg-0)]",
               "[&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:overscroll-x-contain [&_code]:break-words [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto [&_img]:max-w-full [&_img]:h-auto",
               isFailedText && "text-[var(--danger)]",
@@ -607,58 +556,52 @@ const AssistantTurn = memo(function AssistantTurn({
             {isStreaming && (
               <span
                 aria-hidden
-                className="ml-0.5 inline-block w-[0.5ch] animate-pulse text-[var(--amber-400)] motion-reduce:animate-none"
+                className="ml-0.5 inline-block w-[0.5ch] animate-pulse text-accent motion-reduce:animate-none"
               >
                 ▍
               </span>
             )}
           </div>
           {canCopy && (
-            <button
-              type="button"
+            <IconButton
+              size="sm"
               onClick={copy}
-              aria-label="复制"
-              className="mt-0.5 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-3)] transition-[background-color,color,transform] hover:text-[var(--fg-1)] active:scale-[0.96] active:bg-[var(--bg-2)] motion-reduce:transition-none"
+              aria-label={copied ? "已复制" : "复制"}
+              tooltip={copied ? "已复制" : "复制"}
+              className="mt-0.5 text-[var(--fg-3)]"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
+            </IconButton>
           )}
         </div>
       )}
 
       {/* 文本失败重试 */}
       {isFailedText && (
-        <button
-          type="button"
+        <Button
+          size="sm"
+          variant="secondary"
           onClick={() => onRetryText(msg.id)}
-          className={cn(
-            "self-start inline-flex min-h-11 items-center gap-1 px-3 rounded-full",
-            "bg-[var(--bg-2)] border border-[var(--border)] text-[12px] text-[var(--fg-0)]",
-            "active:scale-[0.97] transition-transform motion-reduce:transition-none",
-          )}
+          className="self-start min-h-11 px-3"
           aria-label="重试"
+          leftIcon={<RotateCcw className="h-3.5 w-3.5" aria-hidden />}
         >
-          <RotateCcw className="w-3.5 h-3.5" aria-hidden />
           重试
-        </button>
+        </Button>
       )}
 
       {/* 已完成的助手消息：提供重新生成按钮 */}
       {canRegenerate && (
         <div className="flex items-center gap-2 pt-0.5">
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="outline"
             onClick={() => onRegenerate(msg.id, msg.intent_resolved)}
-            className={cn(
-              "inline-flex min-h-11 items-center gap-1 px-3 rounded-full",
-              "border border-[var(--border-subtle)] bg-[var(--bg-1)]",
-              "text-[12px] text-[var(--fg-2)]",
-              "active:scale-[0.97] active:bg-[var(--bg-2)] transition-[background-color,transform] motion-reduce:transition-none",
-            )}
+            className="min-h-11 px-3 text-[var(--fg-2)]"
+            leftIcon={<RotateCcw className="h-3.5 w-3.5" aria-hidden />}
           >
-            <RotateCcw className="w-3 h-3" aria-hidden />
             重新生成
-          </button>
+          </Button>
         </div>
       )}
 
@@ -704,7 +647,7 @@ const AssistantTurn = memo(function AssistantTurn({
           })}
         </div>
       )}
-    </div>
+    </ConversationTurn>
   );
 }, areAssistantTurnPropsEqual);
 

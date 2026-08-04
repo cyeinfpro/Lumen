@@ -1,12 +1,8 @@
-import { Loader2 } from "lucide-react";
-import {
-  type RefObject,
-  type WheelEventHandler,
-} from "react";
+import { type RefObject, type WheelEventHandler } from "react";
 import { Group, Image as KonvaImage, Layer, Line, Stage } from "react-konva";
 import type Konva from "konva";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Spinner } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
 import type { Stroke, Tool } from "../types";
@@ -136,7 +132,7 @@ function MaskBoardCanvasContent({
   if (!imgEl) {
     return (
       <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
-        <Loader2 className="w-4 h-4 animate-spin" />
+        <Spinner size={16} />
         加载中
       </div>
     );
@@ -182,7 +178,10 @@ function MaskCanvasStage({
   onPointerMove,
   onPointerUp,
   onPointerLeave,
-}: Omit<MaskBoardCanvasProps, "boardAreaRef" | "imgError" | "onWheel" | "onRetry"> & {
+}: Omit<
+  MaskBoardCanvasProps,
+  "boardAreaRef" | "imgError" | "onWheel" | "onRetry"
+> & {
   imgEl: HTMLImageElement;
 }) {
   return (
@@ -212,12 +211,7 @@ function MaskCanvasStage({
         onPointerCancel={onPointerUp}
       >
         <Layer listening={false}>
-          <Group
-            x={view.x}
-            y={view.y}
-            scaleX={view.scale}
-            scaleY={view.scale}
-          >
+          <Group x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale}>
             <KonvaImage
               image={imgEl}
               width={displayDims.width}
@@ -226,12 +220,7 @@ function MaskCanvasStage({
           </Group>
         </Layer>
         <Layer listening={false}>
-          <Group
-            x={view.x}
-            y={view.y}
-            scaleX={view.scale}
-            scaleY={view.scale}
-          >
+          <Group x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale}>
             {strokes.map((stroke, index) => (
               <Line
                 key={index}
@@ -242,9 +231,7 @@ function MaskCanvasStage({
                 lineCap="round"
                 lineJoin="round"
                 globalCompositeOperation={
-                  stroke.tool === "brush"
-                    ? "source-over"
-                    : "destination-out"
+                  stroke.tool === "brush" ? "source-over" : "destination-out"
                 }
               />
             ))}

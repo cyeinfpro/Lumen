@@ -28,7 +28,11 @@ import {
   useCreateApparelModelLibraryItemMutation,
   useCreateMultiShareMutation,
 } from "@/lib/queries";
-import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
+import {
+  Button,
+  ConfirmDialog,
+  IconButton,
+} from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import {
   getLightboxDownloadFilename,
@@ -101,7 +105,7 @@ function columnCountForWidth(width: number): number {
 
 function sizeLabel(width?: number, height?: number): string | null {
   if (!width || !height) return null;
-  return `${width} x ${height}`;
+  return `${width} × ${height}`;
 }
 
 function collectConversationImages(
@@ -482,22 +486,18 @@ export function ConversationImageGallery({
         <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]">
           <ImageIcon className="h-5 w-5" aria-hidden />
         </div>
-        <h2 className="text-base font-medium text-[var(--fg-0)]">
+        <h2 className="type-card-title">
           当前会话还没有图片
         </h2>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => setStudioView("chat")}
-          className={cn(
-            "mt-5 inline-flex h-9 items-center gap-2 rounded-full px-3 text-sm",
-            "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-            "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          )}
+          className="mt-5 h-9 border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 text-[var(--fg-1)]"
+          leftIcon={<MessageSquare className="h-4 w-4" aria-hidden />}
         >
-          <MessageSquare className="h-4 w-4" aria-hidden />
           回到对话
-        </button>
+        </Button>
       </section>
     );
   }
@@ -510,10 +510,10 @@ export function ConversationImageGallery({
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h2 className="text-[15px] font-medium tracking-tight text-[var(--fg-0)]">
+          <h2 className="type-body text-[var(--fg-0)]">
             本会话图片
           </h2>
-          <p className="mt-0.5 text-[11px] text-[var(--fg-2)]">
+          <p className="mt-0.5 type-caption text-[var(--fg-2)]">
             {galleryImages.length} 张图片 · {uploadCount} 张上传 · {generatedCount} 张生成
           </p>
         </div>
@@ -564,38 +564,33 @@ export function ConversationImageGallery({
               >
                 删除
               </GalleryActionButton>
-              <button
-                type="button"
+              <IconButton
+                size="sm"
                 onClick={clearSelection}
                 aria-label="取消选择"
+                tooltip="取消选择"
                 disabled={bulkBusy}
-                className={cn(
-                  "inline-flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)]",
-                  "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-                  "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors disabled:opacity-55",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                )}
+                className="border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]"
               >
                 <X className="h-3.5 w-3.5" aria-hidden />
-              </button>
+              </IconButton>
             </>
           ) : (
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={() => setSelectionMode((value) => !value)}
               aria-pressed={selectionMode}
               className={cn(
-                "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
-                "border transition-colors",
+                "h-8 px-2.5",
                 selectionMode
-                  ? "border-[rgba(242,169,58,0.32)] bg-[rgba(242,169,58,0.14)] text-[var(--amber-300)]"
+                  ? "border-accent-border bg-accent-soft text-accent"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
+              leftIcon={<CheckSquare className="h-3.5 w-3.5" aria-hidden />}
             >
-              <CheckSquare className="h-3.5 w-3.5" aria-hidden />
               多选
-            </button>
+            </Button>
           )}
           <div
             role="tablist"
@@ -621,19 +616,15 @@ export function ConversationImageGallery({
               onClick={() => setFilter("generated")}
             />
           </div>
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="secondary"
             onClick={() => setStudioView("chat")}
-            className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
-              "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)]",
-              "hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] transition-colors",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
+            className="h-8 border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[var(--fg-1)]"
+            leftIcon={<MessageSquare className="h-3.5 w-3.5" aria-hidden />}
           >
-            <MessageSquare className="h-3.5 w-3.5" aria-hidden />
             回到对话
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -656,9 +647,10 @@ export function ConversationImageGallery({
               const Icon = image.source === "upload" ? Upload : Sparkles;
               const selected = selectedIds.has(image.shareImageId);
               return (
-                <button
+                <Button
                   key={image.id}
-                  type="button"
+                  variant="ghost"
+                  size="md"
                   onClick={() => {
                     if (selectionActive) {
                       toggleSelectedImage(image.shareImageId);
@@ -669,12 +661,11 @@ export function ConversationImageGallery({
                   aria-label={`查看${image.sourceLabel}图片`}
                   aria-pressed={selectionActive ? selected : undefined}
                   className={cn(
-                    "group block w-full overflow-hidden rounded-[var(--radius-card)]",
+                    "group block h-auto w-full justify-start overflow-hidden rounded-[var(--radius-card)] p-0",
                     "border border-[var(--border-subtle)] bg-[var(--bg-1)] text-left",
                     "shadow-[var(--shadow-1)] transition-colors duration-200",
                     "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)]",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                    selected && "border-[var(--amber-400)] ring-2 ring-[var(--amber-400)]/45",
+                    selected && "border-accent-border shadow-[var(--ring)]",
                   )}
                   style={{
                     containIntrinsicSize: `1px ${Math.max(150, Math.min(360, estimatedHeight / 4))}px`,
@@ -694,13 +685,13 @@ export function ConversationImageGallery({
                       decoding="async"
                       className="h-full w-full object-cover transition-opacity duration-[var(--dur-normal)] group-hover:opacity-95"
                     />
-                    <span className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/60 to-transparent" />
-                    <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-black/45 px-1.5 py-0.5 text-[10px] text-white/80 backdrop-blur">
+                    <span className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-[var(--media-control-bg)] to-transparent" />
+                    <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-full border border-[var(--border)] bg-[var(--media-control-bg)] px-1.5 py-0.5 type-overline text-[var(--media-control-fg)] backdrop-blur">
                       <Icon className="h-2.5 w-2.5" aria-hidden />
                       {image.sourceLabel}
                     </span>
                     {longImage && (
-                      <span className="absolute bottom-2 left-2 rounded-full border border-[var(--border)] bg-black/45 px-2 py-1 text-[11px] text-white/82 backdrop-blur">
+                      <span className="absolute bottom-2 left-2 rounded-full border border-[var(--border)] bg-[var(--media-control-bg)] px-2 py-1 type-caption text-[var(--media-control-fg)] backdrop-blur">
                         长图
                       </span>
                     )}
@@ -709,29 +700,29 @@ export function ConversationImageGallery({
                         className={cn(
                           "absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border backdrop-blur",
                           selected
-                            ? "border-[rgba(242,169,58,0.55)] bg-[var(--amber-400)] text-black"
-                            : "border-[var(--border-strong)] bg-black/45 text-white/80",
+                            ? "border-accent-border bg-accent text-[var(--accent-on)]"
+                            : "border-[var(--border-strong)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)]",
                         )}
                       >
                         {selected && <Check className="h-4 w-4" aria-hidden />}
                       </span>
                     ) : (
-                      <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-black/45 text-white/82 opacity-0 backdrop-blur transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                      <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] opacity-0 backdrop-blur transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
                         <Maximize2 className="h-4 w-4" aria-hidden />
                       </span>
                     )}
                   </span>
                   <span className="block px-2 py-1.5">
-                    <span className="block truncate text-[11px] text-[var(--fg-1)]">
+                    <span className="block truncate type-caption text-[var(--fg-1)]">
                       {image.alt || image.sourceLabel}
                     </span>
                     {image.sizeLabel && (
-                      <span className="mt-px block text-[10px] text-[var(--fg-3)]">
+                      <span className="mt-px block type-overline text-[var(--fg-2)]">
                         {image.sizeLabel}
                       </span>
                     )}
                   </span>
-                </button>
+                </Button>
               );
             })}
           </div>

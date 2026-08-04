@@ -21,6 +21,7 @@ import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { getCanvasDialogTransition } from "./canvasDialogMotion";
 
 export interface CanvasShortcut {
   id: string;
@@ -126,6 +127,7 @@ export function CanvasShortcutsDialog({
     detectModifierLabel,
     MODIFIER_SERVER_SNAPSHOT,
   );
+  const dialogTransition = getCanvasDialogTransition();
   useBodyScrollLock(open);
 
   const closeDialog = useCallback(() => {
@@ -144,10 +146,10 @@ export function CanvasShortcutsDialog({
         <motion.div
           key="canvas-shortcuts-dialog"
           className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center p-0 sm:items-center sm:px-4"
-          initial={false}
+          initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0 }}
+          transition={dialogTransition}
         >
           <button
             type="button"
@@ -164,10 +166,10 @@ export function CanvasShortcutsDialog({
             aria-describedby={descriptionId}
             tabIndex={-1}
             onKeyDown={onDialogKeyDown}
-            initial={false}
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={dialogTransition}
             className={cn(
               "mobile-dialog-panel surface-dialog relative flex max-h-[86dvh] w-full max-w-3xl flex-col overflow-hidden",
               "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none max-sm:border-b-0",

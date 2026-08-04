@@ -1,7 +1,7 @@
 export default function ShareLoading() {
   return (
     <div className="page-shell">
-      <header className="sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+      <header className="sticky top-0 z-[var(--z-header)] border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="safe-x-page-wide mx-auto flex min-h-14 max-w-6xl items-center justify-between">
           <div className="h-6 w-28 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
           <div className="h-10 w-28 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
@@ -43,7 +43,7 @@ export default function ShareLoading() {
           </div>
           <div className="grid w-full max-w-4xl gap-3 self-center md:grid-cols-[minmax(0,1fr)_auto]">
             <div className="h-12 animate-lumen-shimmer rounded-[var(--radius-card)] border border-[var(--border)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%]" />
-            <div className="h-11 animate-lumen-shimmer rounded-[var(--radius-card)] bg-[linear-gradient(90deg,rgba(242,169,58,0.20),rgba(242,169,58,0.36),rgba(242,169,58,0.20))] bg-[length:220%_100%] md:w-28" />
+            <div className="h-11 animate-lumen-shimmer rounded-[var(--radius-card)] bg-[linear-gradient(90deg,var(--bg-2),var(--bg-3),var(--bg-2))] bg-[length:220%_100%] md:w-28" />
           </div>
         </div>
       </main>

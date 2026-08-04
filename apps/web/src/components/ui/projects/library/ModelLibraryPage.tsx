@@ -129,7 +129,7 @@ function LibraryHeader({
         <Tabs current={current} onChange={onChange} compact />
         <Link
           href="/projects"
-          className="inline-flex min-h-9 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+          className="inline-flex min-h-9 items-center gap-1.5 border border-[var(--border)] px-3 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           返回项目
@@ -170,10 +170,10 @@ function Tabs({
             onClick={() => onChange(option.key)}
             aria-pressed={active}
             className={cn(
-              "group relative inline-flex shrink-0 cursor-pointer items-center font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+              "group relative inline-flex shrink-0 cursor-pointer items-center font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
               compact
-                ? "min-h-11 px-3 py-1.5 text-[12px] md:min-h-9"
-                : "min-h-10 px-3 py-2.5 text-[13px] md:min-h-9 md:px-3 md:py-2",
+                ? "min-h-11 px-3 py-1.5 type-caption md:min-h-9"
+                : "min-h-10 px-3 py-2.5 type-body-sm md:min-h-9 md:px-3 md:py-2",
               active
                 ? "text-[var(--fg-0)]"
                 : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
@@ -184,7 +184,7 @@ function Tabs({
               <motion.span
                 layoutId="library-tab-underline"
                 aria-hidden
-                className="absolute inset-x-3 -bottom-px h-px bg-[var(--amber-400)]"
+                className="absolute inset-x-3 -bottom-px h-px bg-accent"
                 transition={SPRING.snap}
               />
             ) : null}

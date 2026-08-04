@@ -2,7 +2,6 @@
 
 import type { ReactNode } from "react";
 import {
-  ChevronDown,
   Code2,
   FileSearch,
   Globe2,
@@ -11,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 
+import { Button, IconButton, Select } from "@/components/ui/primitives";
 import { AspectRatioPicker } from "../shared/AspectRatioPicker";
 import type { ComposerMode } from "@/store/chat/types";
 import type { ReasoningEffort } from "@/store/useChatStore";
@@ -89,18 +89,19 @@ export function AdvancedComposerSettings({
   return (
     <div className="flex min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-        <p className="text-[13px] font-semibold text-[var(--fg-0)]">
+        <p className="type-label text-[var(--fg-0)]">
           执行设置
         </p>
         {/* @hit-area-ok: desktop-only popover; mobile uses MobileAdvancedSettings. */}
-        <button
-          type="button"
+        <IconButton
+          size="sm"
           onClick={onClose}
           aria-label="关闭执行设置"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          tooltip="关闭执行设置"
+          className="text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
         >
           <X className="h-4 w-4" aria-hidden />
-        </button>
+        </IconButton>
       </div>
 
       <div className="min-h-0 overflow-y-auto p-4">
@@ -110,7 +111,7 @@ export function AdvancedComposerSettings({
               <section className="grid gap-2" aria-labelledby="image-output-settings">
                 <h3
                   id="image-output-settings"
-                  className="text-[11px] font-medium text-[var(--fg-2)]"
+                  className="type-caption text-[var(--fg-2)]"
                 >
                   输出
                 </h3>
@@ -144,7 +145,7 @@ export function AdvancedComposerSettings({
               <section className="grid gap-2" aria-labelledby="image-speed-settings">
                 <h3
                   id="image-speed-settings"
-                  className="text-[11px] font-medium text-[var(--fg-2)]"
+                  className="type-caption text-[var(--fg-2)]"
                 >
                   执行
                 </h3>
@@ -158,7 +159,7 @@ export function AdvancedComposerSettings({
               </section>
             </div>
 
-            <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/56">
+            <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]">
               <AspectRatioPicker
                 value={aspect}
                 onChange={onAspectChange}
@@ -171,7 +172,7 @@ export function AdvancedComposerSettings({
             <section className="grid gap-2" aria-labelledby="reasoning-settings">
               <h3
                 id="reasoning-settings"
-                className="text-[11px] font-medium text-[var(--fg-2)]"
+                className="type-caption text-[var(--fg-2)]"
               >
                 推理强度
               </h3>
@@ -179,26 +180,26 @@ export function AdvancedComposerSettings({
                 {REASONING_OPTIONS.map((option) => {
                   const active = option.value === reasoningEffort;
                   return (
-                    <button
+                    <Button
                       key={option.value}
-                      type="button"
+                      variant="outline"
+                      size="md"
                       onClick={() => onReasoningEffortChange(option.value)}
                       aria-pressed={active}
                       className={cn(
-                        "min-h-14 rounded-[var(--radius-card)] border px-3 py-2 text-left",
-                        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+                        "h-auto min-h-14 justify-start rounded-[var(--radius-card)] px-3 py-2 text-left",
                         active
-                          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
+                          ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
                           : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
                       )}
                     >
-                      <span className="block text-[12px] font-medium">
+                      <span className="type-label block">
                         {option.label}
                       </span>
-                      <span className="mt-0.5 block text-[10px] text-[var(--fg-2)]">
+                      <span className="mt-0.5 block type-overline text-[var(--fg-2)]">
                         {option.hint}
                       </span>
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
@@ -207,7 +208,7 @@ export function AdvancedComposerSettings({
             <section className="grid gap-2" aria-labelledby="tool-settings">
               <h3
                 id="tool-settings"
-                className="text-[11px] font-medium text-[var(--fg-2)]"
+                className="type-caption text-[var(--fg-2)]"
               >
                 工具
               </h3>
@@ -269,24 +270,18 @@ function SettingSelect({
 }) {
   return (
     <label className="grid gap-1.5">
-      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
-      <span className="relative">
-        <select
+      <span className="type-overline text-[var(--fg-2)]">{label}</span>
+      <Select
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="h-10 w-full appearance-none rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 pr-8 text-[12px] text-[var(--fg-0)] outline-none transition-colors hover:bg-[var(--bg-2)] focus-visible:shadow-[var(--ring)]"
+          className="h-10 bg-[var(--bg-1)] type-caption text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
         >
           {options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
-        </select>
-        <ChevronDown
-          className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]"
-          aria-hidden
-        />
-      </span>
+      </Select>
     </label>
   );
 }
@@ -305,15 +300,15 @@ function ToggleRow({
   detail: string;
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      variant="outline"
+      size="md"
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "flex min-h-14 items-center gap-3 rounded-[var(--radius-card)] border px-3 text-left",
-        "transition-colors duration-[var(--dur-quick)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+        "h-auto min-h-14 justify-start gap-3 rounded-[var(--radius-card)] px-3 text-left",
         active
-          ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
+          ? "border-accent-border bg-accent-soft text-[var(--fg-0)]"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)]",
       )}
     >
@@ -328,11 +323,11 @@ function ToggleRow({
         {icon}
       </span>
       <span className="min-w-0">
-        <span className="block text-[12px] font-medium">{label}</span>
-        <span className="mt-0.5 block truncate text-[10px] text-[var(--fg-2)]">
+        <span className="type-label block">{label}</span>
+        <span className="mt-0.5 block truncate type-overline text-[var(--fg-2)]">
           {detail}
         </span>
       </span>
-    </button>
+    </Button>
   );
 }

@@ -258,7 +258,7 @@ function FeatureCard({
             <Icon className="h-5 w-5" strokeWidth={1.7} />
           </span>
           <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-3)]">
+            <p className="type-caption text-[var(--fg-3)]">
               {num} · {feature.en}
             </p>
             <h2 className="type-section-title mt-1">
@@ -266,14 +266,14 @@ function FeatureCard({
             </h2>
           </div>
         </div>
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+        <span className="shrink-0 type-caption text-[var(--fg-2)]">
           {feature.badge}
         </span>
       </div>
 
       <p
         className={cn(
-          "min-w-0 text-[13px] leading-6 md:line-clamp-3",
+          "min-w-0 type-body-sm leading-6 md:line-clamp-3",
           feature.available ? "text-[var(--fg-1)]" : "text-[var(--fg-3)]",
         )}
       >
@@ -314,25 +314,25 @@ function FeatureCard({
         {feature.available && "primaryHref" in feature ? (
           <Link
             href={feature.primaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 bg-[var(--accent)] px-3 text-[13px] font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--amber-300)] active:opacity-[var(--op-press)] sm:min-h-10"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 type-body-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[background-color,opacity] duration-[var(--dur-base)] hover:bg-[var(--accent-hover)] active:opacity-[var(--op-press)] sm:min-h-10"
           >
             {feature.primaryLabel}
             <ArrowRight className="h-3.5 w-3.5" />
           </Link>
         ) : (
-          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-[13px] text-[var(--fg-2)]">
+          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-body-sm text-[var(--fg-2)]">
             暂未开放
           </span>
         )}
         {feature.available ? (
           <Link
             href={secondaryHref}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 border border-[var(--border)] bg-[var(--bg-0)]/58 px-3 text-[13px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:min-h-10"
           >
             {secondaryLabel}
           </Link>
         ) : (
-          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 text-[13px] text-[var(--fg-3)]">
+          <span className="inline-flex min-h-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] px-3 type-body-sm text-[var(--fg-3)]">
             规划中
           </span>
         )}
@@ -344,10 +344,10 @@ function FeatureCard({
 function FeatureDatum({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+      <p className="type-caption text-[var(--fg-3)]">
         {label}
       </p>
-      <p className="mt-1 line-clamp-2 min-h-8 text-[12px] leading-4 text-[var(--fg-1)]">
+      <p className="mt-1 line-clamp-2 min-h-8 type-caption leading-4 text-[var(--fg-1)]">
         {value}
       </p>
     </div>
@@ -361,13 +361,13 @@ function WorkflowSteps({ steps, disabled }: { steps: string[]; disabled: boolean
         <span
           key={`${step}-${stepIndex}`}
           className={cn(
-            "inline-flex min-h-7 max-w-full items-center gap-1.5 border-b px-1 text-[11px]",
+            "inline-flex min-h-7 max-w-full items-center gap-1.5 border-b px-1 type-caption",
             disabled
               ? "border-[var(--border-subtle)] text-[var(--fg-3)]"
               : "border-[var(--border)] text-[var(--fg-1)]",
           )}
         >
-          <span className="font-mono text-[10px] tabular-nums text-[var(--fg-3)]">
+          <span className="type-caption tabular-nums text-[var(--fg-3)]">
             {stepIndex + 1}
           </span>
           <span className="truncate">{step}</span>
@@ -397,7 +397,7 @@ function RecentProjects({
         </div>
         <Link
           href="/projects/apparel-model-showcase"
-          className="hidden shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 py-2 text-[12px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] sm:inline-flex"
+          className="hidden shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 py-2 type-caption font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)] sm:inline-flex"
         >
           服饰历史
         </Link>
@@ -407,7 +407,7 @@ function RecentProjects({
         {loading ? (
           <div className="flex min-h-24 items-center justify-center gap-2 text-[var(--fg-2)]">
             <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+            <span className="type-caption">
               读取中
             </span>
           </div>
@@ -415,13 +415,13 @@ function RecentProjects({
           <button
             type="button"
             onClick={onRetry}
-            className="flex min-h-24 w-full items-center justify-center text-[13px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-1)]"
+            className="flex min-h-24 w-full items-center justify-center type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-1)]"
           >
             最近项目加载失败，点击重试
           </button>
         ) : items.length === 0 ? (
-          <div className="grid min-h-24 place-items-center px-4 text-center text-[13px] leading-[1.6] text-[var(--fg-2)]">
-            还没有项目。先从上方模板开始，生成后的 poster 和服饰项目都会在这里继续。
+          <div className="grid min-h-24 place-items-center px-4 text-center type-body-sm leading-[1.6] text-[var(--fg-2)]">
+            还没有项目。先从上方模板开始，生成后的海报和服饰项目都会在这里继续。
           </div>
         ) : (
           <ul>
@@ -448,29 +448,29 @@ function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
         </div>
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <span className="type-caption text-[var(--fg-2)]">
               {info.label}
             </span>
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            <span className="type-caption text-[var(--fg-3)]">
               {statusLabel}
             </span>
             {item.output_count > 0 ? (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
-                {item.output_count} outputs
+              <span className="type-caption text-[var(--fg-3)]">
+                {item.output_count} 个产出
               </span>
             ) : null}
           </div>
-          <h3 className="mt-1 truncate text-[15px] font-medium text-[var(--fg-0)]">
+          <h3 className="mt-1 truncate type-body font-medium text-[var(--fg-0)]">
             {item.title || info.fallbackTitle}
           </h3>
-          <p className="mt-1 truncate text-[12.5px] text-[var(--fg-2)]">
+          <p className="mt-1 truncate type-body-sm text-[var(--fg-2)]">
             {item.next_action} · {updatedAt}
           </p>
         </div>
       </div>
       <Link
         href={projectHref(item)}
-        className="inline-flex min-h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 text-[12px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]"
+        className="inline-flex min-h-9 items-center justify-center gap-1.5 border border-[var(--border)] px-3 type-caption font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-1)]"
       >
         {item.status === "completed" ? "查看交付" : "继续项目"}
         <ArrowRight className="h-3.5 w-3.5" />

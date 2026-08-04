@@ -3,6 +3,7 @@
 import { ChevronDown, Zap } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { Button, Select } from "@/components/ui/primitives";
 import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -131,10 +132,10 @@ function ImageQuickSettingsBar({
         title={summary.text}
         className={cn(
           "mx-3 mt-1.5 flex min-h-10 items-center gap-1.5 overflow-x-auto overscroll-x-contain rounded-[var(--radius-card)] border px-2 py-1 no-scrollbar",
-          "border-[var(--border-subtle)] bg-[var(--bg-2)]/55",
+          "border-[var(--border-subtle)] bg-[var(--bg-2)]",
         )}
       >
-        <span className="shrink-0 px-1 text-[11px] font-medium text-[var(--accent)]">
+        <span className="type-label shrink-0 px-1 text-accent">
           {summary.taskLabel}
         </span>
 
@@ -154,18 +155,17 @@ function ImageQuickSettingsBar({
           className="w-[62px]"
         />
 
-        <button
+        <Button
           ref={aspectAnchorRef}
-          type="button"
+          variant="outline"
+          size="sm"
           aria-label="宽高比"
           aria-haspopup="dialog"
           aria-expanded={aspectOpen}
           title="宽高比"
           onClick={() => setAspectOpen((open) => !open)}
           className={cn(
-            "inline-flex h-8 w-[66px] shrink-0 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/68 px-2",
-            "font-mono text-[11px] font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border)] hover:bg-[var(--bg-1)]",
-            "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+            "h-8 w-[66px] shrink-0 justify-between border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-0)] font-mono",
           )}
         >
           {aspect}
@@ -173,7 +173,7 @@ function ImageQuickSettingsBar({
             className="h-3 w-3 text-[var(--fg-2)]"
             aria-hidden
           />
-        </button>
+        </Button>
 
         <InlineChoiceGroup
           ariaLabel="输出尺寸"
@@ -189,30 +189,32 @@ function ImageQuickSettingsBar({
           items={RENDER_QUALITY_OPTIONS}
         />
 
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           aria-pressed={fast}
           aria-label={fast ? "关闭 Fast" : "开启 Fast"}
           title="Fast"
           onClick={() => onFastChange(!fast)}
           className={cn(
-            "inline-flex h-8 shrink-0 items-center gap-1 rounded-[var(--radius-control)] border px-2 text-[11px] font-medium",
-            "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+            "h-8 shrink-0 px-2",
             fast
-              ? "border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)]"
-              : "border-[var(--border-subtle)] bg-[var(--bg-1)]/68 text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+              ? "border-accent-border bg-accent-soft text-accent"
+              : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
           )}
+          leftIcon={
+            <Zap
+              className="h-3.5 w-3.5"
+              fill={fast ? "currentColor" : "none"}
+              aria-hidden
+            />
+          }
         >
-          <Zap
-            className="h-3.5 w-3.5"
-            fill={fast ? "currentColor" : "none"}
-            aria-hidden
-          />
           Fast
-        </button>
+        </Button>
 
         {attachmentCount > 0 && (
-          <span className="shrink-0 text-[10px] text-[var(--fg-2)]">
+          <span className="type-overline shrink-0 text-[var(--fg-2)]">
             {attachmentCount} 张参考
           </span>
         )}
@@ -220,8 +222,8 @@ function ImageQuickSettingsBar({
         {costLabel && (
           <span
             className={cn(
-              "ml-auto shrink-0 px-1 text-[10px] tabular-nums",
-              costWarning ? "text-[var(--danger)]" : "text-[var(--fg-2)]",
+              "ml-auto shrink-0 px-1 type-overline tabular-nums",
+              costWarning ? "text-warning" : "text-[var(--fg-2)]",
             )}
           >
             {costLabel}
@@ -264,13 +266,13 @@ function QuickSelect({
   return (
     <label className="relative shrink-0" title={ariaLabel}>
       <span className="sr-only">{ariaLabel}</span>
-      <select
+      <Select
         aria-label={ariaLabel}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        wrapperClassName="shrink-0"
         className={cn(
-          "h-8 appearance-none rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/68 pl-2 pr-6",
-          "text-[11px] font-medium text-[var(--fg-0)] outline-none transition-colors hover:border-[var(--border)] hover:bg-[var(--bg-1)] focus-visible:shadow-[var(--ring)]",
+          "h-8 min-h-8 border-[var(--border-subtle)] bg-[var(--bg-1)] pl-2 pr-6 type-label text-[var(--fg-0)] hover:border-[var(--border)]",
           className,
         )}
       >
@@ -279,11 +281,7 @@ function QuickSelect({
             {option.label}
           </option>
         ))}
-      </select>
-      <ChevronDown
-        className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--fg-2)]"
-        aria-hidden
-      />
+      </Select>
     </label>
   );
 }
@@ -308,22 +306,22 @@ function InlineChoiceGroup<V extends string>({
       {items.map((item) => {
         const active = item.value === value;
         return (
-          <button
+          <Button
             key={item.value}
-            type="button"
+            variant="ghost"
+            size="sm"
             aria-pressed={active}
             title={`${ariaLabel}：${item.label}`}
             onClick={() => onChange(item.value)}
             className={cn(
-              "inline-flex h-6 min-w-7 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-1.5 text-[10px] font-medium",
-              "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
+              "h-6 min-w-7 rounded-[var(--radius-control)] px-1.5 type-overline",
               active
                 ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
                 : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
             )}
           >
             {item.label}
-          </button>
+          </Button>
         );
       })}
     </div>

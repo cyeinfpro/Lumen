@@ -1,6 +1,6 @@
 import { Check, X } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Input, Select } from "@/components/ui/primitives";
 import {
   type MemoryScopeOut,
   type MemoryStagingOut,
@@ -118,16 +118,18 @@ function MemoryStagingRow({
           {formatTime(item.created_at)}
         </span>
       </div>
-      <input
+      <Input
         value={value}
         onChange={(event) => onEdit(event.target.value)}
-        className="mb-3 h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10"
+        aria-label="候选记忆内容"
+        wrapperClassName="mb-3"
       />
       <div className="flex flex-wrap gap-2">
-        <select
+        <Select
           value={item.scope_id}
           onChange={(event) => onScopeChange(event.target.value)}
-          className="h-11 min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
+          aria-label="候选记忆作用域"
+          className="min-w-0 sm:h-9"
         >
           {scopes.map((scope) => (
             <option key={scope.id} value={scope.id}>
@@ -135,7 +137,7 @@ function MemoryStagingRow({
               {item.recommended_scope_id === scope.id ? " · 推荐" : ""}
             </option>
           ))}
-        </select>
+        </Select>
         <Button
           variant="ghost"
           size="sm"

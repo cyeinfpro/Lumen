@@ -123,9 +123,7 @@ export function Tooltip({
             id={id}
             role="tooltip"
             initial={
-              reduceMotion || instant
-                ? false
-                : { opacity: 0, scale: 0.97 }
+              reduceMotion || instant ? false : { opacity: 0, scale: 0.97 }
             }
             animate={{ opacity: 1, scale: 1 }}
             exit={
@@ -138,10 +136,8 @@ export function Tooltip({
               ease: [0.22, 1, 0.36, 1],
             }}
             className={cn(
-              "pointer-events-none absolute z-[60]",
-              "max-w-[min(20rem,calc(100vw-1rem))] whitespace-normal break-words px-2 py-1 text-center type-caption font-medium rounded-[var(--radius-control)]",
-              "bg-[var(--bg-1)]/95 text-[var(--fg-0)] border border-[var(--border)]",
-              "shadow-lumen-pop backdrop-blur-md",
+              "surface-panel pointer-events-none absolute z-[var(--z-tray)]",
+              "type-caption max-w-[min(20rem,calc(100vw-1rem))] whitespace-normal break-words px-2 py-1 text-center font-medium text-[var(--fg-0)]",
               SIDE_POS[side],
               className,
             )}

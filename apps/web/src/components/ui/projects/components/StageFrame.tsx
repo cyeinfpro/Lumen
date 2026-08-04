@@ -1,7 +1,7 @@
 "use client";
 
 // Stage frame：去除嵌套卡片化，改为 hairline 分隔 + 工作台式排印层级。
-// 视觉规范：mono uppercase eyebrow + compact title + sans subtitle。
+// 视觉规范：mono eyebrow + compact title + sans subtitle。
 // 子内容贴底铺，不再叠加旧的半透明卡片表面。
 
 import { cn } from "@/lib/utils";
@@ -34,7 +34,7 @@ export function StageFrame({
               {eyebrow}
             </p>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <h2 className="type-page-title-sm md:text-[24px]">
+              <h2 className="type-page-title-sm ">
                 {title}
               </h2>
               {badge}
@@ -70,11 +70,11 @@ export function RunningState({
       )}
     >
       <span aria-hidden className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-50" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--amber-400)]" />
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-50" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
       </span>
       <p className="type-card-title">{label}</p>
-      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Developing
       </p>
     </div>
@@ -96,12 +96,12 @@ export function InfoPanel({
   return (
     <section className={cn("border-t border-[var(--border)] py-3", className)}>
       <header className="flex items-center justify-between gap-2">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           {title}
         </p>
         {trailing}
       </header>
-      <div className="mt-2 text-[13px] leading-6 text-[var(--fg-1)]">{children}</div>
+      <div className="mt-2 type-body-sm leading-6 text-[var(--fg-1)]">{children}</div>
     </section>
   );
 }

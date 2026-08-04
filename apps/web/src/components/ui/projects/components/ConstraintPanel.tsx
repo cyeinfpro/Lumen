@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { ImageGrid } from "./ImageGrid";
-import { jsonValue, stepOf } from "../utils";
+import { StructuredValue } from "./StructuredValue";
+import { stepOf } from "../utils";
 
 interface ConstraintPanelProps {
   workflow: WorkflowRun;
@@ -40,22 +41,22 @@ function ConstraintBody({ workflow }: { workflow: WorkflowRun }) {
         <ImageGrid images={workflow.product_images} compact />
       </ConstraintSection>
       <ConstraintSection title="商品还原点">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(product.must_preserve)}</p>
+        <StructuredValue value={product.must_preserve} />
       </ConstraintSection>
       <ConstraintSection title="推荐背景">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(product.background_recommendation)}</p>
+        <StructuredValue value={product.background_recommendation} />
       </ConstraintSection>
       <ConstraintSection title="已确认模特">
         <p className="break-words">{selected ? `方案 ${selected.candidate_index}` : "未确认"}</p>
       </ConstraintSection>
       <ConstraintSection title="配饰四宫格">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(accessory)}</p>
+        <StructuredValue value={accessory} />
       </ConstraintSection>
       <ConstraintSection title="输出规格">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(outputSpecs)}</p>
+        <StructuredValue value={outputSpecs} />
       </ConstraintSection>
       <ConstraintSection title="质检摘要">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(qualitySummary)}</p>
+        <StructuredValue value={qualitySummary} />
       </ConstraintSection>
     </div>
   );
@@ -70,9 +71,7 @@ function ConstraintSection({
 }) {
   return (
     <section className="grid gap-2 py-4 first:pt-0 last:pb-0">
-      <h4 className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        {title}
-      </h4>
+      <h4 className="type-label text-[var(--fg-1)]">{title}</h4>
       <div className="type-body-sm min-w-0 text-[var(--fg-1)]">{children}</div>
     </section>
   );
@@ -82,9 +81,7 @@ export function ConstraintPanel({ workflow, className }: ConstraintPanelProps) {
   return (
     <div className={cn("relative", className)}>
       <header className="border-b border-[var(--border)] pb-4">
-        <p className="type-page-kicker">
-          Constraints
-        </p>
+        <p className="type-caption">项目约束</p>
         <h3 className="type-section-title mt-1.5">
           项目约束
         </h3>
@@ -109,9 +106,7 @@ function DrawerHeader({
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
       <div className="min-w-0">
-        <p className="type-page-kicker">
-          Constraints
-        </p>
+        <p className="type-caption">项目约束</p>
         <h2 id={titleId} className="type-section-title mt-1.5">
           项目约束
         </h2>
@@ -167,7 +162,7 @@ export function ConstraintDrawer({ workflow, open, onClose }: ConstraintDrawerPr
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-[var(--z-tray)] bg-black/55 backdrop-blur-sm"
+          className="fixed inset-0 z-[var(--z-tray)] bg-[var(--surface-scrim)]"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) onClose();
           }}

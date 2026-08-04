@@ -89,13 +89,13 @@ export function Stat({
 }) {
   return (
     <div className="bg-[var(--bg-0)] px-3 py-3 md:px-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         {label}
       </p>
       <p
         className={cn(
-          "type-metric mt-1 md:text-[22px]",
-          accent ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+          "type-metric mt-1 ",
+          accent ? "text-accent" : "text-[var(--fg-0)]",
         )}
       >
         {String(value).padStart(2, "0")}
@@ -118,13 +118,13 @@ export function Section({
   return (
     <section className="grid gap-3">
       <div className="flex items-baseline gap-3 border-t border-[var(--border)] pt-3">
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {eyebrow}
         </span>
-        <h3 className="text-[16px] font-semibold leading-tight text-[var(--fg-0)] md:text-[18px]">
+        <h3 className="type-body font-semibold leading-tight text-[var(--fg-0)] ">
           {title}
         </h3>
-        <span className="font-mono text-[11px] tabular-nums text-[var(--fg-2)]">
+        <span className="type-caption tabular-nums text-[var(--fg-2)]">
           {String(count).padStart(2, "0")}
         </span>
       </div>
@@ -135,7 +135,7 @@ export function Section({
 
 export function EmptyLine({ label }: { label: string }) {
   return (
-    <p className="border-y border-[var(--border)] py-8 text-center font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+    <p className="border-y border-[var(--border)] py-8 text-center type-caption text-[var(--fg-2)]">
       {label}
     </p>
   );
@@ -156,7 +156,7 @@ export function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 type-caption text-[var(--fg-2)]">
             <StatusBadge status={job.status} />
             <span aria-hidden className="text-[var(--fg-3)]">·</span>
             <span>{ORIGIN_LABEL[job.origin]}</span>
@@ -171,7 +171,7 @@ export function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
                 <span aria-hidden className="text-[var(--fg-3)]">·</span>
                 <Link
                   href={`/projects/${job.workflow_run_id}`}
-                  className="inline-flex items-center gap-1 text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)]"
+                  className="inline-flex items-center gap-1 text-accent transition-colors hover:text-accent"
                 >
                   {job.project_title}
                   <ExternalLink className="h-3 w-3" />
@@ -179,7 +179,7 @@ export function RunningJobCard({ job }: { job: ApparelModelLibraryJob }) {
               </>
             ) : null}
           </div>
-          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="mt-2 type-caption text-[var(--fg-2)]">
             <span className="tabular-nums text-[var(--fg-1)]">{job.finished_count}</span>
             <span className="mx-1 text-[var(--fg-3)]">/</span>
             <span className="tabular-nums">{job.requested_count}</span>
@@ -225,7 +225,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
       ? "bg-[var(--success)]"
       : job.status === "failed"
         ? "bg-[var(--danger)]"
-        : "bg-[var(--amber-300)]";
+        : "bg-accent";
   return (
     <motion.article
       layout
@@ -236,7 +236,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 type-caption text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
               <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", dotTone)} />
               {STATUS_LABEL[job.status]}
@@ -254,7 +254,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
                 <span aria-hidden className="text-[var(--fg-3)]">·</span>
                 <Link
                   href={`/projects/${job.workflow_run_id}`}
-                  className="inline-flex items-center gap-1 text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)]"
+                  className="inline-flex items-center gap-1 text-accent transition-colors hover:text-accent"
                 >
                   {job.project_title}
                   <ExternalLink className="h-3 w-3" />
@@ -262,7 +262,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
               </>
             ) : null}
           </div>
-          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+          <p className="mt-2 type-caption text-[var(--fg-2)]">
             <span className="tabular-nums text-[var(--fg-1)]">{job.finished_count}</span>
             <span className="mx-2 text-[var(--fg-3)]">·</span>
             {formatRelativeTime(job.updated_at ?? job.created_at)}
@@ -270,7 +270,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
           {job.error_message ? (
             <p
               role="alert"
-              className="mt-2 max-w-xl text-[12px] leading-[1.6] text-[var(--danger)]"
+              className="mt-2 max-w-xl type-caption leading-[1.6] text-[var(--danger)]"
             >
               {job.error_message}
             </p>
@@ -291,7 +291,7 @@ export function FinishedJobCard({ job }: { job: ApparelModelLibraryJob }) {
               }}
               disabled={deleteJob.isPending}
               className={cn(
-                "inline-flex min-h-11 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-8 md:min-h-0",
+                "inline-flex min-h-11 items-center gap-1 px-2 type-caption transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-8 md:min-h-0",
                 confirmDelete
                   ? "text-[var(--danger)]"
                   : "text-[var(--fg-2)] hover:text-[var(--danger)]",
@@ -356,10 +356,10 @@ function CandidatesGroup({
   return (
     <section className="grid gap-3 border-t border-[var(--border)] pt-4">
       <header className="grid gap-1">
-        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           候选 · 竞速产出
         </p>
-        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+        <p className="type-caption text-[var(--fg-3)]">
           另一路供应商的产出，可预览或入库
         </p>
       </header>
@@ -392,7 +392,7 @@ function SourceBadge({ job }: { job: ApparelModelLibraryJob }) {
     <span
       className={cn(
         "inline-flex items-center gap-1",
-        reference ? "text-[var(--amber-300)]" : "text-[var(--fg-2)]",
+        reference ? "text-accent" : "text-[var(--fg-2)]",
       )}
     >
       {reference ? <ImageIcon className="h-3 w-3" /> : null}
@@ -433,7 +433,7 @@ function ReferenceSummary({
         />
       </div>
       <div className="min-w-0 self-center">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           参考图识别
         </p>
         {summary.tokens.length > 0 ? (
@@ -441,19 +441,19 @@ function ReferenceSummary({
             {summary.tokens.map((token, idx) => (
               <span
                 key={`${token}-${idx}`}
-                className="max-w-full break-words border border-[var(--border)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)]"
+                className="max-w-full break-words border border-[var(--border)] px-2 py-1 type-caption text-[var(--fg-1)]"
               >
                 {token}
               </span>
             ))}
           </div>
         ) : (
-          <p className="mt-1 text-[12px] text-[var(--fg-3)]">
+          <p className="mt-1 type-caption text-[var(--fg-3)]">
             未返回可展示的识别字段
           </p>
         )}
         {summary.notes ? (
-          <p className="mt-2 line-clamp-2 text-[12px] leading-[1.55] text-[var(--fg-2)]">
+          <p className="mt-2 line-clamp-2 type-caption leading-[1.55] text-[var(--fg-2)]">
             {summary.notes}
           </p>
         ) : null}
@@ -472,7 +472,7 @@ function BriefMeta({ job }: { job: ApparelModelLibraryJob }) {
   }
   if (tokens.length === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 type-caption text-[var(--fg-2)]">
       {tokens.map((token, idx) => (
         <span key={`${token}-${idx}`} className="inline-flex items-center gap-2">
           {idx > 0 ? <span aria-hidden className="text-[var(--fg-3)]">·</span> : null}
@@ -489,12 +489,12 @@ export function StatusBadge({ status }: { status: ApparelModelLibraryJobStatus }
     status === "queued"
       ? "bg-[var(--fg-3)]"
       : status === "running"
-        ? "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
+        ? "bg-accent animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]"
         : status === "succeeded"
           ? "bg-[var(--success)]"
           : status === "failed"
             ? "bg-[var(--danger)]"
-            : "bg-[var(--amber-300)]";
+            : "bg-accent";
   const tone =
     status === "running" || status === "succeeded" || status === "failed" || status === "partial"
       ? "text-[var(--fg-1)]"
@@ -521,11 +521,11 @@ function ProgressBar({ value }: { value: number }) {
     <div className="grid gap-1.5">
       <div className="h-px overflow-hidden bg-[var(--border)]">
         <div
-          className="h-full bg-[var(--amber-400)] transition-[width] duration-300"
+          className="h-full bg-accent transition-[width] duration-300"
           style={{ width: `${value}%` }}
         />
       </div>
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-2)]">
+      <p className="type-caption tabular-nums text-[var(--fg-2)]">
         {String(value).padStart(2, "0")}%
       </p>
     </div>
@@ -629,7 +629,7 @@ function JobThumbCaption({
       .join(" · ") || "未识别";
   return (
     <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2">
-      <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
+      <span className="min-w-0 flex-1 truncate type-caption text-[var(--fg-2)] ">
         {caption}
       </span>
       {model.canSave && !model.saved ? (
@@ -637,7 +637,7 @@ function JobThumbCaption({
           type="button"
           aria-label="收藏入库"
           onClick={onSave}
-          className="inline-flex min-h-11 shrink-0 items-center gap-1 px-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--amber-300)] transition-colors hover:text-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 min-[390px]:tracking-[0.16em] md:h-7 md:min-h-0"
+          className="inline-flex min-h-11 shrink-0 items-center gap-1 px-2 type-caption text-accent transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:h-7 md:min-h-0"
         >
           <Bookmark className="h-3 w-3" />
           入库
@@ -662,7 +662,7 @@ function CompactJobThumbSaveAction({
       type="button"
       aria-label="收藏入库"
       onClick={onSave}
-      className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--amber-200)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
+      className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--bg-0)] shadow-[var(--shadow-1)] transition-opacity hover:bg-[var(--accent-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:h-7 md:w-7 md:opacity-0 md:group-hover:opacity-100"
     >
       <Bookmark className="h-3.5 w-3.5" />
     </button>
@@ -707,7 +707,7 @@ function JobThumbnailMedia({
       onClick={onOpenLightbox}
       aria-label="查看大图"
       className={cn(
-        "relative block w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "relative block w-full cursor-zoom-in overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
         compact ? "aspect-square" : "aspect-[3/4]",
       )}
     >
@@ -720,19 +720,19 @@ function JobThumbnailMedia({
         className="object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
       />
       {typeof order === "number" ? (
-        <span className="absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+        <span className="type-caption absolute left-2 top-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
           N°{String(order + 1).padStart(2, "0")}
         </span>
       ) : null}
       {free ? (
-        <span className="absolute right-2 top-2 inline-flex rounded-full border border-white/20 bg-black/60 px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-white backdrop-blur">
-          free
+        <span className="type-caption absolute right-2 top-2 inline-flex rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
+          免费
         </span>
       ) : null}
       {saved ? (
         <span
           className={cn(
-            "absolute right-2 inline-flex items-center gap-1 bg-[var(--success)]/90 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-white backdrop-blur",
+            "type-caption absolute right-2 inline-flex items-center gap-1 rounded-[var(--radius-control)] bg-success px-2 py-1 text-[var(--success-on)]",
             free ? "top-8" : "top-2",
           )}
         >
@@ -740,8 +740,7 @@ function JobThumbnailMedia({
           已入库
         </span>
       ) : null}
-      {/* @ui-governance-allow media: zoom affordance overlays the generated image. */}
-      <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white opacity-100 backdrop-blur transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
+      <span className="pointer-events-none absolute bottom-2 right-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)] opacity-100 transition-opacity duration-150 md:opacity-0 md:group-hover:opacity-100">
         <Maximize2 className="h-3.5 w-3.5" />
       </span>
     </button>
@@ -755,11 +754,11 @@ export function EmptyJobs() {
     <section className="border-y border-[var(--border)] py-14 md:py-16">
       <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+          <p className="type-caption text-accent">
             <Library className="mr-1.5 -mt-px inline-block h-3 w-3" />
             空队列
           </p>
-          <h4 className="type-page-title mt-3 md:text-[28px]">
+          <h4 className="type-page-title mt-3 ">
             还没有任务
           </h4>
           <p className="type-body mt-3 max-w-xl">

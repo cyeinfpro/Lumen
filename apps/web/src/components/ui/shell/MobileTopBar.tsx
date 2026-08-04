@@ -57,7 +57,7 @@ export function MobileTopBar({
     <header
       ref={ref}
       className={[
-        "sticky left-0 right-0 top-0 shrink-0 safe-x",
+        "sticky left-0 right-0 top-0 z-[var(--z-header)] shrink-0 safe-x",
         "transition-[background-color,backdrop-filter,border-color] duration-[var(--dur-normal)]",
         showGlass
           ? "bg-[var(--bg-0)]/72 backdrop-blur-xl mobile-perf-surface border-b border-[var(--border-subtle)]"
@@ -65,7 +65,6 @@ export function MobileTopBar({
         className,
       ].join(" ")}
       style={{
-        zIndex: "var(--z-header, 10)" as unknown as number,
         paddingTop:
           "calc(env(safe-area-inset-top, 0px) + var(--top-banner-stack-height, 0px))",
       }}
@@ -129,7 +128,7 @@ function MobileWalletPill() {
       aria-label={low ? `钱包余额低 ¥${balanceText}` : `钱包余额 ¥${balanceText}`}
       title={`¥${balanceText}`}
       className={[
-        "inline-flex min-h-11 max-w-[88px] shrink items-center rounded-full border px-2 text-[11px] font-medium tabular-nums",
+        "inline-flex min-h-11 max-w-[88px] shrink items-center rounded-full border px-2 type-caption font-medium tabular-nums",
         "[@media(max-width:390px)]:max-w-[64px] [@media(max-width:360px)]:hidden",
         "truncate font-mono",
         low || negative

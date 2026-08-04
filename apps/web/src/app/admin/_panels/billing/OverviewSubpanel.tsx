@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   Activity,
   CheckCircle2,
@@ -11,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { Button, Card } from "@/components/ui/primitives";
+import { Button, Card, ConfirmDialog } from "@/components/ui/primitives";
 import { formatRmb } from "@/lib/money";
 import type {
   AdminBillingOverviewOut,
@@ -227,48 +228,58 @@ function OrphanHoldRow({
   const holdRmb = Math.abs(item.tx.amount.micro) / 1_000_000;
   const settleDefault = item.recovery_action === "settle_default";
   const manualReview = item.recovery_action === "manual_review";
+  const [confirmOpen, setConfirmOpen] = useState(false);
   return (
-    <div className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto]">
-      <div className="min-w-0">
-        <p
-          className="truncate font-mono text-xs text-[var(--fg-0)]"
-          title={reference}
+    <>
+      <div className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto]">
+        <div className="min-w-0">
+          <p
+            className="truncate font-mono text-xs text-[var(--fg-0)]"
+            title={reference}
+          >
+            {reference}
+          </p>
+          <p className="text-[var(--fg-2)]">
+            用户 {item.user_id} · 预扣 ¥{formatRmb(holdRmb)} ·{" "}
+            {Math.round(item.age_seconds / 60)} 分钟
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={manualReview}
+          onClick={() => {
+            if (!manualReview) setConfirmOpen(true);
+          }}
+          loading={recoveryPending}
         >
-          {reference}
-        </p>
-        <p className="text-[var(--fg-2)]">
-          user {item.user_id} · 预扣 ¥{formatRmb(holdRmb)} ·{" "}
-          {Math.round(item.age_seconds / 60)} 分钟
-        </p>
+          {manualReview
+            ? "需人工核查"
+            : settleDefault
+              ? "按预授权结算"
+              : "强制释放"}
+        </Button>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={manualReview}
-        onClick={() => {
-          if (manualReview) return;
-          if (
-            window.confirm(
-              settleDefault
-                ? "确认按预授权金额结算？提示词增强已可能产生上游费用，该操作会结算同一请求引用下的全部未结算预扣。"
-                : "确认强制释放？该操作会释放同一任务引用下的全部未结算预扣，不只当前显示的这一笔。",
-            )
-          ) {
-            onRecover(
-              item.tx.id,
-              settleDefault ? "settle_default" : "release",
-            );
-          }
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title={settleDefault ? "按预授权结算" : "强制释放预扣"}
+        description={
+          settleDefault
+            ? "该请求可能已产生上游费用，将结算同一请求引用下的全部未结算预扣。"
+            : "将释放同一任务引用下的全部未结算预扣，不只当前显示的这一笔。"
+        }
+        confirmText={settleDefault ? "结算" : "释放"}
+        tone={settleDefault ? "default" : "danger"}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          onRecover(
+            item.tx.id,
+            settleDefault ? "settle_default" : "release",
+          );
         }}
-        loading={recoveryPending}
-      >
-        {manualReview
-          ? "需人工核查"
-          : settleDefault
-            ? "按预授权结算"
-            : "强制释放"}
-      </Button>
-    </div>
+      />
+    </>
   );
 }
 

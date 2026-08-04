@@ -58,7 +58,7 @@ function ResetPasswordInner() {
       setSentTo(trimmedEmail);
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
-        setError("请求过于频繁，请稍后再试");
+        setError("请求过于频繁，稍后再试");
       } else {
         setError(errorToText(err));
       }
@@ -100,7 +100,7 @@ function ResetPasswordInner() {
                 disabled={submitting}
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
+                placeholder="name@example.com"
                 autoComplete="email"
                 inputMode="email"
                 autoCapitalize="none"

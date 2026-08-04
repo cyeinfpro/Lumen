@@ -7,6 +7,7 @@
 // - 退出登录二次确认仍走 AccountCenter 自带的 ActionSheet（嵌套 OK：z-dialog 后渲染覆盖前者）
 
 import { BottomSheet } from "@/components/ui/primitives/mobile";
+import { Avatar } from "@/components/ui/primitives";
 import { Mail } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AccountCenter } from "./AccountCenter";
@@ -36,31 +37,27 @@ export function AccountSheet({ open, onClose, user, loading }: AccountSheetProps
       {/* sheet header：用户摘要（粘性置顶，避免滑动后看不到自己是谁） */}
       <div
         className={cn(
-          "sticky top-0 z-10",
+          "sticky top-0 z-[var(--z-header)]",
           "bg-[var(--bg-1)]/95 backdrop-blur-xl",
           "border-b border-[var(--border-subtle)]",
         )}
       >
         <div className="flex items-center gap-3 px-4 py-3">
-          <div
-            className={cn(
-              "w-10 h-10 rounded-[var(--radius-panel)] shrink-0",
-              "bg-gradient-to-br from-[var(--amber-300)] via-[var(--amber-400)] to-[var(--amber-600)]",
-              "flex items-center justify-center",
-              "text-[15px] font-bold text-[var(--bg-0)]",
-              "shadow-[var(--shadow-amber)]",
-            )}
-          >
-            {avatarChar}
-          </div>
+          <Avatar
+            name={userLabel}
+            initials={avatarChar}
+            alt={userLabel || "账户头像"}
+            size="md"
+            className="border-accent-border bg-accent text-[var(--accent-on)]"
+          />
           <div className="flex-1 min-w-0">
             {user?.name && (
-              <p className="line-clamp-2 break-words text-[15px] font-semibold leading-tight text-[var(--fg-0)]">
+              <p className="line-clamp-2 break-words type-card-title text-[var(--fg-0)]">
                 {user.name}
               </p>
             )}
             {user?.email && (
-              <p className="mt-0.5 flex min-w-0 items-start gap-1.5 text-[12px] text-[var(--fg-2)]">
+              <p className="mt-0.5 flex min-w-0 items-start gap-1.5 type-caption text-[var(--fg-2)]">
                 <Mail className="w-3 h-3 shrink-0" />
                 <span className="min-w-0 break-all">{user.email}</span>
               </p>

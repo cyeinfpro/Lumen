@@ -1,5 +1,11 @@
 import type { PointerEventHandler, WheelEventHandler } from "react";
-import type { DesktopGalleryItem, DownloadStatus, PanOffset, ShareStatus, ViewMode } from "./desktopLightboxModel";
+import type {
+  DesktopGalleryItem,
+  DownloadStatus,
+  PanOffset,
+  ShareStatus,
+  ViewMode,
+} from "./desktopLightboxModel";
 import type { LightboxItem } from "./types";
 
 export type ThumbnailItem = {
@@ -71,12 +77,10 @@ export type DesktopLightboxViewProps = {
   onNext: () => void;
   onImageLoad: () => void;
   onImageError: () => void;
+  onRetryImage: () => void;
   onImagePointerDown: PointerEventHandler<HTMLImageElement>;
   onImagePointerMove: PointerEventHandler<HTMLImageElement>;
   onImagePointerUp: PointerEventHandler<HTMLImageElement>;
   onImagePointerCancel: PointerEventHandler<HTMLImageElement>;
-  onSelectThumbnail: (
-    entry: DesktopGalleryItem,
-    index: number,
-  ) => void;
+  onSelectThumbnail: (entry: DesktopGalleryItem, index: number) => void;
 };

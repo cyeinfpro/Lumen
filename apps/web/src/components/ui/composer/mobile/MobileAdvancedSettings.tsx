@@ -8,6 +8,7 @@ import {
   ImagePlus,
   Zap,
 } from "lucide-react";
+import { Button, Select } from "@/components/ui/primitives";
 import { Chip } from "@/components/ui/primitives/mobile";
 import type { AspectRatio, Quality, RenderQualityChoice } from "@/lib/types";
 import type { ReasoningEffort } from "@/store/useChatStore";
@@ -24,7 +25,7 @@ export const MOBILE_REASONING_OPTIONS: ReadonlyArray<{
   { value: "xhigh", label: "很高", hint: "更慢，适合复杂问题" },
 ];
 
-const COUNT_OPTIONS = [1, 2, 4, 8, 10] as const;
+const COUNT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
 const QUALITY_OPTIONS: ReadonlyArray<{ value: Quality; label: string }> = [
   { value: "1k", label: "1K" },
@@ -93,11 +94,11 @@ export function MobileAdvancedSettings({
   return (
     <div className="mobile-dialog-scroll px-4 pb-5">
       <div className="border-b border-[var(--border-subtle)] py-3.5">
-        <h3 className="text-[15px] font-semibold text-[var(--fg-0)]">
+        <h3 className="type-card-title">
           执行设置
         </h3>
-        <p className="mt-1 text-[12px] text-[var(--fg-2)]">
-          主输入区只保留高频操作，参数在这里集中调整。
+        <p className="mt-1 type-caption text-[var(--fg-2)]">
+          摘要保留在输入区，完整参数在这里调整。
         </p>
       </div>
 
@@ -127,20 +128,21 @@ export function MobileAdvancedSettings({
                 label: `${value} 张`,
               }))}
             />
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="md"
               onClick={onOpenAspect}
-              className="grid min-h-14 gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2 text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+              className="grid h-auto min-h-14 justify-stretch gap-1 rounded-[var(--radius-card)] bg-[var(--bg-1)] px-3 py-2 text-left"
             >
-              <span className="text-[10px] text-[var(--fg-2)]">宽高比</span>
-              <span className="flex items-center justify-between text-[13px] font-medium text-[var(--fg-0)]">
+              <span className="type-overline text-[var(--fg-2)]">宽高比</span>
+              <span className="type-label flex items-center justify-between text-[var(--fg-0)]">
                 {aspect}
                 <ChevronDown
                   className="h-3.5 w-3.5 text-[var(--fg-2)]"
                   aria-hidden
                 />
               </span>
-            </button>
+            </Button>
           </div>
           <Chip
             active={fast}
@@ -153,16 +155,17 @@ export function MobileAdvancedSettings({
         </div>
       ) : (
         <div className="grid gap-4 pt-4">
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="md"
             onClick={onOpenReasoning}
-            className="flex min-h-14 items-center justify-between rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-3 text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+            className="h-auto min-h-14 justify-between rounded-[var(--radius-card)] bg-[var(--bg-1)] px-3 text-left"
           >
             <span>
-              <span className="block text-[11px] text-[var(--fg-2)]">
+              <span className="type-caption block text-[var(--fg-2)]">
                 推理强度
               </span>
-              <span className="mt-0.5 block text-[13px] font-medium text-[var(--fg-0)]">
+              <span className="mt-0.5 block type-label text-[var(--fg-0)]">
                 {MOBILE_REASONING_OPTIONS.find(
                   (option) => option.value === reasoningEffort,
                 )?.label ?? "默认"}
@@ -172,7 +175,7 @@ export function MobileAdvancedSettings({
               className="h-4 w-4 text-[var(--fg-2)]"
               aria-hidden
             />
-          </button>
+          </Button>
           <div className="grid grid-cols-2 gap-2">
             <Chip
               active={webSearch}
@@ -234,24 +237,19 @@ function MobileSettingSelect({
 }) {
   return (
     <label className="grid min-h-14 gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-3 py-2">
-      <span className="text-[10px] text-[var(--fg-2)]">{label}</span>
-      <span className="relative">
-        <select
+      <span className="type-overline text-[var(--fg-2)]">{label}</span>
+      <Select
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="h-7 w-full appearance-none bg-transparent pr-6 text-[13px] font-medium text-[var(--fg-0)] outline-none"
+          wrapperClassName="w-full"
+          className="h-8 min-h-8 border-0 bg-transparent px-0 pr-7 type-label text-[var(--fg-0)] shadow-none focus:border-transparent"
         >
           {options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
-        </select>
-        <ChevronDown
-          className="pointer-events-none absolute right-0 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]"
-          aria-hidden
-        />
-      </span>
+      </Select>
     </label>
   );
 }

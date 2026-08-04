@@ -24,11 +24,11 @@ function formatTokens(value: number | undefined): string {
 }
 
 function titleFor(event: CompactionEvent): string {
-  if (event.phase === "started") return "正在压缩较早上下文...";
+  if (event.phase === "started") return "较早上下文压缩中...";
   if (event.phase === "progress") {
     const current = event.progress?.currentSegment ?? 0;
     const total = event.progress?.totalSegments ?? 0;
-    return total > 0 ? `${current}/${total} 段已完成...` : "正在压缩较早上下文...";
+    return total > 0 ? `${current}/${total} 段已完成...` : "较早上下文压缩中...";
   }
   if (event.ok) return "上下文已压缩";
   return "压缩未成功";
@@ -36,7 +36,7 @@ function titleFor(event: CompactionEvent): string {
 
 function descriptionFor(event: CompactionEvent): string {
   if (event.phase !== "completed") {
-    return event.trigger === "manual" ? "正在处理手动压缩请求。" : "正在整理可复用的早期信息。";
+    return event.trigger === "manual" ? "手动压缩请求处理中。" : "早期信息整理中。";
   }
   if (event.ok) {
     const freed = event.stats?.tokensFreed;
@@ -97,7 +97,7 @@ function ProgressBar({ event }: { event: CompactionEvent }) {
 function StatsLine({ event }: { event: CompactionEvent }) {
   if (event.phase !== "completed" || !event.ok || !event.stats) return null;
   return (
-    <p className="mt-1.5 text-[11px] leading-none text-[var(--fg-2)]">
+    <p className="mt-1.5 type-caption leading-none text-[var(--fg-2)]">
       释放{" "}
       <RollingTokenCounter
         value={event.stats.tokensFreed}
@@ -146,11 +146,11 @@ function ToastBody({
       transition={reducedMotionTransition(reducedMotion, lumenMotion.toastEnterMs)}
       className={cn(
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)] rounded-[var(--radius-panel)] border px-3 py-2.5",
-        "bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-lumen-pop backdrop-blur-xl",
+        "bg-[var(--bg-1)]/95 text-[var(--fg-0)] shadow-[var(--shadow-3)] backdrop-blur-xl",
         "max-sm:fixed max-sm:left-4 max-sm:right-4 max-sm:top-[max(1rem,env(safe-area-inset-top))] max-sm:w-auto",
-        tone === "success" && "border-[var(--success)]/30",
-        tone === "warning" && "border-[var(--warning)]/35",
-        tone === "info" && "border-[var(--info)]/30",
+        tone === "success" && "border-success-border",
+        tone === "warning" && "border-warning-border",
+        tone === "info" && "border-info-border",
         className,
       )}
     >
@@ -159,20 +159,20 @@ function ToastBody({
           className={cn(
             "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
             tone === "success" &&
-              "bg-[var(--success-soft)] text-[var(--success)]",
+              "bg-success-soft text-success",
             tone === "warning" &&
-              "bg-[var(--warning-soft)] text-[var(--warning)]",
-            tone === "info" && "bg-[var(--info-soft)] text-[var(--info)]",
+              "bg-warning-soft text-warning",
+            tone === "info" && "bg-info-soft text-info",
           )}
         >
           <ToneIcon event={event} reducedMotion={reducedMotion} />
         </div>
 
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium leading-tight">
+          <p className="type-label truncate leading-tight">
             {titleFor(event)}
           </p>
-          <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--fg-1)]">
+          <p className="mt-0.5 type-caption text-[var(--fg-1)]">
             {descriptionFor(event)}
           </p>
 
@@ -189,7 +189,7 @@ function ToastBody({
                 onRetry();
               }}
               leftIcon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
-              className="mt-2 h-7 px-2 text-[11px]"
+              className="mt-2 h-8 px-2"
             >
               {copy.action.retry}
             </Button>

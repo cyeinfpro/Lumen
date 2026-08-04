@@ -30,22 +30,20 @@ const TONE = {
     text: "text-[var(--fg-0)]",
     muted: "text-[var(--fg-1)]",
     button:
-      "text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:text-[var(--amber-400)] focus-visible:ring-[var(--amber-400)]/60",
+      "text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:text-accent focus-visible:shadow-[var(--ring)]",
     divider: "border-[var(--border-subtle)]",
-    badge:
-      "border-[var(--accent)]/35 bg-[var(--accent)]/12 text-[var(--fg-0)]",
+    badge: "border-accent-border bg-accent-soft text-accent",
   },
   media: {
-    card: "border-white/10 bg-white/[0.04]",
-    nested: "border-white/10 bg-white/[0.04]",
-    heading: "text-white/45",
-    text: "text-white/84",
-    muted: "text-white/72",
+    card: "border-[var(--border)] bg-transparent",
+    nested: "border-[var(--border)] bg-transparent",
+    heading: "text-[var(--media-control-fg)] opacity-60",
+    text: "text-[var(--media-control-fg)]",
+    muted: "text-[var(--media-control-fg)] opacity-75",
     button:
-      "border border-white/10 bg-white/5 text-white/72 hover:border-white/25 hover:bg-white/10 hover:text-white focus-visible:ring-[var(--accent)]/70",
-    divider: "border-white/10",
-    badge:
-      "border-[var(--accent)]/35 bg-[var(--accent)]/16 text-[var(--amber-100)]",
+      "border border-[var(--border)] bg-transparent text-[var(--media-control-fg)] opacity-80 hover:bg-[var(--media-control-bg)] hover:opacity-100 focus-visible:shadow-[var(--ring)]",
+    divider: "border-[var(--border)]",
+    badge: "border-accent-border bg-accent-soft text-accent",
   },
 } satisfies Record<LightboxDetailsTone, Record<string, string>>;
 
@@ -57,7 +55,9 @@ export function LightboxDetailsContent({
 }: LightboxDetailsContentProps) {
   const style = TONE[tone];
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [revisedOpenItemId, setRevisedOpenItemId] = useState<string | null>(null);
+  const [revisedOpenItemId, setRevisedOpenItemId] = useState<string | null>(
+    null,
+  );
   const promptCopied = copiedKey === `${item.id}:prompt`;
   const revisedCopied = copiedKey === `${item.id}:revised`;
   const revisedOpen = revisedOpenItemId === item.id;
@@ -92,7 +92,9 @@ export function LightboxDetailsContent({
   return (
     <div className={cn("space-y-3.5", className)}>
       {(item.prompt || revisedPrompt) && (
-        <section className={cn("rounded-[var(--radius-card)] border p-3", style.card)}>
+        <section
+          className={cn("rounded-[var(--radius-card)] border p-3", style.card)}
+        >
           {item.prompt && (
             <>
               <div className="mb-1 flex items-center justify-between gap-2">
@@ -217,7 +219,10 @@ export function LightboxDetailsContent({
       {metadataSections.map((section) => (
         <section
           key={section.title}
-          className={cn("rounded-[var(--radius-card)] border p-3", style.nested)}
+          className={cn(
+            "rounded-[var(--radius-card)] border p-3",
+            style.nested,
+          )}
         >
           <h3
             className={cn(
@@ -227,7 +232,12 @@ export function LightboxDetailsContent({
           >
             {section.title}
           </h3>
-          <div className={cn("grid grid-cols-1 gap-2 font-mono text-xs", style.muted)}>
+          <div
+            className={cn(
+              "grid grid-cols-1 gap-2 font-mono text-xs",
+              style.muted,
+            )}
+          >
             {section.rows.map((row) => (
               <ParamRow
                 key={`${section.title}-${row.label}`}

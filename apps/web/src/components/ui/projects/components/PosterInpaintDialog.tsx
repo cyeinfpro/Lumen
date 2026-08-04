@@ -13,6 +13,7 @@ import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { Slider } from "@/components/ui/primitives/Slider";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
@@ -293,7 +294,7 @@ export function PosterInpaintDialog({
       aria-label="局部修复"
       tabIndex={-1}
       onKeyDown={onDialogKeyDown}
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-[var(--surface-scrim)] md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !submitBusy) onClose();
       }}
@@ -301,7 +302,7 @@ export function PosterInpaintDialog({
       <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-[var(--radius-card)] md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               Inpaint
             </p>
             <h2 className="type-section-title mt-1">局部修复</h2>
@@ -362,9 +363,9 @@ export function PosterInpaintDialog({
                     type="button"
                     onClick={() => setMode("draw")}
                     className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                       mode === "draw"
-                        ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
+                        ? "bg-accent text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                     )}
                   >
@@ -375,9 +376,9 @@ export function PosterInpaintDialog({
                     type="button"
                     onClick={() => setMode("erase")}
                     className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                      "inline-flex h-8 items-center gap-1.5 rounded-full px-3 type-caption transition-colors",
                       mode === "erase"
-                        ? "bg-[var(--amber-400)] text-[var(--accent-on)]"
+                        ? "bg-accent text-[var(--accent-on)]"
                         : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                     )}
                   >
@@ -386,16 +387,15 @@ export function PosterInpaintDialog({
                   </button>
                 </div>
 
-                <label className="flex min-w-0 flex-1 items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] sm:flex-none">
+                <label className="flex min-w-0 flex-1 items-center gap-2 type-caption text-[var(--fg-2)] sm:flex-none">
                   画笔
-                  <input
-                    type="range"
+                  <Slider
                     min={BRUSH_MIN}
                     max={BRUSH_MAX}
                     step={2}
                     value={brush}
                     onChange={(event) => setBrush(Number(event.target.value))}
-                    className="min-w-0 flex-1 accent-[var(--amber-400)] sm:w-28 sm:flex-none"
+                    className="min-w-0 flex-1 sm:w-28 sm:flex-none"
                   />
                   <span className="tabular-nums text-[var(--fg-1)]">{brush}</span>
                 </label>
@@ -415,7 +415,7 @@ export function PosterInpaintDialog({
           <aside className="flex min-h-0 shrink-0 flex-col border-t border-[var(--border)] lg:border-l lg:border-t-0">
             <div className="mobile-dialog-scroll flex-1 overflow-y-auto px-5 py-4">
               <label className="block min-w-0">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+                <span className="type-caption text-[var(--fg-2)]">
                   编辑意图
                 </span>
                 <textarea
@@ -426,14 +426,14 @@ export function PosterInpaintDialog({
                   rows={6}
                   maxLength={600}
                   placeholder="例如：把右上角的杂物去掉，保持背景简洁"
-                  className="mt-2 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[14px] leading-6 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  className="control-shell mt-2 w-full resize-y px-3 py-2 type-body-sm leading-6 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
                 />
-                <span className="mt-2 block text-right font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                <span className="mt-2 block text-right type-caption text-[var(--fg-3)]">
                   {instruction.length} / 600
                 </span>
               </label>
 
-              <p className="mt-4 text-[12px] leading-[1.7] text-[var(--fg-2)]">
+              <p className="mt-4 type-caption leading-[1.7] text-[var(--fg-2)]">
                 涂抹要修改的区域 → 在右侧输入修改意图 → 提交。mask 会自动生成 PNG（黑底白笔）。
               </p>
             </div>

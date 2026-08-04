@@ -54,7 +54,7 @@ export function NewSupplierSection({
   onCreate: () => void;
 }) {
   return (
-    <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
+    <section className="surface-card space-y-4 p-5">
       <header className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
           <Plus className="w-3.5 h-3.5" />
@@ -153,7 +153,7 @@ export function ByokSupplierList({
         </div>
       </header>
       {suppliers.length === 0 ? (
-        <div className="rounded-[var(--radius-dialog)] border border-dashed border-[var(--border)] bg-[var(--bg-2)] py-10 text-center text-sm text-[var(--fg-1)]">
+        <div className="rounded-[var(--radius-card)] border border-dashed border-[var(--border)] bg-[var(--bg-2)] py-10 text-center type-body-sm text-[var(--fg-1)]">
           还没有供应商模板，使用上方「新供应商」创建。
         </div>
       ) : (
@@ -204,7 +204,7 @@ function SupplierRow({
   busy: boolean;
 }) {
   return (
-    <article className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 overflow-hidden">
+    <article className="surface-card overflow-hidden">
       <header className="flex flex-wrap items-center gap-3 px-4 py-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">

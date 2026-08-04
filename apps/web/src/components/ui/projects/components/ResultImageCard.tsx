@@ -55,7 +55,7 @@ export function ResultImageCard({
         onClick={onPreview}
         className={cn(
           "relative block aspect-[4/5] w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none",
-          selected && "ring-1 ring-inset ring-[var(--border-amber)]",
+          selected && "ring-1 ring-inset ring-accent-border",
         )}
       >
         <Image
@@ -73,7 +73,7 @@ export function ResultImageCard({
         ) : null}
       </button>
 
-      <div className="mt-2 flex items-center justify-between gap-2 border-b border-[var(--border)] pb-2 font-mono text-[10px] uppercase tracking-[0.18em]">
+      <div className="mt-2 flex items-center justify-between gap-2 border-b border-[var(--border)] pb-2 type-caption">
         <span className={cn("inline-flex items-center gap-1.5", REC_TONE[recommendation] ?? REC_TONE.pending)}>
           <span aria-hidden className={cn("inline-block h-1.5 w-1.5 rounded-full", REC_DOT[recommendation] ?? REC_DOT.pending)} />
           {RECOMMENDATION_LABEL[recommendation] ?? recommendation}

@@ -9,7 +9,6 @@ import { format } from "date-fns";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
-  ArrowLeft,
   CalendarDays,
   CreditCard,
   Database,
@@ -68,32 +67,22 @@ export default function UsagePage() {
         initial={false}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2, ease: "easeOut" }}
+        className="page-frame"
+        data-width="settings"
       >
-        <header className="mb-5 flex items-start justify-between gap-4 flex-wrap md:mb-8">
-          <div className="hidden min-w-0 md:block">
-            <h1 className="type-page-title">
-              用量统计
-            </h1>
-            <p className="type-body mt-1.5">
-              过去 {selectedPeriod.label} 的使用记录
+        <header className="mb-5 flex flex-wrap items-center justify-between gap-4 md:mb-8">
+          {q.data ? (
+            <p className="type-caption font-mono tabular-nums text-[var(--fg-2)]">
+              {formatDay(q.data.range_start)} — {formatDay(q.data.range_end)}
             </p>
-            {q.data && (
-              <p className="type-caption text-[var(--fg-2)] mt-1 font-mono tabular-nums">
-                {formatDay(q.data.range_start)} —{" "}
-                {formatDay(q.data.range_end)}
-              </p>
-            )}
-          </div>
-          <div className="min-w-0 w-full md:w-auto">
-            <UsageRangePicker value={days} onChange={setDays} pending={q.isFetching} />
-            <Link
-              href="/me"
-              className="hidden min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] md:inline-flex"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              返回我的
-            </Link>
-          </div>
+          ) : (
+            <span />
+          )}
+          <UsageRangePicker
+            value={days}
+            onChange={setDays}
+            pending={q.isFetching}
+          />
         </header>
 
         {q.isPending ? (
@@ -198,7 +187,7 @@ function UsageRangePicker({
             className={
               "min-h-11 min-w-0 rounded-[var(--radius-control)] px-1.5 type-caption transition-colors sm:px-2.5 " +
               (active
-                ? "bg-accent text-black"
+                ? "bg-accent text-[var(--accent-on)]"
                 : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
             }
           >
@@ -280,14 +269,14 @@ function UsageView({ data }: { data: UsageOut }) {
         >
           <div className="flex flex-col md:flex-row md:items-baseline gap-4 md:gap-8">
             <div>
-              <div className="type-metric text-[24px] md:text-[28px]">
+              <div className="type-metric">
                 {formatThousands(data.total_tokens_in)}
               </div>
               <div className="type-caption text-[var(--fg-2)] mt-0.5">输入</div>
             </div>
             <div className="h-px w-full bg-[var(--border-subtle)] md:h-8 md:w-px" />
             <div>
-              <div className="type-metric text-[24px] md:text-[28px]">
+              <div className="type-metric">
                 {formatThousands(data.total_tokens_out)}
               </div>
               <div className="type-caption text-[var(--fg-2)] mt-0.5">输出</div>
@@ -300,7 +289,7 @@ function UsageView({ data }: { data: UsageOut }) {
           icon={<Database className="w-4 h-4" />}
           delay={0.2}
         >
-          <div className="type-metric text-[24px] md:text-[28px]">
+          <div className="type-metric">
             {formatBytes(data.storage_bytes)}
           </div>
           <div className="type-caption text-[var(--fg-2)] mt-0.5 font-mono tabular-nums">
@@ -329,7 +318,7 @@ function BillingTransparency({
     <section className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 type-overline text-[var(--fg-1)]">
+          <div className="flex items-center gap-2 type-caption font-medium text-[var(--fg-1)]">
             <Info className="w-3.5 h-3.5" />
             计费口径
           </div>
@@ -396,8 +385,8 @@ function BillingTransparency({
             <div className="mt-3 divide-y divide-[var(--border-subtle)]">
               {recentTransactions.map((tx) => (
                 <div key={tx.id} className="py-2 first:pt-0 last:pb-0">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="truncate text-[var(--fg-0)]">{txLabel(tx)}</span>
+                  <div className="flex items-center justify-between gap-3 type-body-sm">
+                    <span className="truncate type-body-sm text-[var(--fg-0)]">{txLabel(tx)}</span>
                     <span className="shrink-0 font-mono tabular-nums text-[var(--fg-0)]">
                       {txAmount(tx)}
                     </span>
@@ -452,7 +441,7 @@ function BillingStep({
     <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
       <p className="type-caption text-[var(--fg-2)]">{label}</p>
       <p className="mt-1 type-body-sm text-[var(--fg-0)]">{value}</p>
-      <p className="mt-1 text-[11px] leading-relaxed text-[var(--fg-2)]">{description}</p>
+      <p className="mt-1 type-caption leading-relaxed text-[var(--fg-2)]">{description}</p>
     </div>
   );
 }
@@ -461,7 +450,7 @@ function MiniMoney({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <p className="type-caption text-[var(--fg-2)]">{label}</p>
-      <p className="mt-1 font-mono text-base tabular-nums text-[var(--fg-0)]">{value}</p>
+      <p className="mt-1 type-card-title font-mono tabular-nums text-[var(--fg-0)]">{value}</p>
     </div>
   );
 }
@@ -496,7 +485,7 @@ function StatCard({
       className="group rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-[transform,border-color,background-color,box-shadow] duration-[var(--dur-quick)] [@media(hover:hover)]:hover:-translate-y-0.5 [@media(hover:hover)]:hover:border-[var(--border)] [@media(hover:hover)]:hover:bg-[var(--bg-1)]/80 [@media(hover:hover)]:hover:shadow-[var(--shadow-2)] motion-reduce:transform-none"
     >
       <div className="flex items-center justify-between">
-        <span className="type-overline">
+        <span className="type-caption font-medium">
           {label}
         </span>
         {icon && (
@@ -505,7 +494,7 @@ function StatCard({
           </span>
         )}
       </div>
-      <div className="type-metric mt-3 overflow-hidden text-ellipsis whitespace-nowrap text-[24px] md:text-[28px]">
+      <div className="type-metric mt-3 overflow-hidden text-ellipsis whitespace-nowrap">
         {value}
       </div>
       {sublabel && (
@@ -522,7 +511,7 @@ function StatCard({
               ease: EASE.develop,
             }}
             style={{ transformOrigin: "left center" }}
-            className="h-full rounded-full bg-gradient-to-r from-[var(--accent)]/80 to-[var(--accent)]"
+            className="h-full rounded-full bg-accent"
           />
         </div>
       )}
@@ -555,7 +544,7 @@ function SecondaryCard({
       className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 transition-[transform,border-color,background-color,box-shadow] duration-[var(--dur-quick)] [@media(hover:hover)]:hover:-translate-y-0.5 [@media(hover:hover)]:hover:border-[var(--border)] [@media(hover:hover)]:hover:bg-[var(--bg-1)]/80 [@media(hover:hover)]:hover:shadow-[var(--shadow-2)] motion-reduce:transform-none"
     >
       <div className="flex items-center justify-between mb-3">
-        <div className="type-overline">
+        <div className="type-caption font-medium">
           {label}
         </div>
         {icon && (

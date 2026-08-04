@@ -31,7 +31,7 @@ export function ProviderEditActions({
           transition={{ duration: 0.2 }}
           className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[env(safe-area-inset-bottom)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4"
         >
-          <div className="grid grid-cols-2 items-stretch gap-2 rounded-[var(--radius-dialog)] border border-[var(--accent)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:flex sm:items-center sm:gap-3 sm:px-4">
+          <div className="surface-panel grid grid-cols-2 items-stretch gap-2 px-3 py-2.5 sm:flex sm:items-center sm:gap-3 sm:px-4">
             <span className="col-span-2 min-w-0 type-caption text-[var(--fg-1)] sm:col-span-1 sm:whitespace-nowrap">
               <span className="inline-flex items-center gap-1.5">
                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)] shadow-[var(--shadow-amber)]" />

@@ -237,7 +237,7 @@ export function ApparelWorkflowNewPage() {
   }, [ageSegment, gender, appearanceDirection, styleDirection, extraPrompt]);
   const promptRemaining = PROMPT_MAX - composedPrompt.length;
 
-  // 释放 ObjectURL 并终止尚未完成的上传，避免卸载后继续回写状态。
+  // 释放 ObjectURL 并终止未完成的上传，避免卸载后继续回写状态。
   useEffect(() => {
     const uploadTasks = uploadTasksRef.current;
     return () => {
@@ -464,10 +464,10 @@ export function ApparelWorkflowNewPage() {
     [files],
   );
   const isBusy = submitting || createMutation.isPending;
-  const ctaDisabled = !files.length || isBusy;
+  const ctaBlocked = !files.length || isBusy;
 
   return (
-    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
+    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-base max-md:[&_textarea]:text-base">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -495,7 +495,7 @@ export function ApparelWorkflowNewPage() {
             <div className="page-header-actions">
               <Link
                 href="/projects/apparel-model-showcase"
-                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 返回服饰模特图
@@ -534,7 +534,7 @@ export function ApparelWorkflowNewPage() {
                   onChange={(event) => setProjectTitle(event.target.value.slice(0, TITLE_MAX))}
                   maxLength={TITLE_MAX}
                   aria-label="项目名称"
-                  className="-mt-2 h-12 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+                  className="control-shell -mt-2 h-12 w-full px-3 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
                   placeholder="给这个项目起个名字"
                 />
               </div>
@@ -566,16 +566,16 @@ export function ApparelWorkflowNewPage() {
                 </div>
 
                 <details className="border-t border-[var(--border-subtle)] pt-4">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[13px] text-[var(--fg-1)]">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 type-body-sm text-[var(--fg-1)]">
                     <span>
-                      <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+                      <span className="type-caption text-[var(--fg-2)]">
                         高级偏好
                       </span>
-                      <span className="ml-2 text-[12px] text-[var(--fg-3)]">
+                      <span className="ml-2 type-caption text-[var(--fg-3)]">
                         外貌、风格与补充说明
                       </span>
                     </span>
-                    <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+                    <span className="type-caption text-[var(--fg-3)]">
                       可选
                     </span>
                   </summary>
@@ -595,7 +595,7 @@ export function ApparelWorkflowNewPage() {
                       onChange={setStyleDirection}
                     />
                     <label className="grid gap-2 md:col-span-2">
-                      <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                      <span className="type-caption text-[var(--fg-2)]">
                         Notes <span className="ml-1 normal-case tracking-normal text-[var(--fg-3)]">补充说明</span>
                       </span>
                       <textarea
@@ -605,17 +605,17 @@ export function ApparelWorkflowNewPage() {
                         rows={3}
                         aria-label="补充说明"
                         placeholder="例如：更活泼一点，适合校园通勤"
-                        className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-[1.6] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
+                        className="control-shell w-full resize-none px-3 py-2 type-body leading-[1.6] text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
                       />
                     </label>
                   </div>
                 </details>
 
                 <div className="min-w-0 border-t border-[var(--border)] pt-4">
-                  <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                  <p className="type-caption text-[var(--fg-2)]">
                     组合提示词
                   </p>
-                  <p className="mt-2 break-words text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                  <p className="mt-2 break-words type-body-sm leading-[1.7] text-[var(--fg-1)]">
                     {composedPrompt}
                   </p>
                 </div>
@@ -624,15 +624,15 @@ export function ApparelWorkflowNewPage() {
               {error ? (
                 <div
                   role="alert"
-                  className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5"
+                  className="border-y border-danger-border bg-danger-soft px-4 py-4 md:px-5"
                 >
                   <div className="flex items-start gap-3">
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
                     <div className="min-w-0">
-                      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--danger)]">
+                      <p className="type-caption text-[var(--danger)]">
                         错误
                       </p>
-                      <p className="mt-1 text-[13px] text-[var(--fg-0)]">{error}</p>
+                      <p className="mt-1 type-body-sm text-[var(--fg-0)]">{error}</p>
                     </div>
                   </div>
                 </div>
@@ -641,7 +641,7 @@ export function ApparelWorkflowNewPage() {
               <ApparelCreateButton
                 isBusy={isBusy}
                 allDone={allDone}
-                disabled={ctaDisabled}
+                disabled={ctaBlocked}
                 onClick={onCreate}
               />
             </section>
@@ -649,17 +649,17 @@ export function ApparelWorkflowNewPage() {
             {/* Right rail */}
             <aside className="hidden grid-cols-1 gap-0 self-start lg:grid">
               <InfoPanel title="流程">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   商品约束、3 套模特候选、配饰四宫格、4 张展示图、一次文字返修。
                 </p>
               </InfoPanel>
               <InfoPanel title="质量">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   默认高质量模式，优先模特一致性、商品还原度和高级质感。
                 </p>
               </InfoPanel>
               <InfoPanel title="顺序">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   第一张图作为商品主图。可用上移 / 下移调整顺序。
                 </p>
               </InfoPanel>
@@ -672,7 +672,7 @@ export function ApparelWorkflowNewPage() {
         mobile
         isBusy={isBusy}
         allDone={allDone}
-        disabled={ctaDisabled}
+        disabled={ctaBlocked}
         onClick={onCreate}
       />
 

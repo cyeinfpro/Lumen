@@ -95,7 +95,7 @@ export function MobileStudioTopBar() {
               aria-label="打开会话侧栏"
               className="-ml-1 flex min-h-11 min-w-0 max-w-full flex-1 items-center gap-1 rounded-[var(--radius-control)] px-2"
             >
-              <span className="min-w-0 flex-1 overflow-hidden text-ellipsis text-left text-[15px] font-medium leading-5 text-[var(--fg-0)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
+              <span className="min-w-0 flex-1 overflow-hidden text-ellipsis text-left type-body font-medium text-[var(--fg-0)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]">
                 {currentTitle}
               </span>
               <ChevronDown className="w-4 h-4 text-[var(--fg-2)] shrink-0" />
@@ -105,7 +105,7 @@ export function MobileStudioTopBar() {
         right={
           <MobileIconButton
             icon={<Plus className="w-5 h-5" />}
-            label="新建对话"
+            label="新建会话"
             onPress={handleNewConv}
             disabled={createMut.isPending}
             minHit
@@ -154,7 +154,7 @@ export function MobileStudioTopBar() {
               className={[
                 "h-10 w-10 shrink-0 rounded-[var(--radius-control)] border",
                 fast
-                  ? "border-[var(--accent-border)] bg-[var(--accent-soft)]"
+                  ? "border-accent-border bg-accent-soft"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)]",
               ].join(" ")}
             >
@@ -184,7 +184,7 @@ function FastLamp({ on }: { on: boolean }) {
     <span
       className={[
         "inline-flex items-center justify-center",
-        on ? "text-[var(--amber-400)]" : "text-[var(--fg-3)]",
+        on ? "text-accent" : "text-[var(--fg-3)]",
       ].join(" ")}
     >
       <Zap className="w-4 h-4" fill={on ? "currentColor" : "none"} strokeWidth={1.8} />

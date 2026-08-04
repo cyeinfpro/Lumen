@@ -52,10 +52,7 @@ export function TaskCenter({
   const userScope = useUserQueryScope();
   const status = taskFilterStatus(filter);
   const query = useQuery({
-    queryKey: userTaskQueryKeys.recent(
-      userScope.userId,
-      status ?? "all",
-    ),
+    queryKey: userTaskQueryKeys.recent(userScope.userId, status ?? "all"),
     queryFn: ({ signal }) => listTasks({ status, limit: 80 }, { signal }),
     enabled: userScope.enabled,
     staleTime: 8_000,
@@ -97,9 +94,7 @@ export function TaskCenter({
             key={task.id}
             task={task}
             localGeneration={
-              task.kind === "generation"
-                ? localGenerations[task.id]
-                : undefined
+              task.kind === "generation" ? localGenerations[task.id] : undefined
             }
             busy={actions.busy}
             onRetry={() => actions.retry(task)}
@@ -110,7 +105,7 @@ export function TaskCenter({
           />
         ))}
         {query.isLoading && (
-          <TaskCenterMessage>正在读取最近任务</TaskCenterMessage>
+          <TaskCenterMessage>最近任务加载中</TaskCenterMessage>
         )}
         {viewState.isEmpty && <TaskCenterMessage>暂无任务</TaskCenterMessage>}
       </div>
@@ -290,7 +285,11 @@ function TaskHistoryThumb({ task }: { task: TaskItemResponse }) {
     <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-2)]">
       {task.thumb_url ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={task.thumb_url} alt="" className="h-full w-full object-cover" />
+        <img
+          src={task.thumb_url}
+          alt=""
+          className="h-full w-full object-cover"
+        />
       ) : task.kind === "generation" ? (
         <ImageIcon className="h-4 w-4 text-[var(--fg-2)]" />
       ) : (
@@ -334,10 +333,7 @@ function TaskHistorySummary({
           </span>
         )}
         {presentation.timeText && (
-          <span className="text-[var(--fg-3)]">
-            {" "}
-            · {presentation.timeText}
-          </span>
+          <span className="text-[var(--fg-3)]"> · {presentation.timeText}</span>
         )}
       </p>
       {presentation.failed && presentation.errorText && (

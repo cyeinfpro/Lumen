@@ -50,7 +50,7 @@ export function Overview({
   const def = mode ? MODE_DEFS.find((item) => item.value === mode) : undefined;
   const ModeIcon = mode ? MODE_ICONS[mode] : AlertCircle;
   return (
-    <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5">
+    <section className="surface-card p-5">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <OverviewItem
           icon={<ModeIcon className="w-4 h-4" />}
@@ -410,7 +410,7 @@ export function ByokSystemSettingsSection({
   onDiscard: () => void;
 }) {
   return (
-    <section className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-5 space-y-4">
+    <section className="surface-card space-y-4 p-5">
       <ByokModeSettings
         currentMode={currentMode}
         effectiveSettings={effectiveSettings}

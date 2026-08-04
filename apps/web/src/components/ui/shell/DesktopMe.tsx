@@ -7,7 +7,7 @@ import { Mail, Search, X } from "lucide-react";
 import { DesktopTopNav } from "@/components/ui/shell";
 import { AccountCenter } from "@/components/ui/me/AccountCenter";
 import { ConversationList } from "@/components/ui/me/ConversationList";
-import { Card, IconButton } from "@/components/ui/primitives";
+import { Avatar, Card, IconButton } from "@/components/ui/primitives";
 import { getMe, type AuthUser } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 
@@ -31,9 +31,10 @@ export function DesktopMe() {
       <main className="min-h-0 flex-1 overflow-y-auto">
         <div
           className={cn(
-            "mx-auto max-w-[1080px] px-6 md:px-10 pt-8 pb-16",
-            "grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-10",
+            "page-frame grid grid-cols-1 gap-[var(--space-10)]",
+            "lg:grid-cols-[1fr_320px]",
           )}
+          data-width="settings"
         >
           {/* 左列：会话列表 */}
           <section aria-label="会话" className="min-w-0">
@@ -46,8 +47,8 @@ export function DesktopMe() {
             <div
               className={cn(
                 "mb-5 flex min-h-11 items-center gap-2 px-3.5 md:min-h-10",
-                "rounded-[var(--radius-card)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
-                "focus-within:border-[var(--amber-400)]/40",
+                "control-shell",
+                "focus-within:border-accent-border",
                 "transition-colors",
               )}
             >
@@ -61,7 +62,7 @@ export function DesktopMe() {
                 className={cn(
                   "flex-1 bg-transparent border-none outline-none",
                   "h-10",
-                  "text-[14px] text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
+                  "type-body-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                 )}
               />
               {query && (
@@ -88,18 +89,11 @@ export function DesktopMe() {
                 padding="lg"
                 className="flex flex-col items-center gap-3 mb-4"
               >
-                <div
-                  className={cn(
-                    "w-16 h-16 rounded-full",
-                    "bg-gradient-to-br from-[var(--amber-400)] to-[var(--amber-600)]",
-                    "flex items-center justify-center",
-                    "type-card-title text-[var(--bg-0)]",
-                    "shadow-[var(--shadow-1)]",
-                  )}
-                  style={{ fontSize: "24px" }}
-                >
-                  {avatarChar}
-                </div>
+                <Avatar
+                  size="lg"
+                  name={userLabel || "Lumen 用户"}
+                  initials={avatarChar}
+                />
                 {meQuery.data?.name && (
                   <p className="type-card-title truncate max-w-full">
                     {meQuery.data.name}

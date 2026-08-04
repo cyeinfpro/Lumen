@@ -1,9 +1,6 @@
 import type { GeneratedImage, Generation } from "@/lib/types";
 
-import type {
-  LightboxItem,
-  LightboxParamBag,
-} from "./types";
+import type { LightboxItem, LightboxParamBag } from "./types";
 
 export const RESET_PAN_OFFSET = { x: 0, y: 0 };
 export const MIN_ZOOM = 1;
@@ -197,18 +194,14 @@ function toDesktopGalleryImage(item: LightboxItem): DesktopImageMeta {
   };
 }
 
-export function toDesktopGalleryItem(
-  item: LightboxItem,
-): DesktopGalleryItem {
+export function toDesktopGalleryItem(item: LightboxItem): DesktopGalleryItem {
   return {
     image: toDesktopGalleryImage(item),
     prompt: item.prompt ?? "",
   };
 }
 
-function extensionFromMime(
-  mime: string | null | undefined,
-): string | null {
+function extensionFromMime(mime: string | null | undefined): string | null {
   if (!mime) return null;
   const normalized = mime.split(";")[0]?.trim().toLowerCase();
   if (!normalized?.startsWith("image/")) return null;
@@ -240,7 +233,11 @@ export function downloadFilename(
   preferred?: string,
 ): string {
   if (preferred?.trim()) return preferred.trim();
-  const ext = firstPresent(extensionFromMime(mime), extensionFromSrc(src), "png");
+  const ext = firstPresent(
+    extensionFromMime(mime),
+    extensionFromSrc(src),
+    "png",
+  );
   return `lumen-${id ?? "image"}.${ext}`;
 }
 
@@ -359,9 +356,7 @@ function findEventItem(
   return items.find((item) => item.id === imageId);
 }
 
-function valueOrUndefined<T>(
-  value: T | null | undefined,
-): T | undefined {
+function valueOrUndefined<T>(value: T | null | undefined): T | undefined {
   return value === null ? undefined : value;
 }
 
@@ -373,10 +368,7 @@ function fallbackCurrentLightboxItem(
   return {
     id: lightbox.imageId,
     url: lightbox.imageSrc,
-    previewUrl: firstPresent(
-      lightbox.imagePreviewSrc,
-      meta.preview_url,
-    ),
+    previewUrl: firstPresent(lightbox.imagePreviewSrc, meta.preview_url),
     thumbUrl: firstPresent(meta.thumb_url, meta.preview_url),
     prompt: valueOrUndefined(lightbox.imageAlt),
     width: meta.width,
@@ -443,18 +435,12 @@ export function desktopThumbnailItems(
   gallery: DesktopGalleryItem[],
   currentIndex: number,
 ): Array<{ entry: DesktopGalleryItem; index: number }> {
-  if (
-    gallery.length <= DESKTOP_THUMB_WINDOW_SIZE ||
-    currentIndex < 0
-  ) {
+  if (gallery.length <= DESKTOP_THUMB_WINDOW_SIZE || currentIndex < 0) {
     return gallery.map((entry, index) => ({ entry, index }));
   }
   const radius = Math.floor(DESKTOP_THUMB_WINDOW_SIZE / 2);
   let start = Math.max(0, currentIndex - radius);
-  const end = Math.min(
-    gallery.length,
-    start + DESKTOP_THUMB_WINDOW_SIZE,
-  );
+  const end = Math.min(gallery.length, start + DESKTOP_THUMB_WINDOW_SIZE);
   start = Math.max(0, end - DESKTOP_THUMB_WINDOW_SIZE);
   return gallery
     .slice(start, end)
@@ -463,12 +449,9 @@ export function desktopThumbnailItems(
 
 function downloadPresentation(
   status: DownloadStatus,
-): Pick<
-  DesktopActionPresentation,
-  "downloadTitle" | "downloadText"
-> {
+): Pick<DesktopActionPresentation, "downloadTitle" | "downloadText"> {
   if (status === "downloading") {
-    return { downloadTitle: "正在下载...", downloadText: "下载中" };
+    return { downloadTitle: "原图下载中", downloadText: "下载中" };
   }
   if (status === "success") {
     return { downloadTitle: "已开始下载", downloadText: "已下载" };
@@ -486,7 +469,7 @@ function sharePresentation(
   status: ShareStatus,
 ): Pick<DesktopActionPresentation, "shareTitle" | "shareText"> {
   if (status === "creating") {
-    return { shareTitle: "正在生成分享链接...", shareText: "分享中" };
+    return { shareTitle: "分享链接生成中", shareText: "分享中" };
   }
   if (status === "success") {
     return { shareTitle: "分享链接已复制", shareText: "已复制" };
@@ -536,9 +519,7 @@ export function resolvePanBoundsInput(
   };
 }
 
-function firstPositive(
-  ...values: Array<number | null | undefined>
-): number {
+function firstPositive(...values: Array<number | null | undefined>): number {
   for (const value of values) {
     if (typeof value === "number" && value > 0) return value;
   }

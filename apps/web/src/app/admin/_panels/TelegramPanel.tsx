@@ -178,7 +178,7 @@ export function TelegramPanel() {
   return (
     <section className="space-y-5">
       {/* 提示条 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
+      <div className="surface-card p-4 md:p-5">
         <div className="flex items-start gap-3">
           <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center shrink-0">
             <Bot className="w-4 h-4 text-[var(--fg-2)]" />
@@ -191,7 +191,7 @@ export function TelegramPanel() {
       </div>
 
       {/* 基本 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="surface-card space-y-4 p-4 md:p-5">
         <h3 className="type-card-title">基本设置</h3>
 
         <ToggleField
@@ -247,7 +247,7 @@ export function TelegramPanel() {
       </div>
 
       {/* 代理 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="surface-card space-y-4 p-4 md:p-5">
         <div>
           <h3 className="type-card-title">代理设置</h3>
           <p className="type-caption text-[var(--fg-2)] mt-0.5">
@@ -425,7 +425,7 @@ function RestartConfirmModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] sm:items-center"
       onClick={pending ? undefined : onCancel}
     >
       <motion.div
@@ -437,7 +437,7 @@ function RestartConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="restart-telegram-title"
-        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-dialog)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] p-5 shadow-[var(--shadow-3)] sm:rounded-[var(--radius-dialog)] sm:border-b sm:pb-5"
+        className="surface-dialog mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-sheet)] p-5 sm:rounded-[var(--radius-dialog)] sm:pb-5"
       >
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-[var(--radius-card)] bg-warning-soft border border-warning-border flex items-center justify-center shrink-0">

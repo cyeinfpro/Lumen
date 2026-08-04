@@ -45,11 +45,7 @@ export function MaskBoardToolbar({
   const editDisabled = !hasStroke || disabled;
   return (
     <div className="flex flex-wrap items-center gap-2 px-1">
-      <ToolSegment
-        value={tool}
-        onChange={onToolChange}
-        disabled={disabled}
-      />
+      <ToolSegment value={tool} onChange={onToolChange} disabled={disabled} />
 
       <BrushSizeControl
         value={brushSize}
@@ -187,7 +183,7 @@ function BrushSizeControl({
         onChange={(event) => onChange(Number(event.target.value))}
         disabled={disabled}
         aria-label="画笔大小"
-        className="h-1.5 w-28 sm:w-32 cursor-pointer accent-[var(--amber-400)] disabled:cursor-not-allowed"
+        className="h-1.5 w-28 cursor-pointer accent-[var(--accent)] disabled:cursor-not-allowed sm:w-32"
       />
       <span className="text-[11px] text-[var(--fg-1)] tabular-nums w-9">
         {value}px

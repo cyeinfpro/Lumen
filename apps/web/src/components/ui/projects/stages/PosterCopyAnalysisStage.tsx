@@ -9,6 +9,8 @@ import { Check, Sparkles } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { Input } from "@/components/ui/primitives/Input";
+import { Textarea } from "@/components/ui/primitives/Textarea";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useApproveCopyAnalysisMutation } from "@/lib/queries";
 import type { WorkflowRun } from "@/lib/apiClient";
@@ -38,7 +40,7 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
   const approve = useApproveCopyAnalysisMutation(workflow.id, {
     onError: (err) =>
       toast.error("确认文案切分失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
     onSuccess: () => toast.success("文案切分已确认"),
   });
@@ -89,9 +91,9 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
       <StageFrame
         eyebrow="N°03 — 文案切分"
         title="文案切分"
-        subtitle="正在把原始文案拆为主标题、副标题、正文、CTA 等结构化字段。"
+        subtitle="原始文案切分中，整理主标题、副标题、正文和行动召唤。"
       >
-        <RunningState label="正在切分文案…" />
+        <RunningState label="文案切分中" />
       </StageFrame>
     );
   }
@@ -103,18 +105,16 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
       subtitle="AI 已将原始文案拆为结构化字段，可以直接确认或手动微调每条文本。"
     >
       <section className="border-t border-[var(--border)] py-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          AI Reading
-        </p>
+        <p className="type-caption text-[var(--fg-2)]">AI 识别</p>
         <div className="mt-3 grid gap-x-6 gap-y-3 md:grid-cols-2">
           {COPY_FIELDS.map(([label, key]) => {
             const original = initialValues[key];
             return (
               <div key={`ai-${key}`} className="min-w-0">
-                <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                <p className="type-caption text-[var(--fg-3)]">
                   {label}
                 </p>
-                <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-0)]">
+                <p className="mt-1.5 whitespace-pre-wrap break-words type-body-sm leading-6 text-[var(--fg-0)]">
                   {original || "未识别"}
                 </p>
               </div>
@@ -124,9 +124,7 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
       </section>
 
       <section className="border-t border-[var(--border)] py-4">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          Editable
-        </p>
+        <p className="type-caption text-[var(--fg-2)]">可编辑字段</p>
         <div className="mt-3 grid gap-4 md:grid-cols-2">
           {COPY_FIELDS.map(([label, key, kind]) => {
             const value = valueOf(key);
@@ -134,32 +132,25 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
               setOverrides((prev) => ({ ...prev, [key]: next }));
             if (kind === "textarea") {
               return (
-                <label key={`edit-${key}`} className="block min-w-0 md:col-span-2">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-                    {label}
-                  </span>
-                  <textarea
-                    value={value}
-                    onChange={(event) => onChange(event.target.value)}
-                    rows={3}
-                    className="mt-2 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[14px] leading-6 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
-                    placeholder={`覆盖 AI 给出的 ${label}`}
-                  />
-                </label>
+                <Textarea
+                  key={`edit-${key}`}
+                  label={label}
+                  value={value}
+                  onChange={(event) => onChange(event.target.value)}
+                  rows={3}
+                  wrapperClassName="md:col-span-2"
+                  placeholder={`覆盖 AI 给出的${label}`}
+                />
               );
             }
             return (
-              <label key={`edit-${key}`} className="block min-w-0">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-                  {label}
-                </span>
-                <input
-                  value={value}
-                  onChange={(event) => onChange(event.target.value)}
-                  placeholder={`覆盖 AI 给出的 ${label}`}
-                  className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
-                />
-              </label>
+              <Input
+                key={`edit-${key}`}
+                label={label}
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+                placeholder={`覆盖 AI 给出的${label}`}
+              />
             );
           })}
         </div>
@@ -173,15 +164,15 @@ export function PosterCopyAnalysisStage({ workflow }: { workflow: WorkflowRun })
           leftIcon={dirty ? <Check className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
           className="w-full min-[420px]:w-auto"
         >
-          {dirty ? "确认修正后的文案" : "沿用 AI 切分"}
+          {dirty ? "确认修正" : "沿用切分"}
         </Button>
         {dirty ? (
           <button
             type="button"
             onClick={() => setOverrides({})}
-            className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] underline-offset-4 transition-colors hover:text-[var(--fg-0)] hover:underline"
+            className="type-control cursor-pointer text-[var(--fg-2)] underline-offset-4 transition-colors hover:text-[var(--fg-0)] hover:underline"
           >
-            Reset
+            重置
           </button>
         ) : null}
       </div>

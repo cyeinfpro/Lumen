@@ -54,7 +54,7 @@ export function promptCounterColor(
   textLength: number,
 ): string {
   if (promptTooLong) return "text-[var(--danger)]";
-  if (shouldShowCount || textLength > 500) return "text-[var(--amber-400)]";
+  if (shouldShowCount || textLength > 500) return "text-accent";
   return "text-[var(--fg-3)]";
 }
 

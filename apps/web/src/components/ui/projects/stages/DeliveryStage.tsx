@@ -83,17 +83,17 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
 
       <section className="border-t border-[var(--border)] py-5">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             Final Showcases
           </p>
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+          <p className="type-caption text-[var(--fg-3)] tabular-nums">
             {String(images.length).padStart(2, "0")} 张
           </p>
         </div>
         {images.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 border border-dashed border-[var(--border)] py-12 text-center">
             <ArchiveRestore className="h-5 w-5 text-[var(--fg-3)]" />
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               交付目录暂无图像
             </p>
           </div>
@@ -104,7 +104,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                 <button
                   type="button"
                   onClick={() => setPreviewIndex(index)}
-                  className="relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                  className="relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
                 >
                   <Image
                     src={imageSrc(image)}
@@ -114,7 +114,7 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                     unoptimized
                     className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
                   />
-                  <span className="pointer-events-none absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] text-white/90 mix-blend-difference">
+                  <span className="type-caption pointer-events-none absolute left-3 top-3 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
                     N°{String(index + 1).padStart(2, "0")}
                   </span>
                 </button>
@@ -122,10 +122,10 @@ export function DeliveryStage({ workflow }: { workflow: WorkflowRun }) {
                   href={canDownload(image) || "#"}
                   download
                   rel="noopener"
-                  className="mt-2 inline-flex h-11 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] md:h-10"
+                  className="mt-2 inline-flex h-11 w-full items-center justify-center gap-1.5 border-b border-[var(--border)] type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] md:h-10"
                 >
                   <Download className="h-3 w-3" />
-                  Download
+                  下载
                 </a>
               </article>
             ))}

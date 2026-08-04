@@ -43,14 +43,14 @@ function statusLabel(
 ) {
   if (isCurrent && status === "running") {
     return (
-      <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+      <p className="mt-0.5 type-caption text-accent">
         Running
       </p>
     );
   }
   if (isFailed) {
     return (
-      <p className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
+      <p className="mt-0.5 type-caption text-[var(--danger)]">
         失败
       </p>
     );
@@ -77,11 +77,11 @@ export function WorkflowStepRailRow({
         className={cn(
           "relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-all duration-[var(--dur-base)]",
           isCurrent
-            ? "border-[var(--amber-400)] bg-[var(--amber-400)] text-[var(--accent-on)]"
+            ? "border-accent-border bg-accent text-[var(--accent-on)]"
             : done
-              ? "border-[var(--border-amber)] bg-transparent text-[var(--amber-300)]"
+              ? "border-accent-border bg-transparent text-accent"
               : isFailed
-                ? "border-[var(--danger)]/40 text-[var(--danger)]"
+                ? "border-danger-border text-[var(--danger)]"
                 : "border-[var(--border)] text-[var(--fg-3)]",
         )}
       >
@@ -102,7 +102,7 @@ export function WorkflowStepRailRow({
         <div className="flex items-baseline justify-between gap-2">
           <p
             className={cn(
-              "truncate text-[13px] transition-colors",
+              "truncate type-body-sm transition-colors",
               isCurrent
                 ? "font-medium text-[var(--fg-0)]"
                 : done
@@ -112,7 +112,7 @@ export function WorkflowStepRailRow({
           >
             {step.label}
           </p>
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-[var(--fg-3)]">
+          <span className="shrink-0 type-caption tabular-nums text-[var(--fg-3)]">
             {String(index + 1).padStart(2, "0")}
           </span>
         </div>

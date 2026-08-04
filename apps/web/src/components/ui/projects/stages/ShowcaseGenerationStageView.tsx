@@ -8,7 +8,7 @@ import { ImagePreviewModal } from "../components/ImagePreviewModal";
 import { ShowcaseTaskProgress } from "../components/ShowcaseTaskProgress";
 import { RunningState, StageFrame } from "../components/StageFrame";
 import { ShowcaseSetupFields } from "./ShowcaseSetupFields";
-import { sceneEnvironmentEnabled } from "./showcaseStageForm";
+import { supportsSceneEnvironment } from "./showcaseStageForm";
 import type { ShowcaseGenerationStageController } from "./useShowcaseGenerationStage";
 
 export function ShowcaseGenerationStageView({
@@ -56,10 +56,10 @@ export function ShowcaseGenerationStageView({
 
 function RunningBadge() {
   return (
-    <span className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+    <span className="inline-flex items-center gap-2 type-caption text-accent">
       <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--amber-400)] opacity-60" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]" />
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
       </span>
       Running
     </span>
@@ -70,7 +70,7 @@ function StageError({ error }: { error: string | null }) {
   if (!error) return null;
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+      <p className="border-l-2 border-[var(--danger)] pl-3 type-body-sm leading-6 text-[var(--danger)]">
         {error}
       </p>
     </section>
@@ -110,16 +110,16 @@ function OutputSetup({
   const { form } = controller;
   return (
     <section className="border-t border-[var(--border)] py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Output Setup
       </p>
       <ShowcaseSetupFields
         form={form}
         disabled={controller.isRunning}
-        showSceneEnvironment={sceneEnvironmentEnabled(form.template)}
+        showSceneEnvironment={supportsSceneEnvironment(form.template)}
       />
-      <p className="mt-4 inline-flex min-w-0 flex-wrap items-center gap-2 break-words text-[12px] leading-6 text-[var(--fg-2)]">
-        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+      <p className="mt-4 inline-flex min-w-0 flex-wrap items-center gap-2 break-words type-caption leading-6 text-[var(--fg-2)]">
+        <span className="inline-flex items-center gap-1.5 type-caption text-accent">
           <Layers className="h-3 w-3" />
           {String(form.outputCount).padStart(2, "0")} 张
         </span>
@@ -215,15 +215,15 @@ function GeneratedImages({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           Generated
         </p>
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+        <p className="type-caption text-[var(--fg-3)] tabular-nums">
           {String(controller.generated.length).padStart(2, "0")} 张
         </p>
       </div>
       {controller.generated.length === 0 ? (
-        <RunningState label="展示图正在生成…" />
+        <RunningState label="展示图生成中…" />
       ) : (
         <ImageGrid
           images={controller.generated}

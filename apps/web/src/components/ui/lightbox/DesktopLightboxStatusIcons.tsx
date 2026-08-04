@@ -1,4 +1,5 @@
-import { AlertCircle, Check, Download, Loader2, Share2 } from "lucide-react";
+import { AlertCircle, Check, Download, Share2 } from "lucide-react";
+import { Spinner } from "@/components/ui/primitives/Spinner";
 import { cn } from "@/lib/utils";
 import type { DownloadStatus, ShareStatus } from "./desktopLightboxModel";
 
@@ -10,7 +11,7 @@ export function DownloadStatusIcon({
   className?: string;
 }) {
   if (status === "downloading") {
-    return <Loader2 className={cn(className, "animate-spin")} aria-hidden />;
+    return <Spinner size={16} className={cn(className)} />;
   }
   if (status === "success") {
     return <Check className={className} aria-hidden />;
@@ -21,13 +22,9 @@ export function DownloadStatusIcon({
   return <Download className={className} aria-hidden />;
 }
 
-export function ShareStatusIcon({
-  status,
-}: {
-  status: ShareStatus;
-}) {
+export function ShareStatusIcon({ status }: { status: ShareStatus }) {
   if (status === "creating") {
-    return <Loader2 className="h-4 w-4 animate-spin" aria-hidden />;
+    return <Spinner size={16} />;
   }
   if (status === "success") {
     return <Check className="h-4 w-4" aria-hidden />;

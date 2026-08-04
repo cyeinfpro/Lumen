@@ -184,7 +184,7 @@ export function ModelLibraryDialog({
   if (!open) return null;
   return (
     <div
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-center justify-center bg-black/60 backdrop-blur-md"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-center justify-center bg-[var(--surface-scrim)]"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -247,7 +247,7 @@ function DialogHeader({
         <p className="type-page-kicker">
           模特库
         </p>
-        <h2 id={titleId} className="type-page-title-sm mt-1.5 md:text-[24px]">
+        <h2 id={titleId} className="type-page-title-sm mt-1.5 ">
           模特库
         </h2>
         <p id={descriptionId} className="type-page-subtitle mt-2 max-w-md">
@@ -267,7 +267,7 @@ function DialogHeader({
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50 sm:h-10 sm:w-10"
+          className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] sm:h-10 sm:w-10"
           aria-label="关闭模特库"
         >
           <X className="h-4 w-4" />
@@ -288,7 +288,7 @@ function DialogFooter({
 }) {
   return (
     <footer className="mobile-dialog-footer flex shrink-0 flex-col gap-3 border-t border-[var(--border)] bg-[var(--bg-0)] px-4 py-3 md:flex-row md:items-center md:justify-between md:px-6 md:py-4">
-      <p className="min-w-0 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+      <p className="min-w-0 type-caption text-[var(--fg-2)]">
         Tip · 卡片下方和大图内都可以设为当前模特
       </p>
       <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 md:flex md:flex-row">

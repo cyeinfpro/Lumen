@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, type RefObject } from "react";
+import { type RefObject } from "react";
 import { motion } from "framer-motion";
 import {
   Activity,
@@ -15,9 +15,13 @@ import type {
   ProviderProxyOut,
   ProviderStatsItem,
 } from "@/lib/types";
+import {
+  MetricCard,
+  Select,
+} from "@/components/ui/primitives";
 import { EmptyBlock } from "../../_components/AdminFeedback";
 import {
-  WEIGHT_COLORS,
+  WEIGHT_SEGMENT_CLASSES,
   type Draft,
   type FieldErrors,
   type PriorityGroup,
@@ -60,34 +64,31 @@ export function StatsRow({
 
   return (
     <div className="grid grid-cols-3 gap-3">
-      <StatCard
+      <MetricCard
         label="供应商"
         value={total}
-        sub={
-          <span className="inline-flex items-center gap-1 text-[var(--fg-2)]">
-            {sourceIcon} {sourceLabel}
-          </span>
-        }
+        icon={sourceIcon}
+        sub={sourceLabel}
       />
-      <StatCard
+      <MetricCard
         label="已启用"
         value={enabled}
         sub={
           enabled < total ? (
-            <span className="text-[var(--fg-2)]">
+            <span>
               {total - enabled} 已禁用
             </span>
           ) : (
             <span className="text-success">全部启用</span>
           )
         }
-        accent={enabled === total ? "green" : undefined}
+        className={enabled === total ? "border-success-border" : undefined}
       />
-      <StatCard
+      <MetricCard
         label="探活"
         value={
           probing ? (
-            <Loader2 className="w-4 h-4 animate-spin text-[var(--accent)]" />
+            <Loader2 className="h-4 w-4 animate-spin text-accent" />
           ) : healthy !== null ? (
             `${healthy}/${enabled}`
           ) : (
@@ -96,56 +97,19 @@ export function StatsRow({
         }
         sub={
           probedAt ? (
-            <span className="text-[var(--fg-2)]">{relativeTime(probedAt)}</span>
+            <span>{relativeTime(probedAt)}</span>
           ) : (
-            <span className="text-[var(--fg-2)]">未探测</span>
+            <span>未探测</span>
           )
         }
-        accent={
-          healthy !== null
-            ? healthy === enabled
-              ? "green"
-              : healthy === 0
-                ? "red"
-                : "amber"
-            : undefined
+        className={
+          healthy === enabled
+            ? "border-success-border"
+            : healthy === 0
+              ? "border-danger-border"
+              : undefined
         }
       />
-    </div>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  sub,
-  accent,
-}: {
-  label: string;
-  value: ReactNode;
-  sub?: ReactNode;
-  accent?: "green" | "red" | "amber";
-}) {
-  const ring =
-    accent === "green"
-      ? "border-success-border"
-      : accent === "red"
-        ? "border-danger-border"
-        : accent === "amber"
-          ? "border-[var(--accent)]/20"
-          : "border-[var(--border)]";
-
-  return (
-    <div
-      className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 backdrop-blur-sm px-4 py-3 ${ring}`}
-    >
-      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)] mb-1">
-        {label}
-      </div>
-      <div className="text-lg font-semibold text-[var(--fg-0)] tabular-nums leading-tight">
-        {value}
-      </div>
-      {sub && <div className="text-[11px] mt-1">{sub}</div>}
     </div>
   );
 }
@@ -166,16 +130,16 @@ export function WeightBar({ items }: { items: ProviderItemOut[] }) {
   const totalWeight = topGroup.reduce((s, p) => s + p.weight, 0);
 
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
-      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)] mb-2.5">
+    <div className="surface-card p-4">
+      <div className="type-caption mb-2.5">
         流量分配
         {items.some((p) => p.enabled && p.priority < maxPriority) && (
-          <span className="normal-case tracking-normal ml-1.5 text-[var(--fg-2)]">
-            (Priority {maxPriority} 活跃组)
+          <span className="ml-1.5 text-[var(--fg-2)]">
+            （优先级 {maxPriority} 活跃组）
           </span>
         )}
       </div>
-      <div className="flex rounded-[var(--radius-card)] overflow-hidden h-3 gap-px">
+      <div className="flex h-3 gap-px overflow-hidden rounded-[var(--radius-card)]">
         {topGroup.map((p, i) => {
           const pct = (p.weight / totalWeight) * 100;
           return (
@@ -184,26 +148,23 @@ export function WeightBar({ items }: { items: ProviderItemOut[] }) {
               initial={{ width: 0 }}
               animate={{ width: `${pct}%` }}
               transition={{ duration: 0.5, delay: i * 0.08, ease: "easeOut" }}
-              className="h-full rounded-[var(--radius-control)]"
-              style={{
-                backgroundColor: WEIGHT_COLORS[i % WEIGHT_COLORS.length],
-                opacity: 0.8,
-              }}
+              className={`h-full rounded-[var(--radius-control)] opacity-80 ${
+                WEIGHT_SEGMENT_CLASSES[i % WEIGHT_SEGMENT_CLASSES.length]
+              }`}
               title={`${p.name}: ${Math.round(pct)}%`}
             />
           );
         })}
       </div>
-      <div className="flex mt-2 gap-x-4 gap-y-1 flex-wrap">
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
         {topGroup.map((p, i) => {
           const pct = Math.round((p.weight / totalWeight) * 100);
           return (
-            <span key={p.name} className="inline-flex items-center gap-1.5 text-xs">
+            <span key={p.name} className="inline-flex items-center gap-1.5 type-caption">
               <span
-                className="w-2 h-2 rounded-[var(--radius-control)] shrink-0"
-                style={{
-                  backgroundColor: WEIGHT_COLORS[i % WEIGHT_COLORS.length],
-                }}
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  WEIGHT_SEGMENT_CLASSES[i % WEIGHT_SEGMENT_CLASSES.length]
+                }`}
               />
               <span className="text-[var(--fg-1)]">{p.name}</span>
               <span className="text-[var(--fg-2)] tabular-nums">{pct}%</span>
@@ -240,15 +201,15 @@ export function AutoProbeSettings({
 }) {
   const isOff = interval <= 0;
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
+    <div className="surface-card p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <Activity className="w-4 h-4 text-[var(--fg-1)]" />
           <div>
-            <div className="text-xs font-medium text-[var(--fg-0)]">
+          <div className="type-body-sm font-medium text-[var(--fg-0)]">
               自动探活
             </div>
-            <div className="text-[11px] text-[var(--fg-2)] mt-0.5">
+            <div className="mt-0.5 type-caption text-[var(--fg-2)]">
               {isOff
                 ? "已关闭，仅手动探活"
                 : `每 ${interval >= 60 ? `${interval / 60} 分钟` : `${interval} 秒`}自动检测`}
@@ -257,23 +218,18 @@ export function AutoProbeSettings({
         </div>
         <div className="flex items-center gap-2">
           {saving && <Loader2 className="w-3 h-3 animate-spin text-[var(--fg-2)]" />}
-          <select
+          <Select
             value={interval}
             onChange={(e) => onChangeInterval(Number(e.target.value))}
             disabled={saving}
-            className="min-h-[36px] sm:h-8 px-2.5 pr-7 rounded-[var(--radius-card)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs text-[var(--fg-0)] focus:outline-none focus:border-[var(--accent)]/50 disabled:opacity-50 transition-colors appearance-none cursor-pointer"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
-              backgroundRepeat: "no-repeat",
-              backgroundPosition: "right 8px center",
-            }}
+            className="w-auto min-w-28 sm:h-9"
           >
             {PROBE_INTERVAL_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>
                 {opt.label}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       </div>
     </div>
@@ -289,9 +245,9 @@ export function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
   if (grandTotal === 0) return null;
 
   return (
-    <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-panel)] p-4">
+    <div className="surface-card p-4">
       <div className="flex items-center justify-between mb-3">
-        <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
+        <div className="type-caption">
           请求统计
         </div>
         <span className="text-[11px] text-[var(--fg-2)] tabular-nums">
@@ -304,7 +260,7 @@ export function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
           const rate = s.total > 0 ? s.success_rate * 100 : 0;
           return (
             <div key={s.name} className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between type-body-sm">
                 <span className="text-[var(--fg-1)] font-medium">{s.name}</span>
                 <div className="flex items-center gap-3 text-[var(--fg-1)]">
                   <span className="tabular-nums">
@@ -377,16 +333,16 @@ export function PriorityGroupView({
     <div className="space-y-3">
       {totalGroups > 1 && (
         <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-wider text-[var(--fg-1)] font-medium whitespace-nowrap">
-            Priority {group.priority}
+          <span className="type-caption whitespace-nowrap font-medium">
+            优先级 {group.priority}
             {group.label && (
-              <span className="ml-1.5 text-[var(--fg-2)] normal-case tracking-normal">
+              <span className="ml-1.5 text-[var(--fg-2)]">
                 ({group.label})
               </span>
             )}
           </span>
-          <div className="flex-1 h-px bg-[var(--bg-2)]" />
-          <span className="text-[10px] text-[var(--fg-2)] tabular-nums">
+          <div className="h-px flex-1 bg-[var(--border-subtle)]" />
+          <span className="type-caption text-[var(--fg-2)] tabular-nums">
             {group.items.length} 个供应商
           </span>
         </div>

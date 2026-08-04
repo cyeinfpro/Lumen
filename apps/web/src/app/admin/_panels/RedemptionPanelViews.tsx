@@ -251,11 +251,7 @@ function RedemptionCodeRow({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => {
-                if (window.confirm("确认撤销这张兑换码？")) {
-                  actions.onRevokeCode(code.id);
-                }
-              }}
+              onClick={() => actions.onRevokeCode(code.id)}
               leftIcon={<Slash className="h-3.5 w-3.5" />}
             >
               撤销
@@ -272,11 +268,7 @@ function RedemptionCodeRow({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
-                if (window.confirm("确认撤销整个批次？")) {
-                  actions.onRevokeBatch(batchId);
-                }
-              }}
+              onClick={() => actions.onRevokeBatch(batchId)}
               loading={actions.revokeBatchPending}
             >
               撤销批次
@@ -620,7 +612,7 @@ export function NewCodesModal({
   return (
     <div
       data-lumen-modal-layer
-      className="fixed inset-0 z-[var(--z-dialog,90)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] sm:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -633,7 +625,7 @@ export function NewCodesModal({
         aria-describedby={descriptionId}
         tabIndex={-1}
         onKeyDown={onDialogKeyDown}
-        className="surface-dialog mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-t-[var(--radius-panel)] text-[var(--fg-0)] focus:outline-none sm:h-auto sm:rounded-[var(--radius-panel)]"
+        className="surface-dialog mobile-dialog-panel flex h-[var(--mobile-dialog-max-height)] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-t-[var(--radius-sheet)] text-[var(--fg-0)] focus:outline-none sm:h-auto sm:rounded-[var(--radius-dialog)]"
       >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">

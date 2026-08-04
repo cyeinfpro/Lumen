@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { AlertCircle } from "lucide-react";
 
+import { Input, StatusBadge } from "@/components/ui/primitives";
 import type { Issue } from "./domain";
 
 export type StatusTone = "success" | "warning" | "danger" | "neutral";
@@ -53,21 +54,25 @@ export function StatusPill({
   tone: StatusTone;
   label: string;
 }) {
-  const className =
-    tone === "success"
-      ? "border-success-border bg-success-soft text-success"
-      : tone === "warning"
-        ? "border-warning-border bg-warning-soft text-warning"
-        : tone === "danger"
-          ? "border-danger-border bg-danger-soft text-danger"
-          : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]";
-
   return (
-    <span
-      className={`inline-flex items-center rounded-[var(--radius-control)] border px-2 py-1 text-[11px] font-medium ${className}`}
-    >
-      {label}
-    </span>
+    <StatusBadge
+      status={
+        tone === "success"
+          ? "success"
+          : tone === "warning"
+            ? "warning"
+            : tone === "danger"
+              ? "error"
+              : "unknown"
+      }
+      tone={tone === "neutral" ? "info" : tone}
+      label={label}
+      className={
+        tone === "neutral"
+          ? "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]"
+          : undefined
+      }
+    />
   );
 }
 
@@ -89,18 +94,15 @@ export function Field({
   autoComplete?: string;
 }) {
   return (
-    <label className="space-y-1.5">
-      <span className="type-caption text-[var(--fg-2)]">{label}</span>
-      <input
-        type={type}
-        value={value}
-        name={name}
-        autoComplete={autoComplete}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--accent)]/50"
-      />
-    </label>
+    <Input
+      label={label}
+      type={type}
+      value={value}
+      name={name}
+      autoComplete={autoComplete}
+      placeholder={placeholder}
+      onChange={(event) => onChange(event.target.value)}
+    />
   );
 }
 

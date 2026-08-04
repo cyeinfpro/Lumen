@@ -91,7 +91,7 @@ export default function InvitePage({
         </motion.div>
       </main>
 
-      <footer className="px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center text-xs text-[var(--fg-2)]">
+      <footer className="type-caption px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-4 text-center">
         <Link
           href="/login"
           className="inline-flex min-h-11 items-center justify-center px-2 hover:text-[var(--fg-0)] transition-colors"
@@ -118,8 +118,8 @@ function useDelayedFlag(active: boolean, delayMs: number): boolean {
 function SkeletonInvite() {
   return (
     <div className="space-y-5">
-      <div className="h-8 w-48 bg-[var(--bg-2)] rounded animate-pulse" />
-      <div className="h-4 w-72 bg-[var(--bg-2)] rounded animate-pulse" />
+      <div className="h-8 w-48 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
+      <div className="h-4 w-72 animate-pulse rounded-[var(--radius-control)] bg-[var(--bg-2)]" />
       <div className="h-40 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse mt-6" />
       <div className="h-44 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] animate-pulse" />
     </div>
@@ -220,7 +220,7 @@ function SignupForm({
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 409) {
-          setError("该邮箱已注册，请直接登录");
+          setError("该邮箱已注册，可直接登录");
         } else if (err.status === 403) {
           setError("邀请被拒绝（可能与绑定邮箱不一致）");
         } else if (err.status === 410 || err.status === 404) {
@@ -228,10 +228,10 @@ function SignupForm({
         } else if (err.status === 422) {
           setError("提交内容不合法");
         } else {
-          setError("注册失败，请稍后重试");
+          setError("注册失败，稍后重试");
         }
       } else {
-        setError("注册失败，请稍后重试");
+        setError("注册失败，稍后重试");
       }
       submitGuardRef.current = false;
       setSubmitting(false);
@@ -251,7 +251,7 @@ function SignupForm({
 
       {/* 邀请信息 */}
       <div className="surface-section grid gap-2 py-4">
-        <div className="type-label flex items-center gap-1.5 text-[var(--accent)]">
+        <div className="type-label flex items-center gap-1.5 text-[var(--info)]">
           <Sparkles className="w-3.5 h-3.5" /> 邀请详情
         </div>
         <InfoLine label="角色" icon={<UserCog className="w-3 h-3" />}>
@@ -263,7 +263,7 @@ function SignupForm({
           </InfoLine>
         )}
         <InfoLine label="过期" icon={<Clock className="w-3 h-3" />}>
-          <span className="text-[var(--fg-0)] font-mono tabular-nums text-xs">
+          <span className="type-caption font-mono tabular-nums text-[var(--fg-0)]">
             {expiresLabel}
           </span>
         </InfoLine>
@@ -283,7 +283,7 @@ function SignupForm({
               if (lockedEmail) return;
               setEmailInput(e.target.value);
             }}
-            placeholder="you@example.com"
+            placeholder="name@example.com"
             autoComplete="email"
             inputMode="email"
             autoCapitalize="none"
@@ -295,8 +295,8 @@ function SignupForm({
             }
           />
           {lockedEmail && (
-            <p className="text-[11px] text-[var(--fg-2)] mt-1">
-              该邀请已绑定此邮箱，不能修改。
+            <p className="type-caption mt-1">
+              该邀请已绑定此邮箱，邮箱不可修改。
             </p>
           )}
         </Field>
@@ -342,13 +342,13 @@ function SignupForm({
             </>
           ) : (
             <>
-              创建账号并进入 Lumen <ArrowRight className="w-4 h-4" />
+              创建账号 <ArrowRight className="w-4 h-4" />
             </>
           )}
         </button>
       </form>
 
-      <p className="text-xs text-[var(--fg-2)] text-center">
+      <p className="type-caption text-center">
         已有账号？{" "}
         <Link
           href="/login"
@@ -421,7 +421,7 @@ function InvitePasswordFields({
             onClick={onTogglePassword}
             disabled={submitting}
             aria-label={passwordToggleLabel}
-            className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-card)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
+            className="absolute right-0 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:opacity-50"
           >
             {showPassword ? (
               <EyeOff className="w-4 h-4" />
@@ -431,7 +431,7 @@ function InvitePasswordFields({
           </button>
         </div>
         <PasswordStrength strength={strength} show={password.length > 0} />
-        <p className={`mt-1.5 text-[11px] ${passwordLengthTone}`}>
+        <p className={`type-caption mt-1.5 ${passwordLengthTone}`}>
           至少 8 位（{Math.min(password.length, 8)}/8）
         </p>
       </Field>
@@ -503,14 +503,14 @@ function InvalidView({ invite }: { invite: InviteLinkPublicOut }) {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+      <div className="surface-card space-y-3 p-6 text-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]">
           {icon}
         </div>
         <h1 className="type-section-title">邀请不可用</h1>
-        <p className="text-sm text-[var(--fg-1)]">{text}</p>
-        <p className="text-xs text-[var(--fg-2)]">
-          如果你认为这是错误，请联系邀请你的人重新生成邀请。
+        <p className="type-body-sm text-[var(--fg-1)]">{text}</p>
+        <p className="type-caption">
+          若认为这是错误，可联系邀请者重新生成链接。
         </p>
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -543,8 +543,8 @@ function ErrorView({
   const isNotFound = error instanceof ApiError && error.status === 404;
   return (
     <div className="space-y-5">
-      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-6 text-center space-y-3">
-        <div className="mx-auto w-14 h-14 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center">
+      <div className="surface-card space-y-3 p-6 text-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]">
           <FileX className="w-6 h-6 text-[var(--fg-2)]" />
         </div>
         <h1 className="type-section-title">
@@ -553,7 +553,7 @@ function ErrorView({
         {!isNotFound && (
           <p className="flex items-center justify-center gap-1.5 type-caption text-danger">
             <AlertCircle className="w-3.5 h-3.5" />
-            暂时无法加载邀请，请重试。
+            邀请暂时无法加载。
           </p>
         )}
       </div>
@@ -622,8 +622,8 @@ function InfoLine({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between text-[11px] sm:text-xs">
-      <span className="inline-flex items-center gap-1.5 uppercase tracking-wider text-[var(--fg-2)]">
+    <div className="type-caption flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+      <span className="inline-flex items-center gap-1.5">
         {icon}
         {label}
       </span>
@@ -635,16 +635,16 @@ function InfoLine({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/30">
+      <span className="type-caption inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-info-border bg-info-soft px-2 py-0.5 text-[var(--info-fg)]">
         <UserCog className="w-3 h-3" />
-        admin
+        管理员
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
-      <UsersIcon className="w-3 h-3" />
-      member
+    <span className="type-caption inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-[var(--fg-1)]">
+        <UsersIcon className="w-3 h-3" />
+        成员
     </span>
   );
 }
@@ -698,7 +698,7 @@ function PasswordStrength({
           />
         ))}
       </div>
-      <p className="text-[11px] text-[var(--fg-2)]">
+      <p className="type-caption">
         强度：<span className="text-[var(--fg-1)]">{strength.label}</span>
       </p>
     </div>

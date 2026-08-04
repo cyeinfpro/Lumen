@@ -356,7 +356,7 @@ export function MobileStudio() {
               className="flex min-h-[320px] items-center justify-center gap-2 text-body-sm text-[var(--fg-2)]"
             >
               <Spinner size={20} />
-              正在载入历史消息…
+              历史消息载入中…
             </div>
           ) : isEmpty ? (
             <MobileEmptyStudio

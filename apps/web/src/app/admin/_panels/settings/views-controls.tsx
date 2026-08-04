@@ -9,7 +9,14 @@ import {
   RotateCcw,
 } from "lucide-react";
 import type { SystemSettingItem } from "@/lib/types";
-import { Button } from "@/components/ui/primitives";
+import {
+  Badge,
+  Button,
+  Input,
+  Select,
+  StatusBadge,
+  Switch,
+} from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 import {
   IMAGE_CHANNEL_KEY,
@@ -25,8 +32,6 @@ import {
   getBrowserOriginSSR,
   normalizeImageChannel,
   normalizeImageEngine,
-  settingInputClassName,
-  settingMonoInputClassName,
   subscribeStatic,
 } from "./model";
 
@@ -182,16 +187,9 @@ function EnumSettingControl({
                 <span className="flex items-center justify-between gap-2">
                   <span className="type-body-sm font-medium text-current">{option.label}</span>
                   {option.badge && (
-                    <span
-                      className={cn(
-                        "rounded-full border px-2 py-0.5 text-[10px]",
-                        option.value === "dual_race"
-                          ? "border-danger-border bg-danger-soft text-danger"
-                          : "border-warning-border bg-warning-soft text-warning",
-                      )}
-                    >
+                    <Badge tone={option.value === "dual_race" ? "danger" : "warning"}>
                       {option.badge}
-                    </span>
+                    </Badge>
                   )}
                 </span>
                 <span className="mt-1 block type-caption text-[var(--fg-2)]">
@@ -238,37 +236,17 @@ function ToggleSettingControl({
     const checked = controlValue === "1";
     return (
       <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={checked}
+        <Switch
+          checked={checked}
           aria-label={`${meta.title} ${checked ? "关闭" : "开启"}`}
-          onClick={() => onChange({ kind: "set", value: checked ? "0" : "1" })}
-          className={cn(
-            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 max-sm:min-h-11 max-sm:min-w-11",
-            checked
-              ? "border-accent-border bg-accent"
-              : "border-[var(--border)] bg-[var(--bg-2)]",
-          )}
-        >
-          <span
-            aria-hidden
-            className={cn(
-              "inline-block h-5 w-5 rounded-full bg-[var(--bg-0)] shadow-[var(--shadow-1)] transition-transform",
-              checked ? "translate-x-[22px]" : "translate-x-0.5",
-            )}
-          />
-        </button>
-        <span
-          className={cn(
-            "inline-flex rounded-[var(--radius-control)] border px-2 py-1 type-caption",
-            checked
-              ? "border-success-border bg-success-soft text-success"
-              : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
-          )}
-        >
-          {checked ? "开启" : "关闭"}
-        </span>
+          onCheckedChange={(nextChecked) =>
+            onChange({ kind: "set", value: nextChecked ? "1" : "0" })
+          }
+        />
+        <StatusBadge
+          status={checked ? "enabled" : "disabled"}
+          label={checked ? "开启" : "关闭"}
+        />
         <ResetEditButton
           dirty={!!op}
           defaultValue={meta.defaultValue}
@@ -297,7 +275,7 @@ function NumericSettingControl({
           {meta.title}
         </label>
         <div className="relative flex-1">
-          <input
+          <Input
             id={`setting-${item.key}`}
             type="number"
             value={inputValue}
@@ -314,7 +292,7 @@ function NumericSettingControl({
                 : "填写数值"
             }
             inputMode={meta.kind === "integer" ? "numeric" : "decimal"}
-            className={`${settingMonoInputClassName} pr-16`}
+            className="pr-16 font-mono"
           />
           {meta.unit && (
             <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 type-caption text-[var(--fg-2)]">
@@ -354,7 +332,7 @@ function TextSettingControl({
       <label htmlFor={`setting-${item.key}`} className="sr-only">
         {meta.title}
       </label>
-      <input
+      <Input
         id={`setting-${item.key}`}
         type={meta.kind === "url" ? "url" : "text"}
         value={inputValue}
@@ -370,7 +348,8 @@ function TextSettingControl({
               : "填写内容"
         }
         autoComplete="off"
-        className={`flex-1 ${settingMonoInputClassName}`}
+        wrapperClassName="flex-1"
+        className="font-mono"
       />
       {meta.kind === "url" && browserOrigin && (
         <Button
@@ -558,7 +537,7 @@ function ModelChoiceControl({
           onChange={onChange}
         />
       ) : (
-        <select
+        <Select
           value={modelIds.includes(effective) ? effective : "__custom__"}
           onChange={(event) => {
             const next = event.target.value;
@@ -568,7 +547,8 @@ function ModelChoiceControl({
             }
             onChange({ kind: "set", value: next });
           }}
-          className={`flex-1 ${settingMonoInputClassName}`}
+          wrapperClassName="flex-1"
+          className="font-mono"
         >
           {modelIds.map((model) => (
             <option key={model} value={model}>
@@ -576,7 +556,7 @@ function ModelChoiceControl({
             </option>
           ))}
           <option value="__custom__">自定义...</option>
-        </select>
+        </Select>
       )}
       {customMode && (
         <Button
@@ -629,7 +609,7 @@ export function UpdateProxySelectControl({
   return (
     <div className="space-y-2">
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
-        <select
+        <Select
           value={selectedExists ? value : "__custom__"}
           onChange={(event) => {
             const next = event.target.value;
@@ -639,7 +619,7 @@ export function UpdateProxySelectControl({
               onChange({ kind: "set", value: next });
             }
           }}
-          className={`flex-1 ${settingInputClassName}`}
+          wrapperClassName="flex-1"
         >
           <option value="">自动选择第一个启用代理</option>
           {enabledProxies.map((proxy) => (
@@ -652,7 +632,7 @@ export function UpdateProxySelectControl({
             </option>
           ))}
           {!selectedExists && <option value="__custom__">{value}</option>}
-        </select>
+        </Select>
         <ResetEditButton
           dirty={!!op}
           defaultValue={undefined}
@@ -690,7 +670,7 @@ export function TextSettingInput({
       <label htmlFor={`setting-${item.key}`} className="sr-only">
         {meta.title}
       </label>
-      <input
+      <Input
         id={`setting-${item.key}`}
         type={meta.kind === "url" ? "url" : "text"}
         value={value}
@@ -706,7 +686,8 @@ export function TextSettingInput({
               : "填写内容"
         }
         autoComplete="off"
-        className={`flex-1 ${settingMonoInputClassName}`}
+        wrapperClassName="flex-1"
+        className="font-mono"
       />
     </>
   );

@@ -84,7 +84,7 @@ function StageError({ error }: { error: string | null }) {
   if (!error) return null;
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+      <p className="border-l-2 border-[var(--danger)] pl-3 type-body-sm leading-6 text-[var(--danger)]">
         {error}
       </p>
     </section>
@@ -101,10 +101,10 @@ function CandidatesSection({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           候选方案
         </p>
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+        <p className="type-caption text-[var(--fg-3)] tabular-nums">
           {String(controller.candidates.length).padStart(2, "0")} 张
         </p>
       </div>
@@ -144,7 +144,7 @@ function AdjustmentsSection({
 }) {
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Adjustments
       </p>
       <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
@@ -152,7 +152,7 @@ function AdjustmentsSection({
           value={controller.adjustments}
           onChange={(event) => controller.setAdjustments(event.target.value)}
           placeholder="发型再自然一点，保留脸和身材比例"
-          className="h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+          className="control-shell h-10 w-full px-3 type-body-sm text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
         />
         <Button
           variant="primary"
@@ -167,7 +167,7 @@ function AdjustmentsSection({
           确认模特并继续
         </Button>
       </div>
-      <p className="mt-3 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+      <p className="mt-3 min-w-0 break-words type-caption text-[var(--fg-3)]">
         配饰方向 ·{" "}
         <span className="text-[var(--fg-1)] normal-case tracking-normal">
           {controller.accessoryPlan.enabled
@@ -188,11 +188,11 @@ function AccessorySection({
   return (
     <section className="border-t border-[var(--border)] py-4">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           Accessory Quad
         </p>
         {controller.accessoryImages.length > 0 ? (
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+          <p className="type-caption text-[var(--fg-3)] tabular-nums">
             {String(controller.accessoryImages.length).padStart(2, "0")} 张
           </p>
         ) : null}
@@ -207,7 +207,7 @@ function AccessorySection({
             controller.accessoryItems.join("、") ||
             "例如：简洁耳饰、浅色鞋子、小号包袋"
           }
-          className="h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+          className="control-shell h-10 w-full px-3 type-body-sm text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
         />
         <Button
           variant="outline"
@@ -262,7 +262,7 @@ function AccessoryGrid({
     <RunningState
       label={
         controller.selectedCandidate
-          ? "配饰四宫格尚未生成，点击上方按钮开始生成"
+          ? "配饰四宫格未生成，点击上方按钮开始生成"
           : "确认模特后可生成配饰四宫格"
       }
     />
@@ -277,7 +277,7 @@ function ShowcaseSetupSection({
   if (!controller.selectedCandidate) return null;
   return (
     <section className="border-t border-[var(--border)] py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Showcase Setup
       </p>
       <ShowcaseSetupFields
@@ -287,7 +287,7 @@ function ShowcaseSetupSection({
           controller.isShowcaseRunning
         }
       />
-      <p className="mt-2 text-[12px] text-[var(--fg-3)]">张数越多耗时越长</p>
+      <p className="mt-2 type-caption text-[var(--fg-3)]">张数越多耗时越长</p>
       <Button
         className="mt-5 w-full sm:w-auto"
         variant="primary"

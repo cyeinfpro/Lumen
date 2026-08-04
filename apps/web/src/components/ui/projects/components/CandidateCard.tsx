@@ -46,12 +46,12 @@ function CandidateGallery({
         {generating ? (
           <>
             <Spinner size={20} />
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+            <span className="type-caption">
               生成中
             </span>
           </>
         ) : (
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+          <span className="type-caption text-[var(--fg-3)]">
             暂无图片
           </span>
         )}
@@ -173,7 +173,7 @@ export function CandidateCard({
           className={cn(
             "relative grid aspect-[4/5] gap-px overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)]",
             images.length > 1 ? "grid-cols-2" : "grid-cols-1",
-            selected && "ring-1 ring-inset ring-[var(--border-amber)]",
+            selected && "ring-1 ring-inset ring-accent-border",
           )}
         >
           <CandidateGallery
@@ -185,17 +185,12 @@ export function CandidateCard({
           />
         </div>
 
-        <span
-          className={cn(
-            "absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.2em] mix-blend-difference",
-            "text-white/90",
-          )}
-        >
+        <span className="type-caption absolute left-3 top-3 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
           N°{String(candidate.candidate_index).padStart(2, "0")}
         </span>
 
         {selected ? (
-          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
+          <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 type-caption text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
             <Check className="h-3 w-3" />
             已选中
           </span>
@@ -205,17 +200,17 @@ export function CandidateCard({
       <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
         <p
           className={cn(
-            "text-[15px] font-semibold leading-tight tracking-tight transition-colors",
-            selected ? "text-[var(--amber-300)]" : "text-[var(--fg-0)]",
+            "type-body font-semibold leading-tight tracking-tight transition-colors",
+            selected ? "text-accent" : "text-[var(--fg-0)]",
           )}
         >
           方案 {candidate.candidate_index}
         </p>
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {images.length > 1 ? `${images.length} 张` : "1 张"}
         </span>
       </div>
-      <p className="mt-2 text-[12px] leading-5 text-[var(--fg-2)]">
+      <p className="mt-2 type-caption leading-5 text-[var(--fg-2)]">
         未试穿商品，仅用于确认模特形象。
       </p>
 

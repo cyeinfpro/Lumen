@@ -2,20 +2,19 @@
 
 import dynamic from "next/dynamic";
 
+import { Spinner } from "@/components/ui/primitives/Spinner";
+
 const InpaintModalImpl = dynamic(
   () => import("./InpaintModal").then((mod) => mod.InpaintModal),
   {
     ssr: false,
     loading: () => (
       <div
-        className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] bg-black/60 grid place-items-center"
+        className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] grid place-items-center bg-[var(--surface-scrim)]"
         aria-busy="true"
         aria-label="加载中"
       >
-        <div
-          className="h-8 w-8 animate-spin rounded-full border-2 border-white/30 border-t-white"
-          aria-hidden
-        />
+        <Spinner size={24} className="text-[var(--media-control-fg)]" />
       </div>
     ),
   },

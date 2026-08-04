@@ -113,7 +113,7 @@ export function buildShowcaseRequest(
   };
 }
 
-export function sceneEnvironmentEnabled(template: CreateTemplate): boolean {
+export function supportsSceneEnvironment(template: CreateTemplate): boolean {
   return SCENE_ENVIRONMENT_TEMPLATES.has(template);
 }
 
@@ -168,7 +168,7 @@ function resolveSceneEnvironment(
 ): CreateSceneEnvironment {
   if (
     options.forceIndoorForUnsupportedTemplate &&
-    !sceneEnvironmentEnabled(values.template)
+    !supportsSceneEnvironment(values.template)
   ) {
     return "indoor";
   }

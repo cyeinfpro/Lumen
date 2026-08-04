@@ -214,7 +214,7 @@ function DetailHeader({
   const dotTone = useMemo(() => {
     if (status === "completed") return "bg-[var(--success)]";
     if (status === "running" || status === "needs_review")
-      return "bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
+      return "bg-accent animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]";
     if (status === "failed") return "bg-[var(--danger)]";
     return "bg-[var(--fg-3)]";
   }, [status]);
@@ -225,7 +225,7 @@ function DetailHeader({
   return (
     <header className="page-header mb-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
       <div className="min-w-0">
-        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           Step {stepNum} / {String(stepTotal).padStart(2, "0")} · Apparel Project
         </p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1.5">
@@ -250,7 +250,7 @@ function DetailHeader({
                 maxLength={120}
                 autoFocus
                 aria-label="项目名称"
-                className="type-page-title min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] border-b border-[var(--border-amber)] bg-transparent px-1 outline-none"
+                className="control-shell type-page-title min-h-11 min-w-0 max-w-[min(calc(100vw_-_4rem),640px)] px-3 outline-none focus:border-accent-border focus:shadow-[var(--ring)]"
               />
               <button
                 type="submit"
@@ -291,7 +291,7 @@ function DetailHeader({
           )}
         </div>
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.18em]">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 type-caption">
           <span className="inline-flex items-center gap-2 text-[var(--fg-1)]">
             <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", dotTone)} />
             {STATUS_LABEL[status] ?? status}
@@ -320,7 +320,7 @@ function DetailHeader({
           type="button"
           onClick={onOpenDrawer}
           aria-label="查看项目约束 (⌘ .)"
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:min-h-8 xl:hidden"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 border border-[var(--border)] px-2.5 type-caption text-[var(--fg-1)] transition-colors hover:border-accent-border hover:text-accent md:min-h-8 xl:hidden"
         >
           <PanelRightOpen className="h-3.5 w-3.5" />
           Constraints
@@ -335,7 +335,7 @@ function DetailHeader({
               setMenuOpen((open) => !open);
               setConfirmDelete(false);
             }}
-            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)] md:h-8 md:w-8"
+            className="inline-flex h-11 w-11 cursor-pointer items-center justify-center border border-[var(--border)] text-[var(--fg-1)] transition-colors hover:border-accent-border hover:text-accent md:h-8 md:w-8"
           >
             <MoreHorizontal className="h-4 w-4" />
           </button>
@@ -346,7 +346,7 @@ function DetailHeader({
             >
               {confirmDelete ? (
                 <div className="grid gap-2 p-2">
-                  <p className="text-[15px] font-semibold tracking-tight text-[var(--fg-0)]">
+                  <p className="type-body font-semibold tracking-tight text-[var(--fg-0)]">
                     确认删除这个项目？
                   </p>
                   <p className="text-xs leading-5 text-[var(--fg-2)]">
@@ -377,7 +377,7 @@ function DetailHeader({
                       setMenuOpen(false);
                     }}
                     role="menuitem"
-                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] md:min-h-9"
+                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] md:min-h-9"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                     重命名
@@ -386,7 +386,7 @@ function DetailHeader({
                     type="button"
                     onClick={() => setConfirmDelete(true)}
                     role="menuitem"
-                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left text-[13px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
+                    className="flex min-h-11 cursor-pointer items-center gap-2.5 px-2 text-left type-body-sm text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] md:min-h-9"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     删除
@@ -426,7 +426,7 @@ function DetailSkeleton() {
     <div className="flex flex-1 items-center justify-center">
       <div className="grid place-items-center gap-3 text-center">
         <Spinner size={20} />
-        <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           加载中
         </p>
       </div>
@@ -436,8 +436,8 @@ function DetailSkeleton() {
 
 function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="m-6 max-w-md rounded-[var(--radius-card)] border border-[var(--danger)]/30 bg-[var(--danger-soft)]/20 p-5 text-sm">
-      <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
+    <div className="m-6 max-w-md rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 text-sm">
+      <p className="type-caption text-[var(--danger)]">
         错误
       </p>
       <h3 className="type-card-title mt-1">
@@ -449,7 +449,7 @@ function DetailError({ onRetry }: { onRetry: () => void }) {
       <button
         type="button"
         onClick={onRetry}
-        className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-0)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+        className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--border)] px-4 type-caption text-[var(--fg-0)] transition-colors hover:border-accent-border hover:text-accent"
       >
         重试
       </button>

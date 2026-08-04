@@ -50,7 +50,8 @@ import {
   useStoryboardsQuery,
 } from "@/lib/queries";
 import { useQueryClient } from "@tanstack/react-query";
-import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/primitives/Button";
+import { Select } from "@/components/ui/primitives/Select";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { OnlineBanner } from "../components/OnlineBanner";
 import {
@@ -204,11 +205,11 @@ export function StoryboardIndexPage() {
                 <Link
                   key={item.id}
                   href={`/projects/storyboard/${item.id}`}
-                  className="group grid min-h-56 gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/82 p-4 shadow-[var(--shadow-1)] transition hover:border-[var(--border-amber)] hover:shadow-[var(--shadow-2)]"
+                  className="group grid min-h-56 gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/82 p-4 shadow-[var(--shadow-1)] transition hover:border-accent-border hover:shadow-[var(--shadow-2)]"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                      <p className="type-caption text-[var(--fg-3)]">
                         {STATUS_TEXT[item.status] ?? item.status}
                       </p>
                       <h2 className="mt-1 truncate text-lg font-semibold tracking-tight group-hover:text-[var(--accent)]">
@@ -544,18 +545,17 @@ function AssetsStage({ run }: { run: StoryboardRun }) {
       }}
     >
       <div className="grid gap-4">
-        <div className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-3 md:grid-cols-[160px_minmax(0,1fr)]">
-          <label className="grid gap-1.5 text-sm">
-            <span className="text-xs text-[var(--fg-2)]">类型</span>
-            <select
+        <div className="surface-card grid gap-3 p-3 md:grid-cols-[160px_minmax(0,1fr)]">
+          <label className="grid gap-1.5 type-body-sm">
+            <span className="type-caption text-[var(--fg-2)]">类型</span>
+            <Select
               value={kind}
               onChange={(event) => setKind(event.target.value as "character" | "scene" | "prop")}
-              className="min-h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-[var(--fg-0)]"
             >
               <option value="character">人物</option>
               <option value="scene">场景</option>
               <option value="prop">道具</option>
-            </select>
+            </Select>
           </label>
           <LabeledInput label="名称" value={name} onChange={setName} />
           <div className="md:col-span-2">
@@ -670,7 +670,7 @@ function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot })
   return (
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+        <span className="type-caption text-[var(--fg-3)]">
           SEG {String(shot.index).padStart(2, "0")}
         </span>
         <div className="flex flex-wrap gap-2">
@@ -684,30 +684,26 @@ function ShotEditor({ run, shot }: { run: StoryboardRun; shot: StoryboardShot })
       <LabeledTextarea label="画面" value={visual} onChange={setVisual} rows={4} />
       <LabeledTextarea label="旁白/动作" value={narration} onChange={setNarration} rows={3} />
       <div className="flex flex-wrap gap-2">
-        {run.assets.map((asset) => (
-          <label
+        {run.assets.map((asset) => {
+          const selected = assetIds.includes(asset.id);
+          return (
+          <Button
             key={asset.id}
-            className={cn(
-              "inline-flex min-h-11 items-center gap-2 rounded-full border px-3 text-xs sm:min-h-8",
-              assetIds.includes(asset.id)
-                ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--fg-0)]"
-                : "border-[var(--border)] text-[var(--fg-1)]",
-            )}
+            variant={selected ? "primary" : "outline"}
+            size="sm"
+            aria-pressed={selected}
+            onClick={() =>
+              setAssetIds((current) =>
+                selected
+                  ? current.filter((id) => id !== asset.id)
+                  : [...current, asset.id],
+              )
+            }
           >
-            <input
-              type="checkbox"
-              checked={assetIds.includes(asset.id)}
-              onChange={(event) =>
-                setAssetIds((cur) =>
-                  event.target.checked
-                    ? [...cur, asset.id]
-                    : cur.filter((id) => id !== asset.id),
-                )
-              }
-            />
             {asset.name}
-          </label>
-        ))}
+          </Button>
+          );
+        })}
       </div>
       <InfoLine text="批准后才能生成该段的关键帧。" />
       <div className="flex flex-wrap gap-2">

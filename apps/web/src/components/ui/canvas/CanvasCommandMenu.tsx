@@ -23,6 +23,7 @@ import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { cn } from "@/lib/utils";
 import { IconButton, Kbd } from "@/components/ui/primitives";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
+import { getCanvasDialogTransition } from "./canvasDialogMotion";
 
 export type CanvasCommandMenuItemKind = "node" | "command";
 
@@ -141,6 +142,7 @@ export function CanvasCommandMenu({
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const dialogTransition = getCanvasDialogTransition();
   useBodyScrollLock(open);
 
   const filteredItems = useMemo(
@@ -228,10 +230,10 @@ export function CanvasCommandMenu({
         <motion.div
           key="canvas-command-menu"
           className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center p-0 sm:items-start sm:px-4 sm:pt-[14vh]"
-          initial={false}
+          initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0 }}
+          transition={dialogTransition}
         >
           <button
             type="button"
@@ -247,10 +249,10 @@ export function CanvasCommandMenu({
             aria-labelledby={headingId}
             aria-describedby={descriptionId}
             onKeyDown={handleKeyDown}
-            initial={false}
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={dialogTransition}
             className={cn(
               "mobile-dialog-panel surface-dialog relative flex max-h-[82dvh] w-full max-w-2xl flex-col overflow-hidden",
               "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none max-sm:border-b-0",
