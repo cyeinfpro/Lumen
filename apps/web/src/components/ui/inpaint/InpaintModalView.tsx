@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { Button, IconButton, Textarea, Tooltip } from "@/components/ui/primitives";
+import { Dialog } from "@/components/ui/primitives/Dialog";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { cn } from "@/lib/utils";
 import type { InpaintSource } from "@/store/useInpaintStore";
@@ -67,83 +68,54 @@ export function InpaintModalView({
   onSubmit,
 }: InpaintModalViewProps) {
   return (
-    <motion.div
-      key="inpaint-overlay"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.16 }}
+    <Dialog
+      open
+      onClose={onClose}
+      closeOnEscape={false}
+      dialogRef={rootRef}
+      initialFocusRef={prompt ? undefined : promptRef}
+      aria-label="局部修改"
+      aria-busy={submitting}
+      onKeyDown={onKeyDown}
       className={cn(
-        "fixed inset-0 z-[var(--z-dialog)]",
-        "bg-black/76 backdrop-blur-md",
-        "mobile-dialog-shell",
-        "flex items-end justify-center sm:items-center",
+        "h-[var(--mobile-dialog-max-height)] max-w-[1100px]",
+        "sm:h-[760px] sm:max-h-[calc(100dvh-3rem)]",
       )}
-      role="presentation"
-      onPointerDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
-      <motion.div
-        ref={rootRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="局部修改"
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.96, y: 8 }}
-        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        onKeyDown={onKeyDown}
-        className={cn(
-          "mobile-dialog-panel",
-          "w-full max-w-[1100px]",
-          "h-[var(--mobile-dialog-max-height)] sm:h-[760px] sm:max-h-[calc(100dvh-3rem)]",
-          "flex flex-col overflow-hidden",
-          "max-sm:rounded-t-[var(--radius-sheet)] max-sm:rounded-b-none sm:rounded-[var(--radius-dialog)]",
-          "border border-[var(--border)] bg-[var(--bg-1)]",
-          "shadow-[var(--shadow-2)]",
-        )}
-      >
-        <InpaintModalHeader
+      <InpaintModalHeader
+        source={source}
+        confirmingClose={confirmingClose}
+        submitting={submitting}
+        onClose={onClose}
+      />
+      <Dialog.Body className="flex min-h-0 flex-1 flex-col overflow-hidden p-0 md:flex-row">
+        <InpaintCanvasPanel
           source={source}
-          confirmingClose={confirmingClose}
+          boardRef={boardRef}
+          initialStrokes={initialStrokes}
           submitting={submitting}
-          onClose={onClose}
+          onPointerDown={onPointerDownCanvas}
+          onStrokesChange={onStrokesChange}
+          onStatsChange={onStatsChange}
         />
-        <div
-          className={cn(
-            "flex-1 min-h-0 overflow-hidden",
-            "flex flex-col md:flex-row",
-          )}
-        >
-          <InpaintCanvasPanel
-            source={source}
-            boardRef={boardRef}
-            initialStrokes={initialStrokes}
-            submitting={submitting}
-            onPointerDown={onPointerDownCanvas}
-            onStrokesChange={onStrokesChange}
-            onStatsChange={onStatsChange}
-          />
-          <InpaintPromptPanel
-            promptRef={promptRef}
-            submitting={submitting}
-            prompt={prompt}
-            hasStroke={hasStroke}
-            coverage={coverage}
-            warning={warning}
-            confirmingClose={confirmingClose}
-            derivedAspect={derivedAspect}
-            promptOverSoftLimit={promptOverSoftLimit}
-            promptOverHardLimit={promptOverHardLimit}
-            canSubmit={canSubmit}
-            onClose={onClose}
-            onPromptChange={onPromptChange}
-            onSubmit={onSubmit}
-          />
-        </div>
-      </motion.div>
-    </motion.div>
+        <InpaintPromptPanel
+          promptRef={promptRef}
+          submitting={submitting}
+          prompt={prompt}
+          hasStroke={hasStroke}
+          coverage={coverage}
+          warning={warning}
+          confirmingClose={confirmingClose}
+          derivedAspect={derivedAspect}
+          promptOverSoftLimit={promptOverSoftLimit}
+          promptOverHardLimit={promptOverHardLimit}
+          canSubmit={canSubmit}
+          onClose={onClose}
+          onPromptChange={onPromptChange}
+          onSubmit={onSubmit}
+        />
+      </Dialog.Body>
+    </Dialog>
   );
 }
 
@@ -157,7 +129,7 @@ function InpaintModalHeader({
   "source" | "confirmingClose" | "submitting" | "onClose"
 >) {
   return (
-    <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]">
+    <Dialog.Header className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-3 min-w-0">
         {source ? (
           <div
@@ -194,7 +166,7 @@ function InpaintModalHeader({
       >
         <X className="w-4 h-4" />
       </IconButton>
-    </div>
+    </Dialog.Header>
   );
 }
 
@@ -389,7 +361,7 @@ function InpaintPromptPanel({
         </div>
       </div>
 
-      <div className="mobile-dialog-footer mt-auto flex items-center justify-end gap-2 pt-2">
+      <Dialog.Footer className="mt-auto border-0 bg-transparent">
         <Button
           variant={confirmingClose ? "danger" : "ghost"}
           size="md"
@@ -419,7 +391,7 @@ function InpaintPromptPanel({
             </>
           )}
         </Button>
-      </div>
+      </Dialog.Footer>
 
       <div className="md:hidden -mt-1 text-[11px] text-[var(--fg-1)]/70 text-right">
         {hasStroke ? `已涂抹 ${Math.round(coverage * 100)}%` : "未涂抹"}

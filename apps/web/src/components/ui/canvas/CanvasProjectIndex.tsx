@@ -24,6 +24,7 @@ import {
 } from "@/lib/queries/canvases";
 import type { CanvasListItem } from "@/lib/canvas/types";
 import { Button, IconButton, Input, toast } from "@/components/ui/primitives";
+import { Dialog } from "@/components/ui/primitives/Dialog";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import {
   ProjectMobileTabBar,
@@ -291,47 +292,46 @@ function RenameDialog({
   const [title, setTitle] = useState(item.title);
   const patch = usePatchCanvasMutation(item.id);
   return (
-    <div className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] grid place-items-center bg-[var(--surface-scrim)] p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="重命名画布"
-        className="mobile-dialog-panel surface-dialog w-full max-w-sm rounded-[var(--radius-dialog)] bg-[var(--bg-1)]"
-      >
-        <header className="border-b border-[var(--border)] p-4">
-          <h2 className="type-card-title">重命名画布</h2>
-        </header>
-        <div className="p-4">
-          <Input
-            autoFocus
-            label="名称"
-            value={title}
-            maxLength={255}
-            onChange={(event) => setTitle(event.currentTarget.value)}
-          />
-        </div>
-        <footer className="grid grid-cols-2 gap-2 border-t border-[var(--border)] p-3">
-          <Button variant="secondary" onClick={onClose}>
-            取消
-          </Button>
-          <Button
-            variant="primary"
-            loading={patch.isPending}
-            disabled={!title.trim()}
-            onClick={async () => {
-              try {
-                await patch.mutateAsync({ title: title.trim() });
-                onSaved();
-              } catch (error) {
-                toast.error(error instanceof Error ? error.message : "保存失败");
-              }
-            }}
-          >
-            保存
-          </Button>
-        </footer>
-      </div>
-    </div>
+    <Dialog
+      open
+      onClose={onClose}
+      aria-label="重命名画布"
+      aria-busy={patch.isPending}
+      className="max-w-sm"
+    >
+      <Dialog.Header>
+        <h2 className="type-card-title">重命名画布</h2>
+      </Dialog.Header>
+      <Dialog.Body>
+        <Input
+          autoFocus
+          label="名称"
+          value={title}
+          maxLength={255}
+          onChange={(event) => setTitle(event.currentTarget.value)}
+        />
+      </Dialog.Body>
+      <Dialog.Footer className="grid grid-cols-2">
+        <Button variant="secondary" onClick={onClose}>
+          取消
+        </Button>
+        <Button
+          variant="primary"
+          loading={patch.isPending}
+          disabled={!title.trim()}
+          onClick={async () => {
+            try {
+              await patch.mutateAsync({ title: title.trim() });
+              onSaved();
+            } catch (error) {
+              toast.error(error instanceof Error ? error.message : "保存失败");
+            }
+          }}
+        >
+          保存
+        </Button>
+      </Dialog.Footer>
+    </Dialog>
   );
 }
 

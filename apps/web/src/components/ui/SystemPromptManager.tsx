@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -19,6 +19,7 @@ import {
 } from "./SystemPromptManagerPresentation";
 import { copy } from "@/lib/copy";
 import { Button, IconButton } from "./primitives";
+import { Dialog } from "./primitives/Dialog";
 import {
   getConversation,
   type ConversationSummary,
@@ -35,8 +36,6 @@ import {
 } from "@/lib/queries";
 import { useUserQueryScope } from "@/components/QueryProvider";
 import { useChatStore } from "@/store/useChatStore";
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
-import { useModalLayer } from "./primitives/mobile/useModalLayer";
 
 interface SystemPromptManagerProps {
   compact?: boolean;
@@ -318,18 +317,7 @@ function SystemPromptDialog({
   const [content, setContent] = useState(EMPTY_PROMPT);
   const [localError, setLocalError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const dialogRef = useRef<HTMLElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
-  useBodyScrollLock(!embedded);
-  const closeDialog = useCallback(() => {
-    if (!embedded) onClose();
-  }, [embedded, onClose]);
-  const onDialogKeyDown = useModalLayer({
-    open: !embedded,
-    rootRef: dialogRef,
-    onClose: closeDialog,
-    initialFocusRef: nameInputRef,
-  });
 
   const selectedPrompt = selectedPromptForEditor(prompts, selectedId);
 
@@ -462,8 +450,7 @@ function SystemPromptDialog({
   return (
     <SystemPromptDialogLayout
       embedded={embedded}
-      dialogRef={dialogRef}
-      onDialogKeyDown={onDialogKeyDown}
+      initialFocusRef={nameInputRef}
       onClose={onClose}
       sidebar={
         <SystemPromptSidebar
@@ -518,69 +505,52 @@ function SystemPromptDialog({
 
 function SystemPromptDialogLayout({
   embedded,
-  dialogRef,
-  onDialogKeyDown,
+  initialFocusRef,
   onClose,
   sidebar,
   editor,
 }: {
   embedded: boolean;
-  dialogRef: React.RefObject<HTMLElement | null>;
-  onDialogKeyDown: React.KeyboardEventHandler<HTMLElement>;
+  initialFocusRef: React.RefObject<HTMLInputElement | null>;
   onClose: () => void;
   sidebar: React.ReactNode;
   editor: React.ReactNode;
 }) {
-  return (
-    <div
-      className={
-        embedded
-          ? "w-full"
-          : "fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center mobile-dialog-shell sm:items-center sm:p-6"
-      }
-    >
-      {embedded ? null : <SystemPromptBackdrop onClose={onClose} />}
+  if (embedded) {
+    return (
       <section
-        ref={dialogRef}
-        role={embedded ? undefined : "dialog"}
-        aria-modal={embedded ? undefined : true}
-        aria-labelledby="system-prompt-title"
-        tabIndex={embedded ? undefined : -1}
-        onKeyDown={embedded ? undefined : onDialogKeyDown}
         className={cn(
-          "mobile-dialog-panel relative grid w-full overflow-hidden",
-          embedded
-            ? "min-h-[620px] h-[calc(100dvh-14rem)] rounded-[var(--radius-dialog)] max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]"
-            : "h-[var(--mobile-dialog-max-height)] max-w-5xl rounded-t-[var(--radius-sheet)] border-b-0 sm:h-[760px] sm:max-h-[calc(100dvh-1.5rem)] sm:rounded-[var(--radius-sheet)] sm:border-b",
+          "surface-dialog relative grid w-full overflow-hidden",
+          "min-h-[620px] h-[calc(100dvh-14rem)] rounded-[var(--radius-dialog)] max-sm:min-h-0 max-sm:h-[calc(100dvh-10rem)]",
           "grid-rows-[minmax(112px,180px)_minmax(0,1fr)] md:grid-rows-1",
-          "border border-[var(--border)] bg-[var(--bg-0)]/95 backdrop-blur-2xl",
-          embedded ? null : "shadow-[var(--shadow-3)]",
           "md:grid-cols-[280px_minmax(0,1fr)]",
         )}
       >
         {sidebar}
         {editor}
       </section>
-    </div>
-  );
-}
+    );
+  }
 
-function SystemPromptBackdrop({ onClose }: { onClose: () => void }) {
   return (
-    /* @backdrop-button: 全屏 dialog backdrop，需要 button role 让 a11y 拿到 click & focus 但样式不能走 Button primitive */
-    <button
-      type="button"
-      className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-      aria-label="关闭系统提示词管理"
-      onMouseDown={(event) => {
-        // 只在鼠标真的按在 backdrop 自身时响应，避免把 input 内正在选中的 mouseup 误判为 outside-click
-        if (event.target !== event.currentTarget) return;
-      }}
-      onClick={(event) => {
-        if (event.target !== event.currentTarget) return;
-        onClose();
-      }}
-    />
+    <Dialog
+      open
+      onClose={onClose}
+      initialFocusRef={initialFocusRef}
+      aria-labelledby="system-prompt-title"
+      className="h-[var(--mobile-dialog-max-height)] max-w-5xl sm:h-[760px] sm:max-h-[calc(100dvh-1.5rem)]"
+    >
+      <Dialog.Body
+        className={cn(
+          "grid min-h-0 flex-1 overflow-hidden p-0",
+          "grid-rows-[minmax(112px,180px)_minmax(0,1fr)] md:grid-rows-1",
+          "md:grid-cols-[280px_minmax(0,1fr)]",
+        )}
+      >
+        {sidebar}
+        {editor}
+      </Dialog.Body>
+    </Dialog>
   );
 }
 
