@@ -90,7 +90,7 @@ export function StreamErrorState({
         <button
           type="button"
           onClick={onRetry}
-          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <RefreshCw className="h-4 w-4" />
           重新加载
@@ -99,19 +99,19 @@ export function StreamErrorState({
       secondaryAction={
         <Link
           href="/"
-          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 type-body-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           回到创作
         </Link>
       }
     >
-      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+      <div className="grid gap-2 text-left type-caption leading-5 text-[var(--fg-2)] sm:grid-cols-3">
         <StateFact label="状态" value={detail.label} />
         <StateFact label="筛选" value="保留当前条件" />
         <StateFact label="建议" value="重试后再刷新页面" />
       </div>
       {detail.diagnostic ? (
-        <p className="mt-3 truncate rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 px-3 py-2 text-left font-mono text-[11px] text-[var(--fg-2)]">
+        <p className="mt-3 truncate rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/58 px-3 py-2 text-left font-mono type-caption text-[var(--fg-2)]">
           诊断信息：{detail.diagnostic}
         </p>
       ) : null}
@@ -141,14 +141,14 @@ export function StreamNoResultsState({
         <button
           type="button"
           onClick={onClear}
-          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 text-sm font-medium text-[var(--warning-fg)] transition-colors hover:bg-warning-soft focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-4 type-body-sm font-medium text-[var(--warning-fg)] transition-colors hover:bg-warning-soft focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <FilterX className="h-4 w-4" />
           清除条件
         </button>
       }
     >
-      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+      <div className="grid gap-2 text-left type-caption leading-5 text-[var(--fg-2)] sm:grid-cols-3">
         <StateFact label="搜索" value={searchValue?.trim() || "未输入关键词"} />
         <StateFact label="操作" value="清除筛选" />
         <StateFact label="结果" value="恢复全部作品" />
@@ -170,7 +170,7 @@ export function StreamNeverState() {
         <button
           type="button"
           onClick={() => router.push("/")}
-          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[box-shadow,transform] hover:shadow-[var(--shadow-amber)] active:scale-[0.98] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <WandSparkles className="h-4 w-4" />
           去创作
@@ -179,14 +179,14 @@ export function StreamNeverState() {
       secondaryAction={
         <Link
           href="/projects"
-          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 text-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-4 type-body-sm font-medium text-[var(--fg-0)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         >
           <ImagePlus className="h-4 w-4" />
           看项目
         </Link>
       }
     >
-      <div className="grid gap-2 text-left text-xs leading-5 text-[var(--fg-2)] sm:grid-cols-3">
+      <div className="grid gap-2 text-left type-caption leading-5 text-[var(--fg-2)] sm:grid-cols-3">
         <StateFact label="生成" value="创作页出图" />
         <StateFact label="管理" value="素材页筛选" />
         <StateFact label="复用" value="批量分享与定位" />
@@ -222,10 +222,10 @@ function StreamStatePanel({
             {icon}
           </span>
           <p className="mt-4 type-page-kicker">{eyebrow}</p>
-          <h2 className="mt-2 text-[22px] font-semibold leading-tight tracking-tight text-[var(--fg-0)] md:text-[26px]">
+          <h2 className="mt-2 type-page-title-sm font-semibold leading-tight tracking-tight text-[var(--fg-0)]">
             {title}
           </h2>
-          <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--fg-1)]">
+          <p className="mt-3 max-w-xl type-body-sm leading-6 text-[var(--fg-1)]">
             {description}
           </p>
           <div className="mt-5 flex w-full flex-col justify-center gap-2 sm:w-auto sm:flex-row">
@@ -246,10 +246,10 @@ function StreamStatePanel({
 function StateFact({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/48 px-3 py-2">
-      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-3)]">
+      <p className="type-caption text-[var(--fg-3)]">
         {label}
       </p>
-      <p className="mt-1 truncate text-[12px] text-[var(--fg-1)]">{value}</p>
+      <p className="mt-1 truncate type-caption text-[var(--fg-1)]">{value}</p>
     </div>
   );
 }

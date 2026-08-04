@@ -40,7 +40,7 @@ export function RedemptionSecretControl({
         <div className="flex items-center gap-2">
           <EyeOff className="h-4 w-4 text-[var(--fg-2)]" />
           <div>
-            <p className="text-sm text-[var(--fg-0)]">兑换码 secret</p>
+            <p className="type-body-sm text-[var(--fg-0)]">兑换码 secret</p>
             <p className="type-caption text-[var(--fg-2)]">
               {configured
                 ? "已配置；轮换会撤销所有未兑换码"

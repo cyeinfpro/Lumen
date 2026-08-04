@@ -331,11 +331,11 @@ function VideoPricingRow({
     <tr className="border-b border-[var(--border-subtle)] odd:bg-[var(--bg-0)]/35 transition-colors hover:bg-[var(--bg-2)]/70">
       <td
         data-label="模型"
-        className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]"
+        className="px-3 py-2 font-mono type-caption [overflow-wrap:anywhere]"
       >
         {index === 0 ? row.model : ""}
       </td>
-      <td data-label="分辨率" className="px-3 py-2 font-mono text-xs">
+      <td data-label="分辨率" className="px-3 py-2 font-mono type-caption">
         {resolution}
       </td>
       {VIDEO_PRICING_VARIANTS.map((variant) => (
@@ -553,7 +553,7 @@ function ModelPricingRow({
     <tr className="border-b border-[var(--border-subtle)] odd:bg-[var(--bg-0)]/35 transition-colors hover:bg-[var(--bg-2)]/70">
       <td
         data-label="模型"
-        className="px-3 py-2 font-mono text-xs [overflow-wrap:anywhere]"
+        className="px-3 py-2 font-mono type-caption [overflow-wrap:anywhere]"
       >
         {row.model}
       </td>
@@ -679,7 +679,7 @@ export function ModelPricingSection({
             onChange={(event) => form.setPriceFile(event.target.value)}
             rows={5}
             placeholder="- model: gpt-5.5&#10;  input_usd_per_1m: 5.00&#10;  output_usd_per_1m: 15.00"
-            className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 text-sm outline-none focus:border-[var(--accent)]/50"
+            className="w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] p-3 type-body-sm outline-none focus:border-[var(--accent)]/50"
           />
         </label>
         <Input

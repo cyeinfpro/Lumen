@@ -102,13 +102,13 @@ export function UsersPanel() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索邮箱或名称"
-            className="flex-1 bg-transparent text-base focus:outline-none placeholder:text-[var(--fg-2)] md:text-sm"
+            className="flex-1 bg-transparent type-body focus:outline-none placeholder:text-[var(--fg-2)] "
           />
         </div>
         <div
           role="tablist"
           aria-label="按角色过滤"
-          className="inline-flex min-h-11 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5 text-xs"
+          className="inline-flex min-h-11 items-center gap-0.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-0.5 type-caption"
         >
           {(["all", "admin", "member"] as const).map((role) => (
             <button
@@ -141,8 +141,8 @@ export function UsersPanel() {
         ) : (
           <>
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
-              <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+              <table className="w-full type-body-sm">
+                <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                   <tr>
                     <th className="text-left py-3 px-4 font-medium">邮箱</th>
                     <th className="text-left py-3 px-4 font-medium">角色</th>
@@ -175,7 +175,7 @@ export function UsersPanel() {
                       <td className="py-3 px-4 text-[var(--fg-1)] break-all">
                         {user.display_name ?? "—"}
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums whitespace-nowrap">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums whitespace-nowrap">
                         {formatISODate(user.created_at)}
                       </td>
                       <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
@@ -210,7 +210,7 @@ export function UsersPanel() {
               {filtered.map((user) => (
                 <li key={user.id} className="p-4 space-y-2">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="text-sm text-[var(--fg-0)] break-all min-w-0 flex-1">
+                    <span className="type-body-sm text-[var(--fg-0)] break-all min-w-0 flex-1">
                       {user.email}
                     </span>
                     <div className="shrink-0">
@@ -218,14 +218,14 @@ export function UsersPanel() {
                     </div>
                   </div>
                   {user.display_name && (
-                    <div className="text-xs text-[var(--fg-1)] break-all">
+                    <div className="type-caption text-[var(--fg-1)] break-all">
                       {user.display_name}
                     </div>
                   )}
-                  <div className="text-sm text-[var(--fg-2)] font-mono tabular-nums">
+                  <div className="type-body-sm text-[var(--fg-2)] font-mono tabular-nums">
                     {formatISODate(user.created_at)}
                   </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div className="grid grid-cols-3 gap-2 type-caption">
                     <MiniStat label="生成" value={user.generations_count} />
                     <MiniStat label="对话" value={user.completions_count} />
                     <MiniStat label="消息" value={user.messages_count} />
@@ -256,7 +256,7 @@ export function UsersPanel() {
             type="button"
             onClick={() => void q.fetchNextPage()}
             disabled={q.isFetchingNextPage}
-            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-5 text-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 md:min-h-9"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-5 type-body-sm transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 md:min-h-9"
           >
             {q.isFetchingNextPage ? (
               <>
@@ -386,10 +386,10 @@ function ActionIcon({
 function MiniStat({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)]/70 px-2 py-1.5">
-      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
-      <div className="text-base text-[var(--fg-0)] font-mono tabular-nums">
+      <div className="type-body text-[var(--fg-0)] font-mono tabular-nums">
         {value}
       </div>
     </div>
@@ -399,14 +399,14 @@ function MiniStat({ label, value }: { label: string; value: number }) {
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-2 py-0.5 text-xs text-accent">
+      <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-2 py-0.5 type-caption text-accent">
         <UserCog className="w-3 h-3" />
         管理员
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-1)]">
+    <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-1)]">
       <UsersIcon className="w-3 h-3" />
       成员
     </span>

@@ -50,7 +50,7 @@ export function OnlineBanner() {
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: -28, opacity: 0 }}
           transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-          className="sticky top-0 z-[var(--z-toast)] flex h-9 items-center justify-center gap-2 border-b border-danger-border bg-[var(--danger-soft)] text-xs text-[var(--fg-0)]"
+          className="sticky top-0 z-[var(--z-toast)] flex h-9 items-center justify-center gap-2 border-b border-danger-border bg-[var(--danger-soft)] type-caption text-[var(--fg-0)]"
           role="status"
           aria-live="polite"
         >
@@ -64,7 +64,7 @@ export function OnlineBanner() {
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: -28, opacity: 0 }}
           transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-          className="sticky top-0 z-[var(--z-toast)] flex h-9 items-center justify-center gap-2 border-b border-[var(--success)]/30 bg-[var(--success-soft)] text-xs text-[var(--fg-0)]"
+          className="sticky top-0 z-[var(--z-toast)] flex h-9 items-center justify-center gap-2 border-b border-[var(--success)]/30 bg-[var(--success-soft)] type-caption text-[var(--fg-0)]"
           role="status"
           aria-live="polite"
         >

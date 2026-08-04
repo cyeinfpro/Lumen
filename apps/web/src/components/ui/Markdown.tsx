@@ -92,7 +92,7 @@ function CodeBlock({
         )}
       >
         {lang && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide text-[var(--fg-1)] bg-black/40 border border-white/5">
+          <span className="type-caption rounded border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[var(--fg-1)]">
             {lang}
           </span>
         )}
@@ -102,7 +102,7 @@ function CodeBlock({
           onClick={handleCopy}
           aria-label={copied ? copy.state.copied : "复制代码"}
           title={copied ? copy.state.copied : "复制代码"}
-          className="text-[11px] gap-1"
+          className="type-caption gap-1"
           leftIcon={copied ? <Check className="w-3 h-3 text-[var(--success)]" /> : <Copy className="w-3 h-3" />}
         >
           {copied ? copy.state.copied : copy.action.copy}

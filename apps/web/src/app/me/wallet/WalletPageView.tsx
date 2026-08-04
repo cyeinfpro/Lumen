@@ -251,7 +251,7 @@ function RedemptionForm({
             state.notice ? "wallet-redemption-notice" : undefined
           }
           aria-invalid={state.notice?.kind === "error"}
-          className="control-shell type-body-sm h-10 w-full px-3 tracking-[0.06em] outline-none focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11 max-sm:text-base"
+          className="control-shell type-body-sm h-10 w-full px-3 tracking-[0.06em] outline-none focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11 "
         />
         <RedemptionNotice notice={state.notice} />
       </div>

@@ -236,7 +236,7 @@ export function PosterStyleBrowser({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索名称、标签"
-                className="control-shell type-body-sm h-11 w-full min-w-0 pl-9 pr-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:text-base"
+                className="control-shell type-body-sm h-11 w-full min-w-0 pl-9 pr-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 "
               />
             </div>
             <button

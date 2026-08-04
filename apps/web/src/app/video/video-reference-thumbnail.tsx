@@ -35,7 +35,7 @@ export function ReferenceThumbnailView({
       ) : (
         <span className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center">
           <Icon className="h-5 w-5" aria-hidden="true" />
-          <span className="text-[10px] font-medium leading-3">
+          <span className="type-caption font-medium leading-3">
             {failed ? "预览失败" : "暂无预览"}
           </span>
         </span>

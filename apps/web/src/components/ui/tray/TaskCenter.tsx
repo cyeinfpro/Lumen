@@ -136,7 +136,7 @@ function TaskCenterHeader({
             : "bg-[var(--success)]",
         )}
       />
-      <h4 className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--fg-0)]">
+      <h4 className="min-w-0 flex-1 truncate type-caption font-medium text-[var(--fg-0)]">
         任务中心
       </h4>
       <IconButton
@@ -177,7 +177,7 @@ function TaskCenterFilters({
           type="button"
           onClick={() => onChange(item.key)}
           className={cn(
-            "min-h-11 flex-1 rounded-[var(--radius-control)] px-2 text-xs transition",
+            "min-h-11 flex-1 rounded-[var(--radius-control)] px-2 type-caption transition",
             filter === item.key
               ? "bg-[var(--accent-soft)] text-[var(--accent)]"
               : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -231,7 +231,7 @@ function TaskCenterHistoryItem({
 
 function TaskCenterMessage({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-xs text-[var(--fg-2)]">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-3 type-caption text-[var(--fg-2)]">
       {children}
     </div>
   );
@@ -307,7 +307,7 @@ function TaskHistorySummary({
   return (
     <div className="min-w-0 flex-1">
       <div className="flex min-w-0 items-center gap-1.5">
-        <p className="truncate text-[13px] font-medium text-[var(--fg-0)]">
+        <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">
           {presentation.title}
         </p>
         {presentation.succeeded && (
@@ -319,7 +319,7 @@ function TaskHistorySummary({
       </div>
       <p
         className={cn(
-          "mt-0.5 text-[11px]",
+          "mt-0.5 type-caption",
           presentation.failed ? "text-danger" : "text-[var(--fg-2)]",
         )}
         aria-live={presentation.failed ? "assertive" : "polite"}
@@ -337,7 +337,7 @@ function TaskHistorySummary({
         )}
       </p>
       {presentation.failed && presentation.errorText && (
-        <p className="mt-1 line-clamp-2 text-[11px] text-danger" role="alert">
+        <p className="mt-1 line-clamp-2 type-caption text-danger" role="alert">
           {presentation.errorText}
         </p>
       )}
@@ -433,7 +433,7 @@ function TaskRecoveryAction({
         type="button"
         disabled={busy}
         onClick={onRetry}
-        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] disabled:opacity-50"
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] disabled:opacity-50"
       >
         {action.label}
       </button>
@@ -443,14 +443,14 @@ function TaskRecoveryAction({
     return (
       <a
         href={action.href}
-        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)]"
       >
         {action.label}
       </a>
     );
   }
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 type-caption text-[var(--fg-2)]">
       {action.label}
     </span>
   );

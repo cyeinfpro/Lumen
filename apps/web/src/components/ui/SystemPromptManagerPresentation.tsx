@@ -30,7 +30,7 @@ export function SystemPromptEditorHeader({
 }) {
   return (
     <div className="hidden items-center justify-between border-b border-[var(--border)] px-5 py-4 md:flex">
-      <div className="flex items-center gap-2 text-sm text-[var(--fg-1)]">
+      <div className="flex items-center gap-2 type-body-sm text-[var(--fg-1)]">
         <FileText className="h-4 w-4 text-[var(--accent)]" />
         {editing ? "编辑提示词方案" : "创建提示词方案"}
       </div>
@@ -70,7 +70,7 @@ export function SystemPromptEditorFields({
 }) {
   return (
     <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto p-4 sm:p-5 scrollbar-thin">
-      <label className="block text-xs font-medium text-[var(--fg-1)]">
+      <label className="block type-caption font-medium text-[var(--fg-1)]">
         名称
       </label>
       <input
@@ -78,13 +78,13 @@ export function SystemPromptEditorFields({
         value={name}
         onChange={(event) => onNameChange(event.target.value)}
         maxLength={120}
-        className="mt-1.5 h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-base text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20 md:h-10 md:text-sm"
+        className="mt-1.5 h-11 w-full rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 type-body text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20 md:h-10 "
         placeholder="例如：图片导演"
       />
 
       <div className="mt-4 flex items-center justify-between gap-3">
-        <label className="text-xs font-medium text-[var(--fg-1)]">内容</label>
-        <div className="text-[11px] tabular-nums text-[var(--fg-2)]">
+        <label className="type-caption font-medium text-[var(--fg-1)]">内容</label>
+        <div className="type-caption tabular-nums text-[var(--fg-2)]">
           {content.length}/10000
         </div>
       </div>
@@ -92,7 +92,7 @@ export function SystemPromptEditorFields({
         value={content}
         onChange={(event) => onContentChange(event.target.value)}
         rows={14}
-        className="mt-1.5 min-h-[180px] md:min-h-[280px] w-full resize-none rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3.5 py-3 text-sm leading-6 text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+        className="mt-1.5 min-h-[180px] md:min-h-[280px] w-full resize-none rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3.5 py-3 type-body-sm leading-6 text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
         placeholder="写入这个会话要遵守的角色、风格、限制和输出格式…"
       />
 
@@ -262,12 +262,12 @@ export function PromptRow({
           {prompt.name}
         </span>
         {isDefault && (
-          <span className="rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]">
+          <span className="rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 type-caption text-[var(--accent)]">
             默认
           </span>
         )}
         {current && (
-          <span className="rounded-full bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
+          <span className="rounded-full bg-success-soft px-1.5 py-0.5 type-caption text-success">
             当前
           </span>
         )}

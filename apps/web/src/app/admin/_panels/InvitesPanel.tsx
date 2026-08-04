@@ -220,7 +220,7 @@ export function InvitesPanel() {
                 </IconButton>
               </div>
               <div className="flex items-stretch gap-2">
-                <code className="flex-1 px-3 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all">
+                <code className="flex-1 px-3 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] type-caption font-mono text-[var(--fg-0)] break-all">
                   {created.url}
                 </code>
                 <Button
@@ -238,7 +238,7 @@ export function InvitesPanel() {
                   {copiedKey === `new:${created.id}` ? copy.state.copied : copy.action.copy}
                 </Button>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 type-caption">
                 <Field label="令牌">
                   <span className="font-mono text-[var(--fg-1)]">
                     {created.token.slice(0, 12)}…
@@ -293,7 +293,7 @@ export function InvitesPanel() {
                   className="p-3 border border-[var(--border)] rounded-[var(--radius-card)] space-y-3"
                 >
                   <div className="flex flex-col gap-2">
-                    <code className="w-full min-w-0 px-2 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] text-xs font-mono text-[var(--fg-0)] break-all leading-relaxed">
+                    <code className="w-full min-w-0 px-2 py-2 rounded-[var(--radius-control)] bg-[var(--bg-0)]/70 border border-[var(--border)] type-caption font-mono text-[var(--fg-0)] break-all leading-relaxed">
                       {row.url}
                     </code>
                     <Button
@@ -313,9 +313,9 @@ export function InvitesPanel() {
                       {copiedKey === `row:${row.id}` ? copy.state.copied : "复制链接"}
                     </Button>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="grid grid-cols-2 gap-2 type-caption">
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         邮箱
                       </div>
                       <div className="text-[var(--fg-1)] break-all">
@@ -323,7 +323,7 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         角色
                       </div>
                       <div className="mt-0.5">
@@ -331,7 +331,7 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         状态
                       </div>
                       <div className="mt-0.5">
@@ -339,18 +339,18 @@ export function InvitesPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         过期
                       </div>
-                      <div className="text-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </div>
                     </div>
                     <div className="col-span-2">
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         创建
                       </div>
-                      <div className="text-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-1)] font-mono tabular-nums break-all">
                         {formatISODate(row.created_at)}
                       </div>
                     </div>
@@ -398,8 +398,8 @@ export function InvitesPanel() {
           </ul>
           {/* 桌面端表格 */}
           <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
-            <table className="w-full text-sm">
-              <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+            <table className="w-full type-body-sm">
+              <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                 <tr>
                   <th className="text-left py-3 px-4 font-medium">链接</th>
                   <th className="text-left py-3 px-4 font-medium">邮箱</th>
@@ -428,14 +428,14 @@ export function InvitesPanel() {
                     >
                       <td className="py-3 px-4 max-w-[280px]">
                         <div className="flex items-center gap-2">
-                          <code className="text-xs font-mono text-[var(--fg-1)] truncate">
+                          <code className="type-caption font-mono text-[var(--fg-1)] truncate">
                             {row.url}
                           </code>
                           {/* 24px 紧凑内联按钮无法用 Button primitive sm（h-8 太大） */}
                           <button
                             type="button"
                             onClick={() => onCopy(`row:${row.id}`, row.url)}
-                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)] transition-colors"
+                            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-control)] type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:bg-[var(--bg-3)] transition-colors"
                             aria-label="复制链接"
                           >
                             {copiedKey === `row:${row.id}` ? (
@@ -461,10 +461,10 @@ export function InvitesPanel() {
                       <td className="py-3 px-4">
                         <InviteStatusBadge status={st} usedBy={row.used_by_email} />
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums">
                         {formatISODate(row.created_at)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -552,7 +552,7 @@ function FormField({
     <div className="flex flex-col gap-1">
       <label
         htmlFor={id}
-        className="text-[11px] font-medium uppercase tracking-wider text-[var(--fg-1)]"
+        className="type-caption font-medium uppercase tracking-wider text-[var(--fg-1)]"
       >
         {label}
       </label>
@@ -570,7 +570,7 @@ function Field({
 }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
+      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
         {label}
       </div>
       <div className="mt-0.5">{children}</div>

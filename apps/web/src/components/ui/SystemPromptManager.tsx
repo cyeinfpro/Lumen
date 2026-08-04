@@ -132,7 +132,7 @@ function PromptList({
   }
   if (prompts.length === 0) {
     return (
-      <p className="px-3 py-8 text-center text-xs leading-relaxed text-[var(--fg-2)]">
+      <p className="px-3 py-8 text-center type-caption leading-relaxed text-[var(--fg-2)]">
         还没有提示词。可以直接输入，或导入一份 Markdown。
       </p>
     );
@@ -583,11 +583,11 @@ function SystemPromptSidebar({
         <div>
           <h2
             id="system-prompt-title"
-            className="text-sm font-semibold text-[var(--fg-0)]"
+            className="type-body-sm font-semibold text-[var(--fg-0)]"
           >
             系统提示词
           </h2>
-          <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+          <p className="mt-0.5 type-caption text-[var(--fg-2)]">
             管理全局默认和当前会话提示词。
           </p>
         </div>

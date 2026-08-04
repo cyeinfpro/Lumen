@@ -86,7 +86,7 @@ export function TaskIsland({
       aria-label={`${label}，打开任务中心`}
       className={cn(
         "inline-flex min-h-10 shrink-0 items-center gap-2 rounded-[var(--radius-control)]",
-        "border border-[var(--border)] bg-[var(--bg-1)] px-3 text-[12px] font-medium",
+        "border border-[var(--border)] bg-[var(--bg-1)] px-3 type-caption font-medium",
         "text-[var(--fg-1)] shadow-[var(--shadow-1)] transition-[background-color,border-color,color] duration-[var(--dur-quick)]",
         "hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
         "focus-visible:outline-none focus-visible:shadow-[var(--ring)]",

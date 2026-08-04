@@ -152,10 +152,10 @@ function DraftCardSummary({
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--fg-2)]">
+          <span className="shrink-0 font-mono type-caption tabular-nums text-[var(--fg-2)]">
             #{index + 1}
           </span>
-          <span className="truncate text-sm font-medium text-[var(--fg-0)]">
+          <span className="truncate type-body-sm font-medium text-[var(--fg-0)]">
             {draft.name || "(未命名)"}
           </span>
           {!draft.enabled && (
@@ -169,11 +169,11 @@ function DraftCardSummary({
           )}
         </div>
         {draft.base_url && (
-          <code className="mt-0.5 block truncate text-xs text-[var(--fg-2)]">
+          <code className="mt-0.5 block truncate type-caption text-[var(--fg-2)]">
             {draft.base_url}
           </code>
         )}
-        <div className="mt-1 text-[11px] text-[var(--fg-2)]">
+        <div className="mt-1 type-caption text-[var(--fg-2)]">
           代理：{draft.proxy || "直连"} · 异步生图：
           {draft.image_jobs_enabled ? "支持" : "不支持"} · 用途：
           {normalizePurposes(draft.purposes).map(purposeLabel).join(" / ")}
@@ -366,7 +366,7 @@ function PurposeField({
                 if (next.length > 0) onUpdate({ purposes: next });
               }}
               className={
-                "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
+                "inline-flex min-h-[36px] items-center gap-2 rounded-[var(--radius-panel)] border px-3 type-caption transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (checked
           ? "border-accent-border bg-accent-soft text-accent"
                   : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)] hover:text-[var(--fg-1)]")
@@ -527,7 +527,7 @@ function DraftImageJobFields({
   return (
     <div className="grid grid-cols-1 gap-4 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-3 md:grid-cols-2">
       <div className="flex flex-col">
-        <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
+        <label className="mb-1.5 type-caption font-medium text-[var(--fg-1)]">
           接口偏好
         </label>
         <Select
@@ -539,7 +539,7 @@ function DraftImageJobFields({
                 "auto",
             })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-caption text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
         >
           <option value="auto">自动（按健康度自适应）</option>
           <option value="generations">
@@ -605,7 +605,7 @@ function ProviderJobOverrides({
   return (
     <>
       <div className="flex flex-col">
-        <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
+        <label className="mb-1.5 type-caption font-medium text-[var(--fg-1)]">
           旁路服务地址（可选）
         </label>
         <Input
@@ -615,14 +615,14 @@ function ProviderJobOverrides({
           onChange={(event) =>
             onUpdate({ image_jobs_base_url: event.target.value })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-caption text-[var(--fg-1)] placeholder:text-[var(--fg-3)] focus:border-info-border focus:outline-none sm:h-9"
         />
-        <span className="mt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+        <span className="mt-1 type-caption leading-4 text-[var(--fg-2)]">
           支持给不同供应商指定独立的图片任务旁路服务，例如多区域部署时按供应商路由。
         </span>
       </div>
       <div className="flex flex-col">
-        <label className="mb-1.5 text-xs font-medium text-[var(--fg-1)]">
+        <label className="mb-1.5 type-caption font-medium text-[var(--fg-1)]">
           编辑接口输入
         </label>
         <Select
@@ -633,7 +633,7 @@ function ProviderJobOverrides({
                 (event.target.value as "url" | "file") || "url",
             })
           }
-          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-xs text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
+          className="min-h-[44px] rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-caption text-[var(--fg-1)] focus:border-info-border focus:outline-none sm:h-9"
         >
           <option value="url">链接（JSON image_url）</option>
           <option value="file">文件（multipart image[]）</option>
@@ -667,7 +667,7 @@ function DraftCardActions({
         type="button"
         onClick={() => onMove(-1)}
         disabled={index === 0}
-        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
+        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 type-caption text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
       >
         <ChevronUp className="h-3 w-3" /> 上移
       </button>
@@ -675,7 +675,7 @@ function DraftCardActions({
         type="button"
         onClick={() => onMove(1)}
         disabled={index === total - 1}
-        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
+        className="inline-flex min-h-[36px] items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] px-2 type-caption text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-25 sm:h-7"
       >
         <ChevronDown className="h-3 w-3" /> 下移
       </button>

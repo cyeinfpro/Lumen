@@ -100,7 +100,7 @@ export function LightboxDetailsContent({
               <div className="mb-1 flex items-center justify-between gap-2">
                 <h3
                   className={cn(
-                    "font-mono text-[11px] uppercase tracking-wide",
+                    "type-caption",
                     style.heading,
                   )}
                 >
@@ -110,7 +110,7 @@ export function LightboxDetailsContent({
                   type="button"
                   onClick={handleCopyPrompt}
                   className={cn(
-                    "inline-flex min-h-11 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
+                    "inline-flex min-h-11 items-center gap-1.5 rounded-full px-2.5 type-caption transition-colors",
                     style.button,
                   )}
                   aria-live="polite"
@@ -125,8 +125,8 @@ export function LightboxDetailsContent({
               </div>
               <p
                 className={cn(
-                  "whitespace-pre-wrap break-words text-sm leading-relaxed",
-                  tone === "surface" && "text-[15px]",
+                  "whitespace-pre-wrap break-words type-body-sm leading-relaxed",
+                  tone === "surface" && "type-body",
                   style.text,
                 )}
               >
@@ -153,7 +153,7 @@ export function LightboxDetailsContent({
                   }
                   aria-expanded={revisedOpen}
                   className={cn(
-                    "inline-flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-control)] px-2 text-left text-[12px] font-medium transition-colors",
+                    "inline-flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-control)] px-2 text-left type-caption font-medium transition-colors",
                     style.button,
                   )}
                 >
@@ -170,7 +170,7 @@ export function LightboxDetailsContent({
                   type="button"
                   onClick={handleCopyRevisedPrompt}
                   className={cn(
-                    "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[11px] transition-colors",
+                    "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full px-2.5 type-caption transition-colors",
                     style.button,
                   )}
                 >
@@ -203,7 +203,7 @@ export function LightboxDetailsContent({
                       ease: EASE.develop,
                     }}
                     className={cn(
-                      "whitespace-pre-wrap break-words px-2 pt-1 text-sm leading-relaxed",
+                      "whitespace-pre-wrap break-words px-2 pt-1 type-body-sm leading-relaxed",
                       style.text,
                     )}
                   >
@@ -226,7 +226,7 @@ export function LightboxDetailsContent({
         >
           <h3
             className={cn(
-              "mb-2 font-mono text-[11px] uppercase tracking-wide",
+              "mb-2 type-caption",
               style.heading,
             )}
           >
@@ -234,7 +234,7 @@ export function LightboxDetailsContent({
           </h3>
           <div
             className={cn(
-              "grid grid-cols-1 gap-2 font-mono text-xs",
+              "grid grid-cols-1 gap-2 font-mono type-caption",
               style.muted,
             )}
           >
@@ -264,7 +264,7 @@ function ParamRow({
     <div className="grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] items-baseline gap-2.5 py-0.5">
       <span
         className={cn(
-          "text-[10px] font-medium uppercase tracking-wider",
+          "type-caption font-medium uppercase tracking-wider",
           style.heading,
         )}
       >
@@ -272,7 +272,7 @@ function ParamRow({
       </span>
       <span
         className={cn(
-          "flex min-w-0 flex-wrap items-center gap-1.5 break-words text-[13px]",
+          "flex min-w-0 flex-wrap items-center gap-1.5 break-words type-body-sm",
           style.text,
         )}
       >
@@ -280,7 +280,7 @@ function ParamRow({
         {row.badge ? (
           <span
             className={cn(
-              "shrink-0 rounded-full border px-1.5 py-0.5 font-sans text-[10px] font-medium",
+              "shrink-0 rounded-full border px-1.5 py-0.5 font-sans type-caption font-medium",
               style.badge,
             )}
           >

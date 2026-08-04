@@ -164,7 +164,7 @@ export function SettingsGroupNav({
         if (groupsInSection.length === 0) return null;
         return (
           <div key={section.label}>
-            <p className="mb-1.5 px-2 text-[10px] font-medium uppercase tracking-[0.08em] text-[var(--fg-3)]">
+            <p className="mb-1.5 px-2 type-caption font-medium uppercase tracking-[0.08em] text-[var(--fg-3)]">
               {section.label}
             </p>
             <div className="space-y-1">
@@ -196,13 +196,13 @@ export function SettingsGroupNav({
                       <span className="block truncate type-caption text-current">
                         {group.label}
                       </span>
-                      <span className="mt-0.5 hidden truncate text-[11px] leading-4 text-[var(--fg-2)] xl:block">
+                      <span className="mt-0.5 hidden truncate type-caption leading-4 text-[var(--fg-2)] xl:block">
                         {group.description}
                       </span>
                     </span>
                     <span
                       className={cn(
-                        "shrink-0 rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                        "shrink-0 rounded-full border px-1.5 py-0.5 font-mono type-caption",
                         active
                           ? "border-accent-border bg-[var(--bg-0)]/35 text-accent"
                           : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]",
@@ -259,7 +259,7 @@ export function SettingsGroup({
             </p>
           </div>
         </div>
-        <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 font-mono text-[11px] text-[var(--fg-2)]">
+        <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 font-mono type-caption text-[var(--fg-2)]">
           {group.items.length}
         </span>
       </div>
@@ -334,7 +334,7 @@ export function SettingCard({
               <h4 className="type-body-sm font-medium text-[var(--fg-0)]">
                 {meta.title}
               </h4>
-              <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-[11px] text-[var(--fg-1)]">
+              <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-1)]">
                 当前：{displayValue}
               </span>
               <SourceBadge
@@ -408,7 +408,7 @@ function SettingCardAnnotations({
           {meta.warning}
         </div>
       )}
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--fg-2)]">
+      <div className="mt-3 flex flex-wrap items-center gap-2 type-caption text-[var(--fg-2)]">
         {meta.recommended && (
           <span className="rounded-[var(--radius-control)] border border-success-border bg-success-soft px-2 py-1 text-success">
             {meta.recommended}
@@ -436,12 +436,12 @@ function SettingCardAnnotations({
         </p>
       )}
       {op?.kind === "set" && (
-        <p className="mt-3 text-xs text-[var(--accent)]/90">
+        <p className="mt-3 type-caption text-[var(--accent)]/90">
           保存后改为：{formatValue(op.value, meta)}
         </p>
       )}
       {op?.kind === "clear" && (
-        <p className="mt-3 text-xs text-[var(--accent)]/90">
+        <p className="mt-3 type-caption text-[var(--accent)]/90">
           保存后清除该项
         </p>
       )}

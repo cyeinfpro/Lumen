@@ -114,7 +114,7 @@ export function CodeBatchForm({
             value={amount}
             onChange={(event) => onAmountChange(event.target.value)}
             inputMode="decimal"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm"
           />
         </label>
         <label className="space-y-1.5">
@@ -125,7 +125,7 @@ export function CodeBatchForm({
             value={count}
             onChange={(event) => onCountChange(event.target.value)}
             inputMode="numeric"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm"
           />
         </label>
         <label className="space-y-1.5">
@@ -136,7 +136,7 @@ export function CodeBatchForm({
             value={maxRedemptions}
             onChange={(event) => onMaxRedemptionsChange(event.target.value)}
             inputMode="numeric"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm"
           />
         </label>
         <label className="space-y-1.5">
@@ -147,7 +147,7 @@ export function CodeBatchForm({
             type="datetime-local"
             value={expiresAt}
             onChange={(event) => onExpiresAtChange(event.target.value)}
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm"
           />
         </label>
       </div>
@@ -155,7 +155,7 @@ export function CodeBatchForm({
         value={note}
         onChange={(event) => onNoteChange(event.target.value)}
         placeholder="备注"
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm md:max-w-[480px]"
+        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm md:max-w-[480px]"
       />
       <div className="flex flex-col-reverse items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="type-body-sm text-[var(--fg-2)]">
@@ -217,7 +217,7 @@ function RedemptionCodeRow({
           onClick={() => {
             if (batchId) actions.onCopy(batchId, "批次已复制");
           }}
-          className="max-w-full truncate font-mono text-xs text-[var(--fg-1)] hover:text-[var(--fg-0)] md:max-w-[160px]"
+          className="max-w-full truncate font-mono type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] md:max-w-[160px]"
         >
           {batchId ?? "-"}
         </button>
@@ -320,7 +320,7 @@ function RedemptionCodesContent({
   return (
     <>
       <div className="data-stack-on-mobile md:overflow-x-auto">
-        <table className="w-full text-sm md:min-w-[980px]">
+        <table className="w-full type-body-sm md:min-w-[980px]">
           <thead className="text-left text-[var(--fg-2)]">
             <tr className="border-b border-[var(--border-subtle)]">
               <th className="px-4 py-2">前缀</th>
@@ -422,7 +422,7 @@ export function RedemptionCodesCard({
               type="button"
               onClick={() => onStatusChange(item)}
               className={[
-                "shrink-0 rounded-full border px-3 py-1 text-xs",
+                "shrink-0 rounded-full border px-3 py-1 type-caption",
                 status === item
                   ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
                   : "border-[var(--border)] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
@@ -440,7 +440,7 @@ export function RedemptionCodesCard({
             value={qInput}
             onChange={(event) => onQInputChange(event.target.value)}
             placeholder="搜索前缀或 batch id"
-            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
+            className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm"
           />
           <Button
             variant="outline"
@@ -482,7 +482,7 @@ function RedemptionUsageContent({
 }) {
   if (isLoading) {
     return (
-      <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+      <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
         加载中
       </div>
     );
@@ -496,7 +496,7 @@ function RedemptionUsageContent({
   }
   if (items.length === 0) {
     return (
-      <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+      <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
         暂无兑换记录
       </div>
     );
@@ -504,7 +504,7 @@ function RedemptionUsageContent({
 
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
-      <table className="w-full text-sm md:min-w-[720px]">
+      <table className="w-full type-body-sm md:min-w-[720px]">
         <thead className="text-left text-[var(--fg-2)]">
           <tr className="border-b border-[var(--border-subtle)]">
             <th className="px-4 py-2">用户</th>
@@ -521,7 +521,7 @@ function RedemptionUsageContent({
                 <span className="block min-w-0 truncate">
                   {item.user_email ?? item.user_id}
                 </span>
-                <span className="block min-w-0 truncate font-mono text-xs text-[var(--fg-3)]">
+                <span className="block min-w-0 truncate font-mono type-caption text-[var(--fg-3)]">
                   {item.user_id}
                 </span>
               </td>
@@ -530,13 +530,13 @@ function RedemptionUsageContent({
               </td>
               <td
                 data-label="流水"
-                className="truncate px-4 py-2 font-mono text-xs"
+                className="truncate px-4 py-2 font-mono type-caption"
               >
                 {item.wallet_tx_id}
               </td>
               <td
                 data-label="IP Hash"
-                className="truncate px-4 py-2 font-mono text-xs"
+                className="truncate px-4 py-2 font-mono type-caption"
               >
                 {item.ip_hash ?? "-"}
               </td>
@@ -696,7 +696,7 @@ export function NewCodesModal({
                 key={code}
                 className="grid grid-cols-[1fr_auto] items-center gap-3 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-2"
               >
-                <code className="min-w-0 select-all overflow-x-auto whitespace-nowrap font-mono text-sm scrollbar-thin">
+                <code className="min-w-0 select-all overflow-x-auto whitespace-nowrap font-mono type-body-sm scrollbar-thin">
                   {code}
                 </code>
                 <Button
@@ -712,7 +712,7 @@ export function NewCodesModal({
         </div>
         <footer
           id={descriptionId}
-          className="mobile-dialog-footer flex shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/72 px-5 pt-3 text-xs text-[var(--fg-2)]"
+          className="mobile-dialog-footer flex shrink-0 border-t border-[var(--border)] bg-[var(--bg-1)]/72 px-5 pt-3 type-caption text-[var(--fg-2)]"
         >
           关闭后，5 分钟内可在列表里点“重新查看”再次取回明文；超过窗口后明文不会再被保存。
         </footer>

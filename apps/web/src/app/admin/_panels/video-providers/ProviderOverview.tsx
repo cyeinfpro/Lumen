@@ -66,7 +66,7 @@ export function ProviderPanelHeader({
               <Clapperboard className="h-4 w-4 text-accent" />
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm font-medium text-[var(--fg-0)]">
+              <h3 className="type-body-sm font-medium text-[var(--fg-0)]">
                 AI 视频供应商
               </h3>
               <p className="mt-0.5 type-caption text-[var(--fg-2)]">
@@ -286,7 +286,7 @@ function ReadinessNotice({
         <div className="flex min-w-0 items-start gap-2">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
           <div className="min-w-0">
-            <p className="text-sm font-medium text-[var(--fg-0)]">{title}</p>
+            <p className="type-body-sm font-medium text-[var(--fg-0)]">{title}</p>
             <p className="mt-1 type-caption text-warning">{detail}</p>
           </div>
         </div>
@@ -357,7 +357,7 @@ function ProviderCardHeader({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span
-            className={`text-sm font-medium ${
+            className={`type-body-sm font-medium ${
               item.enabled ? "text-[var(--fg-0)]" : "text-[var(--fg-1)]"
             }`}
           >
@@ -375,7 +375,7 @@ function ProviderCardHeader({
             />
           )}
         </div>
-        <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
+        <code className="mt-1 block break-all type-caption text-[var(--fg-2)]">
           {item.base_url}
         </code>
       </div>
@@ -404,18 +404,18 @@ function ProviderCardTags({
       {visibleModels.map((model) => (
         <span
           key={model}
-          className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 py-1 font-mono text-[11px] text-[var(--fg-1)]"
+          className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 py-1 font-mono type-caption text-[var(--fg-1)]"
         >
           {model}
         </span>
       ))}
       {models.length > visibleModels.length && (
-        <span className="rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--fg-2)]">
+        <span className="rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1 type-caption text-[var(--fg-2)]">
           +{models.length - visibleModels.length}
         </span>
       )}
       {models.length === 0 && (
-        <span className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-2 py-1 text-[11px] text-warning">
+        <span className="rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-2 py-1 type-caption text-warning">
           未配置模型
         </span>
       )}
@@ -459,7 +459,7 @@ function VolcanoProviderMeta({ item }: { item: VideoProviderItemOut }) {
 function ProviderCardMeta({ item }: { item: VideoProviderItemOut }) {
   return (
     <div
-      className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${
+      className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 type-caption ${
         item.enabled ? "text-[var(--fg-1)]" : "text-[var(--fg-2)]"
       }`}
     >
@@ -515,7 +515,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)]">
         <Clapperboard className="h-4 w-4 text-[var(--fg-1)]" />
       </div>
-      <p className="mt-3 text-sm font-medium text-[var(--fg-0)]">
+      <p className="mt-3 type-body-sm font-medium text-[var(--fg-0)]">
         还没有 AI 视频供应商
       </p>
       <p className="mx-auto mt-1 max-w-md type-caption text-[var(--fg-2)]">

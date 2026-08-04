@@ -344,10 +344,10 @@ export function PromptEnhanceChooser({
             )}
           </span>
           <span className="min-w-0">
-            <span className="block text-sm font-semibold text-[var(--fg-0)]">
+            <span className="block type-body-sm font-semibold text-[var(--fg-0)]">
               {loading ? "正在优化提示词" : "AI 优化结果"}
             </span>
-            <span className="block truncate text-xs text-[var(--fg-2)]">
+            <span className="block truncate type-caption text-[var(--fg-2)]">
               {promptEnhanceChooserSubtitle({
                 loading,
                 candidateCount: visibleCandidates.length,
@@ -384,10 +384,10 @@ export function PromptEnhanceChooser({
       {!loading && visibleCandidates.length > 0 && previewCandidate && (
         <div className="space-y-3 p-3 sm:p-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs font-medium text-[var(--fg-1)]">
+            <p className="type-caption font-medium text-[var(--fg-1)]">
               选择一个优化方向
             </p>
-            <p className="text-[10px] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               点击卡片切换完整预览
             </p>
           </div>
@@ -433,7 +433,7 @@ export function ReferenceChip({
   return (
     <div
       className={cn(
-        "relative flex h-24 w-[min(82vw,19rem)] max-w-[calc(100vw-3rem)] shrink-0 overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-1)] text-xs text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
+        "relative flex h-24 w-[min(82vw,19rem)] max-w-[calc(100vw-3rem)] shrink-0 overflow-hidden rounded-[var(--radius-control)] border bg-[var(--bg-1)] type-caption text-[var(--fg-1)] transition-[background-color,border-color,box-shadow]",
         active
           ? "border-[var(--accent-border)] bg-[var(--accent-soft)] shadow-[var(--shadow-1)]"
           : "border-[var(--border)]",
@@ -466,10 +466,10 @@ export function ReferenceChip({
             {item.label}
           </span>
         </span>
-        <span className="max-w-full truncate font-mono text-[11px] text-[var(--fg-2)]">
+        <span className="max-w-full truncate font-mono type-caption text-[var(--fg-2)]">
           {item.display}
         </span>
-        <span className="text-[11px] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {active ? "已用于提示词" : "点击文字插入引用"}
         </span>
       </button>
@@ -582,12 +582,12 @@ function ReferenceMediaPreviewContent({
         className="flex flex-col items-center justify-center gap-2 px-5 text-center text-[var(--fg-2)]"
       >
         <ReferenceMediaPreviewIcon item={item} />
-        <p className="text-sm font-medium text-[var(--fg-1)]">
+        <p className="type-body-sm font-medium text-[var(--fg-1)]">
           {failed
             ? `${referenceNoun}预览加载失败`
             : `这个${referenceNoun}暂无可显示预览`}
         </p>
-        <p className="max-w-md text-xs leading-5">
+        <p className="max-w-md type-caption leading-5">
           {failed
             ? "请确认素材仍可访问，或稍后重试。"
             : `官方${referenceNoun}素材可能只有素材 ID，暂时无法在这里直接预览。`}
@@ -715,13 +715,13 @@ export function ReferenceMediaPreviewDialog({
             </p>
             <h2
               id={`reference-preview-${item._key}`}
-              className="mt-1 truncate text-base font-semibold text-[var(--fg-0)]"
+              className="mt-1 truncate type-body font-semibold text-[var(--fg-0)]"
             >
               {displayToken} · {item.label}
             </h2>
             <p
               id={`reference-preview-description-${item._key}`}
-              className="mt-1 truncate font-mono text-xs text-[var(--fg-2)]"
+              className="mt-1 truncate font-mono type-caption text-[var(--fg-2)]"
             >
               {item.display}
             </p>
@@ -749,7 +749,7 @@ export function ReferenceMediaPreviewDialog({
           </div>
         </div>
         <footer className="mobile-dialog-footer flex shrink-0 flex-col items-stretch gap-2 border-t border-[var(--border)] bg-[var(--bg-1)]/88 px-4 py-3 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:px-5">
-          <span className="truncate text-xs text-[var(--fg-2)]">
+          <span className="truncate type-caption text-[var(--fg-2)]">
             提交时映射为 {referencePromptToken(item)}
           </span>
           <div className="grid shrink-0 grid-cols-2 gap-2">

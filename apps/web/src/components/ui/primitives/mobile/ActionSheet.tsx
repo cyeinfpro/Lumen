@@ -63,7 +63,7 @@ export function ActionSheet({
                 }}
                 className={[
                   "w-full h-14 px-3 justify-start text-left gap-3",
-                  "text-[15px]",
+                  "type-body",
                   a.destructive ? "text-[var(--danger)]" : "text-[var(--fg-0)]",
                 ].join(" ")}
               >
@@ -86,7 +86,7 @@ export function ActionSheet({
           haptic="light"
           minHit={true}
           onPress={onClose}
-          className="h-14 w-full rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] text-[15px] font-medium text-[var(--fg-0)]"
+          className="h-14 w-full rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] type-body font-medium text-[var(--fg-0)]"
         >
           {cancelLabel}
         </Pressable>

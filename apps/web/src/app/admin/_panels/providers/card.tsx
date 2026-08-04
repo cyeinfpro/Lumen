@@ -106,7 +106,7 @@ function ProviderCardHeader({
         <div className="flex flex-wrap items-center gap-2">
           <span
             className={
-              "text-sm font-medium " +
+              "type-body-sm font-medium " +
               (provider.enabled
                 ? "text-[var(--fg-0)]"
                 : "text-[var(--fg-1)]")
@@ -127,7 +127,7 @@ function ProviderCardHeader({
             />
           )}
         </div>
-        <code className="mt-1 block break-all text-xs text-[var(--fg-2)]">
+        <code className="mt-1 block break-all type-caption text-[var(--fg-2)]">
           {provider.base_url}
         </code>
       </div>
@@ -218,7 +218,7 @@ function ProviderMetadata({
   return (
     <div
       className={
-        "flex flex-wrap items-center gap-x-3 gap-y-1 text-xs " +
+        "flex flex-wrap items-center gap-x-3 gap-y-1 type-caption " +
         (provider.enabled
           ? "text-[var(--fg-1)]"
           : "text-[var(--fg-2)]")

@@ -416,7 +416,7 @@ export function PosterWorkflowNewPage() {
   };
 
   return (
-    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-base max-md:[&_textarea]:text-base">
+    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] type-body ">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar

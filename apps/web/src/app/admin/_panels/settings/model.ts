@@ -684,7 +684,7 @@ export const SETTINGS_SKELETON_KEYS = [
 ] as const;
 
 export const settingInputClassName =
-  "h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 text-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-accent-border focus:ring-2 focus:ring-accent/20";
+  "h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 type-body-sm text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-accent-border focus:ring-2 focus:ring-accent/20";
 
 export const settingMonoInputClassName = `${settingInputClassName} font-mono`;
 

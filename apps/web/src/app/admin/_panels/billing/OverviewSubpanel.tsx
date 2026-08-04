@@ -64,10 +64,10 @@ function HealthCard({
               <XCircle className="mt-0.5 h-4 w-4 text-[var(--danger-fg)]" />
             )}
             <span className="min-w-0">
-              <span className="block text-sm text-[var(--fg-0)]">
+              <span className="block type-body-sm text-[var(--fg-0)]">
                 {item.label}
               </span>
-              <span className="block whitespace-normal break-words text-xs text-[var(--fg-2)]">
+              <span className="block whitespace-normal break-words type-caption text-[var(--fg-2)]">
                 {item.value}
               </span>
             </span>
@@ -104,7 +104,7 @@ function BootstrapCard({
           onChange={(event) => onRateChange(event.target.value)}
           inputMode="decimal"
           placeholder="USD→RMB"
-          className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm outline-none focus:border-[var(--accent)]/50"
+          className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body-sm outline-none focus:border-[var(--accent)]/50"
         />
         <Button
           variant="primary"
@@ -167,12 +167,12 @@ function RecentAuditCard({
         {events.map((event) => (
           <div
             key={event.id}
-            className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3 text-sm"
+            className="flex flex-wrap gap-x-4 gap-y-1 px-4 py-3 type-body-sm"
           >
             <span className="shrink-0 text-[var(--fg-2)]">
               {new Date(event.created_at).toLocaleString()}
             </span>
-            <span className="max-w-full truncate font-mono text-xs text-[var(--fg-0)] md:max-w-[260px]">
+            <span className="max-w-full truncate font-mono type-caption text-[var(--fg-0)] md:max-w-[260px]">
               {event.event_type}
             </span>
             <span className="truncate text-[var(--fg-2)]">
@@ -181,7 +181,7 @@ function RecentAuditCard({
           </div>
         ))}
         {!loading && events.length === 0 && (
-          <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+          <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
             暂无审计事件
           </div>
         )}
@@ -199,7 +199,7 @@ function AuditResultBanner({
   return (
     <div
       className={[
-        "rounded-[var(--radius-control)] border px-3 py-2 text-sm",
+        "rounded-[var(--radius-control)] border px-3 py-2 type-body-sm",
         result.ok
           ? "border-success-border bg-success-soft text-success"
           : "border-danger-border bg-danger-soft text-[var(--danger-fg)]",
@@ -231,10 +231,10 @@ function OrphanHoldRow({
   const [confirmOpen, setConfirmOpen] = useState(false);
   return (
     <>
-      <div className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto]">
+      <div className="grid gap-3 px-4 py-3 type-body-sm md:grid-cols-[1fr_auto]">
         <div className="min-w-0">
           <p
-            className="truncate font-mono text-xs text-[var(--fg-0)]"
+            className="truncate font-mono type-caption text-[var(--fg-0)]"
             title={reference}
           >
             {reference}
@@ -333,7 +333,7 @@ function ReconciliationCard({
           />
         ))}
         {!orphanHoldsLoading && orphanHolds.length === 0 && (
-          <div className="px-4 py-6 text-center text-sm text-[var(--fg-2)]">
+          <div className="px-4 py-6 text-center type-body-sm text-[var(--fg-2)]">
             暂无孤儿 hold
           </div>
         )}

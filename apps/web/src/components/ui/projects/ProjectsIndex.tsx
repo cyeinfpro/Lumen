@@ -657,8 +657,8 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
             </form>
           ) : confirmingDelete ? (
             <div className="grid gap-2 p-1.5">
-              <p className="text-sm text-[var(--fg-0)]">确认删除这个项目？</p>
-              <p className="text-xs leading-5 text-[var(--fg-2)]">
+              <p className="type-body-sm text-[var(--fg-0)]">确认删除这个项目？</p>
+              <p className="type-caption leading-5 text-[var(--fg-2)]">
                 项目会从列表移除，关联对话不会被删除。
               </p>
               <div className="flex justify-end gap-2">

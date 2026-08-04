@@ -468,7 +468,7 @@ function GenerationTileMedia({
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/20 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
       {/* @ui-governance-allow media: age metadata overlays the generated asset. */}
       {model.age && (
-        <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-black/45 px-1.5 py-1 text-[10px] tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
+        <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-black/45 px-1.5 py-1 type-caption tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
           {model.age}
         </span>
       )}
@@ -494,7 +494,7 @@ function ImageLoadFailure({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--bg-2)] text-[var(--fg-2)]">
       <ImageIcon className="h-5 w-5" />
-      <span className="text-[11px]">图片载入失败</span>
+      <span className="type-caption">图片载入失败</span>
       <button
         type="button"
         onPointerDown={(event) => event.stopPropagation()}
@@ -503,7 +503,7 @@ function ImageLoadFailure({ onRetry }: { onRetry: () => void }) {
           event.stopPropagation();
           onRetry();
         }}
-        className="mt-1 inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 text-[11px] text-[var(--fg-1)] hover:text-[var(--fg-0)] md:min-h-8"
+        className="mt-1 inline-flex min-h-11 cursor-pointer items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-1)] px-3 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] md:min-h-8"
       >
         <RotateCcw className="h-3 w-3" />
         重试
@@ -522,7 +522,7 @@ function GenerationTileMetadata({
   return (
     <div className="space-y-2 px-2.5 pb-2.5 pt-2.5">
       <div
-        className="text-[13px] leading-[1.5] text-[var(--fg-0)]"
+        className="type-body-sm leading-[1.5] text-[var(--fg-0)]"
         style={{
           display: "-webkit-box",
           WebkitLineClamp: 2,
@@ -535,23 +535,23 @@ function GenerationTileMetadata({
       </div>
       <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
         {model.age && (
-          <span className="shrink-0 text-[11px] tabular-nums text-[var(--fg-2)]">
+          <span className="shrink-0 type-caption tabular-nums text-[var(--fg-2)]">
             {model.age}
           </span>
         )}
         {item.aspect_ratio && (
-          <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-px text-[10px] font-mono tabular-nums text-[var(--fg-2)]">
+          <span className="shrink-0 rounded-[4px] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-1.5 py-px type-caption font-mono tabular-nums text-[var(--fg-2)]">
             {item.aspect_ratio}
           </span>
         )}
         {item.fast && (
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-[rgba(242,169,58,0.18)] bg-[rgba(242,169,58,0.12)] px-1.5 py-px text-[10px] font-medium text-[var(--amber-300)]">
+          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-[rgba(242,169,58,0.18)] bg-[rgba(242,169,58,0.12)] px-1.5 py-px type-caption font-medium text-[var(--amber-300)]">
             <Zap className="h-2.5 w-2.5" />
             快速
           </span>
         )}
         {item.has_ref && (
-          <span className="shrink-0 rounded-[4px] border border-[rgba(139,92,246,0.18)] bg-[rgba(139,92,246,0.12)] px-1.5 py-px text-[10px] font-medium text-[#a78bfa]">
+          <span className="shrink-0 rounded-[4px] border border-[rgba(139,92,246,0.18)] bg-[rgba(139,92,246,0.12)] px-1.5 py-px type-caption font-medium text-[#a78bfa]">
             参考图
           </span>
         )}

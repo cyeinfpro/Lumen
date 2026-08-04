@@ -39,9 +39,9 @@ export function EmptyBlock({
         <Inbox className="h-5 w-5 text-[var(--fg-2)]" />
       </div>
       <div>
-        <p className="text-sm text-[var(--fg-0)]">{title}</p>
+        <p className="type-body-sm text-[var(--fg-0)]">{title}</p>
         {description && (
-          <p className="mt-1 text-xs text-[var(--fg-2)]">{description}</p>
+          <p className="mt-1 type-caption text-[var(--fg-2)]">{description}</p>
         )}
       </div>
       {cta}
@@ -69,7 +69,7 @@ export function ErrorBlock({
         <button
           type="button"
           onClick={onRetry}
-          className="h-11 shrink-0 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-2)] px-3 text-sm transition-colors hover:bg-[var(--bg-3)] md:h-8 md:text-xs"
+          className="h-11 shrink-0 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-2)] px-3 type-body-sm transition-colors hover:bg-[var(--bg-3)] md:h-8 "
         >
           重试
         </button>

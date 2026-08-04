@@ -111,7 +111,7 @@ export function CanvasNodePalette({
               "transition-[border-color,background-color,box-shadow] duration-[var(--dur-fast)] ease-[var(--ease-develop)]",
               "focus:border-[var(--border-strong)] focus:shadow-[var(--ring)]",
               "[&::-webkit-search-cancel-button]:appearance-none",
-              compact ? "min-h-11 text-base" : "min-h-11 type-body-sm",
+              compact ? "min-h-11 " : "min-h-11 type-body-sm",
             )}
           />
           {query ? (

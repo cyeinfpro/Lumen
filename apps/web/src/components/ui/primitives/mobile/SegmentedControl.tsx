@@ -107,8 +107,8 @@ export function SegmentedControl<V extends string = string>({
                 ? "relative z-[1] min-h-7 flex-1 min-w-0 rounded-[var(--radius-sm)] px-2 gap-1"
                 : "relative z-[1] min-h-10 flex-1 min-w-0 rounded-[var(--radius-md)] px-2 sm:px-3 gap-1.5 md:min-h-9",
               compact
-                ? "text-[12px] font-medium transition-colors"
-                : "text-[13px] font-medium transition-colors",
+                ? "type-caption font-medium transition-colors"
+                : "type-body-sm font-medium transition-colors",
               "focus-visible:z-[2] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
               active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
             ].join(" ")}
@@ -127,7 +127,7 @@ export function SegmentedControl<V extends string = string>({
             <span className="relative z-[1] flex w-full min-w-0 items-center justify-center gap-1.5 whitespace-nowrap">
               {item.label}
               {item.badge != null && (
-                <span className="shrink-0 text-[10px] tracking-wider text-[var(--fg-2)]">
+                <span className="shrink-0 type-caption tracking-wider text-[var(--fg-2)]">
                   {item.badge}
                 </span>
               )}

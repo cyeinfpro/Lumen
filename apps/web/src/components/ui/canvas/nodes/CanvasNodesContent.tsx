@@ -305,7 +305,7 @@ function TextNodeContent({ data }: { data: CanvasFlowNodeData }) {
         event.stopPropagation();
       }}
       className={cn(
-        "nodrag nopan nowheel nokey block h-24 w-full cursor-text resize-none overflow-y-auto border-0 bg-[var(--bg-2)]/38 p-3 type-body-sm leading-5 text-[var(--fg-1)] outline-none placeholder:text-[var(--fg-3)] focus:bg-[var(--bg-2)]/62 focus:ring-2 focus:ring-inset focus:ring-[var(--accent-soft)] max-[1199px]:text-base max-[1199px]:leading-6",
+        "nodrag nopan nowheel nokey block h-24 w-full cursor-text resize-none overflow-y-auto border-0 bg-[var(--bg-2)]/38 p-3 type-body-sm leading-5 text-[var(--fg-1)] outline-none placeholder:text-[var(--fg-3)] focus:bg-[var(--bg-2)]/62 focus:ring-2 focus:ring-inset focus:ring-[var(--accent-soft)]  max-[1199px]:leading-6",
         editingDisabled &&
           "pointer-events-none cursor-default overflow-hidden bg-transparent",
       )}

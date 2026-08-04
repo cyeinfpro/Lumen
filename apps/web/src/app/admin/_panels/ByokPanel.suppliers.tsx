@@ -56,7 +56,7 @@ export function NewSupplierSection({
   return (
     <section className="surface-card space-y-4 p-5">
       <header className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        <div className="flex items-center gap-2 type-caption uppercase tracking-wider text-[var(--fg-2)]">
           <Plus className="w-3.5 h-3.5" />
           新供应商
         </div>
@@ -148,7 +148,7 @@ export function ByokSupplierList({
   return (
     <section className="space-y-3">
       <header className="flex items-center justify-between gap-3 px-1">
-        <div className="text-xs uppercase tracking-wider text-[var(--fg-2)]">
+        <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
           已有供应商 · {suppliers.length}
         </div>
       </header>
@@ -208,24 +208,24 @@ function SupplierRow({
       <header className="flex flex-wrap items-center gap-3 px-4 py-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm text-[var(--fg-0)] truncate">
+            <h3 className="type-body-sm text-[var(--fg-0)] truncate">
               {supplier.name}
             </h3>
             {supplier.enabled ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-success-soft text-success border border-success-border">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] type-caption bg-success-soft text-success border border-success-border">
                 <Check className="w-3 h-3" /> 启用
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[11px] bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] type-caption bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
                 已禁用
               </span>
             )}
           </div>
-          <p className="text-xs text-[var(--fg-2)] truncate mt-0.5">
+          <p className="type-caption text-[var(--fg-2)] truncate mt-0.5">
             {safeHostname(supplier.base_url)} · {supplier.purposes.join("/")}
           </p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap text-xs">
+        <div className="flex items-center gap-2 flex-wrap type-caption">
           <span className="rounded-full border border-[var(--border)] bg-[var(--bg-2)] px-2.5 py-1 text-[var(--fg-1)]">
             活跃 Key {supplier.active_credentials}
           </span>
@@ -245,7 +245,7 @@ function SupplierRow({
       </header>
 
       {Object.keys(supplier.recent_error_counts).length > 0 && (
-        <p className="px-4 pb-2 text-xs text-[var(--fg-2)]">
+        <p className="px-4 pb-2 type-caption text-[var(--fg-2)]">
           近期错误：
           {Object.entries(supplier.recent_error_counts)
             .map(([key, value]) => `${key}:${value}`)
@@ -346,7 +346,7 @@ function SupplierForm({
       </div>
 
       <details className="group rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] overflow-hidden">
-        <summary className="cursor-pointer list-none px-3 py-2 text-xs text-[var(--fg-2)] flex items-center justify-between">
+        <summary className="cursor-pointer list-none px-3 py-2 type-caption text-[var(--fg-2)] flex items-center justify-between">
           <span>高级配置</span>
           <ChevronDown className="w-3.5 h-3.5 transition-transform group-open:rotate-180" />
         </summary>
@@ -476,7 +476,7 @@ function PurposesField({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11px] uppercase tracking-wider text-[var(--fg-1)]">
+      <span className="type-caption uppercase tracking-wider text-[var(--fg-1)]">
         用途
       </span>
       <div className="flex gap-2 flex-wrap">
@@ -488,7 +488,7 @@ function PurposesField({
               type="button"
               onClick={() => onToggle(purpose.value)}
               className={
-                "px-2.5 py-1 rounded-[var(--radius-card)] border text-xs transition-colors " +
+                "px-2.5 py-1 rounded-[var(--radius-card)] border type-caption transition-colors " +
                 (active
                   ? "bg-[var(--accent)] text-black border-[var(--accent)]"
                   : "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)] hover:bg-[var(--bg-3)]")
@@ -499,7 +499,7 @@ function PurposesField({
           );
         })}
       </div>
-      <span className="text-[11px] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         该供应商支持的模型类型，影响下游路由（至少选 1 个）
       </span>
     </div>

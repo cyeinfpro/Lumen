@@ -149,20 +149,20 @@ export function StoryboardIndexPage() {
             <div className="min-w-0">
               <Link
                 href="/projects"
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
+                className="inline-flex items-center gap-1.5 type-caption font-medium text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 项目中心
               </Link>
               <h1 className="type-page-title mt-2">分镜制作</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--fg-1)]">
+              <p className="mt-2 max-w-2xl type-body-sm leading-6 text-[var(--fg-1)]">
                 每个项目都有独立状态、设定图、分镜、关键帧、视频段和成片合成；刷新页面后继续从服务端恢复。
               </p>
             </div>
             <button
               type="button"
               onClick={() => setDialogOpen(true)}
-              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition hover:shadow-[var(--shadow-amber)] sm:min-h-10"
+              className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] shadow-[var(--shadow-1)] transition hover:shadow-[var(--shadow-amber)] sm:min-h-10"
             >
               <Plus className="h-4 w-4" />
               新建项目
@@ -177,7 +177,7 @@ export function StoryboardIndexPage() {
             <button
               type="button"
               onClick={() => query.refetch()}
-              className="min-h-40 border border-[var(--border)] bg-[var(--bg-1)] text-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
+              className="min-h-40 border border-[var(--border)] bg-[var(--bg-1)] type-body-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
             >
               分镜项目加载失败，点击重试
             </button>
@@ -185,14 +185,14 @@ export function StoryboardIndexPage() {
             <div className="grid min-h-72 place-items-center border border-[var(--border)] bg-[var(--bg-1)]/72 p-6 text-center">
               <div className="max-w-sm">
                 <Clapperboard className="mx-auto h-10 w-10 text-[var(--accent)]" />
-                <h2 className="mt-3 text-lg font-semibold">还没有分镜项目</h2>
-                <p className="mt-2 text-sm leading-6 text-[var(--fg-1)]">
+                <h2 className="mt-3 type-card-title font-semibold">还没有分镜项目</h2>
+                <p className="mt-2 type-body-sm leading-6 text-[var(--fg-1)]">
                   从一个想法开始，后续脚本、设定、分镜图、视频段都会保存到项目里。
                 </p>
                 <button
                   type="button"
                   onClick={() => setDialogOpen(true)}
-                  className="mt-4 inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] sm:min-h-10"
+                  className="mt-4 inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] sm:min-h-10"
                 >
                   <Plus className="h-4 w-4" />
                   新建项目
@@ -212,7 +212,7 @@ export function StoryboardIndexPage() {
                       <p className="type-caption text-[var(--fg-3)]">
                         {STATUS_TEXT[item.status] ?? item.status}
                       </p>
-                      <h2 className="mt-1 truncate text-lg font-semibold tracking-tight group-hover:text-[var(--accent)]">
+                      <h2 className="mt-1 truncate type-card-title font-semibold tracking-tight group-hover:text-[var(--accent)]">
                         {item.title}
                       </h2>
                     </div>
@@ -226,15 +226,15 @@ export function StoryboardIndexPage() {
                     emptyIcon={Film}
                     emptyIconClassName="h-7 w-7"
                   />
-                  <p className="line-clamp-2 text-sm leading-6 text-[var(--fg-1)]">
+                  <p className="line-clamp-2 type-body-sm leading-6 text-[var(--fg-1)]">
                     {item.idea}
                   </p>
-                  <div className="grid grid-cols-3 gap-2 text-xs text-[var(--fg-2)]">
+                  <div className="grid grid-cols-3 gap-2 type-caption text-[var(--fg-2)]">
                     <Metric label="设定" value={`${item.approved_asset_count}/${item.asset_count}`} />
                     <Metric label="镜头" value={String(item.shot_count)} />
                     <Metric label="完成" value={`${item.done_shot_count}/${item.shot_count}`} />
                   </div>
-                  <p className="text-xs text-[var(--fg-3)]">
+                  <p className="type-caption text-[var(--fg-3)]">
                     {formatRelativeTime(item.updated_at)}
                   </p>
                 </Link>
@@ -263,7 +263,7 @@ export function StoryboardIndexPage() {
             className="mobile-dialog-panel w-full max-w-xl rounded-t-[var(--radius-panel)] border border-b-0 border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-0)] shadow-[var(--shadow-3)] focus-visible:outline-none sm:rounded-[var(--radius-panel)] sm:border-b"
           >
             <div className="border-b border-[var(--border)] p-4">
-              <h2 id="storyboard-create-title" className="text-base font-semibold">
+              <h2 id="storyboard-create-title" className="type-body font-semibold">
                 新建分镜项目
               </h2>
             </div>
@@ -277,7 +277,7 @@ export function StoryboardIndexPage() {
                 type="button"
                 onClick={closeDialog}
                 disabled={createMutation.isPending}
-                className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)] min-[390px]:min-h-10"
+                className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 type-body-sm text-[var(--fg-1)] hover:bg-[var(--bg-2)] min-[390px]:min-h-10"
               >
                 取消
               </button>
@@ -285,7 +285,7 @@ export function StoryboardIndexPage() {
                 type="button"
                 onClick={submit}
                 disabled={!title.trim() || !idea.trim() || createMutation.isPending}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] disabled:opacity-60 min-[390px]:min-h-10"
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] disabled:opacity-60 min-[390px]:min-h-10"
               >
                 {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                 创建
@@ -371,11 +371,11 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
     return (
       <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)] p-6 text-center text-[var(--fg-0)]">
         <div>
-          <p className="text-sm text-[var(--fg-1)]">分镜项目加载失败</p>
+          <p className="type-body-sm text-[var(--fg-1)]">分镜项目加载失败</p>
           <button
             type="button"
             onClick={() => query.refetch()}
-            className="mt-3 min-h-10 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm hover:bg-[var(--bg-1)]"
+            className="mt-3 min-h-10 rounded-[var(--radius-control)] border border-[var(--border)] px-4 type-body-sm hover:bg-[var(--bg-1)]"
           >
             重试
           </button>
@@ -413,17 +413,17 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
         <section className="min-h-0 flex-1 overflow-y-auto border-[var(--border)] px-3 py-3 min-[390px]:px-4 md:border-y-0 md:border-x md:px-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] pb-3">
             <div className="min-w-0">
-              <Link href="/projects/storyboard" className="inline-flex items-center gap-1.5 text-xs text-[var(--fg-2)] hover:text-[var(--fg-0)]">
+              <Link href="/projects/storyboard" className="inline-flex items-center gap-1.5 type-caption text-[var(--fg-2)] hover:text-[var(--fg-0)]">
                 <ArrowLeft className="h-3.5 w-3.5" />
                 分镜项目
               </Link>
-              <h1 className="mt-2 break-words text-xl font-semibold tracking-tight md:truncate md:text-2xl">
+              <h1 className="mt-2 break-words type-page-title font-semibold tracking-tight md:truncate ">
                 {run.title}
               </h1>
             </div>
             <div className="flex items-center gap-2">
               {query.isFetching ? (
-                <span className="inline-flex items-center gap-2 text-xs text-[var(--fg-2)]">
+                <span className="inline-flex items-center gap-2 type-caption text-[var(--fg-2)]">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   同步中
                 </span>
@@ -431,7 +431,7 @@ export function StoryboardDetailPage({ storyboardId }: { storyboardId: string })
               <button
                 type="button"
                 onClick={() => setSettingsOpen(true)}
-                className="hidden min-h-11 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-1)] md:inline-flex lg:hidden"
+                className="hidden min-h-11 items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption text-[var(--fg-1)] md:inline-flex lg:hidden"
               >
                 <Settings2 className="h-3.5 w-3.5" />
                 视频参数
@@ -587,8 +587,8 @@ function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset 
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs text-[var(--fg-2)]">{asset.kind}</p>
-          <h3 className="truncate text-base font-semibold">{asset.name}</h3>
+          <p className="type-caption text-[var(--fg-2)]">{asset.kind}</p>
+          <h3 className="truncate type-body font-semibold">{asset.name}</h3>
         </div>
         <StatusPill status={asset.status} />
       </div>
@@ -598,7 +598,7 @@ function AssetCard({ run, asset }: { run: StoryboardRun; asset: StoryboardAsset 
         className="aspect-video w-full rounded-[var(--radius-card)] border border-[var(--border)]"
         emptyClassName="grid aspect-video place-items-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] text-[var(--fg-2)]"
       />
-      <p className="line-clamp-3 min-h-[4.5rem] text-sm leading-6 text-[var(--fg-1)]">
+      <p className="line-clamp-3 min-h-[4.5rem] type-body-sm leading-6 text-[var(--fg-1)]">
         {asset.description || "暂无描述"}
       </p>
       <InfoLine text="批准后将作为每个绑定分镜段的关键帧生成参考。" />
@@ -624,7 +624,7 @@ function ShotsStage({ run }: { run: StoryboardRun }) {
         <button
           type="button"
           onClick={() => create.mutate({ title: `镜头 ${run.shots.length + 1}`, visual: "", duration_s: 5 })}
-          className="inline-flex min-h-11 w-fit items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm hover:bg-[var(--bg-1)] sm:min-h-10"
+          className="inline-flex min-h-11 w-fit items-center gap-2 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-body-sm hover:bg-[var(--bg-1)] sm:min-h-10"
         >
           <Plus className="h-4 w-4" />
           手动添加镜头
@@ -741,12 +741,12 @@ function KeyframeCard({ run, shot }: { run: StoryboardRun; shot: StoryboardShot 
   return (
     <article className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3">
       {shot.keyframe_stale ? (
-        <div className="rounded-[var(--radius-control)] border border-[var(--warning-border,var(--border))] bg-[var(--warning-soft,var(--bg-2))] px-3 py-2 text-xs text-[var(--warning-fg,var(--fg-0))]">
+        <div className="rounded-[var(--radius-control)] border border-[var(--warning-border,var(--border))] bg-[var(--warning-soft,var(--bg-2))] px-3 py-2 type-caption text-[var(--warning-fg,var(--fg-0))]">
           绑定的设定图已更新，关键帧需要重新生成。
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-2">
-        <h3 className="truncate text-sm font-semibold">{shot.title}</h3>
+        <h3 className="truncate type-body-sm font-semibold">{shot.title}</h3>
         <StatusPill status={shot.status} />
       </div>
       <StoryboardMediaFrame

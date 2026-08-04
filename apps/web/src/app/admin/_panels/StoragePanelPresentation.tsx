@@ -89,27 +89,27 @@ function StorageStatusHeader({
         </div>
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-[var(--fg-0)]">
+            <span className="type-body-sm font-medium text-[var(--fg-0)]">
               {storageHeadLine(applying, status)}
             </span>
             <span
               className={cn(
-                "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
+                "rounded-[var(--radius-control)] border px-2 py-0.5 type-caption",
                 storageToneClasses(tone),
               )}
             >
               {storageModeLabel(cfg.backend)}
             </span>
             {status?.disabled && (
-              <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 text-[11px] text-warning">
+              <span className="rounded-[var(--radius-control)] border border-warning-border bg-warning-soft px-2 py-0.5 type-caption text-warning">
                 禁用 flag 已生效
               </span>
             )}
           </div>
           {status && (
-            <div className="text-xs leading-5 text-[var(--fg-1)]">
+            <div className="type-caption leading-5 text-[var(--fg-1)]">
               target{" "}
-              <code className="rounded bg-[var(--bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--fg-0)]">
+              <code className="rounded bg-[var(--bg-2)] px-1.5 py-0.5 font-mono type-caption text-[var(--fg-0)]">
                 {status.target || "—"}
               </code>{" "}
               · fstype{" "}
@@ -129,7 +129,7 @@ function StorageStatusHeader({
           )}
         </div>
       </div>
-      <div className="flex flex-wrap gap-2 text-[11px]">
+      <div className="flex flex-wrap gap-2 type-caption">
         {status?.updated_at != null && (
           <Badge tone="muted">更新 {formatTs(status.updated_at)}</Badge>
         )}
@@ -233,12 +233,12 @@ function SubLine({
   ts: number;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 text-xs">
+    <div className="flex items-start gap-2 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2 type-caption">
       <span className="mt-0.5 shrink-0">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[var(--fg-1)]">{label}</span>
-          <span className="font-mono text-[10px] tabular-nums text-[var(--fg-2)]">
+          <span className="font-mono type-caption tabular-nums text-[var(--fg-2)]">
             {formatTs(ts)}
           </span>
         </div>
@@ -339,11 +339,11 @@ export function BackendSwitch({
               )}
             </span>
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--fg-0)]">
+              <span className="flex items-center gap-1.5 type-body-sm font-medium text-[var(--fg-0)]">
                 {o.icon}
                 {o.label}
               </span>
-              <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--fg-2)]">
+              <span className="mt-0.5 block type-caption leading-relaxed text-[var(--fg-2)]">
                 {o.hint}
               </span>
             </span>
@@ -462,7 +462,7 @@ export function RecoveryHints() {
         <div className="space-y-1.5">
           <p>
             如果 SMB 挂不上，SSH 到 host 上创建{" "}
-            <code className="rounded bg-[var(--bg-2)] px-1 py-0.5 font-mono text-[11px] text-[var(--fg-1)]">
+            <code className="rounded bg-[var(--bg-2)] px-1 py-0.5 font-mono type-caption text-[var(--fg-1)]">
               /var/lib/lumen-storage/disabled
             </code>{" "}
             文件可强制回退到本地默认路径并恢复服务。

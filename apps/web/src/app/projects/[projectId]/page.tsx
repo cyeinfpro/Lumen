@@ -67,13 +67,13 @@ function ProjectDispatcher({ projectId }: { projectId: string }) {
   return (
     <div className="grid h-[100dvh] place-items-center bg-[var(--bg-0)] p-6 text-center text-[var(--fg-0)]">
       <div className="max-w-sm">
-        <p className="text-sm text-[var(--fg-1)]">
+        <p className="type-body-sm text-[var(--fg-1)]">
           {query.isError ? "项目加载失败" : "暂不支持此项目类型"}
         </p>
         <button
           type="button"
           onClick={() => query.refetch()}
-          className="mt-3 min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 text-sm hover:bg-[var(--bg-1)]"
+          className="mt-3 min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-4 type-body-sm hover:bg-[var(--bg-1)]"
         >
           重试
         </button>

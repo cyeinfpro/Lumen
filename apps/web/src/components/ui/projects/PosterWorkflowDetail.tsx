@@ -77,7 +77,7 @@ export function PosterWorkflowDetail({ projectId }: DetailProps) {
       ) : query.isError ? (
         <DetailError onRetry={() => query.refetch()} />
       ) : !workflow ? (
-        <div className="p-6 text-sm text-[var(--fg-1)]">项目加载失败</div>
+        <div className="p-6 type-body-sm text-[var(--fg-1)]">项目加载失败</div>
       ) : (
         <PosterConsole workflow={workflow} refreshing={query.isFetching} />
       )}
@@ -362,7 +362,7 @@ function PosterDetailHeader({
                   <p className="type-body font-semibold tracking-tight text-[var(--fg-0)]">
                     确认删除这个项目？
                   </p>
-                  <p className="text-xs leading-5 text-[var(--fg-2)]">
+                  <p className="type-caption leading-5 text-[var(--fg-2)]">
                     项目会从列表移除，关联对话不会被删除。
                   </p>
                   <div className="mt-1 flex justify-end gap-2">
@@ -447,12 +447,12 @@ function DetailSkeleton() {
 
 function DetailError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="m-6 max-w-md rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 text-sm">
+    <div className="m-6 max-w-md rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 type-body-sm">
       <p className="type-caption text-[var(--danger)]">
         错误
       </p>
       <h3 className="type-card-title mt-1">项目加载失败</h3>
-      <p className="mt-1 text-xs text-[var(--fg-1)]">
+      <p className="mt-1 type-caption text-[var(--fg-1)]">
         网络错误或服务繁忙，请稍后重试。
       </p>
       <button

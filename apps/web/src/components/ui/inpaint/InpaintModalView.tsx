@@ -280,7 +280,7 @@ function InpaintPromptPanel({
         <div className="mb-1.5 flex items-center justify-between gap-2">
           <label
             htmlFor="inpaint-prompt"
-            className="block text-[12px] font-medium text-[var(--fg-1)]"
+            className="block type-caption font-medium text-[var(--fg-1)]"
           >
             把涂抹区域改成什么？
           </label>
@@ -288,7 +288,7 @@ function InpaintPromptPanel({
             <span
               className={cn(
                 "shrink-0 inline-flex items-center gap-1 px-2 h-5 rounded-full",
-                "text-[10px] tabular-nums",
+                "type-caption tabular-nums",
                 "bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border-subtle)]",
               )}
               title="按原图比例生成（避免构图变形）"
@@ -313,7 +313,7 @@ function InpaintPromptPanel({
           )}
           disabled={submitting}
         />
-        <div className="mt-1 flex items-center justify-between text-[11px] text-[var(--fg-1)]/80">
+        <div className="mt-1 flex items-center justify-between type-caption text-[var(--fg-1)]/80">
           <span className="truncate">⌘/Ctrl + Enter 提交</span>
           <span className={promptCounterClass}>
             {prompt.length}/{SOFT_PROMPT_LIMIT}
@@ -321,7 +321,7 @@ function InpaintPromptPanel({
         </div>
       </div>
 
-      <div className="hidden md:block rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 text-[11.5px] leading-relaxed text-[var(--fg-1)]/90">
+      <div className="hidden md:block rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 type-caption leading-relaxed text-[var(--fg-1)]/90">
         <strong className="font-medium text-[var(--fg-0)]">提示</strong>
         ：仅描述涂抹区域，越具体越准。
         <Tooltip content="不要描述整张图；只写涂抹区域要变成什么。" side="top">
@@ -338,7 +338,7 @@ function InpaintPromptPanel({
           exit={{ opacity: 0, y: -4 }}
           transition={{ duration: 0.18 }}
           className={cn(
-            "rounded-[var(--radius-control)] p-2 text-[11.5px]",
+            "rounded-[var(--radius-control)] p-2 type-caption",
             "bg-warning-soft text-warning",
           )}
           role="status"
@@ -348,7 +348,7 @@ function InpaintPromptPanel({
         </motion.div>
       ) : null}
 
-      <div className="hidden md:block text-[10.5px] text-[var(--fg-1)]/70 leading-relaxed">
+      <div className="hidden md:block type-caption text-[var(--fg-1)]/70 leading-relaxed">
         <div className="grid grid-cols-2 gap-x-2 gap-y-0.5">
           <span>
             <Kbd>B</Kbd> 画笔 / <Kbd>E</Kbd> 橡皮
@@ -397,7 +397,7 @@ function InpaintPromptPanel({
         </Button>
       </Dialog.Footer>
 
-      <div className="md:hidden -mt-1 text-[11px] text-[var(--fg-1)]/70 text-right">
+      <div className="md:hidden -mt-1 type-caption text-[var(--fg-1)]/70 text-right">
         {hasStroke ? `已涂抹 ${Math.round(coverage * 100)}%` : "未涂抹"}
       </div>
     </div>

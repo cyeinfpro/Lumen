@@ -250,7 +250,7 @@ export function RequestStatsPanel({ items }: { items: ProviderStatsItem[] }) {
         <div className="type-caption">
           请求统计
         </div>
-        <span className="text-[11px] text-[var(--fg-2)] tabular-nums">
+        <span className="type-caption text-[var(--fg-2)] tabular-nums">
           总计 {grandTotal.toLocaleString()} 次请求
         </span>
       </div>
