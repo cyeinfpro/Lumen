@@ -27,6 +27,31 @@ lumen_systemd_runtime_available() {
         && [ -d "${LUMEN_SYSTEMD_RUNTIME_DIR}" ]
 }
 
+lumen_require_systemd_flock() {
+    if [ "$(uname -s 2>/dev/null || true)" = "Linux" ] \
+            && lumen_systemd_runtime_available \
+            && ! command -v flock >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+lumen_validate_update_runtime_prerequisites() {
+    local deploy_root="${1:-${LUMEN_DEPLOY_ROOT:-/opt/lumen}}"
+    local shared_env="${deploy_root%/}/shared/.env"
+
+    lumen_release_shared_env_path_safe "${deploy_root}" || return 1
+    if [ ! -f "${shared_env}" ]; then
+        log_error "更新前置检查找不到可信 shared/.env：${shared_env}"
+        return 1
+    fi
+    if ! lumen_require_systemd_flock; then
+        log_error "Linux systemd 更新路径需要 flock；请安装 util-linux 后重试。"
+        return 1
+    fi
+    return 0
+}
+
 lumen_operations_host_artifact_paths() {
     local unit
     for unit in \
@@ -351,6 +376,11 @@ lumen_ensure_backup_service_user() {
     [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
     [ -x "${shell_path}" ] || shell_path="/bin/false"
 
+    if ! lumen_require_systemd_flock; then
+        log_error "Linux systemd 备份服务需要 flock；请安装 util-linux 后重试。"
+        return 1
+    fi
+
     if command -v getent >/dev/null 2>&1; then
         if ! getent group "${service_group}" >/dev/null 2>&1; then
             lumen_run_as_root groupadd --system "${service_group}" 2>/dev/null \
@@ -472,15 +502,30 @@ lumen_ensure_backup_service_user() {
         log_error "备份目录或私有 recovery journal 对服务用户 ${service_login} 不可写。"
         return 1
     fi
-    if [ -f "${shared_env}" ] && [ ! -L "${shared_env}" ]; then
-        lumen_run_as_root chgrp "${config_group}" "${shared_env}" 2>/dev/null \
-            || log_warn "无法把 shared/.env 的读取组设置为 ${config_group}。"
-        lumen_run_as_root chmod 0640 "${shared_env}" 2>/dev/null \
-            || log_warn "无法把 shared/.env 权限收紧为 0640。"
+    if [ -L "${shared_env}" ] \
+            || { [ -e "${shared_env}" ] && [ ! -f "${shared_env}" ]; }; then
+        log_error "shared/.env 不是可信普通文件，拒绝配置备份服务。"
+        return 1
     fi
-    lumen_run_as_root touch "${maintenance_lock}" 2>/dev/null || true
-    lumen_run_as_root chown "root:${service_group}" "${maintenance_lock}" 2>/dev/null || true
-    lumen_run_as_root chmod 0660 "${maintenance_lock}" 2>/dev/null || true
+    if [ -f "${shared_env}" ]; then
+        if ! lumen_run_as_root chgrp "${config_group}" "${shared_env}" 2>/dev/null \
+                || ! lumen_run_as_root chmod 0640 "${shared_env}" 2>/dev/null \
+                || ! lumen_run_as_user "${service_login}" \
+                    test -r "${shared_env}"; then
+            log_error "shared/.env 无法安全授权给备份服务用户 ${service_login}。"
+            return 1
+        fi
+    fi
+    if ! lumen_run_as_root touch "${maintenance_lock}" 2>/dev/null \
+            || ! lumen_run_as_root \
+                chown "root:${service_group}" "${maintenance_lock}" 2>/dev/null \
+            || ! lumen_run_as_root chmod 0660 "${maintenance_lock}" 2>/dev/null \
+            || ! lumen_export_borrowed_maintenance_lock "${deploy_root}" \
+            || ! lumen_run_as_user "${service_login}" \
+                test -w "${maintenance_lock}"; then
+        log_error "维护锁文件无法安全授权给备份服务用户 ${service_login}。"
+        return 1
+    fi
     if ! lumen_verify_backup_service_layout_binding; then
         log_error "backup/maintenance root binding 在激活前失效，拒绝继续。"
         return 1

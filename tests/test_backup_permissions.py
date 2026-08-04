@@ -56,6 +56,114 @@ def _nonroot_identity(*, excluding: set[int] | None = None) -> tuple[str, str] |
     return None
 
 
+def _write_flock_mock(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import sys
+
+operation = sys.argv[1]
+descriptor = int(sys.argv[2])
+try:
+    if operation == "-n":
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif operation == "-u":
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        raise SystemExit(2)
+except BlockingIOError:
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _isolated_command_env(
+    fakebin: Path,
+    *,
+    user: str,
+    group: str,
+) -> dict[str, str]:
+    _write_flock_mock(fakebin / "flock")
+    (fakebin / "id").write_text(
+        """#!/usr/bin/env bash
+set -u
+user="${TEST_IDENTITY_USER:?}"
+group="${TEST_IDENTITY_GROUP:?}"
+uid="${TEST_IDENTITY_UID:?}"
+gid="${TEST_IDENTITY_GID:?}"
+target="${2:-$user}"
+case "${1:-}" in
+  "")
+    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+      "$uid" "$user" "$gid" "$group" "$gid" "$group"
+    ;;
+  -u)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$uid"
+    ;;
+  -g)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$gid"
+    ;;
+  -un)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$user"
+    ;;
+  -gn)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$group"
+    ;;
+  -Gn|-nG)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$group"
+    ;;
+  "$user"|"$uid")
+    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+      "$uid" "$user" "$gid" "$group" "$gid" "$group"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "getent").write_text(
+        """#!/usr/bin/env bash
+set -u
+case "${1:-}:${2:-}" in
+  "group:${TEST_IDENTITY_GROUP:?}"|"group:${TEST_IDENTITY_GID:?}")
+    printf '%s:x:%s:%s\\n' \
+      "${TEST_IDENTITY_GROUP}" "${TEST_IDENTITY_GID}" "${TEST_IDENTITY_USER}"
+    ;;
+  "passwd:${TEST_IDENTITY_USER:?}"|"passwd:${TEST_IDENTITY_UID:?}")
+    printf '%s:x:%s:%s::/nonexistent:/usr/sbin/nologin\\n' \
+      "${TEST_IDENTITY_USER}" "${TEST_IDENTITY_UID}" "${TEST_IDENTITY_GID}"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    for path in fakebin.iterdir():
+        path.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+            "TEST_IDENTITY_USER": user,
+            "TEST_IDENTITY_GROUP": group,
+            "TEST_IDENTITY_UID": str(pwd.getpwnam(user).pw_uid),
+            "TEST_IDENTITY_GID": str(grp.getgrnam(group).gr_gid),
+        }
+    )
+    return env
+
+
 def _run_permissions(
     backup_root: Path,
     *,
@@ -536,6 +644,9 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
     shared_archive.chmod(0o644)
     deploy_root = tmp_path / "deploy"
     (deploy_root / "shared").mkdir(parents=True)
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    env = _isolated_command_env(fakebin, user=user, group=group)
     result = subprocess.run(
         [
             "/bin/bash",
@@ -563,6 +674,7 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=env,
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -574,6 +686,9 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
     assert _mode(journal) == 0o600
     assert journal.parent.stat().st_uid == os.geteuid()
     assert os.access(journal.parent, os.W_OK)
+    maintenance_lock = deploy_root / ".lumen-maintenance.lock"
+    assert _mode(maintenance_lock) == 0o660
+    assert os.access(maintenance_lock, os.W_OK)
 
     _write_backup_journal(journal, phase="writers_starting")
     loaded = _run_journal("backup-load-shell", str(journal))
@@ -592,6 +707,268 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
     cleared_restore = _run_journal("clear", str(restore_journal))
     assert cleared_restore.returncode == 0, cleared_restore.stderr
     assert not restore_journal.exists()
+
+
+@pytest.mark.parametrize("failure", ["touch", "chown", "chmod", "writable"])
+def test_backup_service_setup_fails_closed_when_lock_authorization_fails(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    user, group = _current_identity()
+    backup_root = tmp_path / "backup"
+    deploy_root = tmp_path / "deploy"
+    (deploy_root / "shared").mkdir(parents=True)
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    env = _isolated_command_env(fakebin, user=user, group=group)
+    maintenance_lock = deploy_root / ".lumen-maintenance.lock"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+            set -euo pipefail
+            . {shlex.quote(str(LIB))}
+            log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+            log_warn() {{ :; }}
+            log_info() {{ :; }}
+            TEST_FAILURE={shlex.quote(failure)}
+            lumen_run_as_root() {{
+                if [ "${{TEST_FAILURE}}" = "${{1:-}}" ]; then
+                    return 1
+                fi
+                case "${{1:-}}" in
+                    usermod|groupadd|useradd|chown) return 0 ;;
+                esac
+                "$@"
+            }}
+            lumen_run_as_user() {{
+                local run_user="$1"
+                shift
+                if [ "${{TEST_FAILURE}}" = "writable" ] \
+                        && [ "${{1:-}}" = "test" ] \
+                        && [ "${{2:-}}" = "-w" ] \
+                        && [ "${{3:-}}" = \
+                            {shlex.quote(str(maintenance_lock))} ]; then
+                    return 1
+                fi
+                [ "${{run_user}}" = {shlex.quote(user)} ] || return 1
+                "$@"
+            }}
+            LUMEN_SYSTEMD_RUNTIME_AVAILABLE=0
+            LUMEN_BACKUP_SERVICE_USER={shlex.quote(user)}
+            LUMEN_BACKUP_SERVICE_GROUP={shlex.quote(group)}
+            LUMEN_CONFIG_READ_GROUP={shlex.quote(group)}
+            LUMEN_DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+            lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" permission-failure-test
+            if lumen_ensure_backup_service_user \
+                    {shlex.quote(str(backup_root))}; then
+                exit 91
+            fi
+            """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "维护锁文件无法安全授权" in result.stderr
+
+
+def test_systemd_backup_user_setup_requires_flock(tmp_path: Path) -> None:
+    user, group = _current_identity()
+    backup_root = tmp_path / "backup"
+    deploy_root = tmp_path / "deploy"
+    (deploy_root / "shared").mkdir(parents=True)
+    runtime_dir = tmp_path / "systemd-runtime"
+    runtime_dir.mkdir()
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    env = _isolated_command_env(fakebin, user=user, group=group)
+    (fakebin / "uname").write_text(
+        "#!/usr/bin/env bash\nprintf 'Linux\\n'\n",
+        encoding="utf-8",
+    )
+    (fakebin / "systemctl").write_text(
+        "#!/usr/bin/env bash\nexit 0\n",
+        encoding="utf-8",
+    )
+    (fakebin / "uname").chmod(0o755)
+    (fakebin / "systemctl").chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+            set -euo pipefail
+            command() {{
+                if [ "$1" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+                    return 1
+                fi
+                builtin command "$@"
+            }}
+            . {shlex.quote(str(LIB))}
+            log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+            log_warn() {{ :; }}
+            log_info() {{ :; }}
+            LUMEN_SYSTEMD_RUNTIME_DIR={shlex.quote(str(runtime_dir))}
+            LUMEN_BACKUP_SERVICE_USER={shlex.quote(user)}
+            LUMEN_BACKUP_SERVICE_GROUP={shlex.quote(group)}
+            LUMEN_DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+            lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" no-flock-test
+            if lumen_ensure_backup_service_user \
+                    {shlex.quote(str(backup_root))}; then
+                exit 91
+            fi
+            """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "Linux systemd 备份服务需要 flock" in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["chgrp", "chmod", "readable"])
+def test_backup_service_setup_fails_closed_when_env_authorization_fails(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    user, group = _current_identity()
+    backup_root = tmp_path / "backup"
+    deploy_root = tmp_path / "deploy"
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.parent.mkdir(parents=True)
+    shared_env.write_text("DB_PASSWORD=test\n", encoding="utf-8")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    env = _isolated_command_env(fakebin, user=user, group=group)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+            set -euo pipefail
+            . {shlex.quote(str(LIB))}
+            log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+            log_warn() {{ :; }}
+            log_info() {{ :; }}
+            TEST_FAILURE={shlex.quote(failure)}
+            lumen_run_as_root() {{
+                if [ "${{TEST_FAILURE}}" = "chgrp" ] \
+                        && [ "${{1:-}}" = "chgrp" ]; then
+                    return 1
+                fi
+                if [ "${{TEST_FAILURE}}" = "chmod" ] \
+                        && [ "${{1:-}}" = "chmod" ] \
+                        && [ "${{2:-}}" = "0640" ]; then
+                    return 1
+                fi
+                case "${{1:-}}" in
+                    usermod|groupadd|useradd|chown) return 0 ;;
+                esac
+                "$@"
+            }}
+            lumen_run_as_user() {{
+                local run_user="$1"
+                shift
+                if [ "${{TEST_FAILURE}}" = "readable" ] \
+                        && [ "${{1:-}}" = "test" ] \
+                        && [ "${{2:-}}" = "-r" ] \
+                        && [ "${{3:-}}" = {shlex.quote(str(shared_env))} ]; then
+                    return 1
+                fi
+                [ "${{run_user}}" = {shlex.quote(user)} ] || return 1
+                "$@"
+            }}
+            LUMEN_SYSTEMD_RUNTIME_AVAILABLE=0
+            LUMEN_BACKUP_SERVICE_USER={shlex.quote(user)}
+            LUMEN_BACKUP_SERVICE_GROUP={shlex.quote(group)}
+            LUMEN_CONFIG_READ_GROUP={shlex.quote(group)}
+            LUMEN_DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+            lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" env-permission-failure-test
+            if lumen_ensure_backup_service_user \
+                    {shlex.quote(str(backup_root))}; then
+                exit 91
+            fi
+            """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "shared/.env 无法安全授权" in result.stderr
+
+
+def test_backup_service_setup_rejects_shared_env_symlink(
+    tmp_path: Path,
+) -> None:
+    user, group = _current_identity()
+    backup_root = tmp_path / "backup"
+    deploy_root = tmp_path / "deploy"
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.env"
+    outside.write_text("DB_PASSWORD=outside\n", encoding="utf-8")
+    outside.chmod(0o000)
+    shared_env.symlink_to(outside)
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    env = _isolated_command_env(fakebin, user=user, group=group)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+            set -euo pipefail
+            . {shlex.quote(str(LIB))}
+            log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+            log_warn() {{ :; }}
+            log_info() {{ :; }}
+            lumen_run_as_root() {{
+                case "${{1:-}}" in
+                    usermod|groupadd|useradd|chown) return 0 ;;
+                esac
+                "$@"
+            }}
+            LUMEN_SYSTEMD_RUNTIME_AVAILABLE=0
+            LUMEN_BACKUP_SERVICE_USER={shlex.quote(user)}
+            LUMEN_BACKUP_SERVICE_GROUP={shlex.quote(group)}
+            LUMEN_CONFIG_READ_GROUP={shlex.quote(group)}
+            LUMEN_DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+            lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" env-symlink-test
+            if lumen_ensure_backup_service_user \
+                    {shlex.quote(str(backup_root))}; then
+                exit 91
+            fi
+            """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "shared/.env 不是可信普通文件" in result.stderr
+    assert shared_env.is_symlink()
+    assert _mode(outside) == 0o000
 
 
 def test_legacy_0770_recovery_directory_migrates_to_service_owner(

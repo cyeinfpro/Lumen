@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import grp
 import os
 import pwd
 import shlex
@@ -31,16 +32,20 @@ def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _start_bash(script: str) -> subprocess.Popen[str]:
-    env = os.environ.copy()
-    env["LC_ALL"] = "C"
+def _start_bash(
+    script: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[str]:
+    process_env = (env or os.environ).copy()
+    process_env["LC_ALL"] = "C"
     return subprocess.Popen(
         ["bash", "-c", script],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env,
+        env=process_env,
     )
 
 
@@ -98,7 +103,8 @@ def _write_systemctl_mock(path: Path) -> None:
                     fi
                     ;;
                 is-active)
-                    if [ "${3:-}" = "${SYSTEMCTL_INACTIVE_AFTER_START_UNIT:-}" ] \
+                    unit="${*: -1}"
+                    if [ "${unit}" = "${SYSTEMCTL_INACTIVE_AFTER_START_UNIT:-}" ] \
                             && [ -e "${SYSTEMCTL_STARTED_MARKER:?}" ]; then
                         count=0
                         if [ -f "${SYSTEMCTL_ACTIVE_CHECK_COUNT:?}" ]; then
@@ -107,12 +113,19 @@ def _write_systemctl_mock(path: Path) -> None:
                         count=$((count + 1))
                         printf '%s\\n' "${count}" > "${SYSTEMCTL_ACTIVE_CHECK_COUNT}"
                         if [ "${count}" -gt "${SYSTEMCTL_ACTIVE_AFTER_START_SUCCESSES:-0}" ]; then
+                            [ "${2:-}" = "--quiet" ] || printf 'inactive\\n'
                             exit 3
                         fi
                     fi
                     case " ${SYSTEMCTL_ACTIVE_UNITS:-} " in
-                        *" ${3:-} "*) exit 0 ;;
-                        *) exit 3 ;;
+                        *" ${unit} "*)
+                            [ "${2:-}" = "--quiet" ] || printf 'active\\n'
+                            exit 0
+                            ;;
+                        *)
+                            [ "${2:-}" = "--quiet" ] || printf 'inactive\\n'
+                            exit 3
+                            ;;
                     esac
                     ;;
                 stop)
@@ -135,6 +148,91 @@ def _write_systemctl_mock(path: Path) -> None:
         encoding="utf-8",
     )
     path.chmod(0o755)
+
+
+def _write_identity_mocks(fakebin: Path) -> dict[str, str]:
+    identity_user = pwd.getpwuid(os.getuid()).pw_name
+    identity_group = grp.getgrgid(os.getgid()).gr_name
+
+    (fakebin / "id").write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            user="${TEST_IDENTITY_USER:?}"
+            group="${TEST_IDENTITY_GROUP:?}"
+            uid="${TEST_IDENTITY_UID:?}"
+            gid="${TEST_IDENTITY_GID:?}"
+            target="${2:-$user}"
+            case "${1:-}" in
+                "")
+                    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+                        "$uid" "$user" "$gid" "$group" "$gid" "$group"
+                    ;;
+                -u)
+                    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+                    printf '%s\\n' "$uid"
+                    ;;
+                -un)
+                    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+                    printf '%s\\n' "$user"
+                    ;;
+                -g)
+                    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+                    printf '%s\\n' "$gid"
+                    ;;
+                -gn)
+                    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+                    printf '%s\\n' "$group"
+                    ;;
+                -Gn|-nG)
+                    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+                    printf '%s\\n' "$group"
+                    ;;
+                "$user"|"$uid")
+                    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+                        "$uid" "$user" "$gid" "$group" "$gid" "$group"
+                    ;;
+                *) exit 1 ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    (fakebin / "id").chmod(0o755)
+    (fakebin / "getent").write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            case "${1:-}:${2:-}" in
+                "group:${TEST_IDENTITY_GROUP}"|"group:${TEST_IDENTITY_GID}")
+                    printf '%s:x:%s:%s\\n' \
+                        "${TEST_IDENTITY_GROUP}" "${TEST_IDENTITY_GID}" \
+                        "${TEST_IDENTITY_USER}"
+                    exit 0
+                    ;;
+                "passwd:${TEST_IDENTITY_USER}"|"passwd:${TEST_IDENTITY_UID}")
+                    printf '%s:x:%s:%s::/nonexistent:/usr/sbin/nologin\\n' \
+                        "${TEST_IDENTITY_USER}" "${TEST_IDENTITY_UID}" \
+                        "${TEST_IDENTITY_GID}"
+                    exit 0
+                    ;;
+            esac
+            exit 2
+            """
+        ),
+        encoding="utf-8",
+    )
+    (fakebin / "getent").chmod(0o755)
+    return {
+        "TEST_IDENTITY_USER": identity_user,
+        "TEST_IDENTITY_GROUP": identity_group,
+        "TEST_IDENTITY_UID": str(os.getuid()),
+        "TEST_IDENTITY_GID": str(os.getgid()),
+        "LUMEN_BACKUP_SERVICE_USER": identity_user,
+        "LUMEN_BACKUP_SERVICE_GROUP": identity_group,
+    }
 
 
 def _write_curl_mock(path: Path) -> None:
@@ -298,6 +396,7 @@ def _run_migration(
     _write_worker_health_mock(fakebin / "worker-health")
     _write_sudo_mock(fakebin / "sudo")
     _write_flock_mock(fakebin / "flock")
+    identity_env = _write_identity_mocks(fakebin)
 
     env = os.environ.copy()
     env.update(
@@ -336,6 +435,7 @@ def _run_migration(
             "SYSTEMCTL_SIGNAL_READY": str(tmp_path / "signal.ready"),
             "SYSTEMCTL_SIGNAL_GO": str(tmp_path / "signal.go"),
             "SYSTEMCTL_SIGNAL_NAME": "TERM",
+            **identity_env,
         }
     )
     if api_health_url:
@@ -396,6 +496,7 @@ def _prepare_signal_migration(
     _write_curl_mock(fakebin / "curl")
     _write_sudo_mock(fakebin / "sudo")
     _write_flock_mock(fakebin / "flock")
+    identity_env = _write_identity_mocks(fakebin)
     if mv_signal_source is not None:
         _write_mv_signal_mock(fakebin / "mv")
 
@@ -440,6 +541,7 @@ def _prepare_signal_migration(
             "LUMEN_MIGRATION_FAILPOINT_ACTION": "pause",
             "LUMEN_MIGRATION_FAILPOINT_READY": str(ready),
             "LUMEN_MIGRATION_FAILPOINT_GO": str(go),
+            **identity_env,
         }
     )
     if env_out is not None:
@@ -511,19 +613,26 @@ def test_migration_refuses_to_run_while_global_maintenance_lock_is_held(
     root.mkdir()
     data_root.mkdir()
     (root / "payload.txt").write_text("keep-me\n", encoding="utf-8")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    _write_flock_mock(fakebin / "flock")
+    lock_env = os.environ.copy()
+    lock_env["PATH"] = f"{fakebin}{os.pathsep}{lock_env['PATH']}"
 
     holder = _start_bash(
         f"""
         set -euo pipefail
         . {shlex.quote(str(LIB))}
         lumen_acquire_lock {shlex.quote(str(root))} holder.sh
+        test "$LUMEN_LOCK_KIND" = "flock"
         : > {shlex.quote(str(ready))}
         while [ ! -e {shlex.quote(str(go))} ]; do sleep 0.02; done
-        """
+        """,
+        env=lock_env,
     )
     try:
         _wait_for_file(ready)
-        env = os.environ.copy()
+        env = lock_env.copy()
         env.update(
             {
                 "LC_ALL": "C",

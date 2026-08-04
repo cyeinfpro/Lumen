@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -540,18 +541,14 @@ def test_expected_scripts_commit_state_is_outside_app_writable_backup_root(
         lumen_update_bind_expected_scripts_commit {shlex.quote(str(scripts))}
         state_path="$(lumen_update_expected_scripts_state_path)"
         printf 'state=%s\\n' "$state_path"
-        printf 'dir_mode=%s\\n' "$(stat -f '%Lp' "$(dirname "$state_path")" 2>/dev/null \
-            || stat -c '%a' "$(dirname "$state_path")")"
-        printf 'file_mode=%s\\n' "$(stat -f '%Lp' "$state_path" 2>/dev/null \
-            || stat -c '%a' "$state_path")"
         """,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
     state_path = root / ".lumen-update-state" / f"scripts-{operation_id}.commit"
     assert f"state={state_path}" in result.stdout
-    assert "dir_mode=700" in result.stdout
-    assert "file_mode=600" in result.stdout
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
     assert not list(backup_root.glob(".lumen-update-scripts-*.commit"))
 
 

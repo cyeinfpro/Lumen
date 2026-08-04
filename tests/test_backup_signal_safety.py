@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +18,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKUP = ROOT / "scripts" / "backup.sh"
+SYSTEMD_WRITER_UNITS = (
+    "lumen-api.service",
+    "lumen-worker.service",
+    "lumen-tgbot.service",
+)
+APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
 
 
 def _wait_for_file(path: Path, timeout: float = 8.0) -> None:
@@ -218,6 +225,55 @@ def _write_fake_docker(path: Path) -> None:
     path.chmod(0o755)
 
 
+def _write_fake_systemctl(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -u
+            printf '%s\n' "$*" >> "${TEST_SYSTEMCTL_LOG:?}"
+            if [ "${1:-}" != "is-active" ] || [ "$#" -ne 2 ]; then
+                printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+                exit 64
+            fi
+            case " ${TEST_ACTIVE_SYSTEMD_UNITS:-} " in
+                *" $2 "*)
+                    printf 'active\n'
+                    exit 0
+                    ;;
+            esac
+            printf 'inactive\n'
+            exit 3
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_fake_flock(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import sys
+
+operation = sys.argv[1]
+descriptor = int(sys.argv[2])
+try:
+    if operation == "-n":
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif operation == "-u":
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        raise SystemExit(2)
+except BlockingIOError:
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _write_curl_wrapper(path: Path) -> None:
     path.write_text(
         textwrap.dedent(
@@ -291,6 +347,7 @@ def _start_backup(
     appendonlydir_mode: str = "success",
     appendonly_file_mode: str = "missing",
     inspect_failure_service: str = "",
+    active_systemd_units: tuple[str, ...] = (),
     failpoint: str = "",
     api_ready: bool = True,
     worker_ready: bool = True,
@@ -302,6 +359,7 @@ def _start_backup(
     fakebin = tmp_path / "bin"
     marker = tmp_path / "phase.ready"
     docker_log = tmp_path / "docker.log"
+    systemctl_log = tmp_path / "systemctl.log"
     docker_state = tmp_path / "docker.state"
     running_file = backup_root / ".backup.running"
     lock_file = tmp_path / "backup-restore.lock"
@@ -309,6 +367,8 @@ def _start_backup(
     maint_root.mkdir()
     fakebin.mkdir()
     _write_fake_docker(fakebin / "docker")
+    _write_fake_systemctl(fakebin / "systemctl")
+    _write_fake_flock(fakebin / "flock")
     _write_curl_wrapper(fakebin / "curl")
     _write_tar_wrapper(fakebin / "tar")
     _write_sleep_wrapper(fakebin / "sleep")
@@ -325,6 +385,8 @@ def _start_backup(
         ),
         encoding="utf-8",
     )
+    for service in APPLICATION_SERVICES:
+        (tmp_path / f"service-{service}").write_text("true", encoding="utf-8")
 
     env = os.environ.copy()
     env.update(
@@ -344,6 +406,8 @@ def _start_backup(
             "TEST_PHASE_MARKER": str(marker),
             "TEST_DOCKER_LOG": str(docker_log),
             "TEST_DOCKER_STATE": str(docker_state),
+            "TEST_SYSTEMCTL_LOG": str(systemctl_log),
+            "TEST_ACTIVE_SYSTEMD_UNITS": " ".join(active_systemd_units),
             "TEST_CURL_LOG": str(tmp_path / "curl.log"),
             "TEST_BLOCK_PHASE": block_phase,
             "TEST_BGSAVE_MODE": bgsave_mode,
@@ -356,6 +420,7 @@ def _start_backup(
             "TEST_WORKER_READY": "1" if worker_ready else "0",
             "TEST_RDB_VALID": "1" if rdb_valid else "0",
             "LUMEN_BACKUP_FAILPOINT": failpoint,
+            "LUMEN_SYSTEMD_RUNTIME_AVAILABLE": "1",
             "LUMEN_CORE_READINESS_ATTEMPTS": "1",
             "LUMEN_CORE_READINESS_INTERVAL_SECONDS": "0",
             "LUMEN_SERVICE_STATE_INTERVAL_SECONDS": "0",
@@ -366,15 +431,7 @@ def _start_backup(
     if env_out is not None:
         env_out.update(env)
     (tmp_path / "tmp").mkdir()
-    shell = """
-command() {
-    if [ "$1" = "-v" ] && [ "${2:-}" = "flock" ]; then
-        return 1
-    fi
-    builtin command "$@"
-}
-. "$1"
-"""
+    shell = '. "$1"\n'
     process = subprocess.Popen(
         ["/bin/bash", "-c", shell, "backup-signal-test", str(BACKUP)],
         cwd=ROOT,
@@ -385,6 +442,12 @@ command() {
         start_new_session=True,
     )
     return process, marker, backup_root, maint_root, lock_file
+
+
+def _assert_systemd_writer_units_checked(tmp_path: Path) -> None:
+    calls = (tmp_path / "systemctl.log").read_text(encoding="utf-8").splitlines()
+    for unit in SYSTEMD_WRITER_UNITS:
+        assert f"is-active {unit}" in calls
 
 
 def _run_backup_recovery(
@@ -401,15 +464,7 @@ def _run_backup_recovery(
             "TEST_BLOCK_PHASE": "",
         }
     )
-    shell = """
-command() {
-    if [ "$1" = "-v" ] && [ "${2:-}" = "flock" ]; then
-        return 1
-    fi
-    builtin command "$@"
-}
-. "$1"
-"""
+    shell = '. "$1"\n'
     return subprocess.run(
         ["/bin/bash", "-c", shell, "backup-recovery-test", str(BACKUP)],
         cwd=ROOT,
@@ -421,8 +476,14 @@ command() {
     )
 
 
+def _assert_flock_released(path: Path) -> None:
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @pytest.mark.parametrize("block_phase", ["pg_dump", "redis_archive"])
-def test_sighup_removes_partial_pair_markers_and_both_owned_locks(
+def test_sighup_removes_partial_pair_markers_and_releases_both_locks(
     tmp_path: Path,
     block_phase: str,
 ) -> None:
@@ -431,10 +492,10 @@ def test_sighup_removes_partial_pair_markers_and_both_owned_locks(
         block_phase=block_phase,
     )
     _wait_for_file(marker)
-    maintenance_lock = maint_root / ".lumen-maintenance.lock.d"
-    pair_lock = Path(f"{lock_file}.d")
-    assert maintenance_lock.is_dir()
-    assert pair_lock.is_dir()
+    maintenance_lock = maint_root / ".lumen-maintenance.lock"
+    pair_lock = lock_file
+    assert maintenance_lock.is_file()
+    assert pair_lock.is_file()
 
     os.killpg(process.pid, signal.SIGHUP)
     stdout, stderr = process.communicate(timeout=15)
@@ -446,8 +507,8 @@ def test_sighup_removes_partial_pair_markers_and_both_owned_locks(
     assert not list((backup_root / "pg").glob("*"))
     assert not list((backup_root / "redis").glob("*"))
     assert not list(backup_root.glob(".pg-dump*"))
-    assert not maintenance_lock.exists()
-    assert not pair_lock.exists()
+    _assert_flock_released(maintenance_lock)
+    _assert_flock_released(pair_lock)
     calls = (backup_root.parent / "docker.log").read_text(encoding="utf-8")
     assert "compose --ansi=never --profile tgbot stop api worker tgbot" in calls
     assert "compose --ansi=never --profile tgbot start api worker tgbot" in calls
@@ -489,6 +550,11 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
         "compose --ansi=never --profile tgbot start api worker tgbot"
     )
     assert stop_index < pg_index < bgsave_index < start_index
+    for service in APPLICATION_SERVICES:
+        assert (tmp_path / f"service-{service}").read_text(encoding="utf-8") == (
+            "true"
+        )
+    _assert_systemd_writer_units_checked(tmp_path)
     assert len(list((backup_root / "pg").glob("*.pg.dump.gz"))) == 1
     assert len(list((backup_root / "redis").glob("*.redis.tgz"))) == 1
     markers = list(backup_root.glob(".backup-pair.*.json"))
@@ -501,6 +567,31 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
     assert marker_payload["redis"]["sha256"] == hashlib.sha256(
         next((backup_root / "redis").glob("*.redis.tgz")).read_bytes()
     ).hexdigest()
+
+
+@pytest.mark.parametrize("unit", SYSTEMD_WRITER_UNITS)
+def test_backup_refuses_active_systemd_fallback_writer_before_compose_stop(
+    tmp_path: Path,
+    unit: str,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        active_systemd_units=(unit,),
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 70, output
+    assert "systemd fallback writers are active; refusing maintenance" in output
+    assert not (tmp_path / "docker.log").exists()
+    for service in APPLICATION_SERVICES:
+        assert (tmp_path / f"service-{service}").read_text(encoding="utf-8") == (
+            "true"
+        )
+    assert not list((backup_root / "pg").glob("*"))
+    assert not list((backup_root / "redis").glob("*"))
 
 
 def test_backup_waits_out_preexisting_bgsave_then_starts_fresh_generation(

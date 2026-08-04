@@ -98,14 +98,17 @@ pull_or_build_images() {
                 && [ "${current_tag}" != "main" ] \
                 && [ "${LUMEN_INSTALL_FALLBACK_MAIN:-0}" = "1" ]; then
                 log_warn "docker compose pull 失败，疑似默认镜像 tag=${current_tag} 尚未发布；回退到 main 后重试一次。"
-                env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main"
+                if ! env_file_set "${shared_env}" LUMEN_IMAGE_TAG "main" \
+                        || ! lumen_env_file_append_line_if_missing \
+                            "${shared_env}" \
+                            "# install.sh: fallback to main after pull failure; publish stable/latest then switch back"; then
+                    log_error "无法安全记录 pull fallback main 配置。"
+                    exit 1
+                fi
                 current_tag="main"
                 export LUMEN_IMAGE_TAG="${current_tag}"
                 release_manifest=""
                 verify_release_images=0
-                if ! grep -q '^# install.sh: fallback to main after pull failure' "${shared_env}"; then
-                    printf '\n# install.sh: fallback to main after pull failure; publish stable/latest then switch back\n' >> "${shared_env}"
-                fi
                 if lumen_retry 2 5 "docker compose pull (main fallback)" _install_compose_pull_per_image; then
                     log_info "已使用 LUMEN_IMAGE_TAG=main 拉取镜像。"
                 else
@@ -269,6 +272,13 @@ run_migration() {
 
 run_bootstrap_admin() {
     local shared_env="${SHARED_DIR}/.env"
+    if [ -L "${SHARED_DIR}" ] \
+            || { [ -e "${SHARED_DIR}" ] && [ ! -d "${SHARED_DIR}" ]; } \
+            || [ -L "${shared_env}" ] \
+            || { [ -e "${shared_env}" ] && [ ! -f "${shared_env}" ]; }; then
+        log_error "shared/.env 不安全，拒绝写入管理员 bootstrap 标记。"
+        return 78
+    fi
     # 已 bootstrapped 过则跳过
     if grep -q '^LUMEN_BOOTSTRAPPED=1' "${shared_env}" 2>/dev/null; then
         log_info "shared/.env 中已记录 LUMEN_BOOTSTRAPPED=1，跳过管理员创建。"
@@ -346,8 +356,10 @@ run_bootstrap_admin() {
     fi
 
     # 仅在成功或已确认账号存在时标记，避免失败重跑被永久跳过。
-    if ! grep -q '^LUMEN_BOOTSTRAPPED=1' "${shared_env}"; then
-        printf 'LUMEN_BOOTSTRAPPED=1\n' >> "${shared_env}"
+    if ! lumen_env_file_append_line_if_missing \
+            "${shared_env}" "LUMEN_BOOTSTRAPPED=1"; then
+        log_error "无法安全写入 LUMEN_BOOTSTRAPPED 标记。"
+        return 78
     fi
 
     INSTALL_ADMIN_EMAIL="${admin_email}"

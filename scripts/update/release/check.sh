@@ -20,6 +20,11 @@ if ! lumen_release_ensure_shared_env "${ROOT}"; then
     emit_fail check 1
     exit 1
 fi
+if ! lumen_validate_update_runtime_prerequisites "${ROOT}"; then
+    emit_info check reason "runtime_prerequisite_failed"
+    emit_fail check 1
+    exit 1
+fi
 
 if ! lumen_require_python_min_version python3 3 8; then
     emit_info check reason "python3_too_old_or_missing"

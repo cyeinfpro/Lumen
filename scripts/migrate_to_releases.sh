@@ -362,6 +362,10 @@ action_recorded() {
 }
 
 acquire_migration_lock() {
+    if [ "${LUMEN_LOCK_KIND:-}" != "flock" ]; then
+        log_error "release 布局迁移要求全局 flock 互斥；拒绝在不可安全恢复的平台上停止服务或移动目录。"
+        return 78
+    fi
     if ! lumen_try_create_owned_lock_dir \
             "${MIGRATION_LOCK_DIR}" script "migrate_to_releases.sh"; then
         local owner_pid=""
@@ -1613,6 +1617,10 @@ main() {
     local existing_rc=0 adopt_rc=0
     require_root_or_writable
     lumen_acquire_lock "${ROOT}" "migrate_to_releases.sh"
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_error "release 布局迁移需要 systemctl 管理服务；拒绝在无法记录、停止和恢复服务的主机上移动目录。"
+        return 78
+    fi
     if [ -d "${MIGRATION_LOCK_DIR}" ]; then
         adopt_stale_migration_lock || adopt_rc=$?
         if [ "${adopt_rc}" -ne 0 ]; then

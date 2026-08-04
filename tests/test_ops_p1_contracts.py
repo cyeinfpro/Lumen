@@ -25,6 +25,7 @@ UPDATE_ACTIVATION = ROOT / "scripts" / "update" / "services" / "release_activati
 BACKUP_RESTORE_SERVICES = ROOT / "scripts" / "lib" / "backup_restore_services.sh"
 STORAGE_IDENTITY = ROOT / "scripts" / "update" / "backup" / "storage_identity.sh"
 MIGRATE = ROOT / "scripts" / "migrate_to_releases.sh"
+UPDATE_BOOTSTRAP = ROOT / "scripts" / "update" / "bootstrap.sh"
 COMPOSE = ROOT / "docker-compose.yml"
 
 
@@ -169,6 +170,77 @@ def test_shared_env_lookup_stays_inside_custom_deploy_root(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert Path(result.stdout.strip()) == shared_env
+
+
+def test_shared_env_lookup_and_export_reject_symlink(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "deploy"
+    shared_dir = deploy_root / "shared"
+    outside = tmp_path / "outside.env"
+    shared_dir.mkdir(parents=True)
+    outside.write_text("DB_NAME=outside-db\n", encoding="utf-8")
+    (shared_dir / ".env").symlink_to(outside)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        unset DB_NAME LUMEN_ENV_FILE
+        if lumen_find_shared_env {shlex.quote(str(deploy_root))}; then
+            exit 91
+        fi
+        lumen_dotenv_export_if_unset DB_NAME \
+            {shlex.quote(str(shared_dir / ".env"))}
+        test -z "${{DB_NAME:-}}"
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+@pytest.mark.parametrize(
+    ("script", "args", "error_prefix"),
+    (
+        (BACKUP, (), "[backup] ERROR: refusing unsafe shared/.env"),
+        (
+            RESTORE,
+            ("20260804-120000",),
+            "[restore] ERROR: refusing unsafe shared/.env",
+        ),
+    ),
+)
+def test_backup_and_restore_reject_shared_env_symlink_before_import(
+    tmp_path: Path,
+    script: Path,
+    args: tuple[str, ...],
+    error_prefix: str,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    shared_dir = deploy_root / "shared"
+    outside = tmp_path / "outside.env"
+    shared_dir.mkdir(parents=True)
+    outside.write_text(
+        "DB_NAME=outside-db\nBACKUP_ROOT=/outside-backup\n",
+        encoding="utf-8",
+    )
+    (shared_dir / ".env").symlink_to(outside)
+    env = os.environ.copy()
+    env["LUMEN_DEPLOY_ROOT"] = str(deploy_root)
+
+    result = subprocess.run(
+        ["bash", str(script), *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert error_prefix in result.stderr
+    assert outside.read_text(encoding="utf-8") == (
+        "DB_NAME=outside-db\nBACKUP_ROOT=/outside-backup\n"
+    )
 
 
 def test_install_root_resolver_creates_only_canonical_non_symlink_target(
@@ -697,6 +769,220 @@ def test_custom_deploy_root_maintenance_lock_blocks_all_ops(tmp_path: Path) -> N
     assert not (ROOT / ".lumen-maintenance.lock.d").exists()
 
 
+def test_systemd_backup_fails_loudly_when_flock_is_missing(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    backup_root = tmp_path / "backup"
+    deploy_root.mkdir()
+    backup_root.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "BACKUP_ROOT": str(backup_root),
+            "LUMEN_BACKUP_ROOT": str(backup_root),
+            "LUMEN_DEPLOY_ROOT": str(deploy_root),
+            "LUMEN_BACKUP_SERVICE_MODE": "1",
+            "LUMEN_BACKUP_RESTORE_LOCKFILE": str(
+                backup_root / ".backup-restore.lock"
+            ),
+        }
+    )
+
+    result = subprocess.run(
+        _without_flock_source(BACKUP),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert "systemd backup service requires flock" in result.stdout
+    assert not (backup_root / ".backup.running").exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ("shared_env_symlink", "missing_flock"))
+def test_update_bootstrap_rejects_runtime_prerequisite_before_reading_env(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    shared_dir = deploy_root / "shared"
+    shared_dir.mkdir(parents=True)
+    marker = tmp_path / "env-read"
+    shared_env = shared_dir / ".env"
+    if unsafe_kind == "shared_env_symlink":
+        outside = tmp_path / "outside.env"
+        outside.write_text("LUMEN_DATA_ROOT=/outside\n", encoding="utf-8")
+        shared_env.symlink_to(outside)
+    else:
+        shared_env.write_text("LUMEN_DATA_ROOT=/safe\n", encoding="utf-8")
+
+    if unsafe_kind == "shared_env_symlink":
+        runtime_override = "lumen_systemd_runtime_available() { return 1; }"
+    else:
+        runtime_override = """\
+uname() { printf 'Linux\n'; }
+lumen_systemd_runtime_available() { return 0; }
+command() {
+    if [ "${1:-}" = "-v" ] && [ "${2:-}" = "flock" ]; then return 1; fi
+    builtin command "$@"
+}
+"""
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        lumen_resolve_repo_root() {{ printf '%s\\n' {shlex.quote(str(deploy_root))}; }}
+        lumen_resolve_deploy_root() {{ printf '%s\\n' {shlex.quote(str(deploy_root))}; }}
+        lumen_install_signal_handlers() {{ :; }}
+        lumen_env_value() {{
+            : > {shlex.quote(str(marker))}
+            printf 'unexpected=1\\n'
+        }}
+        SCRIPT_DIR={shlex.quote(str(deploy_root / "scripts"))}
+        LUMEN_DEPLOY_ROOT={shlex.quote(str(deploy_root))}
+        _LUMEN_UPDATE_INPUT_DEPLOY_ROOT=
+        _LUMEN_UPDATE_INPUT_UPDATE_ROOT=
+        _LUMEN_UPDATE_INPUT_DATA_ROOT=
+        _LUMEN_UPDATE_INPUT_DB_ROOT=
+        _LUMEN_UPDATE_INPUT_BACKUP_ROOT=
+        _LUMEN_UPDATE_INPUT_POSTGRES_UID=
+        _LUMEN_UPDATE_INPUT_POSTGRES_GID=
+        _LUMEN_UPDATE_INPUT_REDIS_UID=
+        _LUMEN_UPDATE_INPUT_REDIS_GID=
+        _LUMEN_UPDATE_INPUT_APP_UID=
+        _LUMEN_UPDATE_INPUT_APP_GID=
+        _LUMEN_UPDATE_INPUT_APP_STORAGE_GID=
+        {runtime_override}
+        . {shlex.quote(str(UPDATE_BOOTSTRAP))}
+        """
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert not marker.exists()
+    if unsafe_kind == "shared_env_symlink":
+        assert "shared/.env" in result.stderr
+    else:
+        assert "flock" in result.stderr
+
+
+def test_release_migration_rejects_mkdir_lock_before_stopping_services(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    data_root = tmp_path / "data"
+    fakebin = tmp_path / "bin"
+    deploy_root.mkdir()
+    data_root.mkdir()
+    fakebin.mkdir()
+    systemctl = fakebin / "systemctl"
+    systemctl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    systemctl.chmod(0o755)
+    (deploy_root / "payload.txt").write_text("keep\n", encoding="utf-8")
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        export PATH={shlex.quote(str(fakebin))}:$PATH
+        command() {{
+            if [ "${{1:-}}" = "-v" ] && [ "${{2:-}}" = "flock" ]; then
+                return 1
+            fi
+            builtin command "$@"
+        }}
+        export LUMEN_ROOT={shlex.quote(str(deploy_root))}
+        export LUMEN_DATA_ROOT={shlex.quote(str(data_root))}
+        export LUMEN_BACKUP_ROOT={shlex.quote(str(data_root / "backup"))}
+        . {shlex.quote(str(MIGRATE))}
+        """
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert "要求全局 flock 互斥" in result.stderr
+    assert (deploy_root / "payload.txt").read_text(encoding="utf-8") == "keep\n"
+    assert not (deploy_root / "current").exists()
+    assert not Path(f"{deploy_root}.tmp").exists()
+    assert not Path(f"{deploy_root}.migrate-to-releases.lock.d").exists()
+
+
+def test_release_migration_rejects_missing_systemctl_before_lock_or_move(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    data_root = tmp_path / "data"
+    deploy_root.mkdir()
+    data_root.mkdir()
+    (deploy_root / "payload.txt").write_text("keep\n", encoding="utf-8")
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        command() {{
+            if [ "${{1:-}}" = "-v" ] && [ "${{2:-}}" = "systemctl" ]; then
+                return 1
+            fi
+            builtin command "$@"
+        }}
+        export LUMEN_ROOT={shlex.quote(str(deploy_root))}
+        export LUMEN_DATA_ROOT={shlex.quote(str(data_root))}
+        export LUMEN_BACKUP_ROOT={shlex.quote(str(data_root / "backup"))}
+        . {shlex.quote(str(MIGRATE))}
+        """
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert "需要 systemctl 管理服务" in result.stderr
+    assert (deploy_root / "payload.txt").read_text(encoding="utf-8") == "keep\n"
+    assert not (deploy_root / "current").exists()
+    assert not Path(f"{deploy_root}.tmp").exists()
+    assert not Path(f"{deploy_root}.migrate-to-releases.lock.d").exists()
+
+
+def test_install_env_writers_reject_shared_env_symlink(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "deploy"
+    shared_dir = deploy_root / "shared"
+    outside = tmp_path / "outside.env"
+    deploy_root.mkdir()
+    shared_dir.mkdir()
+    outside.write_text(
+        "DATABASE_URL=postgresql://user:password@db/app\n",
+        encoding="utf-8",
+    )
+    (shared_dir / ".env").symlink_to(outside)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        . {shlex.quote(str(ROOT / "scripts" / "install" / "environment.sh"))}
+        set +e
+        lumen_ensure_compose_db_env_vars {shlex.quote(str(shared_dir / ".env"))}
+        compose_rc=$?
+        env_file_set {shlex.quote(str(shared_dir / ".env"))} DB_USER lumen_app
+        set_rc=$?
+        lumen_env_file_append_line_if_missing \
+            {shlex.quote(str(shared_dir / ".env"))} LUMEN_BOOTSTRAPPED=1
+        append_rc=$?
+        set -e
+        test "$compose_rc" -ne 0
+        test "$set_rc" -ne 0
+        test "$append_rc" -ne 0
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert outside.read_text(encoding="utf-8") == (
+        "DATABASE_URL=postgresql://user:password@db/app\n"
+    )
+
+
 def test_flock_owner_write_preserves_shared_group_mode(tmp_path: Path) -> None:
     deploy_root = tmp_path / "deploy"
     deploy_root.mkdir()
@@ -709,11 +995,173 @@ def test_flock_owner_write_preserves_shared_group_mode(tmp_path: Path) -> None:
         set -euo pipefail
         . {shlex.quote(str(LIB))}
         lumen_try_acquire_lock {shlex.quote(str(deploy_root))} backup.sh
-        """
+        """,
+        env=_environment_with_test_flock(tmp_path),
     )
 
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(lock_file.stat().st_mode) == 0o660
+
+
+def test_flock_owner_write_tightens_new_lock_created_under_common_umask(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    lock_file = deploy_root / ".lumen-maintenance.lock"
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        umask 022
+        . {shlex.quote(str(LIB))}
+        lumen_try_acquire_lock {shlex.quote(str(deploy_root))} install.sh
+        test "$(umask)" = "0022"
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("legacy_mode", [0o640, 0o644, 0o664])
+def test_flock_owner_write_migrates_v1_2_86_legacy_mode(
+    tmp_path: Path,
+    legacy_mode: int,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    lock_file = deploy_root / ".lumen-maintenance.lock"
+    lock_file.write_text("untrusted\n", encoding="utf-8")
+    lock_file.chmod(legacy_mode)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        lumen_try_acquire_lock \
+            {shlex.quote(str(deploy_root))} update-from-v1.2.86
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
+    assert "script=update-from-v1.2.86" in lock_file.read_text(encoding="utf-8")
+    assert not (deploy_root / ".lumen-maintenance.lock.d").exists()
+    assert not list(tmp_path.glob(".lumen-maintenance.*.lock.d"))
+
+
+def test_flock_owner_write_rejects_unsafe_preexisting_mode(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    lock_file = deploy_root / ".lumen-maintenance.lock"
+    lock_file.write_text("untrusted\n", encoding="utf-8")
+    lock_file.chmod(0o666)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        umask 027
+        . {shlex.quote(str(LIB))}
+        if lumen_try_acquire_lock \
+                {shlex.quote(str(deploy_root))} install.sh; then
+            exit 91
+        fi
+        test "$(umask)" = "0027"
+        if {{ : >&6; }} 2>/dev/null; then
+            exit 92
+        fi
+        if {{ : >&9; }} 2>/dev/null; then
+            exit 93
+        fi
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o666
+    assert lock_file.read_text(encoding="utf-8") == "untrusted\n"
+    assert not (deploy_root / ".lumen-maintenance.lock.d").exists()
+    assert not list(tmp_path.glob(".lumen-maintenance.*.lock.d"))
+
+
+def test_flock_lock_rejects_insecure_maintenance_root(tmp_path: Path) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir(mode=0o777)
+    deploy_root.chmod(0o777)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        if lumen_try_acquire_lock \
+                {shlex.quote(str(deploy_root))} install.sh; then
+            exit 91
+        fi
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert not (deploy_root / ".lumen-maintenance.lock").exists()
+
+
+def test_flock_lock_rejects_symlink_without_creating_target(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    lock_file = deploy_root / ".lumen-maintenance.lock"
+    outside = tmp_path / "outside-lock-target"
+    lock_file.symlink_to(outside)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        if lumen_try_acquire_lock \
+                {shlex.quote(str(deploy_root))} install.sh; then
+            exit 91
+        fi
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert lock_file.is_symlink()
+    assert not outside.exists()
+
+
+def test_flock_lock_rejects_hardlink_without_modifying_target(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    outside = tmp_path / "outside-lock-target"
+    outside.write_text("keep\n", encoding="utf-8")
+    outside.chmod(0o600)
+    lock_file = deploy_root / ".lumen-maintenance.lock"
+    os.link(outside, lock_file)
+
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        if lumen_try_acquire_lock \
+                {shlex.quote(str(deploy_root))} install.sh; then
+            exit 91
+        fi
+        """,
+        env=_environment_with_test_flock(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+    assert lock_file.read_text(encoding="utf-8") == "keep\n"
 
 
 def test_worker_health_is_the_compose_wait_contract(tmp_path: Path) -> None:

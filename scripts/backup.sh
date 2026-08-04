@@ -34,6 +34,10 @@ fi
 export LUMEN_DEPLOY_ROOT
 unset _LUMEN_BACKUP_INPUT_DEPLOY_ROOT _LUMEN_BACKUP_INPUT_MAINT_ROOT
 
+if ! lumen_release_shared_env_path_safe "${LUMEN_DEPLOY_ROOT}"; then
+    echo "[backup] ERROR: refusing unsafe shared/.env" >&2
+    exit 78
+fi
 ENV_FILE="$(lumen_find_shared_env "${LUMEN_DEPLOY_ROOT}" 2>/dev/null || true)"
 if [ -n "${ENV_FILE}" ]; then
     export LUMEN_ENV_FILE="${ENV_FILE}"
@@ -731,6 +735,11 @@ if [ -n "${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}" ]; then
     fi
     log "using verified borrowed maintenance lock (${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND})"
 elif command -v lumen_try_acquire_lock >/dev/null 2>&1; then
+    if [ "${LUMEN_BACKUP_SERVICE_MODE:-0}" = "1" ] \
+            && ! command -v flock >/dev/null 2>&1; then
+        log "ERROR: systemd backup service requires flock (install util-linux)"
+        exit 78
+    fi
     if ! lumen_try_acquire_lock "${LUMEN_DEPLOY_ROOT}" "backup.sh"; then
         log "skipped: maintenance lock held (install/update/uninstall in progress); next timer cycle will retry"
         exit 0

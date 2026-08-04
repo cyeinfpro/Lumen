@@ -5,6 +5,12 @@
 update_phase_preflight() {
 emit_start preflight
 
+if ! lumen_validate_update_runtime_prerequisites "${ROOT}"; then
+    log_error "[preflight] 更新运行时前置条件未通过，拒绝进入备份、迁移或服务切换。"
+    emit_fail preflight 1
+    exit 1
+fi
+
 # Docker / docker compose 可用
 lumen_require_docker_access
 

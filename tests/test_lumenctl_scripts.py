@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import gzip
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -1075,6 +1077,9 @@ def test_install_bootstrap_failure_does_not_mark_bootstrapped(tmp_path: Path) ->
         emit_info() {{ :; }}
         log_info() {{ :; }}
         log_error() {{ printf '%s\\n' "$*" >&2; }}
+        lumen_env_file_append_line_if_missing() {{
+            grep -Fxq "$2" "$1" || printf '%s\\n' "$2" >> "$1"
+        }}
         _install_compose() {{
             printf 'database unavailable\\n'
             return 42
@@ -1110,6 +1115,9 @@ def test_install_bootstrap_confirmed_existing_user_remains_idempotent(
         emit_info() {{ :; }}
         log_info() {{ :; }}
         log_error() {{ printf '%s\\n' "$*" >&2; }}
+        lumen_env_file_append_line_if_missing() {{
+            grep -Fxq "$2" "$1" || printf '%s\\n' "$2" >> "$1"
+        }}
         _install_compose() {{
             printf 'user_already_exists\\n'
             return 17
@@ -1159,11 +1167,14 @@ def test_install_ghcr_probe_uses_private_mktemp_and_cleans_up(
                     *) shift ;;
                 esac
             done
-            if mode="$(stat -c '%a' "$out" 2>/dev/null)"; then
-                :
-            else
-                mode="$(stat -f '%Lp' "$out")"
-            fi
+            mode="$(python3 - "$out" <<'PY'
+import os
+import stat
+import sys
+
+print(f"{{stat.S_IMODE(os.stat(sys.argv[1]).st_mode):o}}")
+PY
+)"
             printf '%s|%s\\n' "$out" "$mode" > "$TEST_PROBE_META"
             printf '{{"tags":["latest"]}}\\n' > "$out"
             printf '200'
@@ -1995,10 +2006,17 @@ fi
 if [ "${1:-}" = "cp" ]; then
   relative="${2#*:/app/}"
   source_path="${TEST_MAIN_IMAGE_ROOT:?}/${relative}"
+  target_path="$3"
   if [ ! -e "${source_path}" ]; then
     exit 1
   fi
-  cp -R "${source_path}" "$3"
+  if [ -d "${source_path}" ]; then
+    mkdir -p "${target_path}"
+    cp -R "${source_path}/." "${target_path}/"
+  else
+    mkdir -p "$(dirname "${target_path}")"
+    cp "${source_path}" "${target_path}"
+  fi
   exit 0
 fi
 if [ "${1:-}" = "rm" ]; then
@@ -2205,6 +2223,16 @@ def test_release_manifest_python_prerequisite_is_consistent() -> None:
     assert "lumen_require_python_min_version python3 3 8" in update
     assert "Optional[urllib.request.Request]" in guard
     assert "urllib.request.Request | None" not in guard
+
+
+def test_linux_prerequisites_install_and_verify_flock() -> None:
+    prerequisites = (
+        ROOT / "scripts" / "install" / "prerequisites.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'basics_missing+=("util-linux")' in prerequisites
+    assert prerequisites.count("command -v flock") >= 2
+    assert "util-linux 安装后仍未检测到 flock" in prerequisites
 
 
 def test_signature_verification_fails_closed_when_compose_images_cannot_be_enumerated(
@@ -3771,6 +3799,8 @@ def test_lumenctl_install_update_uninstall_smoke_with_fake_docker(
     fakebin = sim_root / "fakebin"
     log_dir.mkdir(parents=True)
     fakebin.mkdir(parents=True)
+    identity_user = pwd.getpwuid(os.getuid()).pw_name
+    identity_group = grp.getgrgid(os.getgid()).gr_name
 
     (fakebin / "docker").write_text(
         """#!/usr/bin/env bash
@@ -3969,6 +3999,10 @@ if [ "${1:-}" = "-u" ]; then
   shift 2
 fi
 case "${1:-}" in
+  groupadd|useradd|usermod)
+    printf 'unexpected identity mutation: %s\\n' "$*" >&2
+    exit 64
+    ;;
   chown)
     exit 0
     ;;
@@ -3988,6 +4022,88 @@ case "${1:-}" in
     command "$@"
     ;;
 esac
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "id").write_text(
+        """#!/usr/bin/env bash
+set -u
+user="${TEST_IDENTITY_USER:?}"
+group="${TEST_IDENTITY_GROUP:?}"
+uid="${TEST_IDENTITY_UID:?}"
+gid="${TEST_IDENTITY_GID:?}"
+target="${2:-$user}"
+case "${1:-}" in
+  "")
+    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+      "$uid" "$user" "$gid" "$group" "$gid" "$group"
+    ;;
+  -u)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$uid"
+    ;;
+  -g)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$gid"
+    ;;
+  -un)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$user"
+    ;;
+  -gn)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$group"
+    ;;
+  -Gn|-nG)
+    [ "$target" = "$user" ] || [ "$target" = "$uid" ] || exit 1
+    printf '%s\\n' "$group"
+    ;;
+  "$user"|"$uid")
+    printf 'uid=%s(%s) gid=%s(%s) groups=%s(%s)\\n' \
+      "$uid" "$user" "$gid" "$group" "$gid" "$group"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "getent").write_text(
+        """#!/usr/bin/env bash
+set -u
+case "${1:-}:${2:-}" in
+  "group:${TEST_IDENTITY_GROUP:?}"|"group:${TEST_IDENTITY_GID:?}")
+    printf '%s:x:%s:%s\\n' \
+      "${TEST_IDENTITY_GROUP}" "${TEST_IDENTITY_GID}" "${TEST_IDENTITY_USER}"
+    ;;
+  "passwd:${TEST_IDENTITY_USER:?}"|"passwd:${TEST_IDENTITY_UID:?}")
+    printf '%s:x:%s:%s::/nonexistent:/usr/sbin/nologin\\n' \
+      "${TEST_IDENTITY_USER}" "${TEST_IDENTITY_UID}" "${TEST_IDENTITY_GID}"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (fakebin / "flock").write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import sys
+
+operation = sys.argv[1]
+descriptor = int(sys.argv[2])
+try:
+    if operation == "-n":
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif operation == "-u":
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        raise SystemExit(2)
+except BlockingIOError:
+    raise SystemExit(1)
 """,
         encoding="utf-8",
     )
@@ -4012,6 +4128,10 @@ esac
     : > "${{LOG_DIR}}/curl.log"
     export TEST_DOCKER_STATE="${{SIM_ROOT}}/docker-state"
     export TEST_IMAGE_COMMIT="$(git -C {shlex.quote(str(ROOT))} rev-parse HEAD)"
+    export TEST_IDENTITY_USER={shlex.quote(identity_user)}
+    export TEST_IDENTITY_GROUP={shlex.quote(identity_group)}
+    export TEST_IDENTITY_UID={os.getuid()}
+    export TEST_IDENTITY_GID={os.getgid()}
     mkdir -p "${{SIM_ROOT}}"
     printf 'lastsave=1\\n' > "${{TEST_DOCKER_STATE}}"
     export PATH={shlex.quote(str(fakebin))}:$PATH

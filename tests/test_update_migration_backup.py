@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -39,7 +40,11 @@ def _function_source(name: str) -> str:
     return match.group(0)
 
 
-def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
+def _run_bash(
+    script: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     helper = ROOT / "scripts" / "restore_journal.py"
     return subprocess.run(
         [
@@ -50,8 +55,32 @@ def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=env,
         check=False,
     )
+
+
+def _write_flock_mock(path: Path) -> None:
+    path.write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import sys
+
+operation = sys.argv[1]
+descriptor = int(sys.argv[2])
+try:
+    if operation == "-n":
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    elif operation == "-u":
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        raise SystemExit(2)
+except BlockingIOError:
+    raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def _pair_result(
@@ -364,6 +393,11 @@ PY
             "run_update_backup_preflight",
         )
     )
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    _write_flock_mock(fakebin / "flock")
+    env = os.environ.copy()
+    env["PATH"] = f"{fakebin}{os.pathsep}{env['PATH']}"
 
     result = _run_bash(
         f"""
@@ -374,6 +408,7 @@ PY
         mkdir -p "$LUMEN_DEPLOY_ROOT"
         export LUMEN_DEPLOY_ROOT
         lumen_acquire_lock "$LUMEN_DEPLOY_ROOT" update-preflight-test
+        test "$LUMEN_LOCK_KIND" = "flock"
         SCRIPT_DIR={shlex.quote(str(scripts_dir))}
         CURRENT_RELEASE=""
         UPDATE_LOG_DIR={shlex.quote(str(backup_root))}
@@ -405,7 +440,8 @@ PY
         test -n "$UPDATE_RESTORE_POINT_TIMESTAMP"
         test -z "$(find {shlex.quote(str(backup_root))} -maxdepth 1 \
             -name '.update-backup*' -print -quit)"
-        """
+        """,
+        env=env,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout

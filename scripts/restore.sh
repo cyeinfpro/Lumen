@@ -41,6 +41,10 @@ unset _LUMEN_RESTORE_INPUT_DEPLOY_ROOT _LUMEN_RESTORE_INPUT_MAINT_ROOT
 
 # 自动从 shared/.env 兜底：lumenctl 调用本脚本时只透传 LUMEN_* 系列 env，
 # 不会传 REDIS_URL / REDIS_PASSWORD / DB_*。无 .env 兜底则 redis_cli 拿不到密码。
+if ! lumen_release_shared_env_path_safe "${LUMEN_DEPLOY_ROOT}"; then
+    echo "[restore] ERROR: refusing unsafe shared/.env" >&2
+    exit 78
+fi
 ENV_FILE="$(lumen_find_shared_env "${LUMEN_DEPLOY_ROOT}" 2>/dev/null || true)"
 if [ -n "${ENV_FILE}" ]; then
     export LUMEN_ENV_FILE="${ENV_FILE}"
