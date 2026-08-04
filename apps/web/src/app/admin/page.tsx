@@ -479,7 +479,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
       data-testid="admin-tab-menu"
       className="space-y-3"
     >
-      <div className="sticky top-0 z-20 -mx-3 border-y border-[var(--border-subtle)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[380px]:-mx-4 min-[380px]:px-4 md:hidden">
+      <div className="sticky top-0 z-[var(--z-header)] -mx-3 border-y border-[var(--border-subtle)] bg-[var(--bg-0)]/95 px-3 py-3 backdrop-blur-xl min-[380px]:-mx-4 min-[380px]:px-4 md:hidden">
         <label htmlFor="admin-mobile-navigation" className="sr-only">
           管理后台页面
         </label>

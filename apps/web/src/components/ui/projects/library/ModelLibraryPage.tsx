@@ -72,7 +72,7 @@ export function ModelLibraryPage() {
           <Tabs
             current={tab}
             onChange={setTab}
-            className="sticky top-0 z-20 -mx-3 overflow-x-auto border-b bg-[var(--bg-0)]/95 px-3 shadow-[var(--shadow-1)] backdrop-blur-xl [scrollbar-width:none] md:hidden"
+            className="sticky top-0 z-[var(--z-header)] -mx-3 overflow-x-auto border-b bg-[var(--bg-0)]/95 px-3 shadow-[var(--shadow-1)] backdrop-blur-xl [scrollbar-width:none] md:hidden"
             compact
           />
 
@@ -156,7 +156,7 @@ function Tabs({
           "flex min-w-0 flex-wrap gap-x-1 gap-y-1",
         compact
           ? ""
-          : "sticky top-0 z-10 bg-[var(--bg-0)]/85 backdrop-blur-xl md:relative md:top-auto md:z-auto md:bg-transparent md:backdrop-blur-none",
+          : "sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)]/85 backdrop-blur-xl md:relative md:top-auto md:z-auto md:bg-transparent md:backdrop-blur-none",
         compact ? "" : "border-b border-[var(--border)]",
         className,
       )}

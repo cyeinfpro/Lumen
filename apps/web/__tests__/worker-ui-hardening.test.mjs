@@ -372,7 +372,7 @@ test("inpaint submit acquires a synchronous lock before mask export awaits", asy
   assert.equal(submitCalls, 1);
 });
 
-test("mobile regenerate preserves the assistant intent and memo callbacks are live", () => {
+test("mobile regenerate preserves the assistant intent and memo callbacks are live", async () => {
   const harness = createReactHarness();
   const toasts = [];
   const mocks = baseChatMocks(harness, {
@@ -381,6 +381,10 @@ test("mobile regenerate preserves the assistant intent and memo callbacks are li
     },
     "@/components/ui/primitives/mobile": {
       pushMobileToast: (...args) => toasts.push(args),
+    },
+    "@/components/ui/chat/ConversationVisualAtoms": {
+      ConversationTurn: "ConversationTurn",
+      ConversationUserTurn: "ConversationUserTurn",
     },
   });
   const exports = loadModule(
@@ -440,7 +444,7 @@ test("mobile regenerate preserves the assistant intent and memo callbacks are li
   const regenerate = findElement(
     tree,
     (node) =>
-      node.type === "button" && textContent(node).includes("重新生成"),
+      node.type === "Button" && textContent(node).includes("重新生成"),
   );
   regenerate.props.onClick();
   assert.deepEqual(regenerateArgs, ["assistant-1", "image_to_image"]);
@@ -453,13 +457,15 @@ test("mobile regenerate preserves the assistant intent and memo callbacks are li
       attachments: [],
     },
   });
-  const copyButton = findElement(
+  const userTurn = findElement(
     userMemoTree,
-    (node) => node.type === "button" && node.props["aria-label"] === "复制",
+    (node) => node.type === "ConversationUserTurn",
   );
   assert.equal(typeof exports.MobileConversationCanvas, "function");
+  assert.equal(typeof userTurn.props.onCopy, "function");
+  userTurn.props.onCopy();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(toasts, []);
-  copyButton.props.onClick();
 });
 
 test("desktop memo comparator rejects stale callbacks and consumes copy rejection", async () => {
@@ -524,7 +530,7 @@ test("desktop memo comparator rejects stale callbacks and consumes copy rejectio
   );
   harness.startRender();
   const copyTree = copyComponent.type(copyComponent.props);
-  findElement(copyTree, (node) => node.type === "button").props.onClick();
+  findElement(copyTree, (node) => node.type === "IconButton").props.onClick();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(errors, ["复制失败"]);
   assert.equal(typeof exports.AssistantTurn, "function");
@@ -919,13 +925,14 @@ test("completion status uses stream start as the missing last-delta fallback", (
   assert.equal(status.label, "等待后续输出 14s");
 });
 
-test("desktop scene divider is a native keyboard-accessible disclosure control", () => {
+test("desktop scene divider uses the shared keyboard-accessible button control", () => {
   const harness = createReactHarness();
   const dividerExports = loadModule(
     "src/components/ui/chat/desktop/DesktopSceneDivider.tsx",
     {
       react: harness.react,
       "react/jsx-runtime": jsxRuntime,
+      "@/components/ui/primitives": { Button: "Button" },
       "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
     },
   );
@@ -938,8 +945,7 @@ test("desktop scene divider is a native keyboard-accessible disclosure control",
       toggled += 1;
     },
   });
-  assert.equal(tree.type, "button");
-  assert.equal(tree.props.type, "button");
+  assert.equal(tree.type, "Button");
   assert.equal(tree.props["aria-expanded"], false);
   assert.equal(tree.props["aria-controls"], "scene-body");
   tree.props.onClick();

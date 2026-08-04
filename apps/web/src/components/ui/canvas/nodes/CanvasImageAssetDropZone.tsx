@@ -268,7 +268,7 @@ export function CanvasImageAssetDropZone({
               event.stopPropagation();
               openPicker();
             }}
-            className="nodrag nopan absolute left-2 top-2 z-10 bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)] hover:bg-[var(--media-control-bg)] hover:brightness-110"
+            className="nodrag nopan absolute left-2 top-2 z-[var(--z-header)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)] hover:bg-[var(--media-control-bg)] hover:brightness-110"
           >
             <Upload className="h-4 w-4" aria-hidden />
           </IconButton>
@@ -302,7 +302,7 @@ export function CanvasImageAssetDropZone({
       {dragActive || uploading ? (
         <div
           role="status"
-          className="pointer-events-none absolute inset-0 z-20 grid place-items-center border-2 border-dashed border-[var(--accent)] bg-[var(--bg-0)]/88 p-4 text-center"
+          className="pointer-events-none absolute inset-0 z-[var(--z-tabbar)] grid place-items-center border-2 border-dashed border-[var(--accent)] bg-[var(--bg-0)]/88 p-4 text-center"
         >
           <div className="grid justify-items-center gap-2">
             {uploading ? (

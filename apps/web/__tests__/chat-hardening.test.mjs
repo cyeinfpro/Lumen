@@ -122,7 +122,11 @@ test("upgrade and inpaint lazy UI keep visible recovery states", () => {
   match(banner, /query\.state\.error\) return 30_000/);
   match(banner, /query\.state\.data\?\.running \? 5000 : 60000/);
   match(lazyInpaint, /loading: \(\) => \(/);
-  match(lazyInpaint, /z-\[var\(--z-dialog\)\] bg-black\/60/);
+  match(
+    lazyInpaint,
+    /z-\[var\(--z-dialog\)\][^"]*bg-\[var\(--surface-scrim\)\]/,
+  );
+  match(lazyInpaint, /aria-busy="true"/);
 });
 
 test("asset prewarm scheduler is bounded and concurrency-limited", () => {
@@ -460,7 +464,7 @@ test("desktop image composer keeps high-frequency settings inline", () => {
   match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
 });
 
-test("mobile image composer exposes complete quick settings and advanced access", () => {
+test("mobile image composer exposes one summary entry and advanced settings", () => {
   const mobile = source(
     "src/components/ui/composer/mobile/MobileComposerPill.tsx",
   );
@@ -470,19 +474,27 @@ test("mobile image composer exposes complete quick settings and advanced access"
   const quickSettings = source(
     "src/components/ui/composer/mobile/MobileComposerExecutionControls.tsx",
   );
+  const summaryBar = source(
+    "src/components/ui/composer/shared/ExecutionSummaryBar.tsx",
+  );
+  const overlays = source(
+    "src/components/ui/composer/mobile/MobileComposerOverlays.tsx",
+  );
 
   match(mobile, /<MobileComposerExpanded/);
+  match(mobile, /setPanel\("advanced"\)/);
   match(expanded, /<MobileComposerExecutionControls/);
-  match(quickSettings, /function MobileImageQuickSettingsBar/);
-  match(quickSettings, /ariaLabel="生成数量"/);
-  match(quickSettings, /COUNT_OPTIONS = \[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\]/);
-  match(quickSettings, /aria-label=\{`宽高比 \$\{aspect\}`\}/);
-  match(quickSettings, /aria-haspopup="dialog"/);
-  match(quickSettings, /ariaLabel="输出尺寸"/);
-  match(quickSettings, /ariaLabel="生成质量"/);
-  match(quickSettings, /aria-label=\{fast \? "关闭 Fast" : "开启 Fast"\}/);
-  match(quickSettings, /aria-label="更多执行设置"/);
-  match(quickSettings, /onClick=\{onAdjust\}/);
+  match(expanded, /summary=\{executionSummary\}/);
+  match(expanded, /onAdjust=\{onOpenAdvanced\}/);
+  match(quickSettings, /<ExecutionSummaryBar/);
+  match(quickSettings, /summary=\{summary\}/);
+  match(quickSettings, /compact/);
+  match(quickSettings, /onAdjust=\{onAdjust\}/);
+  match(summaryBar, /aria-label=\{summary\.text\}/);
+  match(summaryBar, /onClick=\{onAdjust\}/);
+  match(summaryBar, />\s*调整\s*</);
+  match(overlays, /open=\{panel === "advanced"\}/);
+  match(overlays, /<MobileAdvancedSettings/);
 });
 
 test("desktop studio uses one compact control family and aligned content rails", () => {

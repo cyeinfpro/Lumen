@@ -44,7 +44,7 @@ export function NodeActivityBar({
     return (
       <span
         aria-hidden
-        className="absolute inset-x-0 top-0 z-10 h-1 rounded-t-[var(--radius-card)] bg-[var(--danger)]"
+        className="absolute inset-x-0 top-0 z-[var(--z-header)] h-1 rounded-t-[var(--radius-card)] bg-[var(--danger)]"
       />
     );
   }
@@ -52,7 +52,7 @@ export function NodeActivityBar({
     return (
       <span
         aria-hidden
-        className="absolute inset-x-0 top-0 z-10 h-1 rounded-t-[var(--radius-card)] bg-[var(--warning)]"
+        className="absolute inset-x-0 top-0 z-[var(--z-header)] h-1 rounded-t-[var(--radius-card)] bg-[var(--warning)]"
       />
     );
   }
@@ -60,7 +60,7 @@ export function NodeActivityBar({
   return (
     <span
       aria-hidden
-      className="absolute inset-x-0 top-0 z-10 h-1 animate-pulse rounded-t-[var(--radius-card)] bg-[var(--accent)] motion-reduce:animate-none"
+      className="absolute inset-x-0 top-0 z-[var(--z-header)] h-1 animate-pulse rounded-t-[var(--radius-card)] bg-[var(--accent)] motion-reduce:animate-none"
     />
   );
 }

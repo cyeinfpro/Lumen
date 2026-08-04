@@ -3,7 +3,7 @@
 // BottomSheet · spec §9.1
 // - snapPoints: ("auto" | "NN%" | px)[]，在给定点之间拖拽切换
 // - 顶部 28×4 handle 灰条，拖 handle 切换 snap；拖 sheet 其它区域且内部 scrollTop===0 时也可下拉关闭
-// - 遮罩 bg-black/50 backdrop-blur-sm，背景点击关闭
+// - 遮罩使用 surface scrim 与轻量模糊，背景点击关闭
 // - role=dialog aria-modal，focus trap（Tab 循环），Esc 关闭，之前焦点恢复
 // - 内部滚动与外部拖拽冲突：sheet 内容滚到顶才触发关闭
 //
@@ -614,7 +614,7 @@ function BottomSheetLayer({
             />
           </div>
 
-          <div className="absolute right-1 top-0 z-20">
+          <div className="absolute right-1 top-0 z-[var(--z-tray)]">
             <Pressable
               size="default"
               minHit

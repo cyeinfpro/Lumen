@@ -34,14 +34,14 @@ export function Chip({
         "relative min-h-11 px-3 rounded-full gap-1.5",
         "text-caption leading-none whitespace-nowrap font-medium",
         active
-          ? "bg-[rgba(242,169,58,0.15)] text-[var(--amber-300)] border border-[rgba(242,169,58,0.40)]"
+          ? "bg-accent-soft text-accent border border-accent-border"
           : "bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border-subtle)]",
         className,
       ].join(" ")}
       {...rest}
     >
-      {icon && <span className="relative z-[1] inline-flex items-center">{icon}</span>}
-      {children && <span className="relative z-[1]">{children}</span>}
+      {icon && <span className="relative inline-flex items-center">{icon}</span>}
+      {children && <span className="relative">{children}</span>}
     </Pressable>
   );
 }

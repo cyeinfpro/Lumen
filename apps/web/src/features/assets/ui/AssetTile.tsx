@@ -465,10 +465,10 @@ function GenerationTileMedia({
       ) : (
         <ImageLoadFailure onRetry={onRetry} />
       )}
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/20 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[var(--media-control-bg)] via-transparent to-[var(--surface-scrim)] opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
       {/* @ui-governance-allow media: age metadata overlays the generated asset. */}
       {model.age && (
-        <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-black/45 px-1.5 py-1 type-caption tabular-nums text-white/82 opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
+        <span className="pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-1 type-caption tabular-nums text-[var(--media-control-fg)] opacity-0 backdrop-blur-md transition-opacity duration-200 group-hover:opacity-100">
           {model.age}
         </span>
       )}
@@ -478,8 +478,8 @@ function GenerationTileMedia({
             // @ui-governance-allow media: selection control overlays the asset thumbnail.
             "absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur-md transition-colors md:h-8 md:w-8",
             selected
-              ? "border-[rgba(242,169,58,0.55)] bg-[var(--amber-400)] text-black"
-              : "border-white/20 bg-black/45 text-white/80",
+              ? "border-accent-border bg-[var(--accent)] text-[var(--accent-on)]"
+              : "border-[var(--border-strong)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)]",
           )}
           aria-hidden
         >
@@ -545,7 +545,7 @@ function GenerationTileMetadata({
           </span>
         )}
         {item.fast && (
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-[rgba(242,169,58,0.18)] bg-[rgba(242,169,58,0.12)] px-1.5 py-px type-caption font-medium text-[var(--amber-300)]">
+          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] border border-accent-border bg-accent-soft px-1.5 py-px type-caption font-medium text-accent">
             <Zap className="h-2.5 w-2.5" />
             快速
           </span>
@@ -671,7 +671,7 @@ function TileAction({
       }}
       className={cn(
         // @ui-governance-allow media: quick action overlays the generated asset.
-        "pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-white/10 bg-black/50 text-white shadow-[var(--shadow-2)] backdrop-blur-md transition-[background-color,transform] hover:bg-black/70 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9",
+        "pointer-events-auto inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] shadow-[var(--shadow-2)] backdrop-blur-md transition-[filter,transform] hover:brightness-110 active:scale-95 focus-visible:outline-none lg:h-9 lg:w-9",
       )}
     >
       {children}

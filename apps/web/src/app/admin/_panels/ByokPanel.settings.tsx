@@ -123,7 +123,7 @@ function ModeCard({
           className={
             "flex h-7 w-7 items-center justify-center rounded-[var(--radius-card)] " +
             (active
-              ? "bg-[var(--accent)] text-black"
+              ? "bg-[var(--accent)] text-[var(--accent-on)]"
               : "bg-[var(--bg-2)] text-[var(--fg-1)]")
           }
         >

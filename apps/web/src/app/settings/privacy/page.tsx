@@ -7,7 +7,7 @@
 //
 // 交互要点：
 // - 分区卡片（导出 / 会话 / 危险区），每个区独立 header + 描述
-// - 删除账号使用内嵌二次确认（非 window.confirm）
+// - 删除账号使用内嵌二次确认
 // - 会话列表踢下线同样走内嵌确认
 
 import { useEffect, useMemo, useRef, useState } from "react";

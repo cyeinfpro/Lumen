@@ -1,6 +1,6 @@
 "use client";
 
-// 单条会话 item：hover 出 more 菜单，点击菜单再确认（内嵌 popover，不用 window.confirm）。
+// 单条会话 item：hover 出 more 菜单，点击菜单后使用内嵌确认。
 // 用 ref 挂载 focus/scrollIntoView，方便父级键盘导航定位。
 
 import { forwardRef, useEffect, useRef, useState } from "react";

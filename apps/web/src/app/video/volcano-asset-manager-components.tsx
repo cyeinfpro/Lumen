@@ -705,7 +705,7 @@ export function UploadArea({
           accept=".png,.jpg,.jpeg,.webp,.mp4,.mov,image/png,image/jpeg,image/webp,video/mp4,video/quicktime"
           aria-label="选择火山虚拟素材文件"
           disabled={Boolean(disabledReason)}
-          className="absolute inset-0 z-10 cursor-pointer opacity-0 focus-visible:outline-none disabled:cursor-not-allowed"
+          className="absolute inset-0 z-[var(--z-header)] cursor-pointer opacity-0 focus-visible:outline-none disabled:cursor-not-allowed"
           onChange={(event) => {
             onFiles(Array.from(event.target.files ?? []));
             event.target.value = "";

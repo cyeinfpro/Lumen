@@ -140,7 +140,7 @@ function AssetCardActions({
   disabled: boolean;
 }) {
   return (
-    <div className="absolute right-1 top-1 z-20 flex">
+    <div className="absolute right-1 top-1 z-[var(--z-header)] flex">
       <IconButton
         aria-label={`重命名云端素材 ${asset.name || "未命名素材"}`}
         tooltip="重命名"

@@ -48,7 +48,7 @@ export function StreamSearchBar({
   return (
     <div className={`stream-collapse ${open ? "open" : ""}`}>
       <div>
-        <div className="sticky top-0 z-10 bg-[var(--bg-0)]/88 px-3 py-2 backdrop-blur-xl md:static md:bg-transparent md:backdrop-blur-none">
+        <div className="sticky top-0 z-[var(--z-header)] bg-[var(--bg-0)]/88 px-3 py-2 backdrop-blur-xl md:static md:bg-transparent md:backdrop-blur-none">
           <div
             className={[
               "flex min-h-11 items-center gap-2 px-3",

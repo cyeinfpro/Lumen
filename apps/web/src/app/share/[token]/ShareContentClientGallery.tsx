@@ -302,7 +302,7 @@ export function ShareLightbox({
       ref={dialogRootRef}
       tabIndex={-1}
       style={lightboxStyle}
-      className="fixed inset-0 z-[var(--z-lightbox)] flex bg-black text-[var(--media-control-fg)] share-dialog-in outline-none"
+      className="fixed inset-0 z-[var(--z-lightbox)] flex bg-[var(--surface-media)] text-[var(--media-control-fg)] share-dialog-in outline-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby={dialogTitleId}
@@ -620,8 +620,8 @@ function ShareImageLoadingOverlay({
       className={cn(
         "pointer-events-none absolute inset-0 flex items-center justify-center bg-[linear-gradient(110deg,rgba(255,255,255,0.05),rgba(255,255,255,0.12),rgba(255,255,255,0.05))] bg-[length:220%_100%] animate-lumen-shimmer",
         surface === "lightbox"
-          ? "bg-black/[0.18]"
-          : "bg-white/[0.035]",
+          ? "bg-[var(--surface-scrim)]"
+          : "bg-[var(--surface-selected)]",
       )}
     >
       {surface === "lightbox" ? (

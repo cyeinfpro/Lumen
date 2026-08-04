@@ -423,7 +423,7 @@ export function ModelLibraryGenerator({
       </div>
 
       <GenerationSubmitControls
-        className="-mx-3 sticky bottom-0 z-20 mt-1 md:hidden"
+        className="-mx-3 sticky bottom-0 z-[var(--z-composer)] mt-1 md:hidden"
         count={count}
         generating={generating}
         mobile
