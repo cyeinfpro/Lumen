@@ -196,17 +196,17 @@ export function BackupsPanel() {
             {/* 桌面端表格 */}
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
               <table className="w-full type-body-sm">
-                <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+                <thead className="type-caption text-[var(--fg-2)] border-b border-[var(--border)]">
                   <tr>
-                    <th className="text-left py-3 px-4 font-medium">时间</th>
-                    <th className="text-left py-3 px-4 font-medium">相对</th>
-                    <th className="text-right py-3 px-4 font-medium">
+                    <th className="text-left py-2.5 px-4 font-normal">时间</th>
+                    <th className="text-left py-2.5 px-4 font-normal">相对</th>
+                    <th className="text-right py-2.5 px-4 font-normal">
                       <span className="inline-flex items-center gap-1">
                         <Database className="w-3 h-3" /> 数据库
                       </span>
                     </th>
-                    <th className="text-right py-3 px-4 font-medium">缓存</th>
-                    <th className="text-right py-3 px-4 font-medium">操作</th>
+                    <th className="text-right py-2.5 px-4 font-normal">缓存</th>
+                    <th className="text-right py-2.5 px-4 font-normal">操作</th>
                   </tr>
                 </thead>
                 <tbody>

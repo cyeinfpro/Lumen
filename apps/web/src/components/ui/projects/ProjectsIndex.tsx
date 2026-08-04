@@ -593,7 +593,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
 
         <div className="mt-3 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <p className="line-clamp-2 type-body font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-accent">
+            <p className="line-clamp-2 type-body font-medium leading-[1.35] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)]">
               {item.title || "服饰模特图"}
             </p>
             <p className="mt-1.5 flex items-center gap-2 type-caption text-[var(--fg-2)]">

@@ -86,7 +86,7 @@ function StatTile({
   icon: LucideIcon;
   label: string;
   value: number;
-  tone: "amber" | "emerald" | "red" | "sky";
+  tone: "amber" | "emerald" | "red" | "sky" | "neutral";
 }) {
   const toneClass = {
     amber:
@@ -94,6 +94,7 @@ function StatTile({
     emerald: "text-success bg-success-soft border-success-border",
     red: "text-danger bg-danger-soft border-danger-border",
     sky: "text-info bg-info-soft border-info-border",
+    neutral: "text-[var(--fg-2)] bg-[var(--bg-2)] border-[var(--border)]",
   }[tone];
 
   return (
@@ -110,7 +111,7 @@ function StatTile({
           <Icon className="h-3.5 w-3.5" />
         </span>
       }
-      className="bg-[var(--bg-2)]/70 p-3"
+      className="border-0 bg-transparent p-2 shadow-none"
     />
   );
 }
@@ -270,7 +271,7 @@ export function RequestEventsHeader({
           <StatTile icon={Activity} label="进行中" value={summary.active} tone="sky" />
           <StatTile icon={CheckCircle2} label="成功" value={summary.succeeded} tone="emerald" />
           <StatTile icon={AlertTriangle} label="失败" value={summary.failed} tone="red" />
-          <StatTile icon={ImageIcon} label="图片" value={summary.images} tone="amber" />
+          <StatTile icon={ImageIcon} label="图片" value={summary.images} tone="neutral" />
         </div>
       </div>
 

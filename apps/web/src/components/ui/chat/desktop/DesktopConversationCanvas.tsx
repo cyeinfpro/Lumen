@@ -281,7 +281,7 @@ export function DesktopConversationCanvas({
           id={`scene-${scene.anchorId}`}
           data-history-scroll-anchor={scene.anchorId}
           aria-label={`Scene ${String(scene.index).padStart(2, "0")}`}
-          className="relative py-2"
+          className="relative"
           style={
             shouldVirtualize
               ? undefined
@@ -299,7 +299,7 @@ export function DesktopConversationCanvas({
           />
           <div id={`scene-content-${scene.anchorId}`}>
             {!isCollapsed && (
-              <div className="flex flex-col gap-4 px-2 pb-5">
+              <div className="flex flex-col gap-5 px-2 pb-6">
                 {scene.user && <UserTurn msg={scene.user} />}
                 {scene.assistant && (
                   <AssistantTurn

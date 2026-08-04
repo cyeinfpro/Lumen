@@ -84,13 +84,19 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
             aria-label="颜色标签"
           />
         ) : null}
-        <Icon className="h-4 w-4 shrink-0 text-[var(--accent)]" aria-hidden />
+        <Icon
+          className={cn(
+            "h-4 w-4 shrink-0 transition-colors",
+            running ? "text-[var(--accent)]" : "text-[var(--fg-2)]",
+          )}
+          aria-hidden
+        />
         <div className="min-w-0 flex-1">
           <InlineNodeTitle
             key={`${definition.id}:${definition.title}`}
             data={data}
           />
-          <p className="truncate type-mono-meta text-[var(--fg-3)]">
+          <p className="mt-0.5 truncate type-caption text-[var(--fg-3)]">
             {displayLabel}
           </p>
         </div>
@@ -122,8 +128,8 @@ function CanvasNodeBody({
         <CanvasNodesContent data={data} />
       </div>
       <CanvasNodeExecutionProgress execution={data.execution} />
-      <footer className="flex min-h-10 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3">
-        <span className="type-caption truncate text-[var(--fg-2)]">
+      <footer className="flex min-h-11 items-center justify-between gap-2 border-t border-[var(--border-subtle)] px-3">
+        <span className="type-caption truncate text-[var(--fg-3)]">
           {nodeSummary(data)}
         </span>
         <NodeFooterAction data={data} />
@@ -218,7 +224,7 @@ function FrameCanvasNode({ data, selected }: NodeProps<CanvasFlowNode>) {
             aria-label="颜色标签"
           />
         ) : null}
-        <Icon className="h-4 w-4 text-[var(--accent)]" aria-hidden />
+        <Icon className="h-4 w-4 text-[var(--fg-2)]" aria-hidden />
         <InlineNodeTitle
           key={`${definition.id}:${definition.title}`}
           data={data}

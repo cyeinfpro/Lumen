@@ -219,7 +219,7 @@ export function GlobalTaskTray() {
                     "absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 type-caption font-semibold",
                     badge.active
                       ? "bg-[var(--accent)] text-[var(--accent-on)]"
-                      : "bg-[var(--fg-2)] text-[var(--bg-0)]",
+                      : "border border-[var(--border-strong)] bg-[var(--bg-2)] text-[var(--fg-1)]",
                   )}
                 >
                   {badge.count}

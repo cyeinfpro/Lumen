@@ -23,6 +23,7 @@ import type {
   AdminRequestEventOut,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { StatusBadge as PrimitiveStatusBadge } from "@/components/ui/primitives";
 import {
   EmptyBlock,
   ErrorBlock,
@@ -116,7 +117,7 @@ export function RequestEventsPanel() {
   };
 
   return (
-    <section className="space-y-4" aria-labelledby="request-events-title">
+    <section className="space-y-5" aria-labelledby="request-events-title">
       <RequestEventsHeader
         rowsCount={rows.length}
         filteredCount={filtered.length}
@@ -159,16 +160,16 @@ export function RequestEventsPanel() {
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] lg:block">
               <table className="w-full min-w-[1040px] type-body-sm">
-                <thead className="sticky top-0 z-[var(--z-header)] border-b border-[var(--border)] bg-[var(--bg-1)]/95 type-caption text-[var(--fg-1)] backdrop-blur">
+                <thead className="sticky top-0 z-[var(--z-header)] border-b border-[var(--border)] bg-[var(--bg-1)]/95 type-caption text-[var(--fg-2)] backdrop-blur">
                   <tr>
-                    <th className="w-9 py-3 px-3" />
-                    <th className="text-left py-3 px-3 font-medium">结束时间</th>
-                    <th className="text-left py-3 px-3 font-medium">事件</th>
-                    <th className="text-left py-3 px-3 font-medium">模型</th>
-                    <th className="text-left py-3 px-3 font-medium">上游</th>
-                    <th className="text-left py-3 px-3 font-medium">用户</th>
-                    <th className="text-left py-3 px-3 font-medium">图片</th>
-                    <th className="text-right py-3 px-3 font-medium">耗时</th>
+                    <th className="w-9 py-2.5 px-3" />
+                    <th className="text-left py-2.5 px-3 font-normal">结束时间</th>
+                    <th className="text-left py-2.5 px-3 font-normal">事件</th>
+                    <th className="text-left py-2.5 px-3 font-normal">模型</th>
+                    <th className="text-left py-2.5 px-3 font-normal">上游</th>
+                    <th className="text-left py-2.5 px-3 font-normal">用户</th>
+                    <th className="text-left py-2.5 px-3 font-normal">图片</th>
+                    <th className="text-right py-2.5 px-3 font-normal">耗时</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -362,15 +363,7 @@ function RequestEventsResultState({
 function StatusBadge({ status }: { status: string }) {
   const meta = getStatusMeta(status);
   return (
-    <span
-      className={cn(
-        "inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-control)] border px-1.5 py-0.5 type-caption",
-        meta.badge,
-      )}
-    >
-      <span className={cn("h-1.5 w-1.5 rounded-full", meta.dot)} />
-      {meta.label}
-    </span>
+    <PrimitiveStatusBadge status={status} label={meta.label} className="w-fit" />
   );
 }
 

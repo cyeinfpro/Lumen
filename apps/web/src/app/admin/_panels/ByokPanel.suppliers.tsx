@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Check,
   ChevronDown,
   Pencil,
   Plus,
@@ -11,7 +10,7 @@ import {
   TestTube2,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, StatusBadge } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import type {
   ApiSupplierTemplateOut,
@@ -211,15 +210,10 @@ function SupplierRow({
             <h3 className="type-body-sm text-[var(--fg-0)] truncate">
               {supplier.name}
             </h3>
-            {supplier.enabled ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] type-caption bg-success-soft text-success border border-success-border">
-                <Check className="w-3 h-3" /> 启用
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] type-caption bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
-                已禁用
-              </span>
-            )}
+            <StatusBadge
+              status={supplier.enabled ? "enabled" : "disabled"}
+              label={supplier.enabled ? "启用" : "已禁用"}
+            />
           </div>
           <p className="type-caption text-[var(--fg-2)] truncate mt-0.5">
             {safeHostname(supplier.base_url)} · {supplier.purposes.join("/")}

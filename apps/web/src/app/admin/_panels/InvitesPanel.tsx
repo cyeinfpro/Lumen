@@ -399,15 +399,15 @@ export function InvitesPanel() {
           {/* 桌面端表格 */}
           <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
             <table className="w-full type-body-sm">
-              <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+              <thead className="type-caption text-[var(--fg-2)] border-b border-[var(--border)]">
                 <tr>
-                  <th className="text-left py-3 px-4 font-medium">链接</th>
-                  <th className="text-left py-3 px-4 font-medium">邮箱</th>
-                  <th className="text-left py-3 px-4 font-medium">角色</th>
-                  <th className="text-left py-3 px-4 font-medium">状态</th>
-                  <th className="text-left py-3 px-4 font-medium">过期</th>
-                  <th className="text-left py-3 px-4 font-medium">创建</th>
-                  <th className="text-right py-3 px-4 font-medium">操作</th>
+                  <th className="text-left py-2.5 px-4 font-normal">链接</th>
+                  <th className="text-left py-2.5 px-4 font-normal">邮箱</th>
+                  <th className="text-left py-2.5 px-4 font-normal">角色</th>
+                  <th className="text-left py-2.5 px-4 font-normal">状态</th>
+                  <th className="text-left py-2.5 px-4 font-normal">过期</th>
+                  <th className="text-left py-2.5 px-4 font-normal">创建</th>
+                  <th className="text-right py-2.5 px-4 font-normal">操作</th>
                 </tr>
               </thead>
               <tbody>

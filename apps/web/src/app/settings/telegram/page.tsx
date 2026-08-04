@@ -37,12 +37,12 @@ export default function TelegramSettingsPage() {
   return (
     <SettingsShell title="Telegram" subtitle="机器人">
       <div
-        className="page-frame space-y-5 pb-4 sm:space-y-7"
+        className="page-frame space-y-6 pb-4 sm:space-y-8"
         data-width="settings"
       >
         <Card variant="subtle" padding="lg" className="space-y-4 max-sm:p-4">
           <div className="flex items-start gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
               <MessageCircle className="h-4 w-4" />
             </div>
             <div className="min-w-0 flex-1">

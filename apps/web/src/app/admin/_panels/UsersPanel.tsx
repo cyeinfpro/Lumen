@@ -142,16 +142,16 @@ export function UsersPanel() {
           <>
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
               <table className="w-full type-body-sm">
-                <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+                <thead className="type-caption text-[var(--fg-2)] border-b border-[var(--border)]">
                   <tr>
-                    <th className="text-left py-3 px-4 font-medium">邮箱</th>
-                    <th className="text-left py-3 px-4 font-medium">角色</th>
-                    <th className="text-left py-3 px-4 font-medium">名称</th>
-                    <th className="text-left py-3 px-4 font-medium">注册</th>
-                    <th className="text-right py-3 px-4 font-medium">生成</th>
-                    <th className="text-right py-3 px-4 font-medium">对话</th>
-                    <th className="text-right py-3 px-4 font-medium">消息</th>
-                    <th className="text-right py-3 px-4 font-medium">操作</th>
+                    <th className="text-left py-2.5 px-4 font-normal">邮箱</th>
+                    <th className="text-left py-2.5 px-4 font-normal">角色</th>
+                    <th className="text-left py-2.5 px-4 font-normal">名称</th>
+                    <th className="text-left py-2.5 px-4 font-normal">注册</th>
+                    <th className="text-right py-2.5 px-4 font-normal">生成</th>
+                    <th className="text-right py-2.5 px-4 font-normal">对话</th>
+                    <th className="text-right py-2.5 px-4 font-normal">消息</th>
+                    <th className="text-right py-2.5 px-4 font-normal">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -178,13 +178,13 @@ export function UsersPanel() {
                       <td className="py-3 px-4 text-[var(--fg-1)] font-mono type-caption tabular-nums whitespace-nowrap">
                         {formatISODate(user.created_at)}
                       </td>
-                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-1)] font-mono tabular-nums">
                         {user.generations_count}
                       </td>
-                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-1)] font-mono tabular-nums">
                         {user.completions_count}
                       </td>
-                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums">
+                      <td className="py-3 px-4 text-right text-[var(--fg-1)] font-mono tabular-nums">
                         {user.messages_count}
                       </td>
                       <td className="py-3 px-4">

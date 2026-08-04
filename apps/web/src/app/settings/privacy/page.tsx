@@ -84,16 +84,16 @@ function SectionHeader({
   tone?: "neutral" | "danger";
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-baseline gap-3">
       <h2
       className={
-          "type-caption font-medium " +
+          "type-overline " +
           (tone === "danger" ? "text-danger" : "text-[var(--fg-1)]")
         }
       >
         {title}
       </h2>
-      <div className="h-px flex-1 bg-[var(--border-subtle)]" />
+      <div className="h-px flex-1 self-center bg-[var(--border-subtle)]" />
       {description && (
         <p className="type-caption text-[var(--fg-2)]">{description}</p>
       )}
@@ -147,7 +147,7 @@ function ExportSection() {
       <SectionHeader title="导出我的数据" />
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 backdrop-blur-sm p-5 flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-start gap-3 flex-1 min-w-[200px]">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
             <Download className="w-4 h-4" />
           </div>
           <div>
@@ -313,7 +313,7 @@ function SessionRow({
       className="flex flex-col gap-3 px-4 py-4 transition-colors hover:bg-[var(--bg-2)]/50 sm:px-5 md:flex-row md:items-start md:justify-between md:gap-4"
     >
       <div className="min-w-0 flex-1 flex items-start gap-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]">
           <Monitor className="w-4 h-4" />
         </div>
         <div className="min-w-0">
@@ -439,7 +439,7 @@ function DangerSection({
       <SectionHeader title="危险区" tone="danger" />
       <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-5 space-y-4">
         <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-danger-border bg-danger-soft text-danger">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-danger-border bg-danger-soft text-danger">
             <AlertTriangle className="w-4 h-4" />
           </div>
           <div>

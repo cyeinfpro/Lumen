@@ -32,6 +32,9 @@ export function AccountRow({
   onClick,
   toggle,
   destructive,
+  // grouped 为语义标记 prop：分组容器（AccountCenterMenu）统一控制边框，
+  // 行内不再据此区分 padding；保留以兼容既有调用方。
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   grouped,
   last,
   className,
@@ -89,8 +92,7 @@ export function AccountRow({
   );
 
   const baseClass = cn(
-    "flex min-h-11 w-full items-center gap-3 py-2",
-    grouped ? "px-4" : "px-4",
+    "flex min-h-11 w-full items-center gap-3 px-4 py-2.5",
     !last && "border-b border-[var(--border-subtle)]",
     "text-left transition-colors active:bg-[var(--bg-2)] motion-reduce:transition-none",
     className,
@@ -139,19 +141,19 @@ function ToggleSwitch({
       aria-checked={checked}
       aria-label={ariaLabel}
       className={cn(
-        "relative inline-flex items-center shrink-0",
-        "h-7 w-[46px] rounded-full transition-colors duration-200 motion-reduce:transition-none",
+        "relative inline-flex shrink-0 items-center",
+        "h-6 w-11 rounded-full transition-colors duration-[var(--dur-quick)] motion-reduce:transition-none",
         checked
           ? "bg-accent"
-          : "bg-[var(--bg-3)] border border-[var(--border-subtle)]",
+          : "border border-[var(--border-subtle)] bg-[var(--bg-3)]",
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full bg-[var(--accent-on)] shadow-[var(--shadow-1)]",
-          "transition-transform duration-200 motion-reduce:transition-none",
-          checked ? "translate-x-[18px]" : "translate-x-0",
+          "absolute left-[3px] top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-[var(--accent-on)] shadow-[var(--shadow-1)]",
+          "transition-transform duration-[var(--dur-quick)] motion-reduce:transition-none",
+          checked ? "translate-x-[13px]" : "translate-x-0",
         )}
       />
     </span>

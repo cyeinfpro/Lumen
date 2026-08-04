@@ -29,9 +29,9 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
             % · {currentIndex + 1} / {STEPS.length}
           </span>
         </div>
-        <div className="mt-3 h-px w-full bg-[var(--border)]">
+        <div className="mt-3 h-0.5 w-full overflow-hidden rounded-full bg-[var(--bg-3)]">
           <div
-            className="h-px bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
+            className="h-full rounded-full bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
             style={{ width: `${progress * 100}%` }}
           />
         </div>
@@ -76,9 +76,9 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
           </span>
         </div>
       </div>
-      <div className="mt-3 h-px w-full bg-[var(--border)]">
+      <div className="mt-3 h-0.5 w-full overflow-hidden rounded-full bg-[var(--bg-3)]">
         <div
-          className="h-px bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
+          className="h-full rounded-full bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
           style={{ width: `${progress * 100}%` }}
         />
       </div>

@@ -135,7 +135,7 @@ function ImageQuickSettingsBar({
           "border-[var(--border-subtle)] bg-[var(--bg-2)]",
         )}
       >
-        <span className="type-label shrink-0 px-1 text-accent">
+        <span className="type-label shrink-0 px-1 text-[var(--fg-1)]">
           {summary.taskLabel}
         </span>
 

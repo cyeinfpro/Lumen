@@ -125,7 +125,6 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
           className={cn(
             "type-caption pointer-events-auto place-self-start rounded-full px-3.5 py-2 font-mono tabular-nums",
             "bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur-xl",
-            "shadow-[var(--shadow-2)]",
           )}
         >
           {props.currentIndex + 1} / {props.galleryLength}

@@ -11,15 +11,16 @@ export default function NotFound() {
       <div className="w-full max-w-md">
         <p
           aria-hidden="true"
-          className="type-display mb-2 select-none text-center text-[var(--fg-2)]"
+          className="type-display select-none text-center font-bold leading-none tracking-tight text-[var(--fg-3)]"
         >
           404
         </p>
-        <EmptyState
-          icon={<Compass className="w-5 h-5" aria-hidden="true" />}
-          title="找不到这个页面"
-          description="它可能被移走了，也可能你输错了地址。"
-          action={
+        <div className="mt-6">
+          <EmptyState
+            icon={<Compass className="w-5 h-5" aria-hidden="true" />}
+            title="找不到这个页面"
+            description="它可能被移走了，也可能你输错了地址。"
+            action={
             <Link
               href="/"
               className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
@@ -28,7 +29,8 @@ export default function NotFound() {
               返回首页
             </Link>
           }
-        />
+          />
+        </div>
       </div>
     </div>
   );

@@ -544,17 +544,17 @@ export function MobileComposerPill({
                 "flex items-center gap-2",
               )}
             >
-              <Badge
+              <span
                 aria-hidden
                 data-inline
-                tone={isImageMode ? "accent" : "info"}
                 className={cn(
                   "shrink-0 inline-flex items-center justify-center h-[18px] px-1.5 rounded-full",
-                  "type-overline leading-none",
+                  "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
+                  "type-overline leading-none text-[var(--fg-1)]",
                 )}
               >
                 {selectValue(isImageMode, "生图", "对话")}
-              </Badge>
+              </span>
               <textarea
                 ref={collapsedTextareaRef}
                 value={text}

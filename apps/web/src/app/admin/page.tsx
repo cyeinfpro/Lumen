@@ -544,7 +544,7 @@ function TabNav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
                         className={cn(
                           "h-3.5 w-3.5 shrink-0",
                           active
-                            ? "text-[var(--accent-on)]"
+                            ? "text-accent"
                             : "text-[var(--fg-2)]",
                         )}
                       />

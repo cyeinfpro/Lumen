@@ -70,7 +70,7 @@ export const ConversationUserTurn = memo(function ConversationUserTurn({
 }) {
   return (
     <ConversationTurn id={`msg-${msg.id}`} side="user">
-      <div className="flex items-start gap-3 border-l border-accent-border pl-4">
+      <div className="flex items-start gap-3 border-l border-[var(--border-strong)] pl-4">
         <div className="min-w-0 flex-1">
           {msg.attachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2">
@@ -366,12 +366,12 @@ function FinalImageFooter({
   tail: string;
 }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5 px-0.5">
       <Button
         variant="ghost"
         size="sm"
         onClick={onCopy}
-        className="min-w-0 flex-1 justify-start px-1 text-left type-caption tabular-nums text-[var(--fg-2)] hover:bg-transparent hover:text-[var(--fg-0)] font-mono"
+        className="min-w-0 flex-1 justify-start px-1 text-left type-caption tabular-nums text-[var(--fg-2)] hover:bg-transparent hover:text-[var(--fg-0)]"
         title={gen.prompt}
         aria-label="复制 prompt"
       >
@@ -421,7 +421,7 @@ export const FinalImage = memo(function FinalImage({
   return (
     <div
       className={cn(
-        "group flex w-full flex-col gap-1",
+        "group flex w-full flex-col gap-1.5",
         finalImageFrameClass(platform, inGrid, ratio),
       )}
       style={finalImageFrameStyle(platform, inGrid, ratio)}

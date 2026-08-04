@@ -88,7 +88,7 @@ export function WalletPageView({
 }) {
   return (
     <SettingsShell title="钱包" subtitle="余额与兑换码">
-      <div className="page-frame space-y-6" data-width="settings">
+      <div className="page-frame space-y-6 sm:space-y-8" data-width="settings">
         <LowBalanceNotice visible={model.lowBalance} />
         <WalletOverview
           wallet={model.wallet}
@@ -179,7 +179,7 @@ function WalletBalanceCard({
       aria-busy={state.isLoading || state.isRefreshing}
     >
       <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)]">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]">
           <CreditCard className="h-4 w-4" aria-hidden="true" />
         </div>
         <div>
@@ -197,15 +197,15 @@ function WalletBalanceCard({
           retrying={state.isRefreshing}
         />
       ) : (
-        <>
-          <p className="type-body-sm text-[var(--fg-2)]">
-            预扣 ¥{formatRmb(wallet?.hold?.rmb)}
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-[var(--border-subtle)] pt-3">
+          <p className="type-caption text-[var(--fg-2)]">
+            预扣 <span className="tabular-nums text-[var(--fg-1)]">¥{formatRmb(wallet?.hold?.rmb)}</span>
           </p>
-          <p className="type-caption font-mono tabular-nums text-[var(--fg-2)]">
+          <p className="type-caption tabular-nums text-[var(--fg-2)]">
             24h 变化 +¥{activity24h.topup.toFixed(2)} / -¥
             {activity24h.spend.toFixed(2)}
           </p>
-        </>
+        </div>
       )}
     </Card>
   );
@@ -365,10 +365,10 @@ function BillingKindGrid({ snapshot }: { snapshot: BillingSnapshotOut }) {
       {BILLING_KINDS.map(({ key, label }) => (
         <div
           key={key}
-          className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
+          className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4"
         >
           <p className="type-caption text-[var(--fg-2)]">{label}</p>
-          <p className="mt-1 type-card-title font-mono tabular-nums">
+          <p className="mt-1.5 type-card-title font-mono tabular-nums text-[var(--fg-0)]">
             ¥{microMoney(snapshot.by_kind_30d[key])}
           </p>
         </div>
@@ -402,11 +402,12 @@ function BillingWindowCard({
   const limitText = limit > 0 ? `¥${microMoney(limit)}` : "不限";
 
   return (
-    <div className="min-h-[112px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
-      <div className="flex items-center justify-between type-caption text-[var(--fg-2)]">
-        <span>{label} 限额</span>
-        <span>
-          ¥{microMoney(window?.used_micro)} / {limitText}
+    <div className="min-h-[112px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="type-caption text-[var(--fg-2)]">{label} 限额</span>
+        <span className="type-body-sm tabular-nums text-[var(--fg-0)]">
+          ¥{microMoney(window?.used_micro)}
+          <span className="type-caption text-[var(--fg-2)]"> / {limitText}</span>
         </span>
       </div>
       <div
@@ -415,7 +416,7 @@ function BillingWindowCard({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percentage}
-        className="mt-2 h-1.5 rounded-full bg-[var(--bg-2)]"
+        className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--bg-2)]"
       >
         <div
           className="h-full rounded-full bg-[var(--accent)]"
@@ -423,7 +424,7 @@ function BillingWindowCard({
         />
       </div>
       {window?.resets_at ? (
-        <p className="mt-2 type-caption text-[var(--fg-2)]">
+        <p className="mt-3 type-caption text-[var(--fg-2)]">
           重置 {new Date(window.resets_at).toLocaleString()}
         </p>
       ) : null}
@@ -543,15 +544,20 @@ function TransactionRow({
         <p className="truncate type-body-sm text-[var(--fg-0)]">
           {formatKind(transaction.kind)}
         </p>
-        <p className="type-caption text-[var(--fg-2)]">
+        <p className="mt-0.5 type-caption text-[var(--fg-2)]">
           {new Date(transaction.created_at).toLocaleString()}
         </p>
       </div>
       <div className="max-w-[46vw] break-words text-right tabular-nums md:max-w-none">
-        <p className={positive ? "text-success" : "text-[var(--fg-0)]"}>
+        <p
+          className={
+            "type-body-sm font-medium " +
+            (positive ? "text-success" : "text-[var(--fg-0)]")
+          }
+        >
           {positive ? "+" : ""}¥{formatRmb(transaction.amount.rmb)}
         </p>
-        <p className="type-caption text-[var(--fg-2)]">
+        <p className="mt-0.5 type-caption text-[var(--fg-2)]">
           余额 ¥{formatRmb(transaction.balance_after.rmb)}
         </p>
       </div>
@@ -626,13 +632,13 @@ function RedemptionRow({ item }: { item: RedemptionUsageOut }) {
     <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-4 py-3">
       <div className="min-w-0">
         <p className="type-body-sm text-[var(--fg-0)]">兑换码充值</p>
-        <p className="type-caption text-[var(--fg-2)]">
+        <p className="mt-0.5 type-caption text-[var(--fg-2)]">
           {new Date(item.redeemed_at).toLocaleString()}
         </p>
       </div>
       <div className="text-right tabular-nums">
-        <p className="text-success">+¥{formatRmb(item.amount.rmb)}</p>
-        <p className="max-w-[44vw] truncate type-caption text-[var(--fg-2)] md:max-w-none">
+        <p className="type-body-sm font-medium text-success">+¥{formatRmb(item.amount.rmb)}</p>
+        <p className="mt-0.5 max-w-[44vw] truncate type-caption text-[var(--fg-2)] md:max-w-none">
           {item.code_id}
         </p>
       </div>
@@ -667,7 +673,7 @@ function OptionalQueryState({
   return (
     <div
       role="status"
-      className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 px-4 py-8 text-center type-body-sm text-[var(--fg-2)]"
+      className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 px-4 py-10 text-center type-body-sm text-[var(--fg-2)]"
     >
       {loadingText}
     </div>

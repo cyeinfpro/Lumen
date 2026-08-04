@@ -153,10 +153,9 @@ export function CanvasInspector({
   if (!node) {
     return (
       <div className="grid h-full min-h-0 place-items-center px-6 text-center">
-        <div>
-          <p className="type-page-kicker">检查器</p>
-          <h2 className="type-card-title mt-2">选择节点</h2>
-          <p className="type-body-sm mt-2 max-w-[240px] text-[var(--fg-2)]">
+        <div className="grid justify-items-center gap-2">
+          <h2 className="type-card-title">选择节点</h2>
+          <p className="type-body-sm max-w-[240px] text-[var(--fg-2)]">
             参数、输入绑定与历史输出会显示在这里。
           </p>
         </div>

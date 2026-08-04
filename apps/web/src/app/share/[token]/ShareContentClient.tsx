@@ -217,7 +217,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
     <div className="mx-auto flex w-full flex-col items-center gap-5 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] md:gap-7">
       <section className="page-header w-full">
         <div className="page-header-copy">
-          <p className="type-caption">公开画廊</p>
+          <p className="type-page-kicker">公开画廊</p>
           <h1 className="type-page-title">图片分享</h1>
           <div className="type-caption flex flex-wrap items-center gap-x-2.5 gap-y-1 tabular-nums">
             <span className="inline-flex items-center gap-1.5">
@@ -280,7 +280,7 @@ export function ShareContentClient({ data }: { data: PublicShareOut }) {
           />
         </div>
       ) : (
-        <div className="w-full columns-2 gap-1.5 min-[390px]:gap-2 sm:columns-3 md:columns-4 md:gap-3 xl:columns-5">
+        <div className="w-full columns-2 gap-2.5 min-[390px]:gap-3 sm:columns-3 md:columns-4 xl:columns-5">
           {images.map((image, index) => (
             <ShareImageTile
               key={image.id}

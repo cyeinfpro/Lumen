@@ -264,7 +264,7 @@ function ParamRow({
     <div className="grid min-w-0 grid-cols-[5.5rem_minmax(0,1fr)] items-baseline gap-2.5 py-0.5">
       <span
         className={cn(
-          "type-caption font-medium uppercase tracking-wider",
+          "type-caption font-sans font-medium",
           style.heading,
         )}
       >

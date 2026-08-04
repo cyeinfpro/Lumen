@@ -123,10 +123,9 @@ export function SettingsShell({
         >
           <aside className="hidden min-w-0 md:block">
             <div className="sticky top-4 border-r border-[var(--border-subtle)] pr-6">
-              <div className="mb-5 px-2">
-                <p className="type-page-kicker">偏好设置</p>
-                <h1 className="type-page-title-sm mt-1">设置</h1>
-                <p className="type-body-sm mt-1">账户、模型与系统偏好</p>
+              <div className="mb-4 px-2.5">
+                <h1 className="type-page-title-sm">设置</h1>
+                <p className="type-caption mt-1">账户、模型与系统偏好</p>
               </div>
               <nav aria-label="设置分类" className="grid gap-0.5">
                 {SETTINGS_NAV.map((item) => {
@@ -138,9 +137,9 @@ export function SettingsShell({
                       href={item.href}
                       aria-current={active ? "page" : undefined}
                       className={
-                        "relative flex min-h-11 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 type-body-sm font-medium transition-colors " +
+                        "relative flex min-h-10 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 type-body-sm transition-colors " +
                         (active
-                          ? "text-[var(--fg-0)] before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--accent)] before:content-['']"
+                          ? "bg-[var(--surface-selected)] font-medium text-[var(--fg-0)] before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--accent)] before:content-['']"
                           : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
                       }
                     >

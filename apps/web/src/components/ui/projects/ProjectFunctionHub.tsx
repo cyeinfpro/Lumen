@@ -254,7 +254,7 @@ function FeatureCard({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center border border-[var(--border)] bg-[var(--bg-0)] text-[var(--accent)]">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)] transition-colors duration-[var(--dur-base)] group-hover:border-[var(--border-strong)] group-hover:text-[var(--fg-0)]">
             <Icon className="h-5 w-5" strokeWidth={1.7} />
           </span>
           <div className="min-w-0">
@@ -392,7 +392,7 @@ function RecentProjects({
     <section id="recent-projects" className="mt-2 border-t border-[var(--border)] pt-4">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="type-page-kicker">最近项目</p>
+          <p className="type-page-kicker">继续创作</p>
           <h2 className="type-section-title mt-1">最近项目</h2>
         </div>
         <Link
@@ -443,7 +443,7 @@ function RecentProjectRow({ item }: { item: WorkflowRunListItem }) {
   return (
     <li className="list-row grid gap-3 px-0 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
       <div className="flex min-w-0 gap-3">
-        <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)]">
+        <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]">
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0">

@@ -37,7 +37,7 @@ interface AccountCenterMenuProps {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-4 pb-2 pt-6 type-caption font-medium text-[var(--fg-2)]">
+    <div className="px-4 pb-2 pt-6 type-overline text-[var(--fg-2)]">
       {children}
     </div>
   );

@@ -321,15 +321,15 @@ function RedemptionCodesContent({
     <>
       <div className="data-stack-on-mobile md:overflow-x-auto">
         <table className="w-full type-body-sm md:min-w-[980px]">
-          <thead className="text-left text-[var(--fg-2)]">
-            <tr className="border-b border-[var(--border-subtle)]">
-              <th className="px-4 py-2">前缀</th>
-              <th className="px-4 py-2">面额</th>
-              <th className="px-4 py-2">兑换</th>
-              <th className="px-4 py-2">状态</th>
-              <th className="px-4 py-2">批次</th>
-              <th className="px-4 py-2">备注</th>
-              <th className="px-4 py-2" />
+          <thead className="text-left type-caption">
+            <tr className="border-b border-[var(--border)]">
+              <th className="px-4 py-2.5 font-normal">前缀</th>
+              <th className="px-4 py-2.5 font-normal">面额</th>
+              <th className="px-4 py-2.5 font-normal">兑换</th>
+              <th className="px-4 py-2.5 font-normal">状态</th>
+              <th className="px-4 py-2.5 font-normal">批次</th>
+              <th className="px-4 py-2.5 font-normal">备注</th>
+              <th className="px-4 py-2.5 font-normal" />
             </tr>
           </thead>
           <tbody>
@@ -505,13 +505,13 @@ function RedemptionUsageContent({
   return (
     <div className="data-stack-on-mobile md:overflow-x-auto">
       <table className="w-full type-body-sm md:min-w-[720px]">
-        <thead className="text-left text-[var(--fg-2)]">
-          <tr className="border-b border-[var(--border-subtle)]">
-            <th className="px-4 py-2">用户</th>
-            <th className="px-4 py-2">面额</th>
-            <th className="px-4 py-2">流水</th>
-            <th className="px-4 py-2">IP 哈希</th>
-            <th className="px-4 py-2">时间</th>
+        <thead className="text-left type-caption">
+          <tr className="border-b border-[var(--border)]">
+            <th className="px-4 py-2.5 font-normal">用户</th>
+            <th className="px-4 py-2.5 font-normal">面额</th>
+            <th className="px-4 py-2.5 font-normal">流水</th>
+            <th className="px-4 py-2.5 font-normal">IP 哈希</th>
+            <th className="px-4 py-2.5 font-normal">时间</th>
           </tr>
         </thead>
         <tbody>

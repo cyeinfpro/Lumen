@@ -93,7 +93,7 @@ export function DesktopTopNav({
           aria-label="Lumen 首页"
         >
           <LumenMark className="text-[var(--accent)]" />
-          <span className="hidden type-card-title min-[1120px]:inline">
+          <span className="hidden type-nav font-semibold text-[var(--fg-0)] min-[1120px]:inline">
             Lumen
           </span>
         </Link>
@@ -156,7 +156,7 @@ function DesktopNavLink({
         "type-nav relative inline-flex h-10 cursor-pointer items-center whitespace-nowrap px-2.5 transition-colors min-[960px]:px-3",
         active
           ? "text-[var(--fg-0)]"
-          : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+          : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
       ].join(" ")}
     >
       {active ? (

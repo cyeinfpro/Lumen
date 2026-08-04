@@ -23,7 +23,7 @@ export function DesktopSceneDivider({
     <Button
       variant="ghost"
       size="sm"
-      className="mx-auto my-3 h-auto w-full max-w-[var(--content-composer)] justify-start gap-3 px-0 select-none hover:bg-transparent"
+      className="mx-auto my-4 h-auto w-full max-w-[var(--content-composer)] justify-start gap-3 px-0 select-none hover:bg-transparent"
       onClick={onToggle}
       aria-label={
         collapsed ? `${label}（已折叠，点击展开）` : `${label}（点击折叠）`
