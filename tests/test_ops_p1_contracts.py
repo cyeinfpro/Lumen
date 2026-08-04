@@ -726,6 +726,9 @@ def test_custom_deploy_root_maintenance_lock_blocks_all_ops(tmp_path: Path) -> N
                 "LUMEN_BACKUP_ROOT": str(backup_root),
                 "LUMEN_DEPLOY_ROOT": str(deploy_root),
                 "LUMEN_BACKUP_RESTORE_LOCKFILE": str(tmp_path / "backup-restore.lock"),
+                "LUMEN_SYSTEMD_RUNTIME_DIR": str(
+                    tmp_path / "no-systemd-runtime"
+                ),
             }
         )
         backup = subprocess.run(

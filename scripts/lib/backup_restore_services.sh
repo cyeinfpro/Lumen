@@ -23,7 +23,7 @@ lumen_systemd_writer_running_state() {
             return 0
             ;;
         auto)
-            if [ ! -d /run/systemd/system ]; then
+            if [ ! -d "${LUMEN_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}" ]; then
                 printf 'absent\n'
                 return 0
             fi
@@ -125,12 +125,13 @@ lumen_running_site_services() {
 lumen_stop_services() {
     [ "$#" -gt 0 ] || return 0
     if command -v lumen_compose >/dev/null 2>&1; then
+        local rc=0
         if printf '%s\n' "$@" | grep -Fxq tgbot; then
-            lumen_compose --profile tgbot stop "$@"
+            lumen_compose --profile tgbot stop "$@" || rc=$?
         else
-            lumen_compose stop "$@"
+            lumen_compose stop "$@" || rc=$?
         fi
-        return
+        return "${rc}"
     fi
     local service
     local -a containers=()
@@ -143,12 +144,13 @@ lumen_stop_services() {
 lumen_start_services() {
     [ "$#" -gt 0 ] || return 0
     if command -v lumen_compose >/dev/null 2>&1; then
+        local rc=0
         if printf '%s\n' "$@" | grep -Fxq tgbot; then
-            lumen_compose --profile tgbot start "$@"
+            lumen_compose --profile tgbot start "$@" || rc=$?
         else
-            lumen_compose start "$@"
+            lumen_compose start "$@" || rc=$?
         fi
-        return
+        return "${rc}"
     fi
     local service
     local -a containers=()
