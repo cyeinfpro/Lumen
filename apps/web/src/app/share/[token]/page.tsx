@@ -201,7 +201,7 @@ function errorMessageFromPayload(payload: unknown, fallback: string): string {
 function ShareShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="page-shell">
-      <header className="adaptive-material sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+      <header className="sticky top-0 z-10 border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
         <div className="safe-x-page-wide mx-auto flex min-h-14 max-w-6xl items-center justify-between gap-3">
           <Link
             href="/"

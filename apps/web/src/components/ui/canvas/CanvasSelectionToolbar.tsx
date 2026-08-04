@@ -303,7 +303,7 @@ function ToolbarMenu({
           aria-label={label}
           onKeyDown={(event) => handleMenuKeyDown(event, menuRef.current)}
           className={cn(
-            "surface-panel animate-fade-in absolute top-[calc(100%+6px)] z-[var(--z-popover)] min-w-40 p-1",
+            "surface-panel animate-fade-in absolute top-[calc(100%+6px)] z-[var(--z-dialog)] min-w-40 p-1",
             align === "start" ? "left-0" : "right-0",
           )}
         >

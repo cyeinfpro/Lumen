@@ -141,7 +141,7 @@ export function Tooltip({
               "pointer-events-none absolute z-[60]",
               "max-w-[min(20rem,calc(100vw-1rem))] whitespace-normal break-words px-2 py-1 text-center type-caption font-medium rounded-[var(--radius-control)]",
               "bg-[var(--bg-1)]/95 text-[var(--fg-0)] border border-[var(--border)]",
-              "adaptive-material shadow-lumen-pop backdrop-blur-md",
+              "shadow-lumen-pop backdrop-blur-md",
               SIDE_POS[side],
               className,
             )}

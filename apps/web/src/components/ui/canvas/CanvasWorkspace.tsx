@@ -605,7 +605,7 @@ function CanvasInspectorSurfaces({
       ) : null}
 
       {showTabletInspector ? (
-        <div className="pointer-events-none absolute inset-0 z-[var(--z-popover)] flex justify-end p-3">
+        <div className="pointer-events-none absolute inset-0 z-[var(--z-dialog)] flex justify-end p-3">
           <aside className="pointer-events-auto relative flex h-full w-[min(352px,calc(100vw-24px))] min-h-0 flex-col border border-[var(--border)] bg-[var(--bg-1)] shadow-[var(--shadow-2)]">
             <IconButton
               aria-label="关闭检查器"

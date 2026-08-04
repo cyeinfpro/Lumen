@@ -119,7 +119,7 @@ export function FavoriteOptionsForm({
               className={cn(
                 "inline-flex h-8 min-h-11 items-center rounded-[var(--radius-card)] border px-3 text-[12px] transition-colors",
                 gender === value
-                  ? "border-[var(--border-amber)] bg-[var(--amber-soft)] text-[var(--amber-300)]"
+                  ? "border-[var(--border-amber)] bg-accent-soft text-[var(--amber-300)]"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >

@@ -183,7 +183,7 @@ export function DesktopPopover({
             originClass(),
             "min-w-[220px] overflow-auto",
             "rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",
-            "adaptive-material shadow-[var(--shadow-2)] backdrop-blur-xl",
+            "shadow-[var(--shadow-2)] backdrop-blur-xl",
             "p-1",
             className,
           )}

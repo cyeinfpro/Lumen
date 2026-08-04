@@ -150,7 +150,7 @@ export function StudioContextBar({
             aria-modal="false"
             aria-labelledby={settingsTitleId}
             tabIndex={-1}
-            className="surface-panel adaptive-material absolute right-0 top-10 z-40 w-[min(320px,calc(100vw-24px))] origin-top-right p-2"
+            className="surface-panel absolute right-0 top-10 z-40 w-[min(320px,calc(100vw-24px))] origin-top-right bg-[var(--bg-0)]/96 p-2 backdrop-blur-xl"
           >
             <div className="px-2 pb-2 pt-1">
               <p

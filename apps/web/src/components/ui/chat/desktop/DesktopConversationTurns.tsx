@@ -207,7 +207,7 @@ function CopyButton({
         "after:absolute after:-inset-x-2.5 after:-inset-y-2.5 after:content-['']",
         "transition-all duration-150",
         copied
-          ? "opacity-100 px-1.5 text-[var(--ok,#30A46C)] bg-[var(--ok,#30A46C)]/8"
+          ? "opacity-100 px-1.5 text-success bg-success-soft"
           : cn(
               "opacity-0 group-hover/turn:opacity-60 hover:!opacity-100 px-1",
               "text-[var(--fg-3)] hover:text-[var(--fg-2)]",

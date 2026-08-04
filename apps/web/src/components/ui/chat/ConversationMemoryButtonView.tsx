@@ -51,7 +51,7 @@ function MemoryTrigger({
       disabled={!canQueryConversation}
       onClick={onToggleOpen}
       className={[
-        "inline-flex min-h-11 min-w-11 items-center justify-center gap-1 rounded-full transition-colors disabled:opacity-40",
+        "inline-flex max-sm:min-h-11 max-sm:min-w-11 items-center justify-center gap-1 rounded-full transition-colors disabled:opacity-40",
         compact ? "h-9 w-9" : "h-7 px-2",
         disabled
           ? "text-[var(--fg-3)] hover:bg-[var(--bg-3)]"
