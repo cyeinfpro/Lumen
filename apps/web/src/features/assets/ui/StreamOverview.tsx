@@ -177,7 +177,7 @@ export function StreamOverview({
   return (
     <section
       aria-label="图库概览"
-      className="toolbar-shell adaptive-material sticky top-0 z-20 bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
+      className="toolbar-shell sticky top-0 z-20 bg-[var(--bg-0)]/96 px-3 backdrop-blur-xl md:static md:bg-transparent md:px-0 md:backdrop-blur-none"
     >
       <div className="flex flex-col gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between md:gap-3">
         <div className="type-caption flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">

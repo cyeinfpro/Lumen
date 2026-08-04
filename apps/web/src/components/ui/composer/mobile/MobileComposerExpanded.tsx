@@ -250,7 +250,7 @@ export function MobileComposerExpanded({
                   onClick={() => onOpenAttachmentMenu(attachment.id)}
                   aria-label={`打开图 ${index + 1} 操作`}
                   aria-haspopup="dialog"
-                  className="absolute inset-0 z-10 rounded-[var(--radius-card)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
+                  className="absolute inset-0 z-10 rounded-[var(--radius-card)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
                 >
                   <span className="sr-only">打开附件操作</span>
                 </button>

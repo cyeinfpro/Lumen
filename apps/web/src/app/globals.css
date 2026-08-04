@@ -1342,7 +1342,6 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .adaptive-material,
   .surface-panel,
   .surface-dialog {
     -webkit-backdrop-filter: none !important;
@@ -1359,7 +1358,6 @@
     --surface-selected: color-mix(in srgb, var(--fg-0) 12%, transparent);
   }
 
-  .adaptive-material,
   .surface-card,
   .surface-panel,
   .surface-dialog,

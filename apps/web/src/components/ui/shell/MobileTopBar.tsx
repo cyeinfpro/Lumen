@@ -57,7 +57,7 @@ export function MobileTopBar({
     <header
       ref={ref}
       className={[
-        "adaptive-material sticky left-0 right-0 top-0 shrink-0 safe-x",
+        "sticky left-0 right-0 top-0 shrink-0 safe-x",
         "transition-[background-color,backdrop-filter,border-color] duration-[var(--dur-normal)]",
         showGlass
           ? "bg-[var(--bg-0)]/72 backdrop-blur-xl mobile-perf-surface border-b border-[var(--border-subtle)]"

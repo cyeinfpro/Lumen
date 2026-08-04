@@ -63,7 +63,7 @@ export function DesktopTopNav({
   return (
     <header
       className={[
-        "adaptive-material sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
+        "sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
         "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
         "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 backdrop-blur-lg",
       ].join(" ")}

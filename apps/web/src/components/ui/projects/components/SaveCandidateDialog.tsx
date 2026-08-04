@@ -3,7 +3,7 @@
 // Editorial 收藏到模特库表单：
 // - 不再用 BookmarkPlus 大图标做 prefix；改为 mono eyebrow + unified title
 // - input/select 走 underline 极简（h-10 + border-b），去 h-9 rounded-md bg-[var(--bg-1)]
-// - chip 去 amber-soft 填充，改为选中 amber 文字 + amber 下划线
+// - chip 去 accent-soft 填充，改为选中 accent 文字 + accent 下划线
 // - 表单 section 之间用 hairline 分隔
 
 import { useState } from "react";
