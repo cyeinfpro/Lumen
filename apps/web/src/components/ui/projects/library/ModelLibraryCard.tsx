@@ -12,6 +12,7 @@ import Image from "next/image";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { MediaControlButton } from "@/components/ui/primitives/MediaControlButton";
 import { Spinner } from "@/components/ui/primitives/Spinner";
 import { toast } from "@/components/ui/primitives/Toast";
 import {
@@ -219,17 +220,15 @@ function ModelLibrarySelectionControl({
 }) {
   if (!onToggleSelected) return null;
   return (
-    /* @ui-governance-allow media: selection control overlays the model thumbnail. */
-    <button
-      type="button"
+    <MediaControlButton
+      size="sm"
       onClick={onToggleSelected}
       aria-label={selected ? "取消选择" : "选择模特"}
       className={cn(
-        // @ui-governance-allow media
-        "absolute left-2 top-2 z-10 inline-flex h-11 w-11 items-center justify-center rounded-full border backdrop-blur transition-colors md:h-8 md:w-8",
+        "absolute left-2 top-2 z-[var(--z-header)] border",
         selected
-          ? "border-[var(--border-amber)] bg-[var(--accent)] text-[var(--accent-on)]"
-          : "border-white/40 bg-black/35 text-white hover:bg-black/55",
+          ? "border-accent-border bg-[var(--accent)] text-[var(--accent-on)]"
+          : "border-[var(--border-strong)]",
       )}
     >
       {selected ? (
@@ -237,7 +236,7 @@ function ModelLibrarySelectionControl({
       ) : (
         <Square className="h-4 w-4" />
       )}
-    </button>
+    </MediaControlButton>
   );
 }
 
@@ -264,9 +263,9 @@ function ModelLibraryCardThumbnail({
       onClick={onOpenLightbox}
       aria-label={`查看 ${item.title} 大图`}
       className={cn(
-        "relative block aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "relative block aspect-[3/4] w-full cursor-zoom-in overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
         highlighted
-          ? "outline outline-2 outline-offset-2 outline-[var(--amber-400)]"
+          ? "outline outline-2 outline-offset-2 outline-accent-border"
           : "",
       )}
     >
@@ -280,11 +279,11 @@ function ModelLibraryCardThumbnail({
       />
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
+        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[var(--media-control-bg)] via-transparent to-transparent opacity-0 transition-opacity duration-[var(--dur-base)] group-hover:opacity-100"
       />
       <span
         className={cn(
-          "absolute top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference",
+          "type-caption absolute top-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]",
           selectionVisible ? "left-11" : "left-2",
         )}
       >
@@ -292,16 +291,13 @@ function ModelLibraryCardThumbnail({
       </span>
       <span
         className={cn(
-          "absolute right-2 top-2 inline-flex items-center font-mono text-[10px]",
-          isFree
-            ? "rounded-full border border-white/20 bg-black/60 px-2 py-0.5 tracking-[0.14em] text-white backdrop-blur"
-            : "uppercase tracking-[0.18em] text-white/85 mix-blend-difference",
+          "type-caption absolute right-2 top-2 inline-flex items-center rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]",
         )}
       >
-        {isFree ? "free" : SOURCE_LABEL_SHORT[item.source]}
+        {isFree ? "免费" : SOURCE_LABEL_SHORT[item.source]}
       </span>
       {appearanceLabel ? (
-        <span className="absolute bottom-2 right-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/85 mix-blend-difference">
+        <span className="type-caption absolute bottom-2 right-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
           {appearanceLabel}
         </span>
       ) : null}
@@ -318,10 +314,10 @@ function ModelLibraryCardMetadata({
 }) {
   return (
     <div className="mt-2 grid min-w-0 gap-0.5">
-      <p className="line-clamp-1 min-w-0 break-words text-[13px] font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-[var(--amber-300)]">
+      <p className="line-clamp-1 min-w-0 break-words type-body-sm font-medium leading-[1.3] text-[var(--fg-0)] transition-colors duration-[var(--dur-base)] group-hover:text-accent">
         {item.title}
       </p>
-      <p className="min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-2)] min-[390px]:tracking-[0.18em]">
+      <p className="min-w-0 truncate type-caption text-[var(--fg-2)] ">
         <span>{AGE_LABEL[item.age_segment]}</span>
         {item.gender ? (
           <>
@@ -333,11 +329,11 @@ function ModelLibraryCardMetadata({
         ) : null}
       </p>
       {item.style_tags.length > 0 ? (
-        <p className="line-clamp-1 min-w-0 break-words font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-2)] min-[390px]:tracking-[0.16em]">
+        <p className="line-clamp-1 min-w-0 break-words type-caption text-[var(--fg-2)] ">
           {item.style_tags.slice(0, 3).join(" · ")}
         </p>
       ) : (
-        <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-3)] min-[390px]:tracking-[0.16em]">
+        <p className="type-caption text-[var(--fg-3)] ">
           未标记
         </p>
       )}
@@ -437,7 +433,7 @@ function ModelLibraryItemActions({
         disabled={autoTagPending}
         title="重新识别气质方向"
         aria-label="重新识别气质方向"
-        className="inline-flex min-h-11 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)] transition-colors hover:text-[var(--amber-300)] disabled:cursor-not-allowed disabled:opacity-50 md:h-7 md:min-h-0"
+        className="inline-flex min-h-11 cursor-pointer items-center gap-1 type-caption text-[var(--fg-2)] transition-colors hover:text-accent disabled:cursor-not-allowed disabled:opacity-50 md:h-7 md:min-h-0"
       >
         {autoTagPending ? (
           <Spinner size={12} />
@@ -453,7 +449,7 @@ function ModelLibraryItemActions({
         title={deleteLabel}
         aria-label={deleteLabel}
         className={cn(
-          "inline-flex min-h-11 cursor-pointer items-center gap-1 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-7 md:min-h-0",
+          "inline-flex min-h-11 cursor-pointer items-center gap-1 type-caption transition-colors disabled:cursor-not-allowed disabled:opacity-50 md:h-7 md:min-h-0",
           confirmingDelete
             ? "text-[var(--danger)]"
             : "text-[var(--fg-2)] hover:text-[var(--danger)]",

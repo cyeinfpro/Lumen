@@ -2,9 +2,10 @@
 
 // 单条任务条只负责视图组合；状态派生集中在 taskItemModel。
 
-import { Check, Loader2, RotateCw, X } from "lucide-react";
+import { Check, RotateCw, X } from "lucide-react";
 import { memo } from "react";
 
+import { Spinner } from "@/components/ui/primitives/Spinner";
 import type { Generation, RecommendedErrorAction } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -55,16 +56,10 @@ function TaskItemView({
         presentation.failed
           ? "border-danger-border bg-danger-soft pb-8"
           : "border-[var(--border)] bg-[var(--bg-2)]",
-        presentation.showRecoveryActions &&
-          !presentation.failed &&
-          "pb-8",
+        presentation.showRecoveryActions && !presentation.failed && "pb-8",
       )}
     >
-      <TaskThumbnail
-        gen={gen}
-        presentation={presentation}
-        onView={onView}
-      />
+      <TaskThumbnail gen={gen} presentation={presentation} onView={onView} />
       <TaskSummary presentation={presentation} />
       <TaskControls
         gen={gen}
@@ -126,24 +121,20 @@ function TaskThumbnail({
         </div>
       )}
       {presentation.running && (
-        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/80">
+        <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)]">
           <ProgressRing ratio={presentation.ratio} size={12} stroke={2} />
         </span>
       )}
       {presentation.succeeded && (
         <span className="absolute bottom-0.5 right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--success)]">
-          <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />
+          <Check className="h-2.5 w-2.5" strokeWidth={3} />
         </span>
       )}
     </button>
   );
 }
 
-function TaskSummary({
-  presentation,
-}: {
-  presentation: TaskItemPresentation;
-}) {
+function TaskSummary({ presentation }: { presentation: TaskItemPresentation }) {
   return (
     <div className="min-w-0 flex-1">
       <p className="truncate text-[13px] font-medium leading-tight text-[var(--fg-0)]">
@@ -158,7 +149,7 @@ function TaskSummary({
       >
         {presentation.running && (
           <span className="inline-flex flex-wrap items-center gap-x-1 gap-y-0.5">
-            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            <Spinner size={12} />
             <span>{presentation.statusText}</span>
             {!presentation.queued && (
               <span className="tabular-nums text-[var(--fg-3)]">
@@ -224,15 +215,13 @@ function TaskRecoveryBar({
 
   return (
     <div className="absolute bottom-1.5 left-[3.75rem] right-2 flex flex-wrap gap-1">
-      {presentation.actions
-        .slice(0, 2)
-        .map((action) => (
-          <TaskRecoveryAction
-            key={action.id}
-            action={action}
-            onRetry={onRetry ? () => onRetry(gen) : undefined}
-          />
-        ))}
+      {presentation.actions.slice(0, 2).map((action) => (
+        <TaskRecoveryAction
+          key={action.id}
+          action={action}
+          onRetry={onRetry ? () => onRetry(gen) : undefined}
+        />
+      ))}
     </div>
   );
 }

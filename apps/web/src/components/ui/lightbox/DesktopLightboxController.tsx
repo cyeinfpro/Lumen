@@ -52,9 +52,7 @@ export function DesktopLightbox() {
   const closeLightbox = useUiStore((state) => state.closeLightbox);
   const storeEventItems = lightbox.eventItems;
   const imageActionsAvailable = useChatStore((state) =>
-    lightbox.imageId
-      ? Boolean(state.imagesById[lightbox.imageId])
-      : false,
+    lightbox.imageId ? Boolean(state.imagesById[lightbox.imageId]) : false,
   );
 
   const imageStateKey = `${lightbox.imageId ?? ""}\n${lightbox.imageSrc ?? ""}\n${lightbox.imagePreviewSrc ?? ""}`;
@@ -78,11 +76,7 @@ export function DesktopLightbox() {
   const activeZoom = activeImageState.zoom;
   const activePanOffset = activeImageState.panOffset;
   const updateImageState = useCallback(
-    (
-      recipe: (
-        state: ImageTransientState,
-      ) => ImageTransientState,
-    ) => {
+    (recipe: (state: ImageTransientState) => ImageTransientState) => {
       setImageState((previous) => {
         if (activeImageStateKeyRef.current !== imageStateKey) {
           return previous;
@@ -116,13 +110,9 @@ export function DesktopLightbox() {
     displaySrc,
   });
 
-  const [edgeHint, setEdgeHint] = useState<
-    "first" | "last" | null
-  >(null);
+  const [edgeHint, setEdgeHint] = useState<"first" | "last" | null>(null);
   const [, setSlideDir] = useState<1 | -1>(1);
-  const [pendingImageId, setPendingImageId] = useState<string | null>(
-    null,
-  );
+  const [pendingImageId, setPendingImageId] = useState<string | null>(null);
   const switchSeqRef = useRef(0);
   const preloadAbortRef = useRef<AbortController | null>(null);
   const edgeHintTimerRef = useRef<number | null>(null);
@@ -225,9 +215,7 @@ export function DesktopLightbox() {
   });
 
   const handleIterate = useCallback(() => {
-    if (
-      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
-    ) {
+    if (!isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))) {
       return;
     }
     const imageId = lightbox.imageId;
@@ -239,9 +227,7 @@ export function DesktopLightbox() {
   }, [handleClose, lightbox]);
 
   const handleUpscale = useCallback(() => {
-    if (
-      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
-    ) {
+    if (!isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))) {
       return;
     }
     const imageId = lightbox.imageId;
@@ -251,9 +237,7 @@ export function DesktopLightbox() {
   }, [handleClose, lightbox]);
 
   const handleReroll = useCallback(() => {
-    if (
-      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
-    ) {
+    if (!isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))) {
       return;
     }
     const imageId = lightbox.imageId;
@@ -263,9 +247,7 @@ export function DesktopLightbox() {
   }, [handleClose, lightbox]);
 
   const handleInpaint = useCallback(() => {
-    if (
-      !isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))
-    ) {
+    if (!isPrivateIdentitySnapshotCurrent(lightboxIdentity(lightbox))) {
       return;
     }
     const imageId = lightbox.imageId;
@@ -321,16 +303,11 @@ export function DesktopLightbox() {
           );
         } catch {
           if (preloadAbort.signal.aborted) return;
-          if (
-            activeImageStateKeyRef.current !== sourceImageKey
-          ) {
+          if (activeImageStateKeyRef.current !== sourceImageKey) {
             return;
           }
           try {
-            await preloadImage(
-              target.image.data_url,
-              preloadAbort.signal,
-            );
+            await preloadImage(target.image.data_url, preloadAbort.signal);
           } catch {
             if (preloadAbort.signal.aborted) return;
           }
@@ -345,11 +322,7 @@ export function DesktopLightbox() {
         setPendingImageId(null);
         const items = storeEventItems ?? eventItems;
         if (items) {
-          openLightboxFromItems(
-            items,
-            target.image.id,
-            lightbox.action,
-          );
+          openLightboxFromItems(items, target.image.id, lightbox.action);
           return;
         }
         openLightbox(
@@ -385,12 +358,7 @@ export function DesktopLightbox() {
       if (!target) return;
       switchToGalleryItem(target, delta);
     },
-    [
-      currentIndex,
-      gallery,
-      showEdgeHint,
-      switchToGalleryItem,
-    ],
+    [currentIndex, gallery, showEdgeHint, switchToGalleryItem],
   );
 
   const {
@@ -402,6 +370,7 @@ export function DesktopLightbox() {
     handleWheel,
     handleImageLoad,
     handleImageError,
+    retryImage,
     handleImagePointerDown,
     handleImagePointerMove,
     handleImagePointerEnd,
@@ -446,11 +415,7 @@ export function DesktopLightbox() {
       toggleDetails,
     ],
   );
-  useDesktopLightboxKeyboard(
-    lightbox.open,
-    containerRef,
-    keyboardActions,
-  );
+  useDesktopLightboxKeyboard(lightbox.open, containerRef, keyboardActions);
 
   useEffect(() => {
     switchSeqRef.current += 1;
@@ -478,16 +443,13 @@ export function DesktopLightbox() {
   const handleBackdropMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       event.currentTarget.dataset.downTarget =
-        event.target === event.currentTarget
-          ? "backdrop"
-          : "content";
+        event.target === event.currentTarget ? "backdrop" : "content";
     },
     [],
   );
   const handleBackdropMouseUp = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      const wasBackdrop =
-        event.currentTarget.dataset.downTarget === "backdrop";
+      const wasBackdrop = event.currentTarget.dataset.downTarget === "backdrop";
       event.currentTarget.dataset.downTarget = "";
       if (wasBackdrop && event.target === event.currentTarget) {
         handleClose();
@@ -540,9 +502,7 @@ export function DesktopLightbox() {
     galleryLength: gallery.length,
     currentIndex,
     hasPrevious: currentIndex > 0,
-    hasNext:
-      currentIndex >= 0 &&
-      currentIndex < gallery.length - 1,
+    hasNext: currentIndex >= 0 && currentIndex < gallery.length - 1,
     thumbnails: desktopThumbnailItems(gallery, currentIndex),
     posterSrc: posterSource(currentImageMeta),
     sourceLabel,
@@ -585,6 +545,7 @@ export function DesktopLightbox() {
     onNext: () => gotoDelta(1),
     onImageLoad: handleImageLoad,
     onImageError: handleImageError,
+    onRetryImage: retryImage,
     onImagePointerDown: handleImagePointerDown,
     onImagePointerMove: handleImagePointerMove,
     onImagePointerUp: handleImagePointerEnd,

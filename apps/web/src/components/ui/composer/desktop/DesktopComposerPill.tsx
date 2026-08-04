@@ -20,6 +20,7 @@ import {
 import {
   pushMobileToast,
 } from "@/components/ui/primitives/mobile";
+import { Badge, Button, IconButton } from "@/components/ui/primitives";
 import { useChatStore } from "@/store/useChatStore";
 import type { ComposerMode } from "@/store/chat/types";
 import { cn } from "@/lib/utils";
@@ -508,37 +509,37 @@ export function DesktopComposerPill({
               <Paperclip className="w-4 h-4" />,
             )}
             {renderWhen(attachments.length > 0, (
-              <span
+              <Badge
+                tone="accent"
                 aria-hidden
                 className={cn(
                   "absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1",
-                  "rounded-full bg-[var(--amber-400)] text-[9px] font-bold text-[var(--bg-0)]",
-                  "flex items-center justify-center tabular-nums",
+                  "justify-center border-0 type-overline leading-none text-[var(--accent-on)] tabular-nums",
                 )}
                 style={{ fontFamily: "var(--font-mono)" }}
               >
                 {attachments.length}x
-              </span>
+              </Badge>
             ))}
           </IconBtn>
 
           <ModeSegment value={mode} onChange={handleModeChange} />
 
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="md"
             onClick={expandAndFocus}
             aria-label="展开输入框"
             aria-expanded={false}
             className={cn(
-              "flex-1 min-w-0 h-10 px-3 text-left rounded-[var(--radius-control)] cursor-text",
+              "h-10 min-w-0 flex-1 justify-start px-3 text-left cursor-text",
               "bg-transparent transition-colors",
               "hover:bg-[var(--bg-2)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
             )}
           >
             <span
               className={cn(
-                "text-[14px] line-clamp-1",
+                "type-body-sm line-clamp-1",
                 selectValue(
                   Boolean(text),
                   "text-[var(--fg-0)]",
@@ -548,7 +549,7 @@ export function DesktopComposerPill({
             >
               {fallbackText(text, "描述你想创作的内容…")}
             </span>
-          </button>
+          </Button>
 
           <SendButton
             canSubmit={canSubmit}
@@ -597,14 +598,14 @@ export function DesktopComposerPill({
                   )}
                 >
                   <span className="flex-1 break-words">{composerError}</span>
-                  <button
-                    type="button"
+                  <IconButton
+                    size="sm"
                     aria-label="关闭错误提示"
                     onClick={() => setComposerError(null)}
-                    className="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-[var(--radius-control)] hover:bg-[var(--bg-2)]"
+                    className="shrink-0 hover:bg-[var(--bg-2)]"
                   >
-                    <X className="w-3 h-3" />
-                  </button>
+                    <X className="h-3.5 w-3.5" aria-hidden />
+                  </IconButton>
                 </div>
               </motion.div>
             ))}
@@ -642,7 +643,7 @@ export function DesktopComposerPill({
               rows={1}
               className={cn(
                 "w-full bg-transparent outline-none resize-none",
-                "text-body-md text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
+                "type-body text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
                 "min-h-11 max-h-[200px]",
                 selectValue(isEnhancing, "cursor-wait", undefined),
               )}
@@ -709,11 +710,11 @@ export function DesktopComposerPill({
               <span
                 data-inline
                 className={cn(
-                  "text-caption tabular-nums transition-colors duration-200",
+                  "type-caption tabular-nums transition-colors duration-200",
                   selectValue(
                     promptTooLong,
                     "text-[var(--danger)]",
-                    "text-[var(--amber-400)]",
+                    "text-accent",
                   ),
                 )}
                 style={{ fontFamily: "var(--font-mono)" }}

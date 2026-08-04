@@ -1,9 +1,12 @@
 "use client";
 
-import { Loader2, Save, Settings2, X } from "lucide-react";
+import { Save, Settings2, X } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
 
+import { Button } from "@/components/ui/primitives/Button";
+import { IconButton } from "@/components/ui/primitives/IconButton";
+import { Switch } from "@/components/ui/primitives/Switch";
 import type { StoryboardRun } from "@/lib/apiClient";
 import { usePatchStoryboardMutation } from "@/lib/queries";
 import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
@@ -58,7 +61,7 @@ export function SettingsPanel({
   });
   const parsedSeed = parseStoryboardSeed(draft.seed);
   const seedInvalid = Boolean(draft.seed.trim()) && parsedSeed === null;
-  const saveDisabled =
+  const saveBlocked =
     patch.isPending ||
     seedInvalid ||
     !dirty ||
@@ -79,7 +82,7 @@ export function SettingsPanel({
       dirty={dirty}
       seedInvalid={seedInvalid}
       saving={patch.isPending}
-      saveDisabled={saveDisabled}
+      saveBlocked={saveBlocked}
       onChange={setDraft}
       onReset={() => setDraft(settingsDraftFromRun(run))}
       onSave={save}
@@ -100,16 +103,16 @@ export function SettingsPanel({
         <header className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-5 py-3">
           <div className="flex items-center gap-2">
             <Settings2 className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-sm font-semibold">视频参数</h2>
+            <h2 className="type-card-title">视频参数</h2>
           </div>
-          <button
-            type="button"
+          <IconButton
+            variant="ghost"
+            size="sm"
             onClick={onMobileClose}
             aria-label="关闭视频参数"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-full text-[var(--fg-1)] hover:bg-[var(--bg-2)]"
           >
             <X className="h-4 w-4" />
-          </button>
+          </IconButton>
         </header>
         <div className="mobile-dialog-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-3">
           {fields}
@@ -124,7 +127,7 @@ function StoryboardSettingsFields({
   dirty,
   seedInvalid,
   saving,
-  saveDisabled,
+  saveBlocked,
   onChange,
   onReset,
   onSave,
@@ -133,16 +136,16 @@ function StoryboardSettingsFields({
   dirty: boolean;
   seedInvalid: boolean;
   saving: boolean;
-  saveDisabled: boolean;
+  saveBlocked: boolean;
   onChange: Dispatch<SetStateAction<StoryboardSettingsDraft>>;
   onReset: () => void;
   onSave: () => void;
 }) {
   return (
-    <div className="grid gap-3 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/78 p-3 shadow-[var(--shadow-1)]">
+    <div className="surface-card grid gap-3 p-3">
       <div className="hidden items-center gap-2 lg:flex">
         <Settings2 className="h-4 w-4 text-[var(--accent)]" />
-        <h2 className="text-sm font-semibold">视频参数</h2>
+        <h2 className="type-card-title">视频参数</h2>
       </div>
       <LabeledInput
         label="模型"
@@ -169,45 +172,42 @@ function StoryboardSettingsFields({
         onChange={(seed) => onChange((current) => ({ ...current, seed }))}
       />
       {seedInvalid ? (
-        <p className="text-xs text-[var(--danger)]" role="alert">
+        <p className="type-caption text-[var(--danger)]" role="alert">
           Seed 需为 -1 到 4294967295 的整数
         </p>
       ) : null}
-      <label className="flex min-h-11 items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm">
-        <span>生成音频</span>
-        <input
-          type="checkbox"
+      <div className="control-shell flex min-h-11 items-center justify-between gap-3 px-3">
+        <span className="type-body-sm text-[var(--fg-1)]">生成音频</span>
+        <Switch
+          aria-label="生成音频"
           checked={draft.generateAudio}
-          onChange={(event) =>
+          onCheckedChange={(checked) =>
             onChange((current) => ({
               ...current,
-              generateAudio: event.target.checked,
+              generateAudio: checked,
             }))
           }
         />
-      </label>
+      </div>
       <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
+        <Button
+          variant="outline"
           onClick={onReset}
           disabled={!dirty || saving}
-          className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-sm text-[var(--fg-1)] disabled:opacity-50"
+          fullWidth
         >
           取消修改
-        </button>
-        <button
-          type="button"
-          disabled={saveDisabled}
+        </Button>
+        <Button
+          variant="primary"
+          disabled={saveBlocked}
           onClick={onSave}
-          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-on)] disabled:cursor-not-allowed disabled:opacity-55"
+          loading={saving}
+          leftIcon={<Save className="h-4 w-4" />}
+          fullWidth
         >
-          {saving ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Save className="h-4 w-4" />
-          )}
           保存参数
-        </button>
+        </Button>
       </div>
     </div>
   );

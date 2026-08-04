@@ -362,8 +362,16 @@ test("mobile navigation keeps current state and closes transient layers safely",
   doesNotMatch(mobileTabBarSource, /router\.replace\(tab\.route\)/);
   match(mobileMeSource, /conversationId=\$\{encodeURIComponent\(conv\.id\)\}/);
   match(streamSearchSource, /inputRef\.current\?\.blur\(\)/);
-  match(mobileDrawerSource, /isFetchNextPageError/);
-  match(mobileDrawerSource, /setCurrentConv\(previousConvId\)/);
+  match(
+    mobileDrawerSource,
+    /<Sidebar embedded showBrand onNavigate=\{onClose\} \/>/,
+  );
+  match(mobileDrawerSource, /w-\[var\(--sidebar-panel-w\)\]/);
+  match(mobileDrawerSource, /bg-\[var\(--surface-scrim\)\]/);
+  doesNotMatch(
+    mobileDrawerSource,
+    /useListConversationsInfiniteQuery|deriveConversationDrawerModel/,
+  );
   match(desktopStudioSource, /onNavigate=\{closeSidebarDrawer\}/);
   match(sidebarSource, /const ARCHIVED_ROW_HEIGHT = 56/);
 });

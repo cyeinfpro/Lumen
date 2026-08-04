@@ -1,3 +1,6 @@
+import { Select } from "@/components/ui/primitives/Select";
+import { Switch } from "@/components/ui/primitives/Switch";
+
 import {
   ASPECT_RATIO_LABELS,
   CONTINUITY_ANCHOR_LABELS,
@@ -145,25 +148,22 @@ function SelectField({
 }) {
   return (
     <label className="block min-w-0">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        {label}
-      </span>
-      <select
+      <span className="type-label text-[var(--fg-1)]">{label}</span>
+      <Select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="mt-2 h-10 w-full min-w-0 border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] disabled:opacity-40"
+        wrapperClassName="mt-2"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option
             key={optionValue}
             value={optionValue}
-            className="bg-[var(--bg-1)]"
           >
             {optionLabel}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -180,15 +180,16 @@ function CheckboxField({
   disabled: boolean;
 }) {
   return (
-    <label className="inline-flex min-h-10 items-center gap-2 text-[13px] text-[var(--fg-1)]">
-      <input
-        type="checkbox"
+    <div className="control-shell flex min-h-10 items-center justify-between gap-3 px-3 py-2">
+      <span className="type-body-sm min-w-0 break-words text-[var(--fg-1)]">
+        {label}
+      </span>
+      <Switch
+        aria-label={label}
         checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
+        onCheckedChange={onChange}
         disabled={disabled}
-        className="h-4 w-4 accent-[var(--amber-400)] disabled:opacity-40"
       />
-      <span className="min-w-0 break-words">{label}</span>
-    </label>
+    </div>
   );
 }

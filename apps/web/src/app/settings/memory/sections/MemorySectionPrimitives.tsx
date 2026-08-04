@@ -30,7 +30,7 @@ export function SectionHeader({
 
 export function TypeBadge({ type }: { type: MemoryType | string }) {
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 text-[10px] text-[var(--fg-1)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-1.5 py-0.5 type-caption text-[var(--fg-1)]">
       {typeLabel(type)}
     </span>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Badge, type BadgeTone } from "@/components/ui/primitives/Badge";
 import { cn } from "@/lib/utils";
 import type { AssistantMessage, CompletionToolCall } from "@/lib/types";
 
@@ -152,7 +153,7 @@ function streamingStatus(
     return {
       label: stalled
         ? `仍在思考 ${secondsSince(now, lastDeltaAt)}s`
-        : `正在思考 ${elapsed}s`,
+        : `思考中 ${elapsed}s`,
       tone: stalled ? "warn" : "active",
       active: true,
     };
@@ -161,7 +162,7 @@ function streamingStatus(
   return {
     label: stalled
       ? `仍在等待输出 ${elapsed}s`
-      : `正在连接模型 ${elapsed}s`,
+      : `连接模型中 ${elapsed}s`,
     tone: stalled ? "warn" : "active",
     active: true,
   };
@@ -213,22 +214,25 @@ export function CompletionStatusLine({
   const now = useNow(active);
   const status = resolveCompletionStatus(msg, now);
   if (!status) return null;
+  const tone: BadgeTone =
+    status.tone === "active"
+      ? "accent"
+      : status.tone === "warn"
+        ? "warning"
+        : status.tone === "danger"
+          ? "danger"
+          : "info";
 
   return (
-    <div
+    <Badge
+      tone={tone}
       role="status"
       aria-live="polite"
       className={cn(
-        "inline-flex w-fit items-center gap-1.5 rounded-full border px-2",
-        compact ? "h-6 text-[11px]" : "h-6 text-[12px]",
-        status.tone === "active" &&
-          "border-[var(--amber-400)]/25 bg-[var(--amber-400)]/10 text-[var(--amber-500)]",
+        "w-fit gap-1.5 px-2",
+        compact ? "h-6 type-overline" : "h-6 type-caption",
         status.tone === "muted" &&
           "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-2)]",
-        status.tone === "warn" &&
-          "border-[var(--amber-400)]/40 bg-[var(--amber-400)]/15 text-[var(--amber-500)]",
-        status.tone === "danger" &&
-          "border-[var(--danger)]/25 bg-[var(--danger)]/10 text-[var(--danger)]",
       )}
     >
       <span
@@ -236,14 +240,16 @@ export function CompletionStatusLine({
         className={cn(
           "h-1.5 w-1.5 rounded-full",
           status.tone === "danger"
-            ? "bg-[var(--danger)]"
+            ? "bg-danger"
             : status.tone === "muted"
               ? "bg-[var(--fg-3)]"
-              : "bg-[var(--amber-400)]",
+              : status.tone === "warn"
+                ? "bg-warning"
+                : "bg-accent",
           status.active && "animate-pulse",
         )}
       />
       <span>{status.label}</span>
-    </div>
+    </Badge>
   );
 }

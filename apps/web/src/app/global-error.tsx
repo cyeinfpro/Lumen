@@ -67,10 +67,10 @@ export default function GlobalError({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          backgroundColor: "var(--bg-0, #0a0a0b)",
-          color: "var(--fg-0, #e4e4e7)",
+          backgroundColor: "var(--bg-0, #09090B)",
+          color: "var(--fg-0, #F5F2EB)",
           fontFamily:
-            'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+            'var(--font-body, "Geist", "SourceHanSans-VF", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif)',
         }}
       >
         <div
@@ -84,39 +84,42 @@ export default function GlobalError({
         >
           <h1
             style={{
-              fontSize: "1.25rem",
+              fontSize: "1.5rem",
               fontWeight: 600,
               marginBottom: "0.75rem",
-              color: "var(--fg-0, #fafafa)",
+              color: "var(--fg-0, #F5F2EB)",
+              letterSpacing: 0,
+              lineHeight: 1.1,
             }}
           >
             页面出错
           </h1>
           <p
             style={{
-              fontSize: "0.875rem",
-              color: "var(--fg-1, #a1a1aa)",
+              fontSize: "0.9375rem",
+              color: "var(--fg-1, #C2BCAF)",
               marginBottom: "1.25rem",
-              lineHeight: 1.6,
+              lineHeight: 1.5,
             }}
           >
-            请刷新页面，或先返回首页。
+            刷新页面，或先返回首页。
           </p>
           {detail && (
             <pre
               style={{
                 fontSize: "0.75rem",
-                color: "var(--fg-2, #71717a)",
+                color: "var(--fg-2, #8A8378)",
                 marginBottom: "1.25rem",
                 padding: "0.75rem",
-                borderRadius: 8,
-                backgroundColor: "rgba(255,255,255,0.04)",
+                borderRadius: "var(--radius-card, 8px)",
+                border: "1px solid var(--border, rgba(245,242,235,0.13))",
+                backgroundColor: "var(--bg-1, #0D0E11)",
                 wordBreak: "break-all",
                 whiteSpace: "pre-wrap",
                 overflowWrap: "anywhere",
                 textAlign: "left",
                 fontFamily:
-                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+                  'var(--font-mono, "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)',
               }}
             >
               {detail}
@@ -138,13 +141,14 @@ export default function GlobalError({
                 minWidth: 132,
                 flex: "1 1 132px",
                 padding: "0.5rem 1.25rem",
-                borderRadius: 8,
-                border: "1px solid rgba(242,169,58,0.3)",
-                backgroundColor: "rgba(242,169,58,0.12)",
-                color: "#f5a623",
+                borderRadius: "var(--radius-control, 6px)",
+                border: "1px solid var(--accent-border, #74522A)",
+                backgroundColor: "var(--accent, #F2A93A)",
+                color: "var(--accent-on, #18120A)",
                 fontSize: "0.875rem",
                 cursor: "pointer",
-                fontWeight: 500,
+                fontFamily: "inherit",
+                fontWeight: 540,
               }}
             >
               重试
@@ -159,13 +163,14 @@ export default function GlobalError({
                 alignItems: "center",
                 justifyContent: "center",
                 padding: "0.5rem 1.25rem",
-                borderRadius: 8,
-                border: "1px solid rgba(255,255,255,0.1)",
-                backgroundColor: "rgba(255,255,255,0.05)",
-                color: "#a1a1aa",
+                borderRadius: "var(--radius-control, 6px)",
+                border: "1px solid var(--border, rgba(245,242,235,0.13))",
+                backgroundColor: "var(--bg-2, #121318)",
+                color: "var(--fg-1, #C2BCAF)",
                 fontSize: "0.875rem",
                 textDecoration: "none",
-                fontWeight: 500,
+                fontFamily: "inherit",
+                fontWeight: 540,
               }}
             >
               返回首页

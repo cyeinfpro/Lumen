@@ -70,12 +70,12 @@ export function canvasNodeStateClass(
   running: boolean,
   warning: boolean,
 ): string {
-  if (failed) return "border-[var(--danger)] shadow-[var(--shadow-2)]";
-  if (warning) return "border-[var(--warning)] shadow-[var(--shadow-2)]";
+  if (failed) return "border-[var(--danger)] shadow-[var(--shadow-1)]";
+  if (warning) return "border-[var(--warning)] shadow-[var(--shadow-1)]";
   if (running) {
     return "border-[var(--accent-border)] shadow-[var(--shadow-amber)]";
   }
-  return "border-[var(--border)] shadow-[var(--shadow-2)]";
+  return "border-[var(--border)] shadow-[var(--shadow-1)]";
 }
 
 export function NodeFooterAction({ data }: { data: CanvasFlowNodeData }) {

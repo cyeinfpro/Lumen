@@ -35,7 +35,7 @@ export function EmptyBlock({
 }) {
   return (
     <div className="flex flex-col items-center gap-3 py-14 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-2)]">
+      <div className="flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]">
         <Inbox className="h-5 w-5 text-[var(--fg-2)]" />
       </div>
       <div>
@@ -57,7 +57,7 @@ export function ErrorBlock({
   onRetry?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-[var(--radius-dialog)] border border-danger-border bg-danger-soft p-6">
+    <div className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-6">
       <div className="flex items-start gap-3">
         <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-danger" />
         <div>

@@ -9,7 +9,12 @@ import {
   Zap,
 } from "lucide-react";
 
-import { Button, IconButton } from "@/components/ui/primitives";
+import {
+  Button,
+  IconButton,
+  Select,
+  Switch,
+} from "@/components/ui/primitives";
 import type { VideoProviderKind } from "@/lib/types";
 
 import {
@@ -153,7 +158,7 @@ function ProviderConnectionEditor({
         />
         <label className="space-y-1.5">
           <span className="type-caption text-[var(--fg-2)]">类型</span>
-          <select
+          <Select
             value={draft.kind}
             onChange={(event) =>
               onPatch(
@@ -163,7 +168,6 @@ function ProviderConnectionEditor({
                 ),
               )
             }
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
           >
             <option value="volcano">火山方舟</option>
             <option value="volcano_third_party">火山第三方 / MOYU</option>
@@ -172,7 +176,7 @@ function ProviderConnectionEditor({
             <option value="veo">Google Veo</option>
             <option value="omni_flash">Google Omni Flash / 第三方</option>
             <option value="fake">测试</option>
-          </select>
+          </Select>
         </label>
         <Field
           label="Base URL"
@@ -313,10 +317,9 @@ function ProviderRoutingEditor({
         />
         <label className="space-y-1.5">
           <span className="type-caption text-[var(--fg-2)]">代理</span>
-          <select
+          <Select
             value={draft.proxy}
             onChange={(event) => onPatch({ proxy: event.target.value })}
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/50"
           >
             <option value="">直连</option>
             {proxies.map((proxy) => (
@@ -324,7 +327,7 @@ function ProviderRoutingEditor({
                 {proxy}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
       </div>
     </>
@@ -344,7 +347,7 @@ function ProviderStateEditor({
 }) {
   return (
     <div className="space-y-3">
-      <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
+      <div className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 type-body-sm text-[var(--fg-0)]">
         <span>
           <span className="block">启用此供应商</span>
           {draft.kind === "veo" && (
@@ -353,30 +356,30 @@ function ProviderStateEditor({
             </span>
           )}
         </span>
-        <input
-          type="checkbox"
+        <Switch
           checked={normalizeVideoProviderEnabled(draft.kind, draft.enabled)}
           disabled={!videoProviderKindCanBeEnabled(draft.kind)}
-          onChange={(event) =>
+          onCheckedChange={(checked) =>
             onPatch({
               enabled: normalizeVideoProviderEnabled(
                 draft.kind,
-                event.target.checked,
+                checked,
               ),
             })
           }
+          aria-label="启用此视频供应商"
         />
-      </label>
-      <label className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 text-sm text-[var(--fg-0)]">
+      </div>
+      <div className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-3 type-body-sm text-[var(--fg-0)]">
         <span>确认支持幂等提交</span>
-        <input
-          type="checkbox"
+        <Switch
           checked={draft.supports_idempotency}
-          onChange={(event) =>
-            onPatch({ supports_idempotency: event.target.checked })
+          onCheckedChange={(checked) =>
+            onPatch({ supports_idempotency: checked })
           }
+          aria-label="确认支持幂等提交"
         />
-      </label>
+      </div>
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
         <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
           <KeyRound className="h-4 w-4 text-[var(--fg-2)]" />

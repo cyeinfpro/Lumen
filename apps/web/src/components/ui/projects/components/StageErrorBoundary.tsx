@@ -43,25 +43,25 @@ export class StageErrorBoundary extends Component<Props, State> {
   render(): ReactNode {
     if (!this.state.error) return this.props.children;
     return (
-      <section className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-8">
+      <section className="border-y border-danger-border bg-danger-soft px-4 py-8">
         <div className="flex items-start gap-4">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--danger)]/40 text-[var(--danger)]">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-danger-border text-[var(--danger)]">
             <AlertTriangle className="h-4 w-4" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--danger)]">
+            <p className="type-caption text-[var(--danger)]">
               错误
             </p>
             <h3 className="type-section-title mt-1">
               阶段渲染异常
             </h3>
-            <p className="mt-1 break-words text-[12px] text-[var(--fg-1)]">
+            <p className="mt-1 break-words type-caption text-[var(--fg-1)]">
               {this.state.error.message || "未知错误"}
             </p>
             <button
               type="button"
               onClick={this.reset}
-              className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-0)] transition-colors hover:border-[var(--border-amber)] hover:text-[var(--amber-300)]"
+              className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--border)] px-4 type-caption text-[var(--fg-0)] transition-colors hover:border-accent-border hover:text-accent"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               重试本阶段

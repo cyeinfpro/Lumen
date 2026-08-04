@@ -37,10 +37,10 @@ export function ProjectActionsSheet({
   return (
     <div className="grid gap-4 px-5 pb-5 pt-3">
       <div className="border-b border-[var(--border)] pb-3">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           项目
         </p>
-        <p className="mt-1 truncate text-[16px] font-semibold tracking-tight text-[var(--fg-0)]">
+        <p className="mt-1 truncate type-body font-semibold tracking-tight text-[var(--fg-0)]">
           {itemTitle || "服饰模特图"}
         </p>
       </div>
@@ -53,7 +53,7 @@ export function ProjectActionsSheet({
           }}
         >
           <label className="grid gap-1.5">
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+            <span className="type-caption text-[var(--fg-2)]">
               名称
             </span>
             <input
@@ -61,7 +61,7 @@ export function ProjectActionsSheet({
               onChange={(event) => onTitleChange(event.target.value)}
               maxLength={120}
               autoFocus
-              className="h-11 border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)]"
+              className="control-shell h-11 px-3 type-body text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)]"
             />
           </label>
           <div className="grid grid-cols-2 gap-2">
@@ -75,7 +75,7 @@ export function ProjectActionsSheet({
         </form>
       ) : confirmingDelete ? (
         <div className="grid gap-3">
-          <p className="text-[15px] text-[var(--fg-0)]">确认删除这个项目？</p>
+          <p className="type-body text-[var(--fg-0)]">确认删除这个项目？</p>
           <p className="text-xs leading-5 text-[var(--fg-2)]">
             项目会从列表移除，关联对话不会被删除。
           </p>
@@ -99,7 +99,7 @@ export function ProjectActionsSheet({
           <button
             type="button"
             onClick={onStartRename}
-            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left text-[15px] text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] active:bg-[var(--bg-3)]"
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left type-body text-[var(--fg-0)] transition-colors hover:bg-[var(--bg-3)] active:bg-[var(--bg-3)]"
           >
             <Pencil className="h-4 w-4 text-[var(--fg-2)]" />
             重命名
@@ -107,7 +107,7 @@ export function ProjectActionsSheet({
           <button
             type="button"
             onClick={onStartDelete}
-            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left text-[15px] text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] active:bg-[var(--danger-soft)]"
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 px-1 text-left type-body text-[var(--danger)] transition-colors hover:bg-[var(--danger-soft)] active:bg-[var(--danger-soft)]"
           >
             <Trash2 className="h-4 w-4" />
             删除
@@ -115,7 +115,7 @@ export function ProjectActionsSheet({
           <button
             type="button"
             onClick={onClose}
-            className="mt-2 flex min-h-11 w-full cursor-pointer items-center justify-center border border-[var(--border)] px-3 text-[15px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
+            className="mt-2 flex min-h-11 w-full cursor-pointer items-center justify-center border border-[var(--border)] px-3 type-body text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
           >
             取消
           </button>
@@ -143,9 +143,9 @@ export function SkeletonGrid() {
 
 export function ErrorPanel({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="border-y border-[var(--danger)]/25 bg-[var(--danger-soft)]/20 px-5 py-6 md:px-6 md:py-7">
+    <div className="border-y border-danger-border bg-danger-soft px-5 py-6 md:px-6 md:py-7">
       <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--danger)]/40 text-[var(--danger)]">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-danger-border text-[var(--danger)]">
           <AlertTriangle className="h-4 w-4" />
         </span>
         <div className="flex-1">
@@ -175,10 +175,10 @@ export function EmptyHero() {
     <section className="page-section">
       <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:gap-8">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--amber-300)]">
+          <p className="type-caption text-accent">
             Apparel Workflow
           </p>
-          <h2 className="type-page-title mt-2 max-w-2xl md:text-[28px]">
+          <h2 className="type-page-title mt-2 max-w-2xl ">
             从一张商品图，到一条完整的模特图工作流
           </h2>
           <p className="type-body-sm mt-3 max-w-2xl">
@@ -187,7 +187,7 @@ export function EmptyHero() {
         </div>
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full bg-[var(--accent)] px-5 py-2.5 text-[13px] font-medium text-black shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
+          className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full bg-[var(--accent)] px-5 py-2.5 type-body-sm font-medium text-black shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
         >
           <Plus className="h-3.5 w-3.5" />
           创建第一个项目

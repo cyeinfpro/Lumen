@@ -8,7 +8,6 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Archive,
   Inbox,
-  Loader2,
   MessageSquarePlus,
   MoreHorizontal,
   PanelLeftClose,
@@ -28,7 +27,7 @@ import type { ConversationSummary } from "@/lib/apiClient";
 import { copy } from "@/lib/copy";
 import { DURATION, resolveDrawerMotion } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-import { Button, IconButton } from "./primitives";
+import { Button, IconButton, Kbd } from "./primitives";
 import { ConversationItem, titleOf } from "./sidebar/ConversationItem";
 import { SearchBox } from "./sidebar/SearchBox";
 import {
@@ -78,6 +77,7 @@ export function Sidebar({
     <SidebarChrome
       controller={controller}
       showBrand={showBrand}
+      onClose={embedded && onNavigate ? onNavigate : controller.toggleSidebar}
       onListKeyDown={handleListKey}
     />
   );
@@ -147,17 +147,19 @@ function useSidebarListKeyNavigation(): KeyboardEventHandler<HTMLDivElement> {
 function SidebarChrome({
   controller,
   showBrand,
+  onClose,
   onListKeyDown,
 }: {
   controller: SidebarController;
   showBrand: boolean;
+  onClose: () => void;
   onListKeyDown: KeyboardEventHandler<HTMLDivElement>;
 }) {
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col">
       <SidebarBrand
         visible={showBrand}
-        onClose={controller.toggleSidebar}
+        onClose={onClose}
       />
       <SidebarPrimaryAction controller={controller} showBrand={showBrand} />
       <div className="px-4 pb-3">
@@ -182,37 +184,24 @@ function SidebarPrimaryAction({
 }) {
   return (
     <div className={sidebarPrimaryActionClass(showBrand)}>
-      <motion.button
-        type="button"
+      <Button
+        variant="primary"
+        fullWidth
+        loading={controller.createPending}
         onClick={controller.createConversation}
-        disabled={controller.createPending}
-        className={cn(
-          "group flex h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-3",
-          "border border-[var(--fg-0)] bg-[var(--fg-0)] font-medium text-[var(--bg-0)]",
-          "transition-opacity duration-[var(--dur-quick)]",
-          "hover:opacity-90 active:opacity-[var(--op-press)]",
-          "outline-none focus-visible:shadow-[var(--ring)]",
-          "disabled:cursor-wait disabled:opacity-60",
-        )}
+        leftIcon={<Plus className="h-4 w-4" strokeWidth={2.5} />}
+        className="h-10 justify-start px-3"
       >
-        {controller.createPending ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Plus
-            className="h-4 w-4 text-[var(--accent)]"
-            strokeWidth={2.5}
-          />
-        )}
-        <span className="flex-1 text-left text-sm">新建会话</span>
-        <kbd
+        <span className="flex-1 text-left">新建会话</span>
+        <Kbd
           aria-hidden
-          className="hidden text-[10px] font-mono tracking-wide opacity-55 sm:inline-flex"
+          className="hidden border-[var(--accent-border)] bg-transparent text-[var(--accent-on)] opacity-70 shadow-none sm:inline-flex"
         >
           ⌘N
-        </kbd>
-      </motion.button>
+        </Kbd>
+      </Button>
       {controller.createError && (
-        <p role="alert" className="mt-2 text-[11px] leading-snug text-danger">
+        <p role="alert" className="mt-2 type-caption leading-snug text-danger">
           新建失败：{controller.createErrorMessage}
         </p>
       )}
@@ -230,7 +219,7 @@ function SidebarListHeader({
   return (
     <div className="px-4 pb-2">
       <div className="flex h-8 items-center justify-between border-b border-[var(--border-subtle)]">
-        <span className="text-[11px] font-medium text-[var(--fg-2)]">
+        <span className="type-caption font-medium text-[var(--fg-2)]">
           {viewingActive ? "会话" : "已归档"}
         </span>
         <div data-sidebar-archive-menu className="relative">
@@ -258,8 +247,7 @@ function SidebarListHeader({
                 exit={{ opacity: 0, y: -4, scale: 0.98 }}
                 transition={{ duration: 0.14 }}
                 className={cn(
-                  "absolute right-0 top-9 z-20 min-w-40 overflow-hidden rounded-[var(--radius-card)]",
-                  "border border-[var(--border-subtle)] bg-[var(--bg-1)] shadow-[var(--shadow-3)]",
+                  "surface-panel absolute right-0 top-9 z-[var(--z-tray)] min-w-40 overflow-hidden",
                 )}
               >
                 {/* @list-item-ok: menu item, 行内 a11y role + 横向布局 */}
@@ -282,7 +270,7 @@ function SidebarListHeader({
                     {viewingActive ? "查看归档" : "返回会话"}
                   </span>
                   {viewingActive && controller.archivedTotal > 0 && (
-                    <span className="font-mono text-[10px] text-[var(--fg-3)]">
+                    <span className="type-caption font-mono text-[var(--fg-2)]">
                       {controller.archivedTotal}
                     </span>
                   )}
@@ -378,7 +366,7 @@ function ActiveConversationGroups({
 
     return (
       <div key={bucket}>
-        <h3 className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--fg-1)]">
+        <h3 className="mb-1.5 px-3 type-caption font-medium text-[var(--fg-2)]">
           {SIDEBAR_BUCKET_LABEL[bucket]}
         </h3>
         <ul className="space-y-0.5 px-2">
@@ -432,7 +420,7 @@ function SidebarShell({
             transition={drawerMotion.scrimTransition}
             onClick={onToggle}
             aria-label="关闭侧栏"
-            className="fixed inset-0 z-30 bg-black/45 backdrop-blur-[2px] md:hidden"
+            className="fixed inset-0 z-[var(--z-dialog)] bg-[var(--surface-scrim)] md:hidden"
           />
         )}
       </AnimatePresence>
@@ -446,11 +434,10 @@ function SidebarShell({
             exit={drawerMotion.panelExit}
             transition={drawerMotion.panelTransition}
             className={cn(
-              "fixed inset-y-0 left-0 z-40 md:hidden",
-              "w-[min(320px,calc(100vw-44px))] min-w-[min(276px,calc(100vw-44px))]",
+              "fixed inset-y-0 left-0 z-[var(--z-dialog)] md:hidden",
+              "w-[var(--sidebar-panel-w)] max-w-[calc(100vw-var(--space-12))]",
               "flex max-h-[100dvh] shrink-0 flex-col overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
               "pl-[env(safe-area-inset-left,0px)] pt-[env(safe-area-inset-top,0px)]",
-              "[@media(orientation:landscape)_and_(max-height:520px)]:w-[min(360px,55vw)]",
             )}
           >
             {children}
@@ -467,7 +454,7 @@ function SidebarShell({
           "border-r border-[var(--border-subtle)] bg-[var(--bg-1)]",
           "transition-[width,border-color] duration-200 ease-out",
           sidebarOpen
-            ? "w-72"
+            ? "w-[var(--sidebar-panel-w)]"
             : "w-0 border-r-0 pointer-events-none",
         )}
       >

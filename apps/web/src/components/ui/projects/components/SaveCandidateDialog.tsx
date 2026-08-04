@@ -1,16 +1,12 @@
 "use client";
 
-// Editorial 收藏到模特库表单：
-// - 不再用 BookmarkPlus 大图标做 prefix；改为 mono eyebrow + unified title
-// - input/select 走 underline 极简（h-10 + border-b），去 h-9 rounded-md bg-[var(--bg-1)]
-// - chip 去 accent-soft 填充，改为选中 accent 文字 + accent 下划线
-// - 表单 section 之间用 hairline 分隔
-
 import { useState } from "react";
 
-import { ConfirmDialog } from "@/components/ui/primitives/ConfirmDialog";
+import { Button } from "@/components/ui/primitives/Button";
+import { Dialog } from "@/components/ui/primitives/Dialog";
+import { Input } from "@/components/ui/primitives/Input";
+import { Select } from "@/components/ui/primitives/Select";
 import { toast } from "@/components/ui/primitives/Toast";
-import { cn } from "@/lib/utils";
 import type {
   ModelCandidate,
   ModelLibraryAppearance,
@@ -22,6 +18,7 @@ import {
   MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS,
 } from "@/lib/apiClient";
 import { useSaveModelCandidateToLibraryMutation } from "@/lib/queries";
+import { cn } from "@/lib/utils";
 import { inferAgeSegmentFromText } from "../utils";
 
 const AGE_OPTIONS: Array<[ModelLibraryItemAgeSegment, string]> = [
@@ -66,174 +63,172 @@ export function SaveCandidateDialog({
   open,
   onOpenChange,
 }: SaveCandidateDialogProps) {
-  // state 重置由父组件用 key 强制 re-mount 完成（React 19 不允许 effect 中
-  // setState）；初始值就是空表单 + 推断出的年龄段。
   const [title, setTitle] = useState("");
   const [ageSegment, setAgeSegment] = useState<ModelLibraryItemAgeSegment>(
     defaultAgeSegment(workflow),
   );
   const [gender, setGender] = useState<ModelLibraryGender>("female");
-  // chip 选择：空 = 不指定
   const [appearance, setAppearance] = useState<ModelLibraryAppearance | "">("");
-  const [tagsEnabled, setTagsEnabled] = useState(false);
+  const [manualTags, setManualTags] = useState(false);
   const [tags, setTags] = useState("");
-  const save = useSaveModelCandidateToLibraryMutation(workflow.id, candidate?.id ?? "", {
-    onSuccess: () => {
-      toast.success("已收藏到模特库");
-      onOpenChange(false);
+  const save = useSaveModelCandidateToLibraryMutation(
+    workflow.id,
+    candidate?.id ?? "",
+    {
+      onSuccess: () => {
+        toast.success("已收藏到模特库");
+        onOpenChange(false);
+      },
+      onError: (err) =>
+        toast.error("收藏失败", {
+          description: err instanceof Error ? err.message : "稍后重试",
+        }),
     },
-    onError: (err) =>
-      toast.error("收藏失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
-      }),
-  });
-
-  const titlePlaceholder = `方案 ${candidate?.candidate_index ?? ""}`;
-
-  const form = (
-    <div className="-mx-1 min-w-0">
-      <Field eyebrow="名称" label="名称">
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder={titlePlaceholder}
-          className={UNDERLINE_INPUT}
-        />
-      </Field>
-
-      <Field eyebrow="年龄段" label="年龄段">
-        <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-          <select
-            value={ageSegment}
-            onChange={(event) => setAgeSegment(event.target.value as ModelLibraryItemAgeSegment)}
-            className={UNDERLINE_INPUT}
-          >
-            {AGE_OPTIONS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <p className="min-w-0 break-all font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
-            <span className="text-[var(--fg-3)]">→ </span>
-            {AGE_FOLDER_BY_SEGMENT[ageSegment]}/{gender}
-          </p>
-        </div>
-      </Field>
-
-      <Field eyebrow="性别" label="性别">
-        <div className="flex flex-wrap gap-x-5 gap-y-1.5">
-          {GENDER_OPTIONS.map(([value, label]) => (
-            <Chip
-              key={value}
-              active={gender === value}
-              onClick={() => setGender(value)}
-            >
-              {label}
-            </Chip>
-          ))}
-        </div>
-      </Field>
-
-      <Field eyebrow="外貌方向" label="外貌方向">
-        <div className="flex flex-wrap gap-x-5 gap-y-1.5">
-          <Chip active={appearance === ""} onClick={() => setAppearance("")}>
-            不指定
-          </Chip>
-          {MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map((value) => (
-            <Chip
-              key={value}
-              active={appearance === value}
-              onClick={() => setAppearance(value)}
-            >
-              {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
-            </Chip>
-          ))}
-        </div>
-      </Field>
-
-      <Field eyebrow="气质方向" label="气质方向">
-        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
-          <Chip active={!tagsEnabled} onClick={() => setTagsEnabled(false)}>
-            不填
-          </Chip>
-          <Chip active={tagsEnabled} onClick={() => setTagsEnabled(true)}>
-            填写气质
-          </Chip>
-        </div>
-        {tagsEnabled ? (
-          <input
-            value={tags}
-            onChange={(event) => setTags(event.target.value)}
-            placeholder="知性通勤、清冷高级"
-            className={cn(UNDERLINE_INPUT, "mt-3")}
-          />
-        ) : null}
-      </Field>
-    </div>
   );
 
+  const submit = () => {
+    if (!candidate) return;
+    const finalTitle = title.trim() || `方案 ${candidate.candidate_index}`;
+    save.mutate({
+      title: finalTitle,
+      age_segment: ageSegment,
+      gender,
+      appearance_direction: appearance || null,
+      style_tags: manualTags ? splitTags(tags) : [],
+    });
+  };
+
   return (
-    <ConfirmDialog
+    <Dialog
       open={open}
-      onOpenChange={onOpenChange}
-      title={
-        <span className="block">
-          <span className="type-page-kicker block">
-            收藏 · 模特库
-          </span>
-          <span className="type-section-title mt-1 block">
-            收藏到模特库
-          </span>
-        </span>
-      }
-      description={form}
-      confirmText="收藏"
-      confirming={save.isPending}
-      onConfirm={async () => {
-        if (!candidate) return;
-        const finalTitle = title.trim() || `方案 ${candidate.candidate_index}`;
-        save.mutate({
-          title: finalTitle,
-          age_segment: ageSegment,
-          gender,
-          appearance_direction: appearance || null,
-          style_tags: tagsEnabled ? splitTags(tags) : [],
-        });
-      }}
-    />
+      onClose={() => onOpenChange(false)}
+      aria-label="收藏到模特库"
+      aria-busy={save.isPending}
+      className="max-w-lg"
+    >
+      <Dialog.Header>
+        <p className="type-caption">模特库</p>
+        <h2 className="type-section-title mt-1">收藏到模特库</h2>
+      </Dialog.Header>
+      <Dialog.Body>
+        <div className="min-w-0 divide-y divide-[var(--border-subtle)]">
+          <Field label="名称">
+            <Input
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder={`方案 ${candidate?.candidate_index ?? ""}`}
+            />
+          </Field>
+
+          <Field label="年龄段">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+              <Select
+                value={ageSegment}
+                onChange={(event) =>
+                  setAgeSegment(
+                    event.target.value as ModelLibraryItemAgeSegment,
+                  )
+                }
+              >
+                {AGE_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+              <p className="type-caption min-w-0 break-all text-[var(--fg-2)]">
+                {AGE_FOLDER_BY_SEGMENT[ageSegment]}/{gender}
+              </p>
+            </div>
+          </Field>
+
+          <Field label="性别">
+            <div className="flex flex-wrap gap-2">
+              {GENDER_OPTIONS.map(([value, label]) => (
+                <Chip
+                  key={value}
+                  active={gender === value}
+                  onClick={() => setGender(value)}
+                >
+                  {label}
+                </Chip>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="外貌方向">
+            <div className="flex flex-wrap gap-2">
+              <Chip active={appearance === ""} onClick={() => setAppearance("")}>
+                不指定
+              </Chip>
+              {MODEL_LIBRARY_APPEARANCE_SELECT_OPTIONS.map((value) => (
+                <Chip
+                  key={value}
+                  active={appearance === value}
+                  onClick={() => setAppearance(value)}
+                >
+                  {MODEL_LIBRARY_APPEARANCE_LABEL[value]}
+                </Chip>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="气质方向">
+            <div className="flex flex-wrap gap-2">
+              <Chip active={!manualTags} onClick={() => setManualTags(false)}>
+                不填
+              </Chip>
+              <Chip active={manualTags} onClick={() => setManualTags(true)}>
+                手动填写
+              </Chip>
+            </div>
+            {manualTags ? (
+              <Input
+                value={tags}
+                onChange={(event) => setTags(event.target.value)}
+                placeholder="知性通勤、清冷高级"
+                wrapperClassName="mt-3"
+              />
+            ) : null}
+          </Field>
+        </div>
+      </Dialog.Body>
+      <Dialog.Footer>
+        <Button
+          variant="ghost"
+          onClick={() => onOpenChange(false)}
+          disabled={save.isPending}
+        >
+          取消
+        </Button>
+        <Button
+          variant="primary"
+          loading={save.isPending}
+          onClick={submit}
+          disabled={!candidate}
+        >
+          收藏
+        </Button>
+      </Dialog.Footer>
+    </Dialog>
   );
 }
 
-const UNDERLINE_INPUT =
-  "h-10 w-full border-b border-[var(--border)] bg-transparent px-0 text-[14px] text-[var(--fg-0)] placeholder:text-[var(--fg-3)] " +
-  "transition-colors duration-150 focus:border-[var(--border-amber)] focus:outline-none " +
-  "max-sm:text-[16px]";
-
-// editorial Field 容器：mono uppercase eyebrow + 中文小标 + hairline 分隔
 function Field({
-  eyebrow,
   label,
   children,
 }: {
-  eyebrow: string;
   label: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="min-w-0 border-t border-[var(--border)] px-1 py-3.5 first:border-t-0 first:pt-1">
-      <header className="mb-2 flex items-baseline justify-between gap-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          {eyebrow}
-        </p>
-        <p className="text-[11px] text-[var(--fg-2)]">{label}</p>
-      </header>
+    <section className="min-w-0 py-4 first:pt-0 last:pb-0">
+      <p className="type-label mb-2 text-[var(--fg-1)]">{label}</p>
       <div className="min-w-0">{children}</div>
     </section>
   );
 }
 
-// editorial chip：mono uppercase + dot + 选中 amber 文字 + amber 下划线
 function Chip({
   children,
   active,
@@ -248,20 +243,13 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group inline-flex min-h-11 cursor-pointer items-center gap-1.5 border-b py-1.5 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors sm:min-h-9",
+        "type-caption inline-flex min-h-9 items-center rounded-[var(--radius-control)] border px-3 py-1.5 transition-colors",
         active
-          ? "border-[var(--border-amber)] text-[var(--amber-300)]"
-          : "border-transparent text-[var(--fg-1)] hover:text-[var(--fg-0)]",
+          ? "border-accent-border bg-accent-soft text-accent"
+          : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
       )}
       aria-pressed={active || undefined}
     >
-      <span
-        aria-hidden
-        className={cn(
-          "h-1 w-1 rounded-full transition-colors",
-          active ? "bg-[var(--amber-400)]" : "bg-[var(--fg-3)] group-hover:bg-[var(--fg-1)]",
-        )}
-      />
       {children}
     </button>
   );

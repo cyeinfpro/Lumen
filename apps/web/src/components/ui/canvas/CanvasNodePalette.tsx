@@ -35,8 +35,8 @@ const PALETTE_CATEGORIES: Array<{
 const CATEGORY_ICON_CLASS: Record<CanvasNodeCategory, string> = {
   input: "bg-[var(--info-soft)] text-[var(--info-fg)]",
   text: "bg-[var(--bg-3)] text-[var(--fg-1)]",
-  image: "bg-[var(--accent-soft)] text-[var(--accent)]",
-  video: "bg-[var(--success-soft)] text-[var(--success-fg)]",
+  image: "bg-[var(--success-soft)] text-[var(--success-fg)]",
+  video: "bg-[var(--warning-soft)] text-[var(--warning-fg)]",
   organize: "bg-[var(--bg-2)] text-[var(--fg-1)]",
   deliver: "bg-[var(--success-soft)] text-[var(--success-fg)]",
 };

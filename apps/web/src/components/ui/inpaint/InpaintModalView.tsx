@@ -1,13 +1,20 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Loader2, Sparkles, X } from "lucide-react";
+import { Sparkles, X } from "lucide-react";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
 
-import { Button, IconButton, Textarea, Tooltip } from "@/components/ui/primitives";
+import {
+  Button,
+  IconButton,
+  Kbd,
+  Spinner,
+  Textarea,
+  Tooltip,
+} from "@/components/ui/primitives";
 import { Dialog } from "@/components/ui/primitives/Dialog";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { cn } from "@/lib/utils";
@@ -199,7 +206,7 @@ function InpaintCanvasPanel({
     >
       {!source ? (
         <div className="flex h-full items-center justify-center type-body-sm text-[var(--fg-1)]">
-          <Loader2 className="w-4 h-4 animate-spin mr-2" />
+          <Spinner size={16} className="mr-2" />
           图片加载中
         </div>
       ) : (
@@ -317,10 +324,7 @@ function InpaintPromptPanel({
       <div className="hidden md:block rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/40 p-2.5 text-[11.5px] leading-relaxed text-[var(--fg-1)]/90">
         <strong className="font-medium text-[var(--fg-0)]">提示</strong>
         ：仅描述涂抹区域，越具体越准。
-        <Tooltip
-          content="不要描述整张图；只写涂抹区域要变成什么。"
-          side="top"
-        >
+        <Tooltip content="不要描述整张图；只写涂抹区域要变成什么。" side="top">
           <span className="ml-1 text-[var(--info)] underline decoration-dotted cursor-help">
             详解
           </span>
@@ -397,19 +401,5 @@ function InpaintPromptPanel({
         {hasStroke ? `已涂抹 ${Math.round(coverage * 100)}%` : "未涂抹"}
       </div>
     </div>
-  );
-}
-
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd
-      className={cn(
-        "inline-flex items-center justify-center min-w-4 h-4 px-1 mx-0.5 rounded",
-        "border border-[var(--border-subtle)] bg-[var(--bg-2)]",
-        "text-[9.5px] font-mono text-[var(--fg-1)]",
-      )}
-    >
-      {children}
-    </kbd>
   );
 }

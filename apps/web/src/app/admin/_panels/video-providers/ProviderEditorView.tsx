@@ -8,7 +8,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Switch } from "@/components/ui/primitives";
 import type { VideoProviderItemOut } from "@/lib/types";
 
 import {
@@ -174,7 +174,7 @@ export function ProviderEditorView({
         )}
       </div>
       <div className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4">
-        <div className="grid grid-cols-2 items-stretch gap-2 rounded-[var(--radius-dialog)] border border-[var(--accent)]/40 bg-[var(--bg-1)]/95 px-3 py-2.5 shadow-[var(--shadow-3)] backdrop-blur-xl sm:flex sm:items-center sm:gap-3 sm:px-4">
+        <div className="surface-panel grid grid-cols-2 items-stretch gap-2 px-3 py-2.5 sm:flex sm:items-center sm:gap-3 sm:px-4">
           <span className="col-span-2 min-w-0 type-caption text-[var(--fg-1)] sm:col-span-1">
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)] shadow-[var(--shadow-amber)]" />
@@ -244,7 +244,7 @@ function EditCommandCenter({
   onAddFake: () => void;
 }) {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm">
+    <div className="surface-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -265,14 +265,14 @@ function EditCommandCenter({
             当前来源：{sourceLabel(source)}
           </p>
         </div>
-        <label className="flex min-h-9 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 text-sm text-[var(--fg-0)] lg:min-w-[220px]">
+        <div className="flex min-h-10 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 py-2 type-body-sm text-[var(--fg-0)] lg:min-w-[220px]">
           <span>启用视频生成</span>
-          <input
-            type="checkbox"
+          <Switch
             checked={enabled}
-            onChange={(event) => onToggle(event.target.checked)}
+            onCheckedChange={onToggle}
+            aria-label="启用视频生成"
           />
-        </label>
+        </div>
       </div>
       {source === "env" && (
         <div className="mt-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft px-3 py-2 type-caption text-warning">

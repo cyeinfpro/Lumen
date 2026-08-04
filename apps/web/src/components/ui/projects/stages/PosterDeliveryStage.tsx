@@ -161,7 +161,7 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
     >
       {!renders.length ? (
         <div className="mt-4 flex h-32 flex-col items-center justify-center gap-2 border border-dashed border-[var(--border)] text-[var(--fg-2)]">
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+          <span className="type-caption">
             暂无可交付的成品
           </span>
         </div>
@@ -182,11 +182,11 @@ export function PosterDeliveryStage({ workflow }: { workflow: WorkflowRun }) {
       )}
 
       <div className="mt-8 grid gap-2 border-t border-[var(--border)] pt-5">
-        <p className="inline-flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--success)]">
+        <p className="inline-flex items-center gap-2 type-caption text-[var(--success)]">
           <Check className="h-3 w-3" />
           交付就绪
         </p>
-        <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+        <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
           {allSaved
             ? "这些成品已保存为项目素材，可从项目中心继续追踪与复用。"
             : "下载前建议先加入项目素材，便于后续查找、复用和交付复盘。"}
@@ -237,7 +237,7 @@ function DeliveryCard({
         type="button"
         onClick={() => onPreview(image)}
         className={cn(
-          "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+          "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
           aspectCls,
         )}
       >
@@ -249,16 +249,16 @@ function DeliveryCard({
           unoptimized
           className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
         />
-        <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
+        <span className="type-caption absolute left-3 top-3 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
           {render.aspect_ratio}
         </span>
       </button>
 
       <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
-        <p className="text-[14px] font-medium tracking-tight text-[var(--fg-0)]">
+        <p className="type-body-sm font-medium tracking-tight text-[var(--fg-0)]">
           {render.aspect_ratio}
         </p>
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {render.size}
         </span>
       </div>

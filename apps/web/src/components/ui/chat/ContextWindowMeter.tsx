@@ -76,7 +76,7 @@ function tone(percent: number, state: ContextState): string {
   if (state === "compressed_truncated") return "bg-[var(--warning)]";
   if (state === "compressed") return "bg-[var(--success)]";
   if (percent >= 95) return "bg-[var(--danger)]";
-  if (percent >= 80) return "bg-[var(--amber-400)]";
+  if (percent >= 80) return "bg-warning";
   return "bg-[var(--fg-1)]";
 }
 
@@ -435,7 +435,7 @@ export function ContextWindowMeter({
             className={cn(
               "inline-flex h-8 w-12 flex-col justify-center gap-1 rounded-[var(--radius-card)]",
               "border border-[var(--border-subtle)] bg-[var(--bg-1)]/70 px-1.5",
-              "text-[10px] tabular-nums text-[var(--fg-2)]",
+              "type-overline tabular-nums text-[var(--fg-2)]",
             )}
             style={{ fontFamily: "var(--font-mono)" }}
           >
@@ -475,7 +475,7 @@ export function ContextWindowMeter({
           event={latestCompaction}
           conversationId={convId}
           onRetry={retryManualCompact}
-          className="absolute right-0 top-10 z-50"
+          className="absolute right-0 top-10 z-[var(--z-tray)]"
         />
       </div>
     );
@@ -496,7 +496,7 @@ export function ContextWindowMeter({
           className={cn(
             "inline-flex h-8 w-[168px] flex-col justify-center gap-1 rounded-[var(--radius-card)]",
             "border border-[var(--border-subtle)] bg-[var(--bg-1)]/70 px-2.5",
-            "text-[10px] text-[var(--fg-2)]",
+            "type-overline text-[var(--fg-2)]",
           )}
         >
           <span className="flex min-w-0 items-center justify-between gap-2 leading-none">
@@ -532,7 +532,7 @@ export function ContextWindowMeter({
             )
           }
           className={cn(
-            "h-8 px-2.5 text-[11px] rounded-[var(--radius-control)]",
+            "h-8 rounded-[var(--radius-control)] px-2.5",
             "border-[var(--border-subtle)] bg-[var(--bg-1)]/70 text-[var(--fg-1)]",
           )}
         >
@@ -542,7 +542,7 @@ export function ContextWindowMeter({
         event={latestCompaction}
         conversationId={convId}
         onRetry={retryManualCompact}
-        className="absolute right-0 top-10 z-50"
+        className="absolute right-0 top-10 z-[var(--z-tray)]"
       />
     </div>
   );

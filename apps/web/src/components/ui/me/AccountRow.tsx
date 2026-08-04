@@ -65,14 +65,14 @@ export function AccountRow({
           {label}
         </span>
         {displayBadge != null && (
-          <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[var(--amber-400)]/15 px-1 type-caption font-medium tabular-nums text-[var(--amber-400)]">
+          <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-info-soft px-1 type-caption font-medium tabular-nums text-info">
             {displayBadge}
           </span>
         )}
       </span>
 
       {description && (
-        <span className="mr-1 max-w-[42%] shrink-0 break-all text-right text-[12px] text-[var(--fg-2)]">
+        <span className="mr-1 max-w-[42%] shrink-0 break-all text-right type-caption text-[var(--fg-2)]">
           {description}
         </span>
       )}
@@ -142,14 +142,14 @@ function ToggleSwitch({
         "relative inline-flex items-center shrink-0",
         "h-7 w-[46px] rounded-full transition-colors duration-200 motion-reduce:transition-none",
         checked
-          ? "bg-[var(--amber-400)]"
+          ? "bg-accent"
           : "bg-[var(--bg-3)] border border-[var(--border-subtle)]",
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full bg-[var(--accent-on)] shadow-sm",
+          "absolute left-[3px] top-[3px] h-[22px] w-[22px] rounded-full bg-[var(--accent-on)] shadow-[var(--shadow-1)]",
           "transition-transform duration-200 motion-reduce:transition-none",
           checked ? "translate-x-[18px]" : "translate-x-0",
         )}

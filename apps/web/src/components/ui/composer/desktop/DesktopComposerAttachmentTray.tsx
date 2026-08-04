@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import type { AttachmentImage } from "@/lib/types";
+import { Button, MediaControlButton } from "@/components/ui/primitives";
 import { DURATION, EASE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
@@ -69,8 +70,8 @@ export function DesktopComposerAttachmentTray({
             <div
               className={cn(
                 "mx-3 mt-3 flex items-center justify-center gap-2 rounded-[var(--radius-card)]",
-                "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
-                "px-3 py-3 text-xs text-[var(--amber-400)]",
+                "border border-dashed border-accent-border bg-accent-soft",
+                "px-3 py-3 type-caption text-accent",
               )}
             >
               <Paperclip className="h-3.5 w-3.5" aria-hidden />
@@ -108,7 +109,7 @@ export function DesktopComposerAttachmentTray({
                     "cursor-grab active:cursor-grabbing",
                   draggingAttachmentId === attachment.id && "opacity-55",
                   showMaskBadge
-                    ? "border-[var(--amber-400)]/70"
+                    ? "border-accent-border"
                     : "border-[var(--border-subtle)]",
                 )}
               >
@@ -120,65 +121,58 @@ export function DesktopComposerAttachmentTray({
                   className="w-full h-full object-cover"
                   loading="lazy"
                 />
-                {/* @hit-area-ok: desktop-only 64px tile; larger targets overlap the adjacent role control. */}
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => onInsertImageMention(index + 1)}
                   aria-label={`插入 @图${index + 1}`}
                   title={`插入 @图${index + 1}`}
                   className={cn(
-                    "absolute top-0.5 left-0.5 h-5 px-1 rounded-[var(--radius-control)]",
-                    "bg-[var(--bg-0)]/80 text-[10px] font-semibold text-[var(--amber-400)]",
+                    "absolute top-0.5 left-0.5 h-5 min-h-0 px-1 rounded-[var(--radius-control)]",
+                    "bg-[var(--media-control-bg)] type-overline text-[var(--media-control-fg)]",
                     "backdrop-blur-sm leading-none",
-                    "active:scale-[0.94] transition-transform",
                   )}
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
                   @图{index + 1}
-                </button>
+                </Button>
                 <AttachmentRoleBadge
                   role={role}
                   imageNumber={index + 1}
                   onClick={() => attachmentRoles.cycleRole(attachment.id)}
                 />
-                {/* @hit-area-ok: desktop-only 64px tile; larger targets overlap the adjacent role control. */}
-                <button
-                  type="button"
+                <MediaControlButton
+                  size="sm"
                   onClick={() => onRemoveAttachment(attachment.id)}
                   aria-label="移除参考图"
-                  className={cn(
-                    "absolute top-0.5 right-0.5 w-5 h-5 rounded-full",
-                    "bg-[var(--media-control-bg)] backdrop-blur-sm text-[var(--media-control-fg)]",
-                    "flex items-center justify-center",
-                    "active:scale-[0.92] transition-transform",
-                  )}
+                  title="移除参考图"
+                  className="absolute top-0.5 right-0.5 h-6 min-h-0 w-6 min-w-0 backdrop-blur-sm"
                 >
                   <X className="w-3 h-3" aria-hidden />
-                </button>
+                </MediaControlButton>
               </div>
             );
           })}
           {renderWhen(isImageMode, (
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="sm"
               onClick={inpaint.openInpaint}
               disabled={inpaint.disabled}
               aria-label="局部修改"
               title={inpaint.tooltip}
               className={cn(
-                "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
-                "w-16 h-16 rounded-[var(--radius-panel)] border text-[10px] font-medium",
+                "h-16 w-16 shrink-0 flex-col gap-0.5 rounded-[var(--radius-panel)] border px-0 type-overline",
                 "transition-colors",
                 selectValue(
                   inpaint.disabled,
                   "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed",
                   selectValue(
                     inpaint.maskActive,
-                    "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10 hover:bg-[var(--amber-400)]/15",
+                    "border-accent-border bg-accent-soft text-accent hover:bg-accent-soft",
                     "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)] hover:text-[var(--fg-0)] hover:border-[var(--border)]",
                   ),
                 ),
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
               )}
             >
               <SquareDashedMousePointer
@@ -188,12 +182,12 @@ export function DesktopComposerAttachmentTray({
               <span>
                 {selectValue(inpaint.maskActive, "重涂", "局部")}
               </span>
-            </button>
+            </Button>
           ))}
         </div>
       ))}
       {renderWhen(Boolean(attachmentRoles.hint), (
-        <div className="px-3 pt-1 text-[11px] leading-4 text-[var(--fg-2)]">
+        <div className="px-3 pt-1 type-caption text-[var(--fg-2)]">
           {attachmentRoles.hint}
         </div>
       ))}

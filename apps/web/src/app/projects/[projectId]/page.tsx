@@ -44,7 +44,7 @@ function ProjectDispatcher({ projectId }: { projectId: string }) {
       <div className="flex h-[100dvh] items-center justify-center bg-[var(--bg-0)]">
         <div className="grid place-items-center gap-3 text-center">
           <Spinner size={20} />
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             加载中
           </p>
         </div>

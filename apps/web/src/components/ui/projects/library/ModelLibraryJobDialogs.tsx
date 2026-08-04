@@ -10,6 +10,8 @@ import { X } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { Select } from "@/components/ui/primitives/Select";
+import { Switch } from "@/components/ui/primitives/Switch";
 import { toast } from "@/components/ui/primitives/Toast";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "@/components/ui/primitives/mobile/useModalLayer";
@@ -104,7 +106,7 @@ export function SaveJobItemDialog({
 
   return (
     <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -146,32 +148,30 @@ export function SaveJobItemDialog({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               placeholder="高级简洁青年女模特"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body h-11 w-full px-3 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
             />
           </UnderlineLabeled>
           <div className="grid gap-5 md:grid-cols-2">
             <UnderlineLabeled label="年龄段">
-              <select
+              <Select
                 value={age}
                 onChange={(event) => setAge(event.target.value as ModelLibraryItemAgeSegment)}
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] md:h-10 md:text-sm"
               >
                 {(Object.keys(AGE_LABEL) as ModelLibraryItemAgeSegment[]).map((segment) => (
                   <option key={segment} value={segment} className="bg-[var(--bg-0)]">
                     {AGE_LABEL[segment]}
                   </option>
                 ))}
-              </select>
+              </Select>
             </UnderlineLabeled>
             <UnderlineLabeled label="性别">
-              <select
+              <Select
                 value={gender}
                 onChange={(event) => setGender(event.target.value)}
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--amber-400)] md:h-10 md:text-sm"
               >
                 <option value="female" className="bg-[var(--bg-0)]">女</option>
                 <option value="male" className="bg-[var(--bg-0)]">男</option>
-              </select>
+              </Select>
             </UnderlineLabeled>
           </div>
           <UnderlineLabeled label="外貌方向">
@@ -195,18 +195,17 @@ export function SaveJobItemDialog({
               value={styleTags}
               onChange={(event) => setStyleTags(event.target.value)}
               placeholder="知性通勤、清冷高级"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body h-11 w-full px-3 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
             />
           </UnderlineLabeled>
-          <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)]">
-            <input
-              type="checkbox"
+          <div className="control-shell flex min-h-11 items-center gap-3 px-3 type-caption text-[var(--fg-1)]">
+            <Switch
               checked={autoTag}
-              onChange={(event) => setAutoTag(event.target.checked)}
-              className="accent-[var(--amber-400)]"
+              onCheckedChange={setAutoTag}
+              aria-label="入库后自动识别"
             />
             入库后再跑一次自动识别
-          </label>
+          </div>
         </div>
         <footer className="mobile-dialog-footer grid shrink-0 grid-cols-1 gap-2 border-t border-[var(--border)] px-5 py-4 min-[380px]:grid-cols-2 md:flex md:justify-end">
           <Button variant="outline" onClick={onClose} className="w-full md:w-auto">
@@ -230,7 +229,7 @@ function UnderlineLabeled({
 }) {
   return (
     <label className="grid gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         {label}
       </span>
       {children}
@@ -253,7 +252,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1.5 font-mono text-[11px] uppercase tracking-[0.16em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-9",
+        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1.5 type-caption transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)] md:min-h-9",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -263,7 +262,7 @@ function Chip({
         className={cn(
           "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
           active
-            ? "bg-[var(--amber-400)]"
+            ? "bg-accent"
             : "bg-transparent group-hover:bg-[var(--border-strong)]",
         )}
       />

@@ -2,7 +2,7 @@ import { Check, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/primitives/Button";
 import { RunningState, StageFrame } from "../components/StageFrame";
-import { jsonValue } from "../utils";
+import { StructuredValue } from "../components/StructuredValue";
 import type { ProductAnalysisStageController } from "./useProductAnalysisStage";
 
 const CORE_FIELDS = [
@@ -36,9 +36,9 @@ function ProductAnalysisRunning() {
     <StageFrame
       eyebrow="N°02 — 商品约束"
       title="商品约束"
-      subtitle="正在从商品图提取服装还原点、推荐配饰和匹配背景。"
+      subtitle="商品图分析中，提取服装还原点、推荐配饰和匹配背景。"
     >
-      <RunningState label="正在分析商品约束…" />
+      <RunningState label="商品约束分析中" />
     </StageFrame>
   );
 }
@@ -71,17 +71,15 @@ function ProductAnalysisReady({
           }
           className="w-full min-[420px]:w-auto"
         >
-          {controller.dirty
-            ? "确认修正后的商品约束"
-            : "沿用 AI 建议"}
+          {controller.dirty ? "确认修正" : "沿用建议"}
         </Button>
         {controller.dirty ? (
           <button
             type="button"
             onClick={controller.reset}
-            className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] underline-offset-4 transition-colors hover:text-[var(--fg-0)] hover:underline"
+            className="type-control cursor-pointer text-[var(--fg-2)] underline-offset-4 transition-colors hover:text-[var(--fg-0)] hover:underline"
           >
-            Reset
+            重置
           </button>
         ) : null}
       </div>
@@ -96,18 +94,17 @@ function AnalysisFields({
 }) {
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        AI Reading
-      </p>
+      <p className="type-caption text-[var(--fg-2)]">AI 识别</p>
       <div className="mt-3 grid gap-x-6 gap-y-4 md:grid-cols-3">
         {CORE_FIELDS.map(([label, key]) => (
           <div key={key} className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            <p className="type-caption text-[var(--fg-3)]">
               {label}
             </p>
-            <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-0)]">
-              {jsonValue(controller.step?.output_json?.[key])}
-            </p>
+            <StructuredValue
+              value={controller.step?.output_json?.[key]}
+              className="text-[var(--fg-0)]"
+            />
           </div>
         ))}
       </div>
@@ -122,8 +119,8 @@ function EditableFields({
 }) {
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        Editable
+      <p className="type-caption text-[var(--fg-2)]">
+        可编辑字段
       </p>
       <div className="mt-3 grid gap-4">
         <FieldInput
@@ -156,7 +153,7 @@ function AnalysisSummary({
 }) {
   return (
     <details className="group border-t border-[var(--border)] py-4">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 type-caption text-[var(--fg-2)] transition-colors hover:text-[var(--fg-0)]">
         <span>查看识别摘要</span>
         <span
           aria-hidden
@@ -168,12 +165,10 @@ function AnalysisSummary({
       <div className="mt-4 grid gap-x-6 gap-y-4 md:grid-cols-3">
         {SUMMARY_FIELDS.map(([label, key]) => (
           <div key={key} className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            <p className="type-caption text-[var(--fg-3)]">
               {label}
             </p>
-            <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--fg-1)]">
-              {jsonValue(controller.step?.output_json?.[key])}
-            </p>
+            <StructuredValue value={controller.step?.output_json?.[key]} />
           </div>
         ))}
       </div>
@@ -194,14 +189,14 @@ function FieldInput({
 }) {
   return (
     <label className="block min-w-0">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         {label}
       </span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
-        className="mt-2 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+        className="control-shell type-body-sm mt-2 h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-accent-border focus:shadow-[var(--ring)]"
       />
     </label>
   );

@@ -197,7 +197,7 @@ function getPosterFormState({
     derivedTitle:
       titleTrimmed ||
       (copyTrimmed ? copyTrimmed.split(/\n/)[0]?.slice(0, 24) || "海报设计" : "海报设计"),
-    ctaDisabled:
+    ctaBlocked:
       !copyTrimmed ||
       !style ||
       !aspects.length ||
@@ -362,7 +362,7 @@ export function PosterWorkflowNewPage() {
   };
 
   const uploadPending = uploading.logo || uploading.product;
-  const { copyTrimmed, derivedTitle, ctaDisabled } = useMemo(
+  const { copyTrimmed, derivedTitle, ctaBlocked } = useMemo(
     () =>
       getPosterFormState({
         aspects,
@@ -416,7 +416,7 @@ export function PosterWorkflowNewPage() {
   };
 
   return (
-    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-[16px] max-md:[&_textarea]:text-[16px]">
+    <div className="page-shell relative h-[100dvh] max-md:[&_button]:min-h-[44px] max-md:[&_input]:text-base max-md:[&_textarea]:text-base">
       <div data-topbar-sentinel className="absolute top-0 h-1 w-full" aria-hidden />
       <OnlineBanner />
       <ProjectMobileTopBar
@@ -434,13 +434,13 @@ export function PosterWorkflowNewPage() {
               <p className="type-page-kicker">新建项目</p>
               <h1 className="type-page-title">新建海报设计</h1>
               <p className="type-page-subtitle hidden max-w-3xl lg:block">
-                录入文案、选择风格、确定尺寸；剩下交给 AI。
+                录入文案、选择风格、确认尺寸；剩下交给 AI。
               </p>
             </div>
             <div className="page-header-actions">
               <Link
                 href="/projects"
-                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60"
+                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 border border-[var(--border)] px-3 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 返回项目
@@ -466,7 +466,7 @@ export function PosterWorkflowNewPage() {
                 placeholder={
                   "例如：\n夏季新品·椰子香水\n清新调，海洋木质底；525 ml 经典瓶身\n限时五折 · 立即下单"
                 }
-                className="-mt-3 w-full resize-y border-b border-[var(--border)] bg-transparent px-1 py-2 text-[16px] leading-7 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[15px]"
+                className="control-shell -mt-3 w-full resize-y px-3 py-2 type-body leading-7 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
               />
 
               <PosterStyleSection
@@ -480,7 +480,7 @@ export function PosterWorkflowNewPage() {
                 eyebrow="N°03 — 尺寸"
                 title="目标尺寸"
                 trailing={
-                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+                  <span className="type-caption text-[var(--fg-2)]">
                     {String(aspects.length).padStart(2, "0")} / {String(POSTER_ASPECT_LABELS.length).padStart(2, "0")}
                   </span>
                 }
@@ -494,9 +494,9 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => toggleAspect(value)}
                       className={cn(
-                        "inline-flex min-h-11 cursor-pointer items-center rounded-full border px-3 text-[12px] transition-colors md:min-h-9",
+                        "inline-flex min-h-11 cursor-pointer items-center rounded-full border px-3 type-caption transition-colors md:min-h-9",
                         active
-                          ? "border-[var(--border-amber)] bg-[var(--accent-soft)] text-[var(--amber-300)]"
+                          ? "border-accent-border bg-[var(--accent-soft)] text-accent"
                           : "border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
                       )}
                     >
@@ -517,7 +517,7 @@ export function PosterWorkflowNewPage() {
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-left">
                   <div className="min-w-0">
                     <p className="type-page-kicker">N°04 — 品牌（可选）</p>
-                    <h2 className="type-section-title mt-2 md:text-[22px]">
+                    <h2 className="type-section-title mt-2 ">
                       品牌素材
                     </h2>
                   </div>
@@ -550,7 +550,7 @@ export function PosterWorkflowNewPage() {
 
                 <div className="mt-5 grid gap-x-8 gap-y-5 md:grid-cols-2">
                   <label className="block min-w-0">
-                    <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    <span className="type-caption text-[var(--fg-2)]">
                       主色
                     </span>
                     <div className="mt-2 flex min-w-0 items-center gap-3">
@@ -567,12 +567,12 @@ export function PosterWorkflowNewPage() {
                         }
                         maxLength={24}
                         placeholder="#FFD166 / amber"
-                        className="h-11 min-w-0 flex-1 border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
+                        className="control-shell h-11 min-w-0 flex-1 px-3 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
                       />
                     </div>
                   </label>
                   <label className="block min-w-0">
-                    <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                    <span className="type-caption text-[var(--fg-2)]">
                       字体
                     </span>
                     <input
@@ -582,7 +582,7 @@ export function PosterWorkflowNewPage() {
                       }
                       maxLength={64}
                       placeholder="例如：思源黑体 / Inter"
-                      className="mt-2 h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
+                      className="control-shell mt-2 h-11 w-full px-3 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
                     />
                   </label>
                 </div>
@@ -592,7 +592,7 @@ export function PosterWorkflowNewPage() {
               <SectionHeader eyebrow="N°05 — 设置" title="项目设置" />
               <div className="-mt-2 grid gap-5 md:grid-cols-2">
                 <label className="block min-w-0">
-                  <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                  <span className="type-caption text-[var(--fg-2)]">
                     标题
                   </span>
                   <input
@@ -602,12 +602,12 @@ export function PosterWorkflowNewPage() {
                     }
                     maxLength={TITLE_MAX}
                     placeholder={derivedTitle}
-                    className="mt-2 h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-[14px]"
+                    className="control-shell mt-2 h-11 w-full px-3 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-10"
                   />
                   <CharCount remaining={titleRemaining} max={TITLE_MAX} />
                 </label>
                 <div>
-                  <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+                  <span className="type-caption text-[var(--fg-2)]">
                     质量
                   </span>
                   <div className="mt-2 inline-flex rounded-full border border-[var(--border)] p-0.5">
@@ -615,9 +615,9 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("standard")}
                       className={cn(
-                        "inline-flex min-h-11 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-9",
+                        "inline-flex min-h-11 items-center rounded-full px-3 type-caption transition-colors md:min-h-9",
                         qualityMode === "standard"
-                          ? "bg-[var(--amber-400)] text-black"
+                          ? "bg-accent text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                       )}
                     >
@@ -627,9 +627,9 @@ export function PosterWorkflowNewPage() {
                       type="button"
                       onClick={() => setQualityMode("premium")}
                       className={cn(
-                        "inline-flex min-h-11 items-center rounded-full px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-9",
+                        "inline-flex min-h-11 items-center rounded-full px-3 type-caption transition-colors md:min-h-9",
                         qualityMode === "premium"
-                          ? "bg-[var(--amber-400)] text-black"
+                          ? "bg-accent text-black"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                       )}
                     >
@@ -642,15 +642,15 @@ export function PosterWorkflowNewPage() {
               {error ? (
                 <div
                   role="alert"
-                  className="border-y border-[var(--danger)]/30 bg-[var(--danger-soft)]/30 px-4 py-4 md:px-5"
+                  className="border-y border-danger-border bg-danger-soft px-4 py-4 md:px-5"
                 >
                   <div className="flex items-start gap-3">
                     <X className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
                     <div>
-                      <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--danger)]">
+                      <p className="type-caption text-[var(--danger)]">
                         错误
                       </p>
-                      <p className="mt-1 text-[13px] text-[var(--fg-0)]">{error}</p>
+                      <p className="mt-1 type-body-sm text-[var(--fg-0)]">{error}</p>
                     </div>
                   </div>
                 </div>
@@ -658,24 +658,24 @@ export function PosterWorkflowNewPage() {
 
               <PosterCreateButton
                 pending={submitting || create.isPending}
-                disabled={ctaDisabled}
+                disabled={ctaBlocked}
                 onClick={onCreate}
               />
             </section>
 
             <aside className="hidden grid-cols-1 gap-0 self-start lg:grid">
               <InfoPanel title="流程">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   文案切分、4 张母版候选、多尺寸成品（默认 4 尺寸），可逐张返修。
                 </p>
               </InfoPanel>
               <InfoPanel title="文字策略">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   V1 全 AI 出图（无文字层 Canvas 编辑器）。所有文字直接写在 prompt 里。
                 </p>
               </InfoPanel>
               <InfoPanel title="风格">
-                <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+                <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
                   在「风格库」沉淀常用风格，每次创建项目只挑一个；保证视觉一致性。
                 </p>
               </InfoPanel>
@@ -687,7 +687,7 @@ export function PosterWorkflowNewPage() {
       <PosterCreateButton
         mobile
         pending={submitting || create.isPending}
-        disabled={ctaDisabled}
+        disabled={ctaBlocked}
         onClick={onCreate}
       />
 
@@ -731,7 +731,7 @@ function BrandImageSlot({
   const inputRef = useRef<HTMLInputElement | null>(null);
   return (
     <div className="grid gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         {label}
       </span>
       <div className="relative">
@@ -748,7 +748,7 @@ function BrandImageSlot({
             <button
               type="button"
               onClick={onRemove}
-              className="absolute right-2 top-2 inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full bg-black/55 text-white/85 backdrop-blur hover:bg-[var(--danger)]/70 hover:text-white md:h-7 md:w-7"
+              className="absolute right-2 top-2 inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur hover:bg-danger hover:text-[var(--media-control-fg)] md:h-7 md:w-7"
               aria-label="移除"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -759,19 +759,19 @@ function BrandImageSlot({
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={uploading}
-            className="flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-[var(--border-amber)] hover:bg-[var(--bg-2)] disabled:opacity-50"
+            className="flex aspect-square w-full cursor-pointer flex-col items-center justify-center gap-2 border border-dashed border-[var(--border-strong)] px-3 text-center transition-colors hover:border-accent-border hover:bg-[var(--bg-2)] disabled:opacity-50"
           >
             {uploading ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin text-[var(--fg-1)]" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] tabular-nums text-[var(--fg-1)]">
+                <span className="type-caption tabular-nums text-[var(--fg-1)]">
                   {Math.round(progress * 100).toString().padStart(2, "0")}%
                 </span>
               </>
             ) : (
               <>
                 <Upload className="h-5 w-5 text-[var(--fg-2)]" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+                <span className="type-caption text-[var(--fg-2)]">
                   点击上传
                 </span>
               </>
@@ -791,7 +791,7 @@ function BrandImageSlot({
         />
       </div>
       {state ? (
-        <p className="truncate text-[11px] text-[var(--fg-2)]" title={state.filename}>
+        <p className="truncate type-caption text-[var(--fg-2)]" title={state.filename}>
           {state.filename}
         </p>
       ) : null}

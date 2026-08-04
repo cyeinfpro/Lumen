@@ -18,20 +18,20 @@ export function StepRail({ workflow }: { workflow: WorkflowRun }) {
   return (
     <div className="grid gap-6">
       <div>
-        <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           Progress
         </p>
         <div className="mt-2 flex items-baseline gap-3">
-          <span className="type-metric text-[28px]">
+          <span className="type-metric ">
             {Math.round(progress * 100)}
           </span>
-          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <span className="type-caption text-[var(--fg-2)]">
             % · {currentIndex + 1} / {STEPS.length}
           </span>
         </div>
         <div className="mt-3 h-px w-full bg-[var(--border)]">
           <div
-            className="h-px bg-[var(--amber-400)] transition-[width] duration-[var(--dur-slow)] ease-out"
+            className="h-px bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
             style={{ width: `${progress * 100}%` }}
           />
         </div>
@@ -60,25 +60,25 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
     <div className="mb-6 border-y border-[var(--border)] py-4 lg:hidden">
       <div className="flex items-baseline justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             Progress
           </p>
-          <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-1)]">
+          <p className="mt-1 type-caption text-[var(--fg-1)]">
             {currentIndex + 1} / {STEPS.length}
           </p>
         </div>
         <div className="flex items-baseline gap-1">
-          <span className="type-metric text-[28px] text-[var(--amber-300)]">
+          <span className="type-metric  text-accent">
             {Math.round(progress * 100)}
           </span>
-          <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-[var(--fg-2)]">
+          <span className="type-caption text-[var(--fg-2)]">
             %
           </span>
         </div>
       </div>
       <div className="mt-3 h-px w-full bg-[var(--border)]">
         <div
-          className="h-px bg-[var(--amber-400)] transition-[width] duration-[var(--dur-slow)] ease-out"
+          className="h-px bg-accent transition-[width] duration-[var(--dur-slow)] ease-out"
           style={{ width: `${progress * 100}%` }}
         />
       </div>
@@ -91,9 +91,9 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
             <span
               key={step.key}
               className={cn(
-                "inline-flex min-h-11 shrink-0 snap-start items-center gap-1.5 px-2 font-mono text-[10px] uppercase tracking-[0.16em] transition-colors md:min-h-9",
+                "inline-flex min-h-11 shrink-0 snap-start items-center gap-1.5 px-2 type-caption transition-colors md:min-h-9",
                 isCurrent
-                  ? "text-[var(--amber-300)]"
+                  ? "text-accent"
                   : isPast
                     ? "text-[var(--fg-1)]"
                     : "text-[var(--fg-3)]",
@@ -102,7 +102,7 @@ export function MobileStageStrip({ workflow }: { workflow: WorkflowRun }) {
               <Icon className="h-3 w-3" />
               {step.label}
               {isCurrent ? (
-                <span aria-hidden className="ml-1 inline-block h-1 w-1 rounded-full bg-[var(--amber-400)] animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]" />
+                <span aria-hidden className="ml-1 inline-block h-1 w-1 rounded-full bg-accent animate-[lumen-pulse-soft_1800ms_ease-in-out_infinite]" />
               ) : null}
             </span>
           );

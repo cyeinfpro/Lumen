@@ -23,7 +23,13 @@ import {
   usePatchCanvasMutation,
 } from "@/lib/queries/canvases";
 import type { CanvasListItem } from "@/lib/canvas/types";
-import { Button, IconButton, Input, toast } from "@/components/ui/primitives";
+import {
+  Button,
+  ConfirmDialog,
+  IconButton,
+  Input,
+  toast,
+} from "@/components/ui/primitives";
 import { Dialog } from "@/components/ui/primitives/Dialog";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import {
@@ -39,6 +45,7 @@ export function CanvasProjectIndex() {
   const remove = useDeleteCanvasMutation();
   const [active, setActive] = useState<CanvasListItem | null>(null);
   const [renaming, setRenaming] = useState<CanvasListItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CanvasListItem | null>(null);
 
   return (
     <div className="relative flex h-[100dvh] min-h-0 w-full min-w-0 flex-col bg-[var(--bg-0)] text-[var(--fg-0)]">
@@ -175,22 +182,42 @@ export function CanvasProjectIndex() {
                 icon={Trash2}
                 label="删除画布"
                 danger
-                loading={remove.isPending}
-                onClick={async () => {
-                  if (!window.confirm(`删除“${active.title}”？生成资产不会被删除。`)) return;
-                  try {
-                    await remove.mutateAsync(active.id);
-                    setActive(null);
-                    toast.success("画布已删除");
-                  } catch (error) {
-                    toast.error(error instanceof Error ? error.message : "删除失败");
-                  }
+                onClick={() => {
+                  setDeleteTarget(active);
                 }}
               />
             </div>
           </div>
         ) : null}
       </BottomSheet>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title="删除画布"
+        description={
+          deleteTarget
+            ? `删除“${deleteTarget.title}”？生成资产不会被删除。`
+            : undefined
+        }
+        confirmText="删除"
+        tone="danger"
+        confirming={remove.isPending}
+        onConfirm={async () => {
+          const target = deleteTarget;
+          if (!target) return;
+          try {
+            await remove.mutateAsync(target.id);
+            setDeleteTarget(null);
+            setActive(null);
+            toast.success("画布已删除");
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "删除失败");
+          }
+        }}
+      />
 
       {renaming ? (
         <RenameDialog

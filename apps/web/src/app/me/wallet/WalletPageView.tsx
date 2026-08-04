@@ -1,10 +1,8 @@
 "use client";
 
 import type { FormEvent } from "react";
-import Link from "next/link";
 import {
   AlertTriangle,
-  ArrowLeft,
   Check,
   Copy,
   CreditCard,
@@ -67,20 +65,16 @@ function microMoney(value?: number | null): string {
 
 export function ByokWalletPage() {
   return (
-    <SettingsShell title="钱包" subtitle="BYOK" maxWidth="max-w-3xl">
-      <Card variant="subtle" padding="lg" className="space-y-3">
-        <p className="type-card-title">BYOK 账号</p>
-        <p className="type-body">
-          你的账号由 BYOK 自助注册流程创建，所以费用直接由你在 OpenAI/Claude
-          等上游账单结算，Lumen 不维护钱包余额。
-        </p>
-        <Link
-          href="/me"
-          className="inline-flex min-h-9 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
-        >
-          返回我的
-        </Link>
-      </Card>
+    <SettingsShell title="钱包" subtitle="BYOK">
+      <div className="page-frame" data-width="settings">
+        <Card variant="subtle" padding="lg" className="space-y-3">
+          <p className="type-card-title">BYOK 账号</p>
+          <p className="type-body">
+            你的账号由 BYOK 自助注册流程创建，所以费用直接由你在 OpenAI/Claude
+            等上游账单结算，Lumen 不维护钱包余额。
+          </p>
+        </Card>
+      </div>
     </SettingsShell>
   );
 }
@@ -93,9 +87,8 @@ export function WalletPageView({
   activity24h: WalletActivityStats;
 }) {
   return (
-    <SettingsShell title="钱包" subtitle="余额与兑换码" maxWidth="max-w-4xl">
-      <div className="space-y-6">
-        <WalletHeader />
+    <SettingsShell title="钱包" subtitle="余额与兑换码">
+      <div className="page-frame space-y-6" data-width="settings">
         <LowBalanceNotice visible={model.lowBalance} />
         <WalletOverview
           wallet={model.wallet}
@@ -112,30 +105,12 @@ export function WalletPageView({
   );
 }
 
-function WalletHeader() {
-  return (
-    <header className="hidden items-start justify-between gap-4 md:flex">
-      <div>
-        <h1 className="type-page-title">钱包</h1>
-        <p className="type-body mt-1.5">查看余额、兑换额度和流水。</p>
-      </div>
-      <Link
-        href="/me"
-        className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
-      >
-        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        返回我的
-      </Link>
-    </header>
-  );
-}
-
 function LowBalanceNotice({ visible }: { visible: boolean }) {
   if (!visible) return null;
   return (
     <div
       role="alert"
-      className="flex items-center gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 text-sm text-[var(--danger-fg)]"
+      className="flex items-center gap-2 rounded-[var(--radius-card)] border border-danger-border bg-danger-soft px-4 py-3 type-body-sm text-[var(--danger-fg)]"
     >
       <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
       <span>
@@ -193,8 +168,8 @@ function WalletBalanceCard({
   state: WalletPageModel["walletState"];
 }) {
   const balanceClass = lowBalance
-    ? "type-page-title-sm font-mono tabular-nums text-[var(--danger-fg)]"
-    : "type-page-title-sm font-mono tabular-nums";
+    ? "type-metric font-mono text-[var(--danger-fg)]"
+    : "type-metric font-mono";
 
   return (
     <Card
@@ -254,7 +229,7 @@ function RedemptionForm({
     >
       <label
         htmlFor="wallet-redemption-code"
-        className="flex items-center gap-2 type-overline"
+        className="flex items-center gap-2 type-label"
       >
         <Gift className="h-3.5 w-3.5" aria-hidden="true" />
         兑换码
@@ -276,7 +251,7 @@ function RedemptionForm({
             state.notice ? "wallet-redemption-notice" : undefined
           }
           aria-invalid={state.notice?.kind === "error"}
-          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base tracking-[0.06em] outline-none focus:border-[var(--accent)]/50 sm:text-lg"
+          className="control-shell type-body-sm h-10 w-full px-3 tracking-[0.06em] outline-none focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11 max-sm:text-base"
         />
         <RedemptionNotice notice={state.notice} />
       </div>
@@ -332,7 +307,7 @@ function BillingSnapshotSection({
       <OptionalQueryState
         loading={state.isLoading}
         error={state.error}
-        loadingText="正在加载费用构成…"
+        loadingText="费用构成加载中"
         errorTitle="费用构成加载失败"
         onRetry={state.refresh}
       />
@@ -393,7 +368,7 @@ function BillingKindGrid({ snapshot }: { snapshot: BillingSnapshotOut }) {
           className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3"
         >
           <p className="type-caption text-[var(--fg-2)]">{label}</p>
-          <p className="mt-1 text-base font-semibold tabular-nums">
+          <p className="mt-1 type-card-title font-mono tabular-nums">
             ¥{microMoney(snapshot.by_kind_30d[key])}
           </p>
         </div>
@@ -428,7 +403,7 @@ function BillingWindowCard({
 
   return (
     <div className="min-h-[112px] rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-3">
-      <div className="flex items-center justify-between text-xs text-[var(--fg-2)]">
+      <div className="flex items-center justify-between type-caption text-[var(--fg-2)]">
         <span>{label} 限额</span>
         <span>
           ¥{microMoney(window?.used_micro)} / {limitText}
@@ -514,9 +489,9 @@ function TransactionFilters({
           aria-pressed={value === item.key}
           onClick={() => onChange(item.key)}
           className={[
-            "min-h-11 shrink-0 rounded-full border px-3 text-xs md:min-h-9",
+            "min-h-11 shrink-0 rounded-full border px-3 type-caption md:min-h-9",
             value === item.key
-              ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
+              ? "border-accent-border bg-accent-soft text-accent"
               : "border-[var(--border)] text-[var(--fg-2)]",
           ].join(" ")}
         >
@@ -549,7 +524,7 @@ function TransactionList({
         error={state.error}
         loading={state.isLoading}
         empty={empty}
-        loadingMessage="正在加载流水…"
+        loadingMessage="流水加载中"
         emptyMessage="暂无流水"
       />
     </div>
@@ -639,7 +614,7 @@ function RedemptionList({
         error={state.error}
         loading={state.isLoading}
         empty={empty}
-        loadingMessage="正在加载兑换记录…"
+        loadingMessage="兑换记录加载中"
         emptyMessage="暂无兑换记录"
       />
     </div>

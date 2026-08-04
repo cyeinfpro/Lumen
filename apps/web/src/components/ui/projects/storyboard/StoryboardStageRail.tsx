@@ -41,19 +41,19 @@ export function StageRail({
               className={cn(
                 "grid min-h-14 min-w-[116px] shrink-0 gap-1 rounded-[var(--radius-card)] border px-3 py-2 text-left transition md:min-h-[76px] md:min-w-0 md:p-3",
                 active
-                  ? "border-[var(--border-amber)] bg-[var(--accent-soft)]"
+                  ? "border-accent-border bg-[var(--accent-soft)]"
                   : "border-[var(--border)] bg-[var(--bg-1)]/74 hover:bg-[var(--bg-2)]",
                 !unlocked &&
                   "cursor-not-allowed opacity-55 hover:bg-[var(--bg-1)]/74",
               )}
             >
               <span className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+                <span className="type-caption text-[var(--fg-3)]">
                   {String(index + 1).padStart(2, "0")}
                 </span>
                 <span
                   className={cn(
-                    "inline-flex h-5 min-w-5 items-center justify-center rounded-full border px-1 text-[10px]",
+                    "inline-flex h-5 min-w-5 items-center justify-center rounded-full border px-1 type-caption",
                     meta.done
                       ? "border-[var(--success-border)] bg-[var(--success-soft)] text-[var(--success-fg)]"
                       : "border-[var(--border)] text-[var(--fg-2)]",

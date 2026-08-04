@@ -14,7 +14,8 @@ import { useIsMobile } from "@/hooks/useMediaQuery";
 import type { WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { InfoPanel } from "./StageFrame";
-import { jsonValue, stepOf } from "../utils";
+import { StructuredValue } from "./StructuredValue";
+import { stepOf } from "../utils";
 
 interface PosterConstraintPanelProps {
   workflow: WorkflowRun;
@@ -36,7 +37,7 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
   return (
     <div className="min-w-0">
       <InfoPanel title="原始文案">
-        <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.7] text-[var(--fg-1)]">
+        <p className="type-body-sm whitespace-pre-wrap break-words text-[var(--fg-1)]">
           {workflow.user_prompt || "未录入"}
         </p>
       </InfoPanel>
@@ -47,7 +48,7 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
             : "未指定"}
         </p>
         {typeof styleSummary.mood === "string" && styleSummary.mood ? (
-          <p className="mt-1 text-[12px] text-[var(--fg-2)]">
+          <p className="type-caption mt-1 text-[var(--fg-2)]">
             {String(styleSummary.mood)}
           </p>
         ) : null}
@@ -58,10 +59,10 @@ function PosterConstraintBody({ workflow }: { workflow: WorkflowRun }) {
         </p>
       </InfoPanel>
       <InfoPanel title="文案切分">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(copyAnalysis)}</p>
+        <StructuredValue value={copyAnalysis} />
       </InfoPanel>
       <InfoPanel title="品牌素材">
-        <p className="whitespace-pre-wrap break-words">{jsonValue(brandAssets)}</p>
+        <StructuredValue value={brandAssets} />
       </InfoPanel>
       <InfoPanel title="选定母版">
         <p className="break-words">
@@ -81,7 +82,7 @@ export function PosterConstraintPanel({
   return (
     <div className={cn("relative", className)}>
       <header className="border-b border-[var(--border)] pb-4">
-        <p className="type-page-kicker">Constraints</p>
+        <p className="type-caption">项目约束</p>
         <h3 className="type-section-title mt-1.5">项目约束</h3>
       </header>
       <PosterConstraintBody workflow={workflow} />
@@ -104,7 +105,7 @@ function DrawerHeader({
   return (
     <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
       <div className="min-w-0">
-        <p className="type-page-kicker">Constraints</p>
+        <p className="type-caption">项目约束</p>
         <h2 id={titleId} className="type-section-title mt-1.5">
           项目约束
         </h2>
@@ -162,7 +163,7 @@ export function PosterConstraintDrawer({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-[var(--z-tray)] bg-black/55 backdrop-blur-sm"
+          className="fixed inset-0 z-[var(--z-tray)] bg-[var(--surface-scrim)]"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) onClose();
           }}

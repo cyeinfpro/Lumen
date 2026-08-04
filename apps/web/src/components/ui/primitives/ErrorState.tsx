@@ -7,7 +7,10 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "./Button";
 
-interface ErrorStateProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "title"> {
+interface ErrorStateProps extends Omit<
+  React.HTMLAttributes<HTMLDivElement>,
+  "title"
+> {
   icon?: React.ReactNode;
   title: React.ReactNode;
   description?: React.ReactNode;
@@ -42,8 +45,8 @@ export function ErrorState({
         "flex min-w-0 flex-col items-center justify-center px-6 py-10 text-center max-sm:px-4 max-sm:py-8",
         "rounded-[var(--radius-card)] border backdrop-blur-sm",
         isWarn
-          ? "border-[var(--warning)]/25 bg-[var(--warning-soft)]"
-          : "border-[var(--danger)]/25 bg-[var(--danger-soft)]",
+          ? "border-warning-border bg-warning-soft"
+          : "border-danger-border bg-danger-soft",
         className,
       )}
       {...props}
@@ -52,22 +55,20 @@ export function ErrorState({
         className={cn(
           "mb-3 flex h-12 w-12 items-center justify-center rounded-[var(--radius-card)] border",
           isWarn
-            ? "bg-[var(--warning-soft)] border-[var(--warning)]/30 text-[var(--warning)]"
-            : "bg-[var(--danger-soft)] border-[var(--danger)]/30 text-[var(--danger)]",
+            ? "border-warning-border bg-warning-soft text-warning"
+            : "border-danger-border bg-danger-soft text-danger",
         )}
       >
         {icon ?? <AlertTriangle className="w-5 h-5" aria-hidden="true" />}
       </div>
-      <h3 className="type-card-title mb-1 text-balance">
-        {title}
-      </h3>
+      <h3 className="type-card-title mb-1 text-balance">{title}</h3>
       {description ? (
         <p className="type-body-sm max-w-sm text-pretty break-words text-[var(--fg-1)]">
           {description}
         </p>
       ) : null}
       {detail ? (
-        <p className="mt-3 max-w-md break-words rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-1.5 font-mono text-[11px] text-[var(--fg-1)]">
+        <p className="type-caption mt-3 max-w-md break-words rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/70 px-3 py-1.5 font-mono text-[var(--fg-1)]">
           {detail}
         </p>
       ) : null}

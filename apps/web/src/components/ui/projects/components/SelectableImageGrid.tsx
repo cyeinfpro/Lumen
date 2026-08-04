@@ -37,8 +37,8 @@ export function SelectableImageGrid({
                 type="button"
                 onClick={() => onPreview(image, index)}
                 className={cn(
-                  "relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-                  selected && "ring-1 ring-inset ring-[var(--border-amber)]",
+                  "relative block aspect-[4/5] w-full overflow-hidden bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
+                  selected && "ring-1 ring-inset ring-accent-border",
                 )}
               >
                 <Image
@@ -50,11 +50,11 @@ export function SelectableImageGrid({
                   className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
                 />
               </button>
-              <span className="pointer-events-none absolute left-2 top-2 font-mono text-[10px] uppercase tracking-[0.18em] text-white/90 mix-blend-difference">
+              <span className="type-caption pointer-events-none absolute left-2 top-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
                 N°{String(index + 1).padStart(2, "0")}
               </span>
               {selected ? (
-                <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
+                <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 type-caption text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
                   <Check className="h-3 w-3" />
                   已选中
                 </span>
@@ -65,9 +65,9 @@ export function SelectableImageGrid({
               onClick={() => onSelect(selected ? null : image.id)}
               disabled={saving}
               className={cn(
-                "mt-2 flex h-10 w-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.18em] transition-colors",
+                "mt-2 flex h-10 w-full items-center justify-center type-caption transition-colors",
                 selected
-                  ? "border-b border-[var(--border-amber)] text-[var(--amber-300)]"
+                  ? "border-b border-accent-border text-accent"
                   : "border-b border-[var(--border)] text-[var(--fg-1)] hover:border-[var(--border-strong)] hover:text-[var(--fg-0)]",
                 "disabled:cursor-not-allowed disabled:opacity-60",
               )}
@@ -94,7 +94,7 @@ export function SelectableImageGridLoading({
         <article key={index}>
           <div className="flex aspect-[4/5] flex-col items-center justify-center gap-2 bg-[var(--bg-2)] text-[var(--fg-2)]">
             <Spinner size={20} />
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+            <span className="type-caption">
               {label}
             </span>
           </div>

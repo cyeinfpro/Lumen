@@ -2,34 +2,16 @@
 
 // /settings/prompts —— 独立嵌入式系统提示词管理页。
 
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
-
 import { SystemPromptManager } from "@/components/ui/SystemPromptManager";
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
 
 export default function PromptsPage() {
   return (
     <SettingsShell title="系统提示词" subtitle="PROMPTS">
-      <div className="flex min-w-0 flex-col gap-5 pb-4">
-        <header className="hidden flex-wrap items-start justify-between gap-4 md:flex">
-          <div>
-            <h1 className="type-page-title">
-              系统提示词
-            </h1>
-            <p className="type-body mt-1.5">
-              管理可复用的系统提示词。
-            </p>
-          </div>
-          <Link
-            href="/me"
-            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            返回我的
-          </Link>
-        </header>
-
+      <div
+        className="page-frame flex min-w-0 flex-col gap-5 pb-4"
+        data-width="settings"
+      >
         <section className="min-w-0 overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-3 sm:p-5 [&_button]:min-h-11 [&_input]:min-h-11 [&_textarea]:min-h-32 [&_textarea]:scroll-mb-32">
           <SystemPromptManager mode="embedded" hideTrigger />
         </section>

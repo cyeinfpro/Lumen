@@ -29,7 +29,7 @@ export function MobileStreamTopBar({
               素材
             </span>
             {countLabel && (
-              <span className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono truncate">
+              <span className="type-caption truncate text-[var(--fg-2)]">
                 {countLabel}
               </span>
             )}
@@ -40,7 +40,7 @@ export function MobileStreamTopBar({
               素材
             </div>
             {countLabel && (
-              <div className="text-[10px] tracking-wider text-[var(--fg-2)] font-mono mt-0.5 truncate">
+              <div className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
                 {countLabel}
               </div>
             )}
@@ -84,7 +84,7 @@ function IconToggle({
       className={[
         "h-11 w-11 rounded-full",
         active
-          ? "text-[var(--amber-400)] bg-[var(--accent-soft)]"
+          ? "bg-accent-soft text-accent"
           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
       ].join(" ")}
     >

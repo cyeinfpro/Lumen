@@ -55,7 +55,7 @@ export function ModelLibraryJobsPanel() {
             <p className="type-page-kicker">
               任务中心
             </p>
-            <h2 className="type-page-title mt-1.5 md:text-[28px]">
+            <h2 className="type-page-title mt-1.5 ">
               任务中心
             </h2>
             <p className="type-page-subtitle mt-2 max-w-xl">
@@ -69,8 +69,8 @@ export function ModelLibraryJobsPanel() {
               onClick={() => clearJobs.mutate()}
               disabled={clearJobs.isPending || (finished.length === 0 && !jobs.hasNextPage)}
               className={cn(
-                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-50 min-[420px]:h-8 min-[420px]:min-h-0 ",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
               )}
             >
               {clearJobs.isPending ? (
@@ -86,8 +86,8 @@ export function ModelLibraryJobsPanel() {
               onClick={() => jobs.refetch()}
               disabled={jobs.isFetching}
               className={cn(
-                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 min-[420px]:tracking-[0.16em]",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--border)] px-2.5 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 min-[420px]:h-8 min-[420px]:min-h-0 ",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
               )}
             >
               <RefreshCw className={cn("h-3.5 w-3.5", jobs.isFetching && "animate-spin")} />
@@ -105,7 +105,7 @@ export function ModelLibraryJobsPanel() {
       </header>
 
       {jobs.isPending ? (
-        <div className="flex h-40 items-center justify-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <div className="flex h-40 items-center justify-center gap-2 type-caption text-[var(--fg-2)]">
           <Spinner size={20} />
           加载中
         </div>
@@ -142,8 +142,8 @@ export function ModelLibraryJobsPanel() {
               onClick={() => jobs.fetchNextPage()}
               disabled={jobs.isFetchingNextPage}
               className={cn(
-                "mx-auto inline-flex min-h-11 items-center gap-2 rounded-full border border-[var(--border)] px-4 font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:h-9 md:min-h-0",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+                "mx-auto inline-flex min-h-11 items-center gap-2 rounded-full border border-[var(--border)] px-4 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--fg-0)] disabled:cursor-not-allowed disabled:opacity-60 md:h-9 md:min-h-0",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
               )}
             >
               {jobs.isFetchingNextPage ? <Spinner size={12} /> : null}

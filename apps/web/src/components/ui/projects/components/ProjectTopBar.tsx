@@ -50,7 +50,7 @@ export function ProjectMobileTopBar({
             <Link
               href={backHref}
               aria-label={backLabel}
-              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/50"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[var(--fg-1)] transition-colors active:bg-[var(--bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]"
             >
               <ArrowLeft className="h-[18px] w-[18px]" />
             </Link>
@@ -60,7 +60,7 @@ export function ProjectMobileTopBar({
               {title}
             </div>
             {subtitle ? (
-              <div className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              <div className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
                 {subtitle}
               </div>
             ) : null}

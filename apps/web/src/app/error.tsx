@@ -62,7 +62,7 @@ export default function GlobalError({
           secondaryAction={
             <Link
               href="/"
-              className="inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 text-sm font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] sm:w-auto"
+              className="type-control inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-[var(--radius-control)] px-3 text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] focus-visible:outline-none focus-visible:shadow-[var(--ring)] sm:w-auto"
             >
               <Home className="h-3.5 w-3.5" aria-hidden />
               返回首页

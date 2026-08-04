@@ -78,7 +78,7 @@ export function PosterStyleSelector({
       aria-label="选择风格"
       tabIndex={-1}
       onKeyDown={onDialogKeyDown}
-      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-black/65 backdrop-blur-sm md:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-stretch justify-center bg-[var(--surface-scrim)] md:items-center"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -86,7 +86,7 @@ export function PosterStyleSelector({
       <div className="mobile-dialog-panel relative flex h-[var(--mobile-dialog-max-height)] w-full max-w-[1100px] flex-col overflow-hidden bg-[var(--bg-0)] shadow-[var(--shadow-2)] max-md:rounded-t-[var(--radius-sheet)] md:h-[min(86vh,720px)] md:rounded-[var(--radius-card)] md:border md:border-[var(--border)]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
           <div className="min-w-0">
-            <p className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
+            <p className="type-caption text-[var(--fg-2)]">
               Poster Style
             </p>
             <h2 className="type-section-title mt-1">选择风格</h2>
@@ -109,7 +109,7 @@ export function PosterStyleSelector({
                 value={search}
                 onChange={(event) => setSearch(event.target.value.slice(0, 60))}
                 placeholder="搜索风格标题 / 标签"
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent pl-7 pr-2 text-[16px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-9 md:text-[13px]"
+                className="control-shell h-11 w-full pl-7 pr-2 type-body text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)] md:h-9"
               />
             </label>
             <div className="scrollbar-none flex max-w-full gap-1 overflow-x-auto">
@@ -119,9 +119,9 @@ export function PosterStyleSelector({
                   type="button"
                   onClick={() => setCategory(cat)}
                   className={cn(
-                    "inline-flex min-h-11 shrink-0 cursor-pointer items-center px-3 font-mono text-[10px] uppercase tracking-[0.18em] transition-colors md:min-h-8",
+                    "inline-flex min-h-11 shrink-0 cursor-pointer items-center px-3 type-caption transition-colors md:min-h-8",
                     category === cat
-                      ? "border-b border-[var(--amber-400)] text-[var(--amber-300)]"
+                      ? "border-b border-accent-border text-accent"
                       : "text-[var(--fg-2)] hover:text-[var(--fg-0)]",
                   )}
                 >
@@ -136,16 +136,16 @@ export function PosterStyleSelector({
           {query.isLoading ? (
             <div className="flex h-64 flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
               <Spinner size={20} />
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em]">
+              <p className="type-caption">
                 加载中
               </p>
             </div>
           ) : !items.length ? (
             <div className="flex h-64 flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em]">
+              <p className="type-caption">
                 暂无风格
               </p>
-              <p className="text-[12px] text-[var(--fg-3)]">
+              <p className="type-caption text-[var(--fg-3)]">
                 可在「风格库」页面创建或同步预设。
               </p>
             </div>
@@ -183,8 +183,8 @@ function StyleCard({
         type="button"
         onClick={onSelect}
         className={cn(
-          "group relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] text-left transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-          selected ? "ring-1 ring-inset ring-[var(--border-amber)]" : "",
+          "group relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] text-left transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
+          selected ? "ring-1 ring-inset ring-accent-border" : "",
         )}
       >
         <div className="relative aspect-[4/5] w-full overflow-hidden">
@@ -198,23 +198,23 @@ function StyleCard({
               className="h-full w-full object-cover transition-transform duration-[var(--dur-slow)] ease-[var(--ease-develop)] group-hover:scale-[1.02]"
             />
           ) : (
-            <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            <div className="flex h-full items-center justify-center type-caption text-[var(--fg-3)]">
               暂无封面
             </div>
           )}
           {selected ? (
-            <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
+            <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 type-caption text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
               <Check className="h-3 w-3" />
               已选
             </span>
           ) : null}
         </div>
         <div className="border-b border-[var(--border)] px-1 py-2">
-          <p className="line-clamp-1 text-[13px] font-medium tracking-tight text-[var(--fg-0)]">
+          <p className="line-clamp-1 type-body-sm font-medium tracking-tight text-[var(--fg-0)]">
             {style.title}
           </p>
           {style.mood ? (
-            <p className="mt-1 line-clamp-1 text-[12px] text-[var(--fg-2)]">
+            <p className="mt-1 line-clamp-1 type-caption text-[var(--fg-2)]">
               {style.mood}
             </p>
           ) : null}

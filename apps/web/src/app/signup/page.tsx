@@ -34,15 +34,15 @@ const BYOK_ERROR_TEXT: Record<string, string> = {
   supplier_unsupported: "供应商或协议不支持",
   model_not_available: "供应商不可用此模型",
   key_rate_limited: "Key 当前被限流，稍后再试",
-  supplier_transient_error: "供应商临时错误，请稍后重试",
+  supplier_transient_error: "供应商临时错误，稍后重试",
   validation_timeout: "验证超时",
-  validation_wrong_answer: "供应商返回不可信，请检查 Key 与供应商配置",
+  validation_wrong_answer: "供应商返回不可信，检查 Key 与供应商配置",
   invalid_supplier_response: "供应商响应格式不兼容",
-  invalid_verification_token: "验证已失效，请重新验证 API Key",
-  verification_expired: "验证已过期，请重新验证 API Key",
-  verification_consumed: "验证已使用，请重新验证 API Key",
-  verification_not_found: "验证记录不存在，请重新验证 API Key",
-  email_taken: "该邮箱已注册，请直接登录",
+  invalid_verification_token: "验证已失效，重新验证 API Key",
+  verification_expired: "验证已过期，重新验证 API Key",
+  verification_consumed: "验证已使用，重新验证 API Key",
+  verification_not_found: "验证记录不存在，重新验证 API Key",
+  email_taken: "该邮箱已注册，可直接登录",
 };
 
 // step 2 拿到 verification_* 错误码时需要清空 token 回退到 step 1。
@@ -162,7 +162,7 @@ export default function SignupPage() {
       if (code && VERIFICATION_RESET_RE.test(code)) {
         setVerificationToken("");
         setKeyHint("");
-        setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，请重新验证 API Key");
+        setError(BYOK_ERROR_TEXT[code] ?? "验证已失效，重新验证 API Key");
         submitGuardRef.current = false;
         setSubmitting(false);
         return;
@@ -349,7 +349,7 @@ function SupplierLoadError({
         type="button"
         onClick={onRetry}
         disabled={fetching}
-        className="inline-flex items-center gap-1 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-xs text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
+        className="type-caption inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1 text-[var(--fg-1)] hover:bg-[var(--bg-2)] disabled:opacity-50"
       >
         {fetching ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -542,8 +542,8 @@ function byokErrorText(err: unknown): string {
   const code = extractErrorCode(err);
   if (code && BYOK_ERROR_TEXT[code]) return BYOK_ERROR_TEXT[code];
   if (err instanceof ApiError) {
-    if (err.status === 429) return "请求过于频繁，请稍后再试";
+    if (err.status === 429) return "请求过于频繁，稍后再试";
     if (err.status === 422) return "提交内容不合法";
   }
-  return "请求失败，请稍后重试";
+  return "请求失败，稍后重试";
 }

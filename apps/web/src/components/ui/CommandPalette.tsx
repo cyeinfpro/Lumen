@@ -30,13 +30,13 @@ import {
   type SVGProps,
 } from "react";
 
-import { IconButton, Kbd } from "@/components/ui/primitives";
-import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import {
-  trapModalFocus,
-  useModalLayer,
-} from "@/components/ui/primitives/mobile/useModalLayer";
-import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
+  Badge,
+  Dialog,
+  IconButton,
+  Kbd,
+} from "@/components/ui/primitives";
+import { BottomSheet } from "@/components/ui/primitives/mobile/BottomSheet";
 import {
   getActiveNavKey,
   getAppNavItems,
@@ -170,7 +170,7 @@ export function CommandPalette() {
   const descriptionId = useId();
   const listboxId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -185,7 +185,6 @@ export function CommandPalette() {
   );
   // SSR safe：首屏视为桌面，挂载后由 matchMedia 修正。
   const [isDesktop, setIsDesktop] = useState(true);
-  useBodyScrollLock(open && isDesktop);
 
   const navCommands = useMemo(
     () =>
@@ -260,14 +259,6 @@ export function CommandPalette() {
       }, 0);
     }
   }, [resetPalette]);
-  useModalLayer({
-    open: open && isDesktop,
-    rootRef: dialogRef,
-    onClose: closePalette,
-    initialFocusRef: inputRef,
-    restoreFocus: false,
-  });
-
   const runCommand = useCallback(
     (item: Command) => {
       resetPalette();
@@ -325,7 +316,6 @@ export function CommandPalette() {
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (isDesktop) trapModalFocus(event, dialogRef.current);
     if (event.key === "Escape") {
       event.preventDefault();
       closePalette();
@@ -362,48 +352,47 @@ export function CommandPalette() {
     }
   };
 
-  if (!open) return null;
-
   // 共用：搜索框 + 结果列表，两种容器（移动 BottomSheet / 桌面居中 modal）共享。
   const searchRow = (
     <div
       className={cn(
-        "flex min-h-14 shrink-0 items-center gap-3 border-b border-[var(--border)] px-4",
+        "flex shrink-0 items-center gap-2 border-b border-[var(--border)] p-3",
         // 移动端粘顶：BottomSheet 内容长时不让搜索框滚走
-        !isDesktop && "sticky top-0 z-10 bg-[var(--bg-1)]",
+        !isDesktop && "sticky top-0 z-[var(--z-header)] bg-[var(--bg-1)]",
       )}
     >
-      <Search className="h-5 w-5 shrink-0 text-[var(--fg-2)]" aria-hidden />
-      <input
-        ref={inputRef}
-        role="combobox"
-        aria-expanded="true"
-        aria-controls={listboxId}
-        aria-activedescendant={
-          selectedCommand ? optionId(selectedCommand.id) : undefined
-        }
-        aria-autocomplete="list"
-        value={query}
-        onChange={(event) => handleQueryChange(event.target.value)}
-        placeholder="搜索命令或页面"
-        autoComplete="off"
-        spellCheck={false}
-        className={cn(
-          "h-14 min-w-0 flex-1 bg-transparent text-[15px] text-[var(--fg-0)]",
-          "placeholder:text-[var(--fg-2)] focus:outline-none",
+      <div className="control-shell flex min-h-11 min-w-0 flex-1 items-center gap-3 px-3 focus-within:border-accent-border">
+        <Search className="h-5 w-5 shrink-0 text-[var(--fg-2)]" aria-hidden />
+        <input
+          ref={inputRef}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls={listboxId}
+          aria-activedescendant={
+            selectedCommand ? optionId(selectedCommand.id) : undefined
+          }
+          aria-autocomplete="list"
+          value={query}
+          onChange={(event) => handleQueryChange(event.target.value)}
+          placeholder="搜索命令或页面"
+          autoComplete="off"
+          spellCheck={false}
+          className={cn(
+            "h-10 min-w-0 flex-1 bg-transparent type-body text-[var(--fg-0)]",
+            "placeholder:text-[var(--fg-2)] focus:outline-none",
+          )}
+        />
+        {isDesktop && (
+          <div className="hidden items-center gap-1 sm:flex" aria-hidden>
+            <Kbd>{modifierLabel}</Kbd>
+            <Kbd>K</Kbd>
+          </div>
         )}
-      />
-      {isDesktop && (
-        <div className="hidden items-center gap-1 sm:flex" aria-hidden>
-          <Kbd>{modifierLabel}</Kbd>
-          <Kbd>K</Kbd>
-        </div>
-      )}
+      </div>
       <IconButton
         variant="ghost"
-        size="lg"
+        size="md"
         aria-label="关闭命令面板"
-        className="rounded-[var(--radius-control)]"
         onClick={() => closePalette()}
       >
         <X className="h-4 w-4" aria-hidden />
@@ -444,44 +433,44 @@ export function CommandPalette() {
               onFocus={() => setSelectedIndex(index)}
               onClick={() => runCommand(item)}
               className={cn(
-                "flex min-h-[58px] w-full items-center gap-3 rounded-[var(--radius-control)] px-3 py-2.5 text-left",
+                "flex min-h-14 w-full items-center gap-3 rounded-[var(--radius-control)] px-3 py-2.5 text-left",
                 "transition-colors focus-visible:outline-none",
                 selected
-                  ? "bg-[var(--bg-2)] text-[var(--fg-0)]"
+                  ? "bg-accent-soft text-[var(--fg-0)]"
                   : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >
               <span
                 className={cn(
                   "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)]",
-                  selected ? "bg-[var(--accent-soft)]" : "bg-[var(--bg-2)]",
+                  selected ? "bg-accent-soft" : "bg-[var(--bg-2)]",
                 )}
                 aria-hidden
               >
                 <Icon
                   className={cn(
                     "h-[18px] w-[18px]",
-                    selected ? "text-[var(--amber-300)]" : "text-[var(--fg-2)]",
+                    selected ? "text-accent" : "text-[var(--fg-2)]",
                   )}
                 />
               </span>
 
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium">
+                <span className="block truncate type-body-sm font-medium text-[var(--fg-0)]">
                   {item.label}
                 </span>
-                <span className="mt-0.5 block truncate text-xs text-[var(--fg-2)]">
+                <span className="mt-0.5 block truncate type-caption text-[var(--fg-2)]">
                   {item.detail}
                 </span>
               </span>
 
               <span className="flex shrink-0 items-center gap-2">
                 {current && (
-                  <span className="rounded-[4px] border border-[var(--border)] px-1.5 py-0.5 text-[11px] text-[var(--fg-2)]">
+                  <Badge tone="accent">
                     当前
-                  </span>
+                  </Badge>
                 )}
-                <span className="hidden text-[11px] text-[var(--fg-2)] sm:inline">
+                <span className="hidden type-caption text-[var(--fg-2)] sm:inline">
                   {item.group}
                 </span>
                 <ArrowRight
@@ -496,7 +485,7 @@ export function CommandPalette() {
           );
         })
       ) : (
-        <div className="px-4 py-10 text-center text-sm text-[var(--fg-2)]">
+        <div className="px-4 py-10 text-center type-body-sm text-[var(--fg-2)]">
           没有匹配命令
         </div>
       )}
@@ -505,7 +494,7 @@ export function CommandPalette() {
 
   const shortcutHelp = (
     <div
-      className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-4 py-3 text-[11px] text-[var(--fg-2)]"
+      className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border)] px-4 py-3 type-caption text-[var(--fg-2)]"
       aria-label="快捷键"
     >
       <span className="inline-flex items-center gap-1.5">
@@ -542,6 +531,7 @@ export function CommandPalette() {
         onClose={() => closePalette()}
         ariaLabel="命令面板"
         snapPoints={["75%"]}
+        restoreFocus={false}
       >
         <div
           className="flex h-full min-h-0 flex-1 flex-col overflow-hidden"
@@ -555,29 +545,17 @@ export function CommandPalette() {
   }
 
   return (
-    <div className="mobile-dialog-shell fixed inset-0 z-[95] flex items-start justify-center px-3 pt-[12vh] sm:pt-[16vh]">
-      {/* @backdrop-button: dialog backdrop button，需要 click 但不能用 Button primitive 样式 */}
-      <button
-        type="button"
-        aria-label="关闭命令面板"
-        className="absolute inset-0 cursor-default bg-black/45 backdrop-blur-sm"
-        onClick={() => closePalette()}
-        tabIndex={-1}
-      />
-
-      <section
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={headingId}
-        aria-describedby={descriptionId}
-        className={cn(
-          "mobile-dialog-panel relative flex w-full max-w-xl flex-col max-h-[70vh] overflow-hidden rounded-[var(--radius-card)]",
-          "border border-[var(--border-strong)] bg-[var(--bg-1)]/95",
-          "shadow-[var(--shadow-3)] backdrop-blur-xl",
-        )}
-        onKeyDown={handleKeyDown}
-      >
+    <Dialog
+      open={open}
+      onClose={() => closePalette()}
+      dialogRef={dialogRef}
+      initialFocusRef={inputRef}
+      restoreFocus={false}
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+      className="max-h-[70vh] max-w-xl"
+      onKeyDown={handleKeyDown}
+    >
         <h2 id={headingId} className="sr-only">
           命令面板
         </h2>
@@ -587,7 +565,6 @@ export function CommandPalette() {
         {searchRow}
         {list}
         {shortcutHelp}
-      </section>
-    </div>
+    </Dialog>
   );
 }

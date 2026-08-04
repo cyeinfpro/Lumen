@@ -41,9 +41,8 @@ export function MeTopBar({
         expanded ? (
           <div
             className={cn(
-              "flex-1 flex items-center gap-2 h-9 px-3 rounded-full",
-              "bg-[var(--bg-2)] border border-[var(--border-subtle)]",
-              "focus-within:border-[var(--amber-400)]/40",
+              "control-shell flex h-10 flex-1 items-center gap-2 px-3",
+              "focus-within:border-accent-border focus-within:shadow-[var(--ring)]",
               "transition-colors",
             )}
           >
@@ -64,7 +63,7 @@ export function MeTopBar({
               autoComplete="off"
               enterKeyHint="search"
               className={cn(
-                "flex-1 bg-transparent text-[14px] text-[var(--fg-0)]",
+                "type-body-sm flex-1 bg-transparent text-[var(--fg-0)]",
                 "placeholder:text-[var(--fg-2)] outline-none",
               )}
             />
@@ -82,7 +81,7 @@ export function MeTopBar({
             </IconButton>
           </div>
         ) : (
-          <span className="type-section-title pl-0.5 tracking-tight">
+          <span className="type-section-title pl-0.5">
             我的
           </span>
         )
@@ -106,8 +105,7 @@ export function MeTopBar({
                 onClick={onCreateConversation}
                 disabled={createPending}
                 aria-label="新建会话"
-                className="rounded-full text-[var(--amber-400)] hover:text-[var(--amber-400)]"
-                style={{ filter: "drop-shadow(0 0 6px var(--amber-glow))" }}
+                className="rounded-full text-accent shadow-[var(--shadow-amber)] hover:text-accent"
               >
                 <Plus className="w-[18px] h-[18px]" strokeWidth={2.4} />
               </IconButton>

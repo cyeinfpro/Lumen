@@ -52,7 +52,7 @@ export function PosterStyleEditDialog({
     },
     onError: (err) =>
       toast.error("更新失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       }),
   });
 
@@ -72,7 +72,7 @@ export function PosterStyleEditDialog({
 
   const submit = () => {
     if (!canSubmit) {
-      toast.warning("请填写名称");
+      toast.warning("名称未填");
       return;
     }
     const body: PosterStylePatchIn = {
@@ -97,7 +97,7 @@ export function PosterStyleEditDialog({
 
   return (
     <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-md md:items-center md:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] backdrop-blur-md md:items-center md:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -118,8 +118,7 @@ export function PosterStyleEditDialog({
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 pb-4 pt-5">
           <div>
-            <p className="type-page-kicker">编辑风格</p>
-            <h2 id={titleId} className="type-page-title mt-2 md:text-[26px]">
+            <h2 id={titleId} className="type-page-title">
               编辑风格
             </h2>
             <p id={descriptionId} className="type-page-subtitle mt-2 max-w-md">
@@ -142,7 +141,7 @@ export function PosterStyleEditDialog({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               maxLength={120}
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="类目">
@@ -151,7 +150,7 @@ export function PosterStyleEditDialog({
               onChange={(event) =>
                 setCategory(event.target.value as PosterStyleCategory)
               }
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body-sm h-10 w-full appearance-none px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             >
               {POSTER_STYLE_CATEGORY_OPTIONS.map((value) => (
                 <option key={value} value={value} className="bg-[var(--bg-0)]">
@@ -160,31 +159,31 @@ export function PosterStyleEditDialog({
               ))}
             </select>
           </UnderlineLabeled>
-          <UnderlineLabeled label="情绪 / mood">
+          <UnderlineLabeled label="情绪">
             <input
               value={mood}
               onChange={(event) => setMood(event.target.value)}
               maxLength={120}
               placeholder="温暖、冷峻、奇幻"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
           </UnderlineLabeled>
-          <UnderlineLabeled label="Prompt 模板" wrapperClass="md:col-span-2">
+          <UnderlineLabeled label="提示词模板" wrapperClass="md:col-span-2">
             <textarea
               value={promptTemplate}
               onChange={(event) => setPromptTemplate(event.target.value)}
               maxLength={2000}
               rows={5}
               placeholder="海报构图、用色、字体方向"
-              className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-1.5 text-[14px] leading-[1.5] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-[13px]"
+              className="control-shell type-body-sm min-h-11 w-full resize-none px-3 py-2.5 leading-relaxed text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:text-base"
             />
           </UnderlineLabeled>
-          <UnderlineLabeled label="色板（逗号分隔 hex）" wrapperClass="md:col-span-2">
+          <UnderlineLabeled label="色板（逗号分隔 HEX）" wrapperClass="md:col-span-2">
             <input
               value={palette}
               onChange={(event) => setPalette(event.target.value)}
-              placeholder="#F2A93A, #2A2A2A"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              placeholder="#8A8378，#2A2A2A"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
             <PaletteSwatchRow hexes={parseHexList(palette)} />
           </UnderlineLabeled>
@@ -193,7 +192,7 @@ export function PosterStyleEditDialog({
               value={styleTags}
               onChange={(event) => setStyleTags(event.target.value)}
               placeholder="极简、复古、低饱和"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="推荐尺寸" wrapperClass="md:col-span-2">
@@ -245,9 +244,7 @@ function UnderlineLabeled({
 }) {
   return (
     <label className={cn("grid gap-2", wrapperClass)}>
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-        {label}
-      </span>
+      <span className="type-label">{label}</span>
       {children}
     </label>
   );
@@ -284,7 +281,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
+        "type-control group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:min-h-8",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -294,7 +291,7 @@ function Chip({
         className={cn(
           "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
           active
-            ? "bg-[var(--amber-400)]"
+            ? "bg-[var(--accent)]"
             : "bg-transparent group-hover:bg-[var(--border-strong)]",
         )}
       />

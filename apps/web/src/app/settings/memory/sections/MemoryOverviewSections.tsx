@@ -7,7 +7,7 @@ import {
   ShieldOff,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Switch } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 
 import type { MemorySettingsData } from "../types";
@@ -19,11 +19,11 @@ export function MemoryCapabilityBanner({
 }) {
   if (available) return null;
   return (
-    <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+    <section className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-warning-border bg-warning-soft p-4 type-body-sm sm:flex-row sm:items-center sm:justify-between">
       <div className="flex gap-3">
         <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-warning" />
         <div>
-          <div className="font-medium text-warning">记忆未启用</div>
+          <div className="type-body-sm font-medium text-warning">记忆未启用</div>
           <p className="mt-1 type-caption leading-5 text-warning/80">
             需先在管理员后台为某个 provider 勾选
             “embedding”；写入、检索、抽取均依赖向量。
@@ -63,7 +63,7 @@ export function MemorySettingsToggles({
       <SettingToggle
         icon={<Brain className="h-4 w-4" />}
         title="启用记忆"
-        description="开启后 Lumen 会从对话中学习稳定偏好,并在新会话里复用。"
+        description="开启后 Lumen 会从对话中学习稳定偏好，并在新会话里复用。"
         checked={!memoryDisabled}
         disabled={pending}
         onChange={onEnableChange}
@@ -138,12 +138,9 @@ function SettingToggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
+    <div
       className={[
-        "flex min-h-[112px] items-start gap-3 rounded-[var(--radius-card)] border p-4 text-left transition-colors disabled:opacity-60",
+        "flex min-h-[112px] items-start gap-3 rounded-[var(--radius-card)] border p-4 text-left transition-colors",
         checked
           ? "border-accent-border bg-accent-soft"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/60 hover:bg-[var(--bg-3)]",
@@ -158,22 +155,13 @@ function SettingToggle({
           {description}
         </span>
       </span>
-      <span
-        className={[
-          "mt-1 inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
-          checked
-            ? "border-accent bg-accent"
-            : "border-[var(--border)] bg-[var(--bg-2)]",
-        ].join(" ")}
-        aria-hidden
-      >
-        <span
-          className={[
-            "inline-block h-4 w-4 rounded-full bg-[var(--accent-on)] transition-transform",
-            checked ? "translate-x-4" : "translate-x-0.5",
-          ].join(" ")}
-        />
-      </span>
-    </button>
+      <Switch
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onChange}
+        aria-label={title}
+        className="mt-1"
+      />
+    </div>
   );
 }

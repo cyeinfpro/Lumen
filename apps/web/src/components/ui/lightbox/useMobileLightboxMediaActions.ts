@@ -11,15 +11,10 @@ import {
 import { isPrivateIdentitySnapshotCurrent } from "@/lib/auth/privateIdentityEpoch";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { useCreateShareMutation } from "@/lib/queries";
-import type {
-  ActionNotice,
-  DownloadStatus,
-} from "./MobileLightboxView";
+import type { ActionNotice, DownloadStatus } from "./MobileLightboxView";
 import type { LightboxItem } from "./types";
 
-function extensionFromMime(
-  mime: string | null | undefined,
-): string | null {
+function extensionFromMime(mime: string | null | undefined): string | null {
   if (!mime) return null;
   const normalized = mime.split(";")[0]?.trim().toLowerCase();
   if (!normalized?.startsWith("image/")) return null;
@@ -51,8 +46,7 @@ function downloadFilename(
   preferred?: string,
 ): string {
   if (preferred?.trim()) return preferred.trim();
-  const extension =
-    extensionFromMime(mime) ?? extensionFromSrc(src) ?? "png";
+  const extension = extensionFromMime(mime) ?? extensionFromSrc(src) ?? "png";
   return `lumen-${id}.${extension}`;
 }
 
@@ -155,18 +149,17 @@ async function performMobileDownload(
     blob.type || fallbackMime,
     current.filename ?? current.file_name,
   );
-  const shareResult = await shareDownloadedFile(
-    blob,
-    filename,
-    fallbackMime,
-  );
+  const shareResult = await shareDownloadedFile(blob, filename, fallbackMime);
   if (!operationIsCurrent()) return null;
   if (shareResult === "shared") {
     operation.setDownloadStatus("success");
-    operation.showNotice({
-      kind: "success",
-      text: "已发送到分享菜单",
-    }, operationIsCurrent);
+    operation.showNotice(
+      {
+        kind: "success",
+        text: "已发送到分享菜单",
+      },
+      operationIsCurrent,
+    );
     return null;
   }
   if (shareResult === "canceled") {
@@ -269,7 +262,7 @@ async function runMobileShare({
   ) => void;
   setActionNotice: (notice: ActionNotice) => void;
 }): Promise<void> {
-  setActionNotice({ kind: "info", text: "正在生成分享链接" });
+  setActionNotice({ kind: "info", text: "分享链接生成中" });
   let link: string;
   try {
     link = (await createShare({ imageId, show_prompt: false })).url;
@@ -286,10 +279,7 @@ async function runMobileShare({
   const nativeShare = await shareLinkWithNavigator(link);
   if (!operationIsCurrent()) return;
   if (nativeShare === "shared") {
-    showNotice(
-      { kind: "success", text: "已打开分享菜单" },
-      operationIsCurrent,
-    );
+    showNotice({ kind: "success", text: "已打开分享菜单" }, operationIsCurrent);
     return;
   }
   if (nativeShare === "canceled") return;
@@ -318,10 +308,8 @@ export function useMobileLightboxMediaActions({
   downloadAnchorRef,
 }: UseMobileLightboxMediaActionsOptions) {
   const createShareMutation = useCreateShareMutation();
-  const [downloadStatus, setDownloadStatus] =
-    useState<DownloadStatus>("idle");
-  const [actionNotice, setActionNotice] =
-    useState<ActionNotice>(null);
+  const [downloadStatus, setDownloadStatus] = useState<DownloadStatus>("idle");
+  const [actionNotice, setActionNotice] = useState<ActionNotice>(null);
   const currentItemKey = current ? `${current.id}\n${current.url}` : "";
   const feedbackTimerRef = useRef<number | null>(null);
   const downloadResetTimerRef = useRef<number | null>(null);
@@ -363,10 +351,7 @@ export function useMobileLightboxMediaActions({
       const feedbackSeq = feedbackSeqRef.current;
       setActionNotice(notice);
       feedbackTimerRef.current = window.setTimeout(() => {
-        if (
-          feedbackSeqRef.current === feedbackSeq &&
-          operationIsCurrent()
-        ) {
+        if (feedbackSeqRef.current === feedbackSeq && operationIsCurrent()) {
           setActionNotice(null);
         }
         feedbackTimerRef.current = null;
@@ -406,7 +391,7 @@ export function useMobileLightboxMediaActions({
       downloadSeqRef.current === operationSeq;
     clearDownloadResetTimer();
     setDownloadStatus("downloading");
-    setActionNotice({ kind: "info", text: "正在下载原图" });
+    setActionNotice({ kind: "info", text: "原图下载中" });
     void runMobileDownload(
       {
         current,
@@ -452,24 +437,17 @@ export function useMobileLightboxMediaActions({
       })
       .catch(() => {
         if (operationIsCurrent()) {
-          showNotice(
-            { kind: "error", text: "复制失败" },
-            operationIsCurrent,
-          );
+          showNotice({ kind: "error", text: "复制失败" }, operationIsCurrent);
         }
       });
   }, [current, currentItemKey, identityIsCurrent, showNotice]);
 
   const handleShare = useCallback(() => {
-    if (
-      !current ||
-      typeof window === "undefined" ||
-      !identityIsCurrent()
-    ) {
+    if (!current || typeof window === "undefined" || !identityIsCurrent()) {
       return;
     }
     if (createShareMutation.isPending) {
-      showNotice({ kind: "info", text: "正在生成分享链接" });
+      showNotice({ kind: "info", text: "分享链接生成中" });
       return;
     }
     const operationKey = currentItemKey;

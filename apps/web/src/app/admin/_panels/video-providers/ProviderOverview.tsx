@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import {
   AlertCircle,
   Check,
@@ -9,7 +8,11 @@ import {
   X,
 } from "lucide-react";
 
-import { Button, IconButton } from "@/components/ui/primitives";
+import {
+  Button,
+  IconButton,
+  MetricCard,
+} from "@/components/ui/primitives";
 import type { VideoProviderItemOut } from "@/lib/types";
 
 import {
@@ -236,7 +239,7 @@ function VideoStatCard({
 }: {
   label: string;
   value: string;
-  sub?: ReactNode;
+  sub?: React.ReactNode;
   accent?: "green" | "amber";
 }) {
   const ring =
@@ -246,19 +249,7 @@ function VideoStatCard({
         ? "border-[var(--accent)]/20"
         : "border-[var(--border)]";
 
-  return (
-    <div
-      className={`rounded-[var(--radius-panel)] border bg-[var(--bg-1)]/60 px-4 py-3 backdrop-blur-sm ${ring}`}
-    >
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
-        {label}
-      </div>
-      <div className="text-lg font-semibold leading-tight text-[var(--fg-0)] tabular-nums">
-        {value}
-      </div>
-      {sub && <div className="mt-1 truncate text-[11px]">{sub}</div>}
-    </div>
-  );
+  return <MetricCard label={label} value={value} sub={sub} className={ring} />;
 }
 
 function ReadinessNotice({
@@ -338,7 +329,7 @@ function ProviderCard({
   return (
     <article
       className={
-        "rounded-[var(--radius-dialog)] border p-5 shadow-[var(--shadow-1)] backdrop-blur-sm transition-colors " +
+        "surface-card p-5 transition-colors " +
         (item.enabled
           ? "border-[var(--border)] bg-[var(--bg-1)]/60"
           : "border-[var(--border-subtle)] bg-[var(--bg-1)]/30")

@@ -1,6 +1,6 @@
 import { Check } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Switch } from "@/components/ui/primitives";
 
 const SELECT_CLASS =
   "h-9 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm text-[var(--fg-0)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-soft)] max-sm:min-h-11 max-sm:text-base";
@@ -183,16 +183,15 @@ export function ToggleField({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-11 items-center justify-between gap-3">
+    <div className="flex min-h-11 items-center justify-between gap-3">
       <span className="type-body-sm text-[var(--fg-1)]">{label}</span>
-      <input
-        type="checkbox"
+      <Switch
+        aria-label={label}
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.currentTarget.checked)}
-        className="h-5 w-5 accent-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+        onCheckedChange={onChange}
       />
-    </label>
+    </div>
   );
 }
 

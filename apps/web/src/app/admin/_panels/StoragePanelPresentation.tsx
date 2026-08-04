@@ -211,7 +211,7 @@ export function StatusCard({
   return (
     <div
       className={cn(
-        "rounded-[var(--radius-dialog)] border bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5",
+        "surface-card p-4 md:p-5",
         "border-[var(--border)]",
       )}
     >
@@ -456,7 +456,7 @@ export function SmbForm({
 
 export function RecoveryHints() {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
+    <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-2)] p-4 type-caption leading-relaxed text-[var(--fg-2)]">
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
         <div className="space-y-1.5">

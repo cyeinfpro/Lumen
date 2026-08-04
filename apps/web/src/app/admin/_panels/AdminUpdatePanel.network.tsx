@@ -3,9 +3,8 @@
 import { useMemo } from "react";
 import { Loader2, RotateCcw } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Select, Switch } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
-import { cn } from "@/lib/utils";
 
 const UPDATE_USE_PROXY_POOL_KEY = "update.use_proxy_pool";
 const UPDATE_PROXY_NAME_KEY = "update.proxy_name";
@@ -92,34 +91,19 @@ export function UpdateNetworkSettingsCard({
       ) : (
         <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <div className="flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-3">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={useProxyPool}
+            <Switch
+              checked={useProxyPool}
               aria-label={`更新时使用代理池 ${useProxyPool ? "关闭" : "开启"}`}
               disabled={saving || loading}
-              onClick={() =>
+              onCheckedChange={(checked) =>
                 onSave([
                   {
                     key: UPDATE_USE_PROXY_POOL_KEY,
-                    value: useProxyPool ? "0" : "1",
+                    value: checked ? "1" : "0",
                   },
                 ])
               }
-              className={cn(
-                "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11",
-                useProxyPool
-                  ? "border-accent-border bg-accent"
-                  : "border-[var(--border)] bg-[var(--bg-2)]",
-              )}
-            >
-              <span
-                className={cn(
-                  "h-5 w-5 rounded-full bg-[var(--bg-0)] shadow-[var(--shadow-1)] transition-transform",
-                  useProxyPool ? "translate-x-5" : "translate-x-1",
-                )}
-              />
-            </button>
+            />
             <div className="min-w-0">
               <p className="type-body-sm font-medium text-[var(--fg-0)]">
                 更新时使用代理池
@@ -132,7 +116,7 @@ export function UpdateNetworkSettingsCard({
 
           <label className="block rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 py-3">
             <span className="type-caption text-[var(--fg-2)]">更新代理</span>
-            <select
+            <Select
               value={proxyName}
               disabled={saving || loading}
               onChange={(event) =>
@@ -143,7 +127,7 @@ export function UpdateNetworkSettingsCard({
                   },
                 ])
               }
-              className="mt-2 h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 type-body-sm text-[var(--fg-0)] outline-none transition-colors focus:border-accent-border focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+              wrapperClassName="mt-2"
             >
               <option value="">自动选择第一个启用代理</option>
               {enabledProxies.map((proxy) => (
@@ -159,7 +143,7 @@ export function UpdateNetworkSettingsCard({
                 !enabledProxies.some((proxy) => proxy.name === proxyName) && (
                   <option value={proxyName}>{proxyName} · 当前配置</option>
                 )}
-            </select>
+            </Select>
             <p className="mt-2 type-caption text-[var(--fg-2)]">
               留空会交给后端选择第一个启用代理；这里保存后立即影响下一次更新。
             </p>

@@ -51,7 +51,7 @@ function StageError({ error }: { error: string | null }) {
   if (!error) return null;
   return (
     <section className="border-t border-[var(--border)] py-4">
-      <p className="border-l-2 border-[var(--danger)] pl-3 text-[13px] leading-6 text-[var(--danger)]">
+      <p className="border-l-2 border-[var(--danger)] pl-3 type-body-sm leading-6 text-[var(--danger)]">
         {error}
       </p>
     </section>
@@ -66,10 +66,10 @@ function ReviewImages({
   return (
     <section className="border-t border-[var(--border)] py-5">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <p className="type-caption text-[var(--fg-2)]">
           Showcases
         </p>
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)] tabular-nums">
+        <p className="type-caption text-[var(--fg-3)] tabular-nums">
           <span className="text-[var(--success)]">
             {String(controller.approveCount).padStart(2, "0")}
           </span>
@@ -109,7 +109,7 @@ function ContinueGenerating({
   const { form } = controller;
   return (
     <section className="border-t border-[var(--border)] py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Continue Generating
       </p>
       <ShowcaseSetupFields
@@ -129,8 +129,8 @@ function ContinueGenerating({
         >
           继续再生成 {form.outputCount} 张
         </Button>
-        <p className="inline-flex min-w-0 flex-wrap items-center gap-2 break-words text-[12px] leading-6 text-[var(--fg-2)]">
-          <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--amber-300)]">
+        <p className="inline-flex min-w-0 flex-wrap items-center gap-2 break-words type-caption leading-6 text-[var(--fg-2)]">
+          <span className="inline-flex items-center gap-1.5 type-caption text-accent">
             <Layers className="h-3 w-3" />
             追加 {String(form.outputCount).padStart(2, "0")} 张
           </span>
@@ -153,13 +153,13 @@ function ReviseAndDeliver({
 }) {
   return (
     <section className="border-t border-[var(--border)] py-5">
-      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <p className="type-caption text-[var(--fg-2)]">
         Revise Instruction
       </p>
       <input
         value={controller.instruction}
         onChange={(event) => controller.setInstruction(event.target.value)}
-        className="mt-3 h-10 w-full border-b border-[var(--border)] bg-transparent px-1 text-[14px] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)]"
+        className="control-shell mt-3 h-10 w-full px-3 type-body-sm text-[var(--fg-0)] outline-none transition-[border-color,box-shadow] placeholder:text-[var(--fg-3)] focus:border-accent-border focus:shadow-[var(--ring)]"
       />
       <div className="mt-5 grid grid-cols-1 gap-3 min-[420px]:flex min-[420px]:flex-wrap min-[420px]:items-center">
         <Button

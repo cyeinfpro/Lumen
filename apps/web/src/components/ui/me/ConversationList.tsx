@@ -284,8 +284,8 @@ function ConversationRows({
       <section key={bucket} aria-label={BUCKET_LABEL[bucket]}>
         <h3
           className={cn(
-            "px-4 pt-6 pb-2.5 text-[11px] font-semibold",
-            "tracking-[0.1em] uppercase text-[var(--fg-2)]",
+            "px-4 pb-2.5 pt-6 type-caption font-medium",
+            "text-[var(--fg-2)]",
           )}
         >
           {BUCKET_LABEL[bucket]}
@@ -415,10 +415,10 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
         <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Search className="w-4.5 h-4.5 text-[var(--fg-2)]" />
         </div>
-        <p className="text-[14px] text-[var(--fg-1)]">
+        <p className="type-body-sm text-[var(--fg-1)]">
           没有匹配的会话
         </p>
-        <p className="text-[12px] text-[var(--fg-2)] mt-1">
+        <p className="mt-1 type-caption text-[var(--fg-2)]">
           尝试不同的关键词搜索
         </p>
       </div>
@@ -430,8 +430,8 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
         <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
           <Inbox className="w-4.5 h-4.5 text-[var(--fg-2)]" />
         </div>
-        <p className="text-[14px] text-[var(--fg-1)]">暂无归档会话</p>
-        <p className="text-[12px] text-[var(--fg-2)] mt-1">
+        <p className="type-body-sm text-[var(--fg-1)]">暂无归档会话</p>
+        <p className="mt-1 type-caption text-[var(--fg-2)]">
           左滑会话可归档
         </p>
       </div>
@@ -442,8 +442,8 @@ function EmptyState({ query, tab }: { query: string; tab: TabKind }) {
       <div className="mx-auto w-11 h-11 rounded-[var(--radius-dialog)] bg-[var(--bg-2)] flex items-center justify-center mb-3">
         <Inbox className="w-4.5 h-4.5 text-[var(--fg-2)]" />
       </div>
-      <p className="text-[14px] text-[var(--fg-1)]">还没有会话</p>
-      <p className="text-[12px] text-[var(--fg-2)] mt-1">
+      <p className="type-body-sm text-[var(--fg-1)]">还没有会话</p>
+      <p className="mt-1 type-caption text-[var(--fg-2)]">
         去创作页开始你的第一次对话
       </p>
     </div>

@@ -12,6 +12,7 @@ import {
   useState,
 } from "react";
 import { Loader2, Paperclip } from "lucide-react";
+import { Badge } from "@/components/ui/primitives";
 import { pushMobileToast } from "@/components/ui/primitives/mobile";
 import { useChatStore } from "@/store/useChatStore";
 import { cn } from "@/lib/utils";
@@ -493,11 +494,11 @@ export function MobileComposerPill({
           "fixed inset-x-3 mx-auto max-w-[616px]",
           "overflow-hidden",
           "rounded-[var(--radius-sheet)] mobile-perf-surface",
-          "bg-[var(--bg-1)]/96",
+          "bg-[var(--bg-1)]",
           "border transition-[border-color,box-shadow] duration-[var(--dur-normal)]",
           selectValue(
             isDragActive,
-            "border-[var(--accent)]",
+            "border-accent-border",
             "border-[var(--border)] focus-within:border-[var(--accent-border)]",
           ),
           "shadow-[var(--shadow-2)]",
@@ -522,17 +523,17 @@ export function MobileComposerPill({
                 <Paperclip className="w-4 h-4" />,
               )}
               {renderWhen(attachments.length > 0, (
-                <span
+                <Badge
+                  tone="accent"
                   aria-hidden
                   className={cn(
                     "absolute -top-0.5 -right-0.5 min-w-[16px] h-[16px] px-1",
-                    "rounded-full bg-[var(--amber-400)] text-[9px] font-bold text-[var(--bg-0)]",
-                    "flex items-center justify-center tabular-nums",
+                    "justify-center border-0 type-overline leading-none text-[var(--accent-on)] tabular-nums",
                   )}
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
                   {attachments.length}
-                </span>
+                </Badge>
               ))}
             </MobileComposerIconButton>
 
@@ -543,21 +544,17 @@ export function MobileComposerPill({
                 "flex items-center gap-2",
               )}
             >
-              <span
+              <Badge
                 aria-hidden
                 data-inline
+                tone={isImageMode ? "accent" : "info"}
                 className={cn(
                   "shrink-0 inline-flex items-center justify-center h-[18px] px-1.5 rounded-full",
-                  "text-[11px] font-semibold tracking-wide leading-none",
-                  selectValue(
-                    isImageMode,
-                    "bg-[rgba(242,169,58,0.15)] text-[var(--amber-400)]",
-                    "bg-[rgba(62,158,255,0.12)] text-[var(--info)]",
-                  ),
+                  "type-overline leading-none",
                 )}
               >
                 {selectValue(isImageMode, "生图", "对话")}
-              </span>
+              </Badge>
               <textarea
                 ref={collapsedTextareaRef}
                 value={text}
@@ -583,7 +580,7 @@ export function MobileComposerPill({
                 enterKeyHint="send"
                 className={cn(
                   "min-w-0 flex-1 h-10 resize-none overflow-hidden bg-transparent py-[9px]",
-                  "text-[16px] leading-[22px] outline-none placeholder:text-[var(--fg-2)]",
+                  "type-body outline-none placeholder:text-[var(--fg-2)]",
                   selectValue(
                     Boolean(text),
                     "text-[var(--fg-0)]",
@@ -624,13 +621,6 @@ export function MobileComposerPill({
             inpaint={inpaint}
             promptEnhancement={promptEnhancement}
             executionSummary={executionSummary}
-            count={count}
-            aspect={aspect}
-            quality={quality}
-            renderQuality={renderQuality}
-            fast={fast}
-            costLabel={costEstimate.label}
-            costWarning={costEstimate.warning}
             onCollapse={() => setExpanded(false)}
             onTextChange={handleTextChange}
             onKeyDown={handleKeyDown}
@@ -646,11 +636,6 @@ export function MobileComposerPill({
             onBeginAttachmentReorder={beginAttachmentReorder}
             onAttachmentClickCapture={handleAttachmentClickCapture}
             onClearComposerError={() => setComposerError(null)}
-            onCountChange={setImageCount}
-            onOpenAspect={openAspectSheet}
-            onQualityChange={setQuality}
-            onRenderQualityChange={setRenderQuality}
-            onFastChange={setFast}
             onOpenAdvanced={openAdvancedSheet}
             onModeChange={setMode}
             onSubmit={() => void handleSubmit()}

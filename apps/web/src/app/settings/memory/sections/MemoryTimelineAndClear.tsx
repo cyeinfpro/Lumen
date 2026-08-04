@@ -106,7 +106,8 @@ function MemoryClearPanel({
         value={clearText}
         onChange={(event) => onClearTextChange(event.target.value)}
         placeholder="清空"
-        className="mt-3 h-11 w-full rounded-[var(--radius-control)] border border-danger-border bg-[var(--bg-0)]/70 px-3 text-base text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/50 focus:border-danger sm:h-10 sm:text-sm"
+        aria-label="清空确认文字"
+        className="control-shell type-body-sm mt-3 h-10 w-full border-danger-border bg-[var(--bg-0)]/70 px-3 text-[var(--danger-fg)] outline-none placeholder:text-[var(--danger-fg)]/50 focus:border-danger focus:shadow-[var(--ring)] max-sm:min-h-11"
       />
       <Button
         variant="danger"

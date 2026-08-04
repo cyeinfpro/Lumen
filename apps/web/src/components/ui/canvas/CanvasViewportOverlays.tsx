@@ -1,27 +1,28 @@
 import { Cable, Plus, X } from "lucide-react";
 
+import { Button, EmptyState } from "@/components/ui/primitives";
 import { BottomSheet } from "@/components/ui/primitives/mobile";
 import type { CompatibleTarget } from "./CanvasViewportModel";
-import styles from "./canvas.module.css";
 
 export function CanvasEmptyState({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className={styles.emptyState}>
-      <div className={styles.emptyStateContent}>
-        <span className={styles.emptyStateIcon} aria-hidden>
-          <Plus />
-        </span>
-        <p className={styles.emptyStateTitle}>开始构建画布</p>
-        <p className={styles.emptyStateCopy}>从一个节点开始。</p>
-        <button
-          type="button"
-          className={styles.emptyStateAction}
-          onClick={onCreate}
-        >
-          <Plus aria-hidden />
-          创建节点
-        </button>
-      </div>
+    <div className="pointer-events-none absolute inset-0 z-[var(--z-base)] grid place-items-center p-6">
+      <EmptyState
+        icon={<Plus className="h-5 w-5" aria-hidden />}
+        title="开始构建画布"
+        description="从一个节点开始。"
+        className="pointer-events-none"
+        action={
+          <Button
+            variant="primary"
+            leftIcon={<Plus className="h-4 w-4" aria-hidden />}
+            onClick={onCreate}
+            className="pointer-events-auto"
+          >
+            创建节点
+          </Button>
+        }
+      />
     </div>
   );
 }

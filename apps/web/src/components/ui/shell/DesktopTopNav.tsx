@@ -63,13 +63,12 @@ export function DesktopTopNav({
   return (
     <header
       className={[
-        "sticky top-0 grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
+        "sticky top-0 z-[var(--z-header)] grid h-[var(--appbar-h)] w-full items-center gap-2 px-3 md:px-5",
         "grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
         "border-b border-[var(--border-subtle)] bg-[var(--bg-0)]/96 backdrop-blur-lg",
       ].join(" ")}
       style={{
         top: "var(--top-banner-stack-height, 0px)",
-        zIndex: "var(--z-header, 10)",
       }}
     >
       {/* Left: sidebar toggle + Logo */}
@@ -168,7 +167,7 @@ function DesktopNavLink({
           transition={SPRING.snap}
         />
       ) : null}
-      <span className="relative z-10">{tab.label}</span>
+      <span className="relative">{tab.label}</span>
     </Link>
   );
 }

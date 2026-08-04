@@ -77,7 +77,7 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
         subtitle="基于文案切分和选定风格，一次生成 4 张 1:1 候选母版。"
       >
         <section className="border-y border-[var(--border)] py-6">
-          <p className="text-[13px] leading-[1.7] text-[var(--fg-1)]">
+          <p className="type-body-sm leading-[1.7] text-[var(--fg-1)]">
             母版作为主版本，后续多尺寸成品都会参考它。建议从 4 张候选中选一张最契合的。
           </p>
         </section>
@@ -101,9 +101,9 @@ export function PosterMasterGenerationStage({ workflow }: { workflow: WorkflowRu
       <StageFrame
         eyebrow="N°04 — 母版生成"
         title="母版生成"
-        subtitle="正在生成 4 张母版候选，预计 30-60 秒。"
+        subtitle="4 张母版候选生成中，预计 30-60 秒。"
       >
-        <RunningState label="正在派发母版任务…" />
+        <RunningState label="母版任务派发中…" />
       </StageFrame>
     );
   }
@@ -246,9 +246,9 @@ function MasterCardMedia({
       }}
       disabled={!image}
       className={cn(
-        "relative block aspect-square w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "relative block aspect-square w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
         presentation.isSelected &&
-          "ring-1 ring-inset ring-[var(--border-amber)]",
+          "ring-1 ring-inset ring-accent-border",
       )}
     >
       {image ? (
@@ -263,11 +263,11 @@ function MasterCardMedia({
       ) : (
         <MasterCardPlaceholder presentation={presentation} />
       )}
-      <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
+      <span className="type-caption absolute left-3 top-3 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
         N°{String(master.candidate_index).padStart(2, "0")}
       </span>
       {presentation.isSelected ? (
-        <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--amber-400)] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
+        <span className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-accent px-2.5 py-1 type-caption text-[var(--accent-on)] shadow-[var(--shadow-amber)]">
           <Check className="h-3 w-3" />
           已选定
         </span>
@@ -285,7 +285,7 @@ function MasterCardPlaceholder({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
         <Loader2 className="h-5 w-5 animate-spin" />
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+        <span className="type-caption">
           生成中
         </span>
       </div>
@@ -295,7 +295,7 @@ function MasterCardPlaceholder({
     <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
       <span
         className={cn(
-          "font-mono text-[10px] uppercase tracking-[0.18em]",
+          "type-caption",
           presentation.isFailed
             ? "text-[var(--danger)]"
             : "text-[var(--fg-3)]",
@@ -318,15 +318,15 @@ function MasterCardMeta({
     <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
       <p
         className={cn(
-          "text-[15px] font-semibold leading-tight tracking-tight transition-colors",
+          "type-body font-semibold leading-tight tracking-tight transition-colors",
           presentation.isSelected
-            ? "text-[var(--amber-300)]"
+            ? "text-accent"
             : "text-[var(--fg-0)]",
         )}
       >
         候选 {master.candidate_index}
       </p>
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+      <span className="type-caption text-[var(--fg-2)]">
         {presentation.statusLabel}
       </span>
     </div>

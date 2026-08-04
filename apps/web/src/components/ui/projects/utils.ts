@@ -1,4 +1,4 @@
-// 共享工具函数：步骤定位、图片解析、JSON 渲染、时间格式。
+// 共享工具函数：步骤定位、图片解析、时间格式。
 // 没有任何 React 依赖，可被 server / worker 单测直接 import。
 
 import {
@@ -10,16 +10,7 @@ import {
   type WorkflowRunListItem,
   type WorkflowStep,
 } from "@/lib/apiClient";
-import {
-  JSON_KEY_LABEL,
-  QUALITY_VALUE_LABEL,
-  RECOMMENDATION_LABEL,
-  SHOT_VALUE_LABEL,
-  STATUS_LABEL,
-  STEP_INDEX,
-  STEPS,
-  TEMPLATE_VALUE_LABEL,
-} from "./types";
+import { STEP_INDEX, STEPS } from "./types";
 
 type InferredAgeSegment = Exclude<
   ModelLibraryAgeSegment,
@@ -154,32 +145,6 @@ function isLibraryAgeSegment(value: string): value is ModelLibraryAgeSegment {
     "middle_aged",
     "senior",
   ].includes(value);
-}
-
-export function jsonValue(value: unknown): string {
-  if (value == null || value === "") return "未知";
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (Array.isArray(value)) {
-    if (!value.length) return "无";
-    return value.map((item) => jsonValue(item)).join("、");
-  }
-  if (typeof value === "object") {
-    return (
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, item]) => item !== undefined && item !== null && item !== "")
-        .map(([key, item]) => `${JSON_KEY_LABEL[key] ?? key}：${jsonValue(item)}`)
-        .join("\n") || "无"
-    );
-  }
-  const raw = String(value);
-  return (
-    STATUS_LABEL[raw] ??
-    RECOMMENDATION_LABEL[raw] ??
-    TEMPLATE_VALUE_LABEL[raw] ??
-    SHOT_VALUE_LABEL[raw] ??
-    QUALITY_VALUE_LABEL[raw] ??
-    raw
-  );
 }
 
 export function formatShortDate(value: string): string {

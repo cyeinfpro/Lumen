@@ -5,7 +5,12 @@ import {
   Search,
 } from "lucide-react";
 
-import { Button, IconButton } from "@/components/ui/primitives";
+import {
+  Button,
+  IconButton,
+  Input,
+  Select,
+} from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import {
   type MemoryItemOut,
@@ -139,19 +144,19 @@ function MemoryLibraryToolbar({
     selectedScope === "all" ? "跨作用域搜索" : "搜索当前作用域";
   return (
     <div className="flex flex-col gap-2 border-t border-[var(--border-subtle)] p-3 sm:flex-row sm:items-center sm:justify-between">
-      <label className="relative min-w-0 flex-1">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--fg-2)]" />
-        <input
-          value={search}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder={searchPlaceholder}
-          className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] pl-9 pr-3 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 sm:h-9"
-        />
-      </label>
+      <Input
+        value={search}
+        onChange={(event) => onSearchChange(event.target.value)}
+        placeholder={searchPlaceholder}
+        aria-label={searchPlaceholder}
+        leftIcon={<Search className="h-3.5 w-3.5" />}
+        wrapperClassName="min-w-0 flex-1"
+        className="sm:h-9"
+      />
       {showBulkActions ? (
         <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-1)]">
           <span>已选 {selectedMemoryIds.size} 条</span>
-          <select
+          <Select
             disabled={bulkMoving}
             onChange={(event) => {
               const scopeId = event.target.value;
@@ -159,8 +164,9 @@ function MemoryLibraryToolbar({
               onBulkMove(scopeId);
               event.currentTarget.value = "";
             }}
-            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-0)] outline-none sm:h-9"
             defaultValue=""
+            aria-label="批量改作用域"
+            className="sm:h-9"
           >
             <option value="" disabled>
               批量改作用域
@@ -170,7 +176,7 @@ function MemoryLibraryToolbar({
                 {scope.is_default ? "默认" : scope.name}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       ) : null}
     </div>
@@ -272,7 +278,7 @@ function MemoryRow({
             type="checkbox"
             checked={selected}
             onChange={(event) => onToggleSelected?.(event.target.checked)}
-            className="h-4 w-4 rounded border-[var(--border-strong)] bg-[var(--bg-2)]"
+            className="h-4 w-4 rounded border-[var(--border-strong)] bg-[var(--bg-2)] accent-[var(--accent)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
             aria-label="选择记忆"
           />
         ) : null}
@@ -284,9 +290,9 @@ function MemoryRow({
           {formatTime(memory.updated_at)}
         </span>
         {memory.pinned ? (
-          <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent">
+          <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] bg-accent-soft px-1.5 py-0.5 type-caption text-accent">
             <Pin className="h-2.5 w-2.5" />
-            pinned
+            已置顶
           </span>
         ) : null}
       </div>
@@ -295,7 +301,8 @@ function MemoryRow({
           <input
             value={editingValue}
             onChange={(event) => onEditValue(event.target.value)}
-            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-3 text-base text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 sm:h-10 sm:text-sm"
+            aria-label="记忆内容"
+            className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11"
           />
           <div className="flex gap-2">
             <Button variant="primary" size="md" onClick={onSaveEdit}>
@@ -329,7 +336,7 @@ function MemoryRow({
           size="sm"
           onClick={() => onPatch({ pinned: !memory.pinned })}
         >
-          {memory.pinned ? "取消 Pin" : "Pin"}
+          {memory.pinned ? "取消置顶" : "置顶"}
         </Button>
         <Button
           variant="outline"
@@ -338,17 +345,18 @@ function MemoryRow({
         >
           {memory.disabled ? "启用" : "停用"}
         </Button>
-        <select
+        <Select
           value={memory.scope_id}
           onChange={(event) => onPatch({ scope_id: event.target.value })}
-          className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-base text-[var(--fg-1)] outline-none sm:h-8 sm:text-xs"
+          aria-label="记忆作用域"
+          className="sm:h-9"
         >
           {scopes.map((scope) => (
             <option key={scope.id} value={scope.id}>
               {scope.is_default ? "默认" : scope.name}
             </option>
           ))}
-        </select>
+        </Select>
         <Button
           variant="outline"
           size="sm"

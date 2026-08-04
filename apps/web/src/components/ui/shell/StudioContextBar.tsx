@@ -150,7 +150,7 @@ export function StudioContextBar({
             aria-modal="false"
             aria-labelledby={settingsTitleId}
             tabIndex={-1}
-            className="surface-panel absolute right-0 top-10 z-40 w-[min(320px,calc(100vw-24px))] origin-top-right bg-[var(--bg-0)]/96 p-2 backdrop-blur-xl"
+            className="surface-panel absolute right-0 top-10 z-[var(--z-tray)] w-[min(320px,calc(100vw-24px))] origin-top-right p-2"
           >
             <div className="px-2 pb-2 pt-1">
               <p
@@ -169,7 +169,7 @@ export function StudioContextBar({
                 "type-control flex min-h-10 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left",
                 "transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
                 fast
-                  ? "bg-[var(--accent-soft)] text-[var(--fg-0)]"
+                  ? "bg-accent-soft text-[var(--fg-0)]"
                   : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
               )}
             >

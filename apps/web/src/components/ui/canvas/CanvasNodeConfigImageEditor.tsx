@@ -7,7 +7,7 @@ import {
 } from "./CanvasNodeConfigControls";
 import {
   ConfigSection,
-  RangeField,
+  SliderField,
   SelectField,
   ToggleField,
 } from "./CanvasNodeConfigFields";
@@ -135,7 +135,7 @@ function ImageGenerationParameters({
         options={RENDER_QUALITY_OPTIONS}
         onChange={(value) => patch({ render_quality: value })}
       />
-      <RangeField
+      <SliderField
         label="候选数量"
         value={Number(node.config.count ?? 1)}
         min={1}
@@ -202,7 +202,7 @@ function ImageCompressionControls({
         }
       />
       {compression !== null ? (
-        <RangeField
+        <SliderField
           label="压缩质量"
           value={compression}
           min={0}

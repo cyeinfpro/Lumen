@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
+import { IconButton } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
 
 export function SearchBox({
@@ -21,7 +22,7 @@ export function SearchBox({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // 父级 value 变化时同步到本地（外部清空 / 重置场景）。
-  // 仅在父值变化时执行，避免覆盖用户正在输入但尚未 debounce flush 的中间态。
+  // 仅在父值变化时执行，避免覆盖用户输入中但还未 debounce flush 的中间态。
   useEffect(() => {
     if (lastSyncedValueRef.current !== value) {
       lastSyncedValueRef.current = value;
@@ -63,22 +64,23 @@ export function SearchBox({
             onChange("");
           }
         }}
-        // 移动端 font-size 16px 防 iOS Safari 聚焦缩放；桌面端回到 14px
-        className="w-full h-full bg-transparent pl-8 pr-10 text-base md:text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] outline-none"
+        // 移动端用 16px 档防 iOS Safari 聚焦缩放；桌面回到紧凑正文档。
+        className="h-full w-full bg-transparent pl-8 pr-10 type-card-title font-normal text-[var(--fg-0)] placeholder:text-[var(--fg-2)] outline-none"
       />
       {local && (
-        <button
-          type="button"
+        <IconButton
+          size="sm"
+          variant="ghost"
           onClick={() => {
             setLocal("");
             onChange("");
             inputRef.current?.focus();
           }}
           aria-label="清除搜索"
-          className="absolute right-0 inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-2)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] md:right-1 md:h-9 md:w-9"
+          className="absolute right-0 text-[var(--fg-2)] md:right-1"
         >
           <X className="w-4 h-4" />
-        </button>
+        </IconButton>
       )}
     </div>
   );

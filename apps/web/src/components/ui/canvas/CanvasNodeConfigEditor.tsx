@@ -22,7 +22,7 @@ import {
   CommitInput,
   CommitTextarea,
   ConfigSection,
-  RangeField,
+  SliderField,
   ToggleField,
 } from "./CanvasNodeConfigFields";
 import type { CanvasNodeConfigEditorProps } from "./CanvasNodeConfigEditorContracts";
@@ -164,7 +164,7 @@ function ImageAssetConfig({
         />
         {crop ? (
           <div className="grid gap-3">
-            <RangeField
+            <SliderField
               label="水平起点"
               value={Math.round(crop.x * 100)}
               min={0}
@@ -176,7 +176,7 @@ function ImageAssetConfig({
                 })
               }
             />
-            <RangeField
+            <SliderField
               label="垂直起点"
               value={Math.round(crop.y * 100)}
               min={0}
@@ -188,7 +188,7 @@ function ImageAssetConfig({
                 })
               }
             />
-            <RangeField
+            <SliderField
               label="裁切宽度"
               value={Math.round(crop.width * 100)}
               min={5}
@@ -200,7 +200,7 @@ function ImageAssetConfig({
                 })
               }
             />
-            <RangeField
+            <SliderField
               label="裁切高度"
               value={Math.round(crop.height * 100)}
               min={5}

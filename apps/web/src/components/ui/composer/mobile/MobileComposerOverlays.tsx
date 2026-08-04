@@ -10,6 +10,7 @@ import {
   ActionSheet,
   BottomSheet,
 } from "@/components/ui/primitives/mobile";
+import { Button } from "@/components/ui/primitives";
 import type {
   AspectRatio,
   Quality,
@@ -260,7 +261,7 @@ function SheetList({
 }) {
   return (
     <div className="px-4 pb-5">
-      <div className="py-3.5 text-center text-[15px] font-semibold text-[var(--fg-0)] border-b border-[var(--border-subtle)]">
+      <div className="border-b border-[var(--border-subtle)] py-3.5 text-center type-card-title">
         {title}
       </div>
       <ul className="flex flex-col">
@@ -269,20 +270,21 @@ function SheetList({
             key={item.key}
             className="border-b border-[var(--border-subtle)] last:border-b-0"
           >
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="md"
               onClick={item.onSelect}
               className={cn(
-                "w-full min-h-[48px] flex items-center gap-3 px-3 py-2 text-left",
-                "text-[15px] rounded-[var(--radius-card)] active:bg-[var(--bg-2)] transition-colors",
+                "h-auto min-h-12 w-full justify-start gap-3 rounded-[var(--radius-card)] px-3 py-2 text-left type-body",
+                "active:bg-[var(--bg-2)]",
                 item.selected
-                  ? "text-[var(--amber-300)] font-medium"
+                  ? "text-accent"
                   : "text-[var(--fg-0)]",
               )}
             >
               <span className="flex-1">{item.label}</span>
               {item.hint ? (
-                <span className="text-body-sm text-[var(--fg-2)]">
+                <span className="type-body-sm text-[var(--fg-2)]">
                   {item.hint}
                 </span>
               ) : null}
@@ -292,7 +294,7 @@ function SheetList({
                   className="h-2.5 w-2.5 rounded-full bg-[var(--accent)]"
                 />
               ) : null}
-            </button>
+            </Button>
           </li>
         ))}
       </ul>

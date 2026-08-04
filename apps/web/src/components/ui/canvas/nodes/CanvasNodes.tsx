@@ -45,6 +45,7 @@ function CanvasNodeComponent({ data, selected }: NodeProps<CanvasFlowNode>) {
       className={cn(
         "relative overflow-visible rounded-[var(--radius-card)] border bg-[var(--bg-1)]/96 text-[var(--fg-0)] backdrop-blur-xl transition-[border-color,box-shadow]",
         canvasNodeStateClass(failed, running, warning),
+        !running && "hover:shadow-[var(--shadow-2)]",
         selected &&
           "ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--surface-canvas)]",
       )}
@@ -167,7 +168,7 @@ function FrameCanvasNode({ data, selected }: NodeProps<CanvasFlowNode>) {
   return (
     <div
       className={cn(
-        "relative w-full border border-dashed bg-[var(--bg-1)]/24",
+        "relative w-full rounded-[var(--radius-card)] border border-dashed bg-[var(--bg-1)]/24 transition-[border-color,box-shadow] hover:shadow-[var(--shadow-2)]",
         collapsed ? "h-11 min-h-11" : "h-full min-h-[220px] p-3",
         selected
           ? "border-[var(--accent)] ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--surface-canvas)]"
@@ -202,7 +203,7 @@ function FrameCanvasNode({ data, selected }: NodeProps<CanvasFlowNode>) {
         }}
       />
       <div
-        className="canvas-node-drag-handle inline-flex min-h-11 max-w-full cursor-grab items-center gap-1.5 bg-[var(--bg-0)]/86 px-2 py-1 text-[var(--fg-1)] active:cursor-grabbing"
+        className="canvas-node-drag-handle inline-flex min-h-11 max-w-full cursor-grab items-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--bg-0)]/86 px-2 py-1 text-[var(--fg-1)] active:cursor-grabbing"
         title="拖动画框"
       >
         <GripVertical

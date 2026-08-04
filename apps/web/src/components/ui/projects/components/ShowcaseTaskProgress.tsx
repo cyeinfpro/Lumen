@@ -49,7 +49,7 @@ const STAGE_LABEL: Record<string, string> = {
 
 const STATUS_TONE: Record<string, string> = {
   queued: "text-[var(--fg-2)]",
-  running: "text-[var(--amber-300)]",
+  running: "text-accent",
   succeeded: "text-[var(--success)]",
   failed: "text-[var(--danger)]",
   canceled: "text-[var(--fg-3)]",
@@ -57,7 +57,7 @@ const STATUS_TONE: Record<string, string> = {
 
 const STATUS_DOT: Record<string, string> = {
   queued: "bg-[var(--fg-3)]",
-  running: "bg-[var(--amber-400)]",
+  running: "bg-accent",
   succeeded: "bg-[var(--success)]",
   failed: "bg-[var(--danger)]",
   canceled: "bg-[var(--fg-3)]",
@@ -73,14 +73,14 @@ export function ShowcaseTaskProgress({
     <section className="border-t border-[var(--border)] py-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             Task Progress
           </p>
-          <p className="mt-1 text-[13px] leading-6 text-[var(--fg-1)]">
+          <p className="mt-1 type-body-sm leading-6 text-[var(--fg-1)]">
             {model.phase}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em]">
+        <div className="flex flex-wrap items-center gap-2 type-caption">
           <Metric
             label="完成"
             value={`${model.progressCount}/${model.plannedCount}`}
@@ -112,7 +112,7 @@ export function ShowcaseTaskProgress({
             (model.failedCount > 0 || model.canceledCount > 0) &&
               model.runningCount === 0
               ? "bg-[var(--danger)]"
-              : "bg-[var(--amber-400)]",
+              : "bg-accent",
           )}
           style={{ width: `${model.percent}%` }}
         />
@@ -126,10 +126,10 @@ export function ShowcaseTaskProgress({
           >
             <MilestoneIcon state={item.state} />
             <div className="min-w-0">
-              <p className="truncate font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+              <p className="truncate type-caption text-[var(--fg-2)]">
                 {item.label}
               </p>
-              <p className="mt-0.5 truncate text-[12px] text-[var(--fg-1)]">
+              <p className="mt-0.5 truncate type-caption text-[var(--fg-1)]">
                 {item.detail}
               </p>
             </div>
@@ -149,14 +149,14 @@ export function ShowcaseTaskProgress({
         ) : (
           <div className="flex min-h-14 items-center justify-between gap-3 px-1 py-3">
             <div className="min-w-0">
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+              <p className="type-caption text-[var(--fg-2)]">
                 等待派发图像任务
               </p>
-              <p className="mt-1 text-[12px] text-[var(--fg-1)]">
+              <p className="mt-1 type-caption text-[var(--fg-1)]">
                 {model.preflightDisplay}
               </p>
             </div>
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--amber-300)]" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-accent" />
           </div>
         )}
       </div>
@@ -179,7 +179,7 @@ function Metric({
       : tone === "danger"
         ? "text-[var(--danger)]"
         : tone === "amber"
-          ? "text-[var(--amber-300)]"
+          ? "text-accent"
           : "text-[var(--fg-1)]";
   return (
     <span className="inline-flex min-h-7 items-center gap-1.5 border border-[var(--border)] px-2 text-[var(--fg-2)]">
@@ -201,12 +201,12 @@ function TaskRow({
     <div className="grid min-h-14 gap-2 px-1 py-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+          <p className="type-caption text-[var(--fg-2)]">
             Image {String(index + 1).padStart(2, "0")}
           </p>
           <span
             className={cn(
-              "inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em]",
+              "inline-flex items-center gap-1.5 type-caption",
               STATUS_TONE[presentation.status],
             )}
           >
@@ -221,13 +221,13 @@ function TaskRow({
             {STATUS_LABEL[presentation.status] ?? presentation.status}
           </span>
         </div>
-        <p className="mt-1 truncate text-[12px] text-[var(--fg-1)]">
+        <p className="mt-1 truncate type-caption text-[var(--fg-1)]">
           {presentation.detail}
         </p>
         {presentation.error ? (
           <p
             role="alert"
-            className="mt-1 line-clamp-2 text-[12px] leading-5 text-[var(--danger)]"
+            className="mt-1 line-clamp-2 type-caption leading-5 text-[var(--danger)]"
           >
             {presentation.error}
           </p>
@@ -272,7 +272,7 @@ function TaskIcon({ status }: { status: string }) {
   }
   if (status === "running") {
     return (
-      <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />
+      <Loader2 className="h-4 w-4 animate-spin text-accent" />
     );
   }
   return <Clock3 className="h-4 w-4 text-[var(--fg-2)]" />;
@@ -287,7 +287,7 @@ function MilestoneIcon({ state }: { state: ProgressState }) {
   }
   if (state === "active") {
     return (
-      <Loader2 className="h-4 w-4 animate-spin text-[var(--amber-300)]" />
+      <Loader2 className="h-4 w-4 animate-spin text-accent" />
     );
   }
   return <Clock3 className="h-4 w-4 text-[var(--fg-3)]" />;

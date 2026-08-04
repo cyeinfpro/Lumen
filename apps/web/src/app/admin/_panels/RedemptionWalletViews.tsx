@@ -3,7 +3,13 @@
 import type { FormEvent, ReactNode } from "react";
 import { Search, UserCog, Wallet } from "lucide-react";
 
-import { Button, Card } from "@/components/ui/primitives";
+import {
+  Button,
+  Card,
+  Input,
+  Select,
+  StatusBadge,
+} from "@/components/ui/primitives";
 import { formatRmb } from "@/lib/money";
 import type {
   AdminRedemptionUsageOut,
@@ -55,21 +61,19 @@ export function WalletSearchForm({
       onSubmit={submitSearch}
       className="grid gap-3 md:grid-cols-[1fr_140px_auto]"
     >
-      <input
+      <Input
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
         placeholder="邮箱 / 用户 ID"
-        className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       />
-      <select
+      <Select
         value={mode}
         onChange={(event) => onModeChange(event.target.value as WalletMode)}
-        className="h-10 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       >
-        <option value="wallet">wallet</option>
-        <option value="byok">byok</option>
-        <option value="all">all</option>
-      </select>
+        <option value="wallet">钱包</option>
+        <option value="byok">自带密钥</option>
+        <option value="all">全部</option>
+      </Select>
       <Button
         variant="outline"
         size="md"
@@ -104,9 +108,10 @@ function WalletListItem({
     >
       <span className="min-w-0 truncate">
         {item.email}
-        <span className="ml-2 font-mono text-xs text-[var(--fg-3)]">
-          {item.account_mode}
-        </span>
+        <StatusBadge
+          status={item.account_mode}
+          className="ml-2 align-middle"
+        />
         {item.last_topup_at && (
           <span className="ml-2 text-xs text-[var(--fg-3)]">
             最近充值 {new Date(item.last_topup_at).toLocaleDateString()}
@@ -193,7 +198,7 @@ function WalletSummaryCard({ selected }: { selected: AdminWalletDetailOut }) {
       <div className="mt-4 grid gap-2 text-sm">
         <div className="flex justify-between">
           <span className="text-[var(--fg-2)]">模式</span>
-          <span>{selected.account_mode}</span>
+          <StatusBadge status={selected.account_mode} />
         </div>
         <div className="flex justify-between">
           <span className="text-[var(--fg-2)]">余额</span>
@@ -242,17 +247,15 @@ function WalletAdjustmentCard({
   return (
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
       <p className="text-sm font-medium">调账</p>
-      <input
+      <Input
         value={amount}
         onChange={(event) => onAmountChange(event.target.value)}
         placeholder="+10 / -5"
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       />
-      <input
+      <Input
         value={reason}
         onChange={(event) => onReasonChange(event.target.value)}
         placeholder="理由"
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       />
       <Button
         variant="primary"
@@ -286,26 +289,24 @@ function WalletModeCard({
   return (
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
       <p className="text-sm font-medium">切换账号模式</p>
-      <select
+      <Select
         value={nextMode}
         onChange={(event) =>
           onNextModeChange(event.target.value as AccountMode)
         }
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       >
-        <option value="wallet">转 wallet</option>
-        <option value="byok">转 byok</option>
-      </select>
-      <select
+        <option value="wallet">转钱包模式</option>
+        <option value="byok">转自带密钥模式</option>
+      </Select>
+      <Select
         value={residualMode}
         onChange={(event) =>
           onResidualModeChange(event.target.value as ResidualMode)
         }
-        className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-sm"
       >
         <option value="freeze">冻结余额</option>
         <option value="zero">清零余额</option>
-      </select>
+      </Select>
       <Button
         variant="outline"
         size="md"

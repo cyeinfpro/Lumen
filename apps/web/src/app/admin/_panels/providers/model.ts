@@ -6,15 +6,15 @@ import type {
   ProviderProxyOut,
 } from "@/lib/types";
 
-export const WEIGHT_COLORS = [
-  "var(--accent)",
-  "#6366f1",
-  "#ec4899",
-  "#14b8a6",
-  "#f97316",
-  "#8b5cf6",
-  "#06b6d4",
-  "#84cc16",
+// Keep the routing visualization inside the product's semantic color slots.
+// The sequence is intentionally limited to five tones so it stays legible
+// without introducing a separate provider-specific palette.
+export const WEIGHT_SEGMENT_CLASSES = [
+  "bg-accent",
+  "bg-info",
+  "bg-success",
+  "bg-warning",
+  "bg-danger",
 ];
 
 export const PROVIDER_PURPOSES: Array<{ value: ProviderPurpose; label: string }> = [

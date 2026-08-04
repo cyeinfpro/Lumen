@@ -145,7 +145,7 @@ export function RequestEventsPanel() {
       />
 
       <div
-        className="overflow-hidden rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/70 backdrop-blur-sm"
+        className="surface-card overflow-hidden"
         aria-busy={q.isFetching}
         aria-live="polite"
       >
@@ -254,7 +254,7 @@ export function RequestEventsPanel() {
               </table>
             </div>
 
-            <ul className="divide-y divide-white/5 lg:hidden">
+            <ul className="divide-y divide-[var(--border-subtle)] lg:hidden">
               {filtered.map((event) => {
                 const expanded = expandedId === event.id;
                 const detailId = `request-event-mobile-detail-${event.id}`;
@@ -590,9 +590,9 @@ function EventDetails({ event }: { event: AdminRequestEventOut }) {
                   loading="lazy"
                   className="absolute inset-0 h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
                 />
-                <span className="absolute inset-x-0 bottom-0 flex min-w-0 items-center justify-between gap-2 bg-black/65 px-2 py-1.5 text-xs text-white backdrop-blur-sm">
+                <span className="absolute inset-x-0 bottom-0 flex min-w-0 items-center justify-between gap-2 bg-[var(--media-control-bg)] px-2 py-1.5 type-caption text-[var(--media-control-fg)] backdrop-blur-sm">
                   <span className="shrink-0">{imageRoleLabel(image)}</span>
-                  <span className="truncate font-mono text-white/75">
+                  <span className="truncate font-mono text-[var(--media-control-fg)] opacity-75">
                     {image.width > 0 && image.height > 0
                       ? `${image.width}x${image.height}`
                       : "尺寸未知"}

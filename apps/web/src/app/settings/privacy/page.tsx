@@ -11,7 +11,6 @@
 // - 会话列表踢下线同样走内嵌确认
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { AnimatePresence, motion } from "framer-motion";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { format, formatDistanceToNow } from "date-fns";
@@ -19,7 +18,6 @@ import { zhCN } from "date-fns/locale";
 import {
   AlertCircle,
   AlertTriangle,
-  ArrowLeft,
   Check,
   Download,
   LogOut,
@@ -60,31 +58,14 @@ export default function PrivacyPage() {
   });
 
   return (
-    <SettingsShell title="隐私 & 数据" subtitle="PRIVACY" maxWidth="max-w-4xl">
+    <SettingsShell title="隐私 & 数据" subtitle="PRIVACY">
       <motion.div
         initial={false}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.2, ease: "easeOut" }}
-        className="space-y-6 pb-4 sm:space-y-8"
+        className="page-frame space-y-6 pb-4 sm:space-y-8"
+        data-width="settings"
       >
-        <header className="hidden items-start justify-between gap-4 flex-wrap md:flex">
-          <div>
-            <h1 className="type-page-title">
-              隐私 & 数据
-            </h1>
-            <p className="type-body mt-1.5">
-              查看数据、登录会话和账号删除选项。
-            </p>
-          </div>
-          <Link
-            href="/me"
-            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] whitespace-nowrap"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            返回我的
-          </Link>
-        </header>
-
         <ExportSection />
         <SessionsSection />
         <DangerSection email={me.data?.email ?? null} loading={me.isLoading} />
@@ -105,8 +86,8 @@ function SectionHeader({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className={
-          "type-overline " +
+      className={
+          "type-caption font-medium " +
           (tone === "danger" ? "text-danger" : "text-[var(--fg-1)]")
         }
       >
@@ -341,7 +322,7 @@ function SessionRow({
               {s.ua ? truncate(s.ua, 80) : "未知设备"}
             </span>
             {s.is_current && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-[10px] bg-accent-soft text-accent border border-accent-border">
+              <span className="inline-flex items-center gap-1 rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-2 py-0.5 type-caption text-accent">
                 <span className="w-1 h-1 rounded-full bg-accent" />
                 当前会话
               </span>
@@ -472,11 +453,11 @@ function DangerSection({
         <div>
           <label
             htmlFor="confirm-email"
-            className="block type-overline text-[var(--fg-1)] mb-1.5"
+            className="mb-1.5 block type-label text-[var(--fg-1)]"
           >
             输入邮箱以确认
             {email && (
-              <span className="ml-1 font-mono text-[var(--fg-1)] normal-case tracking-normal">
+              <span className="ml-1 type-caption font-mono normal-case tracking-normal text-[var(--fg-1)]">
                 ({email})
               </span>
             )}
@@ -492,7 +473,7 @@ function DangerSection({
             placeholder={email ?? (loading ? copy.state.loading : "未登录")}
             disabled={!email || del.isPending}
             autoComplete="off"
-            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)]/72 px-3 text-base transition-colors placeholder:text-[var(--fg-2)] focus:border-danger-border focus:outline-none focus:ring-2 focus:ring-[var(--danger)]/20 disabled:opacity-50 md:h-9 md:text-sm"
+            className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-2)] focus:border-danger-border focus:ring-2 focus:ring-danger/20 disabled:opacity-50 max-sm:min-h-11"
           />
           {confirmEmail && !matches && (
             <p className="type-caption text-[var(--fg-2)] mt-1.5">

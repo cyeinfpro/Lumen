@@ -15,11 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  GESTURE,
-  SPRING,
-  projectMomentum,
-} from "@/lib/motion";
+import { GESTURE, SPRING, projectMomentum } from "@/lib/motion";
 import { IconButton } from "./IconButton";
 
 type ToastTone = "success" | "error" | "info" | "warning";
@@ -40,7 +36,9 @@ interface ToastItem {
 
 interface ToastState {
   items: ToastItem[];
-  push: (t: Omit<ToastItem, "id" | "durationMs"> & { durationMs?: number }) => string;
+  push: (
+    t: Omit<ToastItem, "id" | "durationMs"> & { durationMs?: number },
+  ) => string;
   dismiss: (id: string) => void;
   clear: () => void;
 }
@@ -71,8 +69,7 @@ const useToastStore = create<ToastState>((set) => ({
       title: t.title,
       description: t.description,
       action: t.action,
-      durationMs:
-        t.durationMs ?? defaultDurationMs(t.tone, Boolean(t.action)),
+      durationMs: t.durationMs ?? defaultDurationMs(t.tone, Boolean(t.action)),
     };
     set((s) => ({ items: [...s.items, item] }));
     return id;
@@ -83,8 +80,14 @@ const useToastStore = create<ToastState>((set) => ({
 
 // 外部 API：`toast.success("已保存")` 等
 function make(tone: ToastTone) {
-  return (title: ReactNode, options?: { description?: string; durationMs?: number; action?: ToastAction }) =>
-    useToastStore.getState().push({ tone, title, ...options });
+  return (
+    title: ReactNode,
+    options?: {
+      description?: string;
+      durationMs?: number;
+      action?: ToastAction;
+    },
+  ) => useToastStore.getState().push({ tone, title, ...options });
 }
 
 export const toast = {
@@ -96,34 +99,40 @@ export const toast = {
   clear: () => useToastStore.getState().clear(),
 };
 
-const TONE_CLASSES: Record<ToastTone, { border: string; icon: string; iconBg: string }> = {
+const TONE_CLASSES: Record<
+  ToastTone,
+  { border: string; icon: string; iconBg: string }
+> = {
   success: {
-    border: "border-[var(--success)]/30",
-    icon: "text-[var(--success)]",
-    iconBg: "bg-[var(--success-soft)]",
+    border: "border-success-border",
+    icon: "text-success",
+    iconBg: "bg-success-soft",
   },
   error: {
-    border: "border-[var(--danger)]/30",
-    icon: "text-[var(--danger)]",
-    iconBg: "bg-[var(--danger-soft)]",
+    border: "border-danger-border",
+    icon: "text-danger",
+    iconBg: "bg-danger-soft",
   },
   info: {
-    border: "border-[var(--info)]/30",
-    icon: "text-[var(--info)]",
-    iconBg: "bg-[var(--info-soft)]",
+    border: "border-info-border",
+    icon: "text-info",
+    iconBg: "bg-info-soft",
   },
   warning: {
-    border: "border-[var(--warning)]/30",
-    icon: "text-[var(--warning)]",
-    iconBg: "bg-[var(--warning-soft)]",
+    border: "border-warning-border",
+    icon: "text-warning",
+    iconBg: "bg-warning-soft",
   },
 };
 
 function ToneIcon({ tone }: { tone: ToastTone }) {
   const cls = "w-4 h-4";
-  if (tone === "success") return <CheckCircle2 className={cls} aria-hidden="true" />;
-  if (tone === "error") return <AlertCircle className={cls} aria-hidden="true" />;
-  if (tone === "warning") return <AlertTriangle className={cls} aria-hidden="true" />;
+  if (tone === "success")
+    return <CheckCircle2 className={cls} aria-hidden="true" />;
+  if (tone === "error")
+    return <AlertCircle className={cls} aria-hidden="true" />;
+  if (tone === "warning")
+    return <AlertTriangle className={cls} aria-hidden="true" />;
   return <Info className={cls} aria-hidden="true" />;
 }
 
@@ -175,7 +184,7 @@ function ToastRow({ item }: { item: ToastItem }) {
         "pointer-events-auto w-[320px] max-w-[calc(100vw-2rem)]",
         // 移动端撑满可用宽度（已扣掉 viewport 两侧 padding）
         "max-sm:w-full",
-        "surface-panel flex items-start gap-3 px-3 py-2.5 text-[var(--fg-0)]",
+        "surface-panel flex items-start gap-3 px-3 py-2.5 text-[var(--fg-0)] shadow-[var(--shadow-3)]",
         tone.border,
       )}
     >
@@ -189,7 +198,9 @@ function ToastRow({ item }: { item: ToastItem }) {
         <ToneIcon tone={item.tone} />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="type-label break-words text-[var(--fg-0)]">{item.title}</p>
+        <p className="type-label break-words text-[var(--fg-0)]">
+          {item.title}
+        </p>
         {item.description ? (
           <p className="type-caption mt-0.5 line-clamp-3 text-[var(--fg-1)]">
             {item.description}
@@ -202,7 +213,7 @@ function ToastRow({ item }: { item: ToastItem }) {
               item.action?.onClick();
               dismiss(item.id);
             }}
-            className="mt-1.5 inline-flex items-center justify-center text-[11px] font-medium text-[var(--accent)] underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:px-2 max-sm:min-w-11"
+            className="type-caption mt-1.5 inline-flex items-center justify-center font-medium text-info underline-offset-2 hover:underline max-sm:-ml-2 max-sm:min-h-11 max-sm:min-w-11 max-sm:px-2"
           >
             {item.action.label}
           </button>

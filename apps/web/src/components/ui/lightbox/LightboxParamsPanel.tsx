@@ -108,7 +108,7 @@ export function LightboxParamsPanel({
           aria-describedby={descriptionId}
           tabIndex={-1}
           className={cn(
-            "fixed inset-x-0 bottom-0 z-[var(--z-dialog,90)]",
+            "fixed inset-x-0 bottom-0 z-[var(--z-dialog)]",
             "rounded-t-[var(--radius-sheet)]",
             reducedTransparency
               ? "bg-[var(--bg-1)]"
@@ -122,9 +122,7 @@ export function LightboxParamsPanel({
           animate={reducedMotion ? { opacity: 1 } : { y: 0 }}
           exit={reducedMotion ? { opacity: 0 } : { y: "100%" }}
           transition={
-            reducedMotion
-              ? { duration: 0.18, ease: "linear" }
-              : SPRING.sheet
+            reducedMotion ? { duration: 0.18, ease: "linear" } : SPRING.sheet
           }
         >
           <div className="flex items-center justify-between px-4 pt-3.5">

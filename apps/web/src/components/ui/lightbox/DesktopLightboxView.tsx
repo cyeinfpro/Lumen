@@ -10,18 +10,21 @@ import {
   Edit2,
   ExternalLink,
   Info,
-  Loader2,
   RefreshCw,
   X,
   ZoomIn,
   ZoomOut,
   type LucideIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
 
+import { Button } from "@/components/ui/primitives/Button";
+import { ErrorState } from "@/components/ui/primitives/ErrorState";
+import { Kbd } from "@/components/ui/primitives/Kbd";
+import { MediaControlButton } from "@/components/ui/primitives/MediaControlButton";
 import { Tooltip } from "@/components/ui/primitives/Tooltip";
 import { cn } from "@/lib/utils";
 
+import { LightboxActionMenu } from "./LightboxActionMenu";
 import { LightboxDetailsContent } from "./LightboxDetailsContent";
 import {
   MAX_ZOOM,
@@ -31,14 +34,48 @@ import {
   type ViewMode,
 } from "./desktopLightboxModel";
 
-import type {
-  DesktopLightboxViewProps,
-} from "./DesktopLightboxViewTypes";
+import type { DesktopLightboxViewProps } from "./DesktopLightboxViewTypes";
 export type { DesktopLightboxViewProps } from "./DesktopLightboxViewTypes";
 
-import { DownloadStatusIcon, ShareStatusIcon } from "./DesktopLightboxStatusIcons";
+import {
+  DownloadStatusIcon,
+  ShareStatusIcon,
+} from "./DesktopLightboxStatusIcons";
 
 function DesktopTopBar(props: DesktopLightboxViewProps) {
+  const overflowActions = [
+    {
+      label: "迭代",
+      icon: <Edit2 className="h-4 w-4" />,
+      onSelect: props.onIterate,
+      disabled: !props.imageActionsAvailable,
+    },
+    {
+      label: "局部修改",
+      icon: <Brush className="h-4 w-4" />,
+      onSelect: props.onInpaint,
+      disabled: !props.imageActionsAvailable,
+    },
+    {
+      label: "放大到 4K",
+      icon: <ArrowUpRight className="h-4 w-4" />,
+      onSelect: props.onUpscale,
+      disabled: !props.imageActionsAvailable,
+    },
+    {
+      label: "重新生成",
+      icon: <RefreshCw className="h-4 w-4" />,
+      onSelect: props.onReroll,
+      disabled: !props.imageActionsAvailable,
+    },
+    {
+      label: props.shareText,
+      icon: <ShareStatusIcon status={props.shareStatus} />,
+      onSelect: props.onShare,
+      disabled: !props.imageId || props.shareStatus === "creating",
+    },
+  ];
+
   return (
     <motion.div
       initial={{ y: -12, opacity: 0 }}
@@ -59,49 +96,35 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
         "grid grid-cols-[1fr_auto_1fr] items-start gap-3 pointer-events-none",
       )}
     >
-      <div className="flex min-w-0 items-center gap-2 pointer-events-auto">
-        <div
-          className={cn(
-            "flex min-h-11 items-center gap-1 rounded-full",
-            "border border-white/10 bg-black/35 p-1 backdrop-blur-xl",
-            "shadow-[var(--shadow-2)]",
-          )}
+      <div className="pointer-events-auto flex min-w-0 items-center gap-2">
+        <ToolIconButton
+          onClick={props.onZoomOut}
+          title="缩小（-）"
+          icon={ZoomOut}
+          disabled={props.activeZoom <= MIN_ZOOM}
+        />
+        <MediaControlButton
+          size="lg"
+          onClick={props.onResetView}
+          title="重置为适应窗口（0）"
+          aria-label="重置为适应窗口（0）"
+          className="type-caption w-auto min-w-16 px-3 font-mono tabular-nums shadow-[var(--shadow-2)]"
         >
-          <ToolIconButton
-            onClick={props.onZoomOut}
-            title="缩小（-）"
-            icon={ZoomOut}
-            disabled={props.activeZoom <= MIN_ZOOM}
-          />
-          <button
-            type="button"
-            onClick={props.onResetView}
-            title="重置为适应窗口（0）"
-            aria-label="重置为适应窗口（0）"
-            className={cn(
-              "h-9 min-w-16 rounded-full px-3 text-xs font-mono tabular-nums max-sm:min-h-11",
-              "text-white/82 hover:bg-white/10 hover:text-white",
-              "transition-colors duration-150 cursor-pointer",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-            )}
-          >
-            {formatZoom(props.activeZoom)}
-          </button>
-          <ToolIconButton
-            onClick={props.onZoomIn}
-            title="放大（+）"
-            icon={ZoomIn}
-            disabled={props.activeZoom >= MAX_ZOOM}
-          />
-        </div>
+          {formatZoom(props.activeZoom)}
+        </MediaControlButton>
+        <ToolIconButton
+          onClick={props.onZoomIn}
+          title="放大（+）"
+          icon={ZoomIn}
+          disabled={props.activeZoom >= MAX_ZOOM}
+        />
       </div>
 
       {props.galleryLength > 0 && props.currentIndex >= 0 ? (
         <div
           className={cn(
-            "pointer-events-auto place-self-start px-3.5 py-2 rounded-full",
-            "bg-black/35 border border-white/10 text-white/82",
-            "text-xs font-mono tabular-nums backdrop-blur-xl",
+            "type-caption pointer-events-auto place-self-start rounded-full px-3.5 py-2 font-mono tabular-nums",
+            "bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur-xl",
             "shadow-[var(--shadow-2)]",
           )}
         >
@@ -109,63 +132,19 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
         </div>
       ) : null}
 
-      <div className="flex flex-wrap justify-end gap-2 pointer-events-auto">
-        <div
-          className={cn(
-            "flex min-h-11 items-center gap-1 rounded-full",
-            "border border-white/10 bg-black/35 p-1 backdrop-blur-xl",
-            "shadow-[var(--shadow-2)]",
-          )}
+      <div className="pointer-events-auto flex flex-wrap justify-end gap-2">
+        <MediaControlButton
+          size="lg"
+          onClick={props.onDownload}
+          title={props.downloadTitle}
+          aria-label={props.downloadTitle}
+          disabled={props.downloadStatus === "downloading"}
+          className="type-body-sm w-auto gap-1.5 px-3 shadow-[var(--shadow-2)]"
         >
-          <TopButton
-            onClick={props.onIterate}
-            title="迭代（E）"
-            icon={<Edit2 className="h-4 w-4" aria-hidden />}
-            disabled={!props.imageActionsAvailable}
-          >
-            迭代
-          </TopButton>
-          <TopButton
-            onClick={props.onInpaint}
-            title="局部修改"
-            icon={<Brush className="h-4 w-4" aria-hidden />}
-            disabled={!props.imageActionsAvailable}
-          >
-            局部
-          </TopButton>
-          <TopButton
-            onClick={props.onUpscale}
-            title="放大到4K"
-            icon={<ArrowUpRight className="h-4 w-4" aria-hidden />}
-            disabled={!props.imageActionsAvailable}
-          >
-            放大
-          </TopButton>
-          <TopButton
-            onClick={props.onReroll}
-            title="重新生成"
-            icon={<RefreshCw className="h-4 w-4" aria-hidden />}
-            disabled={!props.imageActionsAvailable}
-          >
-            重画
-          </TopButton>
-          <TopButton
-            onClick={props.onDownload}
-            title={props.downloadTitle}
-            icon={<DownloadStatusIcon status={props.downloadStatus} />}
-            disabled={props.downloadStatus === "downloading"}
-          >
-            {props.downloadText}
-          </TopButton>
-          <TopButton
-            onClick={props.onShare}
-            title={props.shareTitle}
-            icon={<ShareStatusIcon status={props.shareStatus} />}
-            disabled={!props.imageId || props.shareStatus === "creating"}
-          >
-            {props.shareText}
-          </TopButton>
-        </div>
+          <DownloadStatusIcon status={props.downloadStatus} />
+          <span>{props.downloadText}</span>
+        </MediaControlButton>
+        <LightboxActionMenu actions={overflowActions} />
 
         <ToolIconButton
           onClick={props.onToggleDetails}
@@ -173,22 +152,16 @@ function DesktopTopBar(props: DesktopLightboxViewProps) {
           icon={Info}
           active={props.detailsOpen}
         />
-        <button
+        <MediaControlButton
+          size="lg"
           id={props.closeButtonElementId}
-          type="button"
           onClick={props.onClose}
           aria-label="关闭（Esc）"
           title="关闭（Esc）"
-          className={cn(
-            "pointer-events-auto inline-flex items-center justify-center",
-            "w-11 h-11 rounded-full border border-white/15",
-            "bg-black/35 text-white backdrop-blur-xl hover:bg-white/15 hover:border-white/25",
-            "active:scale-[0.94] transition-all duration-150 cursor-pointer",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-          )}
+          className="shadow-[var(--shadow-2)]"
         >
-          <X className="w-5 h-5" />
-        </button>
+          <X className="h-5 w-5" />
+        </MediaControlButton>
       </div>
     </motion.div>
   );
@@ -219,15 +192,12 @@ function DesktopMediaStage(props: DesktopLightboxViewProps) {
         id={props.imageWrapElementId}
         className={mediaWrapClassName(props.detailsOpen)}
       >
-        <div
-          role="alert"
-          className="pointer-events-auto rounded-[var(--radius-dialog)] border border-white/10 bg-black/50 backdrop-blur px-8 py-10 text-center max-w-md"
-        >
-          <p className="text-base text-white/90">图片加载失败</p>
-          <p className="text-xs text-white/50 mt-2">
-            数据可能已过期或网络异常，可关闭后重试。
-          </p>
-        </div>
+        <ErrorState
+          title="图片加载失败"
+          description="网络异常或图片已过期。"
+          onRetry={props.onRetryImage}
+          className="pointer-events-auto max-w-md"
+        />
       </motion.div>
     );
   }
@@ -268,7 +238,7 @@ function DesktopMediaStage(props: DesktopLightboxViewProps) {
         onPointerUp={props.onImagePointerUp}
         onPointerCancel={props.onImagePointerCancel}
         className={cn(
-          "rounded-[var(--radius-control)] shadow-2xl",
+          "rounded-[var(--radius-control)] shadow-[var(--shadow-2)]",
           imageViewModeClassName(props.activeViewMode),
           "pointer-events-auto select-none transform-gpu",
           props.edgeHint && "animate-[lb-shake_0.35s_ease-in-out]",
@@ -281,7 +251,7 @@ function DesktopMediaStage(props: DesktopLightboxViewProps) {
 
 function mediaWrapClassName(detailsOpen: boolean): string {
   return cn(
-    "relative z-10 w-full h-full px-4 sm:px-6 md:px-10 py-20",
+    "relative z-[var(--z-header)] w-full h-full px-4 sm:px-6 md:px-10 py-20",
     "flex items-center justify-center pointer-events-none",
     "transition-[padding] duration-300 ease-[var(--ease-shutter)]",
     detailsOpen && "md:pr-[23rem] lg:pr-[27rem]",
@@ -298,15 +268,10 @@ function imageViewModeClassName(viewMode: ViewMode): string {
   return "max-w-full max-h-full object-contain";
 }
 
-function imageStyle(
-  props: DesktopLightboxViewProps,
-): React.CSSProperties {
+function imageStyle(props: DesktopLightboxViewProps): React.CSSProperties {
   const transformed =
-    props.isPanning ||
-    props.activeZoom > 1 ||
-    props.activeViewMode !== "fit";
-  const pannable =
-    props.activeZoom > 1 || props.activeViewMode !== "fit";
+    props.isPanning || props.activeZoom > 1 || props.activeViewMode !== "fit";
+  const pannable = props.activeZoom > 1 || props.activeViewMode !== "fit";
   return {
     transform: `translate3d(${props.activePanOffset.x}px, ${props.activePanOffset.y}px, 0) scale(${props.activeZoom})`,
     willChange: transformed ? "transform" : "auto",
@@ -334,22 +299,19 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
           style={{
             top: "max(5.5rem, calc(env(safe-area-inset-top) + 5rem))",
             right: "max(1.25rem, env(safe-area-inset-right))",
-            bottom:
-              "max(6.5rem, calc(env(safe-area-inset-bottom) + 5.5rem))",
+            bottom: "max(6.5rem, calc(env(safe-area-inset-bottom) + 5.5rem))",
           }}
           className={cn(
-            "absolute z-30 flex w-[min(22rem,calc(100vw-2.5rem))] flex-col overflow-hidden",
-            "rounded-[var(--radius-dialog)] border border-white/12 bg-black/48 text-white",
-            "backdrop-blur-2xl shadow-[var(--shadow-3)]",
+            "absolute z-[var(--z-tray)] flex w-[min(22rem,calc(100vw-2.5rem))] flex-col overflow-hidden",
+            "rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)]",
+            "backdrop-blur-xl shadow-[var(--shadow-2)]",
             "pointer-events-auto",
           )}
         >
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
             <div>
-              <p className="text-sm font-medium text-white/90">
-                图片信息
-              </p>
-              <p className="mt-0.5 text-[11px] text-white/45">
+              <p className="type-body-sm font-medium">图片信息</p>
+              <p className="type-caption mt-0.5 opacity-60">
                 {props.sourceLabel} · {props.activeViewModeLabel} ·{" "}
                 {formatZoom(props.activeZoom)}
               </p>
@@ -364,17 +326,12 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
 
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4 scrollbar-thin">
             {props.currentItem ? (
-              <LightboxDetailsContent
-                item={props.currentItem}
-                tone="media"
-              />
+              <LightboxDetailsContent item={props.currentItem} tone="media" />
             ) : null}
 
             <section className="space-y-2">
-              <h3 className="text-[11px] font-mono uppercase tracking-wide text-white/45">
-                快捷键
-              </h3>
-              <div className="grid grid-cols-2 gap-2 text-[11px] text-white/58">
+              <h3 className="type-caption opacity-60">快捷键</h3>
+              <div className="type-caption grid grid-cols-2 gap-2 opacity-75">
                 <Shortcut label="上一张" value="K / ←" />
                 <Shortcut label="下一张" value="J / →" />
                 <Shortcut label="缩放" value="+ / -" />
@@ -386,38 +343,26 @@ function DesktopDetailsPanel(props: DesktopLightboxViewProps) {
             </section>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 border-t border-white/10 p-3">
-            <button
-              type="button"
+          <div className="grid grid-cols-2 gap-2 border-t border-[var(--border)] p-3">
+            <MediaControlButton
+              size="md"
               onClick={props.onOpenOriginal}
-              className={cn(
-                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)] max-sm:min-h-11",
-                "border border-white/10 bg-white/5 text-sm text-white/80",
-                "hover:border-white/25 hover:bg-white/10 hover:text-white",
-                "transition-colors duration-150 cursor-pointer",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-              )}
+              aria-label="打开原图"
+              className="type-body-sm w-full gap-2 rounded-[var(--radius-control)]"
             >
               <ExternalLink className="h-4 w-4" />
               打开
-            </button>
-            <button
-              type="button"
+            </MediaControlButton>
+            <MediaControlButton
+              size="md"
               onClick={props.onDownload}
+              aria-label={props.downloadTitle}
               disabled={props.downloadStatus === "downloading"}
-              className={cn(
-                "inline-flex h-10 items-center justify-center gap-2 rounded-[var(--radius-panel)] max-sm:min-h-11",
-                "border border-[var(--accent)]/35 bg-[var(--accent)]/14",
-                "text-sm text-[var(--amber-100)]",
-                "hover:bg-[var(--accent)]/22",
-                "disabled:cursor-wait disabled:opacity-70",
-                "transition-colors duration-150 cursor-pointer",
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-              )}
+              className="type-body-sm w-full gap-2 rounded-[var(--radius-control)]"
             >
               <DownloadStatusIcon status={props.downloadStatus} />
               {props.downloadText}
-            </button>
+            </MediaControlButton>
           </div>
         </motion.aside>
       ) : null}
@@ -448,26 +393,16 @@ function DesktopFooter(props: DesktopLightboxViewProps) {
     >
       <DesktopFooterStatus {...props} />
       {props.injectedAction ? (
-        <button
-          type="button"
-          disabled={props.injectedAction.pending}
+        <Button
+          variant="primary"
+          size="md"
+          loading={props.injectedAction.pending}
           onClick={props.injectedAction.onClick}
-          className={cn(
-            "pointer-events-auto inline-flex items-center gap-2 rounded-full px-5 py-2.5",
-            "bg-[var(--accent)] text-black text-sm font-medium",
-            "shadow-[var(--shadow-amber)]",
-            "hover:bg-[var(--amber-200)] active:scale-[0.97] transition-all duration-150",
-            "disabled:cursor-not-allowed disabled:opacity-70",
-            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-          )}
+          leftIcon={<Check className="h-4 w-4" aria-hidden />}
+          className="pointer-events-auto rounded-full shadow-[var(--shadow-amber)]"
         >
-          {props.injectedAction.pending ? (
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-          ) : (
-            <Check className="h-4 w-4" aria-hidden />
-          )}
           {props.injectedAction.label}
-        </button>
+        </Button>
       ) : null}
       <DesktopThumbnailStrip {...props} />
     </motion.div>
@@ -484,12 +419,12 @@ function DesktopFooterStatus(props: DesktopLightboxViewProps) {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 6 }}
           className={cn(
-            "pointer-events-auto px-3 py-1 rounded-full text-[11px]",
-            "bg-black/60 border border-white/15 text-white/80 backdrop-blur-md",
+            "type-caption pointer-events-auto rounded-full px-3 py-1",
+            "bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur-md",
           )}
           role="status"
         >
-          正在载入下一张
+          下一张加载中
         </motion.div>
       ) : null}
       {props.edgeHint ? (
@@ -498,14 +433,12 @@ function DesktopFooterStatus(props: DesktopLightboxViewProps) {
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 6 }}
           className={cn(
-            "pointer-events-auto px-3 py-1 rounded-full text-[11px]",
-            "bg-black/60 border border-white/15 text-white/80 backdrop-blur-md",
+            "type-caption pointer-events-auto rounded-full px-3 py-1",
+            "bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur-md",
           )}
           role="status"
         >
-          {props.edgeHint === "first"
-            ? "已是第一张"
-            : "已是最后一张"}
+          {props.edgeHint === "first" ? "已是第一张" : "已是最后一张"}
         </motion.div>
       ) : null}
     </AnimatePresence>
@@ -519,7 +452,7 @@ function DesktopThumbnailStrip(props: DesktopLightboxViewProps) {
       className={cn(
         "pointer-events-auto flex items-center gap-1.5 px-2 py-1.5",
         "max-w-[min(720px,90vw)] overflow-x-auto",
-        "bg-black/50 border border-white/10 rounded-[var(--radius-panel)] backdrop-blur-md",
+        "rounded-[var(--radius-panel)] bg-[var(--media-control-bg)] text-[var(--media-control-fg)] backdrop-blur-md",
       )}
     >
       {props.thumbnails.map(({ entry, index }) => (
@@ -558,8 +491,8 @@ function ThumbnailButton({
         "border transition-all duration-150",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
         active
-          ? "border-[var(--accent)] ring-1 ring-[var(--accent)]/60"
-          : "border-white/10 hover:border-white/40 opacity-70 hover:opacity-100",
+          ? "border-accent-border ring-1 ring-[var(--accent)]"
+          : "border-[var(--border)] opacity-70 hover:border-[var(--border-strong)] hover:opacity-100",
       )}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -599,7 +532,7 @@ function DesktopLightboxDialog(props: DesktopLightboxViewProps) {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="absolute inset-0 bg-black/90 pointer-events-none"
+        className="pointer-events-none absolute inset-0 bg-[var(--surface-media)]"
         transition={{
           duration: 0.28,
           ease: [0.16, 1, 0.3, 1],
@@ -607,9 +540,7 @@ function DesktopLightboxDialog(props: DesktopLightboxViewProps) {
         aria-hidden
       />
       <span id={props.dialogTitleId} className="sr-only">
-        {props.imageAlt
-          ? `图片预览：${props.imageAlt}`
-          : "图片预览"}
+        {props.imageAlt ? `图片预览：${props.imageAlt}` : "图片预览"}
       </span>
       <a
         id={props.downloadAnchorElementId}
@@ -633,9 +564,7 @@ function DesktopLightboxDialog(props: DesktopLightboxViewProps) {
   );
 }
 
-export function DesktopLightboxView(
-  props: DesktopLightboxViewProps,
-) {
+export function DesktopLightboxView(props: DesktopLightboxViewProps) {
   const visible = props.open && props.imageSrc && props.displaySrc;
   return (
     <AnimatePresence>
@@ -660,26 +589,21 @@ function ToolIconButton({
   className?: string;
 }) {
   const button = (
-    <button
-      type="button"
+    <MediaControlButton
+      size="md"
       onClick={onClick}
       disabled={disabled}
       aria-label={title}
       title={title}
       className={cn(
-        "inline-flex h-9 w-9 items-center justify-center rounded-full max-sm:min-h-11 max-sm:min-w-11",
-        "border border-transparent text-white/68",
-        "hover:border-white/15 hover:bg-white/10 hover:text-white",
-        "disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-transparent disabled:hover:bg-transparent",
-        "active:scale-[0.94] transition-all duration-150 cursor-pointer",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
+        "shadow-[var(--shadow-2)]",
         active &&
-          "border-[var(--accent)]/45 bg-[var(--accent)]/16 text-[var(--amber-100)]",
+          "bg-accent-soft text-accent ring-1 ring-inset ring-accent-border",
         className,
       )}
     >
       <Icon className="h-4 w-4" aria-hidden />
-    </button>
+    </MediaControlButton>
   );
   return (
     <Tooltip content={title} side="bottom" enabled={!disabled}>
@@ -688,52 +612,13 @@ function ToolIconButton({
   );
 }
 
-function TopButton({
-  onClick,
-  title,
-  icon,
-  disabled = false,
-  children,
-}: {
-  onClick: () => void;
-  title: string;
-  icon: ReactNode;
-  disabled?: boolean;
-  children: ReactNode;
-}) {
+function Shortcut({ label, value }: { label: string; value: string }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      className={cn(
-        "inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-sm max-sm:min-h-11",
-        "border border-transparent text-white/82",
-        "hover:border-white/15 hover:bg-white/10 hover:text-white",
-        "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-transparent disabled:hover:bg-transparent",
-        "active:scale-[0.97] transition-all duration-150 cursor-pointer",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
-      )}
-    >
-      {icon}
-      <span>{children}</span>
-    </button>
-  );
-}
-
-function Shortcut({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2 rounded-[var(--radius-card)] border border-white/8 bg-white/[0.035] px-2 py-1.5">
+    <div className="flex items-center justify-between gap-2 rounded-[var(--radius-card)] border border-[var(--border)] px-2 py-1.5">
       <span>{label}</span>
-      <span className="font-mono text-white/82">{value}</span>
+      <Kbd className="border-[var(--border)] bg-transparent text-[var(--media-control-fg)]">
+        {value}
+      </Kbd>
     </div>
   );
 }
@@ -750,26 +635,21 @@ function SideChevron({
   const Icon = side === "left" ? ChevronLeft : ChevronRight;
   const label = side === "left" ? "上一张（K）" : "下一张（J）";
   return (
-    <button
-      type="button"
+    <MediaControlButton
+      size="lg"
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
       title={label}
       className={cn(
-        "absolute top-1/2 -translate-y-1/2 z-20",
+        "absolute top-1/2 -translate-y-1/2 z-[var(--z-tabbar)]",
         side === "left"
           ? "left-2 sm:left-3 md:left-6"
           : "right-2 sm:right-3 md:right-6",
-        "inline-flex items-center justify-center w-11 h-11 rounded-full",
-        "bg-white/6 border border-white/10 text-white/70 backdrop-blur-md",
-        "hover:bg-white/15 hover:text-white hover:border-white/25",
-        "active:scale-[0.94] transition-all duration-150",
-        "disabled:opacity-30 disabled:cursor-not-allowed",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70",
+        "shadow-[var(--shadow-2)]",
       )}
     >
-      <Icon className="w-5 h-5" />
-    </button>
+      <Icon className="h-5 w-5" />
+    </MediaControlButton>
   );
 }

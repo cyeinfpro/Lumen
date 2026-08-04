@@ -119,7 +119,7 @@ export function BackupsPanel() {
   return (
     <section className="space-y-5">
       {/* —— 顶部：立即备份 + 说明 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5">
+      <div className="surface-card p-4 md:p-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-start gap-3 min-w-0">
             <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--accent)]/15 border border-[var(--accent)]/25 flex items-center justify-center shrink-0">
@@ -178,7 +178,7 @@ export function BackupsPanel() {
       </AnimatePresence>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="surface-card overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={4} />
         ) : q.isError ? (
@@ -253,7 +253,7 @@ export function BackupsPanel() {
               </table>
             </div>
             {/* 移动端卡片列表 */}
-            <ul className="md:hidden divide-y divide-white/5">
+            <ul className="divide-y divide-[var(--border-subtle)] md:hidden">
               {items.map((b) => (
                 <li
                   key={b.timestamp}
@@ -340,7 +340,7 @@ function RestoreModal({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/60 backdrop-blur-sm mobile-dialog-shell sm:items-center"
+      className="mobile-dialog-shell fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] sm:items-center"
       onClick={onCancel}
     >
       <motion.div
@@ -348,7 +348,7 @@ function RestoreModal({
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: 12, scale: 0.97 }}
         transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-        className="mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-dialog)] bg-[var(--bg-1)]/98 p-5 backdrop-blur-xl sm:rounded-[var(--radius-dialog)] border border-[var(--border)] border-b-0 sm:border-b shadow-[var(--shadow-3)] sm:pb-5"
+        className="surface-dialog mobile-dialog-panel mobile-dialog-scroll w-full max-w-md overflow-y-auto rounded-t-[var(--radius-sheet)] p-5 sm:rounded-[var(--radius-dialog)] sm:pb-5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="restore-title"

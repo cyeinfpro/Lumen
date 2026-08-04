@@ -256,7 +256,7 @@ export function ProxiesPanel() {
   return (
     <section className="space-y-5">
       {/* 全局参数 */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-4 md:p-5 space-y-4">
+      <div className="surface-card space-y-4 p-4 md:p-5">
         <div className="flex items-start gap-3">
           <div className="w-9 h-9 rounded-[var(--radius-card)] bg-[var(--bg-2)] border border-[var(--border)] flex items-center justify-center shrink-0">
             <Network className="w-4 h-4 text-[var(--fg-2)]" />
@@ -327,7 +327,7 @@ export function ProxiesPanel() {
       />
 
       {/* 列表（只读 / 编辑） */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="surface-card overflow-hidden">
         <ProxyList
           loading={q.isLoading}
           error={q.isError ? q.error : null}
@@ -375,7 +375,7 @@ function ProxyDraftList({
     );
   }
   return (
-    <ul className="divide-y divide-white/5">
+    <ul className="divide-y divide-[var(--border-subtle)]">
       {drafts.map((draft, index) => (
         <ProxyEditRow
           key={draft._key}
@@ -412,7 +412,7 @@ function ProxyReadList({
     );
   }
   return (
-    <ul className="divide-y divide-white/5">
+    <ul className="divide-y divide-[var(--border-subtle)]">
       {proxies.map((proxy) => (
         <ProxyViewRow
           key={proxy.name}

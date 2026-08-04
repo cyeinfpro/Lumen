@@ -124,7 +124,7 @@ export function StoragePanel() {
   if (q.isLoading && !cfg) {
     return (
       <section className="space-y-5">
-        <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-6 backdrop-blur-sm">
+        <div className="surface-card p-6">
           <div className="flex items-center gap-3 type-body-sm text-[var(--fg-1)]">
             <Loader2 className="h-4 w-4 animate-spin" /> 加载存储配置中
           </div>
@@ -136,7 +136,7 @@ export function StoragePanel() {
   if (q.isError && !cfg) {
     return (
       <section className="space-y-5">
-        <div className="rounded-[var(--radius-dialog)] border border-danger-border bg-danger-soft p-6 type-body-sm text-danger">
+        <div className="rounded-[var(--radius-card)] border border-danger-border bg-danger-soft p-6 type-body-sm text-danger">
           <div className="flex items-start gap-3">
             <ShieldAlert className="h-5 w-5 shrink-0 text-danger" />
             <div className="min-w-0">
@@ -412,7 +412,7 @@ function StorageInner({ cfg, form, setForm }: StorageInnerProps) {
     <section className="space-y-5 pb-12">
       <StatusCard cfg={cfg} applying={isApplying} />
 
-      <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 p-4 backdrop-blur-sm md:p-5">
+      <div className="surface-card p-4 md:p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent)]/25 bg-[var(--accent)]/12">

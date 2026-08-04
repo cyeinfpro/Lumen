@@ -18,15 +18,12 @@ import type {
 } from "react";
 
 import type {
-  AspectRatio,
   AttachmentImage,
-  Quality,
-  RenderQualityChoice,
 } from "@/lib/types";
+import { Button, IconButton } from "@/components/ui/primitives";
 import { DURATION, EASE } from "@/lib/motion";
 import { MAX_PROMPT_CHARS } from "@/lib/promptLimits";
 import { cn } from "@/lib/utils";
-import { MobileIconButton } from "@/components/ui/primitives/mobile/MobileIconButton";
 
 import { MAX_COMPOSER_ATTACHMENTS } from "../shared/attachments";
 import { attachmentRoleLabel } from "../shared/attachmentRoles";
@@ -78,13 +75,6 @@ interface MobileComposerExpandedProps {
   inpaint: Inpaint;
   promptEnhancement: PromptEnhancement;
   executionSummary: ComposerExecutionSummary;
-  count: number;
-  aspect: AspectRatio;
-  quality: Quality;
-  renderQuality: RenderQualityChoice;
-  fast: boolean;
-  costLabel?: string | null;
-  costWarning?: boolean;
   onCollapse: () => void;
   onTextChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -103,11 +93,6 @@ interface MobileComposerExpandedProps {
     event: ReactMouseEvent<HTMLDivElement>,
   ) => void;
   onClearComposerError: () => void;
-  onCountChange: (value: number) => void;
-  onOpenAspect: () => void;
-  onQualityChange: (value: Quality) => void;
-  onRenderQualityChange: (value: RenderQualityChoice) => void;
-  onFastChange: (value: boolean) => void;
   onOpenAdvanced: () => void;
   onModeChange: (value: MobileComposerMode) => void;
   onSubmit: () => void;
@@ -134,13 +119,6 @@ export function MobileComposerExpanded({
   inpaint,
   promptEnhancement,
   executionSummary,
-  count,
-  aspect,
-  quality,
-  renderQuality,
-  fast,
-  costLabel,
-  costWarning,
   onCollapse,
   onTextChange,
   onKeyDown,
@@ -152,11 +130,6 @@ export function MobileComposerExpanded({
   onBeginAttachmentReorder,
   onAttachmentClickCapture,
   onClearComposerError,
-  onCountChange,
-  onOpenAspect,
-  onQualityChange,
-  onRenderQualityChange,
-  onFastChange,
   onOpenAdvanced,
   onModeChange,
   onSubmit,
@@ -168,15 +141,16 @@ export function MobileComposerExpanded({
       className="flex max-h-[inherit] min-h-0 flex-col overflow-y-auto overscroll-contain touch-pan-y"
       style={{ paddingBottom: expandedPaddingBottom }}
     >
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         onPointerDown={(event: ReactPointerEvent) => event.preventDefault()}
         onClick={onCollapse}
-        className="flex min-h-11 w-full items-center justify-center py-2 cursor-pointer active:opacity-60"
+        className="min-h-11 w-full rounded-none py-2 active:opacity-60"
         aria-label="收起输入框"
       >
         <div className="w-9 h-1 rounded-full bg-[var(--fg-3)]/40" />
-      </button>
+      </Button>
 
       <AnimatePresence>
         {renderWhen(isDragActive, (
@@ -189,8 +163,8 @@ export function MobileComposerExpanded({
             <div
               className={cn(
                 "mx-3 mt-2 flex items-center justify-center gap-2 rounded-[var(--radius-card)]",
-                "border border-dashed border-[var(--amber-400)]/60 bg-[var(--amber-400)]/10",
-                "px-3 py-3 text-xs text-[var(--amber-400)]",
+                "border border-dashed border-accent-border bg-accent-soft",
+                "px-3 py-3 type-caption text-accent",
               )}
             >
               <Paperclip className="h-3.5 w-3.5" aria-hidden />
@@ -230,9 +204,9 @@ export function MobileComposerExpanded({
                   draggingAttachmentId === attachment.id &&
                     "opacity-55 scale-[0.98]",
                   reorderTargetAttachmentId === attachment.id &&
-                    "ring-2 ring-[var(--amber-400)]/70",
+                    "shadow-[var(--ring)]",
                   showMaskBadge
-                    ? "border-[var(--amber-400)]/70"
+                    ? "border-accent-border"
                     : "border-[var(--border-subtle)]",
                 )}
               >
@@ -244,46 +218,47 @@ export function MobileComposerExpanded({
                   className="w-full h-full object-cover"
                   loading="lazy"
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="md"
                   data-composer-attachment-action="true"
                   onClick={() => onOpenAttachmentMenu(attachment.id)}
                   aria-label={`打开图 ${index + 1} 操作`}
                   aria-haspopup="dialog"
-                  className="absolute inset-0 z-10 rounded-[var(--radius-card)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+                  className="absolute inset-0 h-full w-full min-h-0 rounded-[var(--radius-card)] p-0 focus-visible:shadow-[var(--ring)]"
                 >
                   <span className="sr-only">打开附件操作</span>
-                </button>
+                </Button>
                 <span
                   aria-hidden
-                  className="pointer-events-none absolute left-1 top-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-1 text-[9px] font-semibold leading-none text-[var(--media-control-fg)] backdrop-blur-sm"
+                  className="pointer-events-none absolute left-1 top-1 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-1.5 py-1 type-overline leading-none text-[var(--media-control-fg)] backdrop-blur-sm"
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
                   @图{index + 1}
                 </span>
-                <span className="pointer-events-none absolute inset-x-1 bottom-1 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/88 px-1.5 py-1 text-center text-[9px] font-semibold leading-none text-[var(--fg-0)] backdrop-blur-sm">
+                <span className="pointer-events-none absolute inset-x-1 bottom-1 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--media-control-bg)] px-1.5 py-1 text-center type-overline leading-none text-[var(--media-control-fg)] backdrop-blur-sm">
                   {attachmentRoleLabel(role)}
                 </span>
               </div>
             );
           })}
           {renderWhen(isImageMode, (
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="sm"
               onClick={inpaint.openInpaint}
               disabled={inpaint.disabled}
               aria-label="局部修改"
               title={inpaint.tooltip}
               className={cn(
-                "shrink-0 inline-flex flex-col items-center justify-center gap-0.5",
-                "w-12 h-12 rounded-[var(--radius-card)] border text-[9px] font-medium",
+                "h-12 w-12 shrink-0 flex-col gap-0.5 rounded-[var(--radius-card)] border px-0 type-overline",
                 "transition-colors",
                 selectValue(
                   inpaint.disabled,
                   "border-[var(--border-subtle)] text-[var(--fg-3)] bg-[var(--bg-2)]/40 cursor-not-allowed",
                   selectValue(
                     inpaint.maskActive,
-                    "border-[var(--amber-400)]/70 text-[var(--amber-400)] bg-[var(--amber-400)]/10",
+                    "border-accent-border bg-accent-soft text-accent",
                     "border-dashed border-[var(--border-subtle)] text-[var(--fg-1)]",
                   ),
                 ),
@@ -294,12 +269,12 @@ export function MobileComposerExpanded({
                 aria-hidden
               />
               <span>{selectValue(inpaint.maskActive, "重涂", "局部")}</span>
-            </button>
+            </Button>
           ))}
         </div>
       ))}
       {renderWhen(Boolean(attachmentRoles.compactHint), (
-        <div className="px-3 pt-1 text-[10.5px] leading-4 text-[var(--fg-2)] line-clamp-1">
+        <div className="line-clamp-1 px-3 pt-1 type-caption text-[var(--fg-2)]">
           {attachmentRoles.compactHint}
         </div>
       ))}
@@ -321,12 +296,14 @@ export function MobileComposerExpanded({
               )}
             >
               <span className="flex-1 break-words">{composerError}</span>
-              <MobileIconButton
-                label="关闭错误提示"
-                onPress={onClearComposerError}
-                icon={<X className="h-4 w-4" />}
-                className="shrink-0 rounded-[var(--radius-control)] active:bg-[var(--bg-2)]"
-              />
+              <IconButton
+                size="sm"
+                aria-label="关闭错误提示"
+                onClick={onClearComposerError}
+                className="shrink-0 active:bg-[var(--bg-2)]"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden />
+              </IconButton>
             </div>
           </motion.div>
         ))}
@@ -360,7 +337,7 @@ export function MobileComposerExpanded({
           rows={2}
           className={cn(
             "w-full bg-transparent outline-none resize-none",
-            "text-[16px] leading-relaxed text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
+            "type-body text-[var(--fg-0)] placeholder:text-[var(--fg-2)]",
             "min-h-[52px] max-h-[168px]",
             selectValue(isEnhancing, "cursor-wait", undefined),
           )}
@@ -368,21 +345,7 @@ export function MobileComposerExpanded({
       </div>
 
       <MobileComposerExecutionControls
-        mode={mode}
         summary={executionSummary}
-        count={count}
-        onCountChange={onCountChange}
-        aspect={aspect}
-        onOpenAspect={onOpenAspect}
-        quality={quality}
-        onQualityChange={onQualityChange}
-        renderQuality={renderQuality}
-        onRenderQualityChange={onRenderQualityChange}
-        fast={fast}
-        onFastChange={onFastChange}
-        attachmentCount={attachments.length}
-        costLabel={costLabel}
-        costWarning={costWarning}
         onAdjust={onOpenAdvanced}
       />
 
@@ -430,7 +393,7 @@ export function MobileComposerExpanded({
               <span
                 data-inline
                 className={cn(
-                  "text-caption tabular-nums transition-colors duration-200",
+                  "type-caption tabular-nums transition-colors duration-200",
                   promptCounterColor(
                     promptTooLong,
                     shouldShowCount,

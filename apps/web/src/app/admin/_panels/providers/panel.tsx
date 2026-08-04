@@ -61,14 +61,14 @@ function ProviderPanelHeader({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-panel)] border border-[var(--accent)]/25 bg-[var(--accent)]/15">
-              <Server className="h-4 w-4 text-[var(--accent)]" />
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-control)] border border-accent-border bg-accent-soft">
+              <Server className="h-4 w-4 text-accent" />
             </div>
             <div>
-              <h3 className="text-sm font-medium text-[var(--fg-0)]">
+              <h3 className="type-card-title">
                 供应商池
               </h3>
-              <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+              <p className="mt-0.5 type-caption text-[var(--fg-2)]">
                 加权轮询 · 断路器 · 主动探活
               </p>
             </div>
@@ -230,7 +230,7 @@ function ProviderPanelSkeleton() {
       {[0, 1, 2].map((index) => (
         <div
           key={`skel-${index}`}
-          className="h-28 animate-pulse rounded-[var(--radius-dialog)] bg-[var(--bg-2)]"
+          className="h-28 animate-pulse rounded-[var(--radius-card)] bg-[var(--bg-2)]"
           style={{ animationDelay: `${index * 80}ms` }}
         />
       ))}
@@ -246,9 +246,9 @@ function EmptyProvidersState({
   addProvider: () => void;
 }) {
   return (
-    <div className="rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-1)]/60 py-16 text-center backdrop-blur-sm">
+    <div className="surface-card py-16 text-center">
       <div className="flex flex-col items-center gap-4">
-        <div className="flex h-14 w-14 items-center justify-center rounded-[var(--radius-dialog)] border border-[var(--border)] bg-[var(--bg-2)]">
+        <div className="flex h-14 w-14 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-2)]">
           <CloudOff className="h-6 w-6 text-[var(--fg-2)]" />
         </div>
         <div>

@@ -6,7 +6,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
   AlertCircle,
-  ArrowLeft,
   Check,
   Clock3,
   KeyRound,
@@ -16,7 +15,13 @@ import {
 } from "lucide-react";
 
 import { SettingsShell } from "@/components/ui/shell/SettingsShell";
-import { Button, Card, ConfirmDialog } from "@/components/ui/primitives";
+import {
+  Button,
+  Card,
+  ConfirmDialog,
+  Input,
+  Select,
+} from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import {
   ApiError,
@@ -162,40 +167,31 @@ export default function ApiKeySettingsPage() {
 
   if (shouldShowWalletAccount(Boolean(meQ.data), isByok)) {
     return (
-      <SettingsShell title="API Key" subtitle="Wallet" maxWidth="max-w-3xl">
-        <Card variant="subtle" padding="lg" className="space-y-3">
-          <p className="type-card-title">钱包账号</p>
-          <p className="type-body">
-            当前账号使用平台供应商和钱包扣费，不支持绑定个人 API Key。
-          </p>
-          <Link
-            href="/me/wallet"
-            className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
-          >
-            查看钱包
-          </Link>
-        </Card>
+      <SettingsShell title="API Key" subtitle="Wallet">
+        <div className="page-frame" data-width="settings">
+          <Card variant="subtle" padding="lg" className="space-y-3">
+            <p className="type-card-title">钱包账号</p>
+            <p className="type-body">
+              当前账号使用平台供应商和钱包扣费，不支持绑定个人 API Key。
+            </p>
+            <Link
+              href="/me/wallet"
+              className="type-control inline-flex min-h-10 items-center rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-[var(--fg-0)] hover:bg-[var(--bg-2)]"
+            >
+              查看钱包
+            </Link>
+          </Card>
+        </div>
       </SettingsShell>
     );
   }
 
   return (
-    <SettingsShell title="API Key" subtitle="BYOK" maxWidth="max-w-3xl">
-      <div className="space-y-5 pb-4 sm:space-y-7">
-        <header className="hidden items-start justify-between gap-4 md:flex">
-          <div>
-            <h1 className="type-page-title">API Key</h1>
-            <p className="type-body mt-1.5">管理用于上游请求的个人 Key。</p>
-          </div>
-          <Link
-            href="/me"
-            className="inline-flex min-h-9 items-center gap-1.5 px-2 type-body-sm text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)]"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            返回我的
-          </Link>
-        </header>
-
+    <SettingsShell title="API Key" subtitle="BYOK">
+      <div
+        className="page-frame space-y-5 pb-4 sm:space-y-7"
+        data-width="settings"
+      >
         <ApiCredentialHealthCard
           active={active}
           loading={credentialsQ.isLoading}
@@ -224,19 +220,19 @@ export default function ApiKeySettingsPage() {
           onSupplierChange={setSupplierId}
           onApiKeyChange={setApiKey}
         />
-      </div>
 
-      <ConfirmDialog
-        open={revokeOpen}
-        onOpenChange={setRevokeOpen}
-        title="撤销 API Key？"
-        description="撤销后任务将失败"
-        confirmText={copy.action.confirm}
-        cancelText={copy.action.cancel}
-        tone="danger"
-        confirming={revokeMut.isPending}
-        onConfirm={confirmRevoke}
-      />
+        <ConfirmDialog
+          open={revokeOpen}
+          onOpenChange={setRevokeOpen}
+          title="撤销 API Key？"
+          description="撤销后任务将失败"
+          confirmText={copy.action.confirm}
+          cancelText={copy.action.cancel}
+          tone="danger"
+          confirming={revokeMut.isPending}
+          onConfirm={confirmRevoke}
+        />
+      </div>
     </SettingsShell>
   );
 }
@@ -385,11 +381,8 @@ function ApiCredentialForm({
     : "sk-...";
 
   return (
-    <form
-      onSubmit={onSubmit}
-      className="space-y-4 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/60 p-4 sm:p-6"
-    >
-      <div className="flex items-center gap-2 type-overline">
+    <form onSubmit={onSubmit} className="surface-card space-y-4 p-4 sm:p-6">
+      <div className="flex items-center gap-2 type-caption text-[var(--fg-1)]">
         <RefreshCw className="w-3.5 h-3.5" />
         绑定或替换
       </div>
@@ -415,30 +408,38 @@ function ApiCredentialForm({
           </Button>
         </div>
       ) : null}
-      <select
-        value={selectedSupplierId}
-        onChange={(event) => onSupplierChange(event.target.value)}
-        disabled={supplierControlsDisabled}
-        className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base focus:outline-none focus:border-[var(--accent)]/50 md:h-10 md:text-sm"
-      >
-        {suppliers.length === 0 ? (
-          <option value="">无可用供应商</option>
-        ) : (
-          suppliers.map((supplier) => (
-            <option key={supplier.id} value={supplier.id}>
-              {supplier.name} · {supplier.validation_model}
-            </option>
-          ))
-        )}
-      </select>
-      <input
-        type="password"
-        value={apiKey}
-        onChange={(event) => onApiKeyChange(event.target.value)}
-        placeholder={keyPlaceholder}
-        autoComplete="off"
-        className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base focus:outline-none focus:border-[var(--accent)]/50 md:h-10 md:text-sm"
-      />
+      <div className="grid gap-3">
+        <div className="grid gap-1.5">
+          <label htmlFor="api-key-supplier" className="type-label">
+            供应商
+          </label>
+          <Select
+            id="api-key-supplier"
+            value={selectedSupplierId}
+            onChange={(event) => onSupplierChange(event.target.value)}
+            disabled={supplierControlsDisabled}
+          >
+            {suppliers.length === 0 ? (
+              <option value="">无可用供应商</option>
+            ) : (
+              suppliers.map((supplier) => (
+                <option key={supplier.id} value={supplier.id}>
+                  {supplier.name} · {supplier.validation_model}
+                </option>
+              ))
+            )}
+          </Select>
+        </div>
+        <Input
+          id="api-key-value"
+          label="API Key"
+          type="password"
+          value={apiKey}
+          onChange={(event) => onApiKeyChange(event.target.value)}
+          placeholder={keyPlaceholder}
+          autoComplete="off"
+        />
+      </div>
       {error ? (
         <div
           role="alert"

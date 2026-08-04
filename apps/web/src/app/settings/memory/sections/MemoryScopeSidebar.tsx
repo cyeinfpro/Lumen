@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Button, IconButton } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
@@ -67,13 +67,15 @@ export function MemoryScopeSidebar({
               onNewScopeEmojiChange(event.target.value.slice(0, 4))
             }
             placeholder="图标"
-            className="h-11 w-14 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+            aria-label="作用域图标"
+            className="control-shell type-body-sm h-10 w-14 px-2 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11"
           />
           <input
             value={newScopeName}
             onChange={(event) => onNewScopeNameChange(event.target.value)}
             placeholder="工作"
-            className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-0)] outline-none focus:border-[var(--accent)]/60 md:h-9"
+            aria-label="作用域名称"
+            className="control-shell type-body-sm h-10 min-w-0 flex-1 px-3 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11"
           />
           <IconButton
             variant="primary"
@@ -110,7 +112,8 @@ function ScopeButton({
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
-          className="h-11 min-w-0 flex-1 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 text-xs text-[var(--fg-0)] outline-none md:h-8"
+          aria-label="作用域名称"
+          className="control-shell type-body-sm h-10 min-w-0 flex-1 px-2 text-[var(--fg-0)] outline-none focus:border-accent-border focus:shadow-[var(--ring)] max-sm:min-h-11"
         />
         <Button
           variant="secondary"
@@ -139,21 +142,25 @@ function ScopeButton({
         <span>{scope.count}</span>
       </button>
       {!scope.is_default ? (
-        <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
-          <button
-            type="button"
+        <div className="flex shrink-0 items-center gap-1">
+          <IconButton
+            variant="ghost"
+            size="sm"
             onClick={() => setEditing(true)}
-            className="min-h-11 min-w-11 rounded-[var(--radius-control)] px-2 text-[11px] text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] lg:min-h-8 lg:min-w-8"
+            aria-label="编辑作用域"
+            tooltip="编辑"
           >
-            改
-          </button>
-          <button
-            type="button"
+            <Pencil className="h-3.5 w-3.5" />
+          </IconButton>
+          <IconButton
+            variant="danger"
+            size="sm"
             onClick={onDelete}
-            className="min-h-11 min-w-11 rounded-[var(--radius-control)] px-2 text-[11px] text-danger/70 hover:bg-danger-soft hover:text-danger lg:min-h-8 lg:min-w-8"
+            aria-label="删除作用域"
+            tooltip="删除"
           >
-            删
-          </button>
+            <Trash2 className="h-3.5 w-3.5" />
+          </IconButton>
         </div>
       ) : null}
     </div>
@@ -162,7 +169,7 @@ function ScopeButton({
 
 function scopeButtonClass(active: boolean): string {
   return [
-    "flex min-h-11 min-w-max flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 text-sm transition-colors lg:h-9 lg:min-h-0 lg:min-w-0",
+    "flex min-h-11 min-w-max flex-1 items-center justify-between gap-2 rounded-[var(--radius-control)] px-3 type-body-sm transition-colors lg:h-9 lg:min-h-0 lg:min-w-0",
     active
       ? "bg-accent-soft text-accent"
       : "text-[var(--fg-1)] hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)]",

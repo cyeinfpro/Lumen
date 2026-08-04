@@ -11,7 +11,7 @@ export default function NotFound() {
       <div className="w-full max-w-md">
         <p
           aria-hidden="true"
-          className="mb-2 text-center font-mono text-[40px] leading-none tracking-normal text-[var(--accent)]/70 select-none md:text-[48px]"
+          className="type-display mb-2 select-none text-center text-[var(--fg-2)]"
         >
           404
         </p>
@@ -22,7 +22,7 @@ export default function NotFound() {
           action={
             <Link
               href="/"
-              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
+              className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-[var(--accent-on)] shadow-[var(--shadow-1)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
             >
               <Home className="h-3.5 w-3.5" aria-hidden />
               返回首页

@@ -3,10 +3,19 @@
 // 海报单尺寸渲染卡：图 + aspect + size + status + 返修 + 下载。
 // 返修按钮：背景重生（scope=background）/ 局部 inpaint（scope=inpaint）。
 
-import { Download, Loader2, Pencil, RefreshCw, Scissors } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  RefreshCw,
+  Scissors,
+} from "lucide-react";
 import Image from "next/image";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/primitives/Button";
+import { IconButton } from "@/components/ui/primitives/IconButton";
 import type { BackendImageMeta, PosterRender, WorkflowRun } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
 import { imageSrc } from "../utils";
@@ -67,7 +76,7 @@ function PosterPreview({
       }}
       disabled={!image}
       className={cn(
-        "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
+        "relative block w-full overflow-hidden rounded-[var(--radius-card)] bg-[var(--bg-2)] transition-shadow duration-[var(--dur-base)] focus-visible:outline-none focus-visible:ring-2 focus-visible:shadow-[var(--ring)]",
         aspectClass(render.aspect_ratio),
       )}
     >
@@ -85,23 +94,23 @@ function PosterPreview({
           {isGenerating ? (
             <>
               <Loader2 className="h-5 w-5 animate-spin" />
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
+              <span className="type-caption">
                 {render.status === "revising" ? "返修中" : "生成中"}
               </span>
             </>
           ) : isFailed ? (
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--danger)]">
+            <span className="type-caption text-[var(--danger)]">
               生成失败
             </span>
           ) : (
-            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+            <span className="type-caption text-[var(--fg-3)]">
               等待中
             </span>
           )}
         </div>
       )}
 
-      <span className="absolute left-3 top-3 font-mono text-[10px] uppercase tracking-[0.22em] text-white/90 mix-blend-difference">
+      <span className="type-caption absolute left-3 top-3 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 text-[var(--media-control-fg)]">
         {render.aspect_ratio}
       </span>
     </button>
@@ -132,8 +141,34 @@ export function PosterRenderCard({
     render.status === "generating" || render.status === "revising";
   const isFailed = render.status === "failed";
   const isReady = render.status === "ready" || render.status === "completed";
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const downloadHref = image?.url || image?.display_url || "";
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      if (menuButtonRef.current?.contains(event.target as Node)) return;
+      setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+
+  const runOverflowAction = (action: () => void) => {
+    setMenuOpen(false);
+    action();
+  };
 
   return (
     <li className="group relative">
@@ -146,17 +181,17 @@ export function PosterRenderCard({
       />
 
       <div className="mt-3 flex items-baseline justify-between gap-3 border-b border-[var(--border)] pb-2">
-        <p className="text-[14px] font-medium tracking-tight text-[var(--fg-0)]">
+        <p className="type-body-sm font-medium tracking-tight text-[var(--fg-0)]">
           {render.aspect_ratio} 成品
         </p>
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           {render.size}
         </span>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2">
+      <div className="relative mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
         <Button
-          variant="outline"
+          variant="primary"
           size="sm"
           disabled={!isReady || reviseLoading}
           onClick={onReviseBackground}
@@ -173,28 +208,48 @@ export function PosterRenderCard({
         >
           局部修复
         </Button>
-      </div>
-
-      <div className="mt-2 grid grid-cols-2 gap-2">
-        <Button
-          variant="ghost"
+        <IconButton
+          ref={menuButtonRef}
+          variant="outline"
           size="sm"
-          disabled={!downloadHref}
-          onClick={() => downloadPoster(downloadHref, render)}
-          leftIcon={<Download className="h-3.5 w-3.5" />}
+          aria-label="更多操作"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
         >
-          下载
-        </Button>
-        {onRegenerate ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!isReady || reviseLoading}
-            onClick={onRegenerate}
-            leftIcon={<Pencil className="h-3.5 w-3.5" />}
+          <MoreHorizontal className="h-4 w-4" />
+        </IconButton>
+        {menuOpen ? (
+          <div
+            ref={menuRef}
+            role="menu"
+            className="surface-panel absolute bottom-12 right-0 z-[var(--z-tray)] grid w-44 gap-1 p-1.5"
           >
-            自定义返修
-          </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!downloadHref}
+              onClick={() =>
+                runOverflowAction(() => downloadPoster(downloadHref, render))
+              }
+              leftIcon={<Download className="h-3.5 w-3.5" />}
+              className="justify-start"
+            >
+              下载
+            </Button>
+            {onRegenerate ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!isReady || reviseLoading}
+                onClick={() => runOverflowAction(onRegenerate)}
+                leftIcon={<Pencil className="h-3.5 w-3.5" />}
+                className="justify-start"
+              >
+                自定义返修
+              </Button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </li>

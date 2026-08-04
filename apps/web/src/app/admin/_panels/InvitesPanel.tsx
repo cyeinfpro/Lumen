@@ -26,7 +26,14 @@ import {
 } from "@/lib/queries";
 import { ApiError } from "@/lib/apiClient";
 import type { InviteLinkOut } from "@/lib/types";
-import { Button, IconButton } from "@/components/ui/primitives";
+import {
+  Badge,
+  Button,
+  IconButton,
+  Input,
+  Select,
+  StatusBadge as PrimitiveStatusBadge,
+} from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import {
   EmptyBlock,
@@ -129,7 +136,7 @@ export function InvitesPanel() {
       {/* —— 生成表单 —— */}
       <form
         onSubmit={onSubmit}
-        className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] p-5 space-y-4"
+        className="surface-card space-y-4 p-5"
       >
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2">
           <h2 className="type-card-title">生成邀请链接</h2>
@@ -139,18 +146,17 @@ export function InvitesPanel() {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto_auto] gap-3 items-stretch">
           <FormField id="invite-new-email" label="邀请邮箱（可选）">
-            <input
+            <Input
               id="invite-new-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 placeholder:text-[var(--fg-2)] transition-colors"
             />
           </FormField>
           <FormField id="invite-new-days" label="有效期（天）">
-            <input
+            <Input
               id="invite-new-days"
               type="number"
               min={1}
@@ -158,19 +164,18 @@ export function InvitesPanel() {
               inputMode="numeric"
               value={days}
               onChange={(e) => setDays(Number(e.target.value))}
-              className="w-full sm:w-24 min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm font-mono tabular-nums focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 transition-colors"
+              className="font-mono tabular-nums sm:w-24"
             />
           </FormField>
           <FormField id="invite-new-role" label="角色">
-            <select
+            <Select
               id="invite-new-role"
               value={role}
               onChange={(e) => setRole(e.target.value as "member" | "admin")}
-              className="w-full min-h-[44px] sm:h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] text-sm focus:outline-none focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 transition-colors"
             >
               <option value="member">成员</option>
               <option value="admin">管理员</option>
-            </select>
+            </Select>
           </FormField>
           <div className="self-end">
             <Button
@@ -261,7 +266,7 @@ export function InvitesPanel() {
       </form>
 
       {/* —— 列表 —— */}
-      <div className="bg-[var(--bg-1)]/60 backdrop-blur-sm border border-[var(--border)] rounded-[var(--radius-dialog)] overflow-hidden">
+      <div className="surface-card overflow-hidden">
         {q.isLoading ? (
           <ListSkeleton rows={5} />
         ) : q.isError ? (
@@ -330,7 +335,7 @@ export function InvitesPanel() {
                         状态
                       </div>
                       <div className="mt-0.5">
-                        <StatusBadge status={st} usedBy={row.used_by_email} />
+                        <InviteStatusBadge status={st} usedBy={row.used_by_email} />
                       </div>
                     </div>
                     <div>
@@ -454,7 +459,7 @@ export function InvitesPanel() {
                         <RoleBadge role={row.role} />
                       </td>
                       <td className="py-3 px-4">
-                        <StatusBadge status={st} usedBy={row.used_by_email} />
+                        <InviteStatusBadge status={st} usedBy={row.used_by_email} />
                       </td>
                       <td className="py-3 px-4 text-[var(--fg-1)] font-mono text-xs tabular-nums">
                         {row.expires_at ? formatISODate(row.expires_at) : "永久"}
@@ -576,59 +581,35 @@ function Field({
 function RoleBadge({ role }: { role: "admin" | "member" }) {
   if (role === "admin") {
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/30">
+      <Badge tone="accent">
         <UserCog className="w-3 h-3" />
         管理员
-      </span>
+      </Badge>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-1)] border border-[var(--border)]">
+    <Badge
+      tone="info"
+      className="border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-1)]"
+    >
       <UsersIcon className="w-3 h-3" />
       成员
-    </span>
+    </Badge>
   );
 }
 
-function StatusBadge({
+function InviteStatusBadge({
   status,
   usedBy,
 }: {
   status: InviteStatus;
   usedBy: string | null;
 }) {
-  if (status === "valid") {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-success-soft text-success border border-success-border">
-        <span className="w-1.5 h-1.5 rounded-full bg-success shadow-[var(--shadow-2)]" />
-        valid
-      </span>
-    );
-  }
-  if (status === "used") {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-info-soft text-info border border-info-border"
-        title={usedBy ? `被 ${usedBy} 使用` : undefined}
-      >
-        <span className="w-1.5 h-1.5 rounded-full bg-info" />
-        used
-      </span>
-    );
-  }
-  if (status === "revoked") {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-danger-soft text-danger border border-danger-border">
-        <span className="w-1.5 h-1.5 rounded-full bg-danger" />
-        revoked
-      </span>
-    );
-  }
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-[var(--radius-control)] text-xs bg-[var(--bg-2)] text-[var(--fg-2)] border border-[var(--border)]">
-      <span className="w-1.5 h-1.5 rounded-full bg-[var(--fg-3)]" />
-      expired
-    </span>
+    <PrimitiveStatusBadge
+      status={status}
+      title={status === "used" && usedBy ? `被 ${usedBy} 使用` : undefined}
+    />
   );
 }
 

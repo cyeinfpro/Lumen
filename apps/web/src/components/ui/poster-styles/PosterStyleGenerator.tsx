@@ -62,11 +62,11 @@ export function PosterStyleGenerator({
 
   const submit = async () => {
     if (!title.trim()) {
-      toast.warning("请填写风格名称");
+      toast.warning("风格名称未填");
       return;
     }
     if (!prompt.trim()) {
-      toast.warning("请填写生成 prompt");
+      toast.warning("生成提示词未填");
       return;
     }
     const body: PosterStyleGenerateIn = {
@@ -85,7 +85,7 @@ export function PosterStyleGenerator({
       await onSubmit(body);
     } catch (err) {
       toast.error("提交失败", {
-        description: err instanceof Error ? err.message : "请稍后重试",
+        description: err instanceof Error ? err.message : "稍后重试",
       });
     }
   };
@@ -111,17 +111,17 @@ export function PosterStyleGenerator({
     <section className="grid gap-4 md:gap-5">
       <header className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-[var(--border)] pb-3 max-[360px]:sr-only">
         <div className="min-w-0">
-          <p className="type-page-kicker">生成器</p>
-          <h2 className="type-page-title mt-1 md:text-[28px]">新建风格</h2>
+          <p className="type-caption">生成器</p>
+          <h2 className="type-page-title mt-1">新建风格</h2>
         </div>
         <p className="type-page-subtitle max-w-2xl md:max-w-xl md:text-right">
-          {`用 prompt 生成 N 张风格样图入库，"自动识别"会在出图后跑一次 vision 反推填充色板和标签。`}
+          用提示词生成风格样图入库，自动识别会在出图后补充色板和标签。
         </p>
       </header>
 
       <div className="grid gap-4 xl:grid-cols-2">
         {/* 1. 基础信息 */}
-        <Section eyebrow="N°01" title="基础信息">
+        <Section title="基础信息">
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
             <Field label="风格名称">
               <input
@@ -129,7 +129,7 @@ export function PosterStyleGenerator({
                 onChange={(event) => setTitle(event.target.value)}
                 maxLength={120}
                 placeholder="例如：低饱和极简海报"
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+                className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
               />
             </Field>
             <Field label="类目">
@@ -138,7 +138,7 @@ export function PosterStyleGenerator({
                 onChange={(event) =>
                   setCategory(event.target.value as PosterStyleCategory)
                 }
-                className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+                className="control-shell type-body-sm h-10 w-full appearance-none px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
               >
                 {POSTER_STYLE_CATEGORY_OPTIONS.map((value) => (
                   <option
@@ -155,9 +155,9 @@ export function PosterStyleGenerator({
         </Section>
 
         {/* 2. Prompt */}
-        <Section eyebrow="N°02" title="Prompt" className="xl:row-span-2">
+        <Section title="提示词" className="xl:row-span-2">
           <Field
-            label="生成 prompt"
+            label="生成提示词"
             hint={`${prompt.length}/${PROMPT_MAX}`}
           >
             <UnderlineTextarea
@@ -168,28 +168,28 @@ export function PosterStyleGenerator({
               placeholder="一张极简风格的海报，平面构图，主体居中，留白克制"
             />
           </Field>
-          <Field label="情绪 / mood" hint="一个短词即可">
+          <Field label="情绪" hint="一个短词即可">
             <input
               value={mood}
               onChange={(event) => setMood(event.target.value)}
               maxLength={120}
               placeholder="冷静、温暖、奇幻"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
           </Field>
-          <Field label="色板（逗号分隔 hex）" hint="可留空，自动识别会补">
+          <Field label="色板（逗号分隔 HEX）" hint="可留空，自动识别会补">
             <input
               value={palette}
               onChange={(event) => setPalette(event.target.value)}
-              placeholder="#F2A93A, #2A2A2A"
-              className="h-11 w-full border-b border-[var(--border)] bg-transparent px-1 text-[15px] text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:h-10 md:text-sm"
+              placeholder="#8A8378，#2A2A2A"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
             />
             <PaletteSwatchRow hexes={parseHexList(palette)} />
           </Field>
         </Section>
 
         {/* 3. 风格标签 */}
-        <Section eyebrow="N°03" title="风格标签">
+        <Section title="风格标签">
           <Field hint="最多选 8 个；自动识别也会追加">
             <ChipRow>
               {STYLE_PRESETS.map((preset) => (
@@ -206,7 +206,7 @@ export function PosterStyleGenerator({
         </Section>
 
         {/* 4. 输出 & 推荐尺寸 */}
-        <Section eyebrow="N°04" title="输出" className="xl:col-span-2">
+        <Section title="输出" className="xl:col-span-2">
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(220px,0.55fr)] xl:grid-cols-[minmax(0,0.7fr)_minmax(220px,0.42fr)_minmax(220px,0.42fr)_auto] xl:items-end">
             <Field label="生成尺寸">
               <ChipRow>
@@ -244,9 +244,7 @@ export function PosterStyleGenerator({
                     active={count === option}
                     onClick={() => setCount(option)}
                   >
-                    <span className="tabular-nums">
-                      {String(option).padStart(2, "0")}
-                    </span>
+                    <span className="tabular-nums">{option}</span>
                   </Chip>
                 ))}
               </ChipRow>
@@ -264,18 +262,18 @@ export function PosterStyleGenerator({
                   className={cn(
                     "inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors",
                     autoTag
-                      ? "border-[var(--border-amber)] bg-[var(--accent)]"
+                      ? "border-[var(--accent-border)] bg-[var(--accent)]"
                       : "border-[var(--border-strong)] bg-transparent",
                   )}
                 >
                   <span
                     className={cn(
-                      "ml-0.5 h-3 w-3 rounded-full bg-white transition-transform",
+                      "ml-0.5 h-3 w-3 rounded-full bg-[var(--fg-0)] transition-transform",
                       autoTag ? "translate-x-3" : "",
                     )}
                   />
                 </span>
-                <span className="font-mono text-[10.5px] uppercase tracking-[0.15em] text-[var(--fg-1)]">
+                <span className="type-body-sm text-[var(--fg-1)]">
                   {autoTag ? "自动识别 · 开" : "自动识别 · 关"}
                 </span>
               </button>
@@ -283,7 +281,7 @@ export function PosterStyleGenerator({
           </div>
 
           <div className="mt-2 hidden flex-col gap-2 md:flex md:flex-row md:items-center md:justify-between">
-            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+            <p className="type-caption">
               {`将生成 ${count} 张样图`}
             </p>
             <Button
@@ -299,8 +297,8 @@ export function PosterStyleGenerator({
       </div>
 
       {/* 提交条（mobile） */}
-      <div className="-mx-3 sticky bottom-0 z-20 mt-1 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 shadow-[var(--shadow-1)] backdrop-blur-xl md:hidden">
-        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--fg-2)]">
+      <div className="-mx-3 sticky bottom-0 z-[var(--z-tabbar)] mt-1 flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg-0)]/95 px-3 py-3 shadow-[var(--shadow-1)] backdrop-blur-xl md:hidden">
+        <p className="type-caption">
           {`将生成 ${count} 张样图`}
         </p>
         <Button
@@ -318,12 +316,10 @@ export function PosterStyleGenerator({
 }
 
 function Section({
-  eyebrow,
   title,
   className,
   children,
 }: {
-  eyebrow: string;
   title: string;
   className?: string;
   children: React.ReactNode;
@@ -335,14 +331,7 @@ function Section({
         className,
       )}
     >
-      <div className="flex items-baseline gap-2.5">
-        <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--fg-2)]">
-          {eyebrow}
-        </span>
-        <h3 className="text-[16px] font-semibold leading-none tracking-tight text-[var(--fg-0)] md:text-[17px]">
-          {title}
-        </h3>
-      </div>
+      <h3 className="type-card-title">{title}</h3>
       {children}
     </div>
   );
@@ -360,15 +349,11 @@ function Field({
   return (
     <div className="grid gap-1.5">
       {label ? (
-        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-2)]">
-          {label}
-        </span>
+        <span className="type-label">{label}</span>
       ) : null}
       {children}
       {hint ? (
-        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--fg-3)]">
-          {hint}
-        </p>
+        <p className="type-caption text-[var(--fg-2)]">{hint}</p>
       ) : null}
     </div>
   );
@@ -392,7 +377,7 @@ function Chip({
       type="button"
       onClick={onClick}
       className={cn(
-        "group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 font-mono text-[10.5px] uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60 md:min-h-8",
+        "type-control group relative inline-flex min-h-11 cursor-pointer items-center px-1 py-1 transition-colors focus-visible:outline-none focus-visible:shadow-[var(--ring)] md:min-h-8",
         active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)] hover:text-[var(--fg-1)]",
       )}
     >
@@ -402,7 +387,7 @@ function Chip({
         className={cn(
           "absolute inset-x-1 -bottom-px h-px transition-colors duration-[var(--dur-base)]",
           active
-            ? "bg-[var(--amber-400)]"
+            ? "bg-[var(--accent)]"
             : "bg-transparent group-hover:bg-[var(--border-strong)]",
         )}
       />
@@ -430,7 +415,7 @@ function UnderlineTextarea({
       placeholder={placeholder}
       rows={rows}
       maxLength={maxLength}
-      className="w-full resize-none border-b border-[var(--border)] bg-transparent px-1 py-1.5 text-[15px] leading-[1.45] text-[var(--fg-0)] outline-none transition-colors placeholder:text-[var(--fg-3)] focus:border-[var(--amber-400)] md:text-sm"
+      className="control-shell type-body-sm min-h-11 w-full resize-none px-3 py-2.5 leading-relaxed text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:text-base"
     />
   );
 }

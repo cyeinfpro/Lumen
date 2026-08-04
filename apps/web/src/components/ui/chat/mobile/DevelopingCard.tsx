@@ -5,6 +5,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { RotateCcw, X } from "lucide-react";
+import { Button } from "@/components/ui/primitives";
 import type { Generation } from "@/lib/types";
 import { aspectRatioToCss } from "@/lib/sizing";
 import { cn } from "@/lib/utils";
@@ -14,10 +15,7 @@ function ReducedMotionBar() {
   return (
     <div
       aria-hidden
-      className="absolute inset-y-0 left-0 w-[3px] bg-[var(--amber-400)]"
-      style={{
-        boxShadow: "0 0 12px var(--amber-glow-strong)",
-      }}
+      className="absolute inset-y-0 left-0 w-[3px] bg-accent shadow-[var(--shadow-amber)]"
     />
   );
 }
@@ -30,7 +28,7 @@ interface DevelopingCardProps {
 
 const STAGE_COPY: Record<Generation["stage"], string> = {
   queued: "排队中",
-  understanding: "正在打光…",
+  understanding: "打光中…",
   rendering: "细化中…",
   finalizing: "收尾中",
 };
@@ -53,21 +51,21 @@ function sizeLabel(ratio: string, sizeRequested: string): string {
   if (sizeRequested && sizeRequested !== "auto") return sizeRequested;
   switch (ratio) {
     case "16:9":
-      return "3840x2160";
+      return "3840 × 2160";
     case "9:16":
-      return "2160x3840";
+      return "2160 × 3840";
     case "10:7":
-      return "3424x2400";
+      return "3424 × 2400";
     case "7:10":
-      return "2400x3424";
+      return "2400 × 3424";
     case "1:1":
-      return "2048x2048";
+      return "2048 × 2048";
     case "4:5":
-      return "2048x2560";
+      return "2048 × 2560";
     case "3:4":
-      return "1920x2560";
+      return "1920 × 2560";
     case "21:9":
-      return "3360x1440";
+      return "3360 × 1440";
     default:
       return "auto";
   }
@@ -124,36 +122,32 @@ export function DevelopingCard({
         <div
           className={cn(
             "relative w-full overflow-hidden max-h-[280px]",
-            "rounded-[var(--radius-md)] border border-[rgba(229,72,77,0.35)]",
-            "bg-[rgba(229,72,77,0.08)] flex flex-col items-center justify-center gap-2.5 p-5",
+            "rounded-[var(--radius-card)] border border-danger-border",
+            "bg-danger-soft flex flex-col items-center justify-center gap-2.5 p-5",
           )}
           style={{ aspectRatio: ratioCss }}
         >
-          <p className="text-body-sm text-[var(--danger)] font-medium">
+          <p className="type-label text-danger">
             生成失败
           </p>
           {(gen.diagnostics?.safe_error_summary || gen.error_message) && (
-            <p className="text-caption text-[var(--fg-1)] text-center max-w-[90%] break-words [overflow-wrap:anywhere]">
+            <p className="type-caption text-[var(--fg-1)] text-center max-w-[90%] break-words [overflow-wrap:anywhere]">
               {gen.diagnostics?.safe_error_summary ?? gen.error_message}
             </p>
           )}
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="secondary"
             onClick={() => onRetry(gen.id)}
-            className={cn(
-              "inline-flex min-h-11 items-center gap-1.5 px-4 rounded-full",
-              "bg-[var(--bg-2)] border border-[var(--border)] text-body-sm text-[var(--fg-0)]",
-              "active:opacity-[var(--op-press)] transition-opacity motion-reduce:transition-none",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
-            )}
+            className="min-h-11 px-4"
             aria-label="重试生成"
+            leftIcon={<RotateCcw className="h-3.5 w-3.5" aria-hidden />}
           >
-            <RotateCcw className="w-3.5 h-3.5" aria-hidden />
             重试
-          </button>
+          </Button>
         </div>
         <p
-          className="px-1 text-caption tabular-nums text-[var(--fg-2)]"
+          className="px-1 type-caption tabular-nums text-[var(--fg-2)]"
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {gen.aspect_ratio} · {size}
@@ -167,7 +161,7 @@ export function DevelopingCard({
       <div
         className={cn(
           "relative w-full overflow-hidden max-h-[280px]",
-          "rounded-[var(--radius-md)] border border-[var(--border-subtle)]",
+          "rounded-[var(--radius-card)] border border-[var(--border-subtle)]",
           "bg-[var(--bg-1)]",
         )}
         style={{ aspectRatio: ratioCss }}
@@ -181,31 +175,27 @@ export function DevelopingCard({
         )}
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
           <span
-            className="text-body-sm font-medium text-[var(--fg-0)]/90 pointer-events-none"
+            className="type-label text-[var(--fg-0)] pointer-events-none"
             style={{ fontFamily: "var(--font-zh-display)" }}
           >
             {stageText}
           </span>
           {onCancel && (
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={() => onCancel(gen.id)}
-              className={cn(
-                "inline-flex min-h-11 items-center gap-1.5 px-3.5 rounded-full",
-                "bg-[var(--bg-1)]/70 backdrop-blur-sm border border-[var(--border)]",
-                "text-[12px] text-[var(--fg-1)] hover:text-[var(--fg-0)]",
-                "active:opacity-[var(--op-press)] transition-[color,opacity] motion-reduce:transition-none",
-              )}
+              className="min-h-11 bg-[var(--bg-1)]/70 px-3.5 text-[var(--fg-1)] backdrop-blur-sm"
               aria-label="取消生成"
+              leftIcon={<X className="h-3.5 w-3.5" aria-hidden />}
             >
-              <X className="w-3.5 h-3.5" aria-hidden />
               取消
-            </button>
+            </Button>
           )}
         </div>
       </div>
       <p
-        className="px-1 text-[11px] tabular-nums text-[var(--fg-2)] mt-0.5"
+        className="mt-0.5 px-1 type-caption tabular-nums text-[var(--fg-2)]"
         style={{ fontFamily: "var(--font-mono)" }}
       >
         {gen.aspect_ratio} · {size} ·{" "}

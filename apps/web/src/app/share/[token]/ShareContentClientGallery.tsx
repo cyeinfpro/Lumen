@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 
+import { MediaControlButton } from "@/components/ui/primitives/MediaControlButton";
 import type { PublicShareImageOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -60,7 +61,7 @@ export function ShareImageTile({
   return (
     <div
       className={cn(
-        "share-tile-shell group relative overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-black text-left shadow-[var(--shadow-3)] transition-[border-color,box-shadow] duration-[var(--dur-normal)] hover:border-white/20 hover:shadow-[var(--shadow-amber)]",
+        "share-tile-shell group relative overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-1)] text-left shadow-[var(--shadow-1)] transition-[border-color,box-shadow] duration-[var(--dur-normal)] hover:border-[var(--border)]",
         single
           ? "max-w-full"
           : "mb-1.5 w-full break-inside-avoid min-[390px]:mb-2 md:mb-3",
@@ -69,7 +70,7 @@ export function ShareImageTile({
       <button
         type="button"
         onClick={() => onOpen(index)}
-        className="relative block w-full overflow-hidden bg-[var(--bg-0)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/70"
+        className="relative block w-full overflow-hidden bg-[var(--bg-0)] text-left focus-visible:outline-none focus-visible:shadow-[var(--ring)]"
         style={frameStyle}
         aria-label={`查看第 ${index + 1} 张大图`}
       >
@@ -87,17 +88,17 @@ export function ShareImageTile({
             single ? "object-contain" : "object-cover",
           )}
         />
-        <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/50 via-black/0 to-black/0 opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
-        <span className="pointer-events-none absolute bottom-2 left-2 rounded-full border border-white/10 bg-black/45 px-2 py-1 text-[10px] font-mono tabular-nums text-white/75 opacity-0 backdrop-blur transition-opacity duration-200 group-hover:opacity-100">
-          {index + 1} · {image.width} x {image.height}
+        <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-[var(--media-control-bg)] via-transparent to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+        <span className="type-caption pointer-events-none absolute bottom-2 left-2 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-2 py-1 font-mono tabular-nums text-[var(--media-control-fg)] opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+          {index + 1} · {image.width} × {image.height}
         </span>
       </button>
 
-      <button
-        type="button"
+      <MediaControlButton
+        size="md"
         onClick={() => onDownload(image)}
         disabled={downloading}
-        className="absolute right-1.5 top-1.5 z-10 inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white/90 backdrop-blur transition-[background-color,border-color,opacity] hover:bg-black/70 disabled:opacity-60 min-[390px]:right-2 min-[390px]:top-2 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100"
+        className="absolute right-1.5 top-1.5 z-[var(--z-header)] min-[390px]:right-2 min-[390px]:top-2 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100"
         aria-label="下载原图"
       >
         {downloading ? (
@@ -105,9 +106,9 @@ export function ShareImageTile({
         ) : (
           <Download className="h-4 w-4" aria-hidden />
         )}
-      </button>
+      </MediaControlButton>
 
-      <span className="pointer-events-none absolute left-1.5 top-1.5 inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 opacity-100 backdrop-blur min-[390px]:left-2 min-[390px]:top-2 sm:opacity-0 sm:group-hover:opacity-100">
+      <span className="pointer-events-none absolute left-1.5 top-1.5 inline-flex h-8 w-8 items-center justify-center rounded-full bg-[var(--media-control-bg)] text-[var(--media-control-fg)] opacity-100 min-[390px]:left-2 min-[390px]:top-2 sm:opacity-0 sm:group-hover:opacity-100">
         <Maximize2 className="h-3.5 w-3.5" aria-hidden />
       </span>
     </div>
@@ -301,7 +302,7 @@ export function ShareLightbox({
       ref={dialogRootRef}
       tabIndex={-1}
       style={lightboxStyle}
-      className="fixed inset-0 z-[var(--z-lightbox,80)] flex bg-black text-white share-dialog-in outline-none"
+      className="fixed inset-0 z-[var(--z-lightbox)] flex bg-black text-[var(--media-control-fg)] share-dialog-in outline-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby={dialogTitleId}
@@ -309,11 +310,10 @@ export function ShareLightbox({
       <span id={dialogTitleId} className="sr-only">
         {`图片预览：${shareImageAlt(image)}`}
       </span>
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(242,169,58,0.10),transparent_28rem),linear-gradient(180deg,rgba(255,255,255,0.05),transparent_35%)]" />
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 border-b border-white/10 bg-black/45 px-3 pb-2 pt-[calc(env(safe-area-inset-top,0px)+0.5rem)] backdrop-blur-xl mobile-perf-surface sm:pb-3 sm:pt-[calc(env(safe-area-inset-top,0px)+0.75rem)]">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-[var(--z-tabbar)] border-b border-[var(--border-subtle)] bg-[var(--media-control-bg)] px-3 pb-2 pt-[calc(env(safe-area-inset-top,0px)+0.5rem)] text-[var(--media-control-fg)] backdrop-blur-xl mobile-perf-surface sm:pb-3 sm:pt-[calc(env(safe-area-inset-top,0px)+0.75rem)]">
         <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0 rounded-full border border-white/10 bg-white/10 px-3 py-2 text-xs font-mono tabular-nums text-white/80">
+          <div className="type-caption min-w-0 rounded-full bg-[var(--media-control-bg)] px-3 py-2 font-mono tabular-nums text-[var(--media-control-fg)]">
             {index + 1}/{images.length}
           </div>
           <div className="pointer-events-auto flex items-center gap-2">
@@ -321,61 +321,60 @@ export function ShareLightbox({
               href={image.image_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="hidden min-h-11 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 sm:inline-flex"
+              className="type-control hidden min-h-11 items-center justify-center gap-1.5 rounded-full bg-[var(--media-control-bg)] px-3 text-[var(--media-control-fg)] transition-[filter] hover:brightness-110 sm:inline-flex"
             >
               <ExternalLink className="h-4 w-4" />
               原图
             </a>
-            <button
-              type="button"
+            <MediaControlButton
+              size="lg"
               onClick={() => onDownload(image)}
               disabled={downloading}
-              className="hidden min-h-11 items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 text-xs text-white backdrop-blur transition-colors hover:bg-white/15 disabled:opacity-55 sm:inline-flex"
+              className="hidden sm:inline-flex"
+              aria-label={downloading ? "准备原图中" : "下载原图"}
             >
               {downloading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Download className="h-4 w-4" />
               )}
-              {downloading ? "准备中" : "下载"}
-            </button>
-            <button
+            </MediaControlButton>
+            <MediaControlButton
               ref={closeButtonRef}
-              type="button"
+              size="lg"
               aria-label="关闭"
               onClick={onClose}
-              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/15"
             >
               <X className="h-5 w-5" />
-            </button>
+            </MediaControlButton>
           </div>
         </div>
       </div>
 
       {multiple && (
         <>
-          <button
-            type="button"
+          <MediaControlButton
+            size="lg"
             aria-label="上一张"
             onClick={onPrev}
-            className="absolute left-4 top-1/2 z-20 hidden h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/15 sm:inline-flex"
+            className="absolute left-4 top-1/2 z-[var(--z-tabbar)] hidden h-12 w-12 -translate-y-1/2 sm:inline-flex"
           >
             <ChevronLeft className="h-6 w-6" />
-          </button>
-          <button
-            type="button"
+          </MediaControlButton>
+          <MediaControlButton
+            size="lg"
             aria-label="下一张"
             onClick={onNext}
-            className="absolute right-4 top-1/2 z-20 hidden h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/15 sm:inline-flex"
+            className="absolute right-4 top-1/2 z-[var(--z-tabbar)] hidden h-12 w-12 -translate-y-1/2 sm:inline-flex"
           >
             <ChevronRight className="h-6 w-6" />
-          </button>
+          </MediaControlButton>
         </>
       )}
 
       <div
         className={cn(
-          "relative z-10 flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pt-[var(--share-lightbox-top-space)] sm:px-16 sm:pt-24",
+          "relative z-[var(--z-header)] flex min-h-0 w-full flex-1 touch-pan-y select-none items-center justify-center px-3 pt-[var(--share-lightbox-top-space)] sm:px-16 sm:pt-24",
           multiple
             ? "pb-[var(--share-lightbox-footer-space)] sm:pb-36"
             : "pb-[var(--share-lightbox-footer-space)] sm:pb-28",
@@ -417,13 +416,13 @@ export function ShareLightbox({
         />
       )}
 
-      <div className="absolute inset-x-0 bottom-0 z-20 border-t border-white/10 bg-black/[0.72] px-3 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-2 backdrop-blur-xl mobile-perf-surface sm:pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] sm:pt-3">
+      <div className="absolute inset-x-0 bottom-0 z-[var(--z-tabbar)] border-t border-[var(--border-subtle)] bg-[var(--media-control-bg)] px-3 pb-[var(--mobile-dialog-footer-pad-bottom)] pt-2 text-[var(--media-control-fg)] backdrop-blur-xl mobile-perf-surface sm:pb-[calc(env(safe-area-inset-bottom,0px)+0.75rem)] sm:pt-3">
         <div className="mx-auto flex w-full max-w-4xl items-center gap-2">
           <button
             type="button"
             onClick={() => onDownload(image)}
             disabled={downloading}
-            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-[var(--radius-card)] bg-[var(--accent)] px-3 text-sm font-medium text-black transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:px-4"
+            className="type-control inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-[var(--radius-control)] bg-[var(--accent)] px-3 text-[var(--accent-on)] transition-[filter,opacity] hover:brightness-110 active:opacity-[var(--op-press)] disabled:opacity-70 sm:px-4"
           >
             {downloading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -436,15 +435,15 @@ export function ShareLightbox({
             href={image.image_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-card)] border border-white/15 bg-white/10 px-3 text-sm text-white transition-colors hover:bg-white/15"
+            className="type-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-[var(--media-control-bg)] px-3 text-[var(--media-control-fg)] transition-[filter] hover:brightness-110"
           >
             <ExternalLink className="h-4 w-4" />
             原图
           </a>
         </div>
-        <div className="mx-auto mt-2 hidden w-full max-w-4xl flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-white/[0.62] sm:flex">
+        <div className="type-caption mx-auto mt-2 hidden w-full max-w-4xl flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[var(--media-control-fg)] opacity-70 sm:flex">
           <span className="font-mono tabular-nums">
-            {image.width} x {image.height} · {image.mime}
+            {image.width} × {image.height} · {image.mime}
           </span>
           {isWeChat ? (
             <span>长按图片可保存；原图按钮打开最高分辨率。</span>
@@ -469,7 +468,7 @@ function ShareFilmstrip({
   onSelect: (index: number) => void;
 }) {
   return (
-    <div className="absolute inset-x-0 bottom-[calc(var(--mobile-dialog-footer-pad-bottom)+3.75rem)] z-20 sm:bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)]">
+    <div className="absolute inset-x-0 bottom-[calc(var(--mobile-dialog-footer-pad-bottom)+3.75rem)] z-[var(--z-tabbar)] sm:bottom-[calc(env(safe-area-inset-bottom,0px)+5.8rem)]">
       <div className="mx-auto flex max-w-4xl scroll-px-3 gap-2 overflow-x-auto px-3 py-2 no-scrollbar">
         {images.map((image, index) => (
           <button
@@ -477,10 +476,10 @@ function ShareFilmstrip({
             type="button"
             onClick={() => onSelect(index)}
             className={cn(
-              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-white/5 transition-[border-color,opacity] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
+              "relative h-14 w-14 flex-none overflow-hidden rounded-[var(--radius-control)] border bg-[var(--media-control-bg)] transition-[border-color,opacity] focus-visible:outline-none focus-visible:shadow-[var(--ring)]",
               index === activeIndex
                 ? "border-[var(--accent)] opacity-100"
-                : "border-white/15 opacity-[0.62] hover:opacity-90",
+                : "border-[var(--border-subtle)] opacity-[0.62] hover:opacity-90",
             )}
             aria-label={`查看第 ${index + 1} 张`}
           >
@@ -627,7 +626,7 @@ function ShareImageLoadingOverlay({
     >
       {surface === "lightbox" ? (
         <Loader2
-          className="h-5 w-5 animate-spin text-white/55"
+          className="h-5 w-5 animate-spin text-[var(--media-control-fg)] opacity-60"
           aria-hidden
         />
       ) : null}
@@ -638,7 +637,7 @@ function ShareImageLoadingOverlay({
 function ShareImageFailure({ visible }: { visible: boolean }) {
   if (!visible) return null;
   return (
-    <span className="pointer-events-none absolute inset-0 flex min-h-32 flex-col items-center justify-center gap-2 bg-[var(--bg-0)] px-4 text-center text-xs text-[var(--fg-1)]">
+    <span className="type-caption pointer-events-none absolute inset-0 flex min-h-32 flex-col items-center justify-center gap-2 bg-[var(--bg-0)] px-4 text-center text-[var(--fg-1)]">
       <ImageOff className="h-6 w-6 text-[var(--fg-2)]" aria-hidden />
       <span>图片暂时不可用</span>
     </span>

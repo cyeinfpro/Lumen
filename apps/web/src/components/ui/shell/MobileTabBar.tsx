@@ -83,13 +83,12 @@ export function MobileTabBar() {
       aria-hidden={navigationHidden || undefined}
       inert={navigationHidden ? true : undefined}
       className={[
-        "mobile-perf-surface fixed inset-x-0 bottom-0 border-t border-[var(--border-subtle)] bg-[var(--bg-0)]/96 safe-x backdrop-blur-xl",
+        "mobile-perf-surface fixed inset-x-0 bottom-0 z-[var(--z-tabbar)] border-t border-[var(--border-subtle)] bg-[var(--bg-0)]/96 safe-x backdrop-blur-xl",
         "transition-[transform,opacity] duration-[var(--dur-normal)] ease-[var(--ease-shutter)]",
         lightboxOpen ? "opacity-0 pointer-events-none" : "opacity-100",
         isKeyboardOpen ? "translate-y-full pointer-events-none" : "translate-y-0",
       ].join(" ")}
       style={{
-        zIndex: "var(--z-tabbar, 20)" as unknown as number,
         paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}
     >
@@ -112,7 +111,7 @@ export function MobileTabBar() {
                 {active && (
                   <span
                     aria-hidden
-                    className="absolute inset-x-1 inset-y-1 rounded-[var(--radius-control)] bg-[var(--surface-selected)]"
+                    className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-[var(--accent)]"
                   />
                 )}
                 <span
@@ -125,7 +124,7 @@ export function MobileTabBar() {
                 </span>
                 <span
                   className={[
-                    "relative mt-px text-[11px] font-medium leading-none",
+                    "relative mt-px type-caption font-medium leading-none",
                     active ? "text-[var(--fg-0)]" : "text-[var(--fg-2)]",
                   ].join(" ")}
                 >

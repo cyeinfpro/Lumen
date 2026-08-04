@@ -37,7 +37,7 @@ interface AccountCenterMenuProps {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-4 pb-2 pt-6 type-overline text-[var(--fg-2)]">
+    <div className="px-4 pb-2 pt-6 type-caption font-medium text-[var(--fg-2)]">
       {children}
     </div>
   );
@@ -106,8 +106,10 @@ export function AccountCenterMenu({
         <AccountRow
           icon={
             <Zap
-              className="h-4 w-4"
-              style={{ color: fast ? "var(--amber-400)" : undefined }}
+              className={
+                "h-4 w-4 " +
+                (fast ? "text-accent" : "text-[var(--fg-2)]")
+              }
             />
           }
           label="Fast 模式"
@@ -135,8 +137,8 @@ export function AccountCenterMenu({
       </div>
 
       <div className="flex items-center justify-center gap-1.5 pb-4 pt-6">
-        <span className="text-[11px] text-[var(--fg-2)]">Lumen</span>
-        <span className="font-mono text-[11px] text-[var(--fg-2)]/60">
+        <span className="type-caption text-[var(--fg-2)]">Lumen</span>
+        <span className="type-mono-meta text-[var(--fg-2)]/60">
           {APP_VERSION}
         </span>
       </div>
@@ -149,7 +151,7 @@ export function AccountCenterMenu({
         actions={[
           {
             key: "logout",
-            label: logout.isPending ? "正在退出…" : "退出登录",
+            label: logout.isPending ? "退出中" : "退出登录",
             destructive: true,
             disabled: logout.isPending,
             onSelect: () => void logout.confirm(),

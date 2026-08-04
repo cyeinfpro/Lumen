@@ -11,7 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/primitives";
+import { Button, Select } from "@/components/ui/primitives";
 import { copy } from "@/lib/copy";
 import type { ProxyTestOut } from "@/lib/types";
 
@@ -233,17 +233,17 @@ export function FieldSelect({
   return (
     <label className="flex flex-col gap-1.5">
       <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
-      <select
+      <Select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 text-sm outline-none transition-colors focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25"
+        className="h-9"
       >
         {options.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }

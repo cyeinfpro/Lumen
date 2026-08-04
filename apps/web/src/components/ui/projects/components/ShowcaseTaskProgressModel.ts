@@ -312,7 +312,7 @@ function resolvePhase(input: PhaseInput): string {
     return "本轮成品图已完成";
   }
   if (input.taskCount === 0) return input.preflightDisplay;
-  if (input.runningCount > 0) return "图像任务正在生成";
+  if (input.runningCount > 0) return "图像任务生成中";
   if (input.failedCount > 0) return "部分图像任务失败";
   if (input.canceledCount > 0) return "部分图像任务已取消";
   return "等待任务状态同步";

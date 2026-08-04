@@ -38,7 +38,6 @@ export function SettingsShell({
   title,
   subtitle,
   children,
-  maxWidth = "max-w-6xl",
 }: SettingsShellProps) {
   const pathname = usePathname();
   const settingsNavRef = useRef<HTMLDivElement | null>(null);
@@ -73,7 +72,7 @@ export function SettingsShell({
                 {title}
               </div>
               {subtitle ? (
-                <div className="mt-0.5 truncate font-mono text-[10px] tracking-wider text-[var(--fg-2)]">
+                <div className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
                   {subtitle}
                 </div>
               ) : null}
@@ -101,9 +100,9 @@ export function SettingsShell({
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={
-                  "inline-flex min-h-11 shrink-0 snap-start items-center justify-center rounded-[var(--radius-control)] px-3 type-caption font-medium transition-colors " +
+                  "relative inline-flex min-h-11 shrink-0 snap-start items-center justify-center rounded-[var(--radius-control)] px-3 type-caption font-medium transition-colors " +
                   (active
-                    ? "bg-accent-soft text-accent"
+                    ? "text-[var(--fg-0)] after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:rounded-full after:bg-[var(--accent)] after:content-['']"
                     : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
                 }
               >
@@ -116,9 +115,12 @@ export function SettingsShell({
 
       <main
         data-app-scroll
-        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain px-4 pb-[calc(32px+env(safe-area-inset-bottom,0px))] pt-4 touch-pan-y [overflow-anchor:none] md:px-8 md:pb-12 md:pt-8"
+        className="max-md:mb-[var(--mobile-tabbar-height)] min-h-0 flex-1 scroll-pb-[calc(var(--mobile-tabbar-height)+var(--mobile-tabbar-h))] overflow-x-hidden overflow-y-auto overscroll-contain touch-pan-y [overflow-anchor:none]"
       >
-        <div className="mx-auto grid w-full max-w-[1440px] min-w-0 gap-10 md:grid-cols-[216px_minmax(0,1fr)] lg:grid-cols-[232px_minmax(0,1fr)]">
+        <div
+          className="page-frame grid gap-[var(--space-10)] md:grid-cols-[216px_minmax(0,1fr)] lg:grid-cols-[232px_minmax(0,1fr)]"
+          data-width="settings"
+        >
           <aside className="hidden min-w-0 md:block">
             <div className="sticky top-4 border-r border-[var(--border-subtle)] pr-6">
               <div className="mb-5 px-2">
@@ -136,9 +138,9 @@ export function SettingsShell({
                       href={item.href}
                       aria-current={active ? "page" : undefined}
                       className={
-                        "flex min-h-11 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 type-body-sm font-medium transition-colors " +
+                        "relative flex min-h-11 items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 type-body-sm font-medium transition-colors " +
                         (active
-                          ? "bg-[var(--surface-selected)] text-[var(--fg-0)]"
+                          ? "text-[var(--fg-0)] before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-[var(--accent)] before:content-['']"
                           : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]")
                       }
                     >
@@ -158,9 +160,7 @@ export function SettingsShell({
               </nav>
             </div>
           </aside>
-          <div
-            className={`w-full min-w-0 ${maxWidth} safe-x mobile-compact pt-1 md:pt-0 [overflow-wrap:anywhere]`}
-          >
+          <div className="mobile-compact w-full min-w-0 pt-1 [overflow-wrap:anywhere] md:pt-0">
             {children}
           </div>
         </div>

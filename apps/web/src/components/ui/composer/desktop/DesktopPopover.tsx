@@ -41,7 +41,7 @@ export interface DesktopPopoverProps {
 /**
  * 使用方式：
  *   <div className="relative">
- *     <button ...>Trigger</button>
+ *     <Button ...>Trigger</Button>
  *     <DesktopPopover open={open} onClose={...}>...</DesktopPopover>
  *   </div>
  *
@@ -179,7 +179,7 @@ export function DesktopPopover({
           exit={{ opacity: 0, scale: 0.96, y: 4 }}
           transition={{ duration: DURATION.quick, ease: EASE.develop }}
           className={cn(
-            "fixed z-[var(--z-tray,50)]",
+            "fixed z-[var(--z-tray)]",
             originClass(),
             "min-w-[220px] overflow-auto",
             "rounded-[var(--radius-panel)] bg-[var(--bg-1)] border border-[var(--border-subtle)]",

@@ -65,7 +65,7 @@ function VideoQueueRow({
       />
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--fg-3)]">
+          <span className="type-caption text-[var(--fg-3)]">
             SEG {String(shot.index).padStart(2, "0")}
           </span>
           <StatusPill status={shot.video_status || shot.status} />

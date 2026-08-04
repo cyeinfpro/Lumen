@@ -108,13 +108,7 @@ export function useDesktopLightboxViewport({
   const clampPanForCurrentView = useCallback(
     (offset: PanOffset, zoom: number, viewMode: ViewMode) => {
       const { viewport, imageSize } = getPanBoundsInput();
-      return clampPanOffset(
-        offset,
-        zoom,
-        viewMode,
-        viewport,
-        imageSize,
-      );
+      return clampPanOffset(offset, zoom, viewMode, viewport, imageSize);
     },
     [getPanBoundsInput],
   );
@@ -123,27 +117,17 @@ export function useDesktopLightboxViewport({
     (nextValue: number | ((current: number) => number)) => {
       updateImageState((state) => {
         const requested =
-          typeof nextValue === "function"
-            ? nextValue(state.zoom)
-            : nextValue;
+          typeof nextValue === "function" ? nextValue(state.zoom) : nextValue;
         const zoom = clampZoom(requested);
         const viewMode =
-          zoom > 1 && state.viewMode === "fit"
-            ? "actual"
-            : state.viewMode;
+          zoom > 1 && state.viewMode === "fit" ? "actual" : state.viewMode;
         const panOffset =
-          zoom <= 1 && viewMode === "fit"
-            ? RESET_PAN_OFFSET
-            : state.panOffset;
+          zoom <= 1 && viewMode === "fit" ? RESET_PAN_OFFSET : state.panOffset;
         return {
           ...state,
           zoom,
           viewMode,
-          panOffset: clampPanForCurrentView(
-            panOffset,
-            zoom,
-            viewMode,
-          ),
+          panOffset: clampPanForCurrentView(panOffset, zoom, viewMode),
         };
       });
     },
@@ -176,32 +160,18 @@ export function useDesktopLightboxViewport({
       const rect = imageRef.current?.getBoundingClientRect();
       updateImageState((state) => {
         const zoom = clampZoom(nextZoom);
-        const centerX =
-          clientX -
-          (rect?.left ?? 0) -
-          (rect?.width ?? 0) / 2;
-        const centerY =
-          clientY -
-          (rect?.top ?? 0) -
-          (rect?.height ?? 0) / 2;
+        const centerX = clientX - (rect?.left ?? 0) - (rect?.width ?? 0) / 2;
+        const centerY = clientY - (rect?.top ?? 0) - (rect?.height ?? 0) / 2;
         const ratio = zoom / state.zoom;
         const panOffset = {
-          x:
-            centerX * (1 - ratio) +
-            state.panOffset.x * ratio,
-          y:
-            centerY * (1 - ratio) +
-            state.panOffset.y * ratio,
+          x: centerX * (1 - ratio) + state.panOffset.x * ratio,
+          y: centerY * (1 - ratio) + state.panOffset.y * ratio,
         };
         return {
           ...state,
           viewMode: "fit",
           zoom,
-          panOffset: clampPanForCurrentView(
-            panOffset,
-            zoom,
-            "fit",
-          ),
+          panOffset: clampPanForCurrentView(panOffset, zoom, "fit"),
         };
       });
     },
@@ -213,9 +183,7 @@ export function useDesktopLightboxViewport({
       if (!event.ctrlKey && !event.metaKey && activeZoom <= 1) return;
       event.preventDefault();
       const direction = event.deltaY > 0 ? -1 : 1;
-      const nextZoom = clampZoom(
-        activeZoom + direction * ZOOM_STEP,
-      );
+      const nextZoom = clampZoom(activeZoom + direction * ZOOM_STEP);
       if (nextZoom === activeZoom) return;
 
       const wrapRect = imageWrapRef.current?.getBoundingClientRect();
@@ -223,21 +191,15 @@ export function useDesktopLightboxViewport({
         setZoom((zoom) => zoom + direction * ZOOM_STEP);
         return;
       }
-      const centerX =
-        event.clientX - (wrapRect.left + wrapRect.width / 2);
-      const centerY =
-        event.clientY - (wrapRect.top + wrapRect.height / 2);
+      const centerX = event.clientX - (wrapRect.left + wrapRect.width / 2);
+      const centerY = event.clientY - (wrapRect.top + wrapRect.height / 2);
       const ratio = nextZoom / activeZoom;
       const nextPan =
         nextZoom <= 1
           ? RESET_PAN_OFFSET
           : {
-              x:
-                centerX * (1 - ratio) +
-                activePanOffset.x * ratio,
-              y:
-                centerY * (1 - ratio) +
-                activePanOffset.y * ratio,
+              x: centerX * (1 - ratio) + activePanOffset.x * ratio,
+              y: centerY * (1 - ratio) + activePanOffset.y * ratio,
             };
       const viewMode =
         nextZoom <= 1
@@ -249,11 +211,7 @@ export function useDesktopLightboxViewport({
         ...state,
         zoom: nextZoom,
         viewMode,
-        panOffset: clampPanForCurrentView(
-          nextPan,
-          nextZoom,
-          viewMode,
-        ),
+        panOffset: clampPanForCurrentView(nextPan, nextZoom, viewMode),
       }));
     },
     [
@@ -270,8 +228,7 @@ export function useDesktopLightboxViewport({
   const handleImagePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLImageElement>) => {
       if (event.pointerType === "touch" || event.button !== 0) return;
-      const canPan =
-        activeZoom > 1 || activeViewMode !== "fit";
+      const canPan = activeZoom > 1 || activeViewMode !== "fit";
       imagePointerRef.current = {
         pointerId: event.pointerId,
         startX: event.clientX,
@@ -310,8 +267,7 @@ export function useDesktopLightboxViewport({
       const dy = event.clientY - gesture.startY;
       if (
         !gesture.moved &&
-        (Math.abs(dx) > CLICK_TAP_SLOP ||
-          Math.abs(dy) > CLICK_TAP_SLOP)
+        (Math.abs(dx) > CLICK_TAP_SLOP || Math.abs(dy) > CLICK_TAP_SLOP)
       ) {
         gesture.moved = true;
       }
@@ -327,12 +283,7 @@ export function useDesktopLightboxViewport({
       );
       updateImageState((state) => ({ ...state, panOffset }));
     },
-    [
-      activeViewMode,
-      activeZoom,
-      clampPanForCurrentView,
-      updateImageState,
-    ],
+    [activeViewMode, activeZoom, clampPanForCurrentView, updateImageState],
   );
 
   const handleImagePointerEnd = useCallback(
@@ -343,21 +294,14 @@ export function useDesktopLightboxViewport({
       setMousePan(null);
       releaseImagePointer(event.currentTarget, event.pointerId);
       if (gesture.moved) return;
-      if (
-        performance.now() - gesture.startTime >
-        CLICK_MAX_DURATION_MS
-      ) {
+      if (performance.now() - gesture.startTime > CLICK_MAX_DURATION_MS) {
         return;
       }
       if (activeZoom > 1 || activeViewMode !== "fit") {
         resetView();
         return;
       }
-      zoomToPointer(
-        event.clientX,
-        event.clientY,
-        CLICK_ZOOM,
-      );
+      zoomToPointer(event.clientX, event.clientY, CLICK_ZOOM);
     },
     [activeViewMode, activeZoom, resetView, zoomToPointer],
   );
@@ -413,6 +357,16 @@ export function useDesktopLightboxViewport({
     updateImageState,
   ]);
 
+  const retryImage = useCallback(() => {
+    if (activeImageStateKeyRef.current !== imageStateKey) return;
+    setMainImageLoaded(false);
+    updateImageState((state) => ({
+      ...state,
+      displayFailed: false,
+      loadError: false,
+    }));
+  }, [activeImageStateKeyRef, imageStateKey, updateImageState]);
+
   useEffect(() => {
     touchActionsRef.current = {
       clampPanForCurrentView,
@@ -420,12 +374,7 @@ export function useDesktopLightboxViewport({
       handleClose,
       updateImageState,
     };
-  }, [
-    clampPanForCurrentView,
-    gotoDelta,
-    handleClose,
-    updateImageState,
-  ]);
+  }, [clampPanForCurrentView, gotoDelta, handleClose, updateImageState]);
 
   useEffect(() => {
     if (open) return;
@@ -466,8 +415,7 @@ export function useDesktopLightboxViewport({
       }));
     };
     window.addEventListener("resize", handleResize);
-    return () =>
-      window.removeEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, [clampPanForCurrentView, open, updateImageState]);
 
   useDesktopLightboxTouch({
@@ -488,6 +436,7 @@ export function useDesktopLightboxViewport({
     handleWheel,
     handleImageLoad,
     handleImageError,
+    retryImage,
     handleImagePointerDown,
     handleImagePointerMove,
     handleImagePointerEnd,

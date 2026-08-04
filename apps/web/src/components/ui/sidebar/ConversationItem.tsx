@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { ConversationSummary } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/primitives";
 
 export function titleOf(c: ConversationSummary): string {
   const t = c.title?.trim();
@@ -106,10 +107,10 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-label={titleOf(conv)}
             title={titleOf(conv)}
             className={cn(
-              "flex min-h-11 w-full items-center gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2.5 pr-12 text-left text-sm leading-5 transition-colors outline-none md:min-h-10",
-              "focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+              "flex min-h-11 w-full items-center gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2.5 pr-12 text-left type-body-sm transition-colors outline-none md:min-h-10",
+              "focus-visible:shadow-[var(--ring)]",
               active
-                ? "bg-[var(--accent)]/12 text-[var(--fg-0)] shadow-[inset_2px_0_0_var(--accent)]"
+                ? "bg-accent-soft text-[var(--fg-0)]"
                 : "text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
             )}
           >
@@ -139,7 +140,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             aria-expanded={view !== "closed"}
             className={cn(
               "absolute right-0.5 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] md:right-1 md:h-8 md:w-8",
-              "focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+              "focus-visible:opacity-100 focus-visible:shadow-[var(--ring)]",
               // 移动端常显（<md 触控设备没有 hover），桌面端 hover 才显
               view !== "closed"
                 ? "opacity-100"
@@ -154,12 +155,12 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             )}
           </button>
 
-          {/* 动作菜单 —— z-50 高于移动端抽屉(z-40) */}
+          {/* 动作菜单位于统一 tray 层级。 */}
           {view === "menu" && (
             <div
               role="menu"
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 z-50 w-40 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card py-1"
+              className="surface-panel absolute right-0 top-full z-[var(--z-tray)] mt-1 w-40 py-1"
             >
               <MenuButton
                 icon={<Pencil className="w-3.5 h-3.5" />}
@@ -214,7 +215,7 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 }
                 setView("closed");
               }}
-              className="absolute right-0 top-full mt-1 z-50 w-64 p-2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
+              className="surface-panel absolute right-0 top-full z-[var(--z-tray)] mt-1 w-64 p-2"
             >
               <input
                 ref={renameInputRef}
@@ -229,28 +230,32 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 }}
                 onClick={(e) => e.stopPropagation()}
                 maxLength={120}
-                className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/70 px-2 text-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60"
+                className="control-shell h-10 w-full px-2 type-body-sm text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] focus:border-accent-border"
                 placeholder="会话标题"
               />
               <div className="flex gap-1.5 mt-1.5 justify-end">
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="h-8 rounded-[var(--radius-control)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+                  className="h-8 px-2"
                 >
                   取消
-                </button>
-                <button
+                </Button>
+                <Button
                   type="submit"
+                  variant="primary"
+                  size="sm"
                   onClick={(e) => e.stopPropagation()}
-                  className="inline-flex items-center gap-1 px-2.5 h-7 text-xs rounded-[var(--radius-control)] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors"
+                  className="h-8 px-2.5"
+                  leftIcon={<Check className="w-3 h-3" />}
                 >
-                  <Check className="w-3 h-3" />
                   保存
-                </button>
+                </Button>
               </div>
             </form>
           )}
@@ -260,9 +265,9 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
             <div
               role="dialog"
               onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 z-50 w-64 p-2.5 rounded-[var(--radius-panel)] border border-danger-border bg-[var(--bg-1)]/95 backdrop-blur-xl shadow-lumen-card"
+              className="surface-panel absolute right-0 top-full z-[var(--z-tray)] mt-1 w-64 border-danger-border p-2.5"
             >
-              <p className="text-xs text-[var(--fg-1)] leading-snug px-0.5 mb-2">
+              <p className="mb-2 px-0.5 type-caption leading-snug text-[var(--fg-1)]">
                 确认删除会话
                 <span className="text-[var(--fg-0)] font-medium mx-1">
                   「{titleOf(conv)}」
@@ -270,29 +275,33 @@ export const ConversationItem = forwardRef<HTMLLIElement, ConversationItemProps>
                 ？此操作不可恢复。
               </p>
               <div className="flex gap-1.5 justify-end">
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     setView("closed");
                   }}
-                  className="inline-flex h-8 items-center gap-1 rounded-[var(--radius-control)] px-2 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]"
+                  className="h-8 px-2"
+                  leftIcon={<X className="w-3 h-3" />}
                 >
-                  <X className="w-3 h-3" />
                   取消
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
+                  variant="danger"
+                  size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete();
                     setView("closed");
                   }}
-                  className="inline-flex items-center gap-1 px-2.5 h-7 type-caption rounded-[var(--radius-control)] bg-danger-soft text-danger hover:brightness-110 transition-colors"
+                  className="h-8 px-2.5"
+                  leftIcon={<Trash2 className="w-3 h-3" />}
                 >
-                  <Trash2 className="w-3 h-3" />
                   删除
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -319,7 +328,7 @@ function MenuButton({
       role="menuitem"
       onClick={onClick}
       className={cn(
-        "w-full flex items-center gap-2 px-2.5 py-2.5 md:py-1.5 text-xs text-left transition-colors",
+        "flex w-full items-center gap-2 px-2.5 py-2.5 text-left type-caption transition-colors md:py-1.5",
         "active:scale-[0.98]",
         danger
           ? "text-danger hover:bg-danger-soft hover:opacity-90"
