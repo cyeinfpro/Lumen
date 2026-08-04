@@ -30,7 +30,7 @@ from lumen_core.models import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # migration 用同步驱动；用 URL parser 避免误改 username/password/path 里的字符串。
 _db_url = make_url(settings.database_url)
