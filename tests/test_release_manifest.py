@@ -136,6 +136,25 @@ def test_docker_release_publishes_verified_release_manifest() -> None:
     assert "populate alembic heads" not in workflow.lower()
 
 
+def test_docker_release_prepares_storage_state_bind_before_starting_apps() -> None:
+    workflow = _load_workflow()
+    quality_gate = workflow["jobs"]["quality-gate"]
+    image_start = _step(quality_gate, "Image start smoke")
+    run = image_start["run"]
+    assert isinstance(run, str)
+
+    prepare_state_dir = (
+        "sudo install -d -m 0750 -o 10001 -g 10001 /var/lib/lumen-storage"
+    )
+    start_apps = (
+        "docker compose --env-file .env.ci -f docker-compose.yml "
+        "-f deploy/docker/docker-compose.local.yml up -d --wait api worker web"
+    )
+    assert prepare_state_dir in run
+    assert start_apps in run
+    assert run.index(prepare_state_dir) < run.index(start_apps)
+
+
 def test_docker_release_binds_dispatch_builds_to_resolved_commit() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 

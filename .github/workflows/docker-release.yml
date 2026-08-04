@@ -314,6 +314,8 @@ jobs:
           sudo chown -R 999:999 "$LUMEN_DB_ROOT/postgres"
           sudo chown -R 999:999 "$LUMEN_DB_ROOT/redis"
           sudo chown -R 10001:10001 "$LUMEN_DATA_ROOT/storage" "$LUMEN_DATA_ROOT/backup"
+          # api mounts this host-managed control directory with create_host_path=false.
+          sudo install -d -m 0750 -o 10001 -g 10001 /var/lib/lumen-storage
           docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
           docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
           docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
