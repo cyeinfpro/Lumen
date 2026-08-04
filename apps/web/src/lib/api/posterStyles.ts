@@ -1,4 +1,8 @@
 import { apiFetch } from "./http";
+import {
+  semanticJsonPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 
 // ============================================================================
 // Poster Style Library（V1.1 海报工作流）
@@ -198,6 +202,31 @@ export interface PosterStyleGenerateOut {
   created_at: string;
 }
 
+function validatePosterStyleGenerateOut(
+  value: PosterStyleGenerateOut,
+): PosterStyleGenerateOut {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    typeof value.job_id !== "string" ||
+    value.job_id.length === 0 ||
+    typeof value.workflow_run_id !== "string" ||
+    value.workflow_run_id.length === 0 ||
+    (value.status !== "queued" && value.status !== "running") ||
+    !Number.isInteger(value.requested_count) ||
+    value.requested_count <= 0 ||
+    !Array.isArray(value.task_ids) ||
+    value.task_ids.some(
+      (taskId) => typeof taskId !== "string" || taskId.length === 0,
+    ) ||
+    typeof value.created_at !== "string" ||
+    value.created_at.length === 0
+  ) {
+    throw new TypeError("malformed poster style generation response");
+  }
+  return value;
+}
+
 export interface PosterStyleJobOut {
   job_id: string;
   workflow_run_id: string;
@@ -308,18 +337,26 @@ export function syncPosterStylePresets(): Promise<PosterStyleSyncOut> {
 export function generatePosterStyle(
   body: PosterStyleGenerateIn,
 ): Promise<PosterStyleGenerateOut> {
-  return apiFetch<PosterStyleGenerateOut>("/poster-styles/generate", {
-    method: "POST",
-    body: JSON.stringify({
-      category: "user_favorites",
-      style_tags: [],
-      palette: [],
-      recommended_aspects: [],
-      aspect_ratio: "1:1",
-      auto_tag: true,
-      ...body,
-    }),
-  });
+  const payload = {
+    category: "user_favorites" as const,
+    style_tags: [],
+    palette: [],
+    recommended_aspects: [],
+    aspect_ratio: "1:1",
+    auto_tag: true,
+    ...body,
+  };
+  return withSemanticPostIdempotency(
+    { operation: "poster_style.generate" },
+    payload,
+    async (idempotencyKey) =>
+      validatePosterStyleGenerateOut(
+        await apiFetch<PosterStyleGenerateOut>(
+          "/poster-styles/generate",
+          semanticJsonPostRequest(payload, idempotencyKey),
+        ),
+      ),
+  );
 }
 
 export interface PosterStyleJobsOpts {

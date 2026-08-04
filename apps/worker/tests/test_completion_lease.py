@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from dataclasses import fields
+import logging
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
 
@@ -12,7 +13,10 @@ import pytest
 
 from app import sse_publish
 from app.provider_runtime.upstream_services import ImageUpstreamRuntime
-from app.tasks.completion_parts import default_runtime as completion
+from app.tasks.completion_parts import (
+    default_runtime as completion,
+    failure_settlement,
+)
 from app.tasks.completion_parts.contracts import CompletionCommand, CompletionServices
 from app.tasks.completion_parts.services import CompletionRepositoryService
 from lumen_core.constants import (
@@ -443,6 +447,99 @@ async def test_terminal_completion_publish_failure_keeps_outbox_for_redrive(
     assert len(session.rows) == 1
     assert session.rows[0].published_at is None
     assert session.rows[0].payload["data"]["event_id"] == event_id
+
+
+@pytest.mark.asyncio
+async def test_completion_retry_ack_loss_keeps_durable_outbox_and_queued_state() -> None:
+    class Result:
+        rowcount = 1
+
+    class Session:
+        def __init__(self) -> None:
+            self.rows: list[OutboxEvent] = []
+            self.commits = 0
+
+        async def __aenter__(self) -> "Session":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result()
+
+        def add(self, row: OutboxEvent) -> None:
+            self.rows.append(row)
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+    class AcceptedThenErrorRedis:
+        def __init__(self) -> None:
+            self.enqueued: list[tuple[str, str, dict[str, Any]]] = []
+
+        async def get(self, _key: str) -> None:
+            return None
+
+        async def enqueue_job(
+            self,
+            job_name: str,
+            task_id: str,
+            **kwargs: Any,
+        ) -> None:
+            self.enqueued.append((job_name, task_id, kwargs))
+            raise RuntimeError("connection lost after enqueue acceptance")
+
+    session = Session()
+    state = SimpleNamespace(
+        request=SimpleNamespace(task_id="comp-1"),
+        preparation=SimpleNamespace(
+            attempt=1,
+            attempt_epoch=1,
+            user_id="user-1",
+            message_id="message-1",
+        ),
+        settlement=SimpleNamespace(task_outcome="retry"),
+        ports=SimpleNamespace(
+            persistence=SimpleNamespace(
+                SessionLocal=lambda: session,
+                Completion=completion.Completion,
+                update=completion.update,
+                affected_rows=lambda result: result.rowcount,
+            ),
+            events=SimpleNamespace(logger=logging.getLogger("test.completion-retry")),
+            retry=SimpleNamespace(_RUNNING_COMPLETION_STATUSES=("streaming",)),
+        ),
+    )
+
+    delivery = await failure_settlement._mark_retry_queued(  # noqa: SLF001
+        state,
+        err_code="upstream_error",
+        err_msg="retry me",
+        defer_s=5.0,
+    )
+
+    assert delivery is not None
+    assert session.commits == 1
+    assert len(session.rows) == 1
+    row = session.rows[0]
+    assert row.kind == "completion"
+    assert row.published_at is None
+    assert row.payload["task_id"] == "comp-1"
+    assert row.payload["job_try"] == 2
+    assert row.payload["defer_s"] == 5.0
+
+    redis = AcceptedThenErrorRedis()
+    await completion._deliver_completion_event(redis, delivery)
+
+    assert redis.enqueued
+    job_name, task_id, kwargs = redis.enqueued[0]
+    assert (job_name, task_id) == ("run_completion", "comp-1")
+    assert kwargs["_job_try"] == 2
+    assert kwargs["_defer_by"] == 5.0
+    assert kwargs["_job_id"].startswith("lumen:completion:comp-1:outbox:")
+    assert row.published_at is None
+    assert state.settlement.task_outcome == "retry"
 
 
 @pytest.mark.asyncio

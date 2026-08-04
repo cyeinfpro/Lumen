@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback } from "react";
 import type { MutableRefObject } from "react";
 import { useMutation } from "@tanstack/react-query";
 
@@ -12,11 +12,6 @@ import {
   retryVideoGeneration,
 } from "@/lib/apiClient";
 import type { VideoAction } from "@/lib/types";
-import {
-  releaseVideoCreateIdempotencyKey,
-  resolveVideoCreateIdempotencyKey,
-  type PendingVideoCreateKey,
-} from "./video-create-idempotency";
 import {
   isVideoRequestFenceCurrent,
   mergeVideoGenerationLists as mergeById,
@@ -91,11 +86,6 @@ export function useVideoTaskMutations({
   syncVideoSettling,
   terminalHistorySyncedRef,
 }: UseVideoTaskMutationsOptions) {
-  // 幂等键按提交操作持有(useRef 限定在本 mutation 实例生命周期),并与 payload
-  // 指纹绑定:同参数重提沿用(服务端回放,避免二次预扣),参数修改自动换新 key
-  // (后端指纹不同,旧 key 会 409);成功或服务端明确拒绝后释放。见
-  // video-create-idempotency.ts。并发提交互不串扰:决策函数纯且无模块级状态。
-  const pendingCreateKeyRef = useRef<PendingVideoCreateKey>(null);
   const createMut = useMutation({
     mutationFn: () => {
       const body = {
@@ -111,16 +101,9 @@ export function useVideoTaskMutations({
         seed: parseSeed(seed),
         watermark: false,
       };
-      const { key, pending } = resolveVideoCreateIdempotencyKey(
-        pendingCreateKeyRef.current,
-        body,
-        () => crypto.randomUUID(),
-      );
-      pendingCreateKeyRef.current = pending;
-      return createVideoGeneration(body, { idempotency_key: key });
+      return createVideoGeneration(body);
     },
     onSuccess: (generation) => {
-      pendingCreateKeyRef.current = null;
       terminalHistorySyncedRef.current.delete(generation.id);
       enableVideoSettling(generation.id);
       syncVideoSettling(generation);
@@ -131,11 +114,6 @@ export function useVideoTaskMutations({
       void invalidateHistory();
     },
     onError: (error) => {
-      // 服务端明确拒绝(4xx/5xx)释放 key;网络/超时等歧义失败保留供重提回放。
-      pendingCreateKeyRef.current = releaseVideoCreateIdempotencyKey(
-        pendingCreateKeyRef.current,
-        error,
-      );
       toast.error("提交失败", {
         description: error instanceof Error ? error.message : undefined,
       });

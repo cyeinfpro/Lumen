@@ -35,6 +35,7 @@ from ...task_cancellation import bind_task_cancellation
 from ..state import is_generation_terminal
 from . import failure, success
 from .admission import WeightedPermit
+from .bonus_obligation import apply_billing_admission_to_request
 from .diagnostics import (
     StageTimer,
 )
@@ -92,6 +93,12 @@ from .runner_dispatch_phase import (
     prepare_upstream_request as _prepare_upstream_request,
 )
 from .services import RunGenerationDeps
+from .takeover_checkpoint import (
+    GenerationTakeoverCheckpointUnavailable,
+    generation_has_takeover_checkpoint,
+    generation_takeover_checkpoint_present,
+    restore_generation_takeover_checkpoint,
+)
 
 
 LEASE_REACQUIRED_SUBSTAGE = "lease_reacquired"
@@ -126,15 +133,14 @@ async def _run_generation_scoped(state: GenerationRunState) -> None:
             execution_epoch=execution_epoch,
             attempt=state.attempt,
         )
-    if not await _prepare_provider_reservation(state):
-        return
-    if not await _start_generation_attempt(state):
+    if not await _prepare_generation_attempt(state):
         return
     _initialize_execution_state(state)
     try:
-        await _prepare_upstream_request(state)
-        await _dispatch_upstream_request(state)
+        await _obtain_generation_result(state)
         await success.finalize_generation_success(state, state.services)
+    except GenerationTakeoverCheckpointUnavailable as exc:
+        await _handle_takeover_checkpoint_unavailable(state, exc)
     except ArtifactCommitOutcomeUnknown as exc:
         logger.error(
             "generation artifact commit pending reconciliation "
@@ -145,13 +151,7 @@ async def _run_generation_scoped(state: GenerationRunState) -> None:
         )
         state.task_outcome = "commit_unknown"
     except LeaseLost as exc:
-        if generation_dispatch_requires_unknown_settlement(state):
-            if await is_cancelled(state.redis, state.task_id, force_db=True):
-                await finalize_generation_cancel_unknown(state)
-            else:
-                await finalize_generation_result_unknown(state, exc)
-        else:
-            await failure.handle_lease_lost(state, exc, state.services)
+        await _handle_generation_lease_lost(state, exc)
     except StaleGenerationAttempt as exc:
         await failure.handle_stale_attempt(state, exc, state.services)
     except TaskCancelled as exc:
@@ -176,6 +176,58 @@ async def _run_generation_scoped(state: GenerationRunState) -> None:
             )
     finally:
         await _cleanup_generation_run(state)
+
+
+async def _prepare_generation_attempt(state: GenerationRunState) -> bool:
+    if not generation_takeover_checkpoint_present(
+        state
+    ) and not await _prepare_provider_reservation(state):
+        return False
+    return await _start_generation_attempt(state)
+
+
+async def _handle_takeover_checkpoint_unavailable(
+    state: GenerationRunState,
+    exc: GenerationTakeoverCheckpointUnavailable,
+) -> None:
+    logger.error(
+        "generation takeover checkpoint unavailable task=%s attempt=%s err=%s",
+        state.task_id,
+        state.attempt,
+        exc,
+    )
+    if await is_cancelled(state.redis, state.task_id, force_db=True):
+        await finalize_generation_cancel_unknown(state)
+    else:
+        await finalize_generation_result_unknown(state, exc)
+
+
+async def _handle_generation_lease_lost(
+    state: GenerationRunState,
+    exc: LeaseLost,
+) -> None:
+    if generation_has_takeover_checkpoint(state):
+        await failure.handle_lease_lost(state, exc, state.services)
+        return
+    if not generation_dispatch_requires_unknown_settlement(state):
+        await failure.handle_lease_lost(state, exc, state.services)
+        return
+    if await is_cancelled(state.redis, state.task_id, force_db=True):
+        await finalize_generation_cancel_unknown(state)
+        return
+    await finalize_generation_result_unknown(state, exc)
+
+
+async def _obtain_generation_result(state: GenerationRunState) -> None:
+    # Finalization still needs resolved size, image options, references, and
+    # mask-derived state. Preparing those values is local-only and must run for
+    # checkpoint takeovers; only provider reservation and network dispatch are
+    # skipped.
+    await _prepare_upstream_request(state)
+    if generation_takeover_checkpoint_present(state):
+        await restore_generation_takeover_checkpoint(state)
+        return
+    await _dispatch_upstream_request(state)
 
 
 def _new_run_state(
@@ -586,14 +638,16 @@ def _running_upstream_request(
     state.lease_reacquired = current.error_code == "lease_lost"
     request["trace_id"] = state.trace_id
     request["execution_epoch"] = generation_execution_epoch(state)
-    request["upstream_route"] = state.image_route
-    if state.route_diagnostics:
-        request["route_diagnostics"] = state.route_diagnostics[:12]
-    if state.is_dual_race:
-        request.pop("provider", None)
-        request.pop("actual_provider", None)
-    elif state.upstream_provider_label:
-        request["provider"] = state.upstream_provider_label
+    apply_billing_admission_to_request(request, state)
+    if not generation_takeover_checkpoint_present(state):
+        request["upstream_route"] = state.image_route
+        if state.route_diagnostics:
+            request["route_diagnostics"] = state.route_diagnostics[:12]
+        if state.is_dual_race:
+            request.pop("provider", None)
+            request.pop("actual_provider", None)
+        elif state.upstream_provider_label:
+            request["provider"] = state.upstream_provider_label
     return request
 
 

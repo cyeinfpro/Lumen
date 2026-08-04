@@ -4,6 +4,7 @@ import io
 import logging
 from dataclasses import dataclass
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from PIL import Image as PILImage
 
@@ -58,6 +59,9 @@ class BonusGenerationContext:
     record_model_library_candidate: bool
     settle_billing: bool
     log_label: str
+    bonus_generation_id: str | None = None
+    require_precreated_generation: bool = False
+    source_attempt: int | None = None
 
 
 @dataclass(slots=True)
@@ -188,8 +192,12 @@ def _build_bonus_artifact(
     processed: Any,
     billing_meta: dict[str, Any],
 ) -> BonusImageArtifact:
-    bonus_generation_id = new_uuid7()
-    image_id = new_uuid7()
+    bonus_generation_id = context.bonus_generation_id or new_uuid7()
+    image_id = (
+        str(uuid5(NAMESPACE_URL, f"lumen:bonus-image:{bonus_generation_id}"))
+        if context.bonus_generation_id is not None
+        else new_uuid7()
+    )
     extension, mime = _bonus_format(processed.orig_format)
     model_metadata = model_image_metadata_from_request(
         image_id=image_id,

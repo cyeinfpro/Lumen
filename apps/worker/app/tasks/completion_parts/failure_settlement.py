@@ -14,6 +14,7 @@ from lumen_core.constants import (
     MessageStatus,
 )
 
+from ...outbox.staging import stage_outbox_event
 from ...reconciliation.task_domains import (
     CompletionDispatchResultUnknown,
     completion_cancel_requires_unknown_settlement,
@@ -76,10 +77,10 @@ async def _cancel_completion_row(
                 completion,
                 has_partial=state.streaming.has_partial,
                 input_list=state.streaming.input_list
-                if state.usage.request_sent
+                if state.usage.active_round_dispatch_started
                 else None,
                 instructions=state.streaming.instructions
-                if state.usage.request_sent
+                if state.usage.active_round_dispatch_started
                 else None,
                 usage_is_finalized=True,
                 accumulated_text=state.streaming.accumulated_text,
@@ -188,7 +189,8 @@ async def _mark_retry_queued(
     *,
     err_code: str,
     err_msg: str,
-) -> bool:
+    defer_s: float,
+) -> tuple[str, str, dict[str, Any]] | None:
     async with state.ports.persistence.SessionLocal() as session:
         result = await session.execute(
             state.ports.persistence.update(state.ports.persistence.Completion)
@@ -208,92 +210,30 @@ async def _mark_retry_queued(
                 error_message=err_msg,
             )
         )
-        await session.commit()
         if state.ports.persistence.affected_rows(result) == 0:
+            await session.commit()
             state.ports.events.logger.info(
                 "completion retry skipped by newer epoch task=%s attempt_epoch=%s",
                 state.request.task_id,
                 state.preparation.attempt_epoch,
             )
             state.settlement.task_outcome = "superseded"
-            return False
-    return True
-
-
-async def _settle_retry_enqueue_failure(
-    state: CompletionExecution,
-    *,
-    enqueue_msg: str,
-) -> None:
-    await state.ports.tools._publish_completion_tool_updates(
-        redis=state.request.redis,
-        user_id=state.preparation.user_id,
-        channel=state.request.channel,
-        task_id=state.request.task_id,
-        message_id=state.preparation.message_id,
-        attempt=state.preparation.attempt,
-        attempt_epoch=state.preparation.attempt_epoch,
-        tool_tracker=state.usage.tool_tracker,
-        updates=state.usage.tool_tracker.finalize_active(
-            ToolStatus.FAILED.value,
-            error=enqueue_msg,
-        ),
-    )
-    async with state.ports.persistence.SessionLocal() as session:
-        result = await session.execute(
-            state.ports.persistence.update(state.ports.persistence.Completion)
-            .where(
-                state.ports.persistence.Completion.id == state.request.task_id,
-                state.ports.persistence.Completion.attempt
-                == state.preparation.attempt_epoch,
-                state.ports.persistence.Completion.status
-                == CompletionStatus.QUEUED.value,
-            )
-            .values(
-                status=CompletionStatus.FAILED.value,
-                progress_stage=CompletionStage.FINALIZING,
-                finished_at=datetime.now(timezone.utc),
-                error_code="retry_enqueue_failed",
-                error_message=enqueue_msg,
-            )
-        )
-        if state.ports.persistence.affected_rows(result) == 0:
-            await session.commit()
-            state.settlement.task_outcome = "superseded"
-            return
-        message = await session.get(
-            state.ports.persistence.Message, state.preparation.message_id
-        )
-        if message is not None and message.status != MessageStatus.CANCELED:
-            message.status = MessageStatus.FAILED
-        completion = await session.get(
-            state.ports.persistence.Completion, state.request.task_id
-        )
-        if completion is not None:
-            await state.ports.billing.worker_billing.release_completion(
-                session,
-                completion,
-                reason="retry_enqueue_failed",
-            )
-        delivery = state.ports.events._stage_completion_event(
+            return None
+        delivery = stage_outbox_event(
             session,
-            state.preparation.user_id,
-            state.request.channel,
-            EV_COMP_FAILED,
-            state.ports.events._completion_event_payload(
-                state.request.task_id,
-                state.preparation.message_id,
-                state.preparation.attempt,
-                state.preparation.attempt_epoch,
-                code="retry_enqueue_failed",
-                message=enqueue_msg,
-                retriable=False,
-            ),
+            kind="completion",
+            payload={
+                "task_id": state.request.task_id,
+                "user_id": state.preparation.user_id,
+                "message_id": state.preparation.message_id,
+                "attempt": state.preparation.attempt + 1,
+                "job_try": state.preparation.attempt + 1,
+                "defer_s": defer_s,
+                "source": "completion_retry",
+            },
         )
         await session.commit()
-        await state.ports.billing.worker_billing.flush_balance_cache_refreshes(session)
-    await state.ports.events._deliver_completion_event(state.request.redis, delivery)
-    state.settlement.task_outcome = "failed"
+        return delivery
 
 
 async def _settle_terminal_failure(
@@ -350,15 +290,15 @@ async def _settle_terminal_failure(
                 content["tool_calls"] = tool_calls
                 message.content = content
             message.status = MessageStatus.FAILED
-        if (
-            state.streaming.has_partial
-            or state.streaming.tool_loop_truncated
-            or any(state.usage.usage_totals.values())
-        ):
-            completion = await session.get(
-                state.ports.persistence.Completion, state.request.task_id
-            )
-            if completion is not None:
+        completion = await session.get(
+            state.ports.persistence.Completion, state.request.task_id
+        )
+        if completion is not None:
+            if (
+                state.streaming.has_partial
+                or state.streaming.tool_loop_truncated
+                or any(state.usage.usage_totals.values())
+            ):
                 if (
                     state.streaming.tool_images
                     and state.usage.usage_totals.image_output_tokens <= 0
@@ -374,22 +314,12 @@ async def _settle_terminal_failure(
                         state.usage.usage_totals.image_output_tokens,
                     )
                 state.usage.usage_totals.apply_to(completion)
-                await state.ports.billing._settle_failed_completion_billing(
-                    session,
-                    completion,
-                    usage_values=state.usage.usage_totals.values(),
-                    reason=str(err_code),
-                )
-        else:
-            completion = await session.get(
-                state.ports.persistence.Completion, state.request.task_id
+            await state.ports.billing._settle_failed_completion_billing(
+                session,
+                completion,
+                usage_values=state.usage.usage_totals.values(),
+                reason=str(err_code),
             )
-            if completion is not None:
-                await state.ports.billing.worker_billing.release_completion(
-                    session,
-                    completion,
-                    reason=str(err_code),
-                )
         delivery = state.ports.events._stage_completion_event(
             session,
             state.preparation.user_id,
@@ -498,28 +428,25 @@ async def handle_completion_failure(
             len(state.ports.retry.RETRY_BACKOFF_SECONDS) - 1,
         )
         delay = state.ports.retry.RETRY_BACKOFF_SECONDS[delay_index]
-        if not await _mark_retry_queued(
+        delivery = await _mark_retry_queued(
             state,
             err_code=err_code,
             err_msg=err_msg,
-        ):
+            defer_s=delay,
+        )
+        if delivery is None:
             return
         try:
-            await state.request.redis.enqueue_job(
-                "run_completion",
-                state.request.task_id,
-                _defer_by=delay,
-                _job_try=state.preparation.attempt + 1,
+            await state.ports.events._deliver_completion_event(
+                state.request.redis,
+                delivery,
             )
-        except Exception as enqueue_exc:  # noqa: BLE001
-            state.ports.events.logger.error(
-                "re-enqueue failed task=%s err=%s",
+        except Exception as delivery_exc:  # noqa: BLE001
+            state.ports.events.logger.warning(
+                "completion retry fast-path delivery failed; "
+                "durable outbox retained task=%s err=%s",
                 state.request.task_id,
-                enqueue_exc,
-            )
-            await _settle_retry_enqueue_failure(
-                state,
-                enqueue_msg=f"failed to enqueue retry: {enqueue_exc}"[:2000],
+                delivery_exc,
             )
         return
     await _settle_terminal_failure(

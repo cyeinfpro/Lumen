@@ -96,15 +96,18 @@ def test_outbox_claim_model_contract_is_expand_contract_safe() -> None:
     assert {
         "claim_owner",
         "claim_until",
+        "next_attempt_at",
         "delivery_attempts",
         "last_delivery_error",
     } <= set(table.c.keys())
     assert table.c.claim_owner.nullable is True
     assert table.c.claim_until.nullable is True
+    assert table.c.next_attempt_at.nullable is True
     assert table.c.delivery_attempts.nullable is False
     assert table.c.delivery_attempts.server_default is not None
     assert table.c.last_delivery_error.nullable is True
     assert "ix_outbox_claimable" in {index.name for index in table.indexes}
+    assert "ix_outbox_due" in {index.name for index in table.indexes}
 
 
 def test_domain_reconcilers_implement_shared_protocol() -> None:

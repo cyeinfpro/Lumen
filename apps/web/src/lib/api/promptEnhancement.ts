@@ -1,4 +1,8 @@
 import { ApiError } from "./http";
+import {
+  markDefinitiveRequestFailure,
+  semanticPostIdempotency,
+} from "./semanticIdempotency";
 import { streamClient } from "./streamClient";
 import type { VideoPromptEnhanceIn } from "../types";
 
@@ -177,6 +181,24 @@ function promptEnhanceStreamErrorMessage(code: string): string {
   }
 }
 
+function parsedEnhancementEvent(data: string): {
+  text?: string;
+  error?: string;
+} {
+  const value = JSON.parse(data) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("enhancement event must be an object");
+  }
+  const event = value as { text?: unknown; error?: unknown };
+  if ("text" in event && typeof event.text !== "string") {
+    throw new TypeError("enhancement event text must be a string");
+  }
+  if ("error" in event && typeof event.error !== "string") {
+    throw new TypeError("enhancement event error must be a string");
+  }
+  return event as { text?: string; error?: string };
+}
+
 function parseEnhancementEvent(
   payload: string,
   state: { hasText: boolean; streamDone: boolean },
@@ -188,13 +210,15 @@ function parseEnhancementEvent(
     return;
   }
   try {
-    const event = JSON.parse(data) as { text?: string; error?: string };
+    const event = parsedEnhancementEvent(data);
     if (event.error) {
-      throw new ApiError({
-        code: event.error,
-        message: promptEnhanceStreamErrorMessage(event.error),
-        status: 502,
-      });
+      throw markDefinitiveRequestFailure(
+        new ApiError({
+          code: event.error,
+          message: promptEnhanceStreamErrorMessage(event.error),
+          status: 502,
+        }),
+      );
     }
     if (event.text) {
       state.hasText = true;
@@ -257,6 +281,13 @@ async function consumeEnhancementStream(
     }
     throw err;
   }
+  if (!state.streamDone) {
+    throw new ApiError({
+      code: "enhance_truncated_response",
+      message: "enhancement stream ended before terminal completion",
+      status: 502,
+    });
+  }
   if (!state.hasText) {
     throw new ApiError({
       code: "enhance_empty_response",
@@ -272,16 +303,32 @@ export async function streamPromptEnhancement(
   onDelta: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await streamClient.postJson(path, body, signal);
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new ApiError({
-      code: "enhance_empty_response",
-      message: "empty response",
-      status: 502,
-    });
+  const lease = await semanticPostIdempotency.acquire(
+    { operation: "prompt_enhancement.stream", path },
+    body,
+  );
+  try {
+    await semanticPostIdempotency.markSubmitted(lease);
+    const response = await streamClient.postJson(
+      path,
+      body,
+      signal,
+      lease.key,
+    );
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new ApiError({
+        code: "enhance_empty_response",
+        message: "empty response",
+        status: 502,
+      });
+    }
+    await consumeEnhancementStream(reader, onDelta);
+    await semanticPostIdempotency.confirm(lease);
+  } catch (error) {
+    await semanticPostIdempotency.recordFailure(lease, error);
+    throw error;
   }
-  await consumeEnhancementStream(reader, onDelta);
 }
 
 export function enhancePrompt(

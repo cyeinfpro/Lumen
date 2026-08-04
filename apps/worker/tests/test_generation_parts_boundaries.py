@@ -638,8 +638,8 @@ async def test_terminal_local_failure_with_response_settles_not_releases() -> No
 
 
 @pytest.mark.asyncio
-async def test_terminal_adapter_failure_with_response_still_releases() -> None:
-    """适配层 UpstreamError(已证明上游未计费)即使有响应收据也保持 release。"""
+async def test_terminal_adapter_failure_with_response_requires_no_cost_evidence() -> None:
+    """UpstreamError 类型本身不是 no-cost 证据；已有响应时按未知成本结算。"""
     message = SimpleNamespace(status=None)
     generation_row = SimpleNamespace(
         id="gen-1",
@@ -689,8 +689,8 @@ async def test_terminal_adapter_failure_with_response_still_releases() -> None:
     )
 
     assert message.status == MessageStatus.FAILED
-    assert release_calls == [(session, generation_row, "sha_echo")]
-    assert settle_calls == []
+    assert release_calls == []
+    assert settle_calls == [(session, generation_row, "sha_echo", "unknown")]
 
 
 @pytest.mark.asyncio

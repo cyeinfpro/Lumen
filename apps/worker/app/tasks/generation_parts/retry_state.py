@@ -24,10 +24,7 @@ from lumen_core.constants import (
     task_channel,
 )
 from lumen_core.models import Generation, Message
-from lumen_core.upstream_billing import (
-    has_proven_undelivered_dispatch,
-    has_upstream_dispatch_receipt,
-)
+from lumen_core.upstream_billing import upstream_dispatch_result_unknown
 
 from ...provider_runtime.errors import UpstreamError
 from ...upstream_parts import GeneratedImageResult
@@ -37,6 +34,7 @@ from ...storage import StorageDiskFullError
 from .errors import LeaseLost, StaleGenerationAttempt, TaskCancelled
 from .event_delivery import stage_generation_event
 from .execution_boundary import release_or_settle_generation
+from .execution_boundary import unknown_generation_requires_settlement
 from .lease import is_cancelled
 from .queue import (
     IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
@@ -113,15 +111,9 @@ def current_generation_execution_epoch(task_id: str) -> int | None:
 def generation_dispatch_requires_unknown_settlement(state: Any) -> bool:
     request = state.gen_upstream_request_snapshot or {}
     execution_epoch = generation_execution_epoch(state)
-    return bool(
-        has_upstream_dispatch_receipt(
-            request,
-            execution_epoch=execution_epoch,
-        )
-        and not has_proven_undelivered_dispatch(
-            request,
-            execution_epoch=execution_epoch,
-        )
+    return upstream_dispatch_result_unknown(
+        request,
+        execution_epoch=execution_epoch,
     )
 
 
@@ -185,12 +177,19 @@ async def _finalize_generation_unknown(
             generation = await session.get(Generation, state.task_id)
             if generation is None:
                 raise LookupError(f"generation missing: {state.task_id}")
-            await state.services.billing.settle_unknown_upstream(
-                session,
-                generation,
-                reason=code,
-                knowledge="unknown",
-            )
+            if unknown_generation_requires_settlement(generation):
+                await state.services.billing.settle_unknown_upstream(
+                    session,
+                    generation,
+                    reason=code,
+                    knowledge="unknown",
+                )
+            else:
+                await state.services.billing.release(
+                    session,
+                    generation,
+                    reason=code,
+                )
             delivery = stage_generation_event(
                 session,
                 state.user_id,

@@ -88,11 +88,11 @@ def is_image_file_storage_key(key: str) -> bool:
     name = parts[-1]
     if name.startswith(".") or name.endswith(".tmp"):
         # Leaf directories also host housekeeping files that are never
-        # registered artifacts: the flock publish mutex
-        # (".artifact-publish.lock"), atomic-write temp files
+        # registered artifacts: the flock publish/lifecycle mutexes,
+        # atomic-write temp files
         # (".{name}.{token}.tmp"), and variant staging temps
         # (".lumen-variant-*.webp"). Treating them as orphan candidates
-        # could unlink a held lock (breaking the publish mutex) or an
+        # could unlink a held lock (breaking storage serialization) or an
         # in-progress write.
         return False
     return True

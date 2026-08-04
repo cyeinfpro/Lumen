@@ -75,6 +75,7 @@ class UsageState:
     upstream_provider_event: dict[str, str] | None = None
     delta_counter: int = 0
     completed_response: dict[str, Any] | None = None
+    completed_usage_exact: bool = True
     memory_meta_for_event: dict[str, Any] = field(
         default_factory=lambda: {
             "used_memory_ids": [],

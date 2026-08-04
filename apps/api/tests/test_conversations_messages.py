@@ -789,7 +789,7 @@ async def test_context_window_estimate_is_token_budgeted_not_20_messages() -> No
 async def test_context_window_releases_db_transaction_before_redis_status() -> None:
     now = datetime.now(timezone.utc)
     message = _message("msg-1", now)
-    message.content = {"text": "x" * 24_000}
+    message.content = {"text": "token " * 5_000}
     db = _ContextDb([message])
     conv = SimpleNamespace(
         id="conv-1",
@@ -812,6 +812,7 @@ async def test_context_window_releases_db_transaction_before_redis_status() -> N
     )
 
     assert db.rollbacks == 1
+    assert out.estimated_history_tokens >= out.manual_compact_min_input_tokens
     assert out.manual_compact_available is True
 
 

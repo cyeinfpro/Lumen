@@ -7,6 +7,7 @@ After=multi-user.target
 # writes this file via /admin/update; PID 1 starts the runner so we sidestep the
 # whole sandbox/sudo/polkit chain.
 PathChanged=/opt/lumendata/backup/.update.trigger
+PathExists=/opt/lumen/shared/.update-resume
 Unit=lumen-update-runner.service
 
 [Install]

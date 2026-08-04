@@ -12,7 +12,9 @@ from lumen_core.model_entities import (
 )
 from lumen_core.pricing import CostBreakdown, UsageTokens
 
+from .common import terminal_billing_applies
 from .contracts import CompletionDependencies
+from .helpers import task_pricing_snapshot
 
 
 async def record_completion_settlement(
@@ -137,12 +139,20 @@ async def charge_completion(
         ref_id=billing_ref_id,
     ):
         return
-    enabled = (
-        await deps.billing_enabled()
+    terminal_billing_enabled = (
+        deps.billing_enabled
         if billing_enabled is None
         else bool(billing_enabled)
     )
-    if not enabled:
+    if not await terminal_billing_applies(
+        session,
+        user_id=completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+        billing_enabled=terminal_billing_enabled,
+        billing_obligation=task_pricing_snapshot(completion) is not None,
+        billing_core=deps.billing_core,
+    ):
         return
     idempotency_key = f"complete:{billing_ref_id}"
     existing = await deps.existing_wallet_tx(
@@ -275,7 +285,15 @@ async def release_completion(
         ref_id=billing_ref_id,
     ):
         return
-    if not await deps.billing_enabled():
+    if not await terminal_billing_applies(
+        session,
+        user_id=completion.user_id,
+        ref_type="completion",
+        ref_id=billing_ref_id,
+        billing_enabled=deps.billing_enabled,
+        billing_obligation=task_pricing_snapshot(completion) is not None,
+        billing_core=deps.billing_core,
+    ):
         return
     idempotency_key = f"release:{billing_ref_id}"
     existing = await deps.existing_wallet_tx(

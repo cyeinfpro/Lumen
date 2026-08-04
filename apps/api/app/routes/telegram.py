@@ -22,12 +22,10 @@ from __future__ import annotations
 
 import logging
 import secrets
-import uuid
 from typing import Annotated, Literal
-from types import MappingProxyType
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +34,6 @@ from lumen_core.constants import (
     MAX_EXPLICIT_SIDE,
 )
 from lumen_core.models import (
-    Conversation,
     Generation,
     Image,
     Message,
@@ -64,8 +61,6 @@ from .messages import submit_user_message
 from .prompts import (
     PromptRuntime,
     get_prompt_runtime,
-    resolve_provider_order,
-    stream_enhance,
 )
 from lumen_core.providers import parse_proxy_item
 from ..proxy_pool import (
@@ -78,6 +73,8 @@ from ..proxy_pool import (
 from ..ratelimit import RateLimiter, require_client_ip
 from . import telegram_image_options as _telegram_image_options
 from . import telegram_runtime_values as _telegram_runtime_values
+from .telegram_generation import lock_telegram_generation_context
+from .telegram_prompt_enhance import enhance_telegram_prompt
 from .telegram_schemas import (
     BindIn,
     BindOut,
@@ -119,8 +116,7 @@ def _http(code: str, msg: str, http: int = 400) -> HTTPException:
 _LINK_CODE_TTL_SECONDS = 600  # 10 min
 _LINK_CODE_REDIS_PREFIX = "tg:link:"
 _LINK_CODE_CLAIM_SUFFIX = ":claim"
-_TG_CONV_TITLE = "Telegram Bot"
-_TG_CONV_MARKER = MappingProxyType({"telegram": True})
+_DEFAULT_TELEGRAM_SSH_PROXY_HOST = "127.0.0.1"
 _BOT_BIND_CODE_LIMITER = RateLimiter(
     capacity=30,
     refill_per_sec=30 / 60,
@@ -223,36 +219,6 @@ def _gen_link_code() -> str:
     # 16 random bytes -> ~22 URL-safe chars. Keep the original alphabet and
     # casing so no entropy is collapsed before the bot consumes the code.
     return secrets.token_urlsafe(16).rstrip("=")
-
-
-async def _get_or_create_tg_conversation(
-    db: AsyncSession, user_id: str
-) -> Conversation:
-    conv = (
-        await db.execute(
-            select(Conversation)
-            .where(
-                Conversation.user_id == user_id,
-                Conversation.deleted_at.is_(None),
-                Conversation.default_params.contains({"telegram": True}),
-            )
-            .order_by(desc(Conversation.last_activity_at))
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if conv is not None:
-        return conv
-    # TG 会话默认归档：bot 用户的图本身在 bot 里看，web 端列表里默认折叠到归档区
-    conv = Conversation(
-        user_id=user_id,
-        title=_TG_CONV_TITLE,
-        default_params=dict(_TG_CONV_MARKER),
-        archived=True,
-    )
-    db.add(conv)
-    await db.commit()
-    await db.refresh(conv)
-    return conv
 
 
 # ---------- /me/telegram/link-code ----------
@@ -488,7 +454,26 @@ async def runtime_config(
     picked = await pick_proxy(redis, candidates, strategy=strategy, avoid=avoid_set)
     proxy_out: RuntimeProxyOut | None = None
     if picked is not None:
-        url = await resolve_provider_proxy_url(picked)
+        if picked.protocol == "ssh":
+            bind_host = await _get_setting_str(
+                db,
+                "telegram.proxy_bind_host",
+                _DEFAULT_TELEGRAM_SSH_PROXY_HOST,
+            )
+            advertise_host = await _get_setting_str(
+                db,
+                "telegram.proxy_advertise_host",
+                bind_host,
+            )
+            url = await resolve_provider_proxy_url(
+                picked,
+                bind_host=bind_host,
+                advertise_host=advertise_host,
+            )
+        else:
+            # Existing SOCKS5 proxies already advertise their own reachable
+            # endpoint. The SSH-only listener settings must not rewrite them.
+            url = await resolve_provider_proxy_url(picked)
         if url:
             proxy_out = RuntimeProxyOut(name=picked.name, url=url)
 
@@ -548,44 +533,25 @@ async def report_proxy(
 
 @router_bot.post("/telegram/prompts/enhance", response_model=EnhancePromptOut)
 async def enhance_prompt(
+    request: Request,
     body: EnhancePromptIn,
     user: BotUser,  # 仅作鉴权，enhance 自身不带 user 上下文
     db: Annotated[AsyncSession, Depends(get_db)],
     runtime: Annotated[PromptRuntime, Depends(get_prompt_runtime)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> EnhancePromptOut:
-    """复用 /prompts/enhance 的内核，但聚合 SSE 增量为完整字符串。bot 端不需要流式。"""
-    import json as _json
-
-    providers = [
-        p for p in await resolve_provider_order(db, runtime) if p.api_key.strip()
-    ]
-    if not providers:
-        raise _http("not_configured", "upstream API key not set", 503)
-
-    parts: list[str] = []
-    error: str | None = None
-    async for chunk in stream_enhance(body.text, providers, runtime=runtime):
-        # chunk 形如 "data: {\"text\": \"...\"}\n\n" 或 "data: [DONE]\n\n" 或 "data: {\"error\": \"...\"}\n\n"
-        if not chunk.startswith("data: "):
-            continue
-        payload = chunk[6:].strip()
-        if payload == "[DONE]" or not payload:
-            break
-        try:
-            obj = _json.loads(payload)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            if "text" in obj and isinstance(obj["text"], str):
-                parts.append(obj["text"])
-            elif "error" in obj:
-                error = str(obj["error"])
-                break
-    if not parts:
-        raise _http("enhance_failed", error or "no enhanced text returned", 502)
-    enhanced = "".join(parts).strip()
-    if not enhanced:
-        raise _http("enhance_failed", error or "empty enhanced result", 502)
+    enhanced = await enhance_telegram_prompt(
+        text=body.text,
+        user=user,
+        chat_id=(request.headers.get(BOT_CHAT_ID_HEADER) or "").strip(),
+        tg_user_id=(request.headers.get(BOT_TG_USER_ID_HEADER) or "").strip(),
+        idempotency_key=idempotency_key,
+        db=db,
+        runtime=runtime,
+    )
     logger.info(
         "telegram enhance: user=%s in_len=%d out_len=%d",
         user.id,
@@ -597,11 +563,28 @@ async def enhance_prompt(
 
 @router_bot.post("/telegram/generations", response_model=GenerateOut)
 async def create_generation(
+    request: Request,
     body: GenerateIn,
     user: BotUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> GenerateOut:
-    conv = await _get_or_create_tg_conversation(db, user.id)
+    idempotency_key = (body.idempotency_key or "").strip()
+    if not idempotency_key:
+        raise _http(
+            "missing_idempotency_key",
+            "idempotency_key is required for telegram generation",
+            422,
+        )
+    context = await lock_telegram_generation_context(
+        db,
+        authenticated_user_id=user.id,
+        chat_id=(request.headers.get(BOT_CHAT_ID_HEADER) or "").strip(),
+        tg_user_id=(request.headers.get(BOT_TG_USER_ID_HEADER) or "").strip(),
+        client_key=idempotency_key,
+        request_payload=body.model_dump(mode="json", exclude={"idempotency_key"}),
+    )
+    locked_user = context.user
+    conv = context.conversation
 
     side_by_resolution = {"1k": 1024, "2k": 2048, "4k": MAX_EXPLICIT_SIDE}
     fixed_size = _aspect_ratio_to_size(
@@ -621,15 +604,18 @@ async def create_generation(
         "image_to_image" if body.attachment_image_ids else "text_to_image"
     )
     msg_in = PostMessageIn(
-        idempotency_key=body.idempotency_key or uuid.uuid4().hex,
+        idempotency_key=context.message_idempotency_key or idempotency_key,
         text=body.prompt,
         intent=intent,
         image_params=image_params,
         attachment_image_ids=list(body.attachment_image_ids),
+        source="telegram",
+        action_source="telegram.generation",
+        trace_id=context.operation_id,
     )
-    result = await submit_user_message(conv.id, msg_in, user, db)
+    result = await submit_user_message(conv.id, msg_in, locked_user, db)
     return GenerateOut(
-        user_id=user.id,
+        user_id=locked_user.id,
         conversation_id=conv.id,
         message_id=result.assistant_message.id,
         generation_ids=result.generation_ids,

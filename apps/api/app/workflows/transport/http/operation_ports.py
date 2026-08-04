@@ -187,6 +187,10 @@ class ModelLibraryWorkflowOperations(Protocol):
         self, *, body: object, user: object, db: object
     ) -> object: ...
 
+    async def replay_apparel_model_library_job(
+        self, *, workflow_run_id: str, user: object, db: object
+    ) -> object: ...
+
     async def list_apparel_model_library_jobs(
         self,
         *,

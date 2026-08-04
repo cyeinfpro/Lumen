@@ -7,6 +7,12 @@ from __future__ import annotations
 # ruff: noqa: F403, F405
 from .default_runtime_parts.composition import *
 
+from ...completion_tool_image_runtime import (
+    acquire_completion_xact_lock as _acquire_completion_xact_lock,
+)
+from ...completion_tool_image_runtime import (
+    build_completion_tool_image_service as _build_completion_tool_image_service,
+)
 from ...task_cancellation import force_next_cancellation_check
 from .default_runtime_parts import (
     composition,
@@ -288,36 +294,6 @@ def _image_format_and_meta(raw_image: bytes) -> tuple[Any, ...]:
     )
 
 
-def _build_completion_tool_image_service(
-    storage_writes: StorageWriteCoordinator | None = None,
-) -> CompletionToolImageService:
-    return tool_runtime.build_completion_tool_image_service(
-        storage_writes=storage_writes,
-        dependencies=tool_runtime.ToolImageServiceDependencies(
-            default_write_files=_write_generation_files,
-            default_cleanup_on_error=_cleanup_storage_on_error,
-            default_delete_files=_delete_storage_files,
-            reserve_budget=_ensure_completion_tool_image_wallet_budget,
-            format_and_meta=_image_format_and_meta,
-            sha256=_sha256,
-            session_factory=SessionLocal,
-            new_id=new_uuid7,
-            acquire_lock=_acquire_completion_xact_lock,
-            completion_model=Completion,
-            running_statuses=_RUNNING_COMPLETION_STATUSES,
-            superseded_error_type=_CompletionEpochSuperseded,
-            fallback_image_tokens=_fallback_completion_tool_image_tokens,
-            image_model=Image,
-            image_variant_model=ImageVariant,
-            message_model=Message,
-            public_url=storage.public_url,
-            publish_event=publish_event,
-            image_event=EV_COMP_IMAGE,
-            bad_response_error_code=EC.BAD_RESPONSE.value,
-        ),
-    )
-
-
 async def _ensure_completion_tool_image_wallet_budget(
     *,
     user_id: str,
@@ -395,17 +371,6 @@ async def _iter_completion_stream_with_abort(
         next_event=_next_completion_stream_event,
     ):
         yield event
-
-
-async def _acquire_completion_xact_lock(
-    session: Any,
-    completion_id: str,
-) -> None:
-    await persistence_runtime.acquire_completion_xact_lock(
-        session,
-        completion_id,
-        logger=logger,
-    )
 
 
 async def _acquire_lease(redis: Any, task_id: str, worker_token: str) -> None:

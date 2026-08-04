@@ -78,6 +78,25 @@ def test_get_tiktoken_encoding_initializes_once_under_concurrency(monkeypatch):
     assert calls == 1
 
 
+def test_default_tiktoken_load_budget_tolerates_scheduler_delay(monkeypatch):
+    import lumen_core.context_window as cw
+
+    encoding = object()
+    fake_tiktoken = types.ModuleType("tiktoken")
+
+    def get_encoding(_name: str):  # noqa: ANN202
+        time.sleep(0.08)
+        return encoding
+
+    fake_tiktoken.get_encoding = get_encoding  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tiktoken", fake_tiktoken)
+    _reset_tiktoken_state(monkeypatch, cw)
+
+    started = time.monotonic()
+    assert cw._get_tiktoken_encoding() is encoding
+    assert time.monotonic() - started < 0.3
+
+
 def test_count_tokens_within_15pct_of_estimate_for_typical_text():
     from lumen_core.context_window import count_tokens, estimate_text_tokens
 

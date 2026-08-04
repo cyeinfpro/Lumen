@@ -23,7 +23,9 @@ export type RuntimeResilienceSnapshot = {
 
 type RecoveryKind = "realtime" | "session";
 type RecoveryHandler = () => void;
-export type SessionInvalidationReason = "realtime_auth_invalidated";
+export type SessionInvalidationReason =
+  | "realtime_auth_invalidated"
+  | "request_identity_mismatch";
 export type SessionInvalidationHandler = (
   reason: SessionInvalidationReason,
 ) => void;
@@ -118,10 +120,26 @@ export function requestSessionInvalidation(
 }
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const PUBLIC_IDENTITY_WRITE_PATHS = new Set([
+  "/auth/api-key/verify",
+  "/auth/login",
+  "/auth/password/reset-confirm",
+  "/auth/password/reset-request",
+  "/auth/signup",
+  "/auth/signup/byok",
+]);
 
-function normalizeApiPath(pathname: string): string {
-  if (pathname === "/api") return "/";
-  return pathname.startsWith("/api/") ? pathname.slice(4) : pathname;
+export function normalizeApiPath(pathname: string): string {
+  let path = pathname;
+  try {
+    if (/^https?:\/\//i.test(path)) path = new URL(path).pathname;
+  } catch {
+    return pathname;
+  }
+  path = path.split(/[?#]/, 1)[0] ?? path;
+  if (!path.startsWith("/")) path = `/${path}`;
+  if (path === "/api") return "/";
+  return path.startsWith("/api/") ? path.slice(4) : path;
 }
 
 export function isHighRiskIdentityWrite(
@@ -131,11 +149,5 @@ export function isHighRiskIdentityWrite(
   const normalizedMethod = method.toUpperCase();
   if (!WRITE_METHODS.has(normalizedMethod)) return false;
   const path = normalizeApiPath(pathname);
-  if (path === "/me" && normalizedMethod === "DELETE") return true;
-  if (path.startsWith("/me/sessions/") && normalizedMethod === "DELETE") {
-    return true;
-  }
-  if (path.startsWith("/me/api-credentials/")) return true;
-  if (path === "/me/redemptions" && normalizedMethod === "POST") return true;
-  return path === "/admin" || path.startsWith("/admin/");
+  return !PUBLIC_IDENTITY_WRITE_PATHS.has(path);
 }

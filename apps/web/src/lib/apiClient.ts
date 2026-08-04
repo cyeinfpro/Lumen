@@ -27,13 +27,11 @@ import {
   enhancePrompt as runEnhancePrompt,
   enhanceVideoPrompt as runEnhanceVideoPrompt,
 } from "./api/promptEnhancement";
+import { idempotentPostRequest } from "./api/semanticIdempotency";
 import type {
   ImageParams,
   ApiSupplierTemplatePublicListOut,
   ApiKeyVerifyOut,
-  RedemptionOut,
-  VideoCreateIn,
-  VideoGenerationOut,
   VideoAssetCreateIn,
   VideoAssetGroupCreateIn,
   VideoAssetGroupPatchIn,
@@ -42,7 +40,6 @@ import type {
   VideoPromptEnhanceIn,
   RecommendedErrorAction,
 } from "./types";
-import { uuid } from "./utils";
 export {
   API_BASE,
   ApiError,
@@ -55,6 +52,11 @@ export * from "./api/tasks";
 export * from "./api/storyboards";
 export * from "./api/workflows";
 export * from "./api/posterWorkflows";
+export {
+  cancelVideoGeneration,
+  createVideoGeneration,
+  retryVideoGeneration,
+} from "./api/videoGenerations";
 export {
   DEFAULT_VIDEO_ASSET_QUOTAS,
   getVideoAsset,
@@ -71,20 +73,6 @@ export type {
 } from "./api/videoAssets";
 
 // —————————————————— 领域接口 ——————————————————
-
-function createIdempotencyKey(): string {
-  if (
-    typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-  ) {
-    try {
-      return crypto.randomUUID();
-    } catch {
-      /* fall back to RFC 4122 v4 helper */
-    }
-  }
-  return uuid();
-}
 
 export interface AuthUser {
   id: string;
@@ -217,7 +205,6 @@ export function signupByok(
 }
 
 export async function logout(): Promise<NoContent> {
-  await invalidateSessionClientState();
   try {
     const result = await apiFetchNoContent("/auth/logout", { method: "POST" });
     notifyAuthSessionChanged();
@@ -229,40 +216,6 @@ export async function logout(): Promise<NoContent> {
 
 export function getMe(): Promise<AuthUser> {
   return apiFetch<AuthUser>("/auth/me");
-}
-
-// —— 视频生成 ——
-
-/**
- * 创建视频生成任务。幂等键按提交操作由调用方显式传入(options.idempotency_key):
- * 歧义失败(网络中断/超时,服务端可能已建任务并预扣)后重提同一操作沿用同一 key,
- * 服务端按 (user, idempotency_key) + request fingerprint 回放已建任务;参数修改后
- * 重提必须换新 key(指纹不同,旧 key 会 409)。调用方见 video-create-idempotency.ts。
- */
-export function createVideoGeneration(
-  body: Omit<VideoCreateIn, "idempotency_key"> & { idempotency_key?: string },
-  options: { idempotency_key?: string } = {},
-): Promise<VideoGenerationOut> {
-  const idempotencyKey =
-    body.idempotency_key ?? options.idempotency_key ?? createIdempotencyKey();
-  return apiFetch<VideoGenerationOut>("/videos/generations", {
-    method: "POST",
-    body: JSON.stringify({ ...body, idempotency_key: idempotencyKey }),
-  });
-}
-
-export function cancelVideoGeneration(id: string): Promise<VideoGenerationOut> {
-  return apiFetch<VideoGenerationOut>(
-    `/videos/generations/${encodeURIComponent(id)}/cancel`,
-    { method: "POST" },
-  );
-}
-
-export function retryVideoGeneration(id: string): Promise<VideoGenerationOut> {
-  return apiFetch<VideoGenerationOut>(
-    `/videos/generations/${encodeURIComponent(id)}/retry`,
-    { method: "POST" },
-  );
 }
 
 export function deleteVideo(id: string): Promise<NoContent> {
@@ -541,10 +494,10 @@ export function createSilentGeneration(
   convId: string,
   body: SilentGenerationIn,
 ): Promise<SilentGenerationOut> {
-  return apiFetch<SilentGenerationOut>(`/conversations/${convId}/generations`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return apiFetch<SilentGenerationOut>(
+    `/conversations/${convId}/generations`,
+    idempotentPostRequest(body),
+  );
 }
 
 export async function enhancePrompt(
@@ -568,17 +521,6 @@ export async function enhanceVideoPrompt(
 // 与后端 Agent B 契约对齐；写操作走 apiFetch 自带的 CSRF；
 // 公共 share endpoint 不发 credentials，直接用 fetch。
 // ——————————————————————————————————————————————————————————————
-
-
-
-export function redeemCode(code: string): Promise<RedemptionOut> {
-  return apiFetch<RedemptionOut>("/me/redemptions", {
-    method: "POST",
-    headers: { "Idempotency-Key": createIdempotencyKey() },
-    body: JSON.stringify({ code }),
-  });
-}
-
 
 
 

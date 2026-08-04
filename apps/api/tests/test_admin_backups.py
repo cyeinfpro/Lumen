@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from app.routes import admin_backups
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_backup_paths_resolve_from_settings_at_call_time(
@@ -78,10 +84,11 @@ def test_try_write_pid_marker_replaces_corrupt_empty_marker(tmp_path: Path) -> N
 
 
 def test_try_write_pid_marker_refuses_live_update_marker(tmp_path: Path) -> None:
+    started_at = datetime.now(timezone.utc)
     update_marker = tmp_path / ".update.running"
     update_marker.write_text(
         "pid=0\n"
-        "started_at=2026-08-02T00:00:00+00:00\n"
+        f"started_at={started_at.isoformat()}\n"
         "unit=lumen-update-runner.service\n",
         encoding="utf-8",
     )
@@ -91,7 +98,7 @@ def test_try_write_pid_marker_refuses_live_update_marker(tmp_path: Path) -> None
         admin_backups._try_write_pid_marker(
             backup_marker,
             12345,
-            datetime(2026, 8, 2, 0, 1, tzinfo=timezone.utc),
+            started_at,
         )
         is False
     )
@@ -466,6 +473,89 @@ async def test_backup_now_reports_skipped_script_as_busy(
     assert getattr(exc_info.value, "status_code", None) == 409
     assert audit_events == ["admin.backup.create.skipped"]
     assert not (backup_root / ".backup.trigger").exists()
+
+
+@pytest.mark.asyncio
+async def test_direct_api_backup_cannot_overlap_host_maintenance_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    deploy_root = tmp_path / "deploy"
+    deploy_root.mkdir()
+    ready = tmp_path / "maintenance-ready"
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(
+        admin_backups.settings,
+        "lumen_scripts_dir",
+        str(REPO_ROOT / "scripts"),
+    )
+    monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: False)
+    monkeypatch.setenv("LUMEN_DEPLOY_ROOT", str(deploy_root))
+    monkeypatch.delenv("LUMEN_BACKUP_FORCE", raising=False)
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **_kwargs) -> None:
+            return None
+
+    async def fake_audit(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
+
+    holder = subprocess.Popen(
+        [
+            "/bin/bash",
+            "-c",
+            """
+            set -euo pipefail
+            . "$1"
+            lumen_acquire_lock "$2" update-holder
+            : > "$3"
+            while :; do sleep 0.1; done
+            """,
+            "api-backup-lock-holder",
+            str(REPO_ROOT / "scripts" / "lib.sh"),
+            str(deploy_root),
+            str(ready),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        env=os.environ.copy(),
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not ready.is_file():
+            time.sleep(0.02)
+        assert ready.is_file()
+        with pytest.raises(Exception) as exc_info:
+            await admin_backups.backup_now(
+                SimpleNamespace(),  # type: ignore[arg-type]
+                SimpleNamespace(  # type: ignore[arg-type]
+                    id="admin-1",
+                    email="admin@example.test",
+                ),
+            )
+    finally:
+        holder.terminate()
+        holder_stdout, holder_stderr = holder.communicate(timeout=5)
+
+    assert holder.returncode in {-15, 143}, holder_stderr + holder_stdout
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert getattr(exc_info.value, "detail", {}).get("error", {}).get("code") == (
+        "backup_skipped"
+    )
+    assert not (backup_root / ".backup.running").exists()
 
 
 @pytest.mark.asyncio

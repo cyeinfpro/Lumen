@@ -2,11 +2,11 @@
 # Blue-green rollback and recovery helpers.
 
 blue_green_restore_blue_traffic() {
-    local blue_health_url="http://127.0.0.1:${_blue_port:-8000}/healthz"
+    local blue_ready_url="${LUMEN_BLUE_GREEN_ROLLBACK_READY_URL:-http://127.0.0.1:${_blue_port:-8000}/readyz}"
     if ! lumen_wait_for_http_ok \
-            "${blue_health_url}" \
+            "${blue_ready_url}" \
             "${LUMEN_BLUE_GREEN_ROLLBACK_HEALTH_TIMEOUT:-60}"; then
-        log_error "[restart_services] blue API 尚未恢复健康，保留 green 承载流量。"
+        log_error "[restart_services] blue API 依赖尚未就绪，保留 green 承载流量。"
         return 1
     fi
     if ! lumen_run_as_root env \

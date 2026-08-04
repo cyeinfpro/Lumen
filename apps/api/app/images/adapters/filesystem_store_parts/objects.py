@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import errno
 import hashlib
 import os
 import stat
@@ -13,18 +15,48 @@ from ..filesystem_staging import ArtifactIdentityMismatch, ArtifactStoreError
 
 
 CHUNK_SIZE = 256 * 1024
+_DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+)
+
+
+def _sync_filesystem(fd: int) -> None:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syncfs = libc.syncfs
+    except (AttributeError, OSError) as exc:
+        raise OSError(
+            errno.ENOTSUP,
+            "syncfs is unavailable for directory durability fallback",
+        ) from exc
+    syncfs.argtypes = [ctypes.c_int]
+    syncfs.restype = ctypes.c_int
+    if syncfs(fd) != 0:
+        code = ctypes.get_errno() or errno.EIO
+        raise OSError(code, os.strerror(code))
 
 
 def fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
+    """Persist prior directory entry changes or fail the owning operation.
+
+    Unsupported directory sync is not a successful compatibility mode: without
+    an equivalent platform guarantee, publication must remain retryable.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
     try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
+                raise
+            _sync_filesystem(fd)
     finally:
         os.close(fd)
 
@@ -72,9 +104,11 @@ class FileSystemObjectsMixin:
         for part in relative.parts:
             current = current / part
             try:
-                current.mkdir(mode=0o700, exist_ok=True)
+                current.mkdir(mode=0o700)
             except FileExistsError:
                 pass
+            else:
+                fsync_directory(current.parent)
             info = current.lstat()
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 raise ArtifactStoreError("artifact parent is not a safe directory")

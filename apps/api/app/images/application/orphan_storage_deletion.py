@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Generic, Protocol, TypeVar
+from typing import AsyncIterator, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +43,28 @@ def _candidate_user_id(storage_key: str) -> str | None:
     return parts[1]
 
 
+@asynccontextmanager
+async def _unfenced_deletion() -> AsyncIterator[None]:
+    yield
+
+
+async def _unlink_before_releasing_fence(
+    unlink_if_unchanged: Callable[[CandidateT], bool],
+    candidate: CandidateT,
+) -> bool:
+    task = asyncio.create_task(asyncio.to_thread(unlink_if_unchanged, candidate))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # Cancelling to_thread does not stop the filesystem call. Drain it so a
+        # candidate-scoped lock is not released while unlink is still running.
+        try:
+            await asyncio.shield(task)
+        except BaseException:  # noqa: BLE001
+            pass
+        raise
+
+
 async def delete_orphan_candidates(
     db: AsyncSession,
     candidates: list[CandidateT],
@@ -55,6 +78,11 @@ async def delete_orphan_candidates(
         Awaitable[set[str]],
     ],
     unlink_if_unchanged: Callable[[CandidateT], bool],
+    deletion_fence: Callable[
+        [CandidateT, float],
+        AbstractAsyncContextManager[None],
+    ]
+    | None = None,
 ) -> OrphanDeletionResult[CandidateT]:
     confirmed: list[CandidateT] = []
     changed: list[str] = []
@@ -107,40 +135,50 @@ async def delete_orphan_candidates(
         if remaining <= 0:
             incomplete = True
             break
-        try:
-            now_known = await asyncio.wait_for(
-                known_storage_keys(db, {candidate.key}),
-                timeout=remaining,
-            )
-        except TimeoutError:
-            incomplete = True
-            break
-        if candidate.key in now_known:
-            continue
-
-        remaining = _remaining_seconds(
-            max_seconds=max_seconds,
-            started=started,
-            monotonic=monotonic,
+        fence = (
+            deletion_fence(candidate, remaining)
+            if deletion_fence is not None
+            else _unfenced_deletion()
         )
-        if remaining <= 0:
-            incomplete = True
-            break
-        if assert_owned is not None:
-            await assert_owned()
-            remaining = _remaining_seconds(
-                max_seconds=max_seconds,
-                started=started,
-                monotonic=monotonic,
-            )
-            if remaining <= 0:
-                incomplete = True
-                break
         try:
-            removed = await asyncio.wait_for(
-                asyncio.to_thread(unlink_if_unchanged, candidate),
-                timeout=remaining,
-            )
+            async with fence:
+                remaining = _remaining_seconds(
+                    max_seconds=max_seconds,
+                    started=started,
+                    monotonic=monotonic,
+                )
+                if remaining <= 0:
+                    incomplete = True
+                    break
+                now_known = await asyncio.wait_for(
+                    known_storage_keys(db, {candidate.key}),
+                    timeout=remaining,
+                )
+                if candidate.key in now_known:
+                    continue
+
+                remaining = _remaining_seconds(
+                    max_seconds=max_seconds,
+                    started=started,
+                    monotonic=monotonic,
+                )
+                if remaining <= 0:
+                    incomplete = True
+                    break
+                if assert_owned is not None:
+                    await assert_owned()
+                    remaining = _remaining_seconds(
+                        max_seconds=max_seconds,
+                        started=started,
+                        monotonic=monotonic,
+                    )
+                    if remaining <= 0:
+                        incomplete = True
+                        break
+                removed = await _unlink_before_releasing_fence(
+                    unlink_if_unchanged,
+                    candidate,
+                )
         except TimeoutError:
             incomplete = True
             break

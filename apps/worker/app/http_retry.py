@@ -35,6 +35,7 @@ class _PostWithRetryArgs(TypedDict):
     files: NotRequired[list[tuple[str, tuple[str, bytes, str]]] | None]
     timeout: NotRequired[httpx.Timeout | None]
     retry_httpx_exceptions: NotRequired[bool]
+    retry_status_codes: NotRequired[bool]
     max_attempts: NotRequired[int]
     backoff_base_s: NotRequired[float]
     before_attempt: NotRequired[Callable[[int], Awaitable[None]] | None]
@@ -52,6 +53,7 @@ class _PostWithRetryRequest:
     files: list[tuple[str, tuple[str, bytes, str]]] | None = None
     timeout: httpx.Timeout | None = None
     retry_httpx_exceptions: bool = True
+    retry_status_codes: bool = True
     max_attempts: int = 2
     backoff_base_s: float = 1.0
     before_attempt: Callable[[int], Awaitable[None]] | None = None
@@ -241,7 +243,7 @@ async def post_with_retry(**kwargs: Unpack[_PostWithRetryArgs]) -> httpx.Respons
                 exc,
             )
             continue
-        if response.status_code in RETRY_STATUS:
+        if request.retry_status_codes and response.status_code in RETRY_STATUS:
             last_resp = response
             logger.warning(
                 "upstream transient status attempt=%d/%d url=%s status=%d",

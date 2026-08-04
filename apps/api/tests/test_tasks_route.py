@@ -45,8 +45,14 @@ class _Result:
 
 
 class _Db:
-    def __init__(self, results: list[_Result]) -> None:
+    def __init__(
+        self,
+        results: list[_Result],
+        *,
+        active_account_mode: str = "wallet",
+    ) -> None:
         self.results = results
+        self.active_account_mode = active_account_mode
         self.statements: list[Any] = []
         self.added: list[Any] = []
         self.committed = False
@@ -54,7 +60,9 @@ class _Db:
     async def execute(self, statement: Any) -> _Result:
         self.statements.append(statement)
         if "from users" in str(statement).lower():
-            return _Result("user-1")
+            active_user = _user()
+            active_user.account_mode = self.active_account_mode
+            return _Result(active_user)
         return self.results.pop(0) if self.results else _Result()
 
     def add(self, value: Any) -> None:
@@ -497,9 +505,7 @@ async def test_list_tasks_does_not_skip_generation_matches_below_page_tail() -> 
         output = await tasks.list_tasks(
             user=_user(),  # type: ignore[arg-type]
             db=db,  # type: ignore[arg-type]
-            query=tasks.TaskListQuery(
-                kind="all", limit=20, source="X", cursor=cursor
-            ),
+            query=tasks.TaskListQuery(kind="all", limit=20, source="X", cursor=cursor),
         )
         collected.extend(item.id for item in output.items)
         cursor = output.next_cursor
@@ -767,8 +773,18 @@ def _seed_derived_task_database(session: AsyncSession) -> None:
     base = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
     specs = [
         ("msg-plain", "conv-1", {}, {"source": "Y"}),  # 显式 source,非派生源
-        ("msg-proj-req", "conv-1", {}, {"workflow_run_id": "proj-1"}),  # project(请求臂)
-        ("msg-proj-msg", "conv-1", {"workflow_run_id": "proj-2"}, {}),  # project(消息臂)
+        (
+            "msg-proj-req",
+            "conv-1",
+            {},
+            {"workflow_run_id": "proj-1"},
+        ),  # project(请求臂)
+        (
+            "msg-proj-msg",
+            "conv-1",
+            {"workflow_run_id": "proj-2"},
+            {},
+        ),  # project(消息臂)
         ("msg-tg", "conv-tg", {}, {}),  # 派生 telegram
         ("msg-chat", "conv-1", {}, {}),  # 派生 chat
         ("msg-explicit-project", "conv-1", {}, {"source": "project"}),  # 显式 project
@@ -1099,6 +1115,9 @@ async def test_retry_generation_requeues_same_row_without_rebuilding_params(
             "upstream_response_received_at": "2026-07-30T00:00:01+00:00",
             "upstream_response_attempt": 2,
             "upstream_response_execution_epoch": 4,
+            "billing_pricing_snapshot": {"tier": "4k", "unit_micro": 500},
+            "billing_admission_billable": True,
+            "billing_admission_ref_id": "gen-1",
         },
     )
     db = _Db([_Result(gen)])
@@ -1638,7 +1657,7 @@ async def test_cancel_queued_generation_skips_wallet_release_for_byok(
         status=GenerationStatus.QUEUED.value,
         finished_at=None,
     )
-    db = _Db([_Result(gen)])
+    db = _Db([_Result(gen)], active_account_mode="byok")
 
     out = await tasks.cancel_generation(
         "gen-1",
@@ -1813,7 +1832,7 @@ async def test_cancel_queued_completion_skips_wallet_release_for_byok(
         progress_stage=CompletionStage.QUEUED.value,
         finished_at=None,
     )
-    db = _Db([_Result(comp)])
+    db = _Db([_Result(comp)], active_account_mode="byok")
 
     async def release_queued_task_hold(*_args: Any, **_kwargs: Any) -> bool:
         released.append("called")
@@ -1919,6 +1938,9 @@ async def test_retry_completion_records_new_billing_retry_count(
             "provider": "provider-old",
             "context": {"compressed": True},
             "memory": {"used_memory_ids": ["memory-old"]},
+            "billing_pricing_snapshot": {"model": "old-model"},
+            "billing_admission_billable": True,
+            "billing_admission_ref_id": "comp-1",
         },
     )
     db = _Db([_Result(comp)])

@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, AsyncContextManager, Iterable
 
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +18,7 @@ from ..domain.artifact import (
     ArtifactStatus,
     ensure_artifact_transition,
 )
+from .sqlalchemy_reconcile_cleanup import reconcile_publish_cleanup_guard
 
 
 class ArtifactCommitError(RuntimeError):
@@ -861,6 +862,18 @@ class SQLAlchemyImageRepository:
                 return False
             await session.commit()
             return True
+
+    def guard_reconcile_publish_cleanup(
+        self,
+        image_id: str,
+        *,
+        stale_fence: int,
+    ) -> AsyncContextManager[bool]:
+        return reconcile_publish_cleanup_guard(
+            self.session_factory,
+            image_id,
+            stale_fence=stale_fence,
+        )
 
     async def list_reconcile_candidates(
         self,

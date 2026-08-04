@@ -126,6 +126,48 @@ async def test_newer_reconcile_fence_blocks_stale_transition() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_publish_cleanup_guard_rechecks_current_database_owner() -> None:
+    async with _repository() as (repository, factory):
+        image = await _insert_image(
+            factory,
+            image_id="image-publish-cleanup",
+            status=ArtifactStatus.PUBLISHING,
+        )
+
+        assert await repository.claim_reconcile(
+            image.id,
+            expected_status=ArtifactStatus.PUBLISHING,
+            expected_updated_at=image.updated_at,
+            fence=51,
+        )
+        async with repository.guard_reconcile_publish_cleanup(
+            image.id,
+            stale_fence=51,
+        ) as can_delete:
+            assert can_delete
+
+        assert await repository.claim_reconcile(
+            image.id,
+            expected_status=ArtifactStatus.PUBLISHING,
+            expected_updated_at=image.updated_at,
+            fence=52,
+        )
+        await repository.transition(
+            image.id,
+            expected=[ArtifactStatus.PUBLISHING],
+            target=ArtifactStatus.READY,
+            values={"ready_at": _NOW},
+            reconcile_fence=52,
+        )
+
+        async with repository.guard_reconcile_publish_cleanup(
+            image.id,
+            stale_fence=51,
+        ) as can_delete:
+            assert not can_delete
+
+
+@pytest.mark.asyncio
 async def test_unfenced_writes_cannot_cross_active_reconcile_claim() -> None:
     async with _repository() as (repository, factory):
         image = await _insert_image(

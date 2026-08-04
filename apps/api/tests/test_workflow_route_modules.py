@@ -248,6 +248,9 @@ def test_extracted_routes_preserve_order_signatures_and_openapi_operations() -> 
         else:
             assert route_parameters[0] == "application"
             route_parameters = route_parameters[1:]
+        route_parameters = tuple(
+            name for name in route_parameters if name != "idempotency_key"
+        )
         assert route_parameters == tuple(
             name for name in operation_parameters if name != "runtime"
         )

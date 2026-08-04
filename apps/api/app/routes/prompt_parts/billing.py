@@ -61,13 +61,15 @@ async def prepare_prompt_enhance_billing(
     user: Any,
     *,
     runtime: BillingRuntime,
+    request_id: str | None = None,
+    commit: bool = True,
 ) -> EnhanceBillingContext | None:
     if getattr(user, "account_mode", "wallet") != "wallet":
         return None
     if not await runtime.billing_enabled(db):
         return None
 
-    request_id = runtime.new_id()
+    billing_request_id = request_id or runtime.new_id()
     rate_multiplier = runtime.rate_multiplier_x10000(user)
     cache_aware = await runtime.billing_cache_aware(db)
     allow_negative = await runtime.billing_allow_negative(db)
@@ -119,8 +121,8 @@ async def prepare_prompt_enhance_billing(
                 user.id,
                 hold_amount,
                 ref_type="prompt_enhance",
-                ref_id=request_id,
-                idempotency_key=f"prompt_enhance:hold:{request_id}",
+                ref_id=billing_request_id,
+                idempotency_key=f"prompt_enhance:hold:{billing_request_id}",
                 allow_negative=allow_negative,
                 meta={
                     "route": "prompts.enhance",
@@ -130,6 +132,8 @@ async def prepare_prompt_enhance_billing(
                     "preauth_micro": hold_amount,
                     "pricing_snapshots": pricing_snapshots,
                     "rate_multiplier_x10000": rate_multiplier,
+                    "cache_aware": cache_aware,
+                    "allow_negative": allow_negative,
                 },
             )
         except billing_core.BillingError as exc:
@@ -137,13 +141,14 @@ async def prepare_prompt_enhance_billing(
                 status_code=exc.status_code,
                 detail={"error": {"code": exc.code, "message": exc.message}},
             ) from exc
-        await db.commit()
-        await runtime.invalidate_balance_cache(user.id)
+        if commit:
+            await db.commit()
+            await runtime.invalidate_balance_cache(user.id)
     return EnhanceBillingContext(
         db=db,
         user_id=user.id,
         user_email=getattr(user, "email", None),
-        request_id=request_id,
+        request_id=billing_request_id,
         rate_multiplier_x10000=rate_multiplier,
         cache_aware=cache_aware,
         allow_negative=allow_negative,
@@ -414,6 +419,22 @@ async def _audit_charge(
 ) -> None:
     if transaction is None:
         return
+    transaction_id = getattr(transaction, "id", None)
+    if transaction_id is not None:
+        existing = (
+            await billing.db.execute(
+                select(AuditLog.id)
+                .where(
+                    AuditLog.event_type == "wallet.charge.completion",
+                    AuditLog.user_id == billing.user_id,
+                    AuditLog.details["billing_tx_id"].as_string()
+                    == str(transaction_id),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
     await _write_required_audit(
         billing,
         runtime=runtime,
@@ -427,6 +448,7 @@ async def _audit_charge(
             "usage": usage.model_dump(),
             "cost_breakdown": breakdown.model_dump(),
             "service_tier": capture.service_tier,
+            "billing_tx_id": transaction_id,
             "amount_micro": transaction.amount_micro,
             "balance_after": transaction.balance_after,
         },
@@ -495,28 +517,26 @@ async def charge_prompt_enhance(
     capture: EnhanceUsageCapture,
     *,
     runtime: BillingRuntime,
-) -> None:
+) -> bool:
     if not capture.usage:
         # 内容已完整交付、上游必然已计费,只是拿不到用量:不得 fail-open 释放,
         # 按 hold 默认金额结算(纯转嫁:上游扣费用户必付)。
-        await settle_prompt_enhance_default_hold(
+        return await settle_prompt_enhance_default_hold(
             billing,
             reason="missing_usage",
             runtime=runtime,
         )
-        return
     model = capture.model or runtime.attempts[0].model
     usage = _normalize_usage_for_billing(
         parse_usage(model, capture.usage),
         cache_aware=billing.cache_aware,
     )
     if _usage_is_empty(usage):
-        await settle_prompt_enhance_default_hold(
+        return await settle_prompt_enhance_default_hold(
             billing,
             reason="zero_usage",
             runtime=runtime,
         )
-        return
     breakdown = await _resolve_breakdown(
         billing,
         capture,
@@ -525,7 +545,7 @@ async def charge_prompt_enhance(
         runtime=runtime,
     )
     response_id = capture.response_id or billing.request_id
-    ref_id = billing.request_id if billing.hold_amount_micro > 0 else response_id
+    ref_id = billing.request_id
     cost, breakdown = _effective_cost(billing, breakdown)
     await _audit_fallback_pricing(
         billing,
@@ -563,6 +583,7 @@ async def charge_prompt_enhance(
     await billing.db.commit()
     if transaction is not None:
         await runtime.invalidate_balance_cache(billing.user_id)
+    return True
 
 
 async def settle_prompt_enhance_default_hold(
@@ -570,7 +591,7 @@ async def settle_prompt_enhance_default_hold(
     *,
     reason: str,
     runtime: BillingRuntime,
-) -> None:
+) -> bool:
     """按 hold 默认金额结算「上游成本已发生但真实用量不可知」的路径。
 
     纯转嫁铁律与 lumen_core.upstream_billing 决策表(仅 PROVEN_ABSENT 才
@@ -579,7 +600,7 @@ async def settle_prompt_enhance_default_hold(
     吸收上游成本;真实成本差额交给对账。hold <= 0(零费率)时无成本可记。
     """
     if billing is None or billing.hold_amount_micro <= 0:
-        return
+        return True
     # 结算尝试标记:链外孤儿兜底释放据此跳过(见 EnhanceSettleOutcome)。
     billing.settle_outcome.attempted = True
     for attempt in range(1, _DEFAULT_SETTLE_ATTEMPTS + 1):
@@ -605,7 +626,7 @@ async def settle_prompt_enhance_default_hold(
             )
             await billing.db.commit()
             await runtime.invalidate_balance_cache(billing.user_id)
-            return
+            return True
         except Exception:  # noqa: BLE001
             rollback = getattr(billing.db, "rollback", None)
             if callable(rollback):
@@ -626,7 +647,7 @@ async def settle_prompt_enhance_default_hold(
                     billing.hold_amount_micro,
                     attempt,
                 )
-                return
+                return False
             runtime.logger.warning(
                 "prompt enhance billing default settle retry "
                 "request_id=%s attempt=%d/%d",
@@ -637,6 +658,7 @@ async def settle_prompt_enhance_default_hold(
             await asyncio.sleep(
                 _DEFAULT_SETTLE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
             )
+    return False
 
 
 async def release_prompt_enhance_hold(
@@ -644,19 +666,43 @@ async def release_prompt_enhance_hold(
     *,
     reason: str,
     runtime: BillingRuntime,
-) -> None:
+) -> bool:
     if billing is None or billing.hold_amount_micro <= 0:
-        return
-    try:
-        await billing_core.release(
-            billing.db,
-            billing.user_id,
-            ref_type="prompt_enhance",
-            ref_id=billing.request_id,
-            idempotency_key=f"prompt_enhance:release:{billing.request_id}:{reason}",
-            meta={"route": "prompts.enhance", "reason": reason},
-        )
-        await billing.db.commit()
-        await runtime.invalidate_balance_cache(billing.user_id)
-    except Exception:
-        runtime.logger.exception("prompt enhance billing hold release failed")
+        return True
+    for attempt in range(1, _DEFAULT_SETTLE_ATTEMPTS + 1):
+        try:
+            await billing_core.release(
+                billing.db,
+                billing.user_id,
+                ref_type="prompt_enhance",
+                ref_id=billing.request_id,
+                idempotency_key=(
+                    f"prompt_enhance:release:{billing.request_id}:{reason}"
+                ),
+                meta={"route": "prompts.enhance", "reason": reason},
+            )
+            await billing.db.commit()
+            await runtime.invalidate_balance_cache(billing.user_id)
+            return True
+        except Exception:  # noqa: BLE001
+            rollback = getattr(billing.db, "rollback", None)
+            if callable(rollback):
+                try:
+                    await rollback()
+                except Exception:  # noqa: BLE001
+                    runtime.logger.exception(
+                        "prompt enhance hold release rollback failed request_id=%s",
+                        billing.request_id,
+                    )
+            if attempt >= _DEFAULT_SETTLE_ATTEMPTS:
+                runtime.logger.exception(
+                    "prompt enhance billing hold release failed request_id=%s "
+                    "attempts=%d",
+                    billing.request_id,
+                    attempt,
+                )
+                return False
+            await asyncio.sleep(
+                _DEFAULT_SETTLE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            )
+    return False

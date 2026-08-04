@@ -17,12 +17,21 @@ from app.provider_runtime.errors import UpstreamError
 from app.reconciliation import task_domains
 from app.tasks.completion_parts import failure_settlement
 from app.tasks.completion_parts import runner as completion_runner
+from app.tasks.completion_parts import tool_images
 from app.tasks.completion_parts.execution import CompletionRequest
 from app.tasks.generation_parts import lease as generation_lease
 from app.tasks.generation_parts import retry_state
 from app.tasks.generation_parts import runner_claim_phase
 from app.tasks.generation_parts import runner_dispatch_phase
 from lumen_core.models import Completion
+from lumen_core.upstream_billing import (
+    LocalBillingAction,
+    decide_dispatch_evidence_billing,
+    mark_upstream_dispatch_proven_no_cost,
+    mark_upstream_dispatch_proven_undelivered,
+    mark_upstream_dispatch_started,
+    mark_upstream_response_received,
+)
 
 
 def test_generation_old_worker_cas_rejects_new_execution_epoch() -> None:
@@ -333,8 +342,13 @@ async def test_completion_lease_owner_is_rebound_to_execution_epoch() -> None:
 async def test_generation_dispatch_without_response_becomes_result_unknown() -> None:
     state = SimpleNamespace(
         generation=SimpleNamespace(execution_epoch=3),
-        gen_upstream_request_snapshot={},
+        gen_upstream_request_snapshot={
+            "upstream_dispatch_started_at": "2026-08-03T00:00:00+00:00",
+            "upstream_dispatch_attempt": 1,
+            "upstream_dispatch_execution_epoch": 3,
+        },
         attempt=1,
+        image_iter=object(),
     )
 
     with pytest.raises(UpstreamError) as exc_info:
@@ -346,6 +360,104 @@ async def test_generation_dispatch_without_response_becomes_result_unknown() -> 
     assert exc_info.value.error_code == "image_job_result_unknown"
     assert exc_info.value.payload["execution_epoch"] == 3
     assert exc_info.value.payload["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_generation_explicit_error_response_requires_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[tuple[bool, bool, bool]] = []
+    state = SimpleNamespace(
+        generation=SimpleNamespace(execution_epoch=3),
+        gen_upstream_request_snapshot={
+            "upstream_dispatch_started_at": "2026-08-03T00:00:00+00:00",
+            "upstream_dispatch_attempt": 1,
+            "upstream_dispatch_execution_epoch": 3,
+        },
+        attempt=1,
+        image_iter=object(),
+    )
+
+    async def record_marker(
+        _state: object,
+        *,
+        response_received: bool,
+        proven_undelivered: bool = False,
+        proven_no_cost: bool = False,
+    ) -> None:
+        markers.append((response_received, proven_undelivered, proven_no_cost))
+
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "record_generation_upstream_marker",
+        record_marker,
+    )
+
+    await runner_dispatch_phase._raise_dispatch_failure(  # noqa: SLF001
+        state,
+        UpstreamError(
+            "provider rejected request",
+            status_code=503,
+            error_code="provider_error",
+        ),
+    )
+
+    assert markers == [(True, False, False)]
+
+
+@pytest.mark.asyncio
+async def test_generation_direct_result_unknown_does_not_overwrite_response_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[tuple[bool, bool, bool]] = []
+    response_at = "2026-08-03T00:00:01+00:00"
+    state = SimpleNamespace(
+        generation=SimpleNamespace(execution_epoch=3),
+        gen_upstream_request_snapshot={
+            "upstream_dispatch_started_at": "2026-08-03T00:00:00+00:00",
+            "upstream_dispatch_attempt": 1,
+            "upstream_dispatch_execution_epoch": 3,
+            "upstream_response_received_at": response_at,
+            "upstream_response_attempt": 1,
+            "upstream_response_execution_epoch": 3,
+        },
+        attempt=1,
+        image_iter=object(),
+    )
+
+    async def record_marker(
+        _state: object,
+        *,
+        response_received: bool,
+        proven_undelivered: bool = False,
+        proven_no_cost: bool = False,
+    ) -> None:
+        markers.append((response_received, proven_undelivered, proven_no_cost))
+
+    monkeypatch.setattr(
+        runner_dispatch_phase,
+        "record_generation_upstream_marker",
+        record_marker,
+    )
+
+    await runner_dispatch_phase._raise_dispatch_failure(  # noqa: SLF001
+        state,
+        UpstreamError(
+            "successful response contained invalid JSON",
+            status_code=200,
+            error_code="direct_image_result_unknown",
+            payload={
+                "upstream_result_unknown": True,
+                "response_received": True,
+            },
+        ),
+    )
+
+    assert markers == []
+    assert state.gen_upstream_request_snapshot["upstream_response_received_at"] == (
+        response_at
+    )
+    assert "upstream_dispatch_delivery" not in state.gen_upstream_request_snapshot
 
 
 class _CompletionEpochSuperseded(RuntimeError):
@@ -414,6 +526,42 @@ async def test_completion_marker_cas_includes_execution_epoch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completion_response_marker_is_not_blocked_by_cancel_intent() -> None:
+    statements: list[Any] = []
+    state = SimpleNamespace(
+        request=SimpleNamespace(task_id="comp-1"),
+        preparation=SimpleNamespace(
+            attempt=1,
+            queue_metadata_payload={"execution_epoch": 9},
+        ),
+        ports=SimpleNamespace(
+            persistence=SimpleNamespace(
+                SessionLocal=lambda: _MarkerSession(statements),
+                select=sa.select,
+                Completion=Completion,
+            ),
+            retry=SimpleNamespace(
+                _CompletionEpochSuperseded=_CompletionEpochSuperseded,
+            ),
+        ),
+    )
+
+    with pytest.raises(_CompletionEpochSuperseded):
+        await completion_runner.record_completion_upstream_marker(
+            state,
+            response_received=True,
+        )
+
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "completions.cancel_requested_at IS NULL" not in sql
+
+
+@pytest.mark.asyncio
 async def test_completion_dispatch_without_response_becomes_result_unknown() -> None:
     state = SimpleNamespace(
         usage=SimpleNamespace(response_receipt_recorded=False),
@@ -434,6 +582,243 @@ async def test_completion_dispatch_without_response_becomes_result_unknown() -> 
 
 
 @pytest.mark.asyncio
+async def test_completion_local_proxy_failure_precedes_dispatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[tuple[bool, bool]] = []
+
+    async def stream_completion(
+        *_args: object,
+        **_kwargs: object,
+    ) -> Any:
+        yield {
+            "type": "provider_used",
+            "provider": "test-provider",
+        }
+        raise RuntimeError("local SSH proxy initialization failed")
+
+    async def iter_stream_with_abort(stream: Any, **_kwargs: object) -> Any:
+        async for event in stream:
+            yield event
+
+    async def record_marker(
+        _state: object,
+        *,
+        response_received: bool,
+        proven_undelivered: bool = False,
+    ) -> None:
+        markers.append((response_received, proven_undelivered))
+
+    monkeypatch.setattr(
+        completion_runner,
+        "record_completion_upstream_marker",
+        record_marker,
+    )
+
+    async def ensure_current(_state: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        completion_runner,
+        "_ensure_completion_execution_current",
+        ensure_current,
+    )
+    state = SimpleNamespace(
+        request=SimpleNamespace(task_id="comp-1"),
+        preparation=SimpleNamespace(
+            attempt=1,
+            queue_metadata_payload={},
+            runtime_override=None,
+            fast_mode=False,
+        ),
+        settlement=SimpleNamespace(
+            cancel_requested=asyncio.Event(),
+            lease_lost=asyncio.Event(),
+        ),
+        streaming=SimpleNamespace(tool_idle_timeout_s=30.0),
+        usage=SimpleNamespace(
+            dispatch_started_recorded=False,
+            response_receipt_recorded=False,
+            active_round_dispatch_started=False,
+            active_round_response_received=False,
+            active_round_dispatch_proven_undelivered=False,
+            upstream_provider_event=None,
+            tool_tracker=object(),
+        ),
+        ports=SimpleNamespace(
+            upstream=SimpleNamespace(
+                stream_completion=stream_completion,
+                _completion_upstream_provider_event=lambda _event: None,
+            ),
+            retry=SimpleNamespace(
+                _iter_completion_stream_with_abort=iter_stream_with_abort,
+                _CompletionEpochSuperseded=_CompletionEpochSuperseded,
+                _TaskCancelled=_TaskCancelled,
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="local SSH proxy initialization failed",
+    ):
+        await completion_runner._consume_round(  # noqa: SLF001
+            state,
+            {},
+            phase="primary",
+            allow_tool_limit=True,
+            track_tool_calls=True,
+            append_completed_text=False,
+            finalize_tools=False,
+        )
+
+    assert markers == []
+    assert state.usage.active_round_dispatch_started is False
+
+
+@pytest.mark.asyncio
+async def test_completion_provider_used_then_cancel_before_dispatch_releases_without_input_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[bool] = []
+
+    async def stream_completion(
+        *_args: object,
+        **_kwargs: object,
+    ) -> Any:
+        yield {
+            "type": "provider_used",
+            "provider": "test-provider",
+        }
+        raise _TaskCancelled("cancelled before upstream dispatch")
+
+    async def iter_stream_with_abort(stream: Any, **_kwargs: object) -> Any:
+        async for event in stream:
+            yield event
+
+    async def record_marker(
+        _state: object,
+        *,
+        response_received: bool,
+        **_kwargs: object,
+    ) -> None:
+        markers.append(response_received)
+
+    async def record_provider_metadata(**_kwargs: object) -> None:
+        return None
+
+    async def ensure_current(_state: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        completion_runner,
+        "record_completion_upstream_marker",
+        record_marker,
+    )
+    monkeypatch.setattr(
+        completion_runner,
+        "_ensure_completion_execution_current",
+        ensure_current,
+    )
+
+    completion_row = SimpleNamespace(
+        execution_epoch=7,
+        upstream_request={},
+    )
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return completion_row
+
+    usage_totals = tool_images._CompletionUsageAccumulator()  # noqa: SLF001
+    usage_totals.start_round(input_fallback_tokens=37)
+    state = SimpleNamespace(
+        request=SimpleNamespace(task_id="comp-1"),
+        preparation=SimpleNamespace(
+            attempt=1,
+            attempt_epoch=1,
+            queue_metadata_payload={"execution_epoch": 7},
+            runtime_override=None,
+            fast_mode=False,
+        ),
+        settlement=SimpleNamespace(
+            cancel_requested=asyncio.Event(),
+            lease_lost=asyncio.Event(),
+        ),
+        streaming=SimpleNamespace(
+            tool_idle_timeout_s=30.0,
+            has_partial=False,
+            tool_images=[],
+        ),
+        usage=SimpleNamespace(
+            request_sent=False,
+            usage_totals=usage_totals,
+            dispatch_started_recorded=False,
+            response_receipt_recorded=False,
+            active_round_dispatch_started=False,
+            active_round_response_received=False,
+            active_round_dispatch_proven_undelivered=False,
+            upstream_provider_event=None,
+            tool_tracker=object(),
+        ),
+        ports=SimpleNamespace(
+            upstream=SimpleNamespace(
+                stream_completion=stream_completion,
+                _completion_upstream_provider_event=lambda event: {
+                    "provider": str(event["provider"])
+                },
+                _record_completion_upstream_metadata=record_provider_metadata,
+            ),
+            retry=SimpleNamespace(
+                _iter_completion_stream_with_abort=iter_stream_with_abort,
+                _CompletionEpochSuperseded=_CompletionEpochSuperseded,
+                _TaskCancelled=_TaskCancelled,
+            ),
+            persistence=SimpleNamespace(
+                SessionLocal=Session,
+                Completion=Completion,
+            ),
+        ),
+    )
+
+    with pytest.raises(_TaskCancelled):
+        await completion_runner._consume_round(  # noqa: SLF001
+            state,
+            {},
+            phase="primary",
+            allow_tool_limit=True,
+            track_tool_calls=True,
+            append_completed_text=False,
+            finalize_tools=False,
+        )
+
+    usage_totals.finish_round()
+
+    assert markers == []
+    assert state.usage.request_sent is False
+    assert state.usage.active_round_dispatch_started is False
+    assert usage_totals.tokens_in == 0
+    assert (
+        await task_domains.completion_cancel_requires_unknown_settlement(state)
+        is False
+    )
+    assert (
+        decide_dispatch_evidence_billing(
+            completion_row,
+            actual_cost_known=False,
+            execution_epoch=7,
+        ).action
+        is LocalBillingAction.RELEASE
+    )
+
+
+@pytest.mark.asyncio
 async def test_completion_connect_error_before_receipt_is_proven_undelivered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -446,6 +831,56 @@ async def test_completion_connect_error_before_receipt_is_proven_undelivered(
         proven_undelivered: bool = False,
     ) -> None:
         markers.append((response_received, proven_undelivered))
+
+    monkeypatch.setattr(
+        task_domains,
+        "record_completion_upstream_marker",
+        record_marker,
+    )
+    usage_totals = tool_images._CompletionUsageAccumulator()  # noqa: SLF001
+    usage_totals.start_round(input_fallback_tokens=41)
+    usage_totals.mark_round_dispatched()
+    state = SimpleNamespace(
+        usage=SimpleNamespace(
+            response_receipt_recorded=False,
+            active_round_dispatch_proven_undelivered=False,
+            usage_totals=usage_totals,
+        ),
+        preparation=SimpleNamespace(queue_metadata_payload={}),
+        ports=SimpleNamespace(
+            retry=SimpleNamespace(
+                _CompletionEpochSuperseded=_CompletionEpochSuperseded,
+                _TaskCancelled=_TaskCancelled,
+            )
+        ),
+    )
+
+    await task_domains.raise_completion_dispatch_failure(
+        state,
+        httpx.ConnectError("connection failed before request delivery"),
+    )
+    usage_totals.finish_round()
+
+    assert state.usage.response_receipt_recorded is False
+    assert state.usage.active_round_dispatch_proven_undelivered is True
+    assert usage_totals.tokens_in == 0
+    assert markers == [(False, True)]
+
+
+@pytest.mark.asyncio
+async def test_completion_explicit_error_response_requires_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markers: list[tuple[bool, bool, bool]] = []
+
+    async def record_marker(
+        _state: object,
+        *,
+        response_received: bool,
+        proven_undelivered: bool = False,
+        proven_no_cost: bool = False,
+    ) -> None:
+        markers.append((response_received, proven_undelivered, proven_no_cost))
 
     monkeypatch.setattr(
         task_domains,
@@ -468,12 +903,17 @@ async def test_completion_connect_error_before_receipt_is_proven_undelivered(
 
     await task_domains.raise_completion_dispatch_failure(
         state,
-        httpx.ConnectError("connection failed before request delivery"),
+        UpstreamError(
+            "provider rejected request",
+            status_code=503,
+            error_code="provider_error",
+        ),
     )
 
-    assert state.usage.response_receipt_recorded is False
-    assert state.usage.active_round_dispatch_proven_undelivered is True
-    assert markers == [(False, True)]
+    assert state.usage.response_receipt_recorded is True
+    assert state.usage.active_round_response_received is True
+    assert state.usage.active_round_dispatch_proven_undelivered is False
+    assert markers == [(True, False, False)]
 
 
 @pytest.mark.asyncio
@@ -496,6 +936,7 @@ async def test_completion_provider_used_then_pre_delta_interruption_settles_unkn
             "provider": "provider-a",
             "route": "responses",
         }
+        await _kwargs["on_dispatch_ready"]()  # type: ignore[operator]
         raise httpx.ReadTimeout("SSE disconnected before first delta")
 
     async def iter_stream_with_abort(stream: Any, **_kwargs: object) -> Any:
@@ -607,6 +1048,7 @@ async def test_completion_tool_limit_fallback_cancel_after_primary_response_sett
             "provider": "provider-b",
             "route": "responses",
         }
+        await _kwargs["on_dispatch_ready"]()  # type: ignore[operator]
         raise _TaskCancelled("cancelled during fallback")
 
     async def iter_stream_with_abort(stream: Any, **_kwargs: object) -> Any:
@@ -765,25 +1207,102 @@ async def test_completion_tool_limit_fallback_cancel_after_primary_response_sett
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("response_received", "proven_undelivered"),
-    [(True, False), (False, True)],
+    ("upstream_request", "usage_value", "expected"),
+    [
+        ({}, 0, False),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=7,
+            ),
+            0,
+            True,
+        ),
+        (
+            mark_upstream_response_received(
+                {},
+                at="2026-08-03T00:00:01+00:00",
+                attempt=1,
+                execution_epoch=7,
+            ),
+            0,
+            True,
+        ),
+        (
+            mark_upstream_dispatch_proven_undelivered(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=7,
+            ),
+            0,
+            False,
+        ),
+        (
+            mark_upstream_dispatch_proven_no_cost(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=7,
+            ),
+            0,
+            False,
+        ),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=7,
+            ),
+            3,
+            False,
+        ),
+    ],
 )
-async def test_completion_cancel_active_round_with_known_outcome_is_not_unknown(
-    response_received: bool,
-    proven_undelivered: bool,
+async def test_completion_cancel_uses_durable_dispatch_evidence(
+    upstream_request: dict[str, object],
+    usage_value: int,
+    expected: bool,
 ) -> None:
+    completion_row = SimpleNamespace(
+        execution_epoch=7,
+        upstream_request=upstream_request,
+    )
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, _model: Any, _task_id: str) -> Any:
+            return completion_row
+
     state = SimpleNamespace(
+        request=SimpleNamespace(task_id="comp-1"),
+        preparation=SimpleNamespace(
+            queue_metadata_payload={"execution_epoch": 7},
+        ),
+        streaming=SimpleNamespace(has_partial=False, tool_images=[]),
         usage=SimpleNamespace(
-            response_receipt_recorded=True,
-            active_round_dispatch_started=True,
-            active_round_response_received=response_received,
-            active_round_dispatch_proven_undelivered=proven_undelivered,
-        )
+            request_sent=False,
+            usage_totals=SimpleNamespace(values=lambda: (usage_value,)),
+        ),
+        ports=SimpleNamespace(
+            persistence=SimpleNamespace(
+                SessionLocal=Session,
+                Completion=Completion,
+            )
+        ),
     )
 
     assert (
         await task_domains.completion_cancel_requires_unknown_settlement(state)
-    ) is False
+    ) is expected
 
 
 @pytest.mark.asyncio

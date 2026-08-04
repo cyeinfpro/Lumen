@@ -109,6 +109,7 @@ async def test_direct_edit_image_once_includes_mask_field(
         headers: dict[str, str],
         timeout_s: float,
         proxy_url: str | None = None,
+        **_kwargs: Any,
     ) -> tuple[int, dict[str, Any]]:
         captured["files"] = files
         captured["data"] = data
@@ -181,6 +182,7 @@ async def test_direct_edit_image_once_omits_mask_when_none(
         headers: dict[str, str],
         timeout_s: float,
         proxy_url: str | None = None,
+        **_kwargs: Any,
     ) -> tuple[int, dict[str, Any]]:
         captured["files"] = files
         return 200, {"data": [{"b64_json": "aGVsbG8="}]}  # noqa: S105

@@ -237,7 +237,8 @@ async def test_get_client_lru_evicts_proxied_clients(
     assert second.closed is True
     assert len(TEST_UPSTREAM_SERVICES.core.proxied_clients) == 2
     assert [
-        client.proxy_url for client in TEST_UPSTREAM_SERVICES.core.proxied_clients.values()
+        client.proxy_url
+        for client in TEST_UPSTREAM_SERVICES.core.proxied_clients.values()
     ] == [
         "http://proxy-1",
         "http://proxy-3",
@@ -281,7 +282,9 @@ async def test_get_images_client_lru_evicts_proxied_clients(
         fake_resolve_timeout_config,
     )
     monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.lifecycle, "build_images_client", fake_build_images_client
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "build_images_client",
+        fake_build_images_client,
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.core, "proxied_images_clients", OrderedDict()
@@ -401,6 +404,49 @@ async def test_iter_sse_with_runtime_closes_response_on_http_error(
 
     assert exc_info.value.error_code == "stream_interrupted"
     assert fake_response.aclose_called is True
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_records_response_only_after_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class OrderedResponse(_FakeStreamResponse):
+        async def __aenter__(self) -> OrderedResponse:
+            order.append("send")
+            return self
+
+    class OrderedClient(_FakeClient):
+        def stream(self, method: str, url: str, **kwargs: Any) -> Any:
+            order.append("request_built")
+            return super().stream(method, url, **kwargs)
+
+    async def dispatch_ready() -> None:
+        order.append("dispatch_ready")
+
+    async def response_ready() -> None:
+        order.append("response_ready")
+
+    response = OrderedResponse(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        sse_lines=[],
+    )
+    client = OrderedClient(response)
+    _patch_client(monkeypatch, client)
+
+    assert [
+        event
+        async for event in TEST_UPSTREAM_SERVICES.responses.iter_sse_with_runtime(
+            base="https://upstream.example/v1",
+            api_key="test-key",
+            body=_valid_body(),
+            on_dispatch_ready=dispatch_ready,
+            on_response_ready=response_ready,
+        )
+    ] == []
+    assert order == ["request_built", "dispatch_ready", "send", "response_ready"]
 
 
 @pytest.mark.asyncio

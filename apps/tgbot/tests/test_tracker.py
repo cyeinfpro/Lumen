@@ -216,6 +216,7 @@ async def test_add_stores_empty_message_id_for_pending_bonus() -> None:
         {
             "mapping": {
                 "chat_id": "123",
+                "tg_user_id": "",
                 "user_id": "user-1",
                 "status_message_id": "",
                 "prompt": "p",
@@ -225,6 +226,27 @@ async def test_add_stores_empty_message_id_for_pending_bonus() -> None:
             }
         },
     ) in redis.pipe.calls
+
+
+@pytest.mark.asyncio
+async def test_tracker_preserves_group_chat_actor_identity() -> None:
+    redis = FakeRedis(
+        {
+            b"user_id": b"user-1",
+            b"chat_id": b"-100123",
+            b"tg_user_id": b"42",
+            b"status_message_id": b"456",
+        }
+    )
+    tr = tracker_mod.Tracker()
+    tr._redis = redis  # type: ignore[assignment]
+
+    result = await tr.get("gen-group")
+
+    assert result is not None
+    assert result.chat_id == -100123
+    assert result.tg_user_id == 42
+    assert redis.deleted == []
 
 
 @pytest.mark.asyncio
@@ -330,7 +352,8 @@ async def test_retry_marker_roundtrip_with_long_ttl() -> None:
     assert await tr.retry_source_new_gen("redo", 42, "gen-src") == "gen-new"
     assert await tr.retry_source_new_gen("retry", 42, "gen-src") is None
     assert await tr.retry_source_new_gen("redo", 7, "gen-src") is None
-    assert redis.set_ex[
-        f"{tracker_mod._RETRY_SOURCE_PREFIX}redo:42:gen-src"
-    ] == tracker_mod._RETRY_SOURCE_TTL_SECONDS
+    assert (
+        redis.set_ex[f"{tracker_mod._RETRY_SOURCE_PREFIX}redo:42:gen-src"]
+        == tracker_mod._RETRY_SOURCE_TTL_SECONDS
+    )
     assert tracker_mod._RETRY_SOURCE_TTL_SECONDS > tracker_mod.TRACK_RETENTION_SECONDS

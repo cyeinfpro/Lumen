@@ -18,7 +18,7 @@ from lumen_core.schemas import (
     PostMessageOut,
 )
 
-from .active_user import lock_active_user
+from .active_user import lock_active_user_snapshot
 
 
 AsyncCallable = Callable[..., Awaitable[Any]]
@@ -75,6 +75,8 @@ class PersistMessageRequestCommand:
     request_metadata: dict[str, Any]
     account_mode: str
     now: datetime
+    idempotency_operation: str
+    request_fingerprint: str
     session_id: str | None = None
 
 
@@ -263,14 +265,14 @@ async def persist_message_request(
     reembed_ids: list[str] = []
     try:
         # Hold the identity fence across every message/task/outbox/hold write.
-        if command.session_id:
-            await lock_active_user(
-                db,
-                user.id,
-                session_id=command.session_id,
-            )
-        else:
-            await lock_active_user(db, user.id)
+        snapshot = await lock_active_user_snapshot(
+            db,
+            user.id,
+            command.account_mode,
+            session_id=command.session_id,
+        )
+        user = snapshot.user
+        locked_account_mode = snapshot.account_mode
         conversation = (
             await db.execute(
                 select(Conversation)
@@ -302,7 +304,7 @@ async def persist_message_request(
             db=db,
             user_id=user.id,
             user_email=user.email,
-            account_mode=command.account_mode,
+            account_mode=locked_account_mode,
             conv=conversation,
             user_msg=user_message,
             intent=intent,
@@ -339,6 +341,8 @@ async def persist_message_request(
             user.id,
             command.conversation_id,
             body.idempotency_key,
+            operation_namespace=command.idempotency_operation,
+            request_fingerprint=command.request_fingerprint,
         )
         if prior is not None:
             return MessageTransactionResult(prior, None, None, [])

@@ -9,21 +9,8 @@ DB 中只持久化 SUPPORTED_SETTINGS 列表里的 key；其它 key 视为非法
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class SettingSpec:
-    key: str
-    description: str
-    sensitive: bool
-    parser: type
-    env_fallback: str
-    # 可选数值范围（仅对 int/float 生效）；None 表示不限制。
-    min_value: int | float | None = None
-    max_value: int | float | None = None
-    # 可选字符串枚举；None 表示不限制。
-    allowed_values: tuple[str, ...] | None = None
+from .runtime_setting_telegram_specs import TELEGRAM_PROXY_ENDPOINT_SETTINGS
+from .runtime_setting_types import SettingSpec
 
 
 SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
@@ -393,7 +380,7 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         key="billing.enabled",
-        description="计费总开关。0=免费路径，1=启用钱包扣费。",
+        description="计费准入开关。0=新任务免费；1=新任务扣费；既有义务仍会结算或释放。",
         sensitive=False,
         parser=int,
         env_fallback="BILLING_ENABLED",
@@ -909,6 +896,7 @@ SUPPORTED_SETTINGS: tuple[SettingSpec, ...] = (
         env_fallback="TELEGRAM_PROXY_STRATEGY",
         allowed_values=("random", "latency", "failover", "round_robin"),
     ),
+    *TELEGRAM_PROXY_ENDPOINT_SETTINGS,
     # ----- 存储后端（/opt/lumendata 挂载来源） -----
     SettingSpec(
         key="storage.backend",

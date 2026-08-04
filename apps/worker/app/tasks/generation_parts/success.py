@@ -37,6 +37,9 @@ from ...upstream_parts import (
     materialize_generated_payload,
 )
 from .active_user_fence import lock_active_generation_user
+from .batch_results import finalize_batch_extra_images
+from .bonus_context import build_bonus_context
+from .bonus_obligation import ensure_dual_race_bonus_obligation
 from .diagnostics import (
     build_generation_diagnostics,
     image_effective_params_snapshot,
@@ -48,7 +51,6 @@ from .event_delivery import stage_generation_success_event
 from .image_artifact_contracts import sha256
 from .lifecycle import raise_if_generation_interrupted
 from .persistence import (
-    BonusGenerationContext,
     compact_image_payload_meta,
     ensure_generation_conversation_alive,
     handle_dual_race_bonus_image,
@@ -70,10 +72,10 @@ from .retry_state import (
 )
 from .run_state import GenerationRunState
 from .services import RunGenerationDeps
+from . import takeover_checkpoint
 
 # Keep the old private seam available to focused tests and extensions.
 _run_post_commit_workflow_tagging = run_workflow_tagging
-
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +138,17 @@ async def finalize_generation_success(
     g: RunGenerationDeps,
 ) -> None:
     await _validate_result_and_publish_finalizing(state, g)
+    bonus_pair = (
+        await _next_bonus_pair(state, g)
+        if state.is_dual_race and state.image_iter is not None
+        else None
+    )
+    await ensure_dual_race_bonus_obligation(state)
     artifact = await _postprocess_generated_image(state, g)
+    await finalize_batch_extra_images(
+        state,
+        artifact.actual_image_count,
+    )
     created_storage_keys = await _write_artifact_files(state, artifact, g)
     await _persist_generation_success(
         state,
@@ -144,11 +156,11 @@ async def finalize_generation_success(
         created_storage_keys,
         g,
     )
+    await takeover_checkpoint.cleanup_consumed_checkpoint(state, g.artifacts)
     state.task_outcome = "succeeded"
     await run_workflow_tagging(state, artifact.image_id, g)
-    await _finalize_batch_extra_images(state, artifact.actual_image_count, g)
     await enqueue_auto_title(state)
-    await _finalize_dual_race_bonus(state, g)
+    await _finalize_dual_race_bonus(state, g, bonus_pair)
 
 
 async def _validate_result_and_publish_finalizing(
@@ -322,7 +334,10 @@ def _build_artifact(
         orig_mime=orig_mime,
         width=processed.width,
         height=processed.height,
-        actual_image_count=1 + len(state.batch_extra_pairs),
+        actual_image_count=(
+            takeover_checkpoint.generation_takeover_result_count(state)
+            or 1 + len(state.batch_extra_pairs)
+        ),
         blurhash=processed.blurhash,
         display_bytes=processed.display.bytes,
         display_size=processed.display.size,
@@ -525,11 +540,7 @@ async def _persist_generation_success(
                 raise ArtifactCommitNotAdopted(
                     f"generation artifact commit was not adopted task={state.task_id} "
                     f"epoch={generation_execution_epoch(state)} attempt={state.attempt}"
-                    + (
-                        f" cause={commit_error}"
-                        if commit_error is not None
-                        else ""
-                    ),
+                    + (f" cause={commit_error}" if commit_error is not None else ""),
                     error_code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
                     commit_error=commit_error,
                 ) from commit_error
@@ -651,6 +662,7 @@ def _success_upstream_request(
         else {}
     )
     upstream_request.update(state.image_request_options)
+    takeover_checkpoint.consume_checkpoint(state, upstream_request)
     upstream_request.update(
         {
             "trace_id": state.trace_id,
@@ -843,66 +855,35 @@ def _stage_success_event(
     )
 
 
-async def _finalize_batch_extra_images(
-    state: GenerationRunState,
-    actual_image_count: int,
-    g: RunGenerationDeps,
-) -> None:
-    for batch_index, (extra_b64, extra_revised) in state.batch_extra_pairs:
-        try:
-            await handle_dual_race_bonus_image(
-                replace(
-                    _bonus_context(state, extra_b64, extra_revised),
-                    upstream_provider=state.actual_upstream_provider,
-                    upstream_actual_route=state.actual_upstream_route,
-                    upstream_actual_source=state.actual_upstream_source,
-                    upstream_actual_endpoint=state.actual_upstream_endpoint,
-                    billing_meta={
-                        "billing_free": False,
-                        "billing_label": "billable",
-                        "billing_policy": "batch_extra_settled_separately",
-                    },
-                    idempotency_suffix=f":n{batch_index}",
-                    extra_upstream_fields={
-                        "batch_parent_generation_id": state.task_id,
-                        "batch_index": batch_index,
-                        "batch_count": actual_image_count,
-                    },
-                    record_model_library_candidate=False,
-                    settle_billing=True,
-                    log_label="image2 n result",
-                )
-            )
-        except (LeaseLost, TaskCancelled, asyncio.CancelledError):
-            logger.info(
-                "image2 n result finalize aborted by cancel/lease task=%s index=%s",
-                state.task_id,
-                batch_index,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "image2 n result finalize unexpected error task=%s index=%s err=%r",
-                state.task_id,
-                batch_index,
-                exc,
-            )
-
-
 async def _finalize_dual_race_bonus(
     state: GenerationRunState,
     g: RunGenerationDeps,
+    bonus_pair: GeneratedImageResult | None,
 ) -> None:
-    if state.image_iter is None:
+    if not state.is_dual_race:
         return
-    bonus_pair = await _next_bonus_pair(state, g)
+    await ensure_dual_race_bonus_obligation(state)
     if bonus_pair is None:
+        if state.dual_race_bonus_obligation_id is not None:
+            logger.info(
+                "dual_race bonus artifact unavailable; durable obligation remains "
+                "for reconciliation task=%s bonus=%s",
+                state.task_id,
+                state.dual_race_bonus_obligation_id,
+            )
         return
     bonus_b64, bonus_revised = bonus_pair
+    if state.dual_race_bonus_obligation_id is None:
+        logger.error(
+            "dual_race bonus artifact refused without durable obligation task=%s",
+            state.task_id,
+        )
+        return
     provider_event = state.progress_publisher.pop_provider_used_event()
     try:
-        await handle_dual_race_bonus_image(
+        persisted = await handle_dual_race_bonus_image(
             replace(
-                _bonus_context(state, bonus_b64, bonus_revised),
+                build_bonus_context(state, bonus_b64, bonus_revised),
                 upstream_provider=provider_event.get("provider"),
                 upstream_actual_route=provider_event.get("route"),
                 upstream_actual_source=provider_event.get("source"),
@@ -910,15 +891,24 @@ async def _finalize_dual_race_bonus(
                 settle_billing=True,
             )
         )
+        if not persisted:
+            logger.warning(
+                "dual_race bonus artifact not committed; durable obligation remains "
+                "for reconciliation task=%s bonus=%s",
+                state.task_id,
+                state.dual_race_bonus_obligation_id,
+            )
     except (LeaseLost, TaskCancelled, asyncio.CancelledError):
         logger.info(
-            "dual_race bonus finalize aborted by cancel/lease task=%s",
+            "dual_race bonus finalize aborted by cancel/lease task=%s bonus=%s",
             state.task_id,
+            state.dual_race_bonus_obligation_id,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "dual_race bonus finalize unexpected error task=%s err=%r",
+            "dual_race bonus finalize unexpected error task=%s bonus=%s err=%r",
             state.task_id,
+            state.dual_race_bonus_obligation_id,
             exc,
         )
 
@@ -951,47 +941,4 @@ async def _next_bonus_pair(
             state.task_id,
             exc,
         )
-        return None
-
-
-def _bonus_context(
-    state: GenerationRunState,
-    b64_result: GeneratedPayloadInput,
-    revised_prompt: str | None,
-) -> BonusGenerationContext:
-    return BonusGenerationContext(
-        services=state.services,
-        redis=state.redis,
-        user_id=state.user_id,
-        channel=state.channel,
-        parent_task_id=state.task_id,
-        execution_epoch=generation_execution_epoch(state),
-        attempt=state.attempt,
-        parent_idempotency_key=state.gen_idempotency_key,
-        parent_upstream_request=(
-            state.parent_upstream_request_for_bonus
-            or state.gen_upstream_request_snapshot
-        ),
-        message_id=state.message_id,
-        action=str(state.action),
-        model=state.gen_model,
-        prompt=state.prompt,
-        size_requested=state.size_requested,
-        aspect_ratio=state.aspect_ratio,
-        input_image_ids=state.input_image_ids,
-        primary_input_image_id=state.primary_input_image_id,
-        references=state.references,
-        image_request_options=state.image_request_options,
-        b64_result=b64_result,
-        revised_prompt=revised_prompt,
-        upstream_provider=None,
-        upstream_actual_route=None,
-        upstream_actual_source=None,
-        upstream_actual_endpoint=None,
-        billing_meta=None,
-        idempotency_suffix=":b",
-        extra_upstream_fields=None,
-        record_model_library_candidate=True,
-        settle_billing=False,
-        log_label="dual_race bonus",
-    )
+        raise

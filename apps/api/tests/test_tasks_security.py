@@ -65,7 +65,9 @@ async def test_retry_generation_locks_row_and_clears_cancel_key(
         async def execute(self, statement: Any) -> _One:
             self.statements.append(statement)
             if "from users" in str(statement).lower():
-                return _One("user-1")
+                return _One(
+                    SimpleNamespace(id="user-1", account_mode="wallet")
+                )
             return _One(gen)
 
         def add(self, row: Any) -> None:
@@ -127,7 +129,11 @@ async def test_cancel_running_generation_commits_intent_before_notification(
     order: list[str] = []
 
     class Db:
-        async def execute(self, _statement: Any) -> _One:
+        async def execute(self, statement: Any) -> _One:
+            if "from users" in str(statement).lower():
+                return _One(
+                    SimpleNamespace(id="user-1", account_mode="wallet")
+                )
             return _One(gen)
 
         async def commit(self) -> None:

@@ -7,6 +7,7 @@ import type {
   AttachmentImage,
   AssistantMessage,
   Generation,
+  Intent,
   UserMessage,
 } from "@/lib/types";
 import {
@@ -15,6 +16,11 @@ import {
   createSilentGeneration,
   retryTask,
 } from "@/lib/apiClient";
+import {
+  idempotentPostRequest,
+  semanticPostIdempotency,
+  type SemanticIdempotencyLease,
+} from "@/lib/api/semanticIdempotency";
 import { uploadImage as apiUploadImage } from "@/lib/api/images";
 import { adaptBackendAssistantMessage } from "./messageAdapters";
 import {
@@ -54,6 +60,12 @@ import {
   _generationConvIds,
   _messageConvIds,
 } from "./runtime";
+import {
+  createGenerationRequestFence,
+  generationRequestIsCurrent,
+  markGenerationRequestSubmitted,
+  type GenerationRequestFence,
+} from "./generationRequestFence";
 
 // 重试在途去重：retryAssistant / retryGeneration 是前端全部「重试」入口的唯一漏斗
 // （GlobalTaskTray、桌面/移动画布的重试按钮均未绑定 disabled）。双击或连点会并发触发
@@ -74,17 +86,135 @@ type GenerationActionDependencies = {
   runtimeFastDefault: () => boolean | null;
 };
 
+type SilentGenerationPayload = Omit<
+  Parameters<typeof createSilentGeneration>[1],
+  "idempotency_key"
+>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function validateSilentGenerationOutput(
+  value: Awaited<ReturnType<typeof createSilentGeneration>>,
+): void {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.assistant_message) ||
+    typeof value.assistant_message.id !== "string" ||
+    value.assistant_message.id.trim().length === 0 ||
+    !Array.isArray(value.generation_ids) ||
+    value.generation_ids.length === 0 ||
+    value.generation_ids.some(
+      (generationId) =>
+        typeof generationId !== "string" ||
+        generationId.trim().length === 0,
+    )
+  ) {
+    throw new TypeError("malformed silent generation response");
+  }
+}
+
+type RegenerateOutput = {
+  assistant_message_id: string;
+  completion_id: string | null;
+  generation_ids: string[];
+};
+
+async function prepareSemanticSubmission(
+  lease: SemanticIdempotencyLease,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  if (!isCurrent()) {
+    await semanticPostIdempotency.discard(lease);
+    return false;
+  }
+  await semanticPostIdempotency.markSubmitted(lease);
+  if (isCurrent()) return true;
+  await semanticPostIdempotency.discard(lease);
+  return false;
+}
+
+function validateRegenerateOutput(
+  value: RegenerateOutput,
+  intent: Exclude<Intent, "auto">,
+): void {
+  const imageIntent = isImageIntent(intent);
+  if (
+    !isRecord(value) ||
+    typeof value.assistant_message_id !== "string" ||
+    value.assistant_message_id.trim().length === 0 ||
+    !(
+      value.completion_id === null ||
+      (typeof value.completion_id === "string" &&
+        value.completion_id.trim().length > 0)
+    ) ||
+    !Array.isArray(value.generation_ids) ||
+    value.generation_ids.some(
+      (generationId) =>
+        typeof generationId !== "string" ||
+        generationId.trim().length === 0,
+    ) ||
+    (imageIntent && value.generation_ids.length === 0) ||
+    (!imageIntent &&
+      (typeof value.completion_id !== "string" ||
+        value.completion_id.trim().length === 0))
+  ) {
+    throw new TypeError("malformed regenerate response");
+  }
+}
+
+async function createSemanticSilentGeneration(
+  request: GenerationRequestFence,
+  operation: "upscale" | "reroll",
+  targetImageId: string,
+  fallbackIntent: Parameters<typeof adaptBackendAssistantMessage>[2],
+  payload: SilentGenerationPayload,
+  isCurrent: () => boolean,
+) {
+  const idempotency = await semanticPostIdempotency.acquire(
+    {
+      operation: `conversation.generation.${operation}`,
+      userId: request.userId,
+      conversationId: request.convId,
+      targetImageId,
+    },
+    payload,
+  );
+  if (!(await prepareSemanticSubmission(idempotency, isCurrent))) return null;
+  markGenerationRequestSubmitted(request);
+  try {
+    const output = await createSilentGeneration(request.convId, {
+      ...payload,
+      idempotency_key: idempotency.key,
+    });
+    validateSilentGenerationOutput(output);
+    const generationIds = output.generation_ids;
+    const assistant = adaptBackendAssistantMessage(
+      output.assistant_message,
+      payload.parent_message_id,
+      fallbackIntent,
+      generationIds,
+      undefined,
+    );
+    await semanticPostIdempotency.confirm(idempotency);
+    return { assistant, generationIds };
+  } catch (err) {
+    await semanticPostIdempotency.recordFailure(idempotency, err);
+    throw err;
+  }
+}
+
 async function _runUpscale(
   set: ChatStateSetter,
   get: ChatStateGetter,
   dependencies: GenerationActionDependencies,
   imageId: string,
+  request: GenerationRequestFence,
 ): Promise<void> {
   // upscaleImage 的主体（不含在途去重锁），拆出以控制函数复杂度预算。
   const state = get();
-  const convId = state.currentConvId;
-  if (!convId) return;
-  const mutationFence = _conversationMutationFence.snapshot();
+  const { convId } = request;
   const img = state.imagesById[imageId];
   if (!img) return;
   const gen = generationForImage(state, img);
@@ -124,8 +254,7 @@ async function _runUpscale(
   );
   if (!parentMsgId) return;
 
-  const out = await createSilentGeneration(convId, {
-    idempotency_key: uuid(),
+  const payload: SilentGenerationPayload = {
     parent_message_id: parentMsgId,
     intent: "image_to_image",
     prompt: upscaleText,
@@ -141,25 +270,19 @@ async function _runUpscale(
       background: "auto",
       moderation: "low",
     },
-  });
-  if (
-    !isConversationMutationCurrent(
-      get().currentConvId,
-      convId,
-      mutationFence,
-    )
-  ) {
-    return;
-  }
-
-  const genIds = out.generation_ids ?? [];
-  const realAssistant = adaptBackendAssistantMessage(
-    out.assistant_message,
-    parentMsgId,
+  };
+  const submission = await createSemanticSilentGeneration(
+    request,
+    "upscale",
+    imageId,
     "image_to_image",
-    genIds,
-    undefined,
+    payload,
+    () => generationRequestIsCurrent(get, request),
   );
+  if (!submission) return;
+  if (!generationRequestIsCurrent(get, request)) return;
+
+  const { assistant: realAssistant, generationIds: genIds } = submission;
   setBounded(_messageConvIds, realAssistant.id, convId);
   for (const gid of genIds) setBounded(_generationConvIds, gid, convId);
 
@@ -360,6 +483,7 @@ export function createGenerationActions(
       // /regenerate，每次都创建新的计费任务并取消旧任务。请求完成（含失败）后释放锁。
       if (_regenerateInFlight.has(messageId)) return;
       _regenerateInFlight.add(messageId);
+      let releaseRequest = () => {};
       try {
         const state = get();
         const convId = state.currentConvId;
@@ -370,7 +494,9 @@ export function createGenerationActions(
             status: 0,
           });
         }
-        const mutationFence = _conversationMutationFence.snapshot();
+        const userId = state.currentUserId;
+        const activeRequest = createGenerationRequestFence(convId, userId);
+        releaseRequest = activeRequest.release;
         const asstIdx = state.messages.findIndex(
           (m) => m.role === "assistant" && m.id === messageId,
         );
@@ -393,6 +519,23 @@ export function createGenerationActions(
         const oldGenId = oldAsst.generation_id;
         const oldGen = oldGenId ? state.generations[oldGenId] : undefined;
 
+        const payload = { intent: newIntent };
+        const idempotency = await semanticPostIdempotency.acquire(
+          {
+            operation: "conversation.message.regenerate",
+            userId,
+            conversationId: convId,
+            messageId,
+          },
+          payload,
+        );
+        if (
+          !(await prepareSemanticSubmission(idempotency, () =>
+            generationRequestIsCurrent(get, activeRequest),
+          ))
+        ) {
+          return;
+        }
         // 1) 乐观从 messages 中移除旧 assistant；保存快照用于回滚。
         // 同时失效会话历史缓存：否则切走切回会短暂恢复出已被移除的旧助手消息
         // （旧 generation 也已本地标 canceled，缓存快照仍是旧状态）。
@@ -402,26 +545,19 @@ export function createGenerationActions(
             (m) => !(m.role === "assistant" && m.id === messageId),
           ),
         }));
-
         try {
-          const out = await apiFetch<{
-            assistant_message_id: string;
-            completion_id: string | null;
-            generation_ids: string[];
-          }>(`/conversations/${convId}/messages/${messageId}/regenerate`, {
-            method: "POST",
-            body: JSON.stringify({
-              intent: newIntent,
-              idempotency_key: uuid(),
-            }),
-          });
-          if (
-            !isConversationMutationCurrent(
-              get().currentConvId,
-              convId,
-              mutationFence,
-            )
-          ) {
+          const body = {
+            ...payload,
+            idempotency_key: idempotency.key,
+          };
+          markGenerationRequestSubmitted(activeRequest);
+          const out = await apiFetch<RegenerateOutput>(
+            `/conversations/${convId}/messages/${messageId}/regenerate`,
+            idempotentPostRequest(body),
+          );
+          validateRegenerateOutput(out, newIntent);
+          await semanticPostIdempotency.confirm(idempotency);
+          if (!generationRequestIsCurrent(get, activeRequest)) {
             return;
           }
 
@@ -484,13 +620,8 @@ export function createGenerationActions(
             return { messages: nextMessages, generations: nextGens };
           });
         } catch (err) {
-          if (
-            !isConversationMutationCurrent(
-              get().currentConvId,
-              convId,
-              mutationFence,
-            )
-          ) {
+          await semanticPostIdempotency.recordFailure(idempotency, err);
+          if (!generationRequestIsCurrent(get, activeRequest)) {
             return;
           }
           // 回滚：把旧 assistant 放回原位置
@@ -507,6 +638,7 @@ export function createGenerationActions(
           throw err;
         }
       } finally {
+        releaseRequest();
         _regenerateInFlight.delete(messageId);
       }
     },
@@ -516,9 +648,18 @@ export function createGenerationActions(
       // 任务（每次 4k 放大都会计费）。请求完成（含失败）后释放锁。
       if (_upscaleInFlight.has(imageId)) return;
       _upscaleInFlight.add(imageId);
+      let releaseRequest = () => {};
       try {
-        await _runUpscale(set, get, dependencies, imageId);
+        const state = get();
+        if (!state.currentConvId) return;
+        const request = createGenerationRequestFence(
+          state.currentConvId,
+          state.currentUserId,
+        );
+        releaseRequest = request.release;
+        await _runUpscale(set, get, dependencies, imageId, request);
       } finally {
+        releaseRequest();
         _upscaleInFlight.delete(imageId);
       }
     },
@@ -528,11 +669,16 @@ export function createGenerationActions(
       // 生成任务（每次都会计费）。请求完成（含失败）后释放锁。
       if (_rerollInFlight.has(imageId)) return;
       _rerollInFlight.add(imageId);
+      let releaseRequest = () => {};
       try {
         const state = get();
         const convId = state.currentConvId;
         if (!convId) return;
-        const mutationFence = _conversationMutationFence.snapshot();
+        const activeRequest = createGenerationRequestFence(
+          convId,
+          state.currentUserId,
+        );
+        releaseRequest = activeRequest.release;
         const img = state.imagesById[imageId];
         if (!img) return;
         const genId = img.from_generation_id;
@@ -551,8 +697,7 @@ export function createGenerationActions(
           gen.aspect_ratio,
         );
 
-        const out = await createSilentGeneration(convId, {
-          idempotency_key: uuid(),
+        const payload: SilentGenerationPayload = {
           parent_message_id: parentMsgId,
           intent,
           prompt: clampPromptForRequest(gen.prompt),
@@ -570,25 +715,19 @@ export function createGenerationActions(
             background: "auto",
             moderation: "low",
           },
-        });
-        if (
-          !isConversationMutationCurrent(
-            get().currentConvId,
-            convId,
-            mutationFence,
-          )
-        ) {
-          return;
-        }
-
-        const genIds = out.generation_ids ?? [];
-        const realAssistant = adaptBackendAssistantMessage(
-          out.assistant_message,
-          parentMsgId,
+        };
+        const submission = await createSemanticSilentGeneration(
+          activeRequest,
+          "reroll",
+          imageId,
           intent,
-          genIds,
-          undefined,
+          payload,
+          () => generationRequestIsCurrent(get, activeRequest),
         );
+        if (!submission) return;
+        if (!generationRequestIsCurrent(get, activeRequest)) return;
+
+        const { assistant: realAssistant, generationIds: genIds } = submission;
         setBounded(_messageConvIds, realAssistant.id, convId);
         for (const gid of genIds) setBounded(_generationConvIds, gid, convId);
 
@@ -617,6 +756,7 @@ export function createGenerationActions(
           generations: { ...s.generations, ...optimisticGens },
         }));
       } finally {
+        releaseRequest();
         _rerollInFlight.delete(imageId);
       }
     },

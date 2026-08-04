@@ -98,21 +98,46 @@ lumen_release_owned_lock_dir() {
 lumen_release_lock() {
     case "${LUMEN_LOCK_KIND:-}" in
         flock)
+            flock -u 6 2>/dev/null || true
+            exec 6>&- 2>/dev/null || true
             flock -u 9 2>/dev/null || true
             exec 9>&- 2>/dev/null || true
             ;;
+        borrowed)
+            ;;
         mkdir)
-            if [ -n "${LUMEN_LOCK_PATH:-}" ]; then
+            if [ -n "${LUMEN_LOCK_LOCAL_PATH:-}" ]; then
                 if ! lumen_release_owned_lock_dir \
-                        "${LUMEN_LOCK_PATH}" "${LUMEN_LOCK_OWNER_TOKEN:-}"; then
-                    log_warn "维护锁 owner 已变化，拒绝删除：${LUMEN_LOCK_PATH}"
+                        "${LUMEN_LOCK_LOCAL_PATH}" \
+                        "${LUMEN_LOCK_OWNER_TOKEN:-}"; then
+                    log_warn "root-local maintenance 锁 owner 已变化，拒绝删除：${LUMEN_LOCK_LOCAL_PATH}"
+                fi
+            fi
+            if [ -n "${LUMEN_LOCK_ANCHOR_PATH:-}" ]; then
+                if ! lumen_release_owned_lock_dir \
+                        "${LUMEN_LOCK_ANCHOR_PATH}" \
+                        "${LUMEN_LOCK_ANCHOR_OWNER_TOKEN:-}"; then
+                    log_warn "parent-anchor maintenance 锁 owner 已变化，拒绝删除：${LUMEN_LOCK_ANCHOR_PATH}"
                 fi
             fi
             ;;
     esac
     LUMEN_LOCK_KIND=""
     LUMEN_LOCK_PATH=""
+    LUMEN_LOCK_LOCAL_PATH=""
+    LUMEN_LOCK_ANCHOR_PATH=""
     LUMEN_LOCK_OWNER_TOKEN=""
+    LUMEN_LOCK_OWNER_CAPABILITY=""
+    LUMEN_LOCK_ANCHOR_OWNER_TOKEN=""
+    LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY=""
+    LUMEN_LOCK_ROOT=""
+    LUMEN_LOCK_ROOT_PARENT_PATH=""
+    LUMEN_LOCK_ROOT_NAME=""
+    LUMEN_LOCK_ROOT_PARENT_DEV=""
+    LUMEN_LOCK_ROOT_PARENT_INO=""
+    LUMEN_LOCK_ROOT_DEV=""
+    LUMEN_LOCK_ROOT_INO=""
+    LUMEN_LOCK_ROOT_ANCHOR_KEY=""
 }
 
 lumen_lock_dir_stale() {
@@ -160,6 +185,9 @@ lumen_write_lock_owner() {
     local owner_id="${owner_dir##*/}"
     local owner_tmp="${owner_dir}/.owner.$$"
     local start_token=""
+    local capability_pair=""
+    local capability=""
+    local capability_sha256=""
     case "${label_key}" in
         ''|*[!A-Za-z0-9_]*) return 1 ;;
     esac
@@ -167,12 +195,24 @@ lumen_write_lock_owner() {
         *$'\n'*|*$'\r'*) return 1 ;;
     esac
     start_token="$(lumen_pid_start_token "$$")" || return 1
+    capability_pair="$(
+        python3 - <<'PY'
+import hashlib
+import secrets
+
+secret = secrets.token_hex(32)
+print(f"{secret}\t{hashlib.sha256(secret.encode('ascii')).hexdigest()}")
+PY
+    )" || return 1
+    IFS=$'\t' read -r capability capability_sha256 <<< "${capability_pair}"
+    [ -n "${capability}" ] && [ -n "${capability_sha256}" ] || return 1
     if ! (
         umask 077
         {
             printf 'pid=%s\n' "$$"
             printf 'start_token=%s\n' "${start_token}"
             printf 'owner_id=%s\n' "${owner_id}"
+            printf 'capability_sha256=%s\n' "${capability_sha256}"
             printf '%s=%s\n' "${label_key}" "${label_value}"
             printf 'started_at=%s\n' "$(date -u +%FT%TZ 2>/dev/null || date)"
         } > "${owner_tmp}"
@@ -181,6 +221,56 @@ lumen_write_lock_owner() {
         return 1
     fi
     LUMEN_LAST_LOCK_OWNER_TOKEN="${owner_id}"
+    LUMEN_LAST_LOCK_OWNER_CAPABILITY="${capability}"
+}
+
+lumen_write_flock_lock_owner() {
+    local fd="$1"
+    local script_name="$2"
+    local start_token=""
+    local capability_pair=""
+    local capability=""
+    local capability_sha256=""
+    start_token="$(lumen_pid_start_token "$$")" || return 1
+    capability_pair="$(
+        python3 - <<'PY'
+import hashlib
+import secrets
+
+secret = secrets.token_hex(32)
+print(f"{secret}\t{hashlib.sha256(secret.encode('ascii')).hexdigest()}")
+PY
+    )" || return 1
+    IFS=$'\t' read -r capability capability_sha256 <<< "${capability_pair}"
+    [ -n "${capability}" ] && [ -n "${capability_sha256}" ] || return 1
+    python3 - "${fd}" "$$" "${start_token}" "${script_name}" \
+            "${capability_sha256}" <<'PY' || return 1
+import os
+import stat
+import sys
+
+fd = int(sys.argv[1])
+metadata = os.fstat(fd)
+if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    raise SystemExit(1)
+mode = stat.S_IMODE(metadata.st_mode)
+if mode & stat.S_IWOTH or not mode & (stat.S_IWUSR | stat.S_IWGRP):
+    raise SystemExit(1)
+payload = (
+    f"pid={sys.argv[2]}\n"
+    f"start_token={sys.argv[3]}\n"
+    "owner_id=flock\n"
+    f"capability_sha256={sys.argv[5]}\n"
+    f"script={sys.argv[4]}\n"
+).encode("ascii")
+os.ftruncate(fd, 0)
+os.lseek(fd, 0, os.SEEK_SET)
+os.write(fd, payload)
+os.fsync(fd)
+PY
+    LUMEN_LOCK_OWNER_TOKEN="flock"
+    LUMEN_LOCK_OWNER_CAPABILITY="${capability}"
+    return 0
 }
 
 lumen_try_create_owned_lock_dir() {
@@ -190,6 +280,7 @@ lumen_try_create_owned_lock_dir() {
     local owner_dir=""
     local owner_pid=""
     LUMEN_LAST_LOCK_OWNER_TOKEN=""
+    LUMEN_LAST_LOCK_OWNER_CAPABILITY=""
     # shellcheck disable=SC2034  # Public status consumed by backup/restore callers.
     LUMEN_LAST_LOCK_RECLAIMED=0
     LUMEN_LAST_LOCK_STALE=0
@@ -242,6 +333,672 @@ lumen_lock_dir_owned_by_current_process() {
     [ "${owner_id}" = "${expected_owner_id}" ] || return 1
     current_token="$(lumen_pid_start_token "$$" 2>/dev/null)" || return 1
     [ "${current_token}" = "${owner_token}" ]
+}
+
+lumen_pid_is_ancestor() {
+    local ancestor="$1"
+    local descendant="$2"
+    local parent=""
+    case "${ancestor}:${descendant}" in
+        *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    while [ "${descendant}" -gt 1 ] 2>/dev/null; do
+        [ "${descendant}" = "${ancestor}" ] && return 0
+        parent="$(
+            ps -o ppid= -p "${descendant}" 2>/dev/null \
+                | tr -d '[:space:]'
+        )"
+        case "${parent}" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "${parent}" = "${descendant}" ] && return 1
+        descendant="${parent}"
+    done
+    [ "${descendant}" = "${ancestor}" ]
+}
+
+lumen_capture_maintenance_root_binding() {
+    local root="$1"
+    local binding=""
+    binding="$(
+        python3 - "${root}" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+raw = sys.argv[1]
+if (
+    not raw.startswith("/")
+    or raw == "/"
+    or any(ord(character) < 32 for character in raw)
+):
+    raise SystemExit(1)
+root = os.path.normpath(raw)
+parent = os.path.dirname(root)
+name = os.path.basename(root)
+if not name or name in {".", ".."}:
+    raise SystemExit(1)
+flags = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+parent_before = os.stat(parent, follow_symlinks=False)
+if not stat.S_ISDIR(parent_before.st_mode):
+    raise SystemExit(1)
+parent_fd = os.open(parent, flags)
+try:
+    parent_opened = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(parent_opened.st_mode)
+        or (parent_before.st_dev, parent_before.st_ino)
+        != (parent_opened.st_dev, parent_opened.st_ino)
+    ):
+        raise SystemExit(1)
+    root_before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(root_before.st_mode):
+        raise SystemExit(1)
+    root_fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        root_opened = os.fstat(root_fd)
+        root_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        parent_after = os.stat(parent, follow_symlinks=False)
+        if (
+            (root_before.st_dev, root_before.st_ino)
+            != (root_opened.st_dev, root_opened.st_ino)
+            or (root_before.st_dev, root_before.st_ino)
+            != (root_after.st_dev, root_after.st_ino)
+            or (parent_before.st_dev, parent_before.st_ino)
+            != (parent_after.st_dev, parent_after.st_ino)
+        ):
+            raise SystemExit(1)
+    finally:
+        os.close(root_fd)
+finally:
+    os.close(parent_fd)
+anchor_key = hashlib.sha256(root.encode("utf-8")).hexdigest()[:32]
+print(
+    "\t".join(
+        (
+            parent,
+            name,
+            str(parent_before.st_dev),
+            str(parent_before.st_ino),
+            str(root_before.st_dev),
+            str(root_before.st_ino),
+            anchor_key,
+        )
+    )
+)
+PY
+    )" || return 1
+    IFS=$'\t' read -r \
+        LUMEN_CAPTURED_ROOT_PARENT_PATH \
+        LUMEN_CAPTURED_ROOT_NAME \
+        LUMEN_CAPTURED_ROOT_PARENT_DEV \
+        LUMEN_CAPTURED_ROOT_PARENT_INO \
+        LUMEN_CAPTURED_ROOT_DEV \
+        LUMEN_CAPTURED_ROOT_INO \
+        LUMEN_CAPTURED_ROOT_ANCHOR_KEY <<< "${binding}"
+    [ -n "${LUMEN_CAPTURED_ROOT_PARENT_PATH:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_NAME:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_PARENT_DEV:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_PARENT_INO:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_DEV:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_INO:-}" ] \
+        && [ -n "${LUMEN_CAPTURED_ROOT_ANCHOR_KEY:-}" ]
+}
+
+lumen_set_maintenance_root_binding() {
+    local root="$1"
+    lumen_capture_maintenance_root_binding "${root}" || return 1
+    LUMEN_LOCK_ROOT="${root}"
+    LUMEN_LOCK_ROOT_PARENT_PATH="${LUMEN_CAPTURED_ROOT_PARENT_PATH}"
+    LUMEN_LOCK_ROOT_NAME="${LUMEN_CAPTURED_ROOT_NAME}"
+    LUMEN_LOCK_ROOT_PARENT_DEV="${LUMEN_CAPTURED_ROOT_PARENT_DEV}"
+    LUMEN_LOCK_ROOT_PARENT_INO="${LUMEN_CAPTURED_ROOT_PARENT_INO}"
+    LUMEN_LOCK_ROOT_DEV="${LUMEN_CAPTURED_ROOT_DEV}"
+    LUMEN_LOCK_ROOT_INO="${LUMEN_CAPTURED_ROOT_INO}"
+    LUMEN_LOCK_ROOT_ANCHOR_KEY="${LUMEN_CAPTURED_ROOT_ANCHOR_KEY}"
+}
+
+lumen_verify_maintenance_root_binding() {
+    local root="$1"
+    lumen_capture_maintenance_root_binding "${root}" || return 1
+    [ "${root}" = "${LUMEN_LOCK_ROOT:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_PARENT_PATH}" = \
+            "${LUMEN_LOCK_ROOT_PARENT_PATH:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_NAME}" = "${LUMEN_LOCK_ROOT_NAME:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_PARENT_DEV}" = \
+            "${LUMEN_LOCK_ROOT_PARENT_DEV:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_PARENT_INO}" = \
+            "${LUMEN_LOCK_ROOT_PARENT_INO:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_DEV}" = "${LUMEN_LOCK_ROOT_DEV:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_INO}" = "${LUMEN_LOCK_ROOT_INO:-}" ] \
+        && [ "${LUMEN_CAPTURED_ROOT_ANCHOR_KEY}" = \
+            "${LUMEN_LOCK_ROOT_ANCHOR_KEY:-}" ]
+}
+
+lumen_clear_borrowed_maintenance_lock() {
+    unset \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_KIND \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_NAME \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_DEV \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_INO \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_OWNER_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_CAPABILITY \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_FD \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_DEV \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_INO \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY
+}
+
+lumen_flock_fd_identity() {
+    local fd="$1"
+    local path="$2"
+    local expected_type="${3:-file}"
+    python3 - "${fd}" "${path}" "${expected_type}" <<'PY'
+import fcntl
+import os
+from pathlib import Path
+import stat
+import sys
+
+try:
+    fd = int(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+path = Path(sys.argv[2])
+expected_type = sys.argv[3]
+opened = os.fstat(fd)
+current = os.stat(path, follow_symlinks=False)
+if expected_type == "file":
+    valid_type = stat.S_ISREG(opened.st_mode) and stat.S_ISREG(current.st_mode)
+elif expected_type == "directory":
+    valid_type = stat.S_ISDIR(opened.st_mode) and stat.S_ISDIR(current.st_mode)
+else:
+    raise SystemExit(1)
+if not valid_type or (
+    opened.st_dev,
+    opened.st_ino,
+) != (current.st_dev, current.st_ino):
+    raise SystemExit(1)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+print(f"{opened.st_dev}\t{opened.st_ino}")
+PY
+}
+
+lumen_maintenance_lock_path_safe() {
+    local path="$1"
+    local expected_type="$2"
+    [ ! -L "${path}" ] || return 1
+    if [ ! -e "${path}" ]; then
+        return 0
+    fi
+    case "${expected_type}" in
+        file) [ -f "${path}" ] ;;
+        directory) [ -d "${path}" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+lumen_lock_path_identity() {
+    local path="$1"
+    local expected_type="$2"
+    python3 - "${path}" "${expected_type}" <<'PY'
+import os
+import stat
+import sys
+
+metadata = os.stat(sys.argv[1], follow_symlinks=False)
+if sys.argv[2] == "file":
+    valid = stat.S_ISREG(metadata.st_mode)
+elif sys.argv[2] == "directory":
+    valid = stat.S_ISDIR(metadata.st_mode)
+else:
+    valid = False
+if not valid:
+    raise SystemExit(1)
+print(f"{metadata.st_dev}\t{metadata.st_ino}")
+PY
+}
+
+lumen_export_borrowed_maintenance_lock() {
+    local root="$1"
+    local expected_file="${root}/.lumen-maintenance.lock"
+    local expected_local_dir="${expected_file}.d"
+    local expected_anchor_dir=""
+    local anchor_identity=""
+    local local_identity=""
+    local owner_file=""
+    local owner_pid=""
+    local owner_start_token=""
+    local owner_id=""
+    local expected_hash=""
+    local actual_hash=""
+    local current_start_token=""
+
+    lumen_clear_borrowed_maintenance_lock
+    lumen_verify_maintenance_root_binding "${root}" || return 1
+    expected_anchor_dir="$(
+        printf '%s/.lumen-maintenance.%s.lock.d' \
+            "${LUMEN_LOCK_ROOT_PARENT_PATH}" \
+            "${LUMEN_LOCK_ROOT_ANCHOR_KEY}"
+    )"
+
+    LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT="${root}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH="${LUMEN_LOCK_ROOT_PARENT_PATH}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_NAME="${LUMEN_LOCK_ROOT_NAME}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV="${LUMEN_LOCK_ROOT_PARENT_DEV}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO="${LUMEN_LOCK_ROOT_PARENT_INO}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_DEV="${LUMEN_LOCK_ROOT_DEV}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_INO="${LUMEN_LOCK_ROOT_INO}"
+    LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY="${LUMEN_LOCK_ROOT_ANCHOR_KEY}"
+    case "${LUMEN_LOCK_KIND:-}" in
+        flock)
+            [ "${LUMEN_LOCK_PATH:-}" = "${expected_file}" ] || return 1
+            [ "${LUMEN_LOCK_LOCAL_PATH:-}" = "${expected_file}" ] || return 1
+            [ "${LUMEN_LOCK_ANCHOR_PATH:-}" = \
+                "${LUMEN_LOCK_ROOT_PARENT_PATH}" ] || return 1
+            anchor_identity="$(
+                lumen_flock_fd_identity \
+                    9 "${LUMEN_LOCK_ROOT_PARENT_PATH}" directory
+            )" || return 1
+            local_identity="$(
+                lumen_flock_fd_identity 6 "${expected_file}" file
+            )" || return 1
+            IFS=$'\t' read -r \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_DEV \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_INO <<< "${local_identity}"
+            IFS=$'\t' read -r \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO \
+                <<< "${anchor_identity}"
+            owner_file="${expected_file}"
+            owner_pid="$(sed -n 's/^pid=//p' "${owner_file}" | head -1)"
+            owner_start_token="$(
+                sed -n 's/^start_token=//p' "${owner_file}" | head -1
+            )"
+            owner_id="$(sed -n 's/^owner_id=//p' "${owner_file}" | head -1)"
+            expected_hash="$(
+                sed -n 's/^capability_sha256=//p' "${owner_file}" | head -1
+            )"
+            [ "${owner_id}" = "flock" ] \
+                && [ "${LUMEN_LOCK_OWNER_TOKEN:-}" = "flock" ] \
+                && [ -n "${LUMEN_LOCK_OWNER_CAPABILITY:-}" ] \
+                && [ -n "${owner_pid}" ] \
+                && [ -n "${owner_start_token}" ] \
+                && [ -n "${expected_hash}" ] || return 1
+            current_start_token="$(
+                lumen_pid_start_token "${owner_pid}" 2>/dev/null
+            )" || return 1
+            [ "${current_start_token}" = "${owner_start_token}" ] || return 1
+            lumen_pid_is_ancestor "${owner_pid}" "$$" || return 1
+            actual_hash="$(
+                python3 - "${LUMEN_LOCK_OWNER_CAPABILITY}" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())
+PY
+            )" || return 1
+            [ "${actual_hash}" = "${expected_hash}" ] || return 1
+            LUMEN_BORROWED_MAINTENANCE_LOCK_KIND="flock"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH="${LUMEN_LOCK_ROOT_PARENT_PATH}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD=9
+            LUMEN_BORROWED_MAINTENANCE_LOCK_PATH="${expected_file}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_FD=6
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH="${expected_file}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN="flock"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY="${LUMEN_LOCK_OWNER_CAPABILITY}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN="flock"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID="${owner_pid}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN="${owner_start_token}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY="${LUMEN_LOCK_OWNER_CAPABILITY}"
+            ;;
+        mkdir)
+            [ "${LUMEN_LOCK_PATH:-}" = "${expected_anchor_dir}" ] || return 1
+            [ "${LUMEN_LOCK_ANCHOR_PATH:-}" = "${expected_anchor_dir}" ] \
+                || return 1
+            [ "${LUMEN_LOCK_LOCAL_PATH:-}" = "${expected_local_dir}" ] \
+                || return 1
+            [ -n "${LUMEN_LOCK_ANCHOR_OWNER_TOKEN:-}" ] \
+                && [ -n "${LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY:-}" ] \
+                && [ -n "${LUMEN_LOCK_OWNER_TOKEN:-}" ] \
+                && [ -n "${LUMEN_LOCK_OWNER_CAPABILITY:-}" ] || return 1
+            lumen_lock_dir_owned_by_current_process \
+                "${expected_anchor_dir}" \
+                "${LUMEN_LOCK_ANCHOR_OWNER_TOKEN}" || return 1
+            lumen_lock_dir_owned_by_current_process \
+                "${expected_local_dir}" "${LUMEN_LOCK_OWNER_TOKEN}" || return 1
+            anchor_identity="$(
+                lumen_lock_path_identity "${expected_anchor_dir}" directory
+            )" || return 1
+            IFS=$'\t' read -r \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV \
+                LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO \
+                <<< "${anchor_identity}"
+            owner_file="${expected_anchor_dir}/${LUMEN_LOCK_ANCHOR_OWNER_TOKEN}/owner"
+            owner_pid="$(sed -n 's/^pid=//p' "${owner_file}" | head -1)"
+            owner_start_token="$(
+                sed -n 's/^start_token=//p' "${owner_file}" | head -1
+            )"
+            expected_hash="$(
+                sed -n 's/^capability_sha256=//p' "${owner_file}" | head -1
+            )"
+            actual_hash="$(
+                python3 - "${LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY}" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())
+PY
+            )" || return 1
+            [ "${actual_hash}" = "${expected_hash}" ] || return 1
+            LUMEN_BORROWED_MAINTENANCE_LOCK_KIND="mkdir"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH="${expected_anchor_dir}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_PATH="${expected_anchor_dir}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH="${expected_local_dir}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN="${LUMEN_LOCK_OWNER_TOKEN}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY="${LUMEN_LOCK_OWNER_CAPABILITY}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN="${LUMEN_LOCK_ANCHOR_OWNER_TOKEN}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID="${owner_pid}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN="${owner_start_token}"
+            LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY="${LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    export \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_KIND \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_NAME \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_DEV \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_INO \
+        LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_FD \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_DEV \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_INO \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN \
+        LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY
+}
+
+lumen_verify_borrowed_maintenance_lock() {
+    local root="$1"
+    local kind="${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}"
+    local expected_file="${root}/.lumen-maintenance.lock"
+    local expected_local_dir="${expected_file}.d"
+    local expected_anchor_dir=""
+    local anchor_identity=""
+    local local_identity=""
+    local actual_dev=""
+    local actual_ino=""
+    local owner_token="${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN:-}"
+    local owner_file=""
+    local owner_pid=""
+    local owner_start_token=""
+    local owner_id=""
+    local expected_hash=""
+    local actual_hash=""
+    local current_start_token=""
+    local local_owner_token=""
+    local local_owner_file=""
+    local local_owner_pid=""
+    local local_owner_start_token=""
+    local local_owner_id=""
+    local local_expected_hash=""
+    local local_actual_hash=""
+
+    [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT:-}" = "${root}" ] || return 1
+    LUMEN_LOCK_ROOT="${root}"
+    LUMEN_LOCK_ROOT_PARENT_PATH="${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH:-}"
+    LUMEN_LOCK_ROOT_NAME="${LUMEN_BORROWED_MAINTENANCE_ROOT_NAME:-}"
+    LUMEN_LOCK_ROOT_PARENT_DEV="${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV:-}"
+    LUMEN_LOCK_ROOT_PARENT_INO="${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO:-}"
+    LUMEN_LOCK_ROOT_DEV="${LUMEN_BORROWED_MAINTENANCE_ROOT_DEV:-}"
+    LUMEN_LOCK_ROOT_INO="${LUMEN_BORROWED_MAINTENANCE_ROOT_INO:-}"
+    LUMEN_LOCK_ROOT_ANCHOR_KEY="${LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY:-}"
+    lumen_verify_maintenance_root_binding "${root}" || return 1
+    expected_anchor_dir="$(
+        printf '%s/.lumen-maintenance.%s.lock.d' \
+            "${LUMEN_LOCK_ROOT_PARENT_PATH}" \
+            "${LUMEN_LOCK_ROOT_ANCHOR_KEY}"
+    )"
+    case "${kind}" in
+        flock)
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_PATH:-}" = "${expected_file}" ] \
+                || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH:-}" = \
+                "${expected_file}" ] || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH:-}" = \
+                "${LUMEN_LOCK_ROOT_PARENT_PATH}" ] || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD:-}" = "9" ] \
+                || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_FD:-}" = "6" ] || return 1
+            anchor_identity="$(
+                lumen_flock_fd_identity \
+                    9 "${LUMEN_LOCK_ROOT_PARENT_PATH}" directory
+            )" || return 1
+            IFS=$'\t' read -r actual_dev actual_ino <<< "${anchor_identity}"
+            [ "${actual_dev}" = \
+                "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV:-}" ] \
+                && [ "${actual_ino}" = \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO:-}" ] \
+                || return 1
+            local_identity="$(
+                lumen_flock_fd_identity 6 "${expected_file}" file
+            )" || return 1
+            IFS=$'\t' read -r actual_dev actual_ino <<< "${local_identity}"
+            [ "${actual_dev}" = "${LUMEN_BORROWED_MAINTENANCE_LOCK_DEV:-}" ] \
+                && [ "${actual_ino}" = "${LUMEN_BORROWED_MAINTENANCE_LOCK_INO:-}" ] \
+                || return 1
+            [ "${owner_token}" = "flock" ] || return 1
+            owner_file="${expected_file}"
+            owner_pid="$(sed -n 's/^pid=//p' "${owner_file}" | head -1)"
+            owner_start_token="$(
+                sed -n 's/^start_token=//p' "${owner_file}" | head -1
+            )"
+            owner_id="$(sed -n 's/^owner_id=//p' "${owner_file}" | head -1)"
+            expected_hash="$(
+                sed -n 's/^capability_sha256=//p' "${owner_file}" | head -1
+            )"
+            [ "${owner_pid}" = "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID:-}" ] \
+                && [ "${owner_start_token}" = \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN:-}" ] \
+                && [ "${owner_id}" = "flock" ] \
+                && [ -n "${expected_hash}" ] || return 1
+            current_start_token="$(
+                lumen_pid_start_token "${owner_pid}" 2>/dev/null
+            )" || return 1
+            [ "${current_start_token}" = "${owner_start_token}" ] || return 1
+            lumen_pid_is_ancestor "${owner_pid}" "$$" || return 1
+            actual_hash="$(
+                python3 - "${LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY:-}" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())
+PY
+            )" || return 1
+            [ "${actual_hash}" = "${expected_hash}" ] || return 1
+            ;;
+        mkdir)
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_PATH:-}" = \
+                "${expected_anchor_dir}" ] \
+                || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH:-}" = \
+                "${expected_anchor_dir}" ] || return 1
+            [ "${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH:-}" = \
+                "${expected_local_dir}" ] || return 1
+            case "${owner_token}" in
+                .owner.*) ;;
+                *) return 1 ;;
+            esac
+            owner_file="${expected_anchor_dir}/${owner_token}/owner"
+            [ ! -L "${expected_anchor_dir}" ] \
+                && [ ! -L "${expected_anchor_dir}/${owner_token}" ] \
+                && [ ! -L "${owner_file}" ] \
+                && [ -f "${owner_file}" ] || return 1
+            local_owner_token="$(
+                printf '%s' \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN:-}"
+            )"
+            case "${local_owner_token}" in
+                .owner.*) ;;
+                *) return 1 ;;
+            esac
+            local_owner_file="${expected_local_dir}/${local_owner_token}/owner"
+            [ ! -L "${expected_local_dir}" ] \
+                && [ ! -L "${expected_local_dir}/${local_owner_token}" ] \
+                && [ ! -L "${local_owner_file}" ] \
+                && [ -f "${local_owner_file}" ] || return 1
+            local_owner_pid="$(
+                sed -n 's/^pid=//p' "${local_owner_file}" | head -1
+            )"
+            local_owner_start_token="$(
+                sed -n 's/^start_token=//p' "${local_owner_file}" | head -1
+            )"
+            local_owner_id="$(
+                sed -n 's/^owner_id=//p' "${local_owner_file}" | head -1
+            )"
+            local_expected_hash="$(
+                sed -n 's/^capability_sha256=//p' \
+                    "${local_owner_file}" | head -1
+            )"
+            [ "${local_owner_pid}" = \
+                "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID:-}" ] \
+                && [ "${local_owner_start_token}" = \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN:-}" ] \
+                && [ "${local_owner_id}" = "${local_owner_token}" ] \
+                && [ -n "${local_expected_hash}" ] || return 1
+            local_actual_hash="$(
+                python3 - \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY:-}" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())
+PY
+            )" || return 1
+            [ "${local_actual_hash}" = "${local_expected_hash}" ] || return 1
+            anchor_identity="$(
+                lumen_lock_path_identity "${expected_anchor_dir}" directory
+            )" || return 1
+            IFS=$'\t' read -r actual_dev actual_ino <<< "${anchor_identity}"
+            [ "${actual_dev}" = \
+                "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV:-}" ] \
+                && [ "${actual_ino}" = \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO:-}" ] \
+                || return 1
+            owner_pid="$(sed -n 's/^pid=//p' "${owner_file}" | head -1)"
+            owner_start_token="$(
+                sed -n 's/^start_token=//p' "${owner_file}" | head -1
+            )"
+            owner_id="$(sed -n 's/^owner_id=//p' "${owner_file}" | head -1)"
+            expected_hash="$(
+                sed -n 's/^capability_sha256=//p' "${owner_file}" | head -1
+            )"
+            [ "${owner_pid}" = "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID:-}" ] \
+                && [ "${owner_start_token}" = \
+                    "${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN:-}" ] \
+                && [ "${owner_id}" = "${owner_token}" ] \
+                && [ -n "${expected_hash}" ] || return 1
+            current_start_token="$(
+                lumen_pid_start_token "${owner_pid}" 2>/dev/null
+            )" || return 1
+            [ "${current_start_token}" = "${owner_start_token}" ] || return 1
+            lumen_pid_is_ancestor "${owner_pid}" "$$" || return 1
+            actual_hash="$(
+                python3 - "${LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY:-}" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("ascii")).hexdigest())
+PY
+            )" || return 1
+            [ "${actual_hash}" = "${expected_hash}" ] || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    LUMEN_LOCK_KIND="borrowed"
+    LUMEN_LOCK_PATH="${LUMEN_BORROWED_MAINTENANCE_LOCK_PATH}"
+    LUMEN_LOCK_ANCHOR_PATH="${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH}"
+    LUMEN_LOCK_LOCAL_PATH="${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH}"
+    return 0
+}
+
+lumen_adopt_borrowed_maintenance_lock() {
+    local root="$1"
+    local borrowed_kind="${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}"
+    local borrowed_path="${LUMEN_BORROWED_MAINTENANCE_LOCK_PATH:-}"
+    local borrowed_owner_token="${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN:-}"
+    local borrowed_owner_pid="${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID:-}"
+    local borrowed_capability="${LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY:-}"
+    local borrowed_anchor_path="${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH:-}"
+    local borrowed_anchor_owner_token="${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN:-}"
+    local borrowed_anchor_capability="${LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY:-}"
+    local borrowed_local_path="${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH:-}"
+    local borrowed_local_owner_token="${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN:-}"
+    local borrowed_local_capability="${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY:-}"
+
+    # Re-exec preserves the process identity. Only that exact owner may turn a
+    # borrowed proof back into a releasable primary lock.
+    [ "${borrowed_owner_pid}" = "$$" ] || return 1
+    lumen_verify_borrowed_maintenance_lock "${root}" || return 1
+    case "${borrowed_kind}" in
+        flock|mkdir) ;;
+        *) return 1 ;;
+    esac
+    LUMEN_LOCK_KIND="${borrowed_kind}"
+    LUMEN_LOCK_PATH="${borrowed_path}"
+    LUMEN_LOCK_ANCHOR_PATH="${borrowed_anchor_path}"
+    LUMEN_LOCK_LOCAL_PATH="${borrowed_local_path}"
+    if [ "${borrowed_kind}" = "mkdir" ]; then
+        LUMEN_LOCK_ANCHOR_OWNER_TOKEN="${borrowed_anchor_owner_token}"
+        LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY="${borrowed_anchor_capability}"
+        LUMEN_LOCK_OWNER_TOKEN="${borrowed_local_owner_token}"
+        LUMEN_LOCK_OWNER_CAPABILITY="${borrowed_local_capability}"
+    else
+        LUMEN_LOCK_OWNER_TOKEN="${borrowed_owner_token}"
+        LUMEN_LOCK_OWNER_CAPABILITY="${borrowed_capability}"
+    fi
+    lumen_clear_borrowed_maintenance_lock
+    trap 'lumen_release_lock' EXIT
+    return 0
 }
 
 lumen_restore_saved_trap() {
@@ -417,45 +1174,163 @@ lumen_install_with_lock_signal_trap() {
 }
 
 # lumen_acquire_lock <root> <script_name>
-# update / uninstall 共用同一把维护锁，避免同时操作 compose、迁移和依赖目录。
+# 固定锁顺序：parent anchor -> root-local compatibility lock ->
+# update/backup/restore operation lock。任何调用方都不得反向获取。
 lumen_acquire_lock() {
     local root="$1"
     local script_name="${2:-maintenance}"
     local lock_file="${root}/.lumen-maintenance.lock"
-    local lock_dir="${lock_file}.d"
+    local local_lock_dir="${lock_file}.d"
+    local anchor_lock_dir=""
+    local anchor_identity=""
+    local anchor_owner_token=""
+    local anchor_owner_capability=""
+    local local_owner_token=""
+    local local_owner_capability=""
+    local owner_pid=""
 
     if [ -n "${LUMEN_LOCK_KIND:-}" ]; then
         return 0
     fi
+    if [ -n "${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}" ]; then
+        if ! lumen_adopt_borrowed_maintenance_lock "${root}"; then
+            log_error "继承的 maintenance 锁证明无效，拒绝重新获取：${root}"
+            exit 1
+        fi
+        return 0
+    fi
+    if ! lumen_set_maintenance_root_binding "${root}"; then
+        log_error "无法安全绑定 maintenance root 的 parent entry：${root}"
+        exit 1
+    fi
+    anchor_lock_dir="$(
+        printf '%s/.lumen-maintenance.%s.lock.d' \
+            "${LUMEN_LOCK_ROOT_PARENT_PATH}" \
+            "${LUMEN_LOCK_ROOT_ANCHOR_KEY}"
+    )"
 
     if command -v flock >/dev/null 2>&1; then
-        if ! exec 9>"${lock_file}"; then
-            log_error "无法创建锁文件：${lock_file}"
+        if ! lumen_maintenance_lock_path_safe "${lock_file}" file; then
+            log_error "维护锁文件存在 symlink 或非普通文件：${lock_file}"
+            exit 1
+        fi
+        if ! exec 9<"${LUMEN_LOCK_ROOT_PARENT_PATH}"; then
+            log_error "无法打开 maintenance parent anchor：${LUMEN_LOCK_ROOT_PARENT_PATH}"
             exit 1
         fi
         if ! flock -n 9; then
             log_error "已有 Lumen 维护脚本在运行，当前 ${script_name} 退出。"
-            log_error "锁文件：${lock_file}"
+            log_error "parent anchor：${LUMEN_LOCK_ROOT_PARENT_PATH}"
+            exit 1
+        fi
+        anchor_identity="$(
+            lumen_flock_fd_identity \
+                9 "${LUMEN_LOCK_ROOT_PARENT_PATH}" directory
+        )" || true
+        if [ "${anchor_identity}" != \
+                "${LUMEN_LOCK_ROOT_PARENT_DEV}"$'\t'"${LUMEN_LOCK_ROOT_PARENT_INO}" ] \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
+            flock -u 9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+            log_error "maintenance parent/root entry 在加锁期间发生替换：${root}"
+            exit 1
+        fi
+        if ! exec 6<>"${lock_file}"; then
+            flock -u 9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+            log_error "无法创建 root-local maintenance 锁文件：${lock_file}"
+            exit 1
+        fi
+        if ! flock -n 6; then
+            exec 6>&- 2>/dev/null || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+            log_error "已有 legacy/root-local maintenance 锁：${lock_file}"
+            exit 1
+        fi
+        if ! lumen_flock_fd_identity 6 "${lock_file}" file >/dev/null 2>&1 \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
+            flock -u 6 2>/dev/null || true
+            exec 6>&- 2>/dev/null || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+            log_error "root-local maintenance 锁或 root entry 发生替换：${root}"
+            exit 1
+        fi
+        if ! lumen_write_flock_lock_owner 6 "${script_name}"; then
+            flock -u 6 2>/dev/null || true
+            exec 6>&- 2>/dev/null || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- 2>/dev/null || true
+            log_error "无法写入 maintenance flock owner capability：${lock_file}"
             exit 1
         fi
         LUMEN_LOCK_KIND="flock"
         LUMEN_LOCK_PATH="${lock_file}"
+        LUMEN_LOCK_LOCAL_PATH="${lock_file}"
+        LUMEN_LOCK_ANCHOR_PATH="${LUMEN_LOCK_ROOT_PARENT_PATH}"
     else
-        if ! lumen_try_create_owned_lock_dir "${lock_dir}" script "${script_name}"; then
-            local _owner_pid=""
-            _owner_pid="$(lumen_lock_owner_pid "${lock_dir}")"
+        if ! lumen_maintenance_lock_path_safe \
+                "${anchor_lock_dir}" directory; then
+            log_error "parent-anchor 锁存在 symlink 或非目录对象：${anchor_lock_dir}"
+            exit 1
+        fi
+        if ! lumen_maintenance_lock_path_safe \
+                "${local_lock_dir}" directory; then
+            log_error "root-local 锁存在 symlink 或非目录对象：${local_lock_dir}"
+            exit 1
+        fi
+        if ! lumen_try_create_owned_lock_dir \
+                "${anchor_lock_dir}" script "${script_name}"; then
+            owner_pid="$(lumen_lock_owner_pid "${anchor_lock_dir}")"
             if [ "${LUMEN_LAST_LOCK_STALE:-0}" = "1" ]; then
-                log_error "检测到 stale Lumen 维护锁（owner pid=${_owner_pid:-未知}）；为避免删除后来 owner，不自动回收。"
-                log_error "确认没有维护脚本运行后，请人工删除：${lock_dir}"
+                log_error "检测到 stale Lumen 维护锁（owner pid=${owner_pid:-未知}）；为避免删除后来 owner，不自动回收。"
+                log_error "确认没有维护脚本运行后，请人工删除：${anchor_lock_dir}"
             else
-                log_error "已有 Lumen 维护脚本在运行（owner pid=${_owner_pid:-未知}），当前 ${script_name} 退出。"
+                log_error "已有 Lumen 维护脚本在运行（owner pid=${owner_pid:-未知}），当前 ${script_name} 退出。"
             fi
-            log_error "锁目录：${lock_dir}"
+            log_error "parent anchor：${anchor_lock_dir}"
+            exit 1
+        fi
+        anchor_owner_token="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        anchor_owner_capability="${LUMEN_LAST_LOCK_OWNER_CAPABILITY}"
+        if ! lumen_verify_maintenance_root_binding "${root}"; then
+            lumen_release_owned_lock_dir \
+                "${anchor_lock_dir}" "${anchor_owner_token}" 2>/dev/null || true
+            log_error "maintenance root entry 在 parent anchor 后发生替换：${root}"
+            exit 1
+        fi
+        if ! lumen_try_create_owned_lock_dir \
+                "${local_lock_dir}" script "${script_name}"; then
+            owner_pid="$(lumen_lock_owner_pid "${local_lock_dir}")"
+            if [ "${LUMEN_LAST_LOCK_STALE:-0}" = "1" ]; then
+                log_error "检测到 stale Lumen root-local 维护锁（owner pid=${owner_pid:-未知}）；为避免删除后来 owner，不自动回收。"
+                log_error "确认没有维护脚本运行后，请人工删除：${local_lock_dir}"
+            else
+                log_error "已有 legacy/root-local 维护锁（owner pid=${owner_pid:-未知}），当前 ${script_name} 退出。"
+            fi
+            lumen_release_owned_lock_dir \
+                "${anchor_lock_dir}" "${anchor_owner_token}" 2>/dev/null || true
+            exit 1
+        fi
+        local_owner_token="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        local_owner_capability="${LUMEN_LAST_LOCK_OWNER_CAPABILITY}"
+        if ! lumen_verify_maintenance_root_binding "${root}"; then
+            lumen_release_owned_lock_dir \
+                "${local_lock_dir}" "${local_owner_token}" 2>/dev/null || true
+            lumen_release_owned_lock_dir \
+                "${anchor_lock_dir}" "${anchor_owner_token}" 2>/dev/null || true
+            log_error "maintenance root entry 在双锁提交前发生替换：${root}"
             exit 1
         fi
         LUMEN_LOCK_KIND="mkdir"
-        LUMEN_LOCK_PATH="${lock_dir}"
-        LUMEN_LOCK_OWNER_TOKEN="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        LUMEN_LOCK_PATH="${anchor_lock_dir}"
+        LUMEN_LOCK_ANCHOR_PATH="${anchor_lock_dir}"
+        LUMEN_LOCK_ANCHOR_OWNER_TOKEN="${anchor_owner_token}"
+        LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY="${anchor_owner_capability}"
+        LUMEN_LOCK_LOCAL_PATH="${local_lock_dir}"
+        LUMEN_LOCK_OWNER_TOKEN="${local_owner_token}"
+        LUMEN_LOCK_OWNER_CAPABILITY="${local_owner_capability}"
     fi
 
     trap 'lumen_release_lock' EXIT
@@ -468,32 +1343,113 @@ lumen_try_acquire_lock() {
     local root="$1"
     local script_name="${2:-maintenance}"
     local lock_file="${root}/.lumen-maintenance.lock"
-    local lock_dir="${lock_file}.d"
+    local local_lock_dir="${lock_file}.d"
+    local anchor_lock_dir=""
+    local anchor_identity=""
+    local anchor_owner_token=""
+    local anchor_owner_capability=""
+    local local_owner_token=""
+    local local_owner_capability=""
 
     if [ -n "${LUMEN_LOCK_KIND:-}" ]; then
         return 0
     fi
+    lumen_set_maintenance_root_binding "${root}" || return 1
+    anchor_lock_dir="$(
+        printf '%s/.lumen-maintenance.%s.lock.d' \
+            "${LUMEN_LOCK_ROOT_PARENT_PATH}" \
+            "${LUMEN_LOCK_ROOT_ANCHOR_KEY}"
+    )"
 
     if command -v flock >/dev/null 2>&1; then
-        # 注意：`exec FD>file 2>/dev/null` 会把当前 shell 的 stderr 永久重定向到
-        # /dev/null（exec 无命令时所有 redirect 都作用于当前 shell）。改为不带
-        # 2>/dev/null，让 exec 失败时错误正常显示，且不污染主 shell 的 fd 2。
-        if ! exec 9>"${lock_file}"; then
+        if ! lumen_maintenance_lock_path_safe "${lock_file}" file; then
+            return 1
+        fi
+        if ! exec 9<"${LUMEN_LOCK_ROOT_PARENT_PATH}"; then
             return 1
         fi
         if ! flock -n 9 2>/dev/null; then
             exec 9>&- || true
             return 1
         fi
+        anchor_identity="$(
+            lumen_flock_fd_identity \
+                9 "${LUMEN_LOCK_ROOT_PARENT_PATH}" directory
+        )" || true
+        if [ "${anchor_identity}" != \
+                "${LUMEN_LOCK_ROOT_PARENT_DEV}"$'\t'"${LUMEN_LOCK_ROOT_PARENT_INO}" ] \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
+            flock -u 9 2>/dev/null || true
+            exec 9>&- || true
+            return 1
+        fi
+        if ! exec 6<>"${lock_file}"; then
+            flock -u 9 2>/dev/null || true
+            exec 9>&- || true
+            return 1
+        fi
+        if ! flock -n 6 2>/dev/null; then
+            exec 6>&- || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- || true
+            return 1
+        fi
+        if ! lumen_flock_fd_identity 6 "${lock_file}" file >/dev/null 2>&1 \
+                || ! lumen_verify_maintenance_root_binding "${root}"; then
+            flock -u 6 2>/dev/null || true
+            exec 6>&- || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- || true
+            return 1
+        fi
+        if ! lumen_write_flock_lock_owner 6 "${script_name}"; then
+            flock -u 6 2>/dev/null || true
+            exec 6>&- || true
+            flock -u 9 2>/dev/null || true
+            exec 9>&- || true
+            return 1
+        fi
         LUMEN_LOCK_KIND="flock"
         LUMEN_LOCK_PATH="${lock_file}"
+        LUMEN_LOCK_LOCAL_PATH="${lock_file}"
+        LUMEN_LOCK_ANCHOR_PATH="${LUMEN_LOCK_ROOT_PARENT_PATH}"
     else
-        if ! lumen_try_create_owned_lock_dir "${lock_dir}" script "${script_name}"; then
+        if ! lumen_maintenance_lock_path_safe \
+                "${anchor_lock_dir}" directory \
+                || ! lumen_maintenance_lock_path_safe \
+                    "${local_lock_dir}" directory; then
+            return 1
+        fi
+        if ! lumen_try_create_owned_lock_dir \
+                "${anchor_lock_dir}" script "${script_name}"; then
+            return 1
+        fi
+        anchor_owner_token="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        anchor_owner_capability="${LUMEN_LAST_LOCK_OWNER_CAPABILITY}"
+        if ! lumen_verify_maintenance_root_binding "${root}" \
+                || ! lumen_try_create_owned_lock_dir \
+                    "${local_lock_dir}" script "${script_name}"; then
+            lumen_release_owned_lock_dir \
+                "${anchor_lock_dir}" "${anchor_owner_token}" 2>/dev/null || true
+            return 1
+        fi
+        local_owner_token="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        local_owner_capability="${LUMEN_LAST_LOCK_OWNER_CAPABILITY}"
+        if ! lumen_verify_maintenance_root_binding "${root}"; then
+            lumen_release_owned_lock_dir \
+                "${local_lock_dir}" "${local_owner_token}" 2>/dev/null || true
+            lumen_release_owned_lock_dir \
+                "${anchor_lock_dir}" "${anchor_owner_token}" 2>/dev/null || true
             return 1
         fi
         LUMEN_LOCK_KIND="mkdir"
-        LUMEN_LOCK_PATH="${lock_dir}"
-        LUMEN_LOCK_OWNER_TOKEN="${LUMEN_LAST_LOCK_OWNER_TOKEN}"
+        LUMEN_LOCK_PATH="${anchor_lock_dir}"
+        LUMEN_LOCK_ANCHOR_PATH="${anchor_lock_dir}"
+        LUMEN_LOCK_ANCHOR_OWNER_TOKEN="${anchor_owner_token}"
+        LUMEN_LOCK_ANCHOR_OWNER_CAPABILITY="${anchor_owner_capability}"
+        LUMEN_LOCK_LOCAL_PATH="${local_lock_dir}"
+        LUMEN_LOCK_OWNER_TOKEN="${local_owner_token}"
+        LUMEN_LOCK_OWNER_CAPABILITY="${local_owner_capability}"
     fi
 
     trap 'lumen_release_lock' EXIT

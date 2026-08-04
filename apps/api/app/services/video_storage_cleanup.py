@@ -134,10 +134,7 @@ class VideoStorageCleanupManager:
             return VideoDetachedCleanup(path=None, issues=issues)
         source = self.storage_root.joinpath(*root_parts)
         quarantine_parent = (
-            self.storage_root
-            / VIDEO_CLEANUP_QUARANTINE_DIRECTORY
-            / user_id
-            / video_id
+            self.storage_root / VIDEO_CLEANUP_QUARANTINE_DIRECTORY / user_id / video_id
         )
         quarantine = quarantine_parent / token
         if quarantine.exists():
@@ -261,6 +258,25 @@ class VideoStorageCleanupManager:
                 bytes_on_disk += max(0, int(info.st_size))
         return artifact_count, bytes_on_disk
 
+    @staticmethod
+    def _fsync_deleted_entries(
+        directory_fd: int,
+        *,
+        changed: bool,
+        relative_parts: tuple[str, ...],
+        errors: list[str],
+    ) -> None:
+        if not changed:
+            return
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            _append_issue(
+                errors,
+                "artifact_directory_fsync_failed:"
+                f"{'/'.join(relative_parts)}:{exc.errno or errno.EIO}",
+            )
+
     def _delete_directory_contents(
         self,
         directory_fd: int,
@@ -275,6 +291,7 @@ class VideoStorageCleanupManager:
             _append_issue(errors, "artifact_delete_depth_limit")
             return 0
         deleted = 0
+        changed = False
         try:
             entries = os.scandir(directory_fd)
         except OSError as exc:
@@ -334,6 +351,8 @@ class VideoStorageCleanupManager:
                         os.rmdir(entry.name, dir_fd=directory_fd)
                     except OSError:
                         pass
+                    else:
+                        changed = True
                     continue
                 if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                     _append_issue(
@@ -344,6 +363,7 @@ class VideoStorageCleanupManager:
                 try:
                     unlink_entry(entry.name, directory_fd=directory_fd)
                     deleted += 1
+                    changed = True
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
@@ -351,6 +371,12 @@ class VideoStorageCleanupManager:
                         errors,
                         f"artifact_unlink_failed:{'/'.join(child_relative)}:{exc.errno or errno.EIO}",
                     )
+        self._fsync_deleted_entries(
+            directory_fd,
+            changed=changed,
+            relative_parts=relative_parts,
+            errors=errors,
+        )
         return deleted
 
     def _cleanup_detached_sync(
@@ -385,7 +411,9 @@ class VideoStorageCleanupManager:
             directory_fd = None
         except OSError as exc:
             directory_fd = None
-            _append_issue(errors, f"cleanup_quarantine_open_failed:{exc.errno or errno.EIO}")
+            _append_issue(
+                errors, f"cleanup_quarantine_open_failed:{exc.errno or errno.EIO}"
+            )
         if directory_fd is not None:
             try:
                 deleted = self._delete_directory_contents(
@@ -397,10 +425,21 @@ class VideoStorageCleanupManager:
                 )
             finally:
                 os.close(directory_fd)
+        detached_removed = False
         try:
             detached.path.rmdir()
         except OSError:
             pass
+        else:
+            detached_removed = True
+        if detached_removed:
+            try:
+                self._fsync_directory(detached.path.parent)
+            except OSError as exc:
+                _append_issue(
+                    errors,
+                    f"cleanup_quarantine_fsync_failed:{exc.errno or errno.EIO}",
+                )
         remaining_count = 0
         remaining_bytes = 0
         if detached.path.exists():

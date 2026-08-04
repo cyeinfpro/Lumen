@@ -7,14 +7,34 @@ from dataclasses import replace
 import json
 from typing import Any, Awaitable, Callable
 
+from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.providers import ProviderProxyDefinition
+from lumen_core.upstream_billing import (
+    IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
+    UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+)
 
 from ..provider_runtime.upstream_services import (
     ImageUpstreamRuntime,
     UpstreamServices,
     resolve_image_upstream_services,
 )
+from .delivery_evidence import (
+    apply_dispatch_receipt,
+    dispatch_receipt_reason,
+    merged_dispatch_receipt_reason,
+)
 from .image_execution import ImageExecutionRequest
+
+
+_POST_RESPONSE_RESULT_UNKNOWN_CODES = frozenset(
+    {
+        EC.BAD_RESPONSE.value,
+        EC.SSE_CURL_FAILED.value,
+        EC.STREAM_INTERRUPTED.value,
+        EC.STREAM_TOO_LARGE.value,
+    }
+)
 
 
 def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
@@ -69,13 +89,92 @@ def _is_retryable_fallback_exception(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> bool:
     services = _runtime_services(runtime)
+    if _dispatch_proves_undelivered(exc):
+        return True
     if isinstance(exc, services.infrastructure.UpstreamError):
+        if (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES:
+            return False
         if exc.status_code in services.core.RETRY_STATUS:
             return True
         if exc.status_code == 429:
             return True
         return exc.error_code in services.core.FALLBACK_RETRY_ERROR_CODES
     return isinstance(exc, services.core.RETRY_HTTPX_EXC)
+
+
+def _post_response_result_unknown(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
+    services = _runtime_services(runtime)
+    return bool(
+        isinstance(exc, services.infrastructure.UpstreamError)
+        and isinstance(exc.status_code, int)
+        and 200 <= exc.status_code < 300
+        and (exc.error_code or "") in _POST_RESPONSE_RESULT_UNKNOWN_CODES
+    )
+
+
+def _dispatch_proves_undelivered(exc: BaseException) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    return bool(
+        not (isinstance(status_code, int) and status_code > 0)
+        and dispatch_receipt_reason(exc) == UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+    )
+
+
+def _responses_post_result_may_be_unknown(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> bool:
+    """Return true when replay could create a second billable image request."""
+
+    services = _runtime_services(runtime)
+    if _post_response_result_unknown(exc, runtime=runtime):
+        return True
+    if isinstance(exc, services.infrastructure.UpstreamError):
+        status_code = exc.status_code
+        if isinstance(status_code, int) and 500 <= status_code < 600:
+            return True
+    if _dispatch_proves_undelivered(exc):
+        return False
+    if isinstance(exc, services.infrastructure.UpstreamError):
+        return exc.status_code is None or exc.status_code == 0
+    return isinstance(exc, services.core.RETRY_HTTPX_EXC)
+
+
+def _result_unknown_after_dispatch(
+    exc: BaseException,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> BaseException:
+    services = _runtime_services(runtime)
+    payload = (
+        dict(exc.payload)
+        if isinstance(exc, services.infrastructure.UpstreamError)
+        and isinstance(exc.payload, dict)
+        else {}
+    )
+    status_code = getattr(exc, "status_code", None)
+    payload.update(
+        {
+            "upstream_result_unknown": True,
+            "wrapped_error_code": getattr(exc, "error_code", None),
+        }
+    )
+    payload.setdefault("path", "responses")
+    payload.setdefault("method", "POST")
+    if isinstance(status_code, int) and status_code > 0:
+        payload["response_received"] = True
+    return services.infrastructure.UpstreamError(
+        "responses image POST outcome is unknown after dispatch; "
+        "the request was not replayed",
+        status_code=status_code if status_code is not None else 0,
+        error_code=EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+        payload=payload,
+    )
 
 
 def _fallback_retry_backoff_seconds(
@@ -148,6 +247,7 @@ def _merge_fallback_errors(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> BaseException:
     services = _runtime_services(runtime)
+    receipt_reason = merged_dispatch_receipt_reason(errors)
     if not errors:
         return services.infrastructure.UpstreamError(
             message,
@@ -157,9 +257,7 @@ def _merge_fallback_errors(
     if any(_mentions_safety_policy(exc, runtime=runtime) for exc in errors):
         payload: dict[str, Any] = {
             "path": "responses",
-            "errors": [
-                _summarize_exception(exc, runtime=runtime) for exc in errors
-            ],
+            "errors": [_summarize_exception(exc, runtime=runtime) for exc in errors],
             "wrapped_error_code": error_code,
         }
         merged = services.infrastructure.UpstreamError(
@@ -172,13 +270,22 @@ def _merge_fallback_errors(
             merged.__cause__ = BaseExceptionGroup(message, errors)
         else:
             merged.__cause__ = errors[0]
+        apply_dispatch_receipt(merged, receipt_reason)
         return merged
     first = errors[0]
     status_code = 200
     merged_payload: dict[str, Any] = {}
     if isinstance(first, services.infrastructure.UpstreamError):
-        status_code = first.status_code or 200
+        status_code = first.status_code if first.status_code is not None else 200
         merged_payload.update(first.payload)
+    if receipt_reason == UPSTREAM_DISPATCH_PROVEN_UNDELIVERED:
+        status_code = 0
+    for key in (
+        "receipt_reason",
+        "upstream_receipt_reason",
+        "upstream_dispatch_delivery",
+    ):
+        merged_payload.pop(key, None)
     merged_payload.setdefault("path", "responses")
     merged_payload["errors"] = [
         _summarize_exception(exc, runtime=runtime) for exc in errors
@@ -193,6 +300,7 @@ def _merge_fallback_errors(
         merged.__cause__ = BaseExceptionGroup(message, errors)
     else:
         merged.__cause__ = first
+    apply_dispatch_receipt(merged, receipt_reason)
     return merged
 
 
@@ -221,15 +329,9 @@ def _mentions_safety_policy(
     """Detect safety blocks hidden inside fallback/provider wrapper errors."""
     services = _runtime_services(runtime)
     text = str(exc).lower()
-    if any(
-        marker in text
-        for marker in services.core.SAFETY_POLICY_ERROR_MARKERS
-    ):
+    if any(marker in text for marker in services.core.SAFETY_POLICY_ERROR_MARKERS):
         return True
-    if (
-        isinstance(exc, services.infrastructure.UpstreamError)
-        and exc.payload
-    ):
+    if isinstance(exc, services.infrastructure.UpstreamError) and exc.payload:
         try:
             payload_text = json.dumps(exc.payload, ensure_ascii=False).lower()
         except Exception:  # noqa: BLE001
@@ -247,9 +349,9 @@ def _mentions_safety_policy(
     ):
         return True
     cause = getattr(exc, "__cause__", None)
-    if isinstance(
-        cause, BaseException
-    ) and _mentions_safety_policy(cause, runtime=runtime):
+    if isinstance(cause, BaseException) and _mentions_safety_policy(
+        cause, runtime=runtime
+    ):
         return True
     context = getattr(exc, "__context__", None)
     return isinstance(
@@ -278,8 +380,7 @@ def _should_continue_image_provider_failover(
         return True
     if (
         isinstance(exc, services.infrastructure.UpstreamError)
-        and exc.error_code
-        in services.core.IMAGE_PROVIDER_FAILOVER_ERROR_CODES
+        and exc.error_code in services.core.IMAGE_PROVIDER_FAILOVER_ERROR_CODES
     ):
         return True
     return _mentions_safety_policy(exc, runtime=runtime)
@@ -295,6 +396,7 @@ def _merge_image_path_errors(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> BaseException:
     services = _runtime_services(runtime)
+    receipt_reason = merged_dispatch_receipt_reason([primary_error, fallback_error])
     status_code = 502
     payload: dict[str, Any] = {}
     if isinstance(primary_error, services.infrastructure.UpstreamError):
@@ -303,6 +405,23 @@ def _merge_image_path_errors(
     elif isinstance(fallback_error, services.infrastructure.UpstreamError):
         status_code = fallback_error.status_code or status_code
         payload.update(fallback_error.payload)
+    for key in (
+        "receipt_reason",
+        "upstream_receipt_reason",
+        "upstream_dispatch_delivery",
+    ):
+        payload.pop(key, None)
+    terminal_unknown: tuple[str, Any] | None = None
+    for path, error in (
+        (fallback_path, fallback_error),
+        (primary_path, primary_error),
+    ):
+        if (
+            isinstance(error, services.infrastructure.UpstreamError)
+            and (error.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+        ):
+            terminal_unknown = (path, error)
+            break
     payload.setdefault("path", primary_path)
     payload["primary_path"] = primary_path
     payload["fallback_path"] = fallback_path
@@ -317,16 +436,24 @@ def _merge_image_path_errors(
         },
     ]
     message = f"{action} image paths failed: {primary_path}, {fallback_path}"
+    error_code = services.infrastructure.EC.PROVIDER_EXHAUSTED.value
+    if terminal_unknown is not None:
+        terminal_path, terminal_error = terminal_unknown
+        status_code = terminal_error.status_code or status_code
+        error_code = terminal_error.error_code
+        payload["terminal_path"] = terminal_path
+        payload["upstream_result_unknown"] = True
     merged = services.infrastructure.UpstreamError(
         message,
         status_code=status_code,
-        error_code=services.infrastructure.EC.PROVIDER_EXHAUSTED.value,
+        error_code=error_code,
         payload=payload,
     )
     merged.__cause__ = BaseExceptionGroup(
         message,
         [primary_error, fallback_error],
     )
+    apply_dispatch_receipt(merged, receipt_reason)
     return merged
 
 
@@ -377,23 +504,28 @@ async def _responses_image_stream_with_retry(
         ):
             raise
         except Exception as exc:  # noqa: BLE001
+            if _responses_post_result_may_be_unknown(
+                exc,
+                runtime=runtime,
+            ):
+                raise _result_unknown_after_dispatch(
+                    exc,
+                    runtime=runtime,
+                ) from exc
             errors.append(exc)
             attempt += 1
             attempts_for_this = _max_attempts_for_exception(
                 exc,
                 runtime=runtime,
             )
-            if (
-                attempt >= attempts_for_this
-                or not _is_retryable_fallback_exception(exc, runtime=runtime)
+            if attempt >= attempts_for_this or not _is_retryable_fallback_exception(
+                exc, runtime=runtime
             ):
                 raise _merge_fallback_errors(
                     errors,
                     error_code=(
                         exc.error_code
-                        if isinstance(
-                            exc, services.infrastructure.UpstreamError
-                        )
+                        if isinstance(exc, services.infrastructure.UpstreamError)
                         and exc.error_code
                         else "responses_fallback_failed"
                     ),

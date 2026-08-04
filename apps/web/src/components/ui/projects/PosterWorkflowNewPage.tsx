@@ -32,6 +32,7 @@ import {
   type PosterStyleItem,
 } from "@/lib/apiClient";
 import { ensureCsrfToken, refreshCsrfToken } from "@/lib/api/http";
+import { assertConfirmedIdentityResponse, bindConfirmedIdentityXhr, coordinateIdentityMismatchResponse } from "@/lib/auth/identityPolicy";
 import { cn } from "@/lib/utils";
 import { OnlineBanner } from "./components/OnlineBanner";
 import {
@@ -43,7 +44,6 @@ import { PosterStyleSelector } from "./components/PosterStyleSelector";
 import { InfoPanel } from "./components/StageFrame";
 import { POSTER_ASPECT_LABELS, POSTER_DEFAULT_TARGET_ASPECTS } from "./types";
 import { formatBytes } from "./utils";
-
 const COPY_MAX = 10000;
 const TITLE_MAX = 60;
 const MAX_BRAND_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -67,6 +67,7 @@ async function uploadWithProgress(
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE.replace(/\/$/, "")}/images/upload`);
       xhr.withCredentials = true;
+      const identity = bindConfirmedIdentityXhr(xhr, "/images/upload");
       if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
 
       const fd = new FormData();
@@ -78,10 +79,13 @@ async function uploadWithProgress(
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
+            assertConfirmedIdentityResponse(identity);
             resolve(JSON.parse(xhr.responseText) as UploadResult);
           } catch {
             reject(new Error("响应解析失败"));
           }
+        } else if (coordinateIdentityMismatchResponse(xhr.status, xhr.responseText)) {
+          reject(new Error("登录身份已变化，请重新操作"));
         } else if (xhr.status === 403 && xhr.responseText.includes("csrf_failed")) {
           reject(new Error("csrf_failed"));
         } else if (xhr.status === 401) {

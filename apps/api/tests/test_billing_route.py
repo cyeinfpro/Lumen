@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import inspect
@@ -39,6 +40,7 @@ from lumen_core.models import (
     UserWallet,
     VideoGeneration,
     WalletTransaction,
+    WorkflowRun,
 )
 from lumen_core.schemas import (
     AdminBillingBootstrapIn,
@@ -48,6 +50,23 @@ from lumen_core.schemas import (
     RedemptionIn,
     WalletOut,
 )
+
+
+@pytest.fixture(autouse=True)
+def _allow_redemption_active_user_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def lock_snapshot(_db: Any, user: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            user=user,
+            account_mode=getattr(user, "account_mode", "wallet"),
+        )
+
+    monkeypatch.setattr(
+        billing_redemption_routes,
+        "lock_authenticated_user_snapshot",
+        lock_snapshot,
+    )
 
 
 def _request(
@@ -93,6 +112,7 @@ def _create_orphan_hold_route_tables(sync_connection: Any) -> None:
         Generation.__table__,
         Completion.__table__,
         VideoGeneration.__table__,
+        WorkflowRun.__table__,
     ):
         ddl = str(CreateTable(table).compile(dialect=sqlite.dialect()))
         ddl = ddl.replace("DEFAULT (ARRAY[]::varchar[])", "DEFAULT '[]'")
@@ -135,6 +155,126 @@ def _wallet_tx(
         meta={},
         created_at=created_at,
     )
+
+
+async def _stale_prompt_operation(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    idempotency_key: str,
+    dispatched: bool,
+    telegram: bool = False,
+    stale: bool = True,
+) -> Any:
+    from app.routes.prompt_parts import idempotency
+
+    if telegram:
+        from app.routes import telegram_prompt_idempotency
+
+        operation = telegram_prompt_idempotency.telegram_prompt_enhance_operation(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            chat_id="-100123",
+            tg_user_id="42",
+            text="cat",
+        )
+        reservation = await telegram_prompt_idempotency.reserve_telegram_prompt_enhance(
+            db,
+            operation,
+        )
+    else:
+        operation = idempotency.prompt_enhance_operation(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+            operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+            payload={"text": "cat"},
+        )
+        reservation = await idempotency.reserve_prompt_enhance_operation(db, operation)
+    assert reservation.attempt is not None
+    await idempotency.bind_billing_snapshot(
+        db,
+        operation,
+        reservation.attempt,
+        {
+            "version": 1,
+            "mode": "wallet",
+            "request_id": operation.record_id,
+            "user_id": user_id,
+            "rate_multiplier_x10000": 10_000,
+            "cache_aware": True,
+            "allow_negative": False,
+            "hold_amount_micro": 1_000,
+            "pricing_snapshots": {},
+        },
+    )
+    run = await db.get(WorkflowRun, operation.record_id)
+    assert run is not None
+    metadata = dict(run.metadata_jsonb)
+    record = dict(metadata[operation.metadata_key])
+    if stale:
+        record["lease_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat()
+    record["dispatch_inflight"] = dispatched
+    record["upstream_cost_possible"] = dispatched
+    metadata[operation.metadata_key] = record
+    run.metadata_jsonb = metadata
+    await db.commit()
+    return operation
+
+
+@pytest.mark.asyncio
+async def test_admin_prompt_orphan_hold_rejects_active_attempt_recovery() -> None:
+    now = datetime.now(timezone.utc)
+    user_id = "user-prompt-orphan-active"
+    hold_tx_id = "hold-prompt-orphan-active"
+
+    async with _orphan_hold_route_session() as db:
+        operation = await _stale_prompt_operation(
+            db,
+            user_id=user_id,
+            idempotency_key="prompt-orphan-active",
+            dispatched=False,
+            stale=False,
+        )
+        db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
+        db.add(
+            _wallet_tx(
+                tx_id=hold_tx_id,
+                user_id=user_id,
+                kind="hold",
+                ref_type="prompt_enhance",
+                ref_id=operation.record_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        await db.commit()
+
+        listed = await billing.admin_list_orphan_holds(
+            SimpleNamespace(id="admin-1"),
+            db,
+            min_age_minutes=60,
+            limit=10,
+        )
+        with pytest.raises(HTTPException) as release_error:
+            await billing.admin_release_orphan_hold(
+                hold_tx_id,
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+        await db.rollback()
+        with pytest.raises(HTTPException) as settle_error:
+            await billing.admin_settle_orphan_prompt_hold(
+                hold_tx_id,
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+
+    assert listed[0].recovery_action == "manual_review"
+    assert release_error.value.detail["error"]["code"] == "HOLD_TASK_ACTIVE"
+    assert settle_error.value.detail["error"]["code"] == "HOLD_TASK_ACTIVE"
 
 
 def _hold_task(
@@ -1132,13 +1272,120 @@ async def test_admin_release_replay_repairs_missing_legacy_audit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("telegram", [False, True])
+async def test_admin_prompt_orphan_hold_releases_with_fenced_no_dispatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    telegram: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    suffix = "telegram" if telegram else "web"
+    user_id = f"user-prompt-orphan-release-{suffix}"
+    hold_tx_id = f"hold-prompt-orphan-release-{suffix}"
+
+    async def write_audit(db: AsyncSession, **kwargs: Any) -> bool:
+        db.add(
+            AuditLog(
+                user_id=kwargs.get("user_id"),
+                event_type=kwargs["event_type"],
+                actor_email_hash=kwargs.get("actor_email_hash"),
+                actor_ip_hash=kwargs.get("actor_ip_hash"),
+                target_user_id=kwargs.get("target_user_id"),
+                details=kwargs.get("details") or {},
+            )
+        )
+        await db.flush()
+        return True
+
+    services = billing.build_billing_services()
+    services = billing.replace_billing_commands(
+        services,
+        write_audit=write_audit,
+        invalidate_balance_cache=lambda _user_id: asyncio.sleep(0),
+        request_ip_hash=lambda _request: "ip-hash",
+    )
+    monkeypatch.setattr(
+        billing_overview_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+    monkeypatch.setattr(
+        billing_orphan_settlement_routes,
+        "build_billing_services",
+        lambda: services,
+    )
+
+    async with _orphan_hold_route_session() as db:
+        operation = await _stale_prompt_operation(
+            db,
+            user_id=user_id,
+            idempotency_key=f"prompt-orphan-before-dispatch-{suffix}",
+            dispatched=False,
+            telegram=telegram,
+        )
+        db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
+        db.add(
+            _wallet_tx(
+                tx_id=hold_tx_id,
+                user_id=user_id,
+                kind="hold",
+                ref_type="prompt_enhance",
+                ref_id=operation.record_id,
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        await db.commit()
+
+        listed = await billing.admin_list_orphan_holds(
+            SimpleNamespace(id="admin-1"),
+            db,
+            min_age_minutes=60,
+            limit=10,
+        )
+        with pytest.raises(HTTPException) as settle_error:
+            await billing.admin_settle_orphan_prompt_hold(
+                hold_tx_id,
+                _request(method="POST"),
+                SimpleNamespace(id="admin-1", email="admin@example.test"),
+                db,
+            )
+        await db.rollback()
+        release = await billing.admin_release_orphan_hold(
+            hold_tx_id,
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            db,
+        )
+        wallet = await db.get(UserWallet, user_id)
+        operation_run = await db.get(WorkflowRun, operation.record_id)
+
+    assert listed[0].recovery_action == "release"
+    assert settle_error.value.detail["error"]["code"] == (
+        "HOLD_SETTLEMENT_NOT_RECOMMENDED"
+    )
+    assert release.kind == "release"
+    assert release.meta["release_proof"] == (
+        "prompt_operation:attempt_fenced_no_dispatch"
+    )
+    assert wallet is not None
+    assert wallet.balance_micro == 10_000
+    assert wallet.hold_micro == 0
+    assert operation_run is not None
+    assert operation_run.status == "failed"
+    operation_record = operation_run.metadata_jsonb[operation.metadata_key]
+    assert operation_record["state"] == "failed"
+    assert operation_record["finalization"]["billing_action"] == "release"
+    assert operation_record["response_chunks"] == [
+        'data: {"error": "idempotency_orphan_hold_released"}\n\n'
+    ]
+
+
+@pytest.mark.asyncio
 async def test_admin_prompt_orphan_hold_uses_default_settlement_idempotently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime.now(timezone.utc)
     user_id = "user-prompt-orphan-settle"
     hold_tx_id = "hold-prompt-orphan-settle"
-    ref_id = "prompt-enhance-request-1"
     audit_calls: list[dict[str, Any]] = []
     invalidations: list[str] = []
 
@@ -1177,6 +1424,13 @@ async def test_admin_prompt_orphan_hold_uses_default_settlement_idempotently(
     )
 
     async with _orphan_hold_route_session() as db:
+        operation = await _stale_prompt_operation(
+            db,
+            user_id=user_id,
+            idempotency_key="prompt-orphan-post-dispatch",
+            dispatched=True,
+        )
+        ref_id = operation.record_id
         db.add(UserWallet(user_id=user_id, balance_micro=9_000, hold_micro=1_000))
         db.add(
             _wallet_tx(
@@ -1216,6 +1470,7 @@ async def test_admin_prompt_orphan_hold_uses_default_settlement_idempotently(
             db,
         )
         wallet = await db.get(UserWallet, user_id)
+        operation_run = await db.get(WorkflowRun, operation.record_id)
         settlements = (
             (
                 await db.execute(
@@ -1240,9 +1495,20 @@ async def test_admin_prompt_orphan_hold_uses_default_settlement_idempotently(
     assert first.created_by_admin == "admin-1"
     assert first.meta["actual_micro"] == 1_000
     assert first.meta["settlement_basis"] == "aggregate_held_micro"
+    assert first.meta["recovery_proof"] == (
+        "prompt_operation:dispatch_or_cost_possible"
+    )
     assert wallet is not None
     assert wallet.balance_micro == 9_000
     assert wallet.hold_micro == 0
+    assert operation_run is not None
+    assert operation_run.status == "failed"
+    operation_record = operation_run.metadata_jsonb[operation.metadata_key]
+    assert operation_record["state"] == "failed"
+    assert operation_record["finalization"]["billing_action"] == "settle_default"
+    assert operation_record["response_chunks"] == [
+        'data: {"error": "idempotency_orphan_hold_settled"}\n\n'
+    ]
     assert len(settlements) == 1
     assert len(audit_calls) == 1
     assert audit_calls[0]["event_type"] == "wallet.hold.force_settle"
@@ -2738,6 +3004,9 @@ async def test_admin_adjust_wallet_passes_client_idempotency_key(
         async def get(self, *_args: Any, **_kwargs: Any) -> Any:
             return SimpleNamespace(account_mode="wallet")
 
+        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+            return _ScalarOneOrNoneResult(None)
+
         async def commit(self) -> None:
             return None
 
@@ -2775,9 +3044,23 @@ async def test_admin_adjust_wallet_passes_client_idempotency_key(
         _request(method="POST"),
         SimpleNamespace(id="admin-1", email="admin@example.test"),
         Db(),  # type: ignore[arg-type]
+        idempotency_key="op-1",
     )
 
     assert seen == [(billing_core.rmb_to_micro("5"), "op-1")]
+
+    # Header-only clients are also recognized by the backend and reach the
+    # same persistent wallet idempotency path.
+    seen.clear()
+    await billing.admin_adjust_wallet(
+        "user-1",
+        AdminWalletAdjustIn(amount_rmb_signed="5", reason="客服补偿"),
+        _request(method="POST"),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        Db(),  # type: ignore[arg-type]
+        idempotency_key="op-header",
+    )
+    assert seen == [(billing_core.rmb_to_micro("5"), "op-header")]
 
     # 未传 key 时后端收到 None，走输入派生键兜底。
     seen.clear()
@@ -2789,6 +3072,64 @@ async def test_admin_adjust_wallet_passes_client_idempotency_key(
         Db(),  # type: ignore[arg-type]
     )
     assert seen == [(billing_core.rmb_to_micro("5"), None)]
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_wallet_rejects_mismatched_header_and_body_keys() -> None:
+    with pytest.raises(Exception) as excinfo:
+        await billing.admin_adjust_wallet(
+            "user-1",
+            AdminWalletAdjustIn(
+                amount_rmb_signed="5",
+                reason="客服补偿",
+                idempotency_key="body-key",
+            ),
+            _request(method="POST"),
+            SimpleNamespace(id="admin-1", email="admin@example.test"),
+            object(),  # type: ignore[arg-type]
+            idempotency_key="header-key",
+        )
+
+    assert getattr(excinfo.value, "status_code", None) == 422
+    assert excinfo.value.detail["error"]["code"] == "idempotency_key_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_wallet_replay_does_not_duplicate_transaction_audit() -> (
+    None
+):
+    class Db:
+        def __init__(self) -> None:
+            self.statements: list[Any] = []
+
+        async def execute(self, statement: Any) -> Any:
+            self.statements.append(statement)
+            if len(self.statements) == 1:
+                return _ScalarOneOrNoneResult("tx-1")
+            return _ScalarOneOrNoneResult("audit-existing")
+
+    class Commands:
+        async def write_audit(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("idempotent replay must not write another audit row")
+
+        def request_ip_hash(self, _request: Any) -> None:
+            return None
+
+    db = Db()
+    await billing_wallet_routes._write_admin_adjust_audit_once(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        commands=Commands(),
+        request=_request(method="POST"),
+        admin=SimpleNamespace(id="admin-1", email="admin@example.test"),
+        target_user_id="user-1",
+        amount_micro=500_000,
+        reason="manual credit",
+        transaction=SimpleNamespace(id="tx-1"),  # type: ignore[arg-type]
+    )
+
+    assert len(db.statements) == 2
+    assert getattr(db.statements[0], "_for_update_arg", None) is not None
+    assert "audit_logs" in str(db.statements[1]).lower()
 
 
 class _AccountModeDb:

@@ -8,16 +8,22 @@ from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
     LocalBillingAction,
+    UPSTREAM_DISPATCH_PROVEN_NO_COST,
+    UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
     UpstreamCostKnowledge,
     classify_upstream_cost,
     clear_upstream_execution_receipts,
     clear_upstream_execution_state,
+    decide_dispatch_evidence_billing,
     decide_image_failure_billing,
     decide_upstream_billing,
+    has_proven_no_cost_dispatch,
     has_upstream_dispatch_receipt,
     has_upstream_response_receipt,
     is_no_upstream_cost_receipt,
     mark_upstream_dispatch_started,
+    mark_upstream_dispatch_proven_no_cost,
+    mark_upstream_dispatch_proven_undelivered,
     mark_upstream_response_received,
     resolve_billing_action,
     upstream_dispatch_can_replay,
@@ -103,6 +109,14 @@ def test_manual_retry_execution_cleanup_removes_provider_identity() -> None:
         "upstream_dispatch_started_at": "2026-07-30T00:00:00+00:00",
         "upstream_dispatch_attempt": 1,
         "upstream_dispatch_execution_epoch": 4,
+        "billing_pricing_snapshot": {"tier": "2k", "unit_micro": 123},
+        "billing_rate_multiplier_x10000": 10000,
+        "billing_admission_billable": True,
+        "billing_admission_source": "pricing_snapshot",
+        "billing_admission_ref_id": "generation-old",
+        "billing_free": False,
+        "billing_label": "billable",
+        "bonus_billing_obligation": True,
     }
 
     cleared = clear_upstream_execution_state(request)
@@ -129,6 +143,113 @@ def test_dispatch_without_response_requires_unknown_unless_replay_is_safe() -> N
     }
     assert upstream_dispatch_can_replay(task) is True
     assert upstream_dispatch_result_unknown(task) is False
+
+
+def test_explicit_no_cost_response_allows_replay_without_cost_receipt() -> None:
+    request = mark_upstream_response_received(
+        {},
+        at="2026-08-03T00:00:00+00:00",
+        attempt=1,
+        execution_epoch=3,
+    )
+    request = mark_upstream_dispatch_proven_no_cost(
+        request,
+        at="2026-08-03T00:00:01+00:00",
+        attempt=1,
+        execution_epoch=3,
+    )
+    task = SimpleNamespace(upstream_request=request, execution_epoch=3)
+
+    assert has_proven_no_cost_dispatch(task) is True
+    assert has_upstream_response_receipt(task) is False
+    assert upstream_dispatch_can_replay(task) is True
+    assert upstream_dispatch_result_unknown(task) is False
+    decision = decide_image_failure_billing(
+        "provider_explicit_no_cost",
+        task_or_request=task,
+    )
+    assert decision.knowledge is UpstreamCostKnowledge.PROVEN_ABSENT
+    assert decision.action is LocalBillingAction.RELEASE
+
+
+@pytest.mark.parametrize(
+    ("request_payload", "execution_epoch", "actual_known", "expected_action"),
+    [
+        ({}, 3, False, LocalBillingAction.RELEASE),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            3,
+            False,
+            LocalBillingAction.SETTLE_DEFAULT,
+        ),
+        (
+            mark_upstream_response_received(
+                {},
+                at="2026-08-03T00:00:01+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            3,
+            True,
+            LocalBillingAction.SETTLE_ACTUAL,
+        ),
+        (
+            mark_upstream_dispatch_proven_undelivered(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            3,
+            False,
+            LocalBillingAction.RELEASE,
+        ),
+        (
+            mark_upstream_dispatch_proven_no_cost(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            3,
+            False,
+            LocalBillingAction.RELEASE,
+        ),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=2,
+            ),
+            3,
+            False,
+            LocalBillingAction.RELEASE,
+        ),
+    ],
+)
+def test_dispatch_evidence_billing_matrix(
+    request_payload: dict[str, object],
+    execution_epoch: int,
+    actual_known: bool,
+    expected_action: LocalBillingAction,
+) -> None:
+    task = SimpleNamespace(
+        upstream_request=request_payload,
+        execution_epoch=execution_epoch,
+    )
+
+    decision = decide_dispatch_evidence_billing(
+        task,
+        actual_cost_known=actual_known,
+    )
+
+    assert decision.action is expected_action
 
 
 def test_billable_false_without_local_receipt_stays_unknown() -> None:
@@ -162,6 +283,8 @@ def test_billable_none_is_always_unknown() -> None:
 @pytest.mark.parametrize(
     "reason",
     [
+        UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+        UPSTREAM_DISPATCH_PROVEN_NO_COST,
         "pre_submit_cancel",
         "pre_submit_expired",
         "deadline_expired_before_submit",
@@ -282,7 +405,16 @@ def test_image_result_unknown_codes_settle_default_when_cost_is_unknown(
 ) -> None:
     # A post-dispatch unknown may already have cost the provider. Pure
     # pass-through settles the hold instead of silently refunding it.
-    decision = decide_image_failure_billing(error_code)
+    task = SimpleNamespace(
+        upstream_request=mark_upstream_dispatch_started(
+            {},
+            at="2026-08-03T00:00:00+00:00",
+            attempt=1,
+            execution_epoch=2,
+        ),
+        execution_epoch=2,
+    )
+    decision = decide_image_failure_billing(error_code, task_or_request=task)
     assert decision.knowledge is UpstreamCostKnowledge.UNKNOWN
     assert decision.action is LocalBillingAction.SETTLE_DEFAULT
     assert decision.released is False
@@ -308,14 +440,73 @@ def test_image_result_unknown_codes_cover_every_post_2xx_failure() -> None:
         None,
     ],
 )
-def test_ordinary_image_failure_still_releases(error_code: str | None) -> None:
-    # 其余 failed 码保持既有语义：适配层能判定未交付且未计费 → 退款。
-    # NO_IMAGE_RETURNED 已移出本组——它的失败点在上游 2xx 之后，适配层恰恰
-    # **无法**判定未计费，退款会让平台吸收成本。
-    decision = decide_image_failure_billing(error_code)
+def test_image_failure_before_dispatch_still_releases(error_code: str | None) -> None:
+    task = SimpleNamespace(upstream_request={}, execution_epoch=2)
+    decision = decide_image_failure_billing(error_code, task_or_request=task)
     assert decision.knowledge is UpstreamCostKnowledge.PROVEN_ABSENT
     assert decision.action is LocalBillingAction.RELEASE
     assert decision.released is True
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        None,
+        "",
+        "stream_interrupted",
+        "request_cancelled",
+        "new_provider_failure_code",
+    ],
+)
+def test_unrecognized_post_dispatch_image_failure_settles_default(
+    error_code: str | None,
+) -> None:
+    task = SimpleNamespace(
+        upstream_request=mark_upstream_dispatch_started(
+            {},
+            at="2026-08-03T00:00:00+00:00",
+            attempt=1,
+            execution_epoch=3,
+        ),
+        execution_epoch=3,
+    )
+
+    decision = decide_image_failure_billing(error_code, task_or_request=task)
+
+    assert decision.knowledge is UpstreamCostKnowledge.UNKNOWN
+    assert decision.action is LocalBillingAction.SETTLE_DEFAULT
+    assert decision.released is False
+
+
+def test_proven_undelivered_image_failure_releases_after_dispatch() -> None:
+    request = mark_upstream_dispatch_started(
+        {},
+        at="2026-08-03T00:00:00+00:00",
+        attempt=1,
+        execution_epoch=4,
+    )
+    request = mark_upstream_dispatch_proven_undelivered(
+        request,
+        at="2026-08-03T00:00:01+00:00",
+        attempt=1,
+        execution_epoch=4,
+    )
+    task = SimpleNamespace(upstream_request=request, execution_epoch=4)
+
+    decision = decide_image_failure_billing(
+        "transport_rejected_before_delivery",
+        task_or_request=task,
+    )
+
+    assert decision.knowledge is UpstreamCostKnowledge.PROVEN_ABSENT
+    assert decision.action is LocalBillingAction.RELEASE
+
+
+def test_image_failure_without_execution_evidence_fails_closed() -> None:
+    decision = decide_image_failure_billing("new_provider_failure_code")
+
+    assert decision.knowledge is UpstreamCostKnowledge.UNKNOWN
+    assert decision.action is LocalBillingAction.SETTLE_DEFAULT
 
 
 def test_image_failure_decision_never_settles_actual() -> None:

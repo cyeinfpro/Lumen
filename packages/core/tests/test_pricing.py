@@ -10,7 +10,27 @@ from lumen_core.pricing import (
     PricingOverflowError,
     UsageTokens,
     compute_breakdown,
+    parse_canonical_nonnegative_int,
     parse_usage,
+)
+
+NONCANONICAL_USAGE_VALUES = (
+    True,
+    -1,
+    2.0,
+    2.9,
+    float("nan"),
+    float("inf"),
+    "-1",
+    "+2",
+    "02",
+    "2.0",
+    " 2",
+    "2 ",
+    "NaN",
+    "inf",
+    "\u0662",
+    "9" * 5000,
 )
 
 
@@ -61,6 +81,92 @@ def test_parse_usage_subtracts_gateway_cache_read_for_non_anthropic_provider() -
 
     assert usage.input_tokens == 800
     assert usage.cache_read_tokens == 200
+
+
+@pytest.mark.parametrize("raw", NONCANONICAL_USAGE_VALUES)
+def test_parse_usage_rejects_noncanonical_token_values_without_raising(
+    raw: object,
+) -> None:
+    usage = parse_usage(
+        "openai",
+        {
+            "input_tokens": raw,
+            "output_tokens": raw,
+            "cache_read_tokens": raw,
+            "cache_creation_tokens": raw,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": raw,
+                "ephemeral_1h_input_tokens": raw,
+            },
+            "input_tokens_details": {"cached_tokens": raw},
+            "output_tokens_details": {
+                "reasoning_tokens": raw,
+                "image_tokens": raw,
+            },
+        },
+    )
+
+    assert parse_canonical_nonnegative_int(raw) is None
+    assert usage == UsageTokens(0, 0)
+
+
+@pytest.mark.parametrize("raw", NONCANONICAL_USAGE_VALUES)
+def test_pricing_normalization_is_fail_safe_for_noncanonical_usage(
+    raw: object,
+) -> None:
+    usage = UsageTokens(
+        input_tokens=raw,  # type: ignore[arg-type]
+        output_tokens=raw,  # type: ignore[arg-type]
+        cache_read_tokens=raw,  # type: ignore[arg-type]
+        cache_creation_tokens=raw,  # type: ignore[arg-type]
+        cache_creation_5m_tokens=raw,  # type: ignore[arg-type]
+        cache_creation_1h_tokens=raw,  # type: ignore[arg-type]
+        reasoning_tokens=raw,  # type: ignore[arg-type]
+        image_output_tokens=raw,  # type: ignore[arg-type]
+    )
+
+    assert usage.normalized() == UsageTokens(0, 0)
+    assert (
+        compute_breakdown(
+            ModelPricing(input_per_1k_micro=1_000, output_per_1k_micro=2_000),
+            usage,
+        ).total_cost_micro
+        == 0
+    )
+
+
+@pytest.mark.parametrize("raw", NONCANONICAL_USAGE_VALUES)
+def test_pricing_factors_are_fail_safe_for_noncanonical_values(raw: object) -> None:
+    pricing = ModelPricing(
+        input_per_1k_micro=raw,  # type: ignore[arg-type]
+        output_per_1k_micro=raw,  # type: ignore[arg-type]
+        cache_read_per_1k_micro=raw,  # type: ignore[arg-type]
+        long_context_threshold_tokens=raw,  # type: ignore[arg-type]
+        long_context_input_multiplier_x10000=raw,  # type: ignore[arg-type]
+        long_context_output_multiplier_x10000=raw,  # type: ignore[arg-type]
+    ).with_defaults()
+
+    assert pricing.input_per_1k_micro == 0
+    assert pricing.output_per_1k_micro == 0
+    assert pricing.cache_read_per_1k_micro == 0
+    assert pricing.long_context_threshold_tokens == 0
+    assert pricing.long_context_input_multiplier_x10000 == 10_000
+    assert pricing.long_context_output_multiplier_x10000 == 10_000
+
+
+def test_parse_usage_accepts_canonical_ascii_integer_strings() -> None:
+    usage = parse_usage(
+        "openai",
+        {
+            "input_tokens": "12",
+            "output_tokens": "34",
+            "cache_read_tokens": "0",
+        },
+    )
+
+    assert usage.input_tokens == 12
+    assert usage.output_tokens == 34
+    assert usage.cache_read_tokens == 0
 
 
 def test_compute_breakdown_folds_cache_tokens_into_input_when_unsupported() -> None:

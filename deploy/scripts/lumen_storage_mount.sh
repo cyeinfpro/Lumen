@@ -11,6 +11,8 @@ set -euo pipefail
 
 STATE_DIR="${LUMEN_STORAGE_STATE_DIR:-/var/lib/lumen-storage}"
 CONF_FILE="${STATE_DIR}/storage.conf"
+LAST_GOOD_CONF_FILE="${STATE_DIR}/last-good.conf"
+UNMANAGED_DIRECT_FILE="${STATE_DIR}/unmanaged-direct"
 DISABLED_FILE="${STATE_DIR}/disabled"
 STATUS_FILE="${STATE_DIR}/status.json"
 APPLY_RESULT_FILE="${STATE_DIR}/last-apply.json"
@@ -19,6 +21,7 @@ TEST_CONF_FILE="${STATE_DIR}/test.conf"
 APPLY_TRIGGER_FILE="${STATE_DIR}/apply.trigger"
 TEST_TRIGGER_FILE="${STATE_DIR}/test.trigger"
 TARGET="${LUMEN_STORAGE_TARGET:-/opt/lumendata}"
+DATASET_IDENTITY_FILE="${TARGET}/.lumen-storage-dataset-id"
 TEST_TARGET="${LUMEN_STORAGE_TEST_TARGET:-${STATE_DIR}/scratch}"
 DEFAULT_LOCAL_ROOT="${LUMEN_STORAGE_DEFAULT_LOCAL_ROOT:-/var/lib/lumen-data}"
 DEFAULT_ALLOWED_LOCAL_ROOTS="/var/lib/lumen-data:/srv/lumen-data:/mnt:/media"
@@ -44,6 +47,66 @@ chmod 0775 "$STATE_DIR" 2>/dev/null || true
 
 log() {
   printf '[lumen-storage] %s\n' "$*" >&2
+}
+
+log_error() {
+  log "$*"
+}
+
+storage_maintenance_root() {
+  local compose_dir="${LUMEN_DOCKER_COMPOSE_DIR%/}"
+  if [[ -n "${LUMEN_STORAGE_MAINTENANCE_ROOT:-}" ]]; then
+    printf '%s\n' "$LUMEN_STORAGE_MAINTENANCE_ROOT"
+  elif [[ "$compose_dir" == */current ]]; then
+    printf '%s\n' "${compose_dir%/current}"
+  else
+    dirname "$compose_dir"
+  fi
+}
+
+storage_acquire_maintenance_lock() {
+  local candidate="" locking_lib="" maintenance_root=""
+  for candidate in \
+    "${LUMEN_STORAGE_LOCKING_LIB:-}" \
+    "${LUMEN_DOCKER_COMPOSE_DIR%/}/scripts/lib/locking.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../../scripts/lib/locking.sh" \
+    "/opt/lumen/current/scripts/lib/locking.sh"; do
+    [[ -n "$candidate" && -f "$candidate" && ! -L "$candidate" ]] || continue
+    locking_lib="$candidate"
+    break
+  done
+  if [[ -z "$locking_lib" ]]; then
+    log "maintenance lock helper is unavailable"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  . "$locking_lib"
+  maintenance_root="$(storage_maintenance_root)" || return 1
+  [[ -d "$maintenance_root" && ! -L "$maintenance_root" ]] || {
+    log "maintenance root is invalid: $maintenance_root"
+    return 1
+  }
+  lumen_try_acquire_lock "$maintenance_root" "lumen-storage-apply"
+}
+
+storage_require_no_active_systemd_fallback_writers() {
+  local candidate="" services_lib=""
+  for candidate in \
+    "${LUMEN_STORAGE_SERVICES_LIB:-}" \
+    "${LUMEN_DOCKER_COMPOSE_DIR%/}/scripts/lib/backup_restore_services.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../../scripts/lib/backup_restore_services.sh" \
+    "/opt/lumen/current/scripts/lib/backup_restore_services.sh"; do
+    [[ -n "$candidate" && -f "$candidate" && ! -L "$candidate" ]] || continue
+    services_lib="$candidate"
+    break
+  done
+  if [[ -z "$services_lib" ]]; then
+    log "systemd fallback writer guard is unavailable"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  . "$services_lib"
+  lumen_require_no_active_systemd_fallback_writers
 }
 
 kv_value() {
@@ -173,6 +236,46 @@ compose_with_timeout() {
   (cd "$LUMEN_DOCKER_COMPOSE_DIR" && timeout "$timeout_sec" docker compose "$@")
 }
 
+storage_core_readiness() {
+  local timeout_sec="${1:-90}"
+  local ready_url="${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}"
+  local attempts="${LUMEN_STORAGE_CORE_READINESS_ATTEMPTS:-$timeout_sec}"
+  local interval="${LUMEN_STORAGE_CORE_READINESS_INTERVAL_SECONDS:-1}"
+  local helper="${LUMEN_DOCKER_COMPOSE_DIR}/scripts/lib.sh"
+  case "${attempts}:${interval}" in
+    *[!0-9:]*|0:*|0[0-9]*:*)
+      log "invalid storage readiness parameters"
+      return 2
+      ;;
+  esac
+  if [[ -f "$helper" && ! -L "$helper" ]]; then
+    (
+      export LUMEN_DEPLOY_ROOT="${LUMEN_DOCKER_COMPOSE_DIR%/current}"
+      # shellcheck source=/dev/null
+      . "$helper"
+      lumen_require_compose_core_readiness \
+        "$LUMEN_DOCKER_COMPOSE_DIR" "$ready_url" "$attempts" "$interval"
+    )
+    return $?
+  fi
+
+  command -v curl >/dev/null 2>&1 || return 1
+  local poll=0
+  for ((poll = 1; poll <= attempts; poll++)); do
+    if curl --noproxy '*' -fsS --max-time 5 -o /dev/null \
+        "$ready_url" 2>/dev/null \
+      && compose_with_timeout "${LUMEN_STORAGE_DOCKER_PROBE_TIMEOUT:-15}" \
+        exec -T worker python -m app.worker_health check \
+        >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ "$poll" -lt "$attempts" && "$interval" -gt 0 ]]; then
+      sleep "$interval"
+    fi
+  done
+  return 1
+}
+
 docker_with_timeout() {
   local timeout_sec="$1"
   shift
@@ -290,7 +393,7 @@ def within_target(value: str) -> bool:
         return False
 
 
-def readlink(path: str) -> str | None:
+def readlink(path):
     global uncertain
     try:
         return os.readlink(path)
@@ -455,6 +558,364 @@ print(f"{stat.st_dev}:{stat.st_ino}")
 PY
 }
 
+dataset_identity_value() {
+  local mode="$1"
+  python3 - "$DATASET_IDENTITY_FILE" "$mode" <<'PY'
+import errno
+import os
+import re
+import secrets
+import stat
+import sys
+
+path = os.path.abspath(sys.argv[1])
+mode = sys.argv[2]
+pattern = re.compile(r"[0-9a-f]{64}")
+
+
+def read_identity() -> str:
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SystemExit("dataset identity is not a regular file")
+    with open(path, "r", encoding="ascii") as stream:
+        value = stream.read(128).strip()
+    if not pattern.fullmatch(value):
+        raise SystemExit("dataset identity is invalid")
+    return value
+
+
+if mode == "read":
+    try:
+        print(read_identity())
+    except (OSError, UnicodeError) as exc:
+        raise SystemExit(f"cannot read dataset identity: {exc}")
+    raise SystemExit(0)
+if mode != "ensure":
+    raise SystemExit("invalid dataset identity mode")
+
+try:
+    print(read_identity())
+    raise SystemExit(0)
+except FileNotFoundError:
+    pass
+except (OSError, UnicodeError) as exc:
+    raise SystemExit(f"cannot read dataset identity: {exc}")
+
+value = secrets.token_hex(32)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+flags |= getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, flags, 0o640)
+except FileExistsError:
+    print(read_identity())
+    raise SystemExit(0)
+try:
+    with os.fdopen(fd, "w", encoding="ascii") as stream:
+        stream.write(value + "\n")
+        stream.flush()
+        os.fchmod(stream.fileno(), 0o640)
+        os.fsync(stream.fileno())
+except BaseException:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    raise
+
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+directory_fd = os.open(os.path.dirname(path), directory_flags)
+try:
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        if exc.errno not in {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+        }:
+            raise
+finally:
+    os.close(directory_fd)
+print(value)
+PY
+}
+
+write_kv_file() {
+  local path="$1" mode="$2"
+  shift 2
+  if (( $# % 2 != 0 )); then
+    return 2
+  fi
+  {
+    while [[ "$#" -gt 0 ]]; do
+      printf '%s\0%s\0' "$1" "$2"
+      shift 2
+    done
+  } | python3 -c '
+import os
+import shlex
+import sys
+import tempfile
+
+path = sys.argv[1]
+mode = int(sys.argv[2], 8)
+raw_fields = sys.stdin.buffer.read().split(b"\0")
+if raw_fields and raw_fields[-1] == b"":
+    raw_fields.pop()
+fields = [value.decode("utf-8") for value in raw_fields]
+if len(fields) % 2:
+    raise SystemExit(2)
+fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        for index in range(0, len(fields), 2):
+            stream.write(f"{fields[index]}={shlex.quote(fields[index + 1])}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+        os.fchmod(stream.fileno(), mode)
+    os.replace(tmp, path)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(os.path.dirname(path), directory_flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+' "$path" "$mode"
+}
+
+write_effective_conf_file() {
+  local path="$1" mode="$2"
+  write_kv_file "$path" "$mode" \
+    MODE "$MODE" \
+    LOCAL_ROOT "$LOCAL_ROOT" \
+    SMB_HOST "$SMB_HOST" \
+    SMB_PORT "${SMB_PORT:-}" \
+    SMB_SHARE "$SMB_SHARE" \
+    SMB_SUBPATH "$SMB_SUBPATH" \
+    SMB_USERNAME "$SMB_USERNAME" \
+    SMB_PASSWORD "$SMB_PASSWORD"
+}
+
+remove_unmanaged_direct_marker() {
+  python3 - "$UNMANAGED_DIRECT_FILE" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    info = path.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISDIR(info.st_mode):
+    raise SystemExit("unmanaged direct marker is unexpectedly a directory")
+path.unlink()
+directory_fd = os.open(
+    path.parent,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+)
+try:
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        unsupported = {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+        }
+        if exc.errno not in unsupported:
+            raise
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            syncfs = libc.syncfs
+        except (AttributeError, OSError) as syncfs_error:
+            raise OSError(
+                errno.ENOTSUP,
+                "syncfs is unavailable for marker durability",
+            ) from syncfs_error
+        syncfs.argtypes = [ctypes.c_int]
+        syncfs.restype = ctypes.c_int
+        if syncfs(directory_fd) != 0:
+            code = ctypes.get_errno() or errno.EIO
+            raise OSError(code, os.strerror(code))
+finally:
+    os.close(directory_fd)
+PY
+}
+
+config_file_matches_loaded() {
+  local file="$1"
+  local mode="" local_root="" smb_host="" smb_port="" smb_share=""
+  local smb_subpath="" smb_username="" smb_password=""
+  [[ -f "$file" ]] || return 1
+  mode="$(kv_value "$file" MODE 2>/dev/null || true)"
+  local_root="$(kv_value "$file" LOCAL_ROOT 2>/dev/null || true)"
+  smb_host="$(kv_value "$file" SMB_HOST 2>/dev/null || true)"
+  smb_port="$(kv_value "$file" SMB_PORT 2>/dev/null || true)"
+  smb_share="$(kv_value "$file" SMB_SHARE 2>/dev/null || true)"
+  smb_subpath="$(kv_value "$file" SMB_SUBPATH 2>/dev/null || true)"
+  smb_username="$(kv_value "$file" SMB_USERNAME 2>/dev/null || true)"
+  smb_password="$(kv_value "$file" SMB_PASSWORD 2>/dev/null || true)"
+  [[ "$mode" == "$MODE" \
+    && "$local_root" == "$LOCAL_ROOT" \
+    && "$smb_host" == "$SMB_HOST" \
+    && "$smb_port" == "${SMB_PORT:-}" \
+    && "$smb_share" == "$SMB_SHARE" \
+    && "${smb_subpath:-/}" == "$SMB_SUBPATH" \
+    && "$smb_username" == "$SMB_USERNAME" \
+    && "$smb_password" == "$SMB_PASSWORD" ]]
+}
+
+verified_mountpoint_identity() {
+  local actual_target="" actual_id="" actual_resolved="" expected_resolved=""
+  mountpoint -q "$TARGET" 2>/dev/null || return 1
+  actual_target="$(findmnt_value "$TARGET" TARGET)" || return 1
+  actual_id="$(findmnt_value "$TARGET" ID)" || return 1
+  actual_resolved="$(normalized_path "$actual_target")" || return 1
+  expected_resolved="$(normalized_path "$TARGET")" || return 1
+  [[ -n "$actual_id" && "$actual_resolved" == "$expected_resolved" ]]
+}
+
+LOCAL_BACKING_ID=""
+LOCAL_BACKING_TARGET=""
+LOCAL_BACKING_SOURCE=""
+LOCAL_BACKING_FSTYPE=""
+
+capture_local_backing_identity() {
+  LOCAL_BACKING_ID=""
+  LOCAL_BACKING_TARGET=""
+  LOCAL_BACKING_SOURCE=""
+  LOCAL_BACKING_FSTYPE=""
+  [[ -e "$LOCAL_ROOT" ]] || return 1
+  LOCAL_BACKING_ID="$(findmnt_value "$LOCAL_ROOT" ID)" || return 1
+  LOCAL_BACKING_TARGET="$(findmnt_value "$LOCAL_ROOT" TARGET)" || return 1
+  LOCAL_BACKING_SOURCE="$(findmnt_value "$LOCAL_ROOT" SOURCE)" || return 1
+  LOCAL_BACKING_FSTYPE="$(findmnt_value "$LOCAL_ROOT" FSTYPE)" || return 1
+}
+
+recorded_local_backing_matches() {
+  local file="$1"
+  local expected_target="" expected_source="" expected_fstype=""
+  expected_target="$(kv_value "$file" LOCAL_BACKING_TARGET 2>/dev/null || true)"
+  expected_source="$(kv_value "$file" LOCAL_BACKING_SOURCE 2>/dev/null || true)"
+  expected_fstype="$(kv_value "$file" LOCAL_BACKING_FSTYPE 2>/dev/null || true)"
+  [[ -n "$expected_target" && -n "$expected_source" && -n "$expected_fstype" ]] \
+    || return 1
+  capture_local_backing_identity || return 1
+  [[ "$LOCAL_BACKING_TARGET" == "$expected_target" \
+    && "$LOCAL_BACKING_SOURCE" == "$expected_source" \
+    && "$LOCAL_BACKING_FSTYPE" == "$expected_fstype" ]]
+}
+
+local_root_backing_ready() {
+  local backing_target_resolved=""
+  if ! capture_local_backing_identity; then
+    log "local mount verification failed: cannot identify backing mount for $LOCAL_ROOT"
+    return 1
+  fi
+  if config_file_matches_loaded "$LAST_GOOD_CONF_FILE"; then
+    if ! recorded_local_backing_matches "$LAST_GOOD_CONF_FILE"; then
+      log "local mount verification failed: backing mount identity changed for $LOCAL_ROOT"
+      return 1
+    fi
+    return 0
+  fi
+  if path_is_within "$LOCAL_ROOT" "$DEFAULT_LOCAL_ROOT"; then
+    return 0
+  fi
+  backing_target_resolved="$(normalized_path "$LOCAL_BACKING_TARGET")" || return 1
+  if [[ "$backing_target_resolved" == "/" ]]; then
+    log "refusing custom local root without an external backing mount: $LOCAL_ROOT"
+    return 1
+  fi
+  return 0
+}
+
+recorded_mount_transport_identity_valid() {
+  local file="$1"
+  local expected_target="" expected_source="" expected_fstype=""
+  local actual_target="" actual_source="" actual_fstype=""
+  expected_target="$(kv_value "$file" MOUNT_TARGET 2>/dev/null || true)"
+  expected_source="$(kv_value "$file" MOUNT_SOURCE 2>/dev/null || true)"
+  expected_fstype="$(kv_value "$file" MOUNT_FSTYPE 2>/dev/null || true)"
+  [[ -n "$expected_target" && -n "$expected_source" && -n "$expected_fstype" ]] \
+    || return 1
+  verified_mountpoint_identity || return 1
+  actual_target="$(findmnt_value "$TARGET" TARGET)" || return 1
+  actual_source="$(findmnt_value "$TARGET" SOURCE)" || return 1
+  actual_fstype="$(findmnt_value "$TARGET" FSTYPE)" || return 1
+  [[ "$actual_target" == "$expected_target" \
+    && "$actual_source" == "$expected_source" \
+    && "$actual_fstype" == "$expected_fstype" ]] || return 1
+  if [[ "$MODE" == "local" ]]; then
+    recorded_local_backing_matches "$file"
+  fi
+}
+
+recorded_mount_identity_valid() {
+  local file="$1"
+  local expected_dataset_identity="" actual_dataset_identity=""
+  recorded_mount_transport_identity_valid "$file" || return 1
+  expected_dataset_identity="$(
+    kv_value "$file" DATASET_IDENTITY 2>/dev/null || true
+  )"
+  [[ "$expected_dataset_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  actual_dataset_identity="$(dataset_identity_value read)" || return 1
+  [[ "$actual_dataset_identity" == "$expected_dataset_identity" ]]
+}
+
+persist_last_good_mount() {
+  local mount_target="" mount_source="" mount_fstype=""
+  local backing_target="" backing_source="" backing_fstype=""
+  local dataset_identity=""
+  configured_mount_valid || return 1
+  mount_target="$(findmnt_value "$TARGET" TARGET)" || return 1
+  mount_source="$(findmnt_value "$TARGET" SOURCE)" || return 1
+  mount_fstype="$(findmnt_value "$TARGET" FSTYPE)" || return 1
+  if [[ "$MODE" == "local" ]]; then
+    capture_local_backing_identity || return 1
+    backing_target="$LOCAL_BACKING_TARGET"
+    backing_source="$LOCAL_BACKING_SOURCE"
+    backing_fstype="$LOCAL_BACKING_FSTYPE"
+  fi
+  dataset_identity="$(dataset_identity_value ensure)" || return 1
+  [[ "$dataset_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  chgrp "$LUMEN_GID" "$DATASET_IDENTITY_FILE" 2>/dev/null || true
+  write_kv_file "$LAST_GOOD_CONF_FILE" 0640 \
+    MODE "$MODE" \
+    LOCAL_ROOT "$LOCAL_ROOT" \
+    SMB_HOST "$SMB_HOST" \
+    SMB_PORT "${SMB_PORT:-}" \
+    SMB_SHARE "$SMB_SHARE" \
+    SMB_SUBPATH "$SMB_SUBPATH" \
+    SMB_USERNAME "$SMB_USERNAME" \
+    SMB_PASSWORD "$SMB_PASSWORD" \
+    MOUNT_TARGET "$mount_target" \
+    MOUNT_SOURCE "$mount_source" \
+    MOUNT_FSTYPE "$mount_fstype" \
+    DATASET_IDENTITY "$dataset_identity" \
+    LOCAL_BACKING_TARGET "$backing_target" \
+    LOCAL_BACKING_SOURCE "$backing_source" \
+    LOCAL_BACKING_FSTYPE "$backing_fstype" || return 1
+  chgrp "$LUMEN_GID" "$LAST_GOOD_CONF_FILE" 2>/dev/null || true
+  remove_unmanaged_direct_marker || return 1
+}
+
+restore_conf_from_last_good() {
+  load_conf_file "$LAST_GOOD_CONF_FILE" || return 1
+  write_effective_conf_file "$CONF_FILE" 0660 || return 1
+  chgrp "$LUMEN_GID" "$CONF_FILE" 2>/dev/null || true
+}
+
 CAPTURED_MOUNT_PRESENT=0
 CAPTURED_MOUNT_ID=""
 CAPTURED_MOUNT_SOURCE=""
@@ -562,13 +1023,31 @@ write_test_result() {
   chmod 0644 "$TEST_RESULT_FILE" 2>/dev/null || true
 }
 
+# Load a concrete config file into MODE/LOCAL_ROOT/SMB_*.
+load_conf_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  MODE="$(kv_value "$file" MODE 2>/dev/null || true)"
+  MODE="${MODE:-local}"
+  LOCAL_ROOT="$(kv_value "$file" LOCAL_ROOT 2>/dev/null || true)"
+  LOCAL_ROOT="${LOCAL_ROOT:-$DEFAULT_LOCAL_ROOT}"
+  SMB_HOST="$(kv_value "$file" SMB_HOST 2>/dev/null || true)"
+  # 空 → 走 mount.cifs 默认 445；其他值（数字字符串）拼到 -o port=
+  SMB_PORT="$(kv_value "$file" SMB_PORT 2>/dev/null || true)"
+  SMB_SHARE="$(kv_value "$file" SMB_SHARE 2>/dev/null || true)"
+  SMB_SUBPATH="$(kv_value "$file" SMB_SUBPATH 2>/dev/null || true)"
+  SMB_SUBPATH="${SMB_SUBPATH:-/}"
+  SMB_USERNAME="$(kv_value "$file" SMB_USERNAME 2>/dev/null || true)"
+  SMB_PASSWORD="$(kv_value "$file" SMB_PASSWORD 2>/dev/null || true)"
+}
+
 # Load effective config into MODE/LOCAL_ROOT/SMB_*.
 # escape hatch: when DISABLED_FILE exists, force local mode on default root.
 load_conf() {
   if [[ -f "$DISABLED_FILE" ]]; then
     MODE="local"
     LOCAL_ROOT="$DEFAULT_LOCAL_ROOT"
-    SMB_HOST=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
+    SMB_HOST=""; SMB_PORT=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
     log "DISABLED_FILE present, forcing local mode on $DEFAULT_LOCAL_ROOT"
     return 0
   fi
@@ -578,18 +1057,7 @@ load_conf() {
     SMB_HOST=""; SMB_PORT=""; SMB_SHARE=""; SMB_SUBPATH="/"; SMB_USERNAME=""; SMB_PASSWORD=""
     return 0
   fi
-  MODE="$(kv_value "$CONF_FILE" MODE 2>/dev/null || true)"
-  MODE="${MODE:-local}"
-  LOCAL_ROOT="$(kv_value "$CONF_FILE" LOCAL_ROOT 2>/dev/null || true)"
-  LOCAL_ROOT="${LOCAL_ROOT:-$DEFAULT_LOCAL_ROOT}"
-  SMB_HOST="$(kv_value "$CONF_FILE" SMB_HOST 2>/dev/null || true)"
-  # 空 → 走 mount.cifs 默认 445；其他值（数字字符串）拼到 -o port=
-  SMB_PORT="$(kv_value "$CONF_FILE" SMB_PORT 2>/dev/null || true)"
-  SMB_SHARE="$(kv_value "$CONF_FILE" SMB_SHARE 2>/dev/null || true)"
-  SMB_SUBPATH="$(kv_value "$CONF_FILE" SMB_SUBPATH 2>/dev/null || true)"
-  SMB_SUBPATH="${SMB_SUBPATH:-/}"
-  SMB_USERNAME="$(kv_value "$CONF_FILE" SMB_USERNAME 2>/dev/null || true)"
-  SMB_PASSWORD="$(kv_value "$CONF_FILE" SMB_PASSWORD 2>/dev/null || true)"
+  load_conf_file "$CONF_FILE"
 }
 
 build_smb_source() {
@@ -615,11 +1083,15 @@ EOF
 verify_local_mount() {
   local target_source="" target_source_base="" target_fstype=""
   local local_source="" local_source_base="" local_fstype=""
-  local target_identity="" local_identity=""
-  if ! mountpoint -q "$TARGET" 2>/dev/null; then
-    log "local mount verification failed: $TARGET is not a mountpoint"
+  local target_identity="" local_identity="" target_mount_id=""
+  if ! verified_mountpoint_identity; then
+    log "local mount verification failed: $TARGET is not the expected mountpoint"
     return 1
   fi
+  if ! local_root_backing_ready; then
+    return 1
+  fi
+  target_mount_id="$(findmnt_value "$TARGET" ID)" || return 1
   target_source="$(findmnt_value "$TARGET" SOURCE)" || return 1
   target_fstype="$(findmnt_value "$TARGET" FSTYPE)" || return 1
   local_source="$(findmnt_value "$LOCAL_ROOT" SOURCE)" || return 1
@@ -630,6 +1102,7 @@ verify_local_mount() {
   local_source_base="${local_source%%\[*}"
   if [[ "$target_source_base" != "$local_source_base" \
     || "$target_fstype" != "$local_fstype" \
+    || "$target_mount_id" == "$LOCAL_BACKING_ID" \
     || "$target_identity" != "$local_identity" ]]; then
     log "local mount verification failed: expected source=$LOCAL_ROOT fstype=$local_fstype, got source=$target_source fstype=$target_fstype"
     return 1
@@ -656,8 +1129,8 @@ smb_source_matches() {
 
 verify_smb_mount() {
   local expected_source="$1" actual_source="" actual_fstype="" options=""
-  if ! mountpoint -q "$TARGET" 2>/dev/null; then
-    log "SMB mount verification failed: $TARGET is not a mountpoint"
+  if ! verified_mountpoint_identity; then
+    log "SMB mount verification failed: $TARGET is not the expected mountpoint"
     return 1
   fi
   actual_source="$(findmnt_value "$TARGET" SOURCE)" || return 1
@@ -690,7 +1163,15 @@ mount_local() {
     log "refusing unsafe local root: $LOCAL_ROOT"
     return 2
   fi
-  mkdir -p "$LOCAL_ROOT"
+  if path_is_within "$LOCAL_ROOT" "$DEFAULT_LOCAL_ROOT"; then
+    mkdir -p "$LOCAL_ROOT"
+  else
+    if [[ ! -d "$LOCAL_ROOT" ]]; then
+      log "refusing missing custom local root: $LOCAL_ROOT"
+      return 1
+    fi
+    local_root_backing_ready || return 1
+  fi
   chown "$LUMEN_UID:$LUMEN_GID" "$LOCAL_ROOT" 2>/dev/null || true
   chmod 0775 "$LOCAL_ROOT" 2>/dev/null || true
   mkdir -p "$TARGET"
@@ -806,8 +1287,35 @@ mount_configured() {
   return "$rc"
 }
 
+unmanaged_direct_storage_valid() {
+  [[ -f "$UNMANAGED_DIRECT_FILE" && ! -L "$UNMANAGED_DIRECT_FILE" ]] \
+    || return 1
+  [[ -d "$TARGET" && ! -L "$TARGET" ]] || return 1
+  ! mountpoint -q "$TARGET" 2>/dev/null
+}
+
 cmd_up() {
-  load_conf
+  local rc=0 use_last_good=0
+  if [[ -f "$DISABLED_FILE" ]]; then
+    load_conf
+  elif [[ -f "$LAST_GOOD_CONF_FILE" && ! -L "$LAST_GOOD_CONF_FILE" ]]; then
+    if ! restore_conf_from_last_good; then
+      log "failed to restore the last verified storage config for boot"
+      return 1
+    fi
+    use_last_good=1
+  elif [[ -e "$UNMANAGED_DIRECT_FILE" || -L "$UNMANAGED_DIRECT_FILE" ]]; then
+    if ! unmanaged_direct_storage_valid; then
+      log "unmanaged direct storage marker is invalid or target is unexpectedly mounted"
+      write_status
+      return 1
+    fi
+    log "storage remains on the verified unmanaged direct data root"
+    write_status
+    return 0
+  else
+    load_conf
+  fi
   if ! prepare_service_scope; then
     write_status
     return 2
@@ -818,7 +1326,71 @@ cmd_up() {
     write_status
     return 1
   fi
-  mount_configured
+  mount_configured || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    return "$rc"
+  fi
+  if [[ "$use_last_good" -eq 1 ]]; then
+    if ! recorded_mount_identity_valid "$LAST_GOOD_CONF_FILE"; then
+      log "boot mount does not match the last verified storage identity"
+      write_status
+      return 1
+    fi
+  elif ! persist_last_good_mount; then
+    log "mounted storage identity could not be persisted; refusing startup"
+    write_status
+    return 1
+  fi
+}
+
+cmd_verify() {
+  if [[ ! -f "$LAST_GOOD_CONF_FILE" \
+      && ( -e "$UNMANAGED_DIRECT_FILE" || -L "$UNMANAGED_DIRECT_FILE" ) ]]; then
+    if unmanaged_direct_storage_valid; then
+      return 0
+    fi
+    log "unmanaged direct storage verification failed"
+    return 1
+  fi
+  load_conf
+  if ! configured_mount_valid; then
+    log "configured storage mount identity verification failed"
+    return 1
+  fi
+  if ! config_file_matches_loaded "$LAST_GOOD_CONF_FILE"; then
+    log "configured storage does not match the last verified mount config"
+    return 1
+  fi
+  if ! recorded_mount_identity_valid "$LAST_GOOD_CONF_FILE"; then
+    log "configured storage does not match the last verified mount identity"
+    return 1
+  fi
+}
+
+cmd_bind_identity() {
+  local recorded_identity=""
+  if [[ ! -f "$LAST_GOOD_CONF_FILE" || -L "$LAST_GOOD_CONF_FILE" ]]; then
+    log "cannot bind dataset identity without a regular last-good config"
+    return 1
+  fi
+  recorded_identity="$(
+    kv_value "$LAST_GOOD_CONF_FILE" DATASET_IDENTITY 2>/dev/null || true
+  )"
+  if [[ -n "$recorded_identity" ]]; then
+    log "last-good config already contains a dataset identity"
+    return 1
+  fi
+  load_conf_file "$LAST_GOOD_CONF_FILE" || return 1
+  if ! configured_mount_valid \
+      || ! recorded_mount_transport_identity_valid "$LAST_GOOD_CONF_FILE"; then
+    log "legacy last-good transport identity does not match the mounted dataset"
+    return 1
+  fi
+  if ! persist_last_good_mount; then
+    log "failed to bind durable dataset identity to legacy last-good config"
+    return 1
+  fi
+  log "legacy last-good config upgraded with a durable dataset identity"
 }
 
 cmd_down() {
@@ -839,27 +1411,217 @@ cmd_down() {
   return "$rc"
 }
 
-recover_stopped_services_if_safe() {
-  local start_timeout="$1" db_moves_with_target="$2"
-  local old_present="$3" old_mount_id="$4" old_source="$5" old_fstype="$6"
-  if [[ "$old_present" -ne 1 ]]; then
-    log "no valid previous mount exists; keeping stopped services down"
-    return 1
+stop_storage_services_fail_closed() {
+  local stop_timeout="$1" stop_rc=0
+  log "stopping storage-dependent services before rollback"
+  compose_with_timeout "$stop_timeout" \
+    stop -t 30 "${STOP_SERVICES[@]}" || stop_rc=$?
+  if [[ "$stop_rc" -ne 0 ]]; then
+    log "graceful rollback stop failed or timed out; verifying actual service state"
   fi
-  if ! mount_snapshot_still_valid \
-      "$old_present" "$old_mount_id" "$old_source" "$old_fstype"; then
-    log "previous mount is no longer valid; keeping stopped services down"
+  if storage_transition_safe 0 "${STOP_SERVICES[@]}"; then
+    return 0
+  fi
+
+  log "storage writers are not proven stopped; forcing Docker service shutdown"
+  compose_with_timeout "$stop_timeout" \
+    kill -s KILL "${STOP_SERVICES[@]}" >/dev/null 2>&1 || true
+  if storage_transition_safe 0 "${STOP_SERVICES[@]}"; then
+    return 0
+  fi
+  log "storage writers or target users remain active; rollback cannot continue safely"
+  return 1
+}
+
+recover_stopped_services_if_safe() {
+  local stop_timeout="$1" start_timeout="$2" db_moves_with_target="$3"
+  local old_present="$4" old_mount_id="$5" old_source="$6" old_fstype="$7"
+  if [[ "$old_present" -eq 0 ]]; then
+    if [[ ! -e "$UNMANAGED_DIRECT_FILE" && ! -L "$UNMANAGED_DIRECT_FILE" ]]; then
+      log "no valid previous mount exists; keeping stopped services down"
+      return 1
+    fi
+    if ! unmanaged_direct_storage_valid; then
+      log "unmanaged direct storage baseline is no longer valid; keeping services down"
+      return 1
+    fi
+  elif [[ "$old_present" -eq 1 ]]; then
+    if ! mount_snapshot_still_valid \
+        "$old_present" "$old_mount_id" "$old_source" "$old_fstype"; then
+      log "previous mount is no longer valid; keeping stopped services down"
+      return 1
+    fi
+  else
+    log "previous storage state is invalid; keeping stopped services down"
     return 1
   fi
   if [[ "$db_moves_with_target" -eq 1 ]]; then
-    log "previous mount is still valid; restarting postgres/redis"
+    log "previous storage baseline is valid; restarting postgres/redis"
     if ! compose_with_timeout "$start_timeout" start postgres redis; then
-      log "postgres/redis recovery restart failed; application services remain stopped"
+      log "postgres/redis recovery restart failed; stopping all storage services"
+      stop_storage_services_fail_closed "$stop_timeout" || true
       return 1
     fi
   fi
-  log "previous mount is still valid; restarting application services"
-  compose_with_timeout "$start_timeout" start "${APP_SERVICES[@]}" || return 1
+  log "previous storage baseline is valid; restarting application services"
+  if ! compose_with_timeout "$start_timeout" start "${APP_SERVICES[@]}"; then
+    log "application service recovery restart failed; stopping all storage services"
+    stop_storage_services_fail_closed "$stop_timeout" || true
+    return 1
+  fi
+  if ! storage_core_readiness "$start_timeout"; then
+    log "previous mount service readiness failed; stopping all storage services"
+    stop_storage_services_fail_closed "$stop_timeout" || true
+    return 1
+  fi
+  return 0
+}
+
+rollback_config_valid_for_snapshot() {
+  local old_present="$1" old_mount_id="$2" old_source="$3" old_fstype="$4"
+  local rc=0
+  if [[ "$old_present" -eq 0 \
+      && ! -e "$LAST_GOOD_CONF_FILE" \
+      && ! -L "$LAST_GOOD_CONF_FILE" ]] \
+      && unmanaged_direct_storage_valid; then
+    rc=0
+  elif [[ "$old_present" -ne 1 || ! -f "$LAST_GOOD_CONF_FILE" ]]; then
+    rc=1
+  elif ! load_conf_file "$LAST_GOOD_CONF_FILE"; then
+    rc=1
+  elif ! configured_mount_valid; then
+    log "previous mount does not match the last-good config"
+    rc=1
+  elif ! recorded_mount_identity_valid "$LAST_GOOD_CONF_FILE"; then
+    log "previous mount does not match the last-good identity"
+    rc=1
+  elif ! mount_snapshot_still_valid \
+      "$old_present" "$old_mount_id" "$old_source" "$old_fstype"; then
+    log "previous mount changed while rollback eligibility was checked"
+    rc=1
+  fi
+  load_conf
+  return "$rc"
+}
+
+restored_mount_matches_previous_identity() {
+  local old_source="$1" old_fstype="$2"
+  local current_source="" current_fstype=""
+  configured_mount_valid || return 1
+  recorded_mount_identity_valid "$LAST_GOOD_CONF_FILE" || return 1
+  current_source="$(findmnt_value "$TARGET" SOURCE)" || return 1
+  current_fstype="$(findmnt_value "$TARGET" FSTYPE)" || return 1
+  [[ "$current_source" == "$old_source" && "$current_fstype" == "$old_fstype" ]]
+}
+
+rollback_previous_mount() {
+  local stop_timeout="$1" start_timeout="$2" db_moves_with_target="$3"
+  local old_present="$4" old_source="$5" old_fstype="$6"
+  if [[ "$old_present" -eq 0 ]] \
+      && [[ ! -e "$LAST_GOOD_CONF_FILE" && ! -L "$LAST_GOOD_CONF_FILE" ]] \
+      && [[ -e "$UNMANAGED_DIRECT_FILE" || -L "$UNMANAGED_DIRECT_FILE" ]]; then
+    if mountpoint -q "$TARGET" 2>/dev/null && ! umount_target_force; then
+      log "failed to remove the unsuccessful replacement mount; keeping services stopped"
+      write_status
+      return 1
+    fi
+    if ! unmanaged_direct_storage_valid; then
+      log "unmanaged direct storage baseline could not be restored"
+      write_status
+      return 1
+    fi
+    log "unmanaged direct storage baseline verified; restarting stopped services"
+    if ! recover_stopped_services_if_safe \
+        "$stop_timeout" "$start_timeout" "$db_moves_with_target" \
+        0 "" "" ""; then
+      log "unmanaged direct storage was restored but service recovery failed"
+      return 2
+    fi
+    return 0
+  fi
+  if [[ "$old_present" -ne 1 || ! -f "$LAST_GOOD_CONF_FILE" ]]; then
+    log "no verified previous mount config exists; keeping stopped services down"
+    return 1
+  fi
+  if ! restore_conf_from_last_good; then
+    log "failed to restore the previous storage config; keeping services stopped"
+    return 1
+  fi
+  if mountpoint -q "$TARGET" 2>/dev/null && ! umount_target_force; then
+    log "failed to remove the unsuccessful replacement mount; keeping services stopped"
+    write_status
+    return 1
+  fi
+  log "restoring previous storage mount source=$old_source fstype=$old_fstype"
+  if ! mount_configured; then
+    log "previous storage mount could not be restored; keeping services stopped"
+    write_status
+    return 1
+  fi
+  if ! restored_mount_matches_previous_identity "$old_source" "$old_fstype"; then
+    log "restored mount failed previous identity verification; keeping services stopped"
+    write_status
+    return 1
+  fi
+  if ! capture_mount_snapshot || [[ "$CAPTURED_MOUNT_PRESENT" -ne 1 ]]; then
+    log "restored mount identity could not be captured; keeping services stopped"
+    write_status
+    return 1
+  fi
+  log "previous storage mount identity verified; restarting stopped services"
+  if ! recover_stopped_services_if_safe \
+      "$stop_timeout" "$start_timeout" "$db_moves_with_target" \
+      "$CAPTURED_MOUNT_PRESENT" "$CAPTURED_MOUNT_ID" \
+      "$CAPTURED_MOUNT_SOURCE" "$CAPTURED_MOUNT_FSTYPE"; then
+    log "previous mount was restored but service recovery failed"
+    return 2
+  fi
+  return 0
+}
+
+write_apply_rollback_result() {
+  local call_id="$1" failure_reason="$2" rollback_rc="$3" started_at="$4"
+  case "$rollback_rc" in
+    0)
+      write_apply_result "$call_id" "fail" \
+        "$failure_reason; restored and verified previous mount" "$started_at"
+      ;;
+    2)
+      write_apply_result "$call_id" "fail" \
+        "$failure_reason; previous mount restored but service recovery failed" \
+        "$started_at"
+      ;;
+    *)
+      write_apply_result "$call_id" "fail" \
+        "$failure_reason; previous mount rollback failed and services remain stopped" \
+        "$started_at"
+      ;;
+  esac
+}
+
+rollback_started_replacement() {
+  local stop_timeout="$1" start_timeout="$2" db_moves_with_target="$3"
+  local old_present="$4" old_source="$5" old_fstype="$6"
+  if ! stop_storage_services_fail_closed "$stop_timeout"; then
+    log "replacement storage rollback blocked because writers are not stopped"
+    return 1
+  fi
+  rollback_previous_mount \
+    "$stop_timeout" "$start_timeout" "$db_moves_with_target" \
+    "$old_present" "$old_source" "$old_fstype"
+}
+
+fail_started_replacement_apply() {
+  local call_id="$1" failure_reason="$2" started_at="$3"
+  local stop_timeout="$4" start_timeout="$5" db_moves_with_target="$6"
+  local old_present="$7" old_source="$8" old_fstype="$9"
+  local rollback_rc=0
+  rollback_started_replacement \
+    "$stop_timeout" "$start_timeout" "$db_moves_with_target" \
+    "$old_present" "$old_source" "$old_fstype" || rollback_rc=$?
+  write_status
+  write_apply_rollback_result \
+    "$call_id" "$failure_reason" "$rollback_rc" "$started_at"
 }
 
 # Full reload cycle: stop dependent docker services, swap mount, start them.
@@ -873,10 +1635,22 @@ cmd_apply() {
     return 2
   fi
 
-  exec 9>"${STATE_DIR}/apply.lock"
-  if ! flock -n 9; then
+  exec 8>"${STATE_DIR}/apply.lock"
+  if ! flock -n 8; then
     log "another apply in progress, abort"
     write_apply_result "$call_id" "fail" "another apply in progress" "$started_at"
+    return 1
+  fi
+  if ! storage_acquire_maintenance_lock; then
+    log "another maintenance operation is active, abort"
+    write_apply_result "$call_id" "fail" \
+      "another maintenance operation is active" "$started_at"
+    return 1
+  fi
+  if ! storage_require_no_active_systemd_fallback_writers; then
+    log "systemd fallback writers are active or unverifiable, abort"
+    write_apply_result "$call_id" "fail" \
+      "systemd fallback writers are active or unverifiable" "$started_at"
     return 1
   fi
 
@@ -914,12 +1688,21 @@ cmd_apply() {
   old_mount_id="$CAPTURED_MOUNT_ID"
   old_source="$CAPTURED_MOUNT_SOURCE"
   old_fstype="$CAPTURED_MOUNT_FSTYPE"
+  if ! rollback_config_valid_for_snapshot \
+      "$old_present" "$old_mount_id" "$old_source" "$old_fstype"; then
+    log "refusing remount: previous mount has no verified rollback identity"
+    write_apply_result "$call_id" "fail" \
+      "refused remount: previous mount rollback identity is not verified" \
+      "$started_at"
+    return 1
+  fi
 
   log "docker compose stop ${STOP_SERVICES[*]} (timeout ${stop_timeout}s)"
   if ! compose_with_timeout "$stop_timeout" \
       stop -t 30 "${STOP_SERVICES[@]}"; then
     log "refusing remount: docker compose stop failed or timed out"
-    recover_stopped_services_if_safe "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+    recover_stopped_services_if_safe "$stop_timeout" "$start_timeout" \
+      "$DB_MOVES_WITH_TARGET" \
       "$old_present" "$old_mount_id" "$old_source" "$old_fstype" \
       >/dev/null 2>&1 || true
     write_apply_result "$call_id" "fail" \
@@ -929,7 +1712,8 @@ cmd_apply() {
 
   if ! storage_transition_safe 0 "${STOP_SERVICES[@]}"; then
     log "refusing remount: stopped-service or target-idle verification failed"
-    recover_stopped_services_if_safe "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+    recover_stopped_services_if_safe "$stop_timeout" "$start_timeout" \
+      "$DB_MOVES_WITH_TARGET" \
       "$old_present" "$old_mount_id" "$old_source" "$old_fstype" || true
     write_apply_result "$call_id" "fail" \
       "refused remount: services or target remain active after stop" "$started_at"
@@ -939,7 +1723,8 @@ cmd_apply() {
   if ! mount_snapshot_still_valid \
       "$old_present" "$old_mount_id" "$old_source" "$old_fstype"; then
     log "refusing remount: target mount changed while services were stopping"
-    recover_stopped_services_if_safe "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+    recover_stopped_services_if_safe "$stop_timeout" "$start_timeout" \
+      "$DB_MOVES_WITH_TARGET" \
       "$old_present" "$old_mount_id" "$old_source" "$old_fstype" || true
     write_apply_result "$call_id" "fail" \
       "refused remount: target mount changed during stop" "$started_at"
@@ -948,7 +1733,8 @@ cmd_apply() {
 
   if ! umount_target_force; then
     log "refusing remount: target could not be safely unmounted"
-    recover_stopped_services_if_safe "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+    recover_stopped_services_if_safe "$stop_timeout" "$start_timeout" \
+      "$DB_MOVES_WITH_TARGET" \
       "$old_present" "$old_mount_id" "$old_source" "$old_fstype" || true
     write_apply_result "$call_id" "fail" \
       "refused remount: target remained mounted" "$started_at"
@@ -956,48 +1742,51 @@ cmd_apply() {
   fi
 
   if ! mount_configured || ! configured_mount_valid; then
-    if [[ "$DB_MOVES_WITH_TARGET" -eq 1 ]]; then
-      log "mount failed; keeping postgres/redis stopped to avoid opening a different data root"
-      write_status
-      write_apply_result "$call_id" "fail" \
-        "mount failed; database services remain stopped to avoid data split" \
-        "$started_at"
-      return 1
-    fi
-    log "mount failed, falling back to local default to keep service usable"
-    local fallback_ok=0
-    MODE=local
-    LOCAL_ROOT="$DEFAULT_LOCAL_ROOT"
-    if mount_local; then
-      fallback_ok=1
-    fi
+    local rollback_rc=0
+    log "new storage mount failed identity verification; attempting verified rollback"
+    rollback_previous_mount "$stop_timeout" "$start_timeout" \
+      "$DB_MOVES_WITH_TARGET" \
+      "$old_present" "$old_source" "$old_fstype" || rollback_rc=$?
     write_status
-    if [[ "$fallback_ok" -eq 1 ]]; then
-      compose_with_timeout "$start_timeout" start "${APP_SERVICES[@]}" >/dev/null 2>&1 || true
-      write_apply_result "$call_id" "fail" \
-        "mount failed; fell back to local default $DEFAULT_LOCAL_ROOT" "$started_at"
-    else
-      log "fallback local mount also failed; application services remain stopped"
-      write_apply_result "$call_id" "fail" \
-        "mount failed; fallback mount failed and services remain stopped" "$started_at"
-    fi
+    write_apply_rollback_result \
+      "$call_id" "new mount failed" "$rollback_rc" "$started_at"
     return 1
   fi
 
   if [[ "$DB_MOVES_WITH_TARGET" -eq 1 ]]; then
     log "docker compose start postgres redis (timeout ${start_timeout}s)"
     if ! compose_with_timeout "$start_timeout" start postgres redis; then
-      log "postgres/redis restart failed; application services remain stopped"
-      write_apply_result "$call_id" "fail" \
-        "mount applied but postgres/redis restart failed" "$started_at"
+      log "postgres/redis restart failed on replacement storage; rolling back"
+      fail_started_replacement_apply \
+        "$call_id" "new mount postgres/redis startup failed" "$started_at" \
+        "$stop_timeout" "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+        "$old_present" "$old_source" "$old_fstype"
       return 1
     fi
   fi
   log "docker compose start ${APP_SERVICES[*]} (timeout ${start_timeout}s)"
   if ! compose_with_timeout "$start_timeout" start "${APP_SERVICES[@]}"; then
-    log "application service restart failed or timed out"
-    write_apply_result "$call_id" "fail" \
-      "mount applied but application service restart failed" "$started_at"
+    log "application service restart failed on replacement storage; rolling back"
+    fail_started_replacement_apply \
+      "$call_id" "new mount application startup failed" "$started_at" \
+      "$stop_timeout" "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+      "$old_present" "$old_source" "$old_fstype"
+    return 1
+  fi
+  if ! storage_core_readiness "$start_timeout"; then
+    log "replacement storage API/Worker readiness failed; rolling back"
+    fail_started_replacement_apply \
+      "$call_id" "new mount readiness failed" "$started_at" \
+      "$stop_timeout" "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+      "$old_present" "$old_source" "$old_fstype"
+    return 1
+  fi
+  if ! persist_last_good_mount; then
+    log "replacement storage readiness passed but last-good promotion failed"
+    fail_started_replacement_apply \
+      "$call_id" "new mount last-good promotion failed" "$started_at" \
+      "$stop_timeout" "$start_timeout" "$DB_MOVES_WITH_TARGET" \
+      "$old_present" "$old_source" "$old_fstype"
     return 1
   fi
 
@@ -1075,8 +1864,10 @@ cmd_status() {
 
 cmd_help() {
   cat <<EOF
-Usage: $(basename "$0") {up|down|apply|test|status|help}
+Usage: $(basename "$0") {up|verify|bind-identity|down|apply|test|status|help}
   up      Mount /opt/lumendata per current conf (idempotent).
+  verify  Verify current mount against config and last-good identity.
+  bind-identity  Upgrade a verified legacy last-good with a dataset marker.
   down    Unmount /opt/lumendata.
   apply   Stop dependent docker services, swap mount, restart services.
   test    Test SMB credentials in conf at $TEST_CONF_FILE.
@@ -1084,6 +1875,7 @@ Usage: $(basename "$0") {up|down|apply|test|status|help}
 
 Files:
   $CONF_FILE          current mount config (KEY=VAL)
+  $LAST_GOOD_CONF_FILE last verified config and mount identity
   $TEST_CONF_FILE     test mount config (transient, removed after test)
   $DISABLED_FILE      escape hatch: forces local mode on $DEFAULT_LOCAL_ROOT
   $STATUS_FILE        status snapshot (read by API)
@@ -1096,6 +1888,8 @@ main() {
   local sub="${1:-help}"; shift || true
   case "$sub" in
     up)     cmd_up ;;
+    verify) cmd_verify ;;
+    bind-identity) cmd_bind_identity ;;
     down)   cmd_down ;;
     apply)  cmd_apply ;;
     test)   cmd_test ;;

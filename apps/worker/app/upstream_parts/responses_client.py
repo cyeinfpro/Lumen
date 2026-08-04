@@ -11,7 +11,7 @@ from ..provider_runtime.upstream_services import (
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -21,6 +21,8 @@ import httpx
 from lumen_core.providers import ProviderProxyDefinition
 
 _ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+DispatchReadyHook = Callable[[], Awaitable[None]]
+ResponseReadyHook = Callable[[], Awaitable[None]]
 
 
 class _ResponseBodyTooLarge(Exception):
@@ -472,6 +474,8 @@ async def _iter_sse_with_runtime(
     proxy_url: str | None = None,
     pinned_target: Any | None = None,
     allow_non_sse_payload: bool = False,
+    on_dispatch_ready: DispatchReadyHook | None = None,
+    on_response_ready: ResponseReadyHook | None = None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """POST ``/v1/responses`` with httpx and yield bounded SSE events."""
@@ -487,9 +491,7 @@ async def _iter_sse_with_runtime(
     url = services.requests.responses_url(base)
     stream_kwargs: dict[str, Any] = {
         "json": body,
-        "headers": services.core.auth_headers(
-            api_key, trace_id=call_trace_id
-        ),
+        "headers": services.core.auth_headers(api_key, trace_id=call_trace_id),
     }
     if read_timeout_s is not None and read_timeout_s > timeout_config.read:
         stream_kwargs["timeout"] = timeout_config.to_httpx(read=read_timeout_s)
@@ -498,7 +500,10 @@ async def _iter_sse_with_runtime(
     final_status = 0
     final_response_headers: Any = None
     try:
-        async with client.stream("POST", url, **stream_kwargs) as response:
+        stream_context = client.stream("POST", url, **stream_kwargs)
+        if on_dispatch_ready is not None:
+            await on_dispatch_ready()
+        async with stream_context as response:
             final_status = response.status_code
             final_response_headers = getattr(response, "headers", None)
             if not 200 <= response.status_code < 300:
@@ -509,6 +514,8 @@ async def _iter_sse_with_runtime(
                     log_prefix="httpx sse",
                     services=services,
                 )
+            if on_response_ready is not None:
+                await on_response_ready()
 
             if allow_non_sse_payload:
                 content_type = (
@@ -584,6 +591,8 @@ async def _iter_sse(
     body: dict[str, Any],
     *,
     runtime_override: Any | None = None,
+    on_dispatch_ready: DispatchReadyHook | None = None,
+    on_response_ready: ResponseReadyHook | None = None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Validate a Responses request, resolve its runtime, and yield SSE events."""
@@ -622,6 +631,10 @@ async def _iter_sse(
     )
     if pinned_target is not None:
         runtime_kwargs["pinned_target"] = pinned_target
+    if on_dispatch_ready is not None:
+        runtime_kwargs["on_dispatch_ready"] = on_dispatch_ready
+    if on_response_ready is not None:
+        runtime_kwargs["on_response_ready"] = on_response_ready
     async for event in services.responses.iter_sse_with_runtime(
         **runtime_kwargs,
     ):
@@ -632,12 +645,16 @@ async def stream_completion(
     body: dict[str, Any],
     *,
     runtime_override: Any | None = None,
+    on_dispatch_ready: DispatchReadyHook | None = None,
+    on_response_ready: ResponseReadyHook | None = None,
     runtime: ImageUpstreamRuntime,
 ) -> AsyncIterator[dict[str, Any]]:
     services = resolve_image_upstream_services(runtime)
     async for event in services.responses.iter_sse(
         body,
         runtime_override=runtime_override,
+        on_dispatch_ready=on_dispatch_ready,
+        on_response_ready=on_response_ready,
         runtime=runtime,
     ):
         yield event

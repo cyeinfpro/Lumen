@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from lumen_core.upstream_billing import (
-    has_proven_undelivered_dispatch,
-    has_upstream_dispatch_receipt,
+    decide_dispatch_evidence_billing,
     receipt_execution_identity,
 )
 
@@ -14,33 +13,159 @@ from ...provider_runtime.errors import UpstreamError
 from ...upstream_clients.image_job_models import (
     ImageJobCostKnowledge,
     ImageJobExecutionHandle,
+    ImageJobResultState,
 )
 
 
 SIDECAR_EXECUTION_KEY = "sidecar_execution"
+SIDECAR_EXECUTIONS_KEY = "sidecar_executions"
+
+
+def _execution_lane_order(execution: ImageJobExecutionHandle) -> tuple[int, str]:
+    endpoint_order = {"generations": 0, "responses": 1}
+    return (
+        endpoint_order.get(execution.endpoint, 2),
+        execution.endpoint,
+    )
+
+
+def _preferred_sidecar_execution(
+    executions: tuple[ImageJobExecutionHandle, ...],
+) -> ImageJobExecutionHandle | None:
+    if not executions:
+        return None
+    recovery_order = {"deliver": 0, "poll": 1, "terminal": 2}
+    cost_order = {
+        ImageJobCostKnowledge.INCURRED: 0,
+        ImageJobCostKnowledge.UNKNOWN: 1,
+        ImageJobCostKnowledge.NONE: 2,
+    }
+    return min(
+        executions,
+        key=lambda execution: (
+            recovery_order[execution.recovery_outcome.value],
+            cost_order[execution.cost_knowledge],
+            *_execution_lane_order(execution),
+        ),
+    )
+
+
+def sidecar_executions_from_request(
+    upstream_request: dict[str, Any] | None,
+) -> tuple[ImageJobExecutionHandle, ...]:
+    if not isinstance(upstream_request, dict):
+        return ()
+    by_endpoint: dict[str, ImageJobExecutionHandle] = {}
+    legacy = ImageJobExecutionHandle.from_mapping(
+        upstream_request.get(SIDECAR_EXECUTION_KEY)
+    )
+    if legacy is not None:
+        by_endpoint[legacy.endpoint] = legacy
+    raw_executions = upstream_request.get(SIDECAR_EXECUTIONS_KEY)
+    values = (
+        raw_executions.values()
+        if isinstance(raw_executions, dict)
+        else raw_executions
+        if isinstance(raw_executions, (list, tuple))
+        else ()
+    )
+    for raw_execution in values:
+        execution = ImageJobExecutionHandle.from_mapping(raw_execution)
+        if execution is not None:
+            by_endpoint[execution.endpoint] = execution
+    return tuple(sorted(by_endpoint.values(), key=_execution_lane_order))
+
+
+def upsert_sidecar_execution(
+    upstream_request: dict[str, Any] | None,
+    execution: ImageJobExecutionHandle,
+) -> dict[str, Any]:
+    request = dict(upstream_request or {})
+    by_endpoint = {
+        existing.endpoint: existing
+        for existing in sidecar_executions_from_request(request)
+    }
+    by_endpoint[execution.endpoint] = execution
+    executions = tuple(sorted(by_endpoint.values(), key=_execution_lane_order))
+    preferred = _preferred_sidecar_execution(executions)
+    if preferred is not None:
+        request[SIDECAR_EXECUTION_KEY] = preferred.to_dict()
+    if len(executions) > 1:
+        request[SIDECAR_EXECUTIONS_KEY] = {
+            item.endpoint: item.to_dict() for item in executions
+        }
+    else:
+        request.pop(SIDECAR_EXECUTIONS_KEY, None)
+    return request
 
 
 def sidecar_execution_from_request(
     upstream_request: dict[str, Any] | None,
 ) -> ImageJobExecutionHandle | None:
-    if not isinstance(upstream_request, dict):
-        return None
-    return ImageJobExecutionHandle.from_mapping(
-        upstream_request.get(SIDECAR_EXECUTION_KEY)
+    return _preferred_sidecar_execution(
+        sidecar_executions_from_request(upstream_request)
     )
+
+
+def _normalized_sidecar_endpoint(value: Any) -> str:
+    endpoint = str(value or "").strip()
+    return endpoint.removeprefix("image-jobs:")
+
+
+def _execution_has_terminal_cost(
+    execution: ImageJobExecutionHandle,
+) -> bool:
+    return bool(
+        execution.cost_knowledge
+        in {
+            ImageJobCostKnowledge.UNKNOWN,
+            ImageJobCostKnowledge.INCURRED,
+        }
+        and (
+            execution.cancel_outcome is not None
+            or execution.result_state != ImageJobResultState.PENDING
+        )
+    )
+
+
+def dual_race_bonus_execution_from_request(
+    upstream_request: dict[str, Any] | None,
+    *,
+    winner_endpoint: str | None,
+) -> ImageJobExecutionHandle | None:
+    executions = sidecar_executions_from_request(upstream_request)
+    if len(executions) < 2:
+        return None
+    cancelled = tuple(
+        execution
+        for execution in executions
+        if execution.cancel_outcome is not None
+        and _execution_has_terminal_cost(execution)
+    )
+    if cancelled:
+        return min(cancelled, key=_execution_lane_order)
+    normalized_winner = _normalized_sidecar_endpoint(winner_endpoint)
+    if not normalized_winner:
+        return None
+    candidates = tuple(
+        execution
+        for execution in executions
+        if execution.endpoint != normalized_winner
+        and _execution_has_terminal_cost(execution)
+    )
+    return min(candidates, key=_execution_lane_order) if candidates else None
 
 
 def sidecar_cost_requires_settlement(
     upstream_request: dict[str, Any] | None,
 ) -> bool:
-    execution = sidecar_execution_from_request(upstream_request)
-    return bool(
-        execution is not None
-        and execution.cost_knowledge
+    return any(
+        execution.cost_knowledge
         in {
             ImageJobCostKnowledge.UNKNOWN,
             ImageJobCostKnowledge.INCURRED,
         }
+        for execution in sidecar_executions_from_request(upstream_request)
     )
 
 
@@ -51,51 +176,41 @@ async def release_or_settle_generation(
     *,
     reason: str,
 ) -> None:
-    execution = sidecar_execution_from_request(
+    executions = sidecar_executions_from_request(
         getattr(generation, "upstream_request", None)
     )
-    if execution is not None and execution.cost_knowledge in {
-        ImageJobCostKnowledge.UNKNOWN,
-        ImageJobCostKnowledge.INCURRED,
-    }:
+    settlement_execution = next(
+        (
+            execution
+            for knowledge in (
+                ImageJobCostKnowledge.INCURRED,
+                ImageJobCostKnowledge.UNKNOWN,
+            )
+            for execution in executions
+            if execution.cost_knowledge == knowledge
+        ),
+        None,
+    )
+    if settlement_execution is not None:
         await billing.settle_unknown_upstream(
             session,
             generation,
             reason=reason,
-            knowledge=execution.cost_knowledge.value,
+            knowledge=settlement_execution.cost_knowledge.value,
         )
         return
-    # 直接引擎（images/responses 直连）没有 sidecar 执行句柄，但 dispatch 收据
-    # 同样代表上游可能已经扣费：请求已发出、结果不可知时必须结算而不是释放，
-    # 与 TaskDomainReconciler._settle_timeout_billing 的语义保持一致（纯转嫁铁律：
-    # 只有能证明上游未产生费用的场景才允许 release）。
-    #
-    # 「结果不可知」仅指已派发但当前 dispatch 未收到任何应答（连接中断/超时等）。
-    # 一旦收到明确应答（response 收据与 dispatch 同 attempt/epoch），失败语义就由
-    # 上游计费决策表 decide_image_failure_billing 裁定：非
-    # IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES 的错误码意味着适配层已证明上游未计费
-    # （PROVEN_ABSENT）→ 必须 release；否则把用户 hold 全额扣掉就是多收用户的钱，
-    # 正是决策表注释里列明要避免的方向。
-    if execution is None:
-        execution_epoch = getattr(generation, "execution_epoch", None)
-        if (
-            has_upstream_dispatch_receipt(
-                generation,
-                execution_epoch=execution_epoch,
-            )
-            and not has_proven_undelivered_dispatch(
-                generation,
-                execution_epoch=execution_epoch,
-            )
-            and not _current_dispatch_has_response(generation)
-        ):
-            await billing.settle_unknown_upstream(
-                session,
-                generation,
-                reason=reason,
-                knowledge="unknown",
-            )
-            return
+    decision = decide_dispatch_evidence_billing(
+        generation,
+        actual_cost_known=False,
+    )
+    if not decision.released:
+        await billing.settle_unknown_upstream(
+            session,
+            generation,
+            reason=reason,
+            knowledge=decision.knowledge.value,
+        )
+        return
     await billing.release(session, generation, reason=reason)
 
 
@@ -118,6 +233,22 @@ def _current_dispatch_has_response(generation: Any) -> bool:
     )
 
 
+def unknown_generation_requires_settlement(generation: Any) -> bool:
+    executions = sidecar_executions_from_request(
+        getattr(generation, "upstream_request", None)
+    )
+    if any(
+        execution.cost_knowledge
+        in {
+            ImageJobCostKnowledge.UNKNOWN,
+            ImageJobCostKnowledge.INCURRED,
+        }
+        for execution in executions
+    ):
+        return True
+    return _current_dispatch_has_response(generation)
+
+
 def release_would_absorb_upstream_cost(
     exc: BaseException | None,
     generation: Any,
@@ -133,18 +264,23 @@ def release_would_absorb_upstream_cost(
     """
     if isinstance(exc, UpstreamError):
         return False
-    execution = sidecar_execution_from_request(
+    executions = sidecar_executions_from_request(
         getattr(generation, "upstream_request", None)
     )
-    if execution is not None:
+    if executions:
         return False
     return _current_dispatch_has_response(generation)
 
 
 __all__ = [
     "SIDECAR_EXECUTION_KEY",
+    "SIDECAR_EXECUTIONS_KEY",
+    "dual_race_bonus_execution_from_request",
     "release_or_settle_generation",
     "release_would_absorb_upstream_cost",
     "sidecar_cost_requires_settlement",
     "sidecar_execution_from_request",
+    "sidecar_executions_from_request",
+    "unknown_generation_requires_settlement",
+    "upsert_sidecar_execution",
 ]

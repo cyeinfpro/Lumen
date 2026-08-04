@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -15,6 +15,8 @@ class CompletionStream(Protocol):
         body: dict[str, Any],
         *,
         runtime_override: Any | None = None,
+        on_dispatch_ready: Callable[[], Awaitable[None]] | None = None,
+        on_response_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]: ...
 
 

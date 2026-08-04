@@ -1,5 +1,11 @@
 import type { VideoOut } from "../types";
 import { apiFetch } from "./http";
+import {
+  idempotentPostRequest,
+  semanticJsonPostRequest,
+  semanticPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 
 export interface StoryboardAsset {
   id: string;
@@ -173,6 +179,107 @@ export interface StoryboardSubmitShotIn {
   idempotency_key?: string | null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function validateStoryboardRun(value: StoryboardRun): StoryboardRun {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    !Array.isArray(value.assets) ||
+    !Array.isArray(value.shots)
+  ) {
+    throw new TypeError("malformed storyboard task response");
+  }
+  return value;
+}
+
+function validateStoryboardAssetTask(
+  value: StoryboardRun,
+  stepId: string,
+): StoryboardRun {
+  validateStoryboardRun(value);
+  const asset = value.assets.find((item) => item.id === stepId);
+  if (
+    !asset ||
+    typeof asset.generation_id !== "string" ||
+    asset.generation_id.length === 0
+  ) {
+    throw new TypeError("malformed storyboard task response");
+  }
+  return value;
+}
+
+function validateStoryboardKeyframeTask(
+  value: StoryboardRun,
+  stepId?: string,
+): StoryboardRun {
+  validateStoryboardRun(value);
+  const shots = stepId
+    ? value.shots.filter((item) => item.id === stepId)
+    : value.shots;
+  if (
+    !shots.some(
+      (item) =>
+        typeof item.keyframe_generation_id === "string" &&
+        item.keyframe_generation_id.length > 0,
+    )
+  ) {
+    throw new TypeError("malformed storyboard task response");
+  }
+  return value;
+}
+
+function validateStoryboardVideoTask(
+  value: StoryboardRun,
+  stepId?: string,
+): StoryboardRun {
+  validateStoryboardRun(value);
+  const shots = stepId
+    ? value.shots.filter((item) => item.id === stepId)
+    : value.shots;
+  if (
+    !shots.some(
+      (item) =>
+        typeof item.video_generation_id === "string" &&
+        item.video_generation_id.length > 0,
+    )
+  ) {
+    throw new TypeError("malformed storyboard task response");
+  }
+  return value;
+}
+
+function semanticStoryboardJsonPost(
+  path: string,
+  scope: Record<string, string>,
+  payload: unknown,
+  validate: (value: StoryboardRun) => StoryboardRun,
+): Promise<StoryboardRun> {
+  return withSemanticPostIdempotency(scope, payload, (idempotencyKey) =>
+    apiFetch<StoryboardRun>(
+      path,
+      semanticJsonPostRequest(payload, idempotencyKey),
+    ).then(validate),
+  );
+}
+
+function semanticStoryboardEmptyPost(
+  path: string,
+  scope: Record<string, string>,
+  validate: (value: StoryboardRun) => StoryboardRun,
+): Promise<StoryboardRun> {
+  const payload = {};
+  return withSemanticPostIdempotency(scope, payload, (idempotencyKey) =>
+    apiFetch<StoryboardRun>(
+      path,
+      semanticPostRequest(idempotencyKey),
+    ).then(validate),
+  );
+}
+
 export function listStoryboards(
   opts: { cursor?: string | null; limit?: number } = {},
 ): Promise<StoryboardListResponse> {
@@ -224,9 +331,15 @@ export function generateStoryboardAsset(
   stepId: string,
   body: StoryboardGenerateIn = {},
 ): Promise<StoryboardRun> {
-  return apiFetch<StoryboardRun>(
+  return semanticStoryboardJsonPost(
     `/storyboards/${encodeURIComponent(storyboardId)}/assets/${encodeURIComponent(stepId)}/generate`,
-    { method: "POST", body: JSON.stringify(body) },
+    {
+      operation: "storyboard.asset.generate",
+      storyboardId,
+      stepId,
+    },
+    body,
+    (value) => validateStoryboardAssetTask(value, stepId),
   );
 }
 
@@ -320,18 +433,28 @@ export function generateStoryboardKeyframe(
   stepId: string,
   body: StoryboardGenerateIn = {},
 ): Promise<StoryboardRun> {
-  return apiFetch<StoryboardRun>(
+  return semanticStoryboardJsonPost(
     `/storyboards/${encodeURIComponent(storyboardId)}/shots/${encodeURIComponent(stepId)}/keyframe`,
-    { method: "POST", body: JSON.stringify(body) },
+    {
+      operation: "storyboard.keyframe.generate",
+      storyboardId,
+      stepId,
+    },
+    body,
+    (value) => validateStoryboardKeyframeTask(value, stepId),
   );
 }
 
 export function generateAllStoryboardKeyframes(
   storyboardId: string,
 ): Promise<StoryboardRun> {
-  return apiFetch<StoryboardRun>(
+  return semanticStoryboardEmptyPost(
     `/storyboards/${encodeURIComponent(storyboardId)}/shots/keyframes/generate-all`,
-    { method: "POST" },
+    {
+      operation: "storyboard.keyframe.generate_all",
+      storyboardId,
+    },
+    (value) => validateStoryboardKeyframeTask(value),
   );
 }
 
@@ -350,18 +473,40 @@ export function submitStoryboardShot(
   stepId: string,
   body: StoryboardSubmitShotIn = {},
 ): Promise<StoryboardRun> {
-  return apiFetch<StoryboardRun>(
-    `/storyboards/${encodeURIComponent(storyboardId)}/shots/${encodeURIComponent(stepId)}/submit`,
-    { method: "POST", body: JSON.stringify(body) },
+  const {
+    idempotency_key: explicitKey,
+    ...payload
+  } = body;
+  const submit = (idempotencyKey: string) =>
+    apiFetch<StoryboardRun>(
+      `/storyboards/${encodeURIComponent(storyboardId)}/shots/${encodeURIComponent(stepId)}/submit`,
+      idempotentPostRequest({
+        ...payload,
+        idempotency_key: idempotencyKey,
+      }),
+    ).then((value) => validateStoryboardVideoTask(value, stepId));
+  if (explicitKey) return submit(explicitKey);
+  return withSemanticPostIdempotency(
+    {
+      operation: "storyboard.shot.submit",
+      storyboardId,
+      stepId,
+    },
+    payload,
+    submit,
   );
 }
 
 export function submitAllStoryboardShots(
   storyboardId: string,
 ): Promise<StoryboardRun> {
-  return apiFetch<StoryboardRun>(
+  return semanticStoryboardEmptyPost(
     `/storyboards/${encodeURIComponent(storyboardId)}/shots/submit-all`,
-    { method: "POST" },
+    {
+      operation: "storyboard.shots.submit_all",
+      storyboardId,
+    },
+    (value) => validateStoryboardVideoTask(value),
   );
 }
 

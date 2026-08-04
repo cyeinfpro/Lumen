@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -160,6 +162,16 @@ class _ArtifactStore:
 
     def processing_path(self, key: ArtifactKey) -> Path:
         return self.tmp_path / Path(key.value).name
+
+    @asynccontextmanager
+    async def artifact_lifecycle_fence(
+        self,
+        _key: ArtifactKey,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> AsyncIterator[None]:
+        del timeout_seconds
+        yield
 
     async def publish_path(
         self,

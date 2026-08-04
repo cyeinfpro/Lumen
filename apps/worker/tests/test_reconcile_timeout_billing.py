@@ -1,11 +1,13 @@
 """对账器把卡死任务判超时时的计费动作。
 
-核心不变式（纯转嫁）：**超时不等于可以退款**。可信实际用量已持久化时按实际
-用量结算；只有没有实际用量证据时才按 hold 结算。能证明请求从未发出才 release。
+核心不变式：可信实际用量已持久化时按实际用量结算；当前 execution 只要已经
+dispatch 且没有 durable 的 undelivered/no-cost 证据，就按 hold 结算。稳定
+idempotency key 只允许安全重放，不把最终未知成本改成 release。
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -13,7 +15,11 @@ from typing import Any
 
 import pytest
 from sqlalchemy.dialects import postgresql
-from lumen_core.constants import CompletionStatus
+from lumen_core.constants import CompletionStatus, GenerationStatus
+from lumen_core.upstream_billing import (
+    GENERATION_TAKEOVER_CHECKPOINT_KEY,
+    mark_upstream_dispatch_proven_no_cost,
+)
 
 from app.reconciliation.contracts import ReconcileContext
 from app.reconciliation.bonus_billing import BONUS_BILLING_RECONCILER
@@ -22,6 +28,11 @@ from app.reconciliation.task_domains import (
     GENERATION_RECONCILER,
     RECON_RESULT_UNKNOWN_CODE,
     RECON_TIMEOUT_CODE,
+    settle_completion_actual_or_unknown,
+)
+from app.tasks.completion_parts.default_runtime_parts import persistence_runtime
+from app.tasks.generation_parts.execution_boundary import (
+    release_or_settle_generation,
 )
 
 
@@ -374,6 +385,128 @@ async def _timeout(reconciler: Any, task: SimpleNamespace) -> _RecordingBilling:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("no_dispatch", "release_completion"),
+        ("dispatch_only", "settle_completion_unknown_upstream"),
+        ("response", "settle_completion_unknown_upstream"),
+        ("proven_no_cost", "release_completion"),
+        ("usage", "charge_completion"),
+    ],
+)
+async def test_completion_live_and_reconcile_billing_actions_match(
+    case: str,
+    expected: str,
+) -> None:
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        1,
+        dispatch_started=case == "dispatch_only",
+        response_received=case == "response",
+        execution_epoch=7,
+        usage_epoch=7 if case == "usage" else None,
+        tokens_out=9 if case == "usage" else 0,
+    )
+    if case == "proven_no_cost":
+        task.upstream_request = mark_upstream_dispatch_proven_no_cost(
+            task,
+            at="2026-08-03T00:00:00+00:00",
+            attempt=1,
+            execution_epoch=7,
+        )
+    live_billing = _RecordingBilling()
+    reconcile_billing = _RecordingBilling()
+
+    await persistence_runtime.settle_failed_billing(
+        object(),
+        task,
+        usage_values=((9,) if case == "usage" else (0,)),
+        reason="failed",
+        worker_billing=live_billing,
+    )
+    await COMPLETION_RECONCILER._settle_timeout_billing(
+        _context(reconcile_billing),
+        task,
+        reason="failed",
+    )
+
+    assert [name for name, _ in live_billing.calls] == [expected]
+    assert [name for name, _ in reconcile_billing.calls] == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("no_dispatch", "release"),
+        ("dispatch_only", "settle"),
+        ("response", "settle"),
+        ("proven_no_cost", "release"),
+    ],
+)
+async def test_generation_live_and_reconcile_billing_actions_match(
+    case: str,
+    expected: str,
+) -> None:
+    task = _task(
+        GenerationStatus.RUNNING.value,
+        1,
+        dispatch_started=case == "dispatch_only",
+        response_received=case == "response",
+        execution_epoch=7,
+    )
+    if case == "proven_no_cost":
+        task.upstream_request = mark_upstream_dispatch_proven_no_cost(
+            task,
+            at="2026-08-03T00:00:00+00:00",
+            attempt=1,
+            execution_epoch=7,
+        )
+    actions: list[str] = []
+
+    class LiveBilling:
+        async def release(self, *_args: Any, **_kwargs: Any) -> None:
+            actions.append("release")
+
+        async def settle_unknown_upstream(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> None:
+            actions.append("settle")
+
+    class ReconcileBilling(_RecordingBilling):
+        async def release_generation(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> None:
+            actions.append("release")
+
+        async def settle_generation_unknown_upstream(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> None:
+            actions.append("settle")
+
+    await release_or_settle_generation(
+        LiveBilling(),
+        object(),
+        task,
+        reason="failed",
+    )
+    await GENERATION_RECONCILER._settle_timeout_billing(
+        _context(ReconcileBilling()),
+        task,
+        reason="failed",
+    )
+
+    assert actions == [expected, expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("reconciler", "expected"),
     [
         (GENERATION_RECONCILER, "release_generation"),
@@ -389,6 +522,34 @@ async def test_never_claimed_task_is_released(
     billing = await _timeout(reconciler, _task(reconciler.spec.queued_status, 0))
     assert [name for name, _ in billing.calls] == [expected]
     assert billing.calls[0][1] == {"reason": RECON_TIMEOUT_CODE}
+
+
+@pytest.mark.asyncio
+async def test_completion_crash_after_dispatch_settles_default() -> None:
+    billing = _RecordingBilling()
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        1,
+        dispatch_started=True,
+    )
+
+    await settle_completion_actual_or_unknown(
+        billing,
+        object(),
+        task,
+        reason="completion_result_unknown",
+        knowledge="unknown",
+    )
+
+    assert billing.calls == [
+        (
+            "settle_completion_unknown_upstream",
+            {
+                "reason": "completion_result_unknown",
+                "knowledge": "unknown",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -461,6 +622,101 @@ async def test_completion_reconciliation_charges_trusted_persisted_usage(
 
 
 @pytest.mark.asyncio
+async def test_completion_reconciler_adopts_completed_response_checkpoint() -> None:
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        2,
+        response_received=True,
+        execution_epoch=7,
+        usage_epoch=7,
+        tokens_out=41,
+    )
+    task.text = "durable final answer"
+    task.upstream_request.update(
+        {
+            "completion_checkpoint_version": 1,
+            "completion_checkpoint_execution_epoch": 7,
+            "completion_checkpoint_attempt_epoch": 2,
+            "completion_checkpoint_response_id": "resp-1",
+            "completion_checkpoint_usage_exact": True,
+            "completion_checkpoint_usage_complete": True,
+            "completion_checkpoint_state": "billing_ready",
+            "completion_checkpoint_images": [],
+            "completion_usage_attempt_epoch": 2,
+        }
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+    context.stage_event = lambda _session, *, kind, payload: (
+        "event-1",
+        kind,
+        payload,
+    )
+
+    result = await COMPLETION_RECONCILER.reconcile(context)
+    repeated = await COMPLETION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert repeated.touched == 0
+    assert task.status == CompletionStatus.SUCCEEDED.value
+    assert task.error_code is None
+    assert billing.calls == [("charge_completion", {})]
+    assert len(result.pending_outbox) == 1
+    assert result.pending_outbox[0][2]["event_name"] == "completion.succeeded"
+
+
+@pytest.mark.asyncio
+async def test_completion_reconciler_adopts_inexact_usage_checkpoint_once() -> None:
+    task = _task(
+        CompletionStatus.STREAMING.value,
+        2,
+        response_received=True,
+        execution_epoch=7,
+        usage_epoch=7,
+        tokens_out=41,
+    )
+    task.text = "durable inexact answer"
+    task.upstream_request.update(
+        {
+            "completion_checkpoint_version": 1,
+            "completion_checkpoint_execution_epoch": 7,
+            "completion_checkpoint_attempt_epoch": 2,
+            "completion_checkpoint_response_id": "resp-inexact",
+            "completion_checkpoint_usage_exact": False,
+            "completion_checkpoint_usage_complete": False,
+            "completion_checkpoint_state": "artifacts_committed",
+            "completion_checkpoint_images": [],
+            "completion_usage_attempt_epoch": 2,
+        }
+    )
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+    context.stage_event = lambda _session, *, kind, payload: (
+        "event-inexact",
+        kind,
+        payload,
+    )
+
+    result = await COMPLETION_RECONCILER.reconcile(context)
+    repeated = await COMPLETION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert repeated.touched == 0
+    assert task.status == CompletionStatus.SUCCEEDED.value
+    assert task.error_code is None
+    assert billing.calls == [("charge_completion", {})]
+    assert len(result.pending_outbox) == 1
+    event = result.pending_outbox[0][2]
+    assert event["event_name"] == "completion.succeeded"
+    assert event["data"]["text"] == "durable inexact answer"
+    assert event["data"]["response_id"] == "resp-inexact"
+
+
+@pytest.mark.asyncio
 async def test_completion_old_usage_marker_falls_back_to_unknown_hold() -> None:
     task = _task(
         CompletionStatus.STREAMING.value,
@@ -498,7 +754,7 @@ async def test_old_response_receipt_cannot_settle_new_execution_hold() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_without_response_converges_to_result_unknown() -> None:
+async def test_generation_crash_after_dispatch_converges_to_settled_unknown() -> None:
     task = _task("running", 1, dispatch_started=True)
     billing = _RecordingBilling()
     context = _context(billing)
@@ -510,12 +766,100 @@ async def test_dispatch_without_response_converges_to_result_unknown() -> None:
     assert result.touched == 1
     assert task.status == "failed"
     assert task.error_code == RECON_RESULT_UNKNOWN_CODE
-    assert [name for name, _ in billing.calls] == ["settle_generation_unknown_upstream"]
+    assert [name for name, _ in billing.calls] == [
+        "settle_generation_unknown_upstream"
+    ]
     assert billing.calls[0][1] == {
         "reason": RECON_RESULT_UNKNOWN_CODE,
         "knowledge": "unknown",
     }
     assert len(result.pending_outbox) == 1
+
+
+@pytest.mark.asyncio
+async def test_completion_crash_after_dispatch_converges_to_settled_unknown() -> None:
+    task = _task(CompletionStatus.STREAMING.value, 1, dispatch_started=True)
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+
+    result = await COMPLETION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert task.status == CompletionStatus.FAILED.value
+    assert task.error_code == RECON_RESULT_UNKNOWN_CODE
+    assert billing.calls == [
+        (
+            "settle_completion_unknown_upstream",
+            {
+                "reason": RECON_RESULT_UNKNOWN_CODE,
+                "knowledge": "unknown",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stable_idempotency_exhaustion_still_settles_dispatch_cost() -> None:
+    task = _task(
+        GenerationStatus.RUNNING.value,
+        GENERATION_RECONCILER.spec.max_attempts,
+        dispatch_started=True,
+        stable_idempotency=True,
+    )
+
+    billing = await _timeout(GENERATION_RECONCILER, task)
+
+    assert billing.calls == [
+        (
+            "settle_generation_unknown_upstream",
+            {"reason": RECON_TIMEOUT_CODE, "knowledge": "unknown"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generation_takeover_checkpoint_precedes_result_unknown() -> None:
+    payload = b"durable-generation-result"
+    task = _task(
+        "running",
+        1,
+        task_id="generation-checkpoint-reconcile",
+        response_received=True,
+        execution_epoch=7,
+    )
+    task.upstream_request[GENERATION_TAKEOVER_CHECKPOINT_KEY] = {
+        "version": 1,
+        "execution_epoch": 7,
+        "attempt": 1,
+        "storage_key": (
+            "u/user-1/g/generation-checkpoint-reconcile/executions/7/"
+            "attempts/1/takeover-result.bin"
+        ),
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "revised_prompt": "restored",
+        "provider": "provider-1",
+        "route": "image2",
+        "source": "image2_direct",
+        "endpoint": "images/generations",
+    }
+    billing = _RecordingBilling()
+    context = _context(billing)
+    context.session = _TaskSession(task)
+    context.redis = _ExpiredLeaseRedis()
+
+    result = await GENERATION_RECONCILER.reconcile(context)
+
+    assert result.touched == 1
+    assert task.status == "queued"
+    assert task.error_code is None
+    assert task.upstream_request[GENERATION_TAKEOVER_CHECKPOINT_KEY]["sha256"] == (
+        hashlib.sha256(payload).hexdigest()
+    )
+    assert billing.calls == []
+    assert len(result.pending_outbox) == 2
 
 
 @pytest.mark.asyncio
@@ -607,6 +951,7 @@ async def test_billing_failure_aborts_timeout_marking() -> None:
 async def test_bonus_billing_reconciler_repairs_succeeded_row_without_ledger() -> None:
     generation = SimpleNamespace(
         id="bonus-1",
+        user_id="user-1",
         status="succeeded",
         upstream_request={
             "billing_policy": "dual_race_loser_settled_separately",
@@ -616,7 +961,7 @@ async def test_bonus_billing_reconciler_repairs_succeeded_row_without_ledger() -
     image = SimpleNamespace(width=1024, height=1024)
     billing = _RecordingBilling()
     context = _context(billing)
-    context.session = _BonusSession([[generation], [image]])
+    context.session = _BonusSession([[generation], [image], ["settlement-bonus-1"]])
 
     result = await BONUS_BILLING_RECONCILER.reconcile(context)
 
@@ -636,6 +981,7 @@ async def test_bonus_billing_reconciler_skips_missing_image_and_continues(
 ) -> None:
     missing = SimpleNamespace(
         id="bonus-missing",
+        user_id="user-1",
         status="succeeded",
         upstream_request={
             "billing_policy": "dual_race_loser_settled_separately",
@@ -644,6 +990,7 @@ async def test_bonus_billing_reconciler_skips_missing_image_and_continues(
     )
     valid = SimpleNamespace(
         id="bonus-valid",
+        user_id="user-1",
         status="succeeded",
         upstream_request={
             "billing_policy": "batch_extra_settled_separately",
@@ -657,6 +1004,7 @@ async def test_bonus_billing_reconciler_skips_missing_image_and_continues(
             [missing, valid],
             [],
             [SimpleNamespace(width=512, height=768)],
+            ["settlement-bonus-valid"],
         ]
     )
 
@@ -933,6 +1281,7 @@ async def test_bonus_billing_reconciler_isolates_single_settlement_failure(
 ) -> None:
     failed = SimpleNamespace(
         id="bonus-failed",
+        user_id="user-1",
         status="succeeded",
         upstream_request={
             "billing_policy": "dual_race_loser_settled_separately",
@@ -941,6 +1290,7 @@ async def test_bonus_billing_reconciler_isolates_single_settlement_failure(
     )
     valid = SimpleNamespace(
         id="bonus-valid",
+        user_id="user-1",
         status="succeeded",
         upstream_request={
             "billing_policy": "batch_extra_settled_separately",
@@ -966,6 +1316,7 @@ async def test_bonus_billing_reconciler_isolates_single_settlement_failure(
             [failed, valid],
             [SimpleNamespace(width=256, height=256)],
             [SimpleNamespace(width=1024, height=1536)],
+            ["settlement-bonus-valid"],
         ]
     )
 

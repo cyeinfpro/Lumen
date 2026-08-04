@@ -32,12 +32,24 @@ class RedoApi:
         self.gen = gen
         self.payloads: list[dict[str, object]] = []
 
-    async def get_generation(self, _chat_id: int, _gen_id: str) -> dict[str, object]:
+    async def get_generation(
+        self,
+        _chat_id: int,
+        _gen_id: str,
+        *,
+        tg_user_id: int,
+    ) -> dict[str, object]:
+        assert tg_user_id == 42
         return dict(self.gen)
 
     async def create_generation(
-        self, _chat_id: int, payload: dict[str, object]
+        self,
+        _chat_id: int,
+        payload: dict[str, object],
+        *,
+        tg_user_id: int,
     ) -> dict[str, object]:
+        assert tg_user_id == 42
         self.payloads.append(dict(payload))
         return {"generation_ids": ["gen-new"], "user_id": "user-1"}
 
@@ -68,6 +80,7 @@ def _make_redo_callback(chat_id: int = 42) -> object:
     cb = MagicMock()
     cb.data = "redo:gen-src"
     cb.message = msg
+    cb.from_user = SimpleNamespace(id=chat_id)
     cb.answer = AsyncMock()
     return cb
 
@@ -130,8 +143,13 @@ class ReplayingRedoApi(RedoApi):
     """create_generation 永远返回同一个新任务（模拟服务端幂等回放）。"""
 
     async def create_generation(
-        self, _chat_id: int, payload: dict[str, object]
+        self,
+        _chat_id: int,
+        payload: dict[str, object],
+        *,
+        tg_user_id: int,
     ) -> dict[str, object]:
+        assert tg_user_id == 42
         self.payloads.append(dict(payload))
         return {"generation_ids": ["gen-new"], "user_id": "user-1"}
 
@@ -187,12 +205,24 @@ class RetryApi:
         self.gen = gen
         self.payloads: list[dict[str, object]] = []
 
-    async def get_generation(self, _chat_id: int, _gen_id: str) -> dict[str, object]:
+    async def get_generation(
+        self,
+        _chat_id: int,
+        _gen_id: str,
+        *,
+        tg_user_id: int,
+    ) -> dict[str, object]:
+        assert tg_user_id == 42
         return dict(self.gen)
 
     async def create_generation(
-        self, _chat_id: int, payload: dict[str, object]
+        self,
+        _chat_id: int,
+        payload: dict[str, object],
+        *,
+        tg_user_id: int,
     ) -> dict[str, object]:
+        assert tg_user_id == 42
         self.payloads.append(dict(payload))
         return {"generation_ids": ["gen-new"], "user_id": "user-1"}
 
@@ -206,6 +236,7 @@ def _make_retry_callback(chat_id: int = 42) -> object:
     cb = MagicMock()
     cb.data = "retry:gen-src"
     cb.message = msg
+    cb.from_user = SimpleNamespace(id=chat_id)
     cb.answer = AsyncMock()
     return cb
 

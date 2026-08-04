@@ -15,6 +15,7 @@ from lumen_core.constants import (
 from lumen_core.chat_tools import ToolStatus
 
 from ...billing_parts.contracts import CompletionBillingRuntimeSnapshot
+from ...completion_text import completion_text_or_empty
 
 
 async def _maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
@@ -23,19 +24,22 @@ async def _maybe_enqueue_auto_title(redis: Any, conversation_id: str) -> None:
     await maybe_enqueue_auto_title(redis, conversation_id)
 
 
-def _final_text(state: Any) -> str:
+def completion_actual_text(state: Any) -> str:
     if state.streaming.tool_loop_truncated and state.streaming.accumulated_text:
-        final_text = state.ports.upstream._apply_url_citations(
+        return state.ports.upstream._apply_url_citations(
             state.streaming.accumulated_text,
             state.ports.upstream._extract_url_citations(
                 state.usage.completed_response or {}
             ),
         )
-    else:
-        final_text = state.ports.upstream._finalize_completion_text(
-            state.streaming.accumulated_text,
-            state.usage.completed_response,
-        )
+    return state.ports.upstream._finalize_completion_text(
+        state.streaming.accumulated_text,
+        state.usage.completed_response,
+    )
+
+
+def completion_final_text(state: Any) -> str:
+    final_text = completion_text_or_empty(completion_actual_text(state))
     if not final_text and state.streaming.tool_images:
         return "已生成图片。"
     if not final_text:
@@ -243,7 +247,7 @@ async def _persist_success(
 
 
 async def settle_success(state: Any) -> None:
-    final_text = _final_text(state)
+    final_text = completion_final_text(state)
     if state.settlement.lease_lost.is_set():
         raise state.ports.retry._LeaseLost("lease lost before success commit")
     await state.ports.retry._raise_if_completion_cancelled(
@@ -292,4 +296,4 @@ async def settle_success(state: Any) -> None:
         )
 
 
-__all__ = ["settle_success"]
+__all__ = ["completion_actual_text", "completion_final_text", "settle_success"]

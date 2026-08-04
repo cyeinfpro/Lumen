@@ -15,6 +15,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .storage import fsync_directory, mkdir_parents_durable
+
 
 _VIDEO_MIME_EXTENSIONS = MappingProxyType(
     {
@@ -239,9 +241,10 @@ def copy_video_file_exclusive_result(
     expected_sha256: str,
     expected_size: int,
 ) -> VideoArtifactWriteResult:
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_parents_durable(destination.parent)
     if destination.exists():
         if _same_file_content(destination, expected_sha256, expected_size):
+            fsync_directory(destination.parent)
             return VideoArtifactWriteResult(size=expected_size, created=False)
         raise FileExistsError(destination)
 
@@ -273,6 +276,7 @@ def copy_video_file_exclusive_result(
                 ):
                     raise
                 created = False
+        fsync_directory(destination.parent)
         return VideoArtifactWriteResult(size=expected_size, created=created)
     finally:
         temporary.unlink(missing_ok=True)

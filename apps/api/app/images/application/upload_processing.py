@@ -66,6 +66,7 @@ class UploadExecutionState:
     processing_stage: _ProcessingStage | None = None
     image_id: str | None = None
     publishing_started: bool = False
+    retain_sources_for_reconcile: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ class UploadProcessingOperation:
             },
         )
         state.publishing_started = True
+        state.retain_sources_for_reconcile = True
         return original_key, normalized_key, prepared
 
     @staticmethod

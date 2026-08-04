@@ -39,9 +39,10 @@ from lumen_core.schemas import (
 
 from ...audit import hash_email
 from ...db import get_db
-from ...deps import AdminUser, CurrentUser, verify_csrf
+from ...deps import AdminUser, CurrentUser, durable_session_id, verify_csrf
 from ...observability import redemption_redeemed_total
 from ...ratelimit import client_ip
+from ...services.active_user import lock_authenticated_user_snapshot
 from .composition import build_billing_services
 
 
@@ -81,6 +82,12 @@ async def redeem_code(
     await services.redemption_limiter.check(
         redis, f"rl:redemption:ip:{client_ip(request)}"
     )
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id(request),
+    )
+    user = snapshot.user
     await commands.lock_redemption_idempotency_key(db, user.id, idempotency_key)
     cached = await queries.cached_redemption_out(user.id, idempotency_key, request_hash)
     if cached is not None:

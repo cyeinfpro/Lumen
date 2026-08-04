@@ -30,15 +30,16 @@ from ..arq_pool import get_arq_pool
 from ..billing_cache_state import invalidate_balance_cache
 from ..canvas_services.task_guard import reject_canvas_retry
 from ..db import get_db
-from ..deps import CurrentUser, durable_session_id, verify_csrf
+from ..deps import (
+    CurrentUser,
+    durable_session_id,
+    durable_session_id_from_db,
+    verify_csrf,
+)
 from ..observability import task_publish_errors_total
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
-from ..services.active_user import (
-    ActiveUserFenceError,
-    active_user_fence_http_error,
-    lock_active_user,
-)
+from ..services.active_user import lock_authenticated_user_snapshot
 from ..services.generation_queue import (
     capture_generation_queue_state,
     completion_cancel_requires_durable_settlement,
@@ -415,21 +416,6 @@ async def _clear_task_cancel_notification(
         )
 
 
-async def _lock_active_user_for_task_write(
-    db: AsyncSession,
-    user: Any,
-    *,
-    session_id: str | None = None,
-) -> None:
-    try:
-        if session_id:
-            await lock_active_user(db, user.id, session_id=session_id)
-        else:
-            await lock_active_user(db, user.id)
-    except ActiveUserFenceError as exc:
-        raise active_user_fence_http_error(exc) from exc
-
-
 # ---------- generations ----------
 
 
@@ -457,6 +443,12 @@ async def cancel_generation(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, object]:
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id_from_db(db),
+    )
+    user = snapshot.user
     gen = (
         await db.execute(
             select(Generation)
@@ -558,11 +550,12 @@ async def retry_generation(
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request = None,
 ) -> dict[str, str]:
-    await _lock_active_user_for_task_write(
+    snapshot = await lock_authenticated_user_snapshot(
         db,
         user,
         session_id=durable_session_id(request),
     )
+    user = snapshot.user
     gen = (
         await db.execute(
             select(Generation)
@@ -591,10 +584,10 @@ async def retry_generation(
     gen.started_at = None
     gen.finished_at = None
     gen.cancel_requested_at = None
-    gen.upstream_request = clear_upstream_execution_state(gen)
     held_retry = False
     if await _task_should_release_wallet_hold(db, user):
         held_retry = await _hold_generation_retry_wallet(db, user.id, gen)
+    gen.upstream_request = clear_upstream_execution_state(gen)
 
     payload = {
         "task_id": gen.id,
@@ -644,6 +637,12 @@ async def cancel_completion(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, object]:
+    snapshot = await lock_authenticated_user_snapshot(
+        db,
+        user,
+        session_id=durable_session_id_from_db(db),
+    )
+    user = snapshot.user
     comp = (
         await db.execute(
             select(Completion)
@@ -697,11 +696,12 @@ async def retry_completion(
     db: Annotated[AsyncSession, Depends(get_db)],
     request: Request = None,
 ) -> dict[str, str]:
-    await _lock_active_user_for_task_write(
+    snapshot = await lock_authenticated_user_snapshot(
         db,
         user,
         session_id=durable_session_id(request),
     )
+    user = snapshot.user
     comp = (
         await db.execute(
             select(Completion)

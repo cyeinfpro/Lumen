@@ -88,7 +88,11 @@ refresh_update_runner_units() {
         fi
     done
 
-    lumen_ensure_backup_service_user "${backup_root}"
+    if ! lumen_ensure_backup_service_user "${backup_root}"; then
+        log_error "[refresh_update_runner] 备份目录权限迁移失败，拒绝完成 switch。"
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
 
     if ! lumen_run_as_root install -m 0644 "${tmp_dir}/lumen-update.path" "${LUMEN_SYSTEMD_UNIT_DIR%/}/lumen-update.path"; then
         log_error "[refresh_update_runner] 安装 lumen-update.path 失败，拒绝完成 switch。"

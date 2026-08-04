@@ -14,15 +14,13 @@ from typing import Any, Awaitable, BinaryIO, Callable
 from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core import storage_capacity as capacity
 from lumen_core.capacity_leases import CapacityLeaseLost
 from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import Video
 from lumen_core.schema_models import VideoUploadOut
-from lumen_core.storage_capacity import (
-    StorageCapacityExceeded,
-    StorageCapacityUnavailable,
-)
 
+from ..services.active_user import lock_db_authenticated_user_snapshot
 from ..services.video_storage_capacity import VideoStorageCapacityManager
 from ..services.video_storage_lifecycle import (
     VideoReferenceStorageLockTimeout,
@@ -41,16 +39,17 @@ from .video_upload_inventory import (
     load_reference_inventory as _load_reference_inventory,
     lock_reference_inventory_for_adoption,
 )
+from .video_upload_planning import (
+    ReferenceInventoryChanged as _ReferenceInventoryChanged,
+    ReferenceUploadPlan as _ReferenceUploadPlan,
+    verify_reusable_reference_upload as _verify_reusable_reference_upload,
+)
 
 _REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE = 32
 _REFERENCE_UPLOAD_FILENAME_MAX_CHARS = 255
 _REFERENCE_UPLOAD_FILENAME_MAX_BYTES = 255
 _REFERENCE_UPLOAD_CAS_ATTEMPTS = 3
 _STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS = 30.0
-
-
-class _ReferenceInventoryChanged(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -380,13 +379,13 @@ async def _write_reserved(
                     await _cleanup_written_path(path, deps=deps)
                 raise
             write_completed = True
-    except StorageCapacityExceeded as exc:
+    except capacity.StorageCapacityExceeded as exc:
         raise deps.http_error(
             "storage_insufficient_space",
             "not enough free storage to accept this video",
             507,
         ) from exc
-    except (StorageCapacityUnavailable, CapacityLeaseLost) as exc:
+    except (capacity.StorageCapacityUnavailable, CapacityLeaseLost) as exc:
         if write_completed:
             await _cleanup_written_path(path, deps=deps)
         raise deps.http_error(
@@ -402,14 +401,6 @@ async def _write_reserved(
                 507,
             ) from exc
         raise
-
-
-@dataclass(frozen=True)
-class _ReferenceUploadPlan:
-    created: bool
-    video_id: str
-    storage_key: str
-    path: Path | None
 
 
 async def _rollback_inherited_transaction(db: AsyncSession) -> None:
@@ -576,11 +567,13 @@ async def _adopt_reference_upload(
     inventory: ReferenceInventorySnapshot,
     plan: _ReferenceUploadPlan,
     marker: VideoUploadAdoptionMarker | None,
+    user: Any,
     db: AsyncSession,
     deps: UploadDependencies,
 ) -> Any:
     commit_started = False
     try:
+        await lock_db_authenticated_user_snapshot(db, user)
         locked = await lock_reference_inventory_for_adoption(
             user_id=user_id,
             sha256=sha256,
@@ -741,6 +734,13 @@ async def upload_reference_video(
                 user_id=user_id,
                 video_id=plan.video_id,
             ):
+                plan = await _verify_reusable_reference_upload(
+                    plan=plan,
+                    user_id=user_id,
+                    size=size,
+                    sha256=sha,
+                    deps=deps,
+                )
                 marker: VideoUploadAdoptionMarker | None = None
                 if plan.path is not None:
                     await file.seek(0)
@@ -768,6 +768,7 @@ async def upload_reference_video(
                         inventory=inventory,
                         plan=plan,
                         marker=marker,
+                        user=user,
                         db=db,
                         deps=deps,
                     )

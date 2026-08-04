@@ -151,6 +151,39 @@ _render_update_runner_units() {
     done
 }
 
+resolve_install_source_commit() {
+    INSTALL_SOURCE_COMMIT=""
+    INSTALL_SOURCE_COMMIT_PROOF=""
+    if [ ! -d "${ROOT}/.git" ] || ! command -v git >/dev/null 2>&1; then
+        return 0
+    fi
+    local commit="" untracked=""
+    commit="$(git -C "${ROOT}" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)"
+    if [[ ! "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+        return 0
+    fi
+    INSTALL_SOURCE_COMMIT="${commit}"
+    INSTALL_SOURCE_COMMIT_PROOF="git-dirty"
+    if ! git -C "${ROOT}" diff --quiet HEAD -- \
+            || ! git -C "${ROOT}" diff --cached --quiet HEAD --; then
+        return 0
+    fi
+    untracked="$(
+        git -C "${ROOT}" ls-files --others --exclude-standard 2>/dev/null \
+            | sed \
+                -e '/^\.lumen-maintenance\.lock$/d' \
+                -e '/^\.lumen-maintenance\.lock\.d\//d' \
+                -e '/^\.lumen-script\.lock\//d' \
+                -e '/^scripts\.lumen-self-update\.lock$/d' \
+                -e '/^\.install-transaction\//d' \
+                -e '/^\.install-logs\//d' \
+                -e '/^\.update\.log$/d'
+    )"
+    if [ -z "${untracked}" ]; then
+        INSTALL_SOURCE_COMMIT_PROOF="git-clean"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # C. 准备 release 布局
 #   ${LUMEN_DEPLOY_ROOT}/
@@ -160,6 +193,8 @@ _render_update_runner_units() {
 # ---------------------------------------------------------------------------
 prepare_release_layout() {
     emit_step_start prepare "准备 release 布局（${DEPLOY_ROOT}）"
+
+    resolve_install_source_commit
 
     # 决定 release id：UTC 时间戳 + 可选 git short sha
     local release_id sha=""
@@ -181,6 +216,11 @@ prepare_release_layout() {
         log_error "无法创建部署目录 ${DEPLOY_ROOT}。请确认 sudo 权限。"
         exit 1
     }
+    if ! install_transaction_begin; then
+        log_error "无法创建 durable fresh-install journal。"
+        exit 1
+    fi
+    install_transaction_failpoint layout
     # DEPLOY_ROOT 写权限给当前用户（compose 要从 RELEASE_DIR 读 docker-compose.yml）
     if [ ! -w "${DEPLOY_ROOT}" ]; then
         lumen_run_as_root chown "$(id -un):$(id -gn)" "${DEPLOY_ROOT}" "${DEPLOY_ROOT}/releases" "${SHARED_DIR}" 2>/dev/null \
@@ -237,9 +277,18 @@ prepare_release_layout() {
         --exclude='/apps/web/.next/' \
         --exclude='/apps/web/node_modules/' \
         --exclude='/.lumen-script.lock/' \
+        --exclude='/.lumen-maintenance.lock' \
+        --exclude='/.lumen-maintenance.lock.d/' \
+        --exclude='/scripts.lumen-self-update.lock' \
+        --exclude='/.install-transaction/' \
         --exclude='/.update.log' \
         --exclude='/.install-logs/' \
         "${ROOT}/" "${RELEASE_DIR}/"
+    if [ -n "${INSTALL_SOURCE_COMMIT}" ]; then
+        printf '%s\n' "${INSTALL_SOURCE_COMMIT}" > "${RELEASE_DIR}/.source-commit"
+        printf '%s\n' "${INSTALL_SOURCE_COMMIT_PROOF}" \
+            > "${RELEASE_DIR}/.source-commit-proof"
+    fi
 
     emit_info "key=release_id" "value=${release_id}"
     emit_info "key=release_dir" "value=${RELEASE_DIR}"
@@ -309,7 +358,7 @@ prepare_env_file() {
     # 写入/覆盖镜像与版本变量（每次安装都更新，便于 update.sh 读到一致 tag）
     local image_registry image_tag lumen_version
     image_registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
-    image_tag="${INSTALL_IMAGE_TAG_OVERRIDE:-${LUMEN_IMAGE_TAG:-latest}}"
+    image_tag="${INSTALL_IMAGE_TAG_OVERRIDE:-${LUMEN_IMAGE_TAG:-${LUMEN_INSTALL_RESOLVED_TAG:-latest}}}"
     if [ -f "${RELEASE_DIR}/VERSION" ]; then
         lumen_version="$(head -n1 "${RELEASE_DIR}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
     fi

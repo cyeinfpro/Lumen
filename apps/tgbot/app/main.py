@@ -1,7 +1,8 @@
 """Bot 进程入口。
 
 - aiogram 3 Dispatcher + Bot
-- MemoryStorage（FSM）；进程重启会丢菜单状态，但绑定 + 任务 tracker 各自有持久化路径
+- RedisStorage 优先，MemoryStorage 只兜底菜单状态；付费生成另有 Redis journal，
+  journal 不可用时 fail closed，不会用易失 FSM 代替幂等身份
 - 单 worker：listener task + polling 在同一 event loop
 - DI：把 LumenApi 实例 inject 给 handler
 """
@@ -37,6 +38,10 @@ from .handlers import GenerationRuntime, build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
 from .proxy_manager import FailoverSession, ProxyManager, normalize_proxy_url
+from .tgbot_health import (
+    TgbotHealthReporter,
+    TgbotRuntimeStatus,
+)
 from .tracker import tracker
 
 
@@ -73,6 +78,14 @@ class PollingTermination:
 
 class PollingSupervisorFailure(RuntimeError):
     pass
+
+
+def _set_runtime_health(
+    runtime_health: TgbotHealthReporter,
+    status: TgbotRuntimeStatus,
+    reason: str,
+) -> None:
+    runtime_health.transition(status, reason)
 
 
 async def _sleep_or_stop(
@@ -156,7 +169,10 @@ async def _wait_for_polling_termination(
     except asyncio.CancelledError:
         pass
     if polling.cancelled():
-        return PollingTermination(PollingTerminationClass.NORMAL_CANCEL)
+        error = PollingSupervisorFailure(
+            "Telegram polling was cancelled before a stop was requested"
+        )
+        return PollingTermination(PollingTerminationClass.UNKNOWN, error)
     error = polling.exception()
     if error is None:
         error = PollingSupervisorFailure(
@@ -170,11 +186,17 @@ async def _run_polling_supervisor(
     start_polling: Callable[[], Awaitable[None]],
     stop_event: asyncio.Event,
     logger: logging.Logger,
+    runtime_health: TgbotHealthReporter,
     pause_invalid_configuration: Callable[[BaseException], Awaitable[None]],
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> PollingTerminationClass:
     network_backoff = 1.0
     while not stop_event.is_set():
+        _set_runtime_health(
+            runtime_health,
+            TgbotRuntimeStatus.POLLING_STARTING,
+            "polling_attempt_start",
+        )
         polling = asyncio.create_task(
             start_polling(),
             name="lumen-polling",
@@ -185,12 +207,22 @@ async def _run_polling_supervisor(
             PollingTerminationClass.NORMAL_STOP,
             PollingTerminationClass.NORMAL_CANCEL,
         }:
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.STOPPING,
+                "polling_stop_requested",
+            )
             logger.info("polling terminated class=%s", classification.value)
             return classification
 
         assert termination.error is not None
         _record_polling_failure(classification)
         if classification is PollingTerminationClass.INVALID_CONFIGURATION:
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+                "polling_invalid_configuration",
+            )
             logger.error(
                 "polling terminated class=%s error=%s",
                 classification.value,
@@ -199,6 +231,11 @@ async def _run_polling_supervisor(
             await pause_invalid_configuration(termination.error)
             return classification
         if classification is PollingTerminationClass.RECOVERABLE_NETWORK:
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.POLLING_BACKOFF,
+                "polling_network_backoff",
+            )
             logger.warning(
                 "polling terminated class=%s error=%s; retry in %.1fs",
                 classification.value,
@@ -217,6 +254,11 @@ async def _run_polling_supervisor(
             )
             continue
 
+        _set_runtime_health(
+            runtime_health,
+            TgbotRuntimeStatus.FAILED,
+            "polling_unknown_failure",
+        )
         logger.error(
             "polling terminated class=%s",
             classification.value,
@@ -459,11 +501,16 @@ async def _pause_until_restart_or_stop(
             await _cancel_task(task)
 
 
-async def _amain() -> None:
+async def _amain(runtime_health: TgbotHealthReporter) -> None:
     _setup_logging()
     logger = logging.getLogger("lumen-tgbot")
 
     if not settings.telegram_bot_shared_secret.strip():
+        _set_runtime_health(
+            runtime_health,
+            TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+            "missing_shared_secret",
+        )
         await _pause_until_restart_or_stop(
             logger,
             "configuration error: TELEGRAM_BOT_SHARED_SECRET is empty",
@@ -488,7 +535,22 @@ async def _amain() -> None:
             if isinstance(proxy_info, dict):
                 initial_proxy_url = str(proxy_info.get("url") or "")
         except ApiError as exc:
-            logger.warning("runtime-config load failed (will use env fallbacks): %s", exc)
+            if exc.status in {401, 403}:
+                _set_runtime_health(
+                    runtime_health,
+                    TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+                    "shared_secret_rejected",
+                )
+                await _pause_until_restart_or_stop(
+                    logger,
+                    "configuration error: TELEGRAM_BOT_SHARED_SECRET was "
+                    "rejected by lumen-api",
+                    level=logging.ERROR,
+                )
+                return
+            logger.warning(
+                "runtime-config load failed (will use env fallbacks): %s", exc
+            )
 
         # bootstrap fallbacks
         if not bot_token:
@@ -498,6 +560,11 @@ async def _amain() -> None:
         initial_proxy_url = normalize_proxy_url(initial_proxy_url)
 
         if not bot_enabled:
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.PAUSED_INTENTIONAL,
+                "runtime_disabled",
+            )
             await _pause_until_restart_or_stop(
                 logger,
                 "telegram.bot_enabled=0 in runtime configuration",
@@ -506,6 +573,11 @@ async def _amain() -> None:
             )
             return
         if not bot_token:
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+                "empty_bot_token",
+            )
             await _pause_until_restart_or_stop(
                 logger,
                 "configuration error: bot token is empty in runtime configuration and "
@@ -541,6 +613,11 @@ async def _amain() -> None:
             )
         except TokenValidationError as exc:
             _record_polling_failure(PollingTerminationClass.INVALID_CONFIGURATION)
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+                "invalid_bot_token",
+            )
             logger.error(
                 "polling initialization failed class=%s error=%s",
                 PollingTerminationClass.INVALID_CONFIGURATION.value,
@@ -558,9 +635,9 @@ async def _amain() -> None:
             return
         stack.push_async_callback(bot.session.close)
 
-        # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败兜底
-        # MemoryStorage，让 bot 仍可启动（用户最坏体验是单次 /new 中断后要重开，
-        # 比 bot 拒绝起完全失联好）。
+        # FSM storage 优先 Redis（进程重启 /new 菜单状态不丢）；连接失败时
+        # MemoryStorage 只维持非付费交互。generation handler 在每次付费提交前
+        # 必须写独立 Redis journal，journal 不可用会拒绝创建任务。
         fsm_redis: aioredis.Redis | None = None
         storage: MemoryStorage | RedisStorage
         try:
@@ -619,6 +696,12 @@ async def _amain() -> None:
         logger.info("starting polling; api=%s", settings.lumen_api_base)
 
         async def start_polling() -> None:
+            await bot.me()
+            _set_runtime_health(
+                runtime_health,
+                TgbotRuntimeStatus.POLLING,
+                "telegram_identity_verified",
+            )
             await dp.start_polling(
                 bot,
                 allowed_updates=dp.resolve_used_update_types(),
@@ -643,17 +726,35 @@ async def _amain() -> None:
             start_polling=start_polling,
             stop_event=stop_event,
             logger=logger,
+            runtime_health=runtime_health,
             pause_invalid_configuration=pause_invalid_configuration,
         )
 
 
 def main() -> None:
     async def run() -> None:
-        metrics_server = _start_metrics_server()
+        runtime_health = TgbotHealthReporter.from_environment()
+        await runtime_health.start()
+        metrics_server = None
+        failed = False
         try:
-            await _amain()
+            metrics_server = _start_metrics_server()
+            await _amain(runtime_health)
+        except BaseException:
+            failed = True
+            raise
         finally:
-            _stop_metrics_server(metrics_server)
+            try:
+                _stop_metrics_server(metrics_server)
+            finally:
+                await runtime_health.stop(
+                    (
+                        TgbotRuntimeStatus.FAILED
+                        if failed
+                        else TgbotRuntimeStatus.STOPPING
+                    ),
+                    "unhandled_process_failure" if failed else "process_exit",
+                )
 
     asyncio.run(run())
 

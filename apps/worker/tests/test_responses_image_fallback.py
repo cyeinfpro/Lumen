@@ -347,6 +347,16 @@ class ErrorStreamResponse:
         return b'{"error":{"message":"gateway unavailable","code":"upstream_error"}}'
 
 
+class RejectedStreamResponse(ErrorStreamResponse):
+    status_code = 400
+
+    async def aread(self) -> bytes:
+        return (
+            b'{"error":{"message":"responses rejected the request",'
+            b'"code":"invalid_request_error"}}'
+        )
+
+
 class ModerationBlockedStreamResponse:
     status_code = 200
 
@@ -425,6 +435,20 @@ class SuccessfulDirectClient(DummyClient):
         return DummyResponse(
             200,
             {"data": [{"b64_json": PNG_B64, "revised_prompt": "direct prompt"}]},
+        )
+
+
+class RejectedDirectClient(DummyClient):
+    def _post_response(self, url: str, **kwargs: Any) -> httpx.Response:
+        _ = url, kwargs
+        return DummyResponse(
+            400,
+            {
+                "error": {
+                    "message": "direct route rejected the request",
+                    "code": "invalid_request_error",
+                }
+            },
         )
 
 
@@ -754,6 +778,9 @@ def patch_responses_stream(
                 "proxy_url": proxy_url,
             }
         )
+        on_dispatch_ready = _kwargs.get("on_dispatch_ready")
+        if on_dispatch_ready is not None:
+            await on_dispatch_ready()
         async for event in _events_from_stream_response(response_type(), url):
             yield event
 
@@ -862,15 +889,11 @@ async def test_iter_sse_curl_idle_timeout_raises(
     fake_curl.write_text(
         textwrap.dedent(
             """
-            #!/usr/bin/env python3
-            import sys
-            import time
-
-            sys.stdout.write("HTTP/1.1 200 OK\\r\\n")
-            sys.stdout.write("content-type: text/event-stream\\r\\n")
-            sys.stdout.write("\\r\\n")
-            sys.stdout.flush()
-            time.sleep(0.3)
+            #!/bin/sh
+            printf 'HTTP/1.1 200 OK\\r\\n'
+            printf 'content-type: text/event-stream\\r\\n'
+            printf '\\r\\n'
+            sleep 2
             """
         ).lstrip(),
         encoding="utf-8",
@@ -885,12 +908,13 @@ async def test_iter_sse_curl_idle_timeout_raises(
                 url="https://upstream.example/v1/responses",
                 json_body={"stream": True},
                 headers={"authorization": "Bearer test-key"},
-                timeout_s=0.05,
+                timeout_s=0.5,
             )
         ]
 
     assert exc_info.value.error_code == "sse_curl_failed"
-    assert exc_info.value.status_code is None
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.payload["response_received"] is True
     assert "idle timeout" in str(exc_info.value)
 
 
@@ -1050,8 +1074,16 @@ async def test_generate_image_uses_responses_stream(
     # instructions 对齐 Codex CLI 标准模板：字段必须存在但内容为空串
     assert stream_body.get("instructions") == ""
     progress_types = [
-        event["type"] for event in progress_events if event["type"] != "provider_used"
+        event["type"]
+        for event in progress_events
+        if event["type"]
+        not in {
+            "dispatch_ready",
+            "provider_used",
+            "response_ready",
+        }
     ]
+    assert sum(event["type"] == "dispatch_ready" for event in progress_events) == 1
     assert progress_types == [
         "fallback_started",
         "partial_image",
@@ -1213,13 +1245,71 @@ async def test_generate_image_can_use_image2_direct_route(
         "moderation": "low",
     }
     progress_types = [
-        event["type"] for event in progress_events if event["type"] != "provider_used"
+        event["type"]
+        for event in progress_events
+        if event["type"]
+        not in {
+            "dispatch_ready",
+            "provider_used",
+            "response_ready",
+        }
     ]
+    assert sum(event["type"] == "dispatch_ready" for event in progress_events) == 1
+    assert sum(event["type"] == "response_ready" for event in progress_events) == 1
     assert progress_types == [
         "final_image",
         "completed",
     ]
-    assert {event["source"] for event in progress_events} == {"image2_direct"}
+    assert {event["source"] for event in progress_events if "source" in event} == {
+        "image2_direct"
+    }
+
+
+@pytest.mark.asyncio
+async def test_response_receipt_persistence_failure_does_not_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SuccessfulDirectClient()
+
+    async def fake_resolve_runtime() -> tuple[str, str]:
+        return "https://upstream.example/v1", "test-key"
+
+    async def fake_get_images_client() -> SuccessfulDirectClient:
+        return client
+
+    async def fake_resolve(key: str) -> str | None:
+        assert key == "image.primary_route"
+        return "image2"
+
+    async def progress(event: dict[str, Any]) -> None:
+        if event["type"] == "response_ready":
+            raise RuntimeError("receipt database unavailable")
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream.generate_image(
+                _image_request(
+                    prompt="make an image",
+                    size="1024x1024",
+                    progress_callback=progress,
+                )
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.payload["receipt_persist_failed"] is True
+    assert len(client.posts) == 1
+    assert client.streams == []
 
 
 @pytest.mark.asyncio
@@ -1428,8 +1518,10 @@ async def test_generate_image_can_use_image_jobs_route(
     progress_types = [
         event["type"]
         for event in progress_events
-        if event["type"] not in {"fallback_started", "image_job_execution"}
+        if event["type"]
+        not in {"dispatch_ready", "fallback_started", "image_job_execution"}
     ]
+    assert sum(event["type"] == "dispatch_ready" for event in progress_events) == 1
     assert progress_types == [
         "image_job_image",
         "provider_used",
@@ -1503,8 +1595,10 @@ async def test_edit_image_can_use_image_jobs_route(
     progress_types = [
         event["type"]
         for event in progress_events
-        if event["type"] not in {"fallback_started", "image_job_execution"}
+        if event["type"]
+        not in {"dispatch_ready", "fallback_started", "image_job_execution"}
     ]
+    assert sum(event["type"] == "dispatch_ready" for event in progress_events) == 1
     assert progress_types == [
         "image_job_image",
         "provider_used",
@@ -1670,10 +1764,10 @@ async def test_direct_edit_transparent_background_uses_matte_png_request(
 
 
 @pytest.mark.asyncio
-async def test_generate_image_image2_route_falls_back_to_responses(
+async def test_generate_image_image2_deterministic_failure_falls_back_to_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = DummyClient()
+    client = RejectedDirectClient()
 
     async def fake_resolve_runtime() -> tuple[str, str]:
         return "https://upstream.example/v1", "test-key"
@@ -1765,7 +1859,56 @@ async def test_generate_image_image2_result_unknown_does_not_fallback(
 
 
 @pytest.mark.asyncio
-async def test_responses_primary_image2_result_unknown_is_not_merged(
+async def test_generate_image_2xx_invalid_json_is_result_unknown_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = BadJsonDirectImagesClient()
+    progress_events: list[dict[str, Any]] = []
+
+    async def fake_resolve_runtime() -> tuple[str, str]:
+        return "https://upstream.example/v1", "test-key"
+
+    async def fake_get_images_client() -> BadJsonDirectImagesClient:
+        return client
+
+    async def fake_resolve(key: str) -> str | None:
+        assert key == "image.primary_route"
+        return "image2"
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core,
+        "resolve_runtime",
+        fake_resolve_runtime,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", fake_resolve)
+    patch_responses_stream(monkeypatch, client)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream.generate_image(
+                _image_request(
+                    prompt="make an image",
+                    size="1024x1024",
+                    progress_callback=progress_events.append,
+                )
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.payload["response_received"] is True
+    assert exc_info.value.payload["wrapped_error_code"] == "bad_response"
+    assert len(client.posts) == 1
+    assert client.streams == []
+    assert sum(event["type"] == "response_ready" for event in progress_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_primary_preserves_image2_result_unknown_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_race_responses_image(
@@ -1774,8 +1917,8 @@ async def test_responses_primary_image2_result_unknown_is_not_merged(
     ) -> tuple[str, str | None]:
         raise upstream.UpstreamError(
             "responses temporarily failed",
-            status_code=503,
-            error_code="server_error",
+            status_code=400,
+            error_code="invalid_request_error",
         )
 
     async def fake_direct_generate_image_with_failover(
@@ -1819,6 +1962,9 @@ async def test_responses_primary_image2_result_unknown_is_not_merged(
 
     assert exc_info.value.error_code == "direct_image_result_unknown"
     assert exc_info.value.payload["upstream_result_unknown"] is True
+    assert exc_info.value.payload["primary_path"] == "responses"
+    assert exc_info.value.payload["fallback_path"] == "image2"
+    assert exc_info.value.payload["terminal_path"] == "image2"
 
 
 @pytest.mark.asyncio
@@ -2060,7 +2206,7 @@ async def test_responses_fallback_no_image_has_diagnostic_payload(
 
 
 @pytest.mark.asyncio
-async def test_fallback_stream_error_includes_path_diagnostics(
+async def test_fallback_result_unknown_includes_path_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = ErrorStreamClient()
@@ -2078,7 +2224,7 @@ async def test_fallback_stream_error_includes_path_diagnostics(
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_client
     )
-    patch_responses_stream(monkeypatch, client, ErrorStreamResponse)
+    patch_responses_stream(monkeypatch, client, RejectedStreamResponse)
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await _first_image_result(
@@ -2092,11 +2238,17 @@ async def test_fallback_stream_error_includes_path_diagnostics(
             )
         )
 
-    assert exc_info.value.status_code == 502
+    assert exc_info.value.status_code == 500
+    assert (
+        exc_info.value.error_code
+        == TEST_UPSTREAM_SERVICES.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
+    )
     assert exc_info.value.payload["path"] == "responses"
     assert exc_info.value.payload["primary_path"] == "responses"
     assert exc_info.value.payload["fallback_path"] == "image2"
-    assert len(client.streams) == 3
+    assert exc_info.value.payload["terminal_path"] == "image2"
+    assert exc_info.value.payload["upstream_result_unknown"] is True
+    assert len(client.streams) == 1
     assert len(client.posts) == 1
     errors = exc_info.value.payload["path_errors"]
     assert errors[0]["path"] == "responses"
@@ -2133,6 +2285,46 @@ async def test_fallback_stream_interruption_is_classified(
 
     assert exc_info.value.error_code == "stream_interrupted"
     assert exc_info.value.payload["path"] == "responses"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_does_not_retry_after_200_stream_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = InterruptedStreamClient()
+
+    async def fake_resolve_runtime() -> tuple[str, str]:
+        return "https://upstream.example", "test-key"
+
+    async def fake_get_client() -> DummyClient:
+        return client
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core, "resolve_runtime", fake_resolve_runtime
+    )
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.lifecycle, "get_client", fake_get_client)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_client,
+    )
+    patch_responses_stream(monkeypatch, client, InterruptedStreamResponse)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream.generate_image(
+                _image_request(
+                    prompt="make an image",
+                    size="3840x2160",
+                )
+            )
+        )
+
+    assert exc_info.value.error_code == "direct_image_result_unknown"
+    assert exc_info.value.payload["response_received"] is True
+    assert exc_info.value.payload["wrapped_error_code"] == "stream_interrupted"
+    assert len(client.streams) == 1
+    assert client.posts == []
 
 
 def test_sniff_image_mime_detects_real_formats() -> None:

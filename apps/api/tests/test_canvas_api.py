@@ -29,7 +29,7 @@ from lumen_core.canvas_models import (
     CanvasTaskTerminalReceipt,
     CanvasVersion,
 )
-from lumen_core.models import Base, VideoGeneration
+from lumen_core.models import Base, User, VideoGeneration
 
 from app import db as app_db
 from app import deps
@@ -209,6 +209,7 @@ async def _session() -> AsyncIterator[AsyncSession]:
         CanvasAssetRef.__table__,
         CanvasRunEvent.__table__,
         CanvasTaskTerminalReceipt.__table__,
+        User.__table__,
         VideoGeneration.__table__,
     ]
     async with engine.begin() as connection:
@@ -220,6 +221,14 @@ async def _session() -> AsyncIterator[AsyncSession]:
         )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
+        session.add(
+            User(
+                id="user-1",
+                email="user@example.com",
+                account_mode="wallet",
+            )
+        )
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -261,6 +270,173 @@ async def test_canvas_crud_ownership_and_duplicate_excludes_history() -> None:
         assert (
             await db.execute(select(CanvasRun).where(CanvasRun.canvas_id == copied.id))
         ).scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_canvas_create_replays_after_response_loss_and_rejects_key_reuse() -> None:
+    async with _session() as db:
+        body = CanvasCreateIn(
+            title="幂等创建",
+            graph=_graph(),
+            idempotency_key="create-request-1",
+        )
+        first = await create_canvas(
+            db,
+            user_id="user-1",
+            body=body,
+            idempotency_key="create-request-1",
+        )
+
+        # The server committed, but the caller did not receive the response.
+        replay = await create_canvas(
+            db,
+            user_id="user-1",
+            body=body,
+            idempotency_key="create-request-1",
+        )
+
+        assert replay.id == first.id
+        documents = list(
+            (
+                await db.execute(
+                    select(CanvasDocument).where(CanvasDocument.user_id == "user-1")
+                )
+            ).scalars()
+        )
+        markers = list(
+            (
+                await db.execute(
+                    select(CanvasMutation).where(
+                        CanvasMutation.canvas_id == first.id,
+                        CanvasMutation.client_id == "__document_create__",
+                    )
+                )
+            ).scalars()
+        )
+        assert [row.id for row in documents] == [first.id]
+        assert len(markers) == 1
+        assert markers[0].base_revision == 0
+        assert markers[0].result_revision == 1
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_canvas(
+                db,
+                user_id="user-1",
+                body=body.model_copy(update={"title": "changed"}),
+                idempotency_key="create-request-1",
+            )
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+        mutation = await apply_mutation(
+            db,
+            user_id="user-1",
+            canvas_id=first.id,
+            body=CanvasMutationIn(
+                base_revision=1,
+                client_id="tab-1",
+                mutation_id="mutation-after-create",
+                operations=[
+                    {
+                        "op": "move_nodes",
+                        "operation_schema_version": 1,
+                        "items": [{"node_id": "prompt-1", "x": 20, "y": 20}],
+                    }
+                ],
+            ),
+            header_idempotency_key="mutation-after-create",
+        )
+        assert mutation["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_canvas_duplicate_replays_without_rereading_changed_source() -> None:
+    async with _session() as db:
+        source = await create_canvas(
+            db,
+            user_id="user-1",
+            body=CanvasCreateIn(title="原画布", graph=_graph()),
+        )
+        body = CanvasDuplicateIn(idempotency_key="duplicate-request-1")
+        first = await duplicate_canvas(
+            db,
+            user_id="user-1",
+            canvas_id=source.id,
+            body=body,
+            idempotency_key="duplicate-request-1",
+        )
+
+        source.title = "原画布已改名"
+        await db.commit()
+        replay = await duplicate_canvas(
+            db,
+            user_id="user-1",
+            canvas_id=source.id,
+            body=body,
+            idempotency_key="duplicate-request-1",
+        )
+
+        assert replay.id == first.id
+        assert replay.title == "原画布 副本"
+        documents = list(
+            (
+                await db.execute(
+                    select(CanvasDocument).where(CanvasDocument.user_id == "user-1")
+                )
+            ).scalars()
+        )
+        assert {row.id for row in documents} == {source.id, first.id}
+
+        with pytest.raises(HTTPException) as excinfo:
+            await duplicate_canvas(
+                db,
+                user_id="user-1",
+                canvas_id=source.id,
+                body=body.model_copy(update={"title": "另一个副本"}),
+                idempotency_key="duplicate-request-1",
+            )
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+def test_canvas_document_routes_allow_legacy_missing_keys_and_require_pairs() -> None:
+    assert canvas_routes._document_idempotency_key(None, None) is None
+    assert (
+        canvas_routes._document_idempotency_key("request-1", "request-1")
+        == "request-1"
+    )
+    for header, body, code in (
+        (None, "request-1", "idempotency_key_required"),
+        ("request-1", None, "idempotency_key_required"),
+        ("header-key", "body-key", "idempotency_key_mismatch"),
+    ):
+        with pytest.raises(HTTPException) as excinfo:
+            canvas_routes._document_idempotency_key(header, body)
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail["error"]["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_canvas_document_routes_keep_legacy_no_key_behavior() -> None:
+    async with _session() as db:
+        user = SimpleNamespace(id="user-1")
+        created = await canvas_routes.create_canvas_route(
+            CanvasCreateIn(title="Legacy create", graph=_graph()),
+            user,  # type: ignore[arg-type]
+            db,
+            None,
+        )
+        copied = await canvas_routes.duplicate_canvas_route(
+            created["id"],
+            user,  # type: ignore[arg-type]
+            db,
+            None,
+            None,
+        )
+
+        assert created["title"] == "Legacy create"
+        assert copied["id"] != created["id"]
+        assert copied["title"] == "Legacy create 副本"
 
 
 @pytest.mark.asyncio

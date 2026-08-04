@@ -26,7 +26,9 @@ class _Db:
     async def execute(self, _statement: Any) -> _ScalarResult:
         self.execute_calls += 1
         if "from users" in str(_statement).lower():
-            return _ScalarResult("user-1")
+            return _ScalarResult(
+                SimpleNamespace(id="user-1", account_mode="wallet")
+            )
         return _ScalarResult(self.row)
 
 

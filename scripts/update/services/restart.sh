@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Service restart, blue-green traffic shift, and automatic rollback phase.
 
+lumen_update_tgbot_expected() {
+    [ -n "${SHARED_ENV:-}" ] \
+        && env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"
+}
+
 lumen_update_compose_up_bound_service() {
     local compose_dir="$1" service="$2"
     (
@@ -31,11 +36,23 @@ lumen_update_start_bound_service() {
 update_phase_restart_services() {
 emit_start restart_services
 
+UPDATE_TGBOT_READINESS_REQUIRED=0
+export UPDATE_TGBOT_READINESS_REQUIRED
 CURRENT_LINK="${ROOT}/current"
 if ! lumen_update_activate_bound_image_override; then
     log_error "[restart_services] immutable image binding 不可用，拒绝启动目标服务。"
     emit_fail restart_services 1
     exit 1
+fi
+if ! lumen_update_write_release_metadata \
+        || ! lumen_update_harden_release_ownership; then
+    emit_fail restart_services 1
+    exit 1
+fi
+if ! lumen_verify_backup_service_layout_binding; then
+    log_error "[restart_services] backup/maintenance root binding 在激活前失效。"
+    emit_fail restart_services 70
+    exit 70
 fi
 # --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
 # 服务启动顺序：worker → web → api。lumen-api **必须最后重启**——
@@ -49,6 +66,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     _blue_port="${API_BIND_PORT:-8000}"
     _blue_upstream="${LUMEN_BLUE_UPSTREAM:-127.0.0.1:${_blue_port}}"
     _green_upstream="${LUMEN_GREEN_UPSTREAM:-127.0.0.1:${_green_port}}"
+    _green_ready_url="${LUMEN_API_GREEN_READY_URL:-http://127.0.0.1:${_green_port}/readyz}"
     _shift_script="${CURRENT_LINK}/scripts/lumen-shift-traffic.sh"
 
     emit_start start_target_worker
@@ -66,7 +84,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
             && lumen_update_verify_running_service_image \
                 api-green lumen-api-green \
             && lumen_wait_for_http_ok \
-                "http://127.0.0.1:${_green_port}/healthz" 60; then
+                "${_green_ready_url}" 60; then
             emit_info start_green port "${_green_port}"
             emit_done start_green 0
         else
@@ -152,8 +170,9 @@ else
     done
 fi
 
-if [ "${_restart_ok}" = "1" ] \
-        && env_key_present "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN"; then
+if [ "${_restart_ok}" = "1" ] && lumen_update_tgbot_expected; then
+    UPDATE_TGBOT_READINESS_REQUIRED=1
+    export UPDATE_TGBOT_READINESS_REQUIRED
     if [ "${TGBOT_IMAGE_READY:-0}" != "1" ] \
             || ! lumen_update_start_bound_service \
                 "${CURRENT_LINK}" tgbot lumen-tgbot; then
@@ -234,7 +253,12 @@ else
                         || lumen_set_env_value_in_file \
                             "${SHARED_ENV}" LUMEN_VERSION "${ROLLBACK_VERSION}"; }; then
                 _rollback_started=1
-                if lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
+                if lumen_release_harden_ownership \
+                        "${ROOT}" "${ROOT}/releases/${CURRENT_ID}" \
+                        "$(dirname "${SHARED_ENV}")" \
+                        "${LUMEN_APP_UID:-10001}" \
+                        "${LUMEN_APP_GID:-10001}" \
+                    && lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
                     # 回滚同样按 worker → web → api 顺序逐个 up，保留 api 最后启动的偏好。
                     for _svc in worker web api; do
@@ -244,16 +268,26 @@ else
                         fi
                     done
                     if [ "${_rollback_started}" = "1" ] \
-                            && env_key_present \
-                                "${SHARED_ENV}" "TELEGRAM_BOT_TOKEN" \
+                            && lumen_update_tgbot_expected \
                             && { ! lumen_compose_in "${CURRENT_LINK}" \
                                 --profile tgbot pull tgbot \
                                 || ! lumen_compose_in "${CURRENT_LINK}" \
                                     --profile tgbot up --pull missing \
-                                    --no-deps -d --force-recreate tgbot; }; then
+                                    --no-deps -d --wait --force-recreate \
+                                    tgbot; }; then
+                        _rollback_started=0
+                    elif [ "${_rollback_started}" = "1" ] \
+                            && ! lumen_update_tgbot_expected \
+                            && ! lumen_compose_in "${CURRENT_LINK}" \
+                                --profile tgbot stop tgbot; then
                         _rollback_started=0
                     fi
                 else
+                    _rollback_started=0
+                fi
+                if [ "${_rollback_started}" = "1" ] \
+                        && ! lumen_update_wait_for_core_ready "${CURRENT_LINK}"; then
+                    log_error "[restart_services] rollback API /readyz 或 Worker health 未通过；保留失败证据且不标记 rolled_back。"
                     _rollback_started=0
                 fi
                 if [ "${_rollback_started}" = "1" ] \
@@ -294,9 +328,10 @@ else
         log_error "  如必须回到旧应用，先使用本轮 PostgreSQL/Redis 恢复点完成配套数据回滚。"
     else
         log_error "[restart_services] 自动回滚失败 → 请按 §18 手动回滚："
-        log_error "  ln -sfn releases/${CURRENT_ID:-<id>} ${ROOT}/current"
+        log_error "  使用 lumen_atomic_replace_symlink 切换 ${ROOT}/current 到 releases/${CURRENT_ID:-<id>}"
         log_error "  sed -i 's|^LUMEN_IMAGE_TAG=.*|LUMEN_IMAGE_TAG=${ROLLBACK_TAG:-${PREVIOUS_TAG:-<old-tag>}}|' ${SHARED_ENV}"
         log_error "  cd ${ROOT}/current && COMPOSE_PROJECT_NAME=lumen docker compose pull && docker compose up --pull missing -d --wait api worker web"
+        log_error "  TELEGRAM_BOT_TOKEN 非空时还必须：docker compose --profile tgbot pull tgbot && docker compose --profile tgbot up --pull missing --no-deps -d --force-recreate tgbot"
     fi
     emit_fail restart_services 1
     exit 1

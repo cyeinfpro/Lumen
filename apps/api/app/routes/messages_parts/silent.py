@@ -29,8 +29,15 @@ from lumen_core.schema_models import (
 
 from ...services.active_user import (
     ActiveUserFenceError,
+    account_mode_from_user,
     active_user_fence_http_error,
-    lock_active_user,
+    lock_active_user_snapshot,
+)
+from ...services.message_idempotency import (
+    SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+    idempotency_request_metadata,
+    require_matching_task_idempotency,
+    task_idempotency_metadata,
 )
 
 
@@ -136,6 +143,17 @@ async def lookup_silent_generation(
     ).scalar_one_or_none()
     if anchor is None:
         return None
+    stored_operation, stored_fingerprint = task_idempotency_metadata(anchor)
+    has_persisted_contract = (
+        stored_operation is not None or stored_fingerprint is not None
+    )
+    if has_persisted_contract:
+        require_matching_task_idempotency(
+            [anchor],
+            operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_hash,
+            http_error=http_error_fn,
+        )
     assistant_msg = (
         await db.execute(
             select(Message).where(
@@ -184,19 +202,31 @@ async def lookup_silent_generation(
     )
     if not generations:
         generations = [anchor]
+    if has_persisted_contract:
+        require_matching_task_idempotency(
+            generations,
+            operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_hash,
+            http_error=http_error_fn,
+        )
     if stored_parent_message_id != parent_message_id:
         raise http_error_fn("idempotency_conflict", "idempotency_key conflict", 409)
 
     stored_hashes = [stored_request_hash_fn(item) for item in generations]
     present_hashes = [value for value in stored_hashes if value is not None]
-    if present_hashes and (
-        len(present_hashes) != len(stored_hashes)
-        or any(
-            not isinstance(value, str) or value != request_hash
-            for value in present_hashes
-        )
-    ):
-        raise http_error_fn("idempotency_conflict", "idempotency_key conflict", 409)
+    if not has_persisted_contract:
+        if not present_hashes or (
+            len(present_hashes) != len(stored_hashes)
+            or any(
+                not isinstance(value, str) or value != request_hash
+                for value in present_hashes
+            )
+        ):
+            raise http_error_fn(
+                "idempotency_conflict",
+                "idempotency_key conflict",
+                409,
+            )
     return SilentGenerationOut(
         assistant_message=MessageOut.model_validate(assistant_msg),
         generation_ids=[generation.id for generation in generations],
@@ -212,6 +242,7 @@ async def create_silent_generation(
     runtime: SilentGenerationRuntime,
     session_id: str | None = None,
 ) -> SilentGenerationOut:
+    expected_account_mode = account_mode_from_user(user)
     redis = runtime.get_redis()
     conv = (
         await db.execute(
@@ -306,16 +337,19 @@ async def create_silent_generation(
         fast_default,
     )
     try:
-        if session_id:
-            await lock_active_user(db, user.id, session_id=session_id)
-        else:
-            await lock_active_user(db, user.id)
+        snapshot = await lock_active_user_snapshot(
+            db,
+            user.id,
+            expected_account_mode,
+            session_id=session_id,
+        )
     except ActiveUserFenceError as exc:
         raise active_user_fence_http_error(exc) from exc
+    user = snapshot.user
     result = await runtime.create_assistant_task(
         db=db,
         user_id=user.id,
-        account_mode=getattr(user, "account_mode", "wallet"),
+        account_mode=snapshot.account_mode,
         conv=conv,
         user_msg=parent_msg,
         intent=intent,
@@ -326,9 +360,11 @@ async def create_silent_generation(
         attachment_ids=attachment_ids,
         text=body.prompt,
         default_image_output_format=default_image_output_format,
-        request_metadata={
-            runtime.request_hash_key: request_hash,
-        },
+        request_metadata=idempotency_request_metadata(
+            {runtime.request_hash_key: request_hash},
+            operation_namespace=SILENT_GENERATION_IDEMPOTENCY_OPERATION,
+            request_fingerprint=request_hash,
+        ),
     )
     conv.last_activity_at = datetime.now(timezone.utc)
     try:

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import copy
 import hashlib
-import os
 import secrets
 import threading
 import warnings
@@ -18,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+
+from .durable_files import atomic_write_bytes, durable_mkdir
 
 
 # 允许作为交付物写盘 / 挂 public URL 的图片格式。image_metadata() 会把任何
@@ -133,13 +133,7 @@ class ImageArtifactFacade:
 
     def atomic_write(self, path: Path, data: bytes) -> None:
         tmp = path.with_suffix(path.suffix + f".tmp-{self.token_hex(4)}")
-        try:
-            tmp.write_bytes(data)
-            os.replace(tmp, path)
-        except Exception:
-            with contextlib.suppress(FileNotFoundError):
-                tmp.unlink()
-            raise
+        atomic_write_bytes(path, data, temporary_path=tmp)
 
     def save_one_image_sync(
         self,
@@ -147,7 +141,7 @@ class ImageArtifactFacade:
         filename: str,
         data: bytes,
     ) -> None:
-        image_dir.mkdir(parents=True, exist_ok=True)
+        durable_mkdir(image_dir)
         self.atomic_write_fn(image_dir / filename, data)
 
     async def save_images(

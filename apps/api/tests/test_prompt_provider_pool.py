@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import asyncio
-from typing import Any, Callable
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 from fastapi import FastAPI
@@ -64,6 +66,594 @@ def test_prompt_enhance_normalizes_responses_url() -> None:
     assert prompts._responses_url("https://upstream.example/v1") == (
         "https://upstream.example/v1/responses"
     )
+
+
+class _PromptIdempotencyDb:
+    def __init__(self) -> None:
+        self.rows: dict[str, Any] = {}
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def get(self, _model: Any, key: str) -> Any | None:
+        return self.rows.get(key)
+
+    def add(self, row: Any) -> None:
+        self.rows[row.id] = row
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_prompt_enhance_paid_idempotency_key_and_fingerprint_contract() -> None:
+    from fastapi import HTTPException
+
+    from app.routes.prompt_parts import idempotency
+
+    assert idempotency.resolve_client_idempotency_key("request-1") == "request-1"
+    first = idempotency.canonical_request_fingerprint(
+        idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        {"text": "cat", "params": {"b": 2, "a": 1}},
+    )
+    reordered = idempotency.canonical_request_fingerprint(
+        idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        {"params": {"a": 1, "b": 2}, "text": "cat"},
+    )
+    other_operation = idempotency.canonical_request_fingerprint(
+        idempotency.VIDEO_PROMPT_ENHANCE_OPERATION,
+        {"params": {"a": 1, "b": 2}, "text": "cat"},
+    )
+
+    assert first == reordered
+    assert first != other_operation
+    for raw in (None, "", " request-1", "request-1 ", "请求-1"):
+        with pytest.raises(HTTPException) as excinfo:
+            idempotency.resolve_client_idempotency_key(raw)
+        assert excinfo.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_paid_operation_replays_and_rejects_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app.routes.prompt_parts import idempotency
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(idempotency, "lock_user_key", no_lock)
+    db = _PromptIdempotencyDb()
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="request-1",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+
+    first = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert first.replay_chunks is None
+    assert "request-1" not in repr(db.rows[operation.record_id].metadata_jsonb)
+
+    with pytest.raises(HTTPException) as pending:
+        await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+            db,
+            operation,
+        )
+    assert pending.value.status_code == 425
+
+    chunks = ['data: {"text":"better cat"}\n\n', "data: [DONE]\n\n"]
+    await idempotency.persist_terminal_response(  # type: ignore[arg-type]
+        db,
+        operation,
+        chunks=chunks,
+        terminal_state="succeeded",
+    )
+    replay = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert replay.replay_chunks == tuple(chunks)
+
+    changed = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="request-1",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "dog"},
+    )
+    with pytest.raises(HTTPException) as conflict:
+        await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+            db,
+            changed,
+        )
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail["error"]["code"] == "idempotency_conflict"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_route_replay_skips_rate_limit_provider_and_billing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from app.routes.prompt_parts import idempotency
+
+    async def replay(*_args: Any, **_kwargs: Any):
+        return idempotency.PromptEnhanceReservation(
+            replay_chunks=(
+                'data: {"text":"better cat"}\n\n',
+                "data: [DONE]\n\n",
+            )
+        )
+
+    async def must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("replay must not start paid work")
+
+    def passthrough(source: AsyncIterator[str], **_kwargs: Any) -> AsyncIterator[str]:
+        return source
+
+    db = _PromptIdempotencyDb()
+    monkeypatch.setattr(
+        prompts._prompt_idempotency,
+        "reserve_prompt_enhance_operation",
+        replay,
+    )
+    monkeypatch.setattr(prompts.PROMPTS_ENHANCE_LIMITER, "check", must_not_run)
+    monkeypatch.setattr(prompts, "_resolve_provider_order", must_not_run)
+    monkeypatch.setattr(prompts, "_prepare_prompt_enhance_billing", must_not_run)
+    monkeypatch.setattr(prompts, "_stream_with_keepalive", passthrough)
+
+    response = await prompts.enhance_prompt(
+        prompts.EnhanceIn(text="cat"),
+        SimpleNamespace(id="user-1", account_mode="wallet"),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+        prompts._PromptRuntime(),
+        "request-1",
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert chunks == ['data: {"text":"better cat"}\n\n', "data: [DONE]\n\n"]
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_durable_producer_survives_consumer_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes.prompt_parts import idempotency, responses
+
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="request-1",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+    release = asyncio.Event()
+    persisted: list[tuple[list[str], str]] = []
+
+    class SessionContext:
+        async def __aenter__(self) -> _PromptIdempotencyDb:
+            return _PromptIdempotencyDb()
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    async def persist(
+        _db: Any,
+        _operation: Any,
+        *,
+        chunks: list[str],
+        terminal_state: str,
+    ) -> None:
+        persisted.append((list(chunks), terminal_state))
+
+    async def source(_db: Any):
+        yield 'data: {"text":"better "}\n\n'
+        await release.wait()
+        yield 'data: {"text":"cat"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(idempotency, "persist_terminal_response", persist)
+    consumer, task = responses.durable_stream(
+        operation=operation,
+        session_factory=SessionContext,
+        source_factory=source,
+        logger=SimpleNamespace(exception=lambda *_args, **_kwargs: None),
+    )
+
+    assert await anext(consumer) == 'data: {"text":"better "}\n\n'
+    await consumer.aclose()
+    release.set()
+    await task
+
+    assert persisted == [
+        (
+            [
+                'data: {"text":"better "}\n\n',
+                'data: {"text":"cat"}\n\n',
+                "data: [DONE]\n\n",
+            ],
+            "succeeded",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_stale_reservation_recovers_before_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes.prompt_parts import idempotency
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    current = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(idempotency, "lock_user_key", no_lock)
+    monkeypatch.setattr(idempotency, "_utcnow", lambda: current)
+    db = _PromptIdempotencyDb()
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="crash-before-producer",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+
+    first = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert first.attempt is not None
+    billing_snapshot = {
+        "version": 1,
+        "mode": "wallet",
+        "request_id": first.attempt.billing_request_id,
+        "user_id": "user-1",
+        "rate_multiplier_x10000": 10_000,
+        "cache_aware": True,
+        "allow_negative": False,
+        "hold_amount_micro": 10_000,
+        "pricing_snapshots": {},
+    }
+    await idempotency.bind_billing_snapshot(  # type: ignore[arg-type]
+        db,
+        operation,
+        first.attempt,
+        billing_snapshot,
+    )
+    await db.commit()
+
+    current += timedelta(seconds=46)
+    takeover = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+
+    assert takeover.attempt is not None
+    assert takeover.attempt.number == first.attempt.number + 1
+    assert takeover.attempt.owner_token != first.attempt.owner_token
+    assert takeover.attempt.billing_request_id == first.attempt.billing_request_id
+    assert takeover.billing_snapshot == billing_snapshot
+    assert takeover.recovery is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_stale_producer_cannot_overwrite_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes.prompt_parts import idempotency
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    current = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(idempotency, "lock_user_key", no_lock)
+    monkeypatch.setattr(idempotency, "_utcnow", lambda: current)
+    db = _PromptIdempotencyDb()
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="stale-writer",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+    first = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert first.attempt is not None
+    await idempotency.bind_billing_snapshot(  # type: ignore[arg-type]
+        db,
+        operation,
+        first.attempt,
+        {
+            "version": 1,
+            "mode": "none",
+            "request_id": first.attempt.billing_request_id,
+        },
+    )
+    await db.commit()
+
+    current += timedelta(seconds=46)
+    takeover = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert takeover.attempt is not None
+
+    with pytest.raises(idempotency.AttemptOwnershipLost):
+        await idempotency.checkpoint_response_chunk(  # type: ignore[arg-type]
+            db,
+            operation,
+            first.attempt,
+            sequence=0,
+            chunk='data: {"text":"stale"}\n\n',
+        )
+
+    winner_chunks = ['data: {"text":"winner"}\n\n', "data: [DONE]\n\n"]
+    await idempotency.checkpoint_response_chunk(  # type: ignore[arg-type]
+        db,
+        operation,
+        takeover.attempt,
+        sequence=0,
+        chunk=winner_chunks[0],
+    )
+    await idempotency.checkpoint_finalization(  # type: ignore[arg-type]
+        db,
+        operation,
+        takeover.attempt,
+        terminal_state="succeeded",
+        terminal_chunk=winner_chunks[-1],
+        billing_action="none",
+    )
+    await idempotency.persist_terminal_response(  # type: ignore[arg-type]
+        db,
+        operation,
+        attempt=takeover.attempt,
+        chunks=winner_chunks,
+        terminal_state="succeeded",
+    )
+
+    with pytest.raises(idempotency.AttemptOwnershipLost):
+        await idempotency.persist_terminal_response(  # type: ignore[arg-type]
+            db,
+            operation,
+            attempt=first.attempt,
+            chunks=['data: {"text":"stale"}\n\n', "data: [DONE]\n\n"],
+            terminal_state="succeeded",
+        )
+
+    replay = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert replay.replay_chunks == tuple(winner_chunks)
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_repeated_recovery_converges_after_terminal_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes.prompt_parts import idempotency, responses
+
+    async def no_lock(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    current = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(idempotency, "lock_user_key", no_lock)
+    monkeypatch.setattr(idempotency, "_utcnow", lambda: current)
+    db = _PromptIdempotencyDb()
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="terminal-recovery",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+    first = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert first.attempt is not None
+    await idempotency.bind_billing_snapshot(  # type: ignore[arg-type]
+        db,
+        operation,
+        first.attempt,
+        {
+            "version": 1,
+            "mode": "wallet",
+            "request_id": first.attempt.billing_request_id,
+            "user_id": "user-1",
+            "rate_multiplier_x10000": 10_000,
+            "cache_aware": True,
+            "allow_negative": False,
+            "hold_amount_micro": 10_000,
+            "pricing_snapshots": {},
+        },
+    )
+    text_chunk = 'data: {"text":"enhanced"}\n\n'
+    await idempotency.checkpoint_response_chunk(  # type: ignore[arg-type]
+        db,
+        operation,
+        first.attempt,
+        sequence=0,
+        chunk=text_chunk,
+    )
+    await idempotency.checkpoint_finalization(  # type: ignore[arg-type]
+        db,
+        operation,
+        first.attempt,
+        terminal_state="succeeded",
+        terminal_chunk="data: [DONE]\n\n",
+        billing_action="charge",
+        billing_capture={"usage": {"input_tokens": 1, "output_tokens": 1}},
+    )
+
+    charged_ids = {first.attempt.billing_request_id}
+    billing_attempts = 1
+    current += timedelta(seconds=46)
+    second = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert second.attempt is not None
+    assert second.recovery is not None
+    real_persist = idempotency.persist_terminal_response
+    persist_calls = 0
+
+    async def flaky_persist(*args: Any, **kwargs: Any) -> None:
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls <= 3:
+            raise RuntimeError("terminal write unavailable")
+        await real_persist(*args, **kwargs)
+
+    async def recover_billing(
+        _db: Any,
+        _recovery: idempotency.PromptEnhanceRecovery,
+    ) -> None:
+        nonlocal billing_attempts
+        billing_attempts += 1
+        charged_ids.add(first.attempt.billing_request_id)
+
+    class SessionContext:
+        async def __aenter__(self) -> _PromptIdempotencyDb:
+            return db
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    async def must_not_produce(_db: Any):
+        raise AssertionError("recovery must not call the upstream producer")
+        yield ""
+
+    monkeypatch.setattr(idempotency, "persist_terminal_response", flaky_persist)
+    consumer, task = responses.durable_stream(
+        operation=operation,
+        attempt=second.attempt,
+        recovery=second.recovery,
+        session_factory=SessionContext,
+        source_factory=must_not_produce,
+        recovery_handler=recover_billing,
+        heartbeat_interval_seconds=0,
+        logger=SimpleNamespace(
+            exception=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+    )
+    assert [chunk async for chunk in consumer] == [
+        'data: {"error": "idempotency_terminal_persist_unknown"}\n\n'
+    ]
+    await task
+
+    current += timedelta(seconds=46)
+    third = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert third.attempt is not None
+    assert third.recovery is not None
+    consumer, task = responses.durable_stream(
+        operation=operation,
+        attempt=third.attempt,
+        recovery=third.recovery,
+        session_factory=SessionContext,
+        source_factory=must_not_produce,
+        recovery_handler=recover_billing,
+        heartbeat_interval_seconds=0,
+        logger=SimpleNamespace(
+            exception=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+    )
+    assert [chunk async for chunk in consumer] == [
+        text_chunk,
+        "data: [DONE]\n\n",
+    ]
+    await task
+
+    replay = await idempotency.reserve_prompt_enhance_operation(  # type: ignore[arg-type]
+        db,
+        operation,
+    )
+    assert replay.replay_chunks == (text_chunk, "data: [DONE]\n\n")
+    assert persist_calls == 4
+    assert billing_attempts == 3
+    assert charged_ids == {first.attempt.billing_request_id}
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_cancels_producer_and_heartbeat_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes.prompt_parts import idempotency, responses
+
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="heartbeat-cancel",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+    attempt = idempotency.PromptEnhanceAttempt(
+        number=1,
+        owner_token="owner-1",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        billing_request_id=operation.record_id,
+    )
+    producer_started = asyncio.Event()
+    producer_closed = asyncio.Event()
+    heartbeat_started = asyncio.Event()
+    heartbeat_cancelled = asyncio.Event()
+
+    class SessionContext:
+        async def __aenter__(self) -> _PromptIdempotencyDb:
+            return _PromptIdempotencyDb()
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+    async def source(_db: Any):
+        try:
+            producer_started.set()
+            await asyncio.sleep(60)
+            yield "unreachable"
+        finally:
+            producer_closed.set()
+
+    async def renew(*_args: Any, **_kwargs: Any) -> None:
+        heartbeat_started.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            heartbeat_cancelled.set()
+
+    monkeypatch.setattr(idempotency, "renew_attempt_lease", renew)
+    consumer, task = responses.durable_stream(
+        operation=operation,
+        attempt=attempt,
+        session_factory=SessionContext,
+        source_factory=source,
+        heartbeat_interval_seconds=0.001,
+        logger=SimpleNamespace(
+            exception=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+    )
+    await asyncio.wait_for(producer_started.wait(), timeout=1)
+    await asyncio.wait_for(heartbeat_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await consumer.aclose()
+
+    assert producer_closed.is_set()
+    assert heartbeat_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -492,16 +1082,55 @@ async def test_prompt_enhance_checks_per_user_rate_limit(
             )
         ]
 
+    async def fake_reserve(*_args: Any, **_kwargs: Any):
+        from app.routes.prompt_parts import idempotency
+
+        operation = _args[1]
+        return idempotency.PromptEnhanceReservation(
+            attempt=idempotency.PromptEnhanceAttempt(
+                number=1,
+                owner_token="owner-1",
+                lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+                billing_request_id=operation.record_id,
+            ),
+            active_user_snapshot=SimpleNamespace(
+                user=SimpleNamespace(id="user-1", account_mode="byok"),
+                account_mode="byok",
+            ),
+        )
+
+    async def fake_prepare_reserved(*_args: Any, **_kwargs: Any):
+        return None, False
+
+    def fake_response(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
     redis = object()
     monkeypatch.setattr(prompts.PROMPTS_ENHANCE_LIMITER, "check", fake_check)
     monkeypatch.setattr(prompts, "get_redis", lambda: redis)
     monkeypatch.setattr(prompts, "_resolve_provider_order", fake_resolve_provider_order)
+    monkeypatch.setattr(
+        prompts._prompt_idempotency,
+        "reserve_prompt_enhance_operation",
+        fake_reserve,
+    )
+    monkeypatch.setattr(
+        prompts,
+        "_durable_prompt_enhance_response",
+        fake_response,
+    )
+    monkeypatch.setattr(
+        prompts,
+        "_prepare_reserved_billing",
+        fake_prepare_reserved,
+    )
 
     await prompts.enhance_prompt(
         prompts.EnhanceIn(text="cat"),
         SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         prompts._PromptRuntime(),
+        "prompt-request-1",
     )
 
     assert calls == [(redis, "rl:prompt_enhance:user-1")]
@@ -533,12 +1162,42 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
             )
         ]
 
-    async def fake_prepare_billing(_db: object, _user: object) -> None:
-        return None
+    async def fake_reserve(*_args: Any, **_kwargs: Any):
+        from app.routes.prompt_parts import idempotency
 
-    async def fake_stream_enhance(*args: Any, **kwargs: Any):
-        captured["args"] = args
+        operation = _args[1]
+        return idempotency.PromptEnhanceReservation(
+            attempt=idempotency.PromptEnhanceAttempt(
+                number=1,
+                owner_token="owner-1",
+                lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+                billing_request_id=operation.record_id,
+            ),
+            active_user_snapshot=SimpleNamespace(
+                user=SimpleNamespace(id="user-1", account_mode="byok"),
+                account_mode="byok",
+            ),
+        )
+
+    async def fake_prepare_reserved(*_args: Any, **_kwargs: Any):
+        return None, False
+
+    def fake_durable_response(
+        operation: Any,
+        _reservation: Any,
+        **kwargs: Any,
+    ):
+        from fastapi.responses import StreamingResponse
+
+        captured["operation"] = operation
         captured["kwargs"] = kwargs
+
+        async def chunks():
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(chunks(), media_type="text/event-stream")
+
+    async def fake_stream_enhance(*_args: Any, **_kwargs: Any):
         yield "data: [DONE]\n\n"
 
     def passthrough_stream(source, **_kwargs: Any):
@@ -547,11 +1206,23 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
     monkeypatch.setattr(prompts.PROMPTS_ENHANCE_LIMITER, "check", fake_check)
     monkeypatch.setattr(prompts, "get_redis", lambda: object())
     monkeypatch.setattr(prompts, "_resolve_provider_order", fake_resolve_provider_order)
-    monkeypatch.setattr(
-        prompts, "_prepare_prompt_enhance_billing", fake_prepare_billing
-    )
     monkeypatch.setattr(prompts, "_stream_enhance", fake_stream_enhance)
     monkeypatch.setattr(prompts, "_stream_with_keepalive", passthrough_stream)
+    monkeypatch.setattr(
+        prompts._prompt_idempotency,
+        "reserve_prompt_enhance_operation",
+        fake_reserve,
+    )
+    monkeypatch.setattr(
+        prompts,
+        "_durable_prompt_enhance_response",
+        fake_durable_response,
+    )
+    monkeypatch.setattr(
+        prompts,
+        "_prepare_reserved_billing",
+        fake_prepare_reserved,
+    )
 
     response = await prompts.enhance_video_prompt(
         prompts.VideoEnhanceIn(text="一个女孩在城市街头奔跑"),
@@ -559,11 +1230,12 @@ async def test_video_prompt_enhance_does_not_forward_metadata(
         SimpleNamespace(id="user-1", account_mode="byok"),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         prompts._PromptRuntime(),
+        "video-prompt-request-1",
     )
     chunks = [chunk async for chunk in response.body_iterator]
 
     assert chunks == ["data: [DONE]\n\n"]
-    assert "metadata" not in captured["kwargs"]
+    assert captured["operation"].idempotency_key == "video-prompt-request-1"
     assert captured["kwargs"]["system_prompt"] == prompts.VIDEO_ENHANCE_SYSTEM_PROMPT
     assert captured["kwargs"]["content"][0]["type"] == "input_text"
 
@@ -712,6 +1384,127 @@ async def test_prompt_enhance_fallback_can_drop_priority_tier(
     assert client.calls[2]["json"]["model"] == "gpt-5.4"
     assert client.calls[2]["json"]["reasoning"] == {"effort": "low"}
     assert "service_tier" not in client.calls[2]["json"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_done_only_stream_is_terminal_failure_not_success_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(200, ["data: [DONE]\n\n"])
+            for _attempt in prompts._ENHANCE_ATTEMPTS
+        ]
+    )
+    calls: dict[str, Any] = {}
+
+    async def charge(*_args: Any, **_kwargs: Any) -> None:
+        calls["charged"] = True
+
+    async def settle(
+        _billing: Any,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    async def release(*_args: Any, **_kwargs: Any) -> None:
+        calls["released"] = True
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", charge)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release)
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="done-only",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"error": "upstream_error"}\n\n']
+    assert calls == {"settled": "no_success"}
+    assert len(client.calls) == len(prompts._ENHANCE_ATTEMPTS)
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_whitespace_only_stream_is_terminal_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient(
+        [
+            _StubStreamResponse(
+                200,
+                [
+                    _sse(
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": "   ",
+                        }
+                    ),
+                    _sse({"type": "response.completed"}),
+                ],
+            )
+            for _attempt in prompts._ENHANCE_ATTEMPTS
+        ]
+    )
+    calls: dict[str, Any] = {}
+
+    async def charge(*_args: Any, **_kwargs: Any) -> None:
+        calls["charged"] = True
+
+    async def settle(
+        _billing: Any,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kw: client)
+    monkeypatch.setattr(prompts, "_charge_prompt_enhance", charge)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle)
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="whitespace-only",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+
+    chunks = [
+        chunk async for chunk in prompts._stream_enhance("cat", [provider], billing)
+    ]
+
+    assert chunks == ['data: {"error": "upstream_error"}\n\n']
+    assert calls == {"settled": "no_success"}
+    assert len(client.calls) == len(prompts._ENHANCE_ATTEMPTS)
 
 
 @pytest.mark.asyncio
@@ -997,8 +1790,8 @@ async def test_prompt_enhance_charge_uses_completion_wallet_kind(
     assert calls["estimate"]["rate_multiplier_x10000"] == 15_000
     assert calls["charge"]["kind"] == "charge_completion"
     assert calls["charge"]["ref_type"] == "prompt_enhance"
-    assert calls["charge"]["ref_id"] == "resp-1"
-    assert calls["charge"]["idempotency_key"] == "prompt_enhance:resp-1"
+    assert calls["charge"]["ref_id"] == "enhance-1"
+    assert calls["charge"]["idempotency_key"] == "prompt_enhance:enhance-1"
     assert calls["committed"] is True
     assert audits[-1]["event_type"] == "wallet.charge.completion"
     assert audits[-1]["details"]["route"] == "prompts.enhance"
@@ -1814,6 +2607,75 @@ async def test_prompt_enhance_releases_hold_when_all_candidates_fail_pre_dispatc
 
 
 @pytest.mark.asyncio
+async def test_prompt_enhance_dispatch_checkpoint_failure_never_calls_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from lumen_core.providers import ProviderDefinition
+
+    client = _StubAsyncClient([])
+    calls: dict[str, Any] = {"outcomes": []}
+
+    async def checkpoint_dispatch() -> None:
+        calls["checkpoint_attempts"] = calls.get("checkpoint_attempts", 0) + 1
+        raise RuntimeError("dispatch checkpoint unavailable")
+
+    async def checkpoint_outcome(cost_possible: bool) -> None:
+        calls["outcomes"].append(cost_possible)
+
+    async def release_hold(
+        billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["released"] = (billing.user_id if billing is not None else None, reason)
+
+    async def settle_default(
+        _billing: prompts._EnhanceBillingContext | None,
+        *,
+        reason: str,
+    ) -> None:
+        calls["settled"] = reason
+
+    monkeypatch.setattr(prompts.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(prompts, "_release_prompt_enhance_hold", release_hold)
+    monkeypatch.setattr(prompts, "_settle_prompt_enhance_default_hold", settle_default)
+    billing = prompts._EnhanceBillingContext(
+        db=object(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-1",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    provider = ProviderDefinition(
+        name="primary",
+        base_url="https://primary.example",
+        api_key="sk-primary",
+    )
+
+    chunks = [
+        chunk
+        async for chunk in prompts._stream_enhance(
+            "cat",
+            [provider],
+            billing,
+            record_dispatch_intent=checkpoint_dispatch,
+            record_candidate_outcome=checkpoint_outcome,
+        )
+    ]
+
+    assert chunks == ['data: {"error": "internal"}\n\n']
+    assert client.calls == []
+    assert calls["checkpoint_attempts"] == len(prompts._ENHANCE_ATTEMPTS)
+    assert calls["outcomes"] == [False] * len(prompts._ENHANCE_ATTEMPTS)
+    assert calls["released"] == ("user-1", "no_success")
+    assert "settled" not in calls
+
+
+@pytest.mark.asyncio
 async def test_prompt_enhance_settles_default_hold_when_candidates_fail_post_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2380,6 +3242,62 @@ async def test_prompt_enhance_billing_preauthorizes_before_stream(
     assert calls["hold"]["idempotency_key"] == f"prompt_enhance:hold:{out.request_id}"
     assert len(calls["hold"]["meta"]["pricing_snapshots"]) == 3
     assert calls["invalidated"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_takeover_reuses_billing_snapshot_without_second_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+    from app.routes.prompt_parts import idempotency
+
+    operation = idempotency.prompt_enhance_operation(
+        user_id="user-1",
+        idempotency_key="stable-billing",
+        operation_namespace=idempotency.TEXT_PROMPT_ENHANCE_OPERATION,
+        payload={"text": "cat"},
+    )
+    attempt = idempotency.PromptEnhanceAttempt(
+        number=2,
+        owner_token="takeover-owner",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        billing_request_id=operation.record_id,
+    )
+    snapshot = {
+        "version": 1,
+        "mode": "wallet",
+        "request_id": operation.record_id,
+        "user_id": "user-1",
+        "rate_multiplier_x10000": 10_000,
+        "cache_aware": True,
+        "allow_negative": False,
+        "hold_amount_micro": 10_000,
+        "pricing_snapshots": {"gpt-5.5::priority": {"model": "gpt-5.5"}},
+    }
+
+    async def must_not_prepare(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("takeover must not create another billing hold")
+
+    monkeypatch.setattr(
+        prompts,
+        "_prepare_prompt_enhance_billing",
+        must_not_prepare,
+    )
+    billing, invalidate_hold = await prompts._prepare_reserved_billing(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1", email="u@example.com"),
+        operation,
+        idempotency.PromptEnhanceReservation(
+            attempt=attempt,
+            billing_snapshot=snapshot,
+        ),
+        runtime=prompts._PromptRuntime(),
+    )
+
+    assert billing is not None
+    assert billing.request_id == operation.record_id
+    assert billing.hold_amount_micro == 10_000
+    assert invalidate_hold is False
 
 
 @pytest.mark.asyncio

@@ -35,12 +35,14 @@ class ImageJobClientError(Exception):
         status_code: int | None = None,
         payload: dict[str, Any] | None = None,
         transient: bool = False,
+        result_unknown: bool = False,
     ) -> None:
         super().__init__(message)
         self.operation = operation
         self.status_code = status_code
         self.payload = payload or {}
         self.transient = transient
+        self.result_unknown = result_unknown
 
 
 class ImageJobClient:
@@ -104,6 +106,8 @@ class ImageJobClient:
         )
         try:
             if self._post_with_retry is None:
+                if before_attempt is not None:
+                    await before_attempt(1)
                 response = await self._client.post(url, headers=headers, json=payload)
             else:
                 response = await self._post_with_retry(
@@ -112,6 +116,8 @@ class ImageJobClient:
                     headers=headers,
                     json_body=payload,
                     max_attempts=3,
+                    retry_httpx_exceptions=False,
+                    retry_status_codes=False,
                     before_attempt=before_attempt,
                 )
         except (httpx.HTTPError, OSError) as exc:
@@ -119,6 +125,10 @@ class ImageJobClient:
                 f"image job submit failed: {exc}",
                 operation="submit",
                 transient=True,
+                result_unknown=not isinstance(
+                    exc,
+                    (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+                ),
             ) from exc
         data = self._json_object(response, operation="submit")
         if response.status_code >= 400:
@@ -129,6 +139,7 @@ class ImageJobClient:
                 payload=data,
                 transient=response.status_code in {408, 425, 429}
                 or response.status_code >= 500,
+                result_unknown=response.status_code >= 500,
             )
         job_id = data.get("job_id")
         if not isinstance(job_id, str) or not job_id:
@@ -137,6 +148,7 @@ class ImageJobClient:
                 operation="submit",
                 status_code=response.status_code,
                 payload=data,
+                result_unknown=True,
             )
         return ImageJobHandle(
             job_id=job_id,
@@ -279,6 +291,12 @@ class ImageJobClient:
         *,
         operation: str,
     ) -> dict[str, Any]:
+        transient = (
+            response.status_code in {408, 425, 429} or response.status_code >= 500
+        )
+        result_unknown = operation == "submit" and (
+            200 <= response.status_code < 300 or response.status_code >= 500
+        )
         try:
             data = response.json()
         except ValueError as exc:
@@ -286,12 +304,16 @@ class ImageJobClient:
                 f"image job {operation} returned invalid JSON",
                 operation=operation,
                 status_code=response.status_code,
+                transient=transient,
+                result_unknown=result_unknown,
             ) from exc
         if not isinstance(data, dict):
             raise ImageJobClientError(
                 f"image job {operation} returned non-object",
                 operation=operation,
                 status_code=response.status_code,
+                transient=transient,
+                result_unknown=result_unknown,
             )
         return data
 

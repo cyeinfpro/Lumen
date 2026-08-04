@@ -4,6 +4,7 @@ import asyncio
 import errno
 import hashlib
 import io
+import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -43,9 +44,20 @@ from app.services.video_storage_lifecycle import (
     record_video_storage_cleanup,
     video_reference_quota_contribution,
 )
+from app.services.video_storage_cleanup import (
+    VideoDetachedCleanup,
+    VideoStorageCleanupManager,
+)
 from lumen_core import storage_capacity as storage_capacity_module
 from lumen_core.capacity_leases import CapacityLeaseLost
-from lumen_core.models import Base, OutboxEvent, User, Video, VideoGeneration
+from lumen_core.models import (
+    AuthSession,
+    Base,
+    OutboxEvent,
+    User,
+    Video,
+    VideoGeneration,
+)
 from lumen_core.schemas import VideoCreateIn, VideoReferenceMediaIn
 from lumen_core.video_billing import VideoCostEstimate
 
@@ -55,6 +67,43 @@ def _payload(size: int, marker: bytes = b"x") -> bytes:
     if size < len(header):
         raise ValueError("video payload must include an ftyp header")
     return header + marker * (size - len(header))
+
+
+@pytest.mark.asyncio
+async def test_quarantine_cleanup_fsync_failure_is_not_reported_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    detached_path = tmp_path / ".lumen-video-cleanup" / "user-1" / "video-1" / "token-1"
+    detached_path.mkdir(parents=True)
+    (detached_path / "artifact.bin").write_bytes(b"private")
+    manager = VideoStorageCleanupManager(
+        tmp_path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+
+    def fail_quarantine_parent_fsync(path: Path) -> None:
+        if path == detached_path.parent:
+            raise OSError(errno.EIO, "fsync failed")
+        VideoStorageCleanupManager._fsync_directory(path)
+
+    monkeypatch.setattr(
+        manager,
+        "_fsync_directory",
+        fail_quarantine_parent_fsync,
+    )
+
+    result = await manager.cleanup_detached(
+        VideoDetachedCleanup(path=detached_path),
+        unlink_entry=lambda name, *, directory_fd: os.unlink(
+            name,
+            dir_fd=directory_fd,
+        ),
+    )
+
+    assert result.complete is False
+    assert result.deleted_artifacts == 1
+    assert any("cleanup_quarantine_fsync_failed" in error for error in result.errors)
 
 
 async def _async_value(value: Any) -> Any:
@@ -113,6 +162,7 @@ async def _database(
                 sync_connection,
                 tables=[
                     User.__table__,
+                    AuthSession.__table__,
                     Video.__table__,
                     VideoGeneration.__table__,
                     OutboxEvent.__table__,
@@ -717,6 +767,181 @@ async def test_reference_upload_relocks_and_rechecks_quota_after_write_race(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["truncated", "same-size-tamper"])
+async def test_reference_video_reupload_repairs_corrupted_primary_under_lock(
+    corruption: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = f"user-repair-{corruption}"
+    video_id = f"video-repair-{corruption}"
+    payload = _payload(1_024, b"r")
+    corrupted = (
+        payload[:-17]
+        if corruption == "truncated"
+        else payload[:-1] + (b"z" if payload[-1:] != b"z" else b"y")
+    )
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    storage_root = Path(videos.settings.storage_root)
+    existing = _video(
+        video_id=video_id,
+        user_id=user_id,
+        payload=payload,
+    )
+    artifact = storage_root / existing.storage_key
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(corrupted)
+    integrity_checks: list[bool] = []
+    writes: list[Path] = []
+
+    async with _database(tmp_path) as factory:
+        async with factory() as session:
+            await _seed_user(session, user_id=user_id)
+            session.add(existing)
+            await session.commit()
+
+            real_lifecycle = VideoStorageLifecycle(storage_root)
+            lock_depth = 0
+
+            class Lifecycle:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(real_lifecycle, name)
+
+                @asynccontextmanager
+                async def reference_mutation_lock(
+                    self,
+                    **kwargs: Any,
+                ) -> AsyncIterator[None]:
+                    nonlocal lock_depth
+                    async with real_lifecycle.reference_mutation_lock(**kwargs):
+                        lock_depth += 1
+                        try:
+                            yield
+                        finally:
+                            lock_depth -= 1
+
+                async def upload_artifact_matches(self, **kwargs: Any) -> bool:
+                    integrity_checks.append(lock_depth > 0)
+                    return await real_lifecycle.upload_artifact_matches(**kwargs)
+
+            def write(path: Path, source: Any) -> None:
+                writes.append(path)
+                videos._write_new_file_atomic(path, source)  # noqa: SLF001
+
+            deps = replace(
+                videos._upload_dependencies(),  # noqa: SLF001
+                storage_lifecycle=Lifecycle(),  # type: ignore[arg-type]
+                write_new_file_atomic=write,
+            )
+            result = await video_upload_routes.upload_reference_video(
+                user=SimpleNamespace(id=user_id),
+                db=session,
+                file=_upload(payload),
+                deps=deps,
+            )
+
+            stored = await session.get(Video, video_id)
+            assert stored is not None
+            assert result.id == video_id
+            assert result.created is False
+            assert integrity_checks == [True]
+            assert writes == [artifact]
+            assert artifact.read_bytes() == payload
+            assert stored.storage_key == existing.storage_key
+            assert stored.size_bytes == len(payload)
+            assert stored.sha256 == hashlib.sha256(payload).hexdigest()
+            assert stored.etag == stored.sha256
+
+
+@pytest.mark.asyncio
+async def test_reference_video_reupload_reuses_verified_primary_without_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-verified-dedupe"
+    video_id = "video-verified-dedupe"
+    payload = _payload(1_024, b"v")
+    digest = hashlib.sha256(payload).hexdigest()
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    storage_root = Path(videos.settings.storage_root)
+    existing = _video(
+        video_id=video_id,
+        user_id=user_id,
+        payload=payload,
+    )
+    artifact = storage_root / existing.storage_key
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(payload)
+    integrity_checks: list[bool] = []
+
+    async with _database(tmp_path) as factory:
+        async with factory() as session:
+            await _seed_user(session, user_id=user_id)
+            session.add(existing)
+            await session.commit()
+
+            real_lifecycle = VideoStorageLifecycle(storage_root)
+            lock_depth = 0
+
+            class Lifecycle:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(real_lifecycle, name)
+
+                @asynccontextmanager
+                async def reference_mutation_lock(
+                    self,
+                    **kwargs: Any,
+                ) -> AsyncIterator[None]:
+                    nonlocal lock_depth
+                    async with real_lifecycle.reference_mutation_lock(**kwargs):
+                        lock_depth += 1
+                        try:
+                            yield
+                        finally:
+                            lock_depth -= 1
+
+                async def upload_artifact_matches(self, **kwargs: Any) -> bool:
+                    integrity_checks.append(lock_depth > 0)
+                    return await real_lifecycle.upload_artifact_matches(**kwargs)
+
+            def unexpected_write(_path: Path, _source: Any) -> None:
+                raise AssertionError("verified reference video must not be rewritten")
+
+            deps = replace(
+                videos._upload_dependencies(),  # noqa: SLF001
+                storage_lifecycle=Lifecycle(),  # type: ignore[arg-type]
+                write_new_file_atomic=unexpected_write,
+            )
+            result = await video_upload_routes.upload_reference_video(
+                user=SimpleNamespace(id=user_id),
+                db=session,
+                file=_upload(payload),
+                deps=deps,
+            )
+
+            stored = await session.get(Video, video_id)
+            assert stored is not None
+            assert result.id == video_id
+            assert result.created is False
+            assert integrity_checks == [True]
+            assert artifact.read_bytes() == payload
+            assert stored.storage_key == existing.storage_key
+            assert stored.size_bytes == len(payload)
+            assert stored.sha256 == digest
+            assert stored.etag == digest
+
+
+@pytest.mark.asyncio
 async def test_upload_delete_reupload_reuses_one_row_and_one_artifact_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1171,7 +1396,13 @@ async def test_reference_snapshot_user_lock_blocks_post_second_guard_race(
                 self.holds_user_lock = True
                 if self.role == "delete":
                     state.delete_user_lock_acquired.set()
-                return Result(state.video.user_id)
+                return Result(
+                    SimpleNamespace(
+                        id=state.video.user_id,
+                        account_mode="wallet",
+                        deleted_at=None,
+                    )
+                )
             if "FROM video_generations" in statement_sql:
                 return Result()
             if "FROM videos" in statement_sql:
@@ -1307,7 +1538,7 @@ async def test_reference_snapshot_user_lock_blocks_post_second_guard_race(
         video_submission.create_video_generation_record(
             creation,  # type: ignore[arg-type]
             body,
-            SimpleNamespace(id=state.video.user_id),
+            SimpleNamespace(id=state.video.user_id, account_mode="wallet"),
             services=services,
         )
     )
@@ -1547,6 +1778,97 @@ async def test_account_delete_commit_blocks_resumed_reference_upload_before_medi
 
 
 @pytest.mark.asyncio
+async def test_session_revoke_after_reference_write_discards_unadopted_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-revoke-upload-race"
+    session_id = "session-revoke-upload-race"
+    payload = _payload(256, b"s")
+    marker_ready = asyncio.Event()
+    resume_upload = asyncio.Event()
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    real_record_marker = (
+        video_upload_routes._record_reference_video_adoption_pending  # noqa: SLF001
+    )
+
+    async def pause_after_marker(**kwargs: Any) -> Any:
+        marker = await real_record_marker(**kwargs)
+        marker_ready.set()
+        await resume_upload.wait()
+        return marker
+
+    monkeypatch.setattr(
+        video_upload_routes,
+        "_record_reference_video_adoption_pending",
+        pause_after_marker,
+    )
+
+    async with _database(tmp_path) as factory:
+        async with factory() as setup:
+            await _seed_user(setup, user_id=user_id)
+            setup.add(
+                AuthSession(
+                    id=session_id,
+                    user_id=user_id,
+                    refresh_token_hash="r" * 64,
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                )
+            )
+            await setup.commit()
+
+        async with factory() as upload_db, factory() as revocation_db:
+            upload_db.info["lumen.durable_session_id"] = session_id
+            upload_task = asyncio.create_task(
+                videos.upload_reference_video(
+                    SimpleNamespace(id=user_id, account_mode="wallet"),
+                    upload_db,
+                    _upload(payload),
+                )
+            )
+            await marker_ready.wait()
+
+            session = await revocation_db.get(AuthSession, session_id)
+            assert session is not None
+            session.revoked_at = datetime.now(timezone.utc)
+            await revocation_db.commit()
+
+            resume_upload.set()
+            with pytest.raises(HTTPException) as exc_info:
+                await upload_task
+
+            assert exc_info.value.status_code == 401
+            assert exc_info.value.detail["error"]["code"] == "session_revoked"
+
+        async with factory() as observer:
+            video_count = int(
+                (
+                    await observer.execute(
+                        select(func.count(Video.id)).where(Video.user_id == user_id)
+                    )
+                ).scalar_one()
+            )
+
+    assert video_count == 0
+    assert not any(
+        path.is_file()
+        for path in Path(videos.settings.storage_root).glob(f"u/{user_id}/vref/**/*")
+    )
+    markers = await VideoStorageLifecycle(
+        videos.settings.storage_root
+    ).aged_upload_adoption_markers(
+        user_id=user_id,
+        minimum_age_seconds=0,
+    )
+    assert markers == ()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_failure_stays_counted_then_recovers_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1679,9 +2001,9 @@ async def test_cleanup_failure_stays_counted_then_recovers_idempotently(
             )
             assert count == 1
             assert accounted_bytes == len(b"poster")
-            quarantine_token = video.metadata_jsonb[
-                VIDEO_STORAGE_CLEANUP_METADATA_KEY
-            ]["quarantine_token"]
+            quarantine_token = video.metadata_jsonb[VIDEO_STORAGE_CLEANUP_METADATA_KEY][
+                "quarantine_token"
+            ]
             quarantine_root = (
                 storage_root
                 / ".lumen-video-cleanup"

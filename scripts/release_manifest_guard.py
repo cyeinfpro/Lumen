@@ -251,6 +251,11 @@ def print_entries(*, path: Path, tag: str, services: list[str]) -> None:
         )
 
 
+def print_commit(*, path: Path, tag: str) -> None:
+    payload = load_manifest(path, tag=tag)
+    print(payload["commit_sha"])
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -261,6 +266,9 @@ def _parser() -> argparse.ArgumentParser:
     entries.add_argument("--tag", required=True)
     entries.add_argument("--manifest", type=Path, required=True)
     entries.add_argument("--service", action="append", default=[])
+    commit = subparsers.add_parser("commit")
+    commit.add_argument("--tag", required=True)
+    commit.add_argument("--manifest", type=Path, required=True)
     subparsers.add_parser("latest-tag")
     alias = subparsers.add_parser("resolve-alias")
     alias.add_argument("--alias", required=True)
@@ -276,6 +284,8 @@ def main() -> int:
             print(resolve_latest_tag())
         elif args.command == "resolve-alias":
             print(resolve_alias_tag(args.alias))
+        elif args.command == "commit":
+            print_commit(path=args.manifest, tag=args.tag)
         else:
             print_entries(
                 path=args.manifest,

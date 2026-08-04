@@ -337,33 +337,12 @@ async def release_generation(
 async def _settle_unknown_upstream_hold(
     session: AsyncSession,
     user_id: str,
-    *,
-    ref_type: str,
-    ref_id: str,
-    no_hold_scope: str,
-    no_hold_extra: dict,
-    settle_meta: dict,
-    settle_event: str,
-    settle_audit_extra: dict,
-    overdraw_extra: dict,
-    reason: str,
-    knowledge: str,
+    settlement: UnknownUpstreamSettlement,
 ) -> None:
     await generation_service.settle_unknown_upstream_hold(
         session,
         user_id,
-        settlement=UnknownUpstreamSettlement(
-            ref_type=ref_type,
-            ref_id=ref_id,
-            no_hold_scope=no_hold_scope,
-            no_hold_extra=no_hold_extra,
-            settle_meta=settle_meta,
-            settle_event=settle_event,
-            settle_audit_extra=settle_audit_extra,
-            overdraw_extra=overdraw_extra,
-            reason=reason,
-            knowledge=knowledge,
-        ),
+        settlement=settlement,
         deps=_unknown_upstream_dependencies(),
     )
 
@@ -379,21 +358,24 @@ async def settle_generation_unknown_upstream(
     await _settle_unknown_upstream_hold(
         session,
         generation.user_id,
-        ref_type="generation",
-        ref_id=billing_ref_id,
-        no_hold_scope="image_result_unknown",
-        no_hold_extra={"generation_id": generation.id},
-        settle_meta={
-            "generation_id": generation.id,
-            "model": generation.model,
-            "retry_count": _generation_billing_retry_count(generation),
-            "provider": _generation_settle_provider(generation),
-        },
-        settle_event="wallet.settle.image_result_unknown",
-        settle_audit_extra={"generation_id": generation.id},
-        overdraw_extra={"generation_id": generation.id},
-        reason=reason,
-        knowledge=knowledge,
+        UnknownUpstreamSettlement(
+            ref_type="generation",
+            ref_id=billing_ref_id,
+            billing_obligation=_task_pricing_snapshot(generation) is not None,
+            no_hold_scope="image_result_unknown",
+            no_hold_extra={"generation_id": generation.id},
+            settle_meta={
+                "generation_id": generation.id,
+                "model": generation.model,
+                "retry_count": _generation_billing_retry_count(generation),
+                "provider": _generation_settle_provider(generation),
+            },
+            settle_event="wallet.settle.image_result_unknown",
+            settle_audit_extra={"generation_id": generation.id},
+            overdraw_extra={"generation_id": generation.id},
+            reason=reason,
+            knowledge=knowledge,
+        ),
     )
 
 
@@ -408,21 +390,24 @@ async def settle_completion_unknown_upstream(
     await _settle_unknown_upstream_hold(
         session,
         completion.user_id,
-        ref_type="completion",
-        ref_id=billing_ref_id,
-        no_hold_scope="completion_result_unknown",
-        no_hold_extra={"completion_id": completion.id},
-        settle_meta={
-            "completion_id": completion.id,
-            "model": completion.model,
-            "billing_retry_count": _completion_billing_retry_count(completion),
-            "provider": getattr(completion, "upstream_supplier_id", None),
-        },
-        settle_event="wallet.settle.completion_result_unknown",
-        settle_audit_extra={"completion_id": completion.id},
-        overdraw_extra={"completion_id": completion.id},
-        reason=reason,
-        knowledge=knowledge,
+        UnknownUpstreamSettlement(
+            ref_type="completion",
+            ref_id=billing_ref_id,
+            billing_obligation=_task_pricing_snapshot(completion) is not None,
+            no_hold_scope="completion_result_unknown",
+            no_hold_extra={"completion_id": completion.id},
+            settle_meta={
+                "completion_id": completion.id,
+                "model": completion.model,
+                "billing_retry_count": _completion_billing_retry_count(completion),
+                "provider": getattr(completion, "upstream_supplier_id", None),
+            },
+            settle_event="wallet.settle.completion_result_unknown",
+            settle_audit_extra={"completion_id": completion.id},
+            overdraw_extra={"completion_id": completion.id},
+            reason=reason,
+            knowledge=knowledge,
+        ),
     )
 
 

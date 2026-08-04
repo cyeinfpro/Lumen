@@ -13,6 +13,35 @@ if TYPE_CHECKING:
     from lumen_core.schemas import ApparelModelLibraryJobOut, ModelAgeSegment
 
 
+async def replay_apparel_model_library_job(
+    db: AsyncSession,
+    *,
+    workflow_run_id: str,
+    user: Any,
+    runtime: ModelLibraryRuntimeAdapter,
+) -> ApparelModelLibraryJobOut:
+    run = await runtime._get_run(
+        db,
+        user_id=user.id,
+        run_id=workflow_run_id,
+    )
+    if run.type != runtime.WORKFLOW_TYPE_APPAREL_MODEL_LIBRARY_GENERATE:
+        raise runtime._http(
+            "idempotency_conflict",
+            "idempotency_key resolved to a different workflow operation",
+            409,
+        )
+    await runtime._ensure_legacy_user_library_migrated(db, user.id)
+    saved_map = await runtime._saved_image_id_set(db, user.id)
+    job = await runtime._job_from_library_run(
+        db,
+        run=run,
+        saved_map=saved_map,
+    )
+    await db.commit()
+    return job
+
+
 async def job_from_library_run(
     db: AsyncSession,
     *,
@@ -238,10 +267,10 @@ async def job_from_project_candidate_step(
         include_dual_bonus=False,
     )
     failed_generations = [
-            generation
-            for generation in task_generations
-            if generation.status == runtime.GenerationStatus.FAILED.value
-        ]
+        generation
+        for generation in task_generations
+        if generation.status == runtime.GenerationStatus.FAILED.value
+    ]
     active_generations = [
         generation
         for generation in task_generations

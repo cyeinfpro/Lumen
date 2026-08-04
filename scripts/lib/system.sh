@@ -127,6 +127,180 @@ lumen_resolve_repo_root() {
     printf '%s' "${probe}"
 }
 
+lumen_canonical_deploy_root_path() {
+    local raw_root="$1"
+    local allow_missing="${2:-0}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "解析部署根目录需要 python3。"
+        return 1
+    fi
+    python3 - "${raw_root}" "${allow_missing}" <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+
+
+def fail(message: str) -> None:
+    print(f"unsafe LUMEN_DEPLOY_ROOT: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+raw = sys.argv[1]
+allow_missing = sys.argv[2] == "1"
+if not raw or any(ord(char) < 32 for char in raw):
+    fail("path is empty or contains control characters")
+if not raw.startswith("/"):
+    fail("path must be absolute")
+
+trimmed = raw.rstrip("/") or "/"
+segments = trimmed.split("/")[1:]
+if any(segment in {"", ".", ".."} for segment in segments):
+    fail("path contains empty, current-directory, or traversal components")
+if trimmed in {
+    "/",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+}:
+    fail("path is a protected system directory")
+
+root = Path(trimmed)
+if root.parent.name == "releases":
+    fail("path points at an individual release instead of the deployment root")
+
+probe = Path("/")
+missing_component = False
+for segment in root.parts[1:]:
+    probe /= segment
+    if missing_component:
+        continue
+    try:
+        metadata = probe.lstat()
+    except FileNotFoundError:
+        if not allow_missing:
+            fail(f"path component does not exist: {probe}")
+        missing_component = True
+        continue
+    if stat.S_ISLNK(metadata.st_mode):
+        fail(f"path component is a symlink: {probe}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail(f"path component is not a directory: {probe}")
+if not missing_component and not root.is_dir():
+    fail("path is not a directory")
+
+releases = root / "releases"
+if not missing_component and (releases.exists() or releases.is_symlink()):
+    metadata = releases.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        fail("releases is not a regular directory")
+
+for name in ("current", "previous"):
+    if missing_component:
+        break
+    link = root / name
+    try:
+        metadata = link.lstat()
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            target = link.resolve(strict=True)
+            releases_resolved = releases.resolve(strict=True)
+        except (FileNotFoundError, RuntimeError, OSError):
+            fail(f"{name} is broken or cannot be resolved safely")
+        if not target.is_dir() or target.parent != releases_resolved:
+            fail(f"{name} escapes the deployment releases directory")
+    elif not stat.S_ISDIR(metadata.st_mode):
+        fail(f"{name} is neither a release symlink nor a directory")
+
+print(root)
+PY
+}
+
+lumen_prepare_deploy_root_for_lock() {
+    local raw_root="$1"
+    local candidate=""
+    candidate="$(
+        lumen_canonical_deploy_root_path "${raw_root}" 1
+    )" || return 1
+    if [ ! -d "${candidate}" ]; then
+        if ! mkdir -p "${candidate}" 2>/dev/null; then
+            if ! command -v lumen_run_as_root >/dev/null 2>&1 \
+                    || ! lumen_run_as_root mkdir -p "${candidate}"; then
+                log_error "无法创建部署根目录：${candidate}"
+                return 1
+            fi
+        fi
+    fi
+    lumen_canonical_deploy_root_path "${candidate}"
+}
+
+lumen_resolve_install_deploy_root() {
+    local script_dir="$1"
+    local requested_root="${2:-}"
+    local script_root=""
+    script_root="$(lumen_resolve_repo_root "${script_dir}")" || return 1
+    if [ -z "${requested_root}" ]; then
+        case "${script_root}" in
+            /opt/lumen|/opt/lumen/*)
+                requested_root="/opt/lumen"
+                ;;
+            *)
+                requested_root="${script_root}"
+                ;;
+        esac
+    fi
+    lumen_prepare_deploy_root_for_lock "${requested_root}"
+}
+
+lumen_resolve_deploy_root() {
+    local script_dir="$1"
+    local requested_root="${2:-}"
+    local legacy_root="${3:-}"
+    local inferred_root=""
+    local canonical_root=""
+    local canonical_legacy=""
+
+    if [ -z "${requested_root}" ]; then
+        requested_root="${legacy_root}"
+    fi
+    if [ -z "${requested_root}" ]; then
+        inferred_root="$(lumen_resolve_repo_root "${script_dir}")" || return 1
+        requested_root="${inferred_root}"
+    fi
+    canonical_root="$(
+        lumen_canonical_deploy_root_path "${requested_root}"
+    )" || return 1
+
+    if [ -n "${legacy_root}" ]; then
+        canonical_legacy="$(
+            lumen_canonical_deploy_root_path "${legacy_root}"
+        )" || return 1
+        if [ "${canonical_legacy}" != "${canonical_root}" ]; then
+            log_error "LUMEN_MAINT_ROOT/LUMEN_UPDATE_ROOT 与 LUMEN_DEPLOY_ROOT 指向不同部署目录。"
+            return 1
+        fi
+    fi
+
+    printf '%s' "${canonical_root}"
+}
+
 # port_in_use <port> -> 返回 0 表示被占用，1 表示空闲（或无可用检测工具）
 # 优先 lsof，其次 ss，再次 netstat。
 port_in_use() {
@@ -219,7 +393,7 @@ lumen_find_shared_env() {
         "${LUMEN_ENV_FILE:-}" \
         "${script_root:+${script_root}/.env}" \
         "${script_root:+${script_root}/shared/.env}" \
-        "/opt/lumen/shared/.env"; do
+        "${LUMEN_DEPLOY_ROOT:-/opt/lumen}/shared/.env"; do
         [ -n "${candidate}" ] || continue
         if [ -f "${candidate}" ]; then
             printf '%s' "${candidate}"

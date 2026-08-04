@@ -55,5 +55,6 @@ async def mark_staged_outbox_published(
                 return False
             if row.published_at is None:
                 row.published_at = datetime.now(timezone.utc)
+            row.next_attempt_at = None
             await resolve(session, [event_id])
     return True

@@ -5,6 +5,7 @@ import {
   type PostMessageOut,
 } from "@/lib/api/conversations";
 import { ApiError } from "@/lib/api/http";
+import { semanticPostIdempotency } from "@/lib/api/semanticIdempotency";
 import { logWarn } from "@/lib/logger";
 import {
   findInvalidImageMentionLabels,
@@ -59,6 +60,8 @@ import {
   rememberGenerationAlias,
   setBounded,
   trackSendRequest,
+  _conversationMutationFence,
+  _userSessionFence,
 } from "./runtime";
 import type {
   ChatState,
@@ -86,7 +89,6 @@ type PreparedSend = {
   structuredAttachments: StructuredAttachment[];
   attachmentImageIds: string[];
   actionSource: string;
-  traceId: string;
 };
 
 type PrepareResult =
@@ -100,6 +102,14 @@ type OptimisticSend = {
   userMessage: UserMessage;
   assistantMessage: AssistantMessage;
   generations: Record<string, Generation>;
+};
+
+type ValidatedSend = {
+  isImage: boolean;
+  realUser: UserMessage;
+  realAssistant: AssistantMessage;
+  generationIds: string[];
+  completionId: string | undefined;
 };
 
 function createConversationError(err: unknown): string {
@@ -228,7 +238,6 @@ function prepareSend(
         (attachment) => attachment.image_id,
       ),
       actionSource: resolveActionSource(intent, maskImageId),
-      traceId: uuid(),
     },
     error: null,
   };
@@ -238,6 +247,7 @@ function optimisticGeneration(
   id: string,
   prepared: PreparedSend,
   assistantId: string,
+  traceId: string,
 ): Generation {
   return {
     id,
@@ -255,14 +265,17 @@ function optimisticGeneration(
     stage: "queued",
     source: "composer",
     action_source: prepared.actionSource,
-    trace_id: prepared.traceId,
+    trace_id: traceId,
     attachment_roles: prepared.structuredAttachments,
     attempt: 0,
     started_at: 0,
   };
 }
 
-function buildOptimisticSend(prepared: PreparedSend): OptimisticSend {
+function buildOptimisticSend(
+  prepared: PreparedSend,
+  traceId: string,
+): OptimisticSend {
   const userId = `opt-user-${uuid()}`;
   const assistantId = `opt-asst-${uuid()}`;
   const generationIds = prepared.isImage
@@ -302,7 +315,7 @@ function buildOptimisticSend(prepared: PreparedSend): OptimisticSend {
   const generations = Object.fromEntries(
     generationIds.map((id) => [
       id,
-      optimisticGeneration(id, prepared, assistantId),
+      optimisticGeneration(id, prepared, assistantId, traceId),
     ]),
   );
   return {
@@ -415,22 +428,36 @@ function buildImageParams(prepared: PreparedSend): ImageParams | undefined {
   return imageParams;
 }
 
-function buildPostBody(prepared: PreparedSend): PostMessageIn {
+type PostMessagePayload = Omit<
+  PostMessageIn,
+  "idempotency_key" | "trace_id"
+>;
+
+function buildPostPayload(prepared: PreparedSend): PostMessagePayload {
   return {
-    idempotency_key: uuid(),
     text: prepared.requestText,
     attachment_image_ids: prepared.attachmentImageIds,
     attachments: prepared.structuredAttachments,
     input_images: prepared.attachmentImageIds,
     source: "composer",
     action_source: prepared.actionSource,
-    trace_id: prepared.traceId,
     ...(prepared.maskImageId
       ? { mask_image_id: prepared.maskImageId }
       : {}),
     intent: prepared.intent,
     image_params: buildImageParams(prepared),
     chat_params: buildChatParams(prepared),
+  };
+}
+
+function buildPostBody(
+  payload: PostMessagePayload,
+  idempotencyKey: string,
+): PostMessageIn {
+  return {
+    ...payload,
+    idempotency_key: idempotencyKey,
+    trace_id: idempotencyKey,
   };
 }
 
@@ -487,12 +514,12 @@ function removeOptimisticSend(
 }
 
 function registerResponseAliases(
-  output: PostMessageOut,
+  generationIds: string[],
   optimistic: OptimisticSend,
   completionId: string | undefined,
 ): void {
   const now = Date.now();
-  for (const [index, realId] of (output.generation_ids ?? []).entries()) {
+  for (const [index, realId] of generationIds.entries()) {
     const optimisticId = optimistic.generationIds[index];
     if (optimisticId) rememberGenerationAlias(realId, optimisticId, now);
   }
@@ -555,14 +582,54 @@ function replaceOptimisticMessages(
   };
 }
 
-function reconcileSuccessfulSend(
-  set: ChatStateSetter,
-  get: ChatStateGetter,
-  convId: string,
-  prepared: PreparedSend,
-  optimistic: OptimisticSend,
+function validatedGenerationIds(
   output: PostMessageOut,
-): void {
+  required: boolean,
+): string[] {
+  const raw = (output as { generation_ids?: unknown }).generation_ids;
+  if (raw === undefined) {
+    if (required) throw new TypeError("malformed send response");
+    return [];
+  }
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (generationId) =>
+        typeof generationId !== "string" ||
+        generationId.trim().length === 0,
+    ) ||
+    (required && raw.length === 0)
+  ) {
+    throw new TypeError("malformed send response");
+  }
+  return raw;
+}
+
+function validatedCompletionId(
+  output: PostMessageOut,
+  required: boolean,
+): string | undefined {
+  const raw = (output as { completion_id?: unknown }).completion_id;
+  if (raw === undefined || raw === null) {
+    if (required) throw new TypeError("malformed send response");
+    return undefined;
+  }
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new TypeError("malformed send response");
+  }
+  return raw;
+}
+
+function validateSuccessfulSend(
+  prepared: PreparedSend,
+  output: PostMessageOut,
+): ValidatedSend {
+  const generationIds = validatedGenerationIds(output, prepared.isImage);
+  const validatedCompletion = validatedCompletionId(
+    output,
+    !prepared.isImage,
+  );
+  const completionId = prepared.isImage ? undefined : validatedCompletion;
   const realUser: UserMessage = {
     ...adaptBackendUserMessage(
       output.user_message,
@@ -572,11 +639,6 @@ function reconcileSuccessfulSend(
     ),
     text: prepared.text,
   };
-  const generationIds = output.generation_ids ?? [];
-  const completionId = prepared.isImage
-    ? undefined
-    : (output.completion_id ?? undefined);
-  registerResponseAliases(output, optimistic, completionId);
   const realAssistant = adaptBackendAssistantMessage(
     output.assistant_message,
     realUser.id,
@@ -584,20 +646,32 @@ function reconcileSuccessfulSend(
     prepared.isImage ? generationIds : undefined,
     completionId,
   );
-  if (!prepared.isImage && !completionId) {
-    // rememberCompletionMessage no-ops on a missing id, which used to make a
-    // chat send that came back without completion_id look successful while
-    // silently disabling text streaming: later completion.delta events cannot
-    // resolve a message id, so they expire in the pending buffer and the
-    // bubble stays blank. Record the backend contract break at its source.
-    logWarn("chat send returned no completion id", {
-      scope: "chat-send",
-      extra: {
-        messageId: realAssistant.id,
-        traceId: prepared.traceId,
-      },
-    });
+  if (
+    typeof realUser.id !== "string" ||
+    realUser.id.trim().length === 0 ||
+    typeof realAssistant.id !== "string" ||
+    realAssistant.id.trim().length === 0
+  ) {
+    throw new TypeError("malformed send response");
   }
+  return {
+    isImage: prepared.isImage,
+    realUser,
+    realAssistant,
+    generationIds,
+    completionId,
+  };
+}
+
+function applySuccessfulSend(
+  set: ChatStateSetter,
+  get: ChatStateGetter,
+  convId: string,
+  optimistic: OptimisticSend,
+  validated: ValidatedSend,
+): void {
+  const { realUser, realAssistant, generationIds, completionId } = validated;
+  registerResponseAliases(generationIds, optimistic, completionId);
   rememberCompletionMessage(completionId, realAssistant.id);
   _messageConvIds.delete(optimistic.userId);
   _messageConvIds.delete(optimistic.assistantId);
@@ -623,9 +697,19 @@ function reconcileSuccessfulSend(
 function isStaleSend(
   get: ChatStateGetter,
   convId: string,
+  userId: string | null,
+  conversationEpoch: number,
+  userEpoch: number,
   signal: AbortSignal,
 ): boolean {
-  return signal.aborted || get().currentConvId !== convId;
+  const state = get();
+  return (
+    signal.aborted ||
+    state.currentConvId !== convId ||
+    state.currentUserId !== userId ||
+    !_conversationMutationFence.isCurrent(conversationEpoch) ||
+    !_userSessionFence.isCurrent(userEpoch)
+  );
 }
 
 function handlePostFailure(
@@ -681,39 +765,116 @@ export function createSendMessageAction(
         if (result.error) set({ composerError: result.error });
         return;
       }
-      if (isStaleSend(get, convId, controller.signal)) return;
-      optimistic = buildOptimisticSend(result.prepared);
-      commitOptimisticSend(
-        set,
-        convId,
-        optimistic,
-        dependencies.createInitialComposer,
+      const userId = get().currentUserId;
+      const conversationEpoch = _conversationMutationFence.snapshot();
+      const userEpoch = _userSessionFence.snapshot();
+      if (
+        isStaleSend(
+          get,
+          convId,
+          userId,
+          conversationEpoch,
+          userEpoch,
+          controller.signal,
+        )
+      ) {
+        return;
+      }
+      const payload = buildPostPayload(result.prepared);
+      const idempotency = await semanticPostIdempotency.acquire(
+        {
+          operation: "conversation.message.create",
+          userId,
+          conversationId: convId,
+        },
+        payload,
       );
+      if (
+        isStaleSend(
+          get,
+          convId,
+          userId,
+          conversationEpoch,
+          userEpoch,
+          controller.signal,
+        )
+      ) {
+        await semanticPostIdempotency.discard(idempotency);
+        return;
+      }
+      await semanticPostIdempotency.markSubmitted(idempotency);
+      if (
+        isStaleSend(
+          get,
+          convId,
+          userId,
+          conversationEpoch,
+          userEpoch,
+          controller.signal,
+        )
+      ) {
+        await semanticPostIdempotency.discard(idempotency);
+        return;
+      }
+      optimistic = buildOptimisticSend(result.prepared, idempotency.key);
+      try {
+        commitOptimisticSend(
+          set,
+          convId,
+          optimistic,
+          dependencies.createInitialComposer,
+        );
+      } catch (err) {
+        await semanticPostIdempotency.discard(idempotency);
+        throw err;
+      }
       try {
         // POST 交给后端前标记已提交：此后切会话的 abortAllSendRequests 不再
         // abort 本请求——后端收到即可能已计费，abort 只会静默丢弃已计费发送。
         markSendRequestSubmitted(controller);
-        const output = await apiPostMessage(
+        const output: PostMessageOut = await apiPostMessage(
           convId,
-          buildPostBody(result.prepared),
+          buildPostBody(payload, idempotency.key),
           { signal: controller.signal },
         );
-        if (isStaleSend(get, convId, controller.signal)) {
+        const validated = validateSuccessfulSend(result.prepared, output);
+        await semanticPostIdempotency.confirm(idempotency);
+        if (
+          isStaleSend(
+            get,
+            convId,
+            userId,
+            conversationEpoch,
+            userEpoch,
+            controller.signal,
+          )
+        ) {
           removeOptimisticSend(set, optimistic);
           return;
         }
-        reconcileSuccessfulSend(
+        applySuccessfulSend(
           set,
           get,
           convId,
-          result.prepared,
           optimistic,
-          output,
+          validated,
         );
       } catch (err) {
+        await semanticPostIdempotency.recordFailure(idempotency, err);
         removeOptimisticSend(set, optimistic);
         if (isAbortRequest(err, controller.signal)) return;
-        if (isStaleSend(get, convId, controller.signal)) return;
+        if (
+          isStaleSend(
+            get,
+            convId,
+            userId,
+            conversationEpoch,
+            userEpoch,
+            controller.signal,
+          )
+        ) {
+          return;
+        }
         handlePostFailure(set, err, options, result.prepared.composer);
       }
     } finally {

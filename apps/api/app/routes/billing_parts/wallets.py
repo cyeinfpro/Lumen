@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
 from lumen_core.models import (
+    AuditLog,
     RedemptionCodeUsage,
     User,
     UserApiCredential,
@@ -39,6 +40,54 @@ from .composition import build_billing_services
 
 
 router = APIRouter()
+
+
+async def _write_admin_adjust_audit_once(
+    db: AsyncSession,
+    *,
+    commands: Any,
+    request: Request,
+    admin: Any,
+    target_user_id: str,
+    amount_micro: int,
+    reason: str,
+    transaction: WalletTransaction,
+) -> None:
+    await db.execute(
+        select(WalletTransaction.id)
+        .where(
+            WalletTransaction.id == transaction.id,
+            WalletTransaction.user_id == target_user_id,
+        )
+        .with_for_update()
+    )
+    existing_audit = (
+        await db.execute(
+            select(AuditLog.id)
+            .where(
+                AuditLog.event_type == "wallet.adjust.admin",
+                AuditLog.target_user_id == target_user_id,
+                AuditLog.details["tx_id"].as_string() == str(transaction.id),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing_audit is not None:
+        return
+    await commands.write_audit(
+        db,
+        event_type="wallet.adjust.admin",
+        user_id=admin.id,
+        actor_email_hash=hash_email(admin.email),
+        actor_ip_hash=commands.request_ip_hash(request),
+        target_user_id=target_user_id,
+        details={
+            "amount_micro": amount_micro,
+            "reason": reason,
+            "tx_id": transaction.id,
+        },
+        autocommit=False,
+    )
 
 
 @router.get("/me/wallet", response_model=WalletOut)
@@ -233,10 +282,36 @@ async def admin_adjust_wallet(
     request: Request,
     admin: AdminUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WalletTransactionOut:
     services = build_billing_services()
     queries = services.queries
     commands = services.commands
+    header_key = idempotency_key.strip() if idempotency_key is not None else None
+    if header_key is not None and (
+        not header_key
+        or len(header_key) > 64
+        or any(ord(char) < 33 or ord(char) > 126 for char in header_key)
+    ):
+        raise queries.http(
+            "idempotency_key_invalid",
+            "Idempotency-Key must be 1-64 printable ASCII characters",
+            422,
+        )
+    if (
+        header_key is not None
+        and body.idempotency_key is not None
+        and header_key != body.idempotency_key
+    ):
+        raise queries.http(
+            "idempotency_key_mismatch",
+            "Idempotency-Key must match idempotency_key",
+            422,
+        )
+    request_idempotency_key = body.idempotency_key or header_key
     target = await db.get(User, user_id)
     if target is None or getattr(target, "deleted_at", None) is not None:
         raise queries.http("not_found", "user not found", 404)
@@ -267,7 +342,7 @@ async def admin_adjust_wallet(
             amount,
             admin_id=admin.id,
             reason=body.reason,
-            idempotency_key=body.idempotency_key,
+            idempotency_key=request_idempotency_key,
             allow_negative=allow_negative,
             min_balance_micro=min_balance_micro,
         )
@@ -280,15 +355,15 @@ async def admin_adjust_wallet(
                 max_negative_balance_micro=services.max_admin_negative_balance_micro,
             ) from exc
         raise queries.billing_http(exc)
-    await commands.write_audit(
+    await _write_admin_adjust_audit_once(
         db,
-        event_type="wallet.adjust.admin",
-        user_id=admin.id,
-        actor_email_hash=hash_email(admin.email),
-        actor_ip_hash=commands.request_ip_hash(request),
+        commands=commands,
+        request=request,
+        admin=admin,
         target_user_id=user_id,
-        details={"amount_micro": amount, "reason": body.reason, "tx_id": tx.id},
-        autocommit=False,
+        amount_micro=amount,
+        reason=body.reason,
+        transaction=tx,
     )
     await db.commit()
     await commands.invalidate_balance_cache(user_id)

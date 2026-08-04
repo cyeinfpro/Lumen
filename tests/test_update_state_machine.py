@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts" / "lib.sh"
 JOURNAL = ROOT / "scripts" / "update" / "journal.sh"
+DURABLE_IO = ROOT / "scripts" / "update" / "durable_io.py"
 CONTRACT = ROOT / "scripts" / "update" / "phase_contract.sh"
 COMMON = ROOT / "scripts" / "update" / "common.sh"
 RUNNER = ROOT / "scripts" / "update" / "runner.sh"
@@ -231,6 +232,46 @@ def test_update_journal_records_rollback_terminal_state(tmp_path: Path) -> None:
     payload = json.loads(journal.read_text(encoding="utf-8"))
     assert payload["status"] == "rolled_back"
     assert payload["current_phase"] is None
+
+
+def test_update_recovery_marker_survives_failure_and_clears_at_terminal_state(
+    tmp_path: Path,
+) -> None:
+    journal = tmp_path / "journal.json"
+    marker = tmp_path / "resume.marker"
+    failed = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(JOURNAL))}
+        SHARED_DIR={shlex.quote(str(tmp_path))}
+        LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
+        LUMEN_UPDATE_RECOVERY_MARKER={shlex.quote(str(marker))}
+        OPERATION_ID=update-consumer
+        lumen_update_journal_init
+        test -f {shlex.quote(str(marker))}
+        lumen_update_journal_phase_start lock
+        lumen_update_journal_failed lock 9
+        test -f {shlex.quote(str(marker))}
+        """
+    )
+    assert failed.returncode == 0, failed.stderr + failed.stdout
+    assert marker.read_text(encoding="utf-8") == "update-consumer\n"
+
+    terminal = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(JOURNAL))}
+        SHARED_DIR={shlex.quote(str(tmp_path))}
+        LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
+        LUMEN_UPDATE_RECOVERY_MARKER={shlex.quote(str(marker))}
+        OPERATION_ID=ignored
+        LUMEN_UPDATE_RESUME=1
+        lumen_update_journal_init
+        lumen_update_journal_status rolled_back
+        test ! -e {shlex.quote(str(marker))}
+        """
+    )
+    assert terminal.returncode == 0, terminal.stderr + terminal.stdout
 
 
 def test_schema_v1_journal_is_never_auto_resumed(tmp_path: Path) -> None:
@@ -2021,7 +2062,10 @@ def test_update_modules_are_domain_split_and_at_most_400_lines() -> None:
 
 def test_self_update_unit_contains_every_update_module() -> None:
     update_dir = ROOT / "scripts" / "update"
-    source = (update_dir / "release" / "self_update.sh").read_text(encoding="utf-8")
+    source = "\n".join(
+        (update_dir / "release" / name).read_text(encoding="utf-8")
+        for name in ("source_helpers.sh", "self_update.sh")
+    )
     expected = {
         path.relative_to(ROOT / "scripts").as_posix()
         for path in update_dir.rglob("*")
@@ -2049,9 +2093,7 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
     check = CHECK_PHASE.read_text(encoding="utf-8")
     switch = SWITCH_PHASE.read_text(encoding="utf-8")
     restart = RESTART_PHASE.read_text(encoding="utf-8")
-    health = (ROOT / "scripts/update/services/health.sh").read_text(
-        encoding="utf-8"
-    )
+    health = (ROOT / "scripts/update/services/health.sh").read_text(encoding="utf-8")
     self_update = (ROOT / "scripts/update/release/self_update.sh").read_text(
         encoding="utf-8"
     )
@@ -2102,11 +2144,17 @@ def test_switch_does_not_complete_when_runner_unit_refresh_fails(
 
 def test_update_snapshot_restore_and_switch_use_durable_filesystem_commits() -> None:
     journal = JOURNAL.read_text(encoding="utf-8")
+    durable_io = DURABLE_IO.read_text(encoding="utf-8")
     recovery = RECOVERY_STATE.read_text(encoding="utf-8")
     switch = SWITCH_PHASE.read_text(encoding="utf-8")
 
     assert "lumen_update_copy_file_durable()" in journal
     assert "lumen_update_fsync_directory()" in journal
+    assert "durable_io.py" in journal
+    assert "copy-file" in journal
+    assert "fsync-directory" in journal
+    assert "_sync_filesystem(directory_fd)" in durable_io
+    assert "syncfs(fd)" in durable_io
     assert recovery.count("lumen_update_copy_file_durable") >= 2
     assert 'lumen_update_fsync_directory "${SHARED_DIR}"' in recovery
     assert 'lumen_update_fsync_directory "${ROOT}"' in recovery

@@ -25,10 +25,44 @@ SELF_UPDATE_UNIT = (
     "lib/locking.sh",
     "lib/container_release.sh",
     "lib/release_layout.sh",
+    "lib/backup_restore_services.sh",
+    "lib/backup_journal.sh",
+    "lib/restore_journal.sh",
     "lib/self_update.sh",
+    "install/bootstrap_transaction.py",
     "release_manifest_guard.py",
     "update_runner.py",
     "restore_runner.py",
+    "redis_backup_archive.py",
+    "backup_permissions.py",
+    "restore_journal.py",
+    "update/entry_lock.py",
+)
+UPDATE_RUNTIME_UNIT = tuple(
+    sorted(
+        path.relative_to(ROOT / "scripts").as_posix()
+        for path in (ROOT / "scripts" / "update").rglob("*")
+        if path.is_file() and path.suffix in {".sh", ".py"}
+    )
+)
+LUMENCTL_MODULE_UNIT = (
+    "lumenctl/validation.sh",
+    "lumenctl/compose.sh",
+    "lumenctl/systemd_image_job.sh",
+    "lumenctl/nginx.sh",
+)
+LUMENCTL_SYNC_UNIT = tuple(
+    dict.fromkeys(
+        (
+            *SELF_UPDATE_UNIT,
+            "backup.sh",
+            "restore.sh",
+            *UPDATE_RUNTIME_UNIT,
+            "update.sh",
+            "lumenctl.sh",
+            *LUMENCTL_MODULE_UNIT,
+        )
+    )
 )
 PROXY_KEYS = (
     "LUMEN_UPDATE_PROXY_URL",
@@ -45,7 +79,12 @@ PROXY_KEYS = (
 def clean_env() -> dict[str, str]:
     env = os.environ.copy()
     env["LC_ALL"] = "C"
-    for key in (*PROXY_KEYS, "LUMEN_SELF_UPDATE_COMMIT", "LUMEN_SELF_UPDATE_REF"):
+    for key in (
+        *PROXY_KEYS,
+        "LUMEN_SELF_UPDATE_COMMIT",
+        "LUMEN_SELF_UPDATE_REF",
+        "LUMEN_UPDATE_EXPECTED_SCRIPTS_COMMIT",
+    ):
         env.pop(key, None)
     return env
 
@@ -65,6 +104,14 @@ def run_bash(
 
 def stage_remote_self_update_unit(remote: Path) -> None:
     for relative in SELF_UPDATE_UNIT:
+        source = ROOT / "scripts" / relative
+        target = remote / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def stage_remote_lumenctl_sync_unit(remote: Path) -> None:
+    for relative in LUMENCTL_SYNC_UNIT:
         source = ROOT / "scripts" / relative
         target = remote / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -141,20 +188,24 @@ def prepare_transaction_case(
     remote.mkdir()
     originals = {
         "backup.sh": b"#!/usr/bin/env bash\nLOCAL_BACKUP=1\n",
+        "lib/backup_journal.sh": b"#!/usr/bin/env bash\nLOCAL_JOURNAL=1\n",
         "restore.sh": b"#!/usr/bin/env bash\nLOCAL_RESTORE=1\n",
     }
     replacements = {
         "backup.sh": b"#!/usr/bin/env bash\nREMOTE_BACKUP=2\n",
+        "lib/backup_journal.sh": b"#!/usr/bin/env bash\nREMOTE_JOURNAL=2\n",
         "restore.sh": b"#!/usr/bin/env bash\nREMOTE_RESTORE=2\n",
     }
     for relative, content in originals.items():
         path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        path.chmod(0o755)
+        path.chmod(0o755 if relative.endswith("backup.sh") else 0o644)
     for relative, content in replacements.items():
         path = remote / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        path.chmod(0o755)
+        path.chmod(0o755 if relative.endswith("backup.sh") else 0o644)
     (target / ".lumen-self-update.files").write_text("old-file\n", encoding="utf-8")
     (target / ".lumen-self-update.source").write_text(f"{'a' * 40}\n", encoding="utf-8")
     (target / ".lumen-self-update.last").write_text("1\n", encoding="utf-8")
@@ -177,8 +228,35 @@ def assert_transaction_restored(
         encoding="utf-8"
     ) == f"{'a' * 40}\n"
     assert (target / ".lumen-self-update.last").read_text(encoding="utf-8") == "1\n"
+    assert not (target / ".lumen-self-update.integrity").exists()
+    assert not (target / ".lumen-self-update.release-tag").exists()
     assert not list(target.glob(".lumen-self-update.txn.*"))
     assert not list(target.rglob("*.new"))
+
+
+def test_backup_self_update_missing_journal_fails_before_publish(
+    tmp_path: Path,
+) -> None:
+    target, remote, _, originals, _ = prepare_transaction_case(tmp_path)
+    (remote / "lib/backup_journal.sh").unlink()
+    env = github_env(tmp_path / "bin", remote, tmp_path / "curl.log")
+    env["LUMEN_SELF_UPDATE_COMMIT"] = COMMIT
+
+    result = run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LIB))}
+        lumen_self_update_scripts \
+            {shlex.quote(str(target))} {COMMIT} 0 backup.sh
+        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        """,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "result=failed" in result.stdout
+    assert "下载 lib/backup_journal.sh 失败" in result.stderr
+    assert_transaction_restored(target, originals)
 
 
 def test_missing_module_bootstrap_resolves_branch_and_installs_one_commit(
@@ -218,6 +296,151 @@ def test_missing_module_bootstrap_resolves_branch_and_installs_one_commit(
         "api.github.com/repos/example/Lumen/commits" in call and "sha=main" in call
         for call in calls
     )
+    raw_calls = [call for call in calls if "raw.githubusercontent.com" in call]
+    assert raw_calls
+    assert all(f"/{COMMIT}/scripts/" in call for call in raw_calls)
+    assert not any("/main/scripts/" in call for call in raw_calls)
+
+
+def test_lumenctl_sync_installs_complete_update_unit_from_one_commit(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "installed" / "scripts"
+    remote = tmp_path / "remote"
+    fakebin = tmp_path / "bin"
+    curl_log = tmp_path / "curl.log"
+    target.mkdir(parents=True)
+    stage_remote_lumenctl_sync_unit(remote)
+    install_fake_github_curl(fakebin)
+
+    result = run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LUMENCTL))}
+        lumenctl_sync_script_unit 0 {shlex.quote(str(target))}
+        printf 'result=%s commit=%s\\n' \
+            "$LUMEN_SELF_UPDATE_RESULT" "$LUMEN_SELF_UPDATE_SOURCE_COMMIT"
+        """,
+        env=github_env(fakebin, remote, curl_log),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"result=ok commit={COMMIT}" in result.stdout
+    for relative in LUMENCTL_SYNC_UNIT:
+        assert (target / relative).read_bytes() == (remote / relative).read_bytes()
+
+    coverage = set(
+        (target / ".lumen-self-update.files").read_text(encoding="utf-8").splitlines()
+    )
+    assert set(UPDATE_RUNTIME_UNIT) | {"update.sh"} <= coverage
+
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
+    raw_calls = [call for call in calls if "raw.githubusercontent.com" in call]
+    downloaded = {
+        call.split(f"/{COMMIT}/scripts/", 1)[1].split()[0]
+        for call in raw_calls
+        if f"/{COMMIT}/scripts/" in call
+    }
+    assert set(UPDATE_RUNTIME_UNIT) | {"update.sh"} <= downloaded
+    assert all(f"/{COMMIT}/scripts/" in call for call in raw_calls)
+    assert not any("/main/scripts/" in call for call in raw_calls)
+
+
+def test_lumenctl_sync_dependency_failure_keeps_update_entry_untouched(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "installed" / "scripts"
+    remote = tmp_path / "remote"
+    fakebin = tmp_path / "bin"
+    curl_log = tmp_path / "curl.log"
+    target.mkdir(parents=True)
+    local_update = target / "update.sh"
+    local_bytes = b"#!/usr/bin/env bash\nLOCAL_UPDATE=1\n"
+    local_update.write_bytes(local_bytes)
+    stage_remote_lumenctl_sync_unit(remote)
+    (remote / "update" / "runner.sh").unlink()
+    install_fake_github_curl(fakebin)
+
+    result = run_bash(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(LUMENCTL))}
+        lumenctl_sync_script_unit 0 {shlex.quote(str(target))}
+        printf 'result=%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+        """,
+        env=github_env(fakebin, remote, curl_log),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "result=failed" in result.stdout
+    assert local_update.read_bytes() == local_bytes
+    assert not (target / "update").exists()
+    assert not list(target.glob(".lumen-self-update.*"))
+
+
+def test_update_lumen_repairs_missing_runner_before_execution(
+    tmp_path: Path,
+) -> None:
+    installed = tmp_path / "installed" / "scripts"
+    remote = tmp_path / "remote"
+    fakebin = tmp_path / "bin"
+    curl_log = tmp_path / "curl.log"
+    installed.mkdir(parents=True)
+    for relative in (
+        "lib.sh",
+        *(item for item in SELF_UPDATE_UNIT if item.startswith("lib/")),
+        "update/entry_lock.py",
+        "lumenctl.sh",
+        "update.sh",
+    ):
+        source = ROOT / "scripts" / relative
+        target = installed / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    stage_remote_lumenctl_sync_unit(remote)
+    remote_runner = remote / "update" / "runner.sh"
+    remote_runner.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'healed-runner:%s\\n' "${1:-}"
+""",
+        encoding="utf-8",
+    )
+    install_fake_github_curl(fakebin)
+    uname = fakebin / "uname"
+    uname.write_text(
+        "#!/usr/bin/env bash\nprintf 'Darwin\\n'\n",
+        encoding="utf-8",
+    )
+    uname.chmod(0o755)
+    env = github_env(fakebin, remote, curl_log)
+    env.update(
+        {
+            "LUMEN_LUMENCTL_SELF_UPDATE": "1",
+            "LUMEN_LUMENCTL_SELF_UPDATED": "1",
+            "LUMEN_DEPLOY_ROOT": str(tmp_path / "deploy"),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(installed / "lumenctl.sh"), "update-lumen", "probe"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "update.sh 依赖单元不完整" in result.stderr
+    assert "updater 脚本单元已修复" in result.stdout
+    assert "healed-runner:probe" in result.stdout
+    assert "127" not in result.stderr
+    for relative in UPDATE_RUNTIME_UNIT:
+        assert (installed / relative).is_file()
+
+    calls = curl_log.read_text(encoding="utf-8").splitlines()
     raw_calls = [call for call in calls if "raw.githubusercontent.com" in call]
     assert raw_calls
     assert all(f"/{COMMIT}/scripts/" in call for call in raw_calls)

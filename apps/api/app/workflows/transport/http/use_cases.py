@@ -280,6 +280,15 @@ class WorkflowHttpUseCases:
             body=body, user=user, db=db
         )
 
+    async def replay_apparel_model_library_job(
+        self, *, workflow_run_id: str, user: object, db: object
+    ) -> object:
+        return await self.model_library.replay_apparel_model_library_job(
+            workflow_run_id=workflow_run_id,
+            user=user,
+            db=db,
+        )
+
     async def list_apparel_model_library_jobs(
         self,
         *,

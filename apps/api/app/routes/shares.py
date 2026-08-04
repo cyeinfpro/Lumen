@@ -26,7 +26,7 @@ from ..audit import hash_email, request_ip_hash, write_audit
 from ..byok_service import read_byok_settings_cached, retention_policy_from_settings
 from ..config import settings
 from ..db import get_db
-from ..deps import CurrentUser, ensure_utc, verify_csrf
+from ..deps import CurrentUser, durable_session_id, ensure_utc, verify_csrf
 from ..public_urls import resolve_public_base_url
 from ..ratelimit import (
     PUBLIC_IMAGE_LIMITER,
@@ -35,6 +35,7 @@ from ..ratelimit import (
 )
 from ..redis_client import get_redis
 from ..runtime_settings import get_setting
+from ..services.active_user import lock_authenticated_user_snapshot
 from ..services import storage_files
 from . import share_delivery as _share_delivery
 
@@ -399,6 +400,10 @@ async def create_share(
     if expires_at is None:
         expires_at = await _default_share_expires_at(db, now)
 
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request)
+    )
+    user = snapshot.user
     token = secrets.token_urlsafe(32)
     share = Share(
         image_id=img.id,
@@ -473,6 +478,10 @@ async def create_multi_image_share(
     if expires_at is None:
         expires_at = await _default_share_expires_at(db, now)
 
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request)
+    )
+    user = snapshot.user
     token = secrets.token_urlsafe(32)
     share = Share(
         image_id=image_ids[0],
@@ -516,6 +525,10 @@ async def revoke_share(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request)
+    )
+    user = snapshot.user
     row = (
         await db.execute(
             select(Share)

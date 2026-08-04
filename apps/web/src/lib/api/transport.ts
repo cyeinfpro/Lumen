@@ -1,4 +1,9 @@
 import { coordinateUnauthorized } from "@/lib/auth/authFailureCoordinator";
+import {
+  applyConfirmedIdentityHeader,
+  assertConfirmedIdentityResponse,
+  coordinateIdentityMismatchResponse,
+} from "@/lib/auth/identityPolicy";
 import { apiUrl } from "./baseUrl";
 import { csrfService, type CsrfService } from "./csrf";
 import {
@@ -128,7 +133,7 @@ export class ApiTransport {
       budgetFor(requestClass, budget),
     );
     try {
-      const prepared = await this.prepareRequest(
+      const { identity, request: prepared } = await this.prepareRequest(
         path,
         requestInit,
         method,
@@ -155,12 +160,14 @@ export class ApiTransport {
       if (response.status === 401) throw unauthorizedError(response, data);
       if (!response.ok) {
         const parsed = parseApiError(response.status, data);
+        coordinateIdentityMismatchResponse(response.status, data);
         throw new ApiError({
           ...parsed,
           status: response.status,
           payload: data,
         });
       }
+      assertConfirmedIdentityResponse(identity);
       return data as T;
     } catch (error) {
       deadline.throwIfAborted(error);
@@ -189,15 +196,19 @@ export class ApiTransport {
     method: string,
     applyCsrf: boolean,
     signal?: AbortSignal,
-  ): Promise<RequestInit> {
+  ) {
     const headers = requestHeaders(init);
+    const identity = applyConfirmedIdentityHeader(headers, path);
     if (applyCsrf) await this.csrf.apply(headers, method, signal);
     return {
-      ...init,
-      method,
-      headers,
-      credentials: "include",
-      signal,
+      identity,
+      request: {
+        ...init,
+        method,
+        headers,
+        credentials: "include",
+        signal,
+      } satisfies RequestInit,
     };
   }
 

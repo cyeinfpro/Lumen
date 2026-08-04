@@ -11,7 +11,9 @@ from .adapters.http_operations import (
     PosterWorkflowOperationsAdapter,
     ProjectWorkflowOperationsAdapter,
 )
+from .adapters.paid_idempotency import SQLAlchemyPaidOperationPort
 from .application.commands import CancelWorkflowRun
+from .application.paid_idempotency import PaidOperationPort
 from .application.policy_registry import WorkflowPolicyRegistry
 from .application.preflight import PreviewWorkflow, ValidateWorkflow
 from .application.queries import GetWorkflowRun
@@ -24,6 +26,10 @@ from .ports.providers import WorkflowPreviewPort
 from .ports.queue import WorkflowQueuePort
 from .ports.repositories import WorkflowRepository
 from .transport.http.use_cases import WorkflowHttpUseCases
+
+
+def build_paid_operation_port(db: object) -> PaidOperationPort:
+    return SQLAlchemyPaidOperationPort(db)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,5 +134,6 @@ def build_workflow_application(
 
 __all__ = [
     "WorkflowApplication",
+    "build_paid_operation_port",
     "build_workflow_application",
 ]

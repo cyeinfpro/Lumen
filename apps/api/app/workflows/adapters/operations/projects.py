@@ -56,6 +56,7 @@ from ...application.project_candidate_rules import (
     revision_prompt,
     saved_library_item_ids,
 )
+from ..paid_idempotency import record_current_paid_operation
 from ...application.project_lifecycle import ProjectLifecycle
 from ...application.upsert_project import UpsertWorkflowProject
 from ...application.runtime_state import WorkflowRuntimeState
@@ -517,6 +518,7 @@ async def create_accessory_previews(
         accessory_plan=accessory_plan_payload,
         style_prompt=body.style_prompt,
     )
+    record_current_paid_operation(db, run)
     existing_task_ids = _dedupe_nonempty(approval.task_ids or [])
     existing_input = approval.input_json or {}
     if approval.status == "running" and existing_task_ids:
@@ -643,6 +645,7 @@ async def _dispatch_showcase_images_generation(
     )
     run: WorkflowRun = context["run"]
     showcase: WorkflowStep = context["showcase"]
+    record_current_paid_operation(db, run)
     if showcase.status == "running" and _dedupe_nonempty(showcase.task_ids or []):
         await db.commit()
         return run
@@ -830,6 +833,7 @@ async def revise_showcase_image(
     ).scalar_one_or_none()
     if image is None:
         raise _http("not_found", "image not found", 404)
+    record_current_paid_operation(db, run)
     product_step = await _step(db, run.id, "product_analysis")
     candidate = await _selected_candidate(db, run.id)
     refs = _dedupe_nonempty(

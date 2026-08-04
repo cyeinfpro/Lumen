@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    Query,
+    Request,
+    Response,
+)
 
 from lumen_core.schemas import (
     AgeSegment,
@@ -24,16 +32,32 @@ from lumen_core.schemas import (
 )
 
 from ....db import get_db
-from ....deps import CurrentUser, verify_csrf
+from ....deps import CurrentUser, durable_session_id_from_db, verify_csrf
+from ...application.paid_idempotency import (
+    APPAREL_CREATE_OPERATION,
+    APPAREL_MODEL_CANDIDATES_OPERATION,
+)
 from ...composition import WorkflowApplication
 from ...ports.run_creation import CreateApparelRunCommand
 from ...slices import create_workflow_run
 from .delivery import binary_file_response
 from .dependencies import get_workflow_application
-from .execution import execute_workflow_action
+from .execution import (
+    execute_durable_workflow_action,
+    execute_paid_workflow_action,
+    execute_workflow_action,
+)
 
 entry_router = APIRouter()
 project_router = APIRouter()
+
+
+async def _replay_created_apparel_workflow(run: Any) -> ApparelWorkflowCreateOut:
+    return ApparelWorkflowCreateOut(
+        workflow_run_id=run.id,
+        status=run.status,
+        current_step=run.current_step,
+    )
 
 
 @entry_router.post(
@@ -45,9 +69,20 @@ async def create_apparel_model_showcase(
     body: ApparelWorkflowCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> ApparelWorkflowCreateOut:
-    result = await execute_workflow_action(
+    result = await execute_paid_workflow_action(
         create_workflow_run(db, user).create_apparel,
+        operation_namespace=APPAREL_CREATE_OPERATION,
+        request_payload={"body": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=_replay_created_apparel_workflow,
         command=CreateApparelRunCommand(
             user_id=user.id,
             product_image_ids=tuple(body.product_image_ids),
@@ -94,7 +129,7 @@ async def sync_apparel_model_library_presets(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> ApparelModelLibrarySyncOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().sync_apparel_model_library_presets, user=user, db=db
     )
 
@@ -147,7 +182,7 @@ async def create_apparel_model_library_item(
     db: Annotated[Any, Depends(get_db)],
     background_tasks: BackgroundTasks,
 ) -> ApparelModelLibraryItemOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().create_apparel_model_library_item,
         body=body,
         user=user,
@@ -168,7 +203,7 @@ async def patch_apparel_model_library_item(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> ApparelModelLibraryItemOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().patch_apparel_model_library_item,
         item_id=item_id,
         body=body,
@@ -186,7 +221,7 @@ async def delete_apparel_model_library_item(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> dict[str, bool]:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().delete_apparel_model_library_item,
         item_id=item_id,
         user=user,
@@ -205,7 +240,7 @@ async def batch_delete_apparel_model_library_items(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> ApparelModelLibraryBatchDeleteOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().batch_delete_apparel_model_library_items,
         body=body,
         user=user,
@@ -225,7 +260,7 @@ async def approve_product_analysis(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().approve_product_analysis,
         workflow_run_id=workflow_run_id,
         body=body,
@@ -245,9 +280,27 @@ async def create_model_candidates(
     body: ModelCandidatesCreateIn,
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_paid_workflow_action(
         application.require_http().create_model_candidates,
+        operation_namespace=APPAREL_MODEL_CANDIDATES_OPERATION,
+        request_payload={
+            "workflow_run_id": workflow_run_id,
+            "body": body.model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+        idempotency_user=user,
+        idempotency_db=db,
+        idempotency_session_id=durable_session_id_from_db(db),
+        replay=lambda run: application.require_http().get_workflow(
+            workflow_run_id=run.id,
+            user=user,
+            db=db,
+        ),
         workflow_run_id=workflow_run_id,
         body=body,
         user=user,
@@ -267,7 +320,7 @@ async def select_apparel_model_library_item(
     user: CurrentUser,
     db: Annotated[Any, Depends(get_db)],
 ) -> WorkflowRunOut:
-    return await execute_workflow_action(
+    return await execute_durable_workflow_action(
         application.require_http().select_apparel_model_library_item,
         workflow_run_id=workflow_run_id,
         body=body,

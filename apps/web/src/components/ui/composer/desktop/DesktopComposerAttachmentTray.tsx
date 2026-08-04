@@ -120,6 +120,7 @@ export function DesktopComposerAttachmentTray({
                   className="w-full h-full object-cover"
                   loading="lazy"
                 />
+                {/* @hit-area-ok: desktop-only 64px tile; larger targets overlap the adjacent role control. */}
                 <button
                   type="button"
                   onClick={() => onInsertImageMention(index + 1)}
@@ -140,6 +141,7 @@ export function DesktopComposerAttachmentTray({
                   imageNumber={index + 1}
                   onClick={() => attachmentRoles.cycleRole(attachment.id)}
                 />
+                {/* @hit-area-ok: desktop-only 64px tile; larger targets overlap the adjacent role control. */}
                 <button
                   type="button"
                   onClick={() => onRemoveAttachment(attachment.id)}

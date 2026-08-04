@@ -15,6 +15,12 @@ lumen_run_as_root() {
 : "${LUMEN_SYSTEMD_UNIT_DIR:=/etc/systemd/system}"
 : "${LUMEN_SYSTEMD_RUNTIME_DIR:=/run/systemd/system}"
 : "${LUMEN_LOCAL_SBIN_DIR:=/usr/local/sbin}"
+if [ -z "${_LUMEN_RUNTIME_LIB_DIR:-}" ]; then
+    _LUMEN_RUNTIME_LIB_DIR="$(
+        cd "$(dirname "${BASH_SOURCE[0]}")" \
+            && pwd -P
+    )"
+fi
 
 lumen_systemd_runtime_available() {
     command -v systemctl >/dev/null 2>&1 \
@@ -325,32 +331,185 @@ lumen_install_optional_systemd_unit() {
 
 lumen_ensure_backup_service_user() {
     local backup_root="${1:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
-    local user="${LUMEN_BACKUP_SERVICE_USER:-lumen-backup}"
-    local group="${LUMEN_BACKUP_SERVICE_GROUP:-lumen-backup}"
+    local default_user="lumen-backup" default_group="lumen-backup"
+    if [ "$(uname -s 2>/dev/null || true)" != "Linux" ] \
+            || ! lumen_systemd_runtime_available; then
+        default_user="$(id -un)"
+        default_group="$(id -gn)"
+    fi
+    local user="${LUMEN_BACKUP_SERVICE_USER:-${default_user}}"
+    local service_group="${LUMEN_BACKUP_SERVICE_GROUP:-${default_group}}"
+    local service_login=""
+    local config_group="${LUMEN_CONFIG_READ_GROUP:-${service_group}}"
+    local deploy_root="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+    local maintenance_lock="${deploy_root}/.lumen-maintenance.lock"
+    local shared_env="${deploy_root}/shared/.env"
+    local permissions_helper=""
+    local binding_token=""
+    local -a maintenance_lock_env=()
     local shell_path="/usr/sbin/nologin"
     [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
     [ -x "${shell_path}" ] || shell_path="/bin/false"
 
     if command -v getent >/dev/null 2>&1; then
-        if ! getent group "${group}" >/dev/null 2>&1; then
-            lumen_run_as_root groupadd --system "${group}" 2>/dev/null \
-                || log_warn "创建 ${group} 组失败；lumen-backup.service 可能无法启动。"
+        if ! getent group "${service_group}" >/dev/null 2>&1; then
+            lumen_run_as_root groupadd --system "${service_group}" 2>/dev/null \
+                || log_warn "创建 ${service_group} 组失败；lumen-backup.service 可能无法启动。"
         fi
     fi
     if ! id "${user}" >/dev/null 2>&1; then
         lumen_run_as_root useradd --system --home-dir "${backup_root}" \
-            --shell "${shell_path}" --gid "${group}" "${user}" 2>/dev/null \
+            --shell "${shell_path}" --gid "${service_group}" "${user}" 2>/dev/null \
             || log_warn "创建 ${user} 用户失败；lumen-backup.service 可能无法启动。"
     fi
+    if ! id "${user}" >/dev/null 2>&1; then
+        log_error "备份服务用户 ${user} 不存在，拒绝继续安装/更新。"
+        return 1
+    fi
+    service_login="$(id -un "${user}" 2>/dev/null || printf '%s' "${user}")"
     if command -v getent >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
-        lumen_run_as_root usermod -aG docker "${user}" 2>/dev/null \
-            || log_warn "把 ${user} 加入 docker 组失败；备份服务可能无法访问 docker socket。"
+        lumen_run_as_root usermod -aG docker "${service_login}" 2>/dev/null \
+            || log_warn "把 ${service_login} 加入 docker 组失败；备份服务可能无法访问 docker socket。"
     else
         log_warn "未找到 docker 组；请确保 ${user} 可访问 /var/run/docker.sock。"
     fi
-    lumen_run_as_root mkdir -p "${backup_root}" 2>/dev/null || true
-    lumen_run_as_root chgrp -R "${group}" "${backup_root}" 2>/dev/null || true
-    lumen_run_as_root chmod -R g+rwX "${backup_root}" 2>/dev/null || true
+    if [ "${config_group}" != "${service_group}" ]; then
+        lumen_run_as_root usermod -aG "${config_group}" "${service_login}" 2>/dev/null \
+            || log_warn "把 ${service_login} 加入 ${config_group} 组失败；备份服务可能无法读取 shared/.env。"
+    fi
+    if id lumen >/dev/null 2>&1; then
+        lumen_run_as_root usermod -aG "${config_group}" lumen 2>/dev/null \
+            || log_warn "把 lumen 加入 ${config_group} 组失败；host 服务可能无法读取 shared/.env。"
+    fi
+    permissions_helper="$(
+        cd "${_LUMEN_RUNTIME_LIB_DIR}/.." \
+            && pwd -P
+    )/backup_permissions.py"
+    if [ ! -f "${permissions_helper}" ] || [ -L "${permissions_helper}" ]; then
+        log_error "备份权限 helper 缺失或不是普通文件：${permissions_helper}"
+        return 1
+    fi
+    if ! command -v lumen_export_borrowed_maintenance_lock >/dev/null 2>&1 \
+            || ! lumen_export_borrowed_maintenance_lock "${deploy_root}"; then
+        log_error "无法证明调用方持有 maintenance 锁，拒绝迁移备份权限。"
+        return 1
+    fi
+    maintenance_lock_env=(
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_KIND=${LUMEN_BORROWED_MAINTENANCE_LOCK_KIND:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT=${LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH=${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_NAME=${LUMEN_BORROWED_MAINTENANCE_ROOT_NAME:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV=${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO=${LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_DEV=${LUMEN_BORROWED_MAINTENANCE_ROOT_DEV:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_INO=${LUMEN_BORROWED_MAINTENANCE_ROOT_INO:-}"
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY=${LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH=${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD=${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_FD:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV=${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO=${LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_PATH=${LUMEN_BORROWED_MAINTENANCE_LOCK_PATH:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_DEV=${LUMEN_BORROWED_MAINTENANCE_LOCK_DEV:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_INO=${LUMEN_BORROWED_MAINTENANCE_LOCK_INO:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH=${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN=${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY=${LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_CAPABILITY:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN=${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_TOKEN:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID=${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_PID:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN=${LUMEN_BORROWED_MAINTENANCE_LOCK_OWNER_START_TOKEN:-}"
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY=${LUMEN_BORROWED_MAINTENANCE_LOCK_CAPABILITY:-}"
+    )
+    if [ "${EUID:-$(id -u)}" -eq 0 ] \
+            || [ "$(id -u)" = "$(id -u "${service_login}")" ]; then
+        if ! binding_token="$(
+            env "${maintenance_lock_env[@]}" python3 -I "${permissions_helper}" \
+                ensure-backup-layout "${backup_root}" \
+                --service-user "${user}" \
+                --service-group "${service_group}" \
+                --legacy-owner-user root \
+                --maintenance-lock-root "${deploy_root}" \
+                --emit-binding-token
+        )"; then
+            log_error "无法安全迁移备份目录与私有 recovery journal：${backup_root}"
+            return 1
+        fi
+    elif ! binding_token="$(
+        lumen_run_as_root env "${maintenance_lock_env[@]}" \
+            python3 -I "${permissions_helper}" \
+            ensure-backup-layout "${backup_root}" \
+            --service-user "${user}" \
+            --service-group "${service_group}" \
+            --legacy-owner-user root \
+            --maintenance-lock-root "${deploy_root}" \
+            --emit-binding-token
+    )"; then
+        log_error "无法安全迁移备份目录与私有 recovery journal：${backup_root}"
+        return 1
+    fi
+    case "${binding_token}" in
+        v1:[0-9]*:[0-9]*:[0-9]*:[0-9]*) ;;
+        *)
+            log_error "备份权限 helper 未返回有效的 backup root binding。"
+            return 1
+            ;;
+    esac
+    LUMEN_BACKUP_LAYOUT_BINDING_ROOT="${backup_root}"
+    LUMEN_BACKUP_LAYOUT_BINDING_TOKEN="${binding_token}"
+    LUMEN_BACKUP_LAYOUT_BINDING_HELPER="${permissions_helper}"
+    LUMEN_BACKUP_LAYOUT_BINDING_SERVICE_LOGIN="${service_login}"
+    export \
+        LUMEN_BACKUP_LAYOUT_BINDING_ROOT \
+        LUMEN_BACKUP_LAYOUT_BINDING_TOKEN \
+        LUMEN_BACKUP_LAYOUT_BINDING_HELPER \
+        LUMEN_BACKUP_LAYOUT_BINDING_SERVICE_LOGIN
+    if ! lumen_verify_backup_service_layout_binding; then
+        log_error "backup root 在 helper 返回后发生替换，拒绝继续。"
+        return 1
+    fi
+    if ! lumen_run_as_user "${service_login}" test -w "${backup_root}" \
+            || ! lumen_run_as_user "${service_login}" \
+                test -w "${backup_root}/.recovery"; then
+        log_error "备份目录或私有 recovery journal 对服务用户 ${service_login} 不可写。"
+        return 1
+    fi
+    if [ -f "${shared_env}" ] && [ ! -L "${shared_env}" ]; then
+        lumen_run_as_root chgrp "${config_group}" "${shared_env}" 2>/dev/null \
+            || log_warn "无法把 shared/.env 的读取组设置为 ${config_group}。"
+        lumen_run_as_root chmod 0640 "${shared_env}" 2>/dev/null \
+            || log_warn "无法把 shared/.env 权限收紧为 0640。"
+    fi
+    lumen_run_as_root touch "${maintenance_lock}" 2>/dev/null || true
+    lumen_run_as_root chown "root:${service_group}" "${maintenance_lock}" 2>/dev/null || true
+    lumen_run_as_root chmod 0660 "${maintenance_lock}" 2>/dev/null || true
+    if ! lumen_verify_backup_service_layout_binding; then
+        log_error "backup/maintenance root binding 在激活前失效，拒绝继续。"
+        return 1
+    fi
+    return 0
+}
+
+lumen_verify_backup_service_layout_binding() {
+    local backup_root="${LUMEN_BACKUP_LAYOUT_BINDING_ROOT:-}"
+    local binding_token="${LUMEN_BACKUP_LAYOUT_BINDING_TOKEN:-}"
+    local helper="${LUMEN_BACKUP_LAYOUT_BINDING_HELPER:-}"
+    local deploy_root="${LUMEN_DEPLOY_ROOT:-/opt/lumen}"
+    if [ -z "${backup_root}" ] || [ -z "${binding_token}" ] \
+            || [ -z "${helper}" ] || [ ! -f "${helper}" ] \
+            || [ -L "${helper}" ]; then
+        log_error "backup root binding proof 缺失或 helper 不安全。"
+        return 1
+    fi
+    if ! lumen_export_borrowed_maintenance_lock "${deploy_root}"; then
+        log_error "maintenance root/parent anchor binding 已失效。"
+        return 1
+    fi
+    if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+        python3 -I "${helper}" verify-path-binding \
+            "${backup_root}" --token "${binding_token}"
+    else
+        lumen_run_as_root python3 -I "${helper}" verify-path-binding \
+            "${backup_root}" --token "${binding_token}"
+    fi
 }
 
 lumen_enable_optional_systemd_unit() {
@@ -398,8 +557,171 @@ lumen_systemd_unit_active() {
     fi
 }
 
+LUMEN_READINESS_READY="ready"
+LUMEN_READINESS_API_NOT_READY="api_not_ready"
+LUMEN_READINESS_WORKER_NOT_READY="worker_not_ready"
+LUMEN_READINESS_INVALID="invalid"
+
+# Typed readiness contract. Stdout is exactly one of the constants above:
+#   ready             rc=0
+#   api_not_ready     rc=1
+#   worker_not_ready  rc=1
+#   invalid           rc=2
+lumen_core_readiness_state() {
+    if [ "$#" -lt 4 ]; then
+        printf '%s\n' "${LUMEN_READINESS_INVALID}"
+        return 2
+    fi
+    local api_probe="$1"
+    local worker_probe="$2"
+    local attempts="$3"
+    local interval="$4"
+    shift 4
+    if ! command -v "${api_probe}" >/dev/null 2>&1 \
+            || ! command -v "${worker_probe}" >/dev/null 2>&1; then
+        printf '%s\n' "${LUMEN_READINESS_INVALID}"
+        return 2
+    fi
+    case "${attempts}:${interval}" in
+        *[!0-9:]*|0:*|0[0-9]*:*)
+            printf '%s\n' "${LUMEN_READINESS_INVALID}"
+            return 2
+            ;;
+    esac
+
+    local poll=0
+    local state="${LUMEN_READINESS_API_NOT_READY}"
+    for ((poll = 1; poll <= attempts; poll++)); do
+        if "${api_probe}" "$@"; then
+            if "${worker_probe}" "$@"; then
+                printf '%s\n' "${LUMEN_READINESS_READY}"
+                return 0
+            fi
+            state="${LUMEN_READINESS_WORKER_NOT_READY}"
+        else
+            state="${LUMEN_READINESS_API_NOT_READY}"
+        fi
+        if [ "${poll}" -lt "${attempts}" ] && [ "${interval}" -gt 0 ]; then
+            sleep "${interval}"
+        fi
+    done
+    printf '%s\n' "${state}"
+    return 1
+}
+
+lumen_systemd_api_readiness_once() {
+    local _root="$1"
+    local ready_url="$2"
+    local check_api="$3"
+    local _check_worker="$4"
+    [ "${check_api}" = "1" ] || return 0
+    curl --noproxy '*' -fsS --max-time 5 -o /dev/null \
+        "${ready_url}" 2>/dev/null
+}
+
+lumen_systemd_worker_readiness_once() {
+    local root="$1"
+    local _ready_url="$2"
+    local _check_api="$3"
+    local check_worker="$4"
+    [ "${check_worker}" = "1" ] || return 0
+
+    local shared_env="${root}/shared/.env"
+    local worker_dir="${root}/current/apps/worker"
+    local default_python="${root}/current/.venv/bin/python"
+    if [ ! -d "${worker_dir}" ]; then
+        worker_dir="${root}/apps/worker"
+        default_python="${root}/.venv/bin/python"
+        [ -f "${shared_env}" ] || shared_env="${root}/.env"
+    fi
+    local python_bin="${LUMEN_SYSTEMD_WORKER_PYTHON:-${default_python}}"
+    local state_file="${LUMEN_SYSTEMD_WORKER_HEALTH_STATE_FILE:-}"
+    local expected_owner_uid=""
+    local worker_user=""
+    local redis_url=""
+    if [ -z "${state_file}" ] && [ -f "${shared_env}" ]; then
+        state_file="$(
+            lumen_env_value LUMEN_WORKER_HEALTH_STATE_FILE \
+                "${shared_env}" 2>/dev/null || true
+        )"
+    fi
+    state_file="${state_file:-${root}/shared/worker-var/worker-health.json}"
+    if [ -f "${shared_env}" ]; then
+        redis_url="$(lumen_env_value REDIS_URL "${shared_env}" 2>/dev/null || true)"
+    fi
+    case "${state_file}" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    worker_user="$(lumen_systemd_unit_property lumen-worker.service User)"
+    worker_user="${worker_user:-lumen}"
+    expected_owner_uid="$(id -u "${worker_user}" 2>/dev/null)" || return 1
+    case "${expected_owner_uid}" in
+        ''|*[!0-9]*|0[0-9]*) return 1 ;;
+    esac
+    [ -n "${redis_url}" ] \
+        && [ -d "${worker_dir}" ] \
+        && [ -x "${python_bin}" ] || return 1
+
+    (
+        cd "${worker_dir}" || exit 1
+        if command -v lumen_run_as_root >/dev/null 2>&1; then
+            lumen_run_as_root env \
+                REDIS_URL="${redis_url}" \
+                LUMEN_WORKER_HEALTH_STATE_FILE="${state_file}" \
+                "${python_bin}" -m app.worker_health check \
+                --expected-owner-uid "${expected_owner_uid}" \
+                >/dev/null 2>&1
+        else
+            env \
+                REDIS_URL="${redis_url}" \
+                LUMEN_WORKER_HEALTH_STATE_FILE="${state_file}" \
+                "${python_bin}" -m app.worker_health check \
+                --expected-owner-uid "${expected_owner_uid}" \
+                >/dev/null 2>&1
+        fi
+    )
+}
+
+lumen_systemd_core_readiness_state() {
+    local root="${1:-${LUMEN_DEPLOY_ROOT:-/opt/lumen}}"
+    local ready_url="${2:-${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}}"
+    local attempts="${3:-${LUMEN_CORE_READINESS_ATTEMPTS:-60}}"
+    local interval="${4:-${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}}"
+    local check_api="${5:-1}"
+    local check_worker="${6:-1}"
+    lumen_core_readiness_state \
+        lumen_systemd_api_readiness_once \
+        lumen_systemd_worker_readiness_once \
+        "${attempts}" "${interval}" \
+        "${root}" "${ready_url}" "${check_api}" "${check_worker}"
+}
+
+lumen_require_systemd_core_readiness() {
+    local state=""
+    local rc=0
+    if state="$(lumen_systemd_core_readiness_state "$@")"; then
+        log_info "systemd 核心 readiness 已通过：API /readyz + Worker health。"
+        return 0
+    else
+        rc=$?
+    fi
+    case "${state}" in
+        "${LUMEN_READINESS_API_NOT_READY}")
+            log_error "API /readyz 未通过，拒绝提交事务状态。"
+            ;;
+        "${LUMEN_READINESS_WORKER_NOT_READY}")
+            log_error "Worker python -m app.worker_health check 未通过，拒绝提交事务状态。"
+            ;;
+        *)
+            log_error "systemd readiness 参数或 probe contract 无效。"
+            ;;
+    esac
+    return "${rc}"
+}
+
 lumen_check_runtime_health() {
-    local api_url="${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
+    local api_url="${LUMEN_API_READY_URL:-${LUMEN_API_HEALTH_URL:-http://127.0.0.1:8000/readyz}}"
     local web_url="${LUMEN_WEB_HEALTH_URL:-http://127.0.0.1:3000/}"
     local api_attempts="${LUMEN_API_HEALTH_ATTEMPTS:-60}"
     local web_attempts="${LUMEN_WEB_HEALTH_ATTEMPTS:-60}"
@@ -408,9 +730,9 @@ lumen_check_runtime_health() {
 
     log_step "Lumen 运行时健康检查"
     if lumen_wait_for_http_ok "${api_url}" "${api_attempts}"; then
-        log_info "API 健康检查通过：${api_url}"
+        log_info "API readiness 通过：${api_url}"
     else
-        log_error "API 健康检查失败：${api_url}"
+        log_error "API readiness 失败：${api_url}"
         failed=1
     fi
 
@@ -424,8 +746,13 @@ lumen_check_runtime_health() {
     if [ "${check_worker}" = "1" ]; then
         if lumen_systemd_has_unit lumen-worker.service; then
             lumen_systemd_unit_active lumen-worker.service || failed=1
+            if ! lumen_systemd_worker_readiness_once \
+                    "${LUMEN_DEPLOY_ROOT:-/opt/lumen}" "${api_url}" 0 1; then
+                log_error "Worker python -m app.worker_health check 失败。"
+                failed=1
+            fi
         else
-            log_warn "未发现 lumen-worker.service；请确认 Worker 进程已启动：cd apps/worker && uv run python -m arq app.main.WorkerSettings"
+            log_warn "未发现 lumen-worker.service；请确认 Worker 进程已启动：cd apps/worker && uv run python -m app.worker_health run"
         fi
     fi
 
@@ -794,7 +1121,7 @@ lumen_start_local_runtime() {
     log_info "启动 Worker → ${worker_log}"
     (
         cd "${root}/apps/worker" || exit 1
-        exec uv run python -m arq app.main.WorkerSettings
+        exec uv run python -m app.worker_health run
     ) >"${worker_log}" 2>&1 &
     worker_pid="$!"
     LUMEN_LOCAL_RUNTIME_PIDS+=("${worker_pid}")

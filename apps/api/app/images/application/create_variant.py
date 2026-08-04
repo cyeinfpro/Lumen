@@ -227,7 +227,16 @@ class CreateVariantService:
         if ready is not None:
             return ready
         source = lookup.source
-        claim = await self._try_claim(source, kind)
+        variant_key = self._variant_key(source, kind, config)
+        async with self.artifacts.artifact_lifecycle_fence(variant_key):
+            ready = await self._read_ready_variant(
+                image_id,
+                kind,
+                expected_user_id=expected_user_id,
+            )
+            if ready is not None:
+                return ready
+            claim = await self._try_claim(source, kind)
         if claim is None:
             return await self._winner_or_busy(
                 image_id,
@@ -241,6 +250,22 @@ class CreateVariantService:
             source=source,
             claim=claim,
             config=config,
+            variant_key=variant_key,
+        )
+
+    @staticmethod
+    def _variant_key(
+        source: VariantSource,
+        kind: str,
+        config: _VariantConfig,
+    ) -> ArtifactKey:
+        return ArtifactKey(
+            deterministic_variant_key(
+                image_id=source.image_id,
+                source_key=source.storage_key,
+                kind=kind,
+                extension=config.extension,
+            )
         )
 
     async def _try_claim(
@@ -286,6 +311,7 @@ class CreateVariantService:
         source: VariantSource,
         claim: VariantClaim,
         config: _VariantConfig,
+        variant_key: ArtifactKey,
     ) -> VariantResult:
         output_path = self._new_output_path(source, kind)
         try:
@@ -297,6 +323,7 @@ class CreateVariantService:
                 kind=kind,
                 config=config,
                 output_path=output_path,
+                variant_key=variant_key,
             )
         except asyncio.CancelledError:
             await self._fail_claim(
@@ -376,6 +403,7 @@ class CreateVariantService:
         kind: str,
         config: _VariantConfig,
         output_path: Path,
+        variant_key: ArtifactKey,
     ) -> VariantResult:
         estimate = estimate_image_resources(
             width=source.width,
@@ -414,37 +442,48 @@ class CreateVariantService:
                     )
                 )
             )
-            prepared, published = await self._render_with_guard(
-                source=source,
-                claim=claim,
-                kind=kind,
-                config=config,
-                output_path=output_path,
-                lease_guards=tuple(lease_guards),
-                storage_reservation_bytes=storage_bytes,
+            guards = tuple(lease_guards)
+            renew_task = asyncio.create_task(
+                self._renew_claim_until_stopped(
+                    claim,
+                    lease_guards=guards,
+                ),
+                name="image-variant-claim-renew",
             )
-            return await self._finalize_rendered(
-                image_id=image_id,
-                kind=kind,
-                expected_user_id=expected_user_id,
-                source=source,
-                claim=claim,
-                prepared=prepared,
-                published=published,
-                lease_guards=tuple(lease_guards),
-            )
+            try:
+                prepared, source_identity = await self._render_with_guard(
+                    source=source,
+                    claim=claim,
+                    config=config,
+                    output_path=output_path,
+                    lease_guards=guards,
+                    storage_reservation_bytes=storage_bytes,
+                )
+                return await self._publish_finalize_with_fence(
+                    image_id=image_id,
+                    kind=kind,
+                    expected_user_id=expected_user_id,
+                    source=source,
+                    claim=claim,
+                    prepared=prepared,
+                    variant_key=variant_key,
+                    source_identity=source_identity,
+                    lease_guards=guards,
+                )
+            finally:
+                renew_task.cancel()
+                await asyncio.gather(renew_task, return_exceptions=True)
 
     async def _render_with_guard(
         self,
         *,
         source: VariantSource,
         claim: VariantClaim,
-        kind: str,
         config: _VariantConfig,
         output_path: Path,
         lease_guards: Sequence[CapacityLeaseGuard],
         storage_reservation_bytes: int | None,
-    ) -> tuple[PreparedImageVariant, PublishedArtifact]:
+    ) -> tuple[PreparedImageVariant, ArtifactIdentity]:
         await self._require_claim_owned(claim, lease_guards=lease_guards)
         source_key = ArtifactKey(source.storage_key)
         source_identity = await self._assert_source_identity(
@@ -453,45 +492,59 @@ class CreateVariantService:
         )
         source_path = self.artifacts.processing_path(source_key)
         await assert_capacity_leases_owned(lease_guards)
-        renew_task = asyncio.create_task(
-            self._renew_claim_until_stopped(
-                claim,
-                lease_guards=lease_guards,
-            ),
-            name="image-variant-claim-renew",
-        )
-        try:
-            prepared = await race_with_capacity_leases(
-                self.processing_executor.render_variant(
-                    ImageVariantProcessingRequest(
-                        source_path=source_path,
-                        output_path=output_path,
-                        variant=config.processor_variant,
-                        max_pixels=self.max_pixels,
-                        max_side=config.max_side,
-                    )
-                ),
-                lease_guards,
-            )
-            if (
-                storage_reservation_bytes is not None
-                and prepared.size_bytes * 2 > storage_reservation_bytes
-            ):
-                raise StorageCapacityExceeded(
-                    "image variant exceeded its storage reservation"
+        prepared = await race_with_capacity_leases(
+            self.processing_executor.render_variant(
+                ImageVariantProcessingRequest(
+                    source_path=source_path,
+                    output_path=output_path,
+                    variant=config.processor_variant,
+                    max_pixels=self.max_pixels,
+                    max_side=config.max_side,
                 )
+            ),
+            lease_guards,
+        )
+        if (
+            storage_reservation_bytes is not None
+            and prepared.size_bytes * 2 > storage_reservation_bytes
+        ):
+            raise StorageCapacityExceeded(
+                "image variant exceeded its storage reservation"
+            )
+        await self._assert_source_identity(
+            source,
+            source_key=source_key,
+            expected_runtime_identity=source_identity,
+        )
+        await self._require_claim_owned(claim, lease_guards=lease_guards)
+        await assert_capacity_leases_owned(lease_guards)
+        return prepared, source_identity
+
+    async def _publish_finalize_with_fence(
+        self,
+        *,
+        image_id: str,
+        kind: str,
+        expected_user_id: str | None,
+        source: VariantSource,
+        claim: VariantClaim,
+        prepared: PreparedImageVariant,
+        variant_key: ArtifactKey,
+        source_identity: ArtifactIdentity,
+        lease_guards: Sequence[CapacityLeaseGuard],
+    ) -> VariantResult:
+        source_key = ArtifactKey(source.storage_key)
+        async with self.artifacts.artifact_lifecycle_fence(variant_key):
+            await self._require_claim_owned(claim, lease_guards=lease_guards)
+            await assert_capacity_leases_owned(lease_guards)
             await self._assert_source_identity(
                 source,
                 source_key=source_key,
                 expected_runtime_identity=source_identity,
             )
-            await self._require_claim_owned(claim, lease_guards=lease_guards)
-            await assert_capacity_leases_owned(lease_guards)
             published = await race_with_capacity_leases(
                 self._publish_prepared(
-                    source=source,
-                    kind=kind,
-                    config=config,
+                    key=variant_key,
                     prepared=prepared,
                 ),
                 lease_guards,
@@ -503,27 +556,23 @@ class CreateVariantService:
                 expected_runtime_identity=source_identity,
             )
             await self._require_claim_owned(claim, lease_guards=lease_guards)
-            return prepared, published
-        finally:
-            renew_task.cancel()
-            await asyncio.gather(renew_task, return_exceptions=True)
+            return await self._finalize_rendered(
+                image_id=image_id,
+                kind=kind,
+                expected_user_id=expected_user_id,
+                source=source,
+                claim=claim,
+                prepared=prepared,
+                published=published,
+                lease_guards=lease_guards,
+            )
 
     async def _publish_prepared(
         self,
         *,
-        source: VariantSource,
-        kind: str,
-        config: _VariantConfig,
+        key: ArtifactKey,
         prepared: PreparedImageVariant,
     ) -> PublishedArtifact:
-        key = ArtifactKey(
-            deterministic_variant_key(
-                image_id=source.image_id,
-                source_key=source.storage_key,
-                kind=kind,
-                extension=config.extension,
-            )
-        )
         return await self.artifacts.publish_path(
             prepared.output_path,
             key,

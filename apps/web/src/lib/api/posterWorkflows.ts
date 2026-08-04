@@ -1,4 +1,8 @@
 import { apiFetch } from "./http";
+import {
+  semanticJsonPostRequest,
+  withSemanticPostIdempotency,
+} from "./semanticIdempotency";
 import type { WorkflowRun } from "./workflows";
 
 export type PosterAspectRatio =
@@ -70,17 +74,110 @@ export interface PosterInpaintIn {
   mask_image_id: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function validatePosterWorkflowCreateResponse(
+  value: PosterDesignWorkflowCreateOut,
+): PosterDesignWorkflowCreateOut {
+  if (
+    !isRecord(value) ||
+    typeof value.workflow_run_id !== "string" ||
+    value.workflow_run_id.length === 0
+  ) {
+    throw new TypeError("malformed poster workflow response");
+  }
+  return value;
+}
+
+function validatePosterTaskResponse(
+  value: WorkflowRun,
+  stepKey: string,
+  renderId?: string,
+): WorkflowRun {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    !Array.isArray(value.steps)
+  ) {
+    throw new TypeError("malformed poster task response");
+  }
+  const step = value.steps.find((item) => item.step_key === stepKey);
+  const input = isRecord(step?.input_json) ? step.input_json : {};
+  const taskIds =
+    stepKey === "multi_size_generation"
+      ? input.active_task_ids
+      : step?.task_ids;
+  if (
+    !Array.isArray(taskIds) ||
+    !taskIds.some((item) => typeof item === "string" && item.length > 0)
+  ) {
+    throw new TypeError("malformed poster task response");
+  }
+  if (renderId && input.active_render_id !== renderId) {
+    throw new TypeError("malformed poster task response");
+  }
+  return value;
+}
+
+function validatePosterRenderBatchResponse(
+  value: WorkflowRun,
+  requestedAspects: PosterAspectRatio[],
+): WorkflowRun {
+  try {
+    return validatePosterTaskResponse(value, "multi_size_generation");
+  } catch (error) {
+    if (!(error instanceof TypeError) || !Array.isArray(value.poster_renders)) {
+      throw error;
+    }
+  }
+  const completedAspects = new Set(
+    value.poster_renders
+      .filter(
+        (render) =>
+          typeof render.image_id === "string" && render.image_id.length > 0,
+      )
+      .map((render) => render.aspect_ratio),
+  );
+  if (
+    requestedAspects.length === 0 ||
+    !requestedAspects.every((aspect) => completedAspects.has(aspect))
+  ) {
+    throw new TypeError("malformed poster task response");
+  }
+  return value;
+}
+
+function semanticPosterPost<T>(
+  path: string,
+  scope: Record<string, string>,
+  payload: unknown,
+  validate: (value: T) => T,
+): Promise<T> {
+  return withSemanticPostIdempotency(scope, payload, (idempotencyKey) =>
+    apiFetch<T>(
+      path,
+      semanticJsonPostRequest(payload, idempotencyKey),
+    ).then(validate),
+  );
+}
+
 export function createPosterDesignWorkflow(
   body: PosterDesignWorkflowCreateIn,
 ): Promise<PosterDesignWorkflowCreateOut> {
-  return apiFetch<PosterDesignWorkflowCreateOut>("/workflows/poster-design", {
-    method: "POST",
-    body: JSON.stringify({
-      target_aspects: ["1:1", "9:16", "16:9", "3:4"],
-      quality_mode: "premium",
-      ...body,
-    }),
-  });
+  const payload = {
+    target_aspects: ["1:1", "9:16", "16:9", "3:4"] as PosterAspectRatio[],
+    quality_mode: "premium" as const,
+    ...body,
+  };
+  return semanticPosterPost<PosterDesignWorkflowCreateOut>(
+    "/workflows/poster-design",
+    { operation: "workflow.poster.create" },
+    payload,
+    validatePosterWorkflowCreateResponse,
+  );
 }
 
 export function approveCopyAnalysis(
@@ -100,14 +197,17 @@ export function createPosterMasters(
   workflowId: string,
   body: PosterMastersCreateIn = {},
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/masters`, {
-    method: "POST",
-    body: JSON.stringify({
-      candidate_count: 4,
-      size_mode: "fixed",
-      ...body,
-    }),
-  });
+  const payload = {
+    candidate_count: 4,
+    size_mode: "fixed" as const,
+    ...body,
+  };
+  return semanticPosterPost<WorkflowRun>(
+    `/workflows/${workflowId}/masters`,
+    { operation: "workflow.poster.masters.create", workflowId },
+    payload,
+    (value) => validatePosterTaskResponse(value, "master_generation"),
+  );
 }
 
 export function approvePosterMaster(
@@ -128,14 +228,17 @@ export function createPosterRenders(
   workflowId: string,
   body: PosterRendersCreateIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(`/workflows/${workflowId}/renders`, {
-    method: "POST",
-    body: JSON.stringify({
-      use_master_as_reference: true,
-      quality_mode: "premium",
-      ...body,
-    }),
-  });
+  const payload = {
+    use_master_as_reference: true,
+    quality_mode: "premium" as const,
+    ...body,
+  };
+  return semanticPosterPost<WorkflowRun>(
+    `/workflows/${workflowId}/renders`,
+    { operation: "workflow.poster.renders.create", workflowId },
+    payload,
+    (value) => validatePosterRenderBatchResponse(value, payload.aspects),
+  );
 }
 
 export function revisePosterRender(
@@ -143,12 +246,16 @@ export function revisePosterRender(
   renderId: string,
   body: PosterReviseIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
+  return semanticPosterPost<WorkflowRun>(
     `/workflows/${workflowId}/renders/${renderId}/revise`,
     {
-      method: "POST",
-      body: JSON.stringify(body),
+      operation: "workflow.poster.render.revise",
+      workflowId,
+      renderId,
     },
+    body,
+    (value) =>
+      validatePosterTaskResponse(value, "multi_size_generation", renderId),
   );
 }
 
@@ -157,11 +264,15 @@ export function inpaintPosterRender(
   renderId: string,
   body: PosterInpaintIn,
 ): Promise<WorkflowRun> {
-  return apiFetch<WorkflowRun>(
+  return semanticPosterPost<WorkflowRun>(
     `/workflows/${workflowId}/renders/${renderId}/inpaint`,
     {
-      method: "POST",
-      body: JSON.stringify(body),
+      operation: "workflow.poster.render.inpaint",
+      workflowId,
+      renderId,
     },
+    body,
+    (value) =>
+      validatePosterTaskResponse(value, "multi_size_generation", renderId),
   );
 }

@@ -2,20 +2,27 @@
 Description=Lumen paired PostgreSQL and Redis restore
 After=docker.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/lumen/current
-EnvironmentFile=-/opt/lumen/shared/.env
+Environment=LUMEN_ENV_FILE=/opt/lumen/shared/.env
 Environment=BACKUP_ROOT=/opt/lumendata/backup
 Environment=LUMEN_BACKUP_ROOT=/opt/lumendata/backup
 Environment=LUMEN_BACKUP_RESTORE_LOCKFILE=/opt/lumendata/backup/.backup-restore.lock
+Environment=LUMEN_RESTORE_JOURNAL_FILE=/var/lib/lumen/restore/active.json
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 StandardOutput=append:/opt/lumendata/backup/.restore.log
 StandardError=append:/opt/lumendata/backup/.restore.log
 ExecStart=/usr/bin/timeout --preserve-status --kill-after=120s 7200s /usr/bin/python3 -I /opt/lumen/current/scripts/restore_runner.py /opt/lumendata/backup/.restore.trigger
-ExecStopPost=/bin/sh -c "rm -f /opt/lumendata/backup/.restore.trigger /opt/lumendata/backup/.restore.running"
+# A failed ExecStart must retain both the API request and maintenance marker.
+# Otherwise Restart can observe no work, exit 0, and turn the failed restore green.
+ExecStopPost=/bin/sh -c 'if [ "$SERVICE_RESULT" = success ]; then rm -f /opt/lumendata/backup/.restore.trigger /opt/lumendata/backup/.restore.running; else echo "restore request retained after service result=$SERVICE_RESULT" >&2; fi'
 TimeoutStartSec=7300
 TimeoutStopSec=180
 KillSignal=SIGTERM
 KillMode=mixed
+Restart=on-failure
+RestartSec=5s

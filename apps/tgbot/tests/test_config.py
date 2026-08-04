@@ -4,8 +4,11 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.types import CallbackQuery, Message
 
 TG_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TG_ROOT))
@@ -13,7 +16,7 @@ for module_name in list(sys.modules):
     if module_name == "app" or module_name.startswith("app."):
         del sys.modules[module_name]
 
-from app import main  # noqa: E402
+from app import main, middlewares  # noqa: E402
 from app.config import Settings  # noqa: E402
 
 
@@ -22,6 +25,85 @@ def test_settings_allow_db_managed_bot_token() -> None:
 
     assert settings.telegram_bot_token == ""
     assert settings.telegram_bot_shared_secret == "s" * 32
+
+
+class _HealthRecorder:
+    def __init__(self) -> None:
+        self.transitions: list[tuple[main.TgbotRuntimeStatus, str]] = []
+
+    def transition(
+        self,
+        status: main.TgbotRuntimeStatus,
+        reason: str,
+    ) -> None:
+        self.transitions.append((status, reason))
+
+
+def _private_message(user_id: int = 42) -> MagicMock:
+    msg = MagicMock(spec=Message)
+    msg.chat = SimpleNamespace(id=user_id, type="private")
+    msg.from_user = SimpleNamespace(id=user_id)
+    msg.answer = AsyncMock()
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_access_gate_fails_closed_on_cold_start_500() -> None:
+    class FailingApi:
+        async def get_access_config(self) -> dict[str, object]:
+            raise middlewares.ApiError("http_error", "server error", 500)
+
+    gate = middlewares.AccessGate(FailingApi())  # type: ignore[arg-type]
+    msg = _private_message()
+    handler = AsyncMock()
+
+    await gate(handler, msg, {})
+
+    handler.assert_not_awaited()
+    msg.answer.assert_awaited_once_with("机器人访问配置暂时不可用，请稍后重试。")
+
+
+@pytest.mark.asyncio
+async def test_access_gate_retains_last_known_good_after_refresh_500() -> None:
+    class FlakyApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_access_config(self) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                return {"bot_enabled": True, "allowed_user_ids": "42"}
+            raise middlewares.ApiError("http_error", "server error", 500)
+
+    api = FlakyApi()
+    gate = middlewares.AccessGate(api)  # type: ignore[arg-type]
+    msg = _private_message()
+    handler = AsyncMock(return_value="handled")
+
+    assert await gate(handler, msg, {}) == "handled"
+    gate._last_refresh = 0.0  # noqa: SLF001
+    assert await gate(handler, msg, {}) == "handled"
+
+    assert api.calls == 2
+    assert handler.await_count == 2
+    msg.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_access_gate_rejects_group_chat_before_handler() -> None:
+    gate = middlewares.AccessGate()
+    msg = MagicMock(spec=Message)
+    msg.chat = SimpleNamespace(id=-100123, type="group")
+    cb = MagicMock(spec=CallbackQuery)
+    cb.message = msg
+    cb.from_user = SimpleNamespace(id=42)
+    cb.answer = AsyncMock()
+    handler = AsyncMock()
+
+    await gate(handler, cb, {})
+
+    handler.assert_not_awaited()
+    cb.answer.assert_awaited_once_with("仅支持私聊使用。", show_alert=True)
 
 
 @pytest.mark.asyncio
@@ -142,6 +224,54 @@ async def test_long_backoff_is_interrupted_by_stop_event() -> None:
 @pytest.mark.asyncio
 async def test_polling_supervisor_treats_stop_as_normal() -> None:
     stop_event = asyncio.Event()
+    health = _HealthRecorder()
+
+    async def start_polling() -> None:
+        main._set_runtime_health(
+            health,
+            main.TgbotRuntimeStatus.POLLING,
+            "telegram_identity_verified",
+        )
+        await asyncio.Event().wait()
+
+    async def pause_invalid(_error: BaseException) -> None:
+        pytest.fail("normal stop must not pause configuration")
+
+    task = asyncio.create_task(
+        main._run_polling_supervisor(
+            start_polling=start_polling,
+            stop_event=stop_event,
+            logger=logging.getLogger("test-polling-stop"),
+            runtime_health=health,
+            pause_invalid_configuration=pause_invalid,
+        )
+    )
+    for _attempt in range(10):
+        await asyncio.sleep(0)
+        if (
+            main.TgbotRuntimeStatus.POLLING,
+            "telegram_identity_verified",
+        ) in health.transitions:
+            break
+    stop_event.set()
+
+    assert await asyncio.wait_for(task, timeout=1) is (
+        main.PollingTerminationClass.NORMAL_STOP
+    )
+    assert (
+        main.TgbotRuntimeStatus.POLLING,
+        "telegram_identity_verified",
+    ) in health.transitions
+    assert health.transitions[-1] == (
+        main.TgbotRuntimeStatus.STOPPING,
+        "polling_stop_requested",
+    )
+
+
+@pytest.mark.asyncio
+async def test_polling_supervisor_does_not_assume_pending_task_is_ready() -> None:
+    stop_event = asyncio.Event()
+    health = _HealthRecorder()
 
     async def start_polling() -> None:
         await asyncio.Event().wait()
@@ -153,13 +283,22 @@ async def test_polling_supervisor_treats_stop_as_normal() -> None:
         main._run_polling_supervisor(
             start_polling=start_polling,
             stop_event=stop_event,
-            logger=logging.getLogger("test-polling-stop"),
+            logger=logging.getLogger("test-polling-pending"),
+            runtime_health=health,
             pause_invalid_configuration=pause_invalid,
         )
     )
     await asyncio.sleep(0)
-    stop_event.set()
+    await asyncio.sleep(0)
 
+    assert health.transitions == [
+        (
+            main.TgbotRuntimeStatus.POLLING_STARTING,
+            "polling_attempt_start",
+        )
+    ]
+
+    stop_event.set()
     assert await asyncio.wait_for(task, timeout=1) is (
         main.PollingTerminationClass.NORMAL_STOP
     )
@@ -170,6 +309,7 @@ async def test_polling_supervisor_retries_recoverable_network_failure() -> None:
     stop_event = asyncio.Event()
     attempts = 0
     sleeps: list[float] = []
+    health = _HealthRecorder()
 
     async def start_polling() -> None:
         nonlocal attempts
@@ -188,6 +328,7 @@ async def test_polling_supervisor_retries_recoverable_network_failure() -> None:
         start_polling=start_polling,
         stop_event=stop_event,
         logger=logging.getLogger("test-polling-network"),
+        runtime_health=health,
         pause_invalid_configuration=pause_invalid,
         sleep=fake_sleep,
     )
@@ -195,11 +336,16 @@ async def test_polling_supervisor_retries_recoverable_network_failure() -> None:
     assert result is main.PollingTerminationClass.NORMAL_STOP
     assert attempts == 2
     assert sleeps == [1.0]
+    assert (
+        main.TgbotRuntimeStatus.POLLING_BACKOFF,
+        "polling_network_backoff",
+    ) in health.transitions
 
 
 @pytest.mark.asyncio
 async def test_polling_supervisor_pauses_invalid_configuration() -> None:
     paused: list[BaseException] = []
+    health = _HealthRecorder()
     counter = main.TGBOT_POLLING_FAILURES.labels(
         main.PollingTerminationClass.INVALID_CONFIGURATION.value
     )
@@ -215,12 +361,17 @@ async def test_polling_supervisor_pauses_invalid_configuration() -> None:
         start_polling=start_polling,
         stop_event=asyncio.Event(),
         logger=logging.getLogger("test-polling-config"),
+        runtime_health=health,
         pause_invalid_configuration=pause_invalid,
     )
 
     assert result is main.PollingTerminationClass.INVALID_CONFIGURATION
     assert len(paused) == 1
     assert counter._value.get() == before + 1
+    assert health.transitions[-1] == (
+        main.TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+        "polling_invalid_configuration",
+    )
 
 
 @pytest.mark.asyncio
@@ -229,6 +380,7 @@ async def test_polling_supervisor_reraises_unknown_failure_with_traceback(
 ) -> None:
     logger = logging.getLogger("test-polling-unknown")
     caplog.set_level(logging.ERROR, logger=logger.name)
+    health = _HealthRecorder()
 
     async def start_polling() -> None:
         raise RuntimeError("polling bug")
@@ -241,11 +393,41 @@ async def test_polling_supervisor_reraises_unknown_failure_with_traceback(
             start_polling=start_polling,
             stop_event=asyncio.Event(),
             logger=logger,
+            runtime_health=health,
             pause_invalid_configuration=pause_invalid,
         )
 
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert any(record.exc_info for record in caplog.records)
+    assert health.transitions[-1] == (
+        main.TgbotRuntimeStatus.FAILED,
+        "polling_unknown_failure",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_polling_cancellation_is_unhealthy() -> None:
+    health = _HealthRecorder()
+
+    async def start_polling() -> None:
+        raise asyncio.CancelledError
+
+    async def pause_invalid(_error: BaseException) -> None:
+        pytest.fail("unexpected cancellation is not a configuration pause")
+
+    with pytest.raises(main.PollingSupervisorFailure):
+        await main._run_polling_supervisor(
+            start_polling=start_polling,
+            stop_event=asyncio.Event(),
+            logger=logging.getLogger("test-polling-cancel"),
+            runtime_health=health,
+            pause_invalid_configuration=pause_invalid,
+        )
+
+    assert health.transitions[-1] == (
+        main.TgbotRuntimeStatus.FAILED,
+        "polling_unknown_failure",
+    )
 
 
 @pytest.mark.asyncio
@@ -338,6 +520,7 @@ async def test_main_pauses_before_api_client_without_shared_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pauses: list[tuple[str, int, object]] = []
+    health = _HealthRecorder()
 
     async def fake_pause(
         _logger: logging.Logger,
@@ -358,13 +541,74 @@ async def test_main_pauses_before_api_client_without_shared_secret(
         lambda: pytest.fail("LumenApi must not be constructed without shared secret"),
     )
 
-    await main._amain()
+    await main._amain(health)
 
     assert pauses == [
         (
             "configuration error: TELEGRAM_BOT_SHARED_SECRET is empty",
             logging.ERROR,
             None,
+        )
+    ]
+    assert health.transitions == [
+        (
+            main.TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+            "missing_shared_secret",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", (401, 403))
+async def test_main_treats_rejected_shared_secret_as_unhealthy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    api = _FakeApi()
+    health = _HealthRecorder()
+    pauses: list[tuple[str, int]] = []
+
+    class RejectingProxyManager:
+        def __init__(self, received_api: _FakeApi) -> None:
+            assert received_api is api
+
+        async def initial_load(self) -> dict[str, object]:
+            raise main.ApiError(
+                "bot_unauthorized",
+                "invalid bot token",
+                status,
+            )
+
+    async def fake_pause(
+        _logger: logging.Logger,
+        diagnostic: str,
+        *,
+        level: int,
+        recovery_check=None,
+        refresh_interval_sec: float = main._PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+    ) -> None:
+        del recovery_check, refresh_interval_sec
+        pauses.append((diagnostic, level))
+
+    monkeypatch.setattr(main.settings, "telegram_bot_shared_secret", "wrong-secret")
+    monkeypatch.setattr(main.settings, "telegram_bot_token", "123:test-token")
+    monkeypatch.setattr(main, "LumenApi", lambda: api)
+    monkeypatch.setattr(main, "ProxyManager", RejectingProxyManager)
+    monkeypatch.setattr(main, "_pause_until_restart_or_stop", fake_pause)
+
+    await main._amain(health)
+
+    assert api.closed is True
+    assert pauses == [
+        (
+            "configuration error: TELEGRAM_BOT_SHARED_SECRET was rejected by lumen-api",
+            logging.ERROR,
+        )
+    ]
+    assert health.transitions == [
+        (
+            main.TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+            "shared_secret_rejected",
         )
     ]
 
@@ -412,7 +656,7 @@ async def test_main_closes_api_when_runtime_bootstrap_crashes(
     monkeypatch.setattr(main, "ProxyManager", CrashingProxyManager)
 
     with pytest.raises(RuntimeError, match="unexpected bootstrap failure"):
-        await main._amain()
+        await main._amain(_HealthRecorder())
 
     assert api.closed is True
 
@@ -477,7 +721,7 @@ async def test_main_closes_bot_and_fsm_when_dispatcher_setup_crashes(
     )
 
     with pytest.raises(RuntimeError, match="dispatcher setup failed"):
-        await main._amain()
+        await main._amain(_HealthRecorder())
 
     assert FakeBot.instance is not None
     assert FakeBot.instance.session.closed is True
@@ -565,6 +809,7 @@ async def test_main_pauses_for_non_runnable_runtime_configuration(
         runtime_configs=[{"bot_enabled": True, "bot_token": "recovered-token"}],
     )
     pauses: list[tuple[str, int, bool]] = []
+    health = _HealthRecorder()
 
     class FakeProxyManager:
         def __init__(self, received_api: _FakeApi) -> None:
@@ -591,10 +836,22 @@ async def test_main_pauses_for_non_runnable_runtime_configuration(
     monkeypatch.setattr(main, "ProxyManager", FakeProxyManager)
     monkeypatch.setattr(main, "_pause_until_restart_or_stop", fake_pause)
 
-    await main._amain()
+    await main._amain(health)
 
     assert api.closed is True
     assert pauses == [(expected_diagnostic, expected_level, True)]
+    expected_health = (
+        (
+            main.TgbotRuntimeStatus.PAUSED_INTENTIONAL,
+            "runtime_disabled",
+        )
+        if runtime_config["bot_enabled"] is False
+        else (
+            main.TgbotRuntimeStatus.PAUSED_CONFIGURATION_ERROR,
+            "empty_bot_token",
+        )
+    )
+    assert health.transitions == [expected_health]
 
 
 def test_systemd_restart_contract_starts_python_without_config_guard() -> None:

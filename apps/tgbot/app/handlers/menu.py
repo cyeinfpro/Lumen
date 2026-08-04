@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Protocol
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -24,6 +25,7 @@ from ..keyboards import (
     main_menu,
     render_params_summary,
 )
+from ..generation_state import new_generation_flow_epoch
 from ..states import GenFlow
 from ._helpers import require_message
 
@@ -44,6 +46,10 @@ _ALLOWED_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
         "enhance": _BOOL_VALUES,
     }
 )
+
+
+class _GenerationRuntime(Protocol):
+    async def cancel_prompt(self, chat_id: int) -> None: ...
 
 
 def _coerce(field: str, value: str) -> object | None:
@@ -67,11 +73,18 @@ def _coerce(field: str, value: str) -> object | None:
 
 
 @router.message(Command("new"))
-async def cmd_new(message: Message, state: FSMContext) -> None:
+async def cmd_new(
+    message: Message,
+    state: FSMContext,
+    generation_runtime: _GenerationRuntime,
+) -> None:
     data = await state.get_data()
     params = dict(data.get("params") or DEFAULT_PARAMS)
+    flow_epoch = new_generation_flow_epoch()
+    await generation_runtime.cancel_prompt(message.chat.id)
+    await state.clear()
     await state.set_state(GenFlow.configuring)
-    await state.update_data(params=params)
+    await state.update_data(params=params, generation_flow_epoch=flow_epoch)
     await message.answer(
         f"生成参数\n{render_params_summary(params)}\n\n"
         "选好后点「开始生成」，再发送你的提示词。",

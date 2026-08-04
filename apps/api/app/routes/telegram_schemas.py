@@ -30,7 +30,7 @@ class BindOut(BaseModel):
 
 
 class GenerateIn(BaseModel):
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=64)
     prompt: str = Field(min_length=1, max_length=10000)
     aspect_ratio: Literal[
         "1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21", "4:5"

@@ -24,6 +24,7 @@ from ..canvas_services.document_service import (
     list_canvases,
     patch_canvas,
 )
+from ..canvas_services.errors import canvas_http
 from ..canvas_services.execution_service import execute_node
 from ..canvas_services.mutation_service import apply_mutation
 from ..canvas_services.read_repair import repair_canvas_executions
@@ -48,13 +49,44 @@ from ..deps import CurrentUser, verify_csrf
 router = APIRouter(prefix="/canvases", tags=["canvases"])
 
 
+def _document_idempotency_key(
+    header_idempotency_key: str | None,
+    body_idempotency_key: str | None,
+) -> str | None:
+    if header_idempotency_key is None and body_idempotency_key is None:
+        return None
+    if not header_idempotency_key or not body_idempotency_key:
+        raise canvas_http(
+            "idempotency_key_required",
+            "Idempotency-Key header and idempotency_key body field must be provided together",
+            422,
+        )
+    if header_idempotency_key != body_idempotency_key:
+        raise canvas_http(
+            "idempotency_key_mismatch",
+            "Idempotency-Key must match idempotency_key",
+            422,
+        )
+    return body_idempotency_key
+
+
 @router.post("", dependencies=[Depends(verify_csrf)])
 async def create_canvas_route(
     body: CanvasCreateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> dict:
-    row = await create_canvas(db, user_id=user.id, body=body)
+    key = _document_idempotency_key(idempotency_key, body.idempotency_key)
+    row = await create_canvas(
+        db,
+        user_id=user.id,
+        body=body,
+        idempotency_key=key,
+    )
     return await serialize_canvas_document(db, canvas=row)
 
 
@@ -129,12 +161,22 @@ async def duplicate_canvas_route(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     body: CanvasDuplicateIn | None = Body(default=None),
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> dict:
+    request_body = body or CanvasDuplicateIn()
+    key = _document_idempotency_key(
+        idempotency_key,
+        request_body.idempotency_key,
+    )
     row = await duplicate_canvas(
         db,
         user_id=user.id,
         canvas_id=canvas_id,
-        body=body or CanvasDuplicateIn(),
+        body=request_body,
+        idempotency_key=key,
     )
     return await serialize_canvas_document(db, canvas=row)
 

@@ -78,12 +78,16 @@ const [
   runtime,
   { createComposerState },
   { applySseEventPayload },
+  { semanticPostIdempotency },
 ] =
   await Promise.all([
     import(new URL("./sendMessageAction.ts", import.meta.url).href),
     import(new URL("./runtime.ts", import.meta.url).href),
     import(new URL("./composerSlice.ts", import.meta.url).href),
     import(new URL("./sseEventActions.ts", import.meta.url).href),
+    import(
+      new URL("../../lib/api/semanticIdempotency.ts", import.meta.url).href
+    ),
   ]);
 
 function deferred<T>() {
@@ -92,6 +96,17 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  message: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail(message);
 }
 
 function createHarness(overrides: Partial<ChatState> = {}) {
@@ -140,12 +155,7 @@ function backendAssistantMessage() {
   };
 }
 
-/**
- * An assistant payload whose `content` throws on first read — the shape a
- * malformed/partial backend response has once `adaptBackendAssistantMessage`
- * touches it. `onRead` runs after `registerResponseAliases`, so it can prove
- * the aliases really existed at the moment reconciliation blew up.
- */
+/** An assistant payload whose `content` throws during response validation. */
 function explodingAssistantMessage(onRead: () => void) {
   return {
     id: "real-asst-1",
@@ -167,7 +177,7 @@ function resetAliases() {
   runtime.rememberCompletionAlias("other-real-comp", "opt-asst-other");
 }
 
-test("rollback drops the generation aliases the failed send registered", async () => {
+test("malformed send validation never registers generation aliases", async () => {
   resetAliases();
   const harness = createHarness();
   let optimisticGenerationIds: string[] = [];
@@ -192,14 +202,11 @@ test("rollback drops the generation aliases the failed send registered", async (
 
   await harness.sendMessage({ intentOverride: "text_to_image" });
 
-  // Non-vacuity: the alias existed and pointed at the optimistic row.
   assert.equal(optimisticGenerationIds.length, 1);
   assert.deepEqual(
     aliasesAtFailure.filter(([realId]) => realId === "real-gen-1"),
-    [["real-gen-1", optimisticGenerationIds[0]]],
+    [],
   );
-  // The optimistic rows are gone, so an alias onto them would strand every
-  // later SSE generation event on a message that no longer exists.
   assert.deepEqual(harness.get().messages, []);
   assert.deepEqual(harness.get().generations, {});
   assert.equal(runtime._generationIdAliases.has("real-gen-1"), false);
@@ -207,7 +214,7 @@ test("rollback drops the generation aliases the failed send registered", async (
   assert.match(harness.get().composerError ?? "", /发送失败/);
 });
 
-test("rollback drops the completion alias the failed send registered", async () => {
+test("malformed send validation never registers completion aliases", async () => {
   resetAliases();
   const harness = createHarness();
   let optimisticAssistantId = "";
@@ -236,56 +243,11 @@ test("rollback drops the completion alias the failed send registered", async () 
   assert.ok(optimisticAssistantId.startsWith("opt-asst-"));
   assert.deepEqual(
     aliasesAtFailure.filter(([realId]) => realId === "comp-1"),
-    [["comp-1", optimisticAssistantId]],
+    [],
   );
   assert.deepEqual(harness.get().messages, []);
   assert.equal(runtime._completionMessageAliases.has("comp-1"), false);
   assert.equal(runtime._completionMessageAliases.has("other-real-comp"), true);
-});
-
-async function sendAndCaptureWarnings(
-  completionId: string | null,
-): Promise<string[]> {
-  const harness = createHarness();
-  stubHost.__conversationsStub = {
-    postMessage: async () => ({
-      user_message: backendUserMessage(),
-      assistant_message: backendAssistantMessage(),
-      completion_id: completionId,
-    }),
-  };
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    warnings.push(args.map((arg) => JSON.stringify(arg) ?? "").join(" "));
-  };
-  try {
-    await harness.sendMessage({ intentOverride: "chat" });
-  } finally {
-    console.warn = originalWarn;
-  }
-  assert.equal(harness.get().messages.length, 2);
-  return warnings;
-}
-
-test("a chat send without a completion id is reported, not silently accepted", async () => {
-  const missing = await sendAndCaptureWarnings(null);
-  const reported = missing.filter((line) =>
-    /chat send returned no completion id/.test(line),
-  );
-  // Without an id `rememberCompletionMessage` no-ops: streaming deltas can
-  // never resolve a message, so the bubble stays blank while the send looks
-  // successful. The break has to surface somewhere.
-  assert.equal(reported.length, 1);
-  assert.match(reported[0] ?? "", /real-asst-1/);
-
-  const healthy = await sendAndCaptureWarnings("comp-1");
-  assert.deepEqual(
-    healthy.filter((line) =>
-      /chat send returned no completion id/.test(line),
-    ),
-    [],
-  );
 });
 
 test("store blocks sends while existing conversation history is unavailable", async () => {
@@ -338,6 +300,241 @@ test("load-more errors do not block sending with loaded messages", async () => {
 
   assert.equal(posts, 1);
   assert.equal(harness.get().messages.length, 3);
+});
+
+test("response loss keeps the semantic send key for the user's second attempt", async () => {
+  await semanticPostIdempotency.clear();
+  const accepted = {
+    user_message: backendUserMessage(),
+    assistant_message: backendAssistantMessage(),
+    completion_id: "comp-replayed",
+  };
+  const acceptedByKey = new Map<string, typeof accepted>();
+  const bodies: Array<{ idempotency_key: string; trace_id?: string }> = [];
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      const request = body as {
+        idempotency_key: string;
+        trace_id?: string;
+      };
+      bodies.push(request);
+      const prior = acceptedByKey.get(request.idempotency_key);
+      if (prior) return prior;
+      acceptedByKey.set(request.idempotency_key, accepted);
+      throw new TypeError("response lost after backend accepted request");
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "chat" });
+  assert.match(harness.get().composerError ?? "", /发送失败/);
+  assert.equal(harness.get().composer.text, "画一只猫");
+
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1]?.idempotency_key, bodies[0]?.idempotency_key);
+  assert.equal(bodies[0]?.trace_id, bodies[0]?.idempotency_key);
+  assert.equal(bodies[1]?.trace_id, bodies[1]?.idempotency_key);
+  assert.equal(acceptedByKey.size, 1);
+  assert.equal(harness.get().messages.length, 2);
+  assert.equal(harness.get().messages[1]?.id, "real-asst-1");
+  assert.equal(harness.get().composerError, null);
+  await semanticPostIdempotency.clear();
+});
+
+test("malformed 2xx reconciliation keeps the semantic send key", async () => {
+  await semanticPostIdempotency.clear();
+  const keys: string[] = [];
+  let calls = 0;
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      calls += 1;
+      keys.push((body as { idempotency_key: string }).idempotency_key);
+      if (calls === 1) {
+        return {
+          user_message: backendUserMessage(),
+          completion_id: "comp-malformed",
+          assistant_message: explodingAssistantMessage(() => undefined),
+        };
+      }
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "comp-reconciled",
+      };
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "chat" });
+  assert.deepEqual(harness.get().messages, []);
+  assert.match(harness.get().composerError ?? "", /发送失败/);
+
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.equal(keys.length, 2);
+  assert.equal(keys[1], keys[0]);
+  assert.equal(harness.get().messages.length, 2);
+  assert.equal(harness.get().composerError, null);
+  await semanticPostIdempotency.clear();
+});
+
+test("text send without completion id retains the semantic key", async () => {
+  await semanticPostIdempotency.clear();
+  const keys: string[] = [];
+  let calls = 0;
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      calls += 1;
+      keys.push((body as { idempotency_key: string }).idempotency_key);
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: calls === 1 ? "   " : "comp-reconciled",
+      };
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "chat" });
+  assert.deepEqual(harness.get().messages, []);
+  assert.match(harness.get().composerError ?? "", /发送失败/);
+
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.equal(harness.get().messages.length, 2);
+  assert.equal(harness.get().composerError, null);
+  await semanticPostIdempotency.clear();
+});
+
+test("image send without generation ids retains the semantic key", async () => {
+  await semanticPostIdempotency.clear();
+  const keys: string[] = [];
+  let calls = 0;
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      calls += 1;
+      keys.push((body as { idempotency_key: string }).idempotency_key);
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        generation_ids: calls === 1 ? ["   "] : ["gen-reconciled"],
+      };
+    },
+  };
+
+  await harness.sendMessage({ intentOverride: "text_to_image" });
+  assert.deepEqual(harness.get().messages, []);
+  assert.deepEqual(harness.get().generations, {});
+
+  await harness.sendMessage({ intentOverride: "text_to_image" });
+
+  assert.deepEqual(keys, [keys[0], keys[0]]);
+  assert.equal(harness.get().messages.length, 2);
+  assert.ok(harness.get().generations["gen-reconciled"]);
+  await semanticPostIdempotency.clear();
+});
+
+test("conversation switch during blocked acquire preserves the new draft", async () => {
+  await semanticPostIdempotency.clear();
+  const acquireEntered = deferred<void>();
+  const releaseAcquire = deferred<void>();
+  const idempotency = semanticPostIdempotency as {
+    acquire: typeof semanticPostIdempotency.acquire;
+  };
+  const originalAcquire = idempotency.acquire;
+  let posts = 0;
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async () => {
+      posts += 1;
+      throw new Error("stale send must not post");
+    },
+  };
+  idempotency.acquire = async (scope: unknown, payload: unknown) => {
+    acquireEntered.resolve();
+    await releaseAcquire.promise;
+    return originalAcquire.call(semanticPostIdempotency, scope, payload);
+  };
+
+  try {
+    const pending = harness.sendMessage({ intentOverride: "chat" });
+    await acquireEntered.promise;
+    runtime._conversationMutationFence.advance();
+    runtime.abortAllSendRequests();
+    harness.set({
+      currentConvId: "conv-2",
+      messages: [],
+      composer: {
+        ...createComposerState(null),
+        text: "新会话中尚未发送的草稿",
+      },
+    });
+    releaseAcquire.resolve();
+    await pending;
+
+    assert.equal(posts, 0);
+    assert.equal(harness.get().currentConvId, "conv-2");
+    assert.equal(harness.get().composer.text, "新会话中尚未发送的草稿");
+    assert.deepEqual(harness.get().messages, []);
+    assert.deepEqual(harness.get().generations, {});
+  } finally {
+    releaseAcquire.resolve();
+    idempotency.acquire = originalAcquire;
+    await semanticPostIdempotency.clear();
+  }
+});
+
+test("conversation switch suppresses stale send UI after confirming its valid response", async () => {
+  await semanticPostIdempotency.clear();
+  const firstResponse = deferred<unknown>();
+  const keys: string[] = [];
+  let calls = 0;
+  const harness = createHarness();
+  stubHost.__conversationsStub = {
+    postMessage: async (_convId, body) => {
+      calls += 1;
+      keys.push((body as { idempotency_key: string }).idempotency_key);
+      if (calls === 1) return firstResponse.promise;
+      return {
+        user_message: backendUserMessage(),
+        assistant_message: backendAssistantMessage(),
+        completion_id: "comp-second",
+      };
+    },
+  };
+
+  const first = harness.sendMessage({ intentOverride: "chat" });
+  await waitFor(() => calls === 1, "first send was not dispatched");
+  harness.set({
+    currentConvId: "conv-2",
+    messages: [],
+    composer: { ...createComposerState(null), text: "other conversation" },
+  });
+  firstResponse.resolve({
+    user_message: backendUserMessage(),
+    assistant_message: backendAssistantMessage(),
+    completion_id: "comp-first",
+  });
+  await first;
+
+  assert.equal(harness.get().currentConvId, "conv-2");
+  assert.deepEqual(harness.get().messages, []);
+
+  harness.set({
+    currentConvId: "conv-1",
+    messages: [],
+    composer: { ...createComposerState(null), text: "画一只猫" },
+  });
+  await harness.sendMessage({ intentOverride: "chat" });
+
+  assert.equal(keys.length, 2);
+  assert.notEqual(keys[1], keys[0]);
+  assert.equal(harness.get().messages.length, 2);
+  await semanticPostIdempotency.clear();
 });
 
 test("a truly new conversation can still be created and sent", async () => {
@@ -435,8 +632,7 @@ test("abortAllSendRequests leaves an already-submitted send in flight", async ()
   };
 
   const pendingSend = harness.sendMessage({ intentOverride: "chat" });
-  await Promise.resolve();
-  await Promise.resolve();
+  await waitFor(() => postSignal !== undefined, "postMessage was not dispatched");
   // 请求已交给后端 stub（模拟 setCurrentConv 切换会话时的 abortAllSendRequests）。
   assert.ok(postSignal, "postMessage must have been dispatched");
   runtime.abortAllSendRequests();

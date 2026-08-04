@@ -1665,6 +1665,103 @@ async def test_release_completion_runs_for_byok_task_with_existing_wallet_hold(
 
 
 @pytest.mark.asyncio
+async def test_release_completion_runs_for_existing_hold_when_billing_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(id="completion-disabled", user_id="user-1")
+    released: list[dict[str, Any]] = []
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return False
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 100
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def release(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        released.append(kwargs)
+        return SimpleNamespace(
+            id="tx-disabled-release",
+            amount_micro=100,
+            balance_after=900,
+            hold_after=0,
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing.billing_core, "release", release)
+
+    await worker_billing.release_completion(  # type: ignore[arg-type]
+        session,
+        completion,
+        reason="cancelled_after_billing_switch",
+    )
+
+    assert released and released[0]["ref_id"] == "completion-disabled"
+    assert session.added[0].event_type == "wallet.release.completion"
+
+
+@pytest.mark.asyncio
+async def test_release_completion_existing_hold_ignores_setting_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(id="completion-setting-failure", user_id="user-1")
+    released: list[dict[str, Any]] = []
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        raise RuntimeError("runtime settings unavailable")
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 100
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def release(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        released.append(kwargs)
+        return SimpleNamespace(
+            id="tx-setting-failure-release",
+            amount_micro=100,
+            balance_after=900,
+            hold_after=0,
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing.billing_core, "release", release)
+
+    await worker_billing.release_completion(  # type: ignore[arg-type]
+        session,
+        completion,
+        reason="cancelled_while_settings_unavailable",
+    )
+
+    assert released and released[0]["ref_id"] == "completion-setting-failure"
+
+
+@pytest.mark.asyncio
 async def test_settle_generation_runs_for_byok_task_with_existing_wallet_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1738,6 +1835,376 @@ async def test_settle_generation_runs_for_byok_task_with_existing_wallet_hold(
     assert settled[0]["ref_id"] == "gen-1"
     assert settled[0]["actual_micro"] == 150
     assert session.added[0].event_type == "wallet.settle.image"
+
+
+@pytest.mark.asyncio
+async def test_settle_generation_runs_for_existing_hold_when_billing_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="gen-disabled",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={},
+    )
+    settled: list[dict[str, Any]] = []
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return False
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 200
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def thresholds() -> dict[str, int]:
+        return {"1k": 0}
+
+    async def estimate_image_cost(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+        return 150, "1k"
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        settled.append(kwargs)
+        return SimpleNamespace(
+            id="tx-disabled-settle",
+            amount_micro=150,
+            balance_after=850,
+            hold_after=0,
+            meta={"overdraw_micro": 0},
+        )
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_thresholds", thresholds)
+    monkeypatch.setattr(
+        worker_billing, "_allow_negative_balance", allow_negative_balance
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_image_cost",
+        estimate_image_cost,
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert settled and settled[0]["ref_id"] == "gen-disabled"
+    assert settled[0]["actual_micro"] == 150
+    assert session.added[0].event_type == "wallet.settle.image"
+
+
+@pytest.mark.asyncio
+async def test_bonus_obligation_without_snapshot_or_hold_settles_once_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="bonus-disabled",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={
+            "billing_rate_multiplier_x10000": 10_000,
+            "billing_free": False,
+            "billing_label": "billable",
+            "bonus_billing_obligation": True,
+            "bonus_billing_width": 1024,
+            "bonus_billing_height": 1024,
+            "bonus_artifact_state": "pending",
+        },
+    )
+    settled: list[dict[str, Any]] = []
+    transactions: dict[str, SimpleNamespace] = {}
+    setting_reads = 0
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        nonlocal setting_reads
+        setting_reads += 1
+        return False
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def existing_tx(
+        _session: Any,
+        _user_id: str,
+        idempotency_key: str,
+    ) -> SimpleNamespace | None:
+        return transactions.get(idempotency_key)
+
+    async def thresholds() -> dict[str, int]:
+        return {"1k": 0}
+
+    async def estimate_image_cost(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+        return 900, "1k"
+
+    async def allow_negative_balance() -> bool:
+        return False
+
+    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        settled.append(kwargs)
+        tx = SimpleNamespace(
+            id="tx-bonus-disabled",
+            kind="settle",
+            amount_micro=-kwargs["actual_micro"],
+            balance_after=-kwargs["actual_micro"],
+            hold_after=0,
+            ref_type=kwargs["ref_type"],
+            ref_id=kwargs["ref_id"],
+            idempotency_key=kwargs["idempotency_key"],
+            meta={**kwargs["meta"], "actual_micro": kwargs["actual_micro"]},
+        )
+        transactions[kwargs["idempotency_key"]] = tx
+        return tx
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_thresholds", thresholds)
+    monkeypatch.setattr(
+        worker_billing, "_allow_negative_balance", allow_negative_balance
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", existing_tx)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_image_cost",
+        estimate_image_cost,
+    )
+    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert setting_reads == 0
+    assert len(settled) == 1
+    assert settled[0]["actual_micro"] == 900
+    assert settled[0]["idempotency_key"] == "settle:bonus-disabled"
+    assert [row.event_type for row in session.added] == [
+        "wallet.settle.image",
+        "wallet.settle.replay",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_free_bonus_obligation_stays_free_after_billing_is_reenabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="bonus-free",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={
+            "billing_free": True,
+            "billing_label": "free",
+            "bonus_billing_obligation": True,
+            "bonus_billing_width": 1024,
+            "bonus_billing_height": 1024,
+            "bonus_artifact_state": "pending",
+        },
+    )
+
+    async def dependency_must_not_run(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("free obligation must return before billing dependencies")
+
+    monkeypatch.setattr(worker_billing, "_account_mode", dependency_must_not_run)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", dependency_must_not_run)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "settle",
+        dependency_must_not_run,
+    )
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_bonus_obligation_without_price_or_hold_becomes_unsettleable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="bonus-unsettleable",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={
+            "billing_rate_multiplier_x10000": 10_000,
+            "bonus_billing_obligation": True,
+            "bonus_billing_width": 1024,
+            "bonus_billing_height": 1024,
+            "bonus_artifact_state": "pending",
+        },
+    )
+    estimate_calls = 0
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return False
+
+    async def no_existing(*_args: Any) -> None:
+        return None
+
+    async def thresholds() -> dict[str, int]:
+        return {"1k": 0}
+
+    async def missing_price(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        raise worker_billing.billing_core.BillingError(
+            "PRICING_MISSING",
+            "pricing unavailable",
+            503,
+        )
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def no_consumption(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def settle_must_not_run(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("unpriceable obligation must not create a fake charge")
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(worker_billing, "_thresholds", thresholds)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "held_amount_for_ref", held_amount_for_ref)
+    monkeypatch.setattr(
+        worker_billing,
+        "existing_ref_consumption_tx",
+        no_consumption,
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "estimate_image_cost",
+        missing_price,
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "settle",
+        settle_must_not_run,
+    )
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+    first_audit_count = len(session.added)
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert estimate_calls == 1
+    assert len(session.added) == first_audit_count
+    assert generation.upstream_request["billing_obligation_state"] == "unsettleable"
+    assert generation.upstream_request["billing_obligation_terminal_reason"] == (
+        "pricing_missing_without_hold"
+    )
+    assert "billing_obligation_terminal_at" in generation.upstream_request
+    assert session.added[0].event_type == "billing.unresolved_after_upstream"
+
+
+@pytest.mark.asyncio
+async def test_settle_generation_skips_new_free_task_when_billing_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    generation = SimpleNamespace(
+        id="gen-disabled-free",
+        user_id="user-1",
+        model="gpt-image-2",
+        upstream_request={},
+    )
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def billing_enabled() -> bool:
+        return False
+
+    async def held_amount_for_ref(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def settle_must_not_run(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("a task admitted while billing is disabled must stay free")
+
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "_held_amount_for_ref",
+        held_amount_for_ref,
+    )
+    monkeypatch.setattr(
+        worker_billing.billing_core,
+        "settle",
+        settle_must_not_run,
+    )
+
+    await worker_billing.settle_generation(  # type: ignore[arg-type]
+        session,
+        generation,
+        width=1024,
+        height=1024,
+    )
+
+    assert session.added == []
 
 
 def _patch_unknown_upstream_settle(

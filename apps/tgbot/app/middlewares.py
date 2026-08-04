@@ -51,11 +51,13 @@ class AccessGate(BaseMiddleware):
         self._last_refresh = 0.0
         self._bot_enabled = True
         self._allowed_user_ids = _parse_allowed_ids()
+        self._has_access_config = api is None
 
     async def _refresh_access_config(self) -> None:
         if self._api is None:
             self._allowed_user_ids = _parse_allowed_ids()
             self._last_refresh = time.monotonic()
+            self._has_access_config = True
             return
 
         if self._refresh_lock is None:
@@ -80,6 +82,7 @@ class AccessGate(BaseMiddleware):
                 str(cfg.get("allowed_user_ids") or "")
             )
             self._last_refresh = now
+            self._has_access_config = True
 
     async def __call__(
         self,
@@ -115,6 +118,15 @@ class AccessGate(BaseMiddleware):
             return
 
         await self._refresh_access_config()
+        if not self._has_access_config:
+            if cb is not None:
+                await cb.answer("机器人访问配置暂时不可用，请稍后重试。", show_alert=True)
+            elif msg is not None:
+                try:
+                    await msg.answer("机器人访问配置暂时不可用，请稍后重试。")
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if not self._bot_enabled:
             if cb is not None:
                 await cb.answer("机器人已暂停。", show_alert=True)

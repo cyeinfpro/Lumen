@@ -131,11 +131,9 @@ async def _image_dispatch_candidates(
     if provider_override is not None:
         endpoint_kind = _image_endpoint_kind_for_engine(engine, runtime=runtime)
         if endpoint_kind is not None:
-            unavailable_error = (
-                services.providers.provider_endpoint_unavailable_error(
-                    provider_override,
-                    endpoint_kind,
-                )
+            unavailable_error = services.providers.provider_endpoint_unavailable_error(
+                provider_override,
+                endpoint_kind,
             )
             if unavailable_error is not None:
                 raise unavailable_error
@@ -348,6 +346,11 @@ async def _run_responses_with_image2_fallback(
     ):
         raise
     except Exception as primary_error:  # noqa: BLE001
+        if direct_requests._is_direct_image_result_unknown(
+            primary_error,
+            runtime=request.upstream_runtime,
+        ):
+            raise
         services.infrastructure.logger.warning(
             "%s responses provider=%s failed; falling back to image2: %r",
             request.action,
@@ -379,11 +382,6 @@ async def _run_responses_with_image2_fallback(
         ):
             raise
         except Exception as fallback_error:  # noqa: BLE001
-            if direct_requests._is_direct_image_result_unknown(
-                fallback_error,
-                runtime=request.upstream_runtime,
-            ):
-                raise
             raise _merge_image_route_errors(
                 request,
                 primary_path="responses",
@@ -415,9 +413,7 @@ async def _run_masked_image_once(
             fallback_route=(
                 "image_jobs:generations" if route.use_jobs else "image2_edit_direct"
             ),
-            byok=services.providers.is_byok_provider(
-                request.provider_override
-            ),
+            byok=services.providers.is_byok_provider(request.provider_override),
             status="routed",
         )
     if not route.use_jobs:
@@ -487,16 +483,22 @@ async def _run_image_once_for_provider(
         yield item
 
 
-async def _dispatch_image(
+async def _resume_persisted_image_jobs(
+    request: ImageExecutionRequest,
+) -> AsyncIterator[ImageResult]:
+    services = _request_services(request)
+    async with aclosing(services.image_jobs.resume_image_jobs(request)) as results:
+        async for item in results:
+            yield item
+
+
+async def _dispatch_fresh_image(
     request: ImageExecutionRequest,
 ) -> AsyncIterator[tuple[str, str | None]]:
     from ..retry import is_retriable as classify_retriable
 
     runtime = request.upstream_runtime
     services = _request_services(request)
-    if request.request_context.sidecar_execution is not None:
-        yield await services.image_jobs.resume_image_job(request)
-        return
     channel = await services.core.resolve_image_channel()
     engine = await services.core.resolve_image_engine()
     dispatch_endpoint_kind = _image_endpoint_kind_for_engine(
@@ -628,16 +630,27 @@ async def _dispatch_image(
         message=f"all {len(providers)} image dispatch provider(s) failed",
         runtime=runtime,
     )
-    merged.payload["provider_errors"] = (
-        services.retry.provider_error_details(
-            providers,
-            errors,
-            runtime=runtime,
-        )
+    merged.payload["provider_errors"] = services.retry.provider_error_details(
+        providers,
+        errors,
+        runtime=runtime,
     )
     merged.payload["channel"] = channel
     merged.payload["engine"] = engine
     raise merged
+
+
+async def _dispatch_image(
+    request: ImageExecutionRequest,
+) -> AsyncIterator[tuple[str, str | None]]:
+    image_iter = (
+        _resume_persisted_image_jobs(request)
+        if request.request_context.sidecar_execution is not None
+        else _dispatch_fresh_image(request)
+    )
+    async with aclosing(image_iter) as results:
+        async for item in results:
+            yield item
 
 
 async def generate_image(

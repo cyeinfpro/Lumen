@@ -4,6 +4,7 @@ After=multi-user.target
 
 [Path]
 PathChanged=/opt/lumendata/backup/.restore.trigger
+PathExists=/var/lib/lumen/restore/active.json
 Unit=lumen-restore-runner.service
 TriggerLimitIntervalSec=60s
 TriggerLimitBurst=2

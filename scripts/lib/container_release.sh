@@ -112,6 +112,38 @@ lumen_fetch_release_manifest() {
     python3 "${guard}" fetch --tag "${tag}" --output "${output}"
 }
 
+lumen_release_manifest_commit() {
+    local manifest="$1"
+    local tag="$2"
+    local guard="${LUMEN_RELEASE_MANIFEST_GUARD:-${SCRIPT_DIR}/release_manifest_guard.py}"
+    python3 "${guard}" commit --manifest "${manifest}" --tag "${tag}"
+}
+
+lumen_release_alias_source_digest() {
+    local reference="$1"
+    local raw=""
+    if ! raw="$(lumen_docker buildx imagetools inspect \
+            "${reference}" --raw 2>/dev/null)"; then
+        return 1
+    fi
+    printf '%s' "${raw}" | python3 -c '
+import json
+import re
+import sys
+
+payload = json.load(sys.stdin)
+annotations = payload.get("annotations") if isinstance(payload, dict) else None
+value = (
+    annotations.get("io.lumen.promotion.source-digest")
+    if isinstance(annotations, dict)
+    else None
+)
+if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+    raise SystemExit(1)
+print(value)
+'
+}
+
 lumen_verify_release_manifest_images() {
     local manifest="$1"
     local manifest_tag="$2"
@@ -119,6 +151,7 @@ lumen_verify_release_manifest_images() {
     shift 3
     local guard="${LUMEN_RELEASE_MANIFEST_GUARD:-${SCRIPT_DIR}/release_manifest_guard.py}"
     local entries service image_ref inspect_ref digest immutable_ref repo_digests
+    local alias_source_digest=""
     if ! entries="$(python3 "${guard}" entries --manifest "${manifest}" --tag "${manifest_tag}" "$@")"; then
         return 1
     fi
@@ -129,8 +162,13 @@ lumen_verify_release_manifest_images() {
             --format '{{range .RepoDigests}}{{println .}}{{end}}' \
             "${inspect_ref}" 2>/dev/null || true)"
         if ! printf '%s\n' "${repo_digests}" | grep -Fxq "${immutable_ref}"; then
-            log_error "镜像 digest 与 release manifest 不一致：service=${service} tag=${inspect_ref} release=${manifest_tag} expected=${digest}"
-            return 1
+            alias_source_digest="$(
+                lumen_release_alias_source_digest "${inspect_ref}" || true
+            )"
+            if [ "${alias_source_digest}" != "${digest}" ]; then
+                log_error "镜像 digest 与 release manifest 不一致：service=${service} tag=${inspect_ref} release=${manifest_tag} expected=${digest}"
+                return 1
+            fi
         fi
         log_info "release manifest digest 通过：${service} ${digest}"
     done <<< "${entries}"
@@ -264,13 +302,14 @@ lumen_health_compose() {
                 sleep "${interval}"
                 continue
             fi
-            status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${proj}-${svc}" 2>/dev/null || true)"
-            if [ -z "${status}" ]; then
-                # 容器可能用其它命名（service-1 等）；按容器 id 再查一次。
-                status="$(lumen_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${cid}" 2>/dev/null || true)"
+            if ! status="$(lumen_docker inspect \
+                    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                    "${cid}" 2>/dev/null)"; then
+                sleep "${interval}"
+                continue
             fi
             case "${status}" in
-                ""|healthy)
+                none|healthy)
                     ok=1
                     break
                     ;;
@@ -294,6 +333,60 @@ lumen_health_compose() {
         fi
     done
     return 0
+}
+
+lumen_compose_api_readiness_once() {
+    local _compose_dir="$1"
+    local ready_url="$2"
+    curl --noproxy '*' -fsS --max-time 5 -o /dev/null \
+        "${ready_url}" 2>/dev/null
+}
+
+lumen_compose_worker_readiness_once() {
+    local compose_dir="$1"
+    local _ready_url="$2"
+    if [ -n "${compose_dir}" ]; then
+        lumen_compose_in "${compose_dir}" exec -T worker \
+            python -m app.worker_health check >/dev/null 2>&1
+    else
+        lumen_compose exec -T worker \
+            python -m app.worker_health check >/dev/null 2>&1
+    fi
+}
+
+lumen_compose_core_readiness_state() {
+    local compose_dir="${1:-}"
+    local ready_url="${2:-${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}}"
+    local attempts="${3:-${LUMEN_CORE_READINESS_ATTEMPTS:-60}}"
+    local interval="${4:-${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}}"
+    lumen_core_readiness_state \
+        lumen_compose_api_readiness_once \
+        lumen_compose_worker_readiness_once \
+        "${attempts}" "${interval}" \
+        "${compose_dir}" "${ready_url}"
+}
+
+lumen_require_compose_core_readiness() {
+    local state=""
+    local rc=0
+    if state="$(lumen_compose_core_readiness_state "$@")"; then
+        log_info "Compose 核心 readiness 已通过：API /readyz + Worker health。"
+        return 0
+    else
+        rc=$?
+    fi
+    case "${state}" in
+        "${LUMEN_READINESS_API_NOT_READY}")
+            log_error "API /readyz 未通过，拒绝提交事务状态。"
+            ;;
+        "${LUMEN_READINESS_WORKER_NOT_READY}")
+            log_error "Worker python -m app.worker_health check 未通过，拒绝提交事务状态。"
+            ;;
+        *)
+            log_error "Compose readiness 参数或 probe contract 无效。"
+            ;;
+    esac
+    return "${rc}"
 }
 
 # 根据 LUMEN_UPDATE_CHANNEL 解析目标镜像 tag；输出到 stdout。

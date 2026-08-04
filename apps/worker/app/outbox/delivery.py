@@ -110,13 +110,25 @@ async def deliver_outbox_event(
             job_try=1,
         )
         if not result.accepted:
-            raise RuntimeError("generation dispatch was not accepted")
+            raise RuntimeError(
+                "generation dispatch lacks durable enqueue evidence "
+                f"task={task_id} attempt={result.identity.attempt} "
+                f"revision={result.identity.revision}"
+            )
         return dedupe_key, str(task_id), True
     enqueue_kwargs["_job_id"] = arq_job_id(
         kind,
         str(task_id),
         str(payload.get("outbox_id") or event_id),
     )
+    job_try = payload.get("job_try")
+    if (
+        kind == "completion"
+        and isinstance(job_try, int)
+        and not isinstance(job_try, bool)
+        and job_try > 0
+    ):
+        enqueue_kwargs["_job_try"] = job_try
     await redis.enqueue_job(job_name, task_id, **enqueue_kwargs)
     return dedupe_key, str(task_id), True
 

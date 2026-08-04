@@ -31,7 +31,7 @@ bash scripts/lumenctl.sh install-lumen
 6. §17.5 `COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait postgres redis`
 7. §17.6 `COMPOSE_PROJECT_NAME=lumen docker compose --profile migrate run --rm migrate`（fail-fast，迁移失败立即停止整个切换）
 8. §17.7 `COMPOSE_PROJECT_NAME=lumen docker compose up -d --wait api worker web`，按需 `--profile tgbot up -d tgbot`
-9. §17.8 验证：`docker compose ps`、`curl http://127.0.0.1:8000/healthz`、`curl http://127.0.0.1:3000/`
+9. §17.8 验证：`docker compose ps`、`curl --noproxy '*' http://127.0.0.1:8000/readyz`、`docker compose exec -T worker python -m app.worker_health check`、`curl http://127.0.0.1:3000/`。`/healthz` 只用于容器 liveness，不作为切换事务提交依据。
 10. §17.9 Docker 栈稳定后 `sudo systemctl disable --now lumen-api lumen-worker lumen-web lumen-tgbot`
 
 ## 数据目录与权限

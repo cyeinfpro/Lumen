@@ -102,16 +102,31 @@ class ProxyManager:
                 except ApiError as exc:
                     logger.warning("report_proxy failed name=%s err=%s", failed, exc)
 
+            active_failed = self._active_failed_names_locked(time.monotonic())
             try:
-                cfg = await self._api.get_runtime_config(
-                    avoid=self._active_failed_names_locked(time.monotonic())
-                )
+                cfg = await self._api.get_runtime_config(avoid=active_failed)
             except ApiError as exc:
                 logger.error("failover get_runtime_config failed: %s", exc)
                 return False
             self.config = cfg
 
             proxy = cfg.get("proxy")
+            if (
+                failed
+                and active_failed
+                and (not isinstance(proxy, dict) or not proxy.get("url"))
+            ):
+                try:
+                    cfg = await self._api.get_runtime_config(avoid=[])
+                except ApiError as exc:
+                    logger.error(
+                        "endpoint refresh get_runtime_config failed: %s",
+                        exc,
+                    )
+                    return False
+                self.config = cfg
+                proxy = cfg.get("proxy")
+
             if not isinstance(proxy, dict) or not proxy.get("url"):
                 logger.error(
                     "proxy pool exhausted (failed=%s); bot cannot send",
@@ -121,16 +136,18 @@ class ProxyManager:
 
             new_name = str(proxy.get("name") or "")
             new_url = normalize_proxy_url(str(proxy.get("url") or ""))
-            if new_name == self.current_name:
-                # 没换到新的，避免空转
+            if not new_url or new_url == self.current_url:
+                # 端点没变化时不重建连接器，避免请求在同一路径上空转。
                 return False
 
+            endpoint_refreshed = new_name == self.current_name
             self.current_name = new_name
             self.current_url = new_url
             if self._session is not None:
                 self._session.proxy = new_url  # 触发 _should_reset_connector
             logger.info(
-                "proxy failover → %s (failed=%s)",
+                "proxy %s → %s (failed=%s)",
+                "endpoint refresh" if endpoint_refreshed else "failover",
                 new_name,
                 self._active_failed_names_locked(time.monotonic()),
             )

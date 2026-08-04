@@ -5,7 +5,15 @@ from __future__ import annotations
 import sys
 from typing import Annotated, Any, AsyncContextManager, Awaitable, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    Query,
+    Request,
+    Response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.model_entities import (
@@ -29,8 +37,9 @@ from lumen_core.schema_models import (
 )
 
 from ..db import get_db
-from ..deps import CurrentUser, verify_csrf
+from ..deps import CurrentUser, durable_session_id, verify_csrf
 from ..services.poster_styles import generation as poster_style_generation
+from ..services.poster_styles import idempotency as poster_style_idempotency
 from ..services.poster_styles import resources as poster_style_resources
 from ..services.poster_styles import serialization as poster_style_serialization
 from ..services.poster_styles import tagging as poster_style_tagging
@@ -321,14 +330,29 @@ async def generate_poster_style_samples(
     body: PosterStyleGenerateIn,
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+    request: Request = None,
 ) -> PosterStyleGenerateOut:
     """用户提交 prompt + 元数据，后端创建隐藏 workflow 并入队 N 个生成任务。"""
     runtime = _runtime()
+    client_key = poster_style_idempotency.resolve_client_idempotency_key(
+        idempotency_key
+    )
+    operation = poster_style_idempotency.poster_style_operation(
+        user_id=user.id,
+        idempotency_key=client_key,
+        payload=body.model_dump(mode="json"),
+    )
     return await poster_style_generation.generate_poster_style_samples(
         runtime,
         body=body,
         user=user,
         db=db,
+        operation=operation,
+        session_id=durable_session_id(request),
         enqueue_fn=runtime._enqueue_poster_style_generate_tasks,
         publish_fn=runtime._poster_style_publish_assistant_task,
     )

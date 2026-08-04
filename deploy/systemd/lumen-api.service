@@ -1,7 +1,8 @@
 [Unit]
 Description=Lumen API
 After=network-online.target docker.service lumen-storage-mount.service
-Wants=network-online.target lumen-storage-mount.service
+Wants=network-online.target
+Requires=docker.service lumen-storage-mount.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -14,12 +15,10 @@ WorkingDirectory=/opt/lumen/current/apps/api
 EnvironmentFile=-/opt/lumen/shared/.env
 # LUMEN_VERSION 从 EnvironmentFile 读取，由 deploy/scripts/sync_env_version.sh 在每次发布时刷新。
 Environment=PYTHONUNBUFFERED=1
-# /opt/lumendata 在生产用 CIFS forceuid 挂载；CIFS 重启后 uid/gid 可能回到
-# server 默认（root），lumen 进程没法写入。这条 ExecStartPre 在每次启动前用
-# `+` 提权 root 检查并 remount 矫正（kernel 不支持选择性 chown 修复权限）；
-# `|| true` 让本地 bind / 非 CIFS 场景安全直通。
-# (per feedback_cifs_chmod_eperm.md / project_lumen_4k_timeout_envelope.md)
-ExecStartPre=+/bin/sh -c 'if findmnt -T /opt/lumendata >/dev/null 2>&1 && [ "$$(findmnt -T /opt/lumendata -no FSTYPE)" = "cifs" ]; then /bin/mount -o remount,uid=$$(id -u lumen),gid=$$(id -g lumen),forceuid,forcegid,file_mode=0664,dir_mode=0775 /opt/lumendata || true; fi'
+# lumen-storage-mount.service owns privileged mount repair. The API only
+# performs a fail-closed check as its unprivileged service account.
+ExecStartPre=/usr/local/sbin/lumen-storage-mount verify
+ExecStartPre=/usr/bin/test -w /opt/lumendata/storage
 ExecStart=/opt/lumen/current/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --limit-max-requests 10000 --limit-max-requests-jitter 1000 --timeout-keep-alive 60 --timeout-graceful-shutdown 30 --timeout-worker-healthcheck 10
 Restart=on-failure
 RestartSec=5s
@@ -33,10 +32,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateDevices=true
 CapabilityBoundingSet=
-# ProtectSystem=strict 解引用 symlink 后按物理路径判定 ReadWritePaths：
-# worker var / .env.local 走 shared，所以必须把 /opt/lumen/shared 标记为可写。
-# /opt/lumen/releases 不需要写权限（API 只读代码 + .venv）。
-ReadWritePaths=/opt/lumendata /opt/lumen/shared
+# Release code and shared configuration stay read-only to the service account.
+ReadWritePaths=/opt/lumendata/storage /opt/lumendata/backup /var/lib/lumen-storage
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lumen-api

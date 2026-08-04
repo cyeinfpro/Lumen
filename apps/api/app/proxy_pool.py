@@ -79,15 +79,37 @@ _proxy_pool_state = _ProxyPoolState()
 
 async def resolve_provider_proxy_url(
     proxy: ProviderProxyDefinition | None,
+    *,
+    bind_host: str = "127.0.0.1",
+    advertise_host: str | None = None,
 ) -> str | None:
-    return await _resolve_provider_proxy_url(
-        proxy,
-        runtime=_proxy_pool_state.provider_proxy,
-    )
+    runtime = _proxy_pool_state.provider_proxy
+    try:
+        return await _resolve_provider_proxy_url(
+            proxy,
+            runtime=runtime,
+            bind_host=bind_host,
+            advertise_host=advertise_host,
+        )
+    except RuntimeError:
+        replacement = _proxy_pool_state.provider_proxy
+        if not runtime.closed or replacement is runtime:
+            raise
+        return await _resolve_provider_proxy_url(
+            proxy,
+            runtime=replacement,
+            bind_host=bind_host,
+            advertise_host=advertise_host,
+        )
 
 
 async def close_provider_proxy_tunnels() -> None:
-    await _close_provider_proxy_tunnels(runtime=_proxy_pool_state.provider_proxy)
+    runtime = _proxy_pool_state.provider_proxy
+    try:
+        await _close_provider_proxy_tunnels(runtime=runtime)
+    finally:
+        if _proxy_pool_state.provider_proxy is runtime:
+            _proxy_pool_state.provider_proxy = ProviderProxyRuntime()
 
 
 def _local_cooldown_mark(name: str, ttl_seconds: float | None = None) -> None:

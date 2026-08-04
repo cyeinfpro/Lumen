@@ -43,7 +43,9 @@ class ToolImageServiceDependencies:
     image_variant_model: Any
     message_model: Any
     public_url: Callable[..., str]
-    publish_event: Callable[..., Any]
+    stage_outbox_event: Callable[..., Any]
+    deliver_outbox_events: Callable[..., Any]
+    outbox_model: Any
     image_event: str
     bad_response_error_code: str
 
@@ -216,7 +218,9 @@ def build_completion_tool_image_service(
             delete_files=delete_files,
         ),
         events=CompletionToolImageEvents(
-            publish=dependencies.publish_event,
+            stage=dependencies.stage_outbox_event,
+            deliver=dependencies.deliver_outbox_events,
+            outbox_model=dependencies.outbox_model,
             image_event=dependencies.image_event,
         ),
     )

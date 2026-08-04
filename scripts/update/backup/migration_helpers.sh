@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
 # Alembic revision and host data migration helpers.
 
+# shellcheck source=scripts/update/backup/storage_identity.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/storage_identity.sh"
+
 alembic_revision_from_output() {
     awk 'NF && !/^INFO/ {print $1; exit}'
 }
-
 target_alembic_head() {
     local compose_dir="$1"
     lumen_compose_in "${compose_dir}" --profile migrate run --rm migrate alembic heads 2>/dev/null \
         | alembic_revision_from_output
 }
-
 current_alembic_revision() {
     local compose_dir="$1"
     lumen_compose_in "${compose_dir}" --profile migrate run --rm migrate alembic current 2>/dev/null \
         | alembic_revision_from_output
 }
-
 guard_automatic_app_rollback_compatibility() {
     local rollback_release="${1:-}"
     local database_release="${2:-${NEW_RELEASE:-}}"
+    local observed_database_head="${3:-}"
     local rollback_head=""
     local database_head=""
     local rollback_tag=""
     local database_tag="${TARGET_TAG:-${LUMEN_IMAGE_TAG:-}}"
 
+    if command -v lumen_update_require_storage_identity >/dev/null 2>&1 \
+            && ! lumen_update_require_storage_identity automatic_rollback; then
+        log_error "拒绝自动应用回滚：storage/database root identity 无法验证。"
+        return 1
+    fi
     if [ "${UPDATE_MIGRATION_STARTED:-0}" -ne 1 ] \
             && [ "${UPDATE_MIGRATION_VERIFIED:-0}" -ne 1 ]; then
         return 0
@@ -53,10 +59,14 @@ guard_automatic_app_rollback_compatibility() {
         LUMEN_IMAGE_TAG="${rollback_tag}" \
             target_alembic_head "${rollback_release}" 2>/dev/null || true
     )"
-    database_head="$(
-        LUMEN_IMAGE_TAG="${database_tag}" \
-            current_alembic_revision "${database_release}" 2>/dev/null || true
-    )"
+    if [ -n "${observed_database_head}" ]; then
+        database_head="${observed_database_head}"
+    else
+        database_head="$(
+            LUMEN_IMAGE_TAG="${database_tag}" \
+                current_alembic_revision "${database_release}" 2>/dev/null || true
+        )"
+    fi
     if [ -z "${rollback_head}" ] || [ -z "${database_head}" ]; then
         log_error "自动应用回滚兼容性无法验证：rollback_head=${rollback_head:-<unknown>} database_head=${database_head:-<unknown>}。"
         return 1

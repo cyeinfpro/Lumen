@@ -19,6 +19,7 @@ from .orphan_hold_recovery import (
     ensure_admin_recovery_audit,
     load_hold_group,
     replay_hold_group,
+    resolve_prompt_hold_recovery,
 )
 
 router = APIRouter()
@@ -71,6 +72,7 @@ async def admin_settle_orphan_prompt_hold(
                 409,
             )
         group = replay_hold_group(existing_settle, hold)
+        meta = existing_settle.meta if isinstance(existing_settle.meta, dict) else {}
         await ensure_admin_recovery_audit(
             db,
             commands=commands,
@@ -89,6 +91,7 @@ async def admin_settle_orphan_prompt_hold(
                 "ref_type": hold.ref_type,
                 "ref_id": hold.ref_id,
                 "settlement_basis": "aggregate_held_micro",
+                "recovery_proof": meta.get("recovery_proof"),
             },
             already_committed=True,
         )
@@ -100,6 +103,12 @@ async def admin_settle_orphan_prompt_hold(
     group = await load_hold_group(db, hold)
     if group.aggregate_held_micro <= 0:
         raise queries.http("HOLD_NOT_ACTIVE", "hold is no longer active", 409)
+    recovery_proof = await resolve_prompt_hold_recovery(
+        db,
+        hold,
+        action="settle_default",
+        http=queries.http,
+    )
     tx = await billing_core.settle(
         db,
         target_user_id,
@@ -114,6 +123,7 @@ async def admin_settle_orphan_prompt_hold(
             "hold_count": group.count,
             "aggregate_held_micro": group.aggregate_held_micro,
             "settlement_basis": "aggregate_held_micro",
+            "recovery_proof": recovery_proof,
         },
         created_by_admin=admin.id,
     )
@@ -149,6 +159,7 @@ async def admin_settle_orphan_prompt_hold(
             "ref_type": hold.ref_type,
             "ref_id": hold.ref_id,
             "settlement_basis": "aggregate_held_micro",
+            "recovery_proof": recovery_proof,
         },
         already_committed=False,
     )

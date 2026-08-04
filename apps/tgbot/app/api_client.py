@@ -32,6 +32,7 @@ _DOWNLOAD_CONCURRENCY = 4
 # 下载前最低空闲磁盘门槛。低于此值直接拒绝下载，避免撑爆 /tmp 后整个 bot 崩。
 _MIN_FREE_DISK_BYTES = 200 * 1024 * 1024  # 200 MB
 _DOWNLOAD_DISK_CHECK_INTERVAL_BYTES = 8 * 1024 * 1024
+_MAX_PAID_IDEMPOTENCY_KEY_LENGTH = 96
 
 
 def make_idempotency_key(scope: str, *parts: object) -> str:
@@ -39,12 +40,39 @@ def make_idempotency_key(scope: str, *parts: object) -> str:
     return f"tg:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:61]}"
 
 
+def _require_paid_idempotency_key(
+    raw_key: object,
+    *,
+    operation: str,
+    max_length: int = _MAX_PAID_IDEMPOTENCY_KEY_LENGTH,
+) -> str:
+    if (
+        not isinstance(raw_key, str)
+        or not raw_key
+        or raw_key != raw_key.strip()
+        or len(raw_key) > max_length
+        or any(ord(char) < 0x21 or ord(char) > 0x7E for char in raw_key)
+    ):
+        raise ValueError(
+            f"{operation} requires a stable printable ASCII idempotency_key"
+        )
+    return raw_key
+
+
 class ApiError(Exception):
-    def __init__(self, code: str, message: str, status: int = 0) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int = 0,
+        *,
+        outcome_unknown: bool = False,
+    ) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
         self.status = status
+        self.outcome_unknown = outcome_unknown
 
 
 class LumenApi:
@@ -92,6 +120,7 @@ class LumenApi:
                     code=str(err.get("code") or "unknown"),
                     message=str(err.get("message") or resp.text),
                     status=resp.status_code,
+                    outcome_unknown=resp.status_code >= 500,
                 )
         except ValueError:
             pass
@@ -99,7 +128,77 @@ class LumenApi:
             code="http_error",
             message=resp.text or resp.reason_phrase,
             status=resp.status_code,
+            outcome_unknown=resp.status_code >= 500,
         )
+
+    @staticmethod
+    def _generation_response(resp: httpx.Response) -> dict[str, Any]:
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ApiError(
+                code="ambiguous_response",
+                message="服务端返回了无法解析的成功响应，提交结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            ) from exc
+        if not isinstance(body, dict):
+            raise ApiError(
+                code="ambiguous_response",
+                message="服务端返回了无效的成功响应，提交结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            )
+
+        generation_ids = body.get("generation_ids")
+        required_ids = ("user_id", "conversation_id", "message_id")
+        if (
+            not isinstance(generation_ids, list)
+            or not generation_ids
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in generation_ids
+            )
+            or any(
+                not isinstance(body.get(field), str) or not str(body[field]).strip()
+                for field in required_ids
+            )
+        ):
+            raise ApiError(
+                code="ambiguous_response",
+                message="服务端成功响应缺少任务标识，提交结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    @staticmethod
+    def _enhance_response(resp: httpx.Response) -> str:
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ApiError(
+                code="ambiguous_response",
+                message="提示词优化服务返回了无法解析的成功响应，结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            ) from exc
+        if not isinstance(body, dict):
+            raise ApiError(
+                code="ambiguous_response",
+                message="提示词优化服务返回了无效的成功响应，结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            )
+        enhanced = body.get("enhanced")
+        if not isinstance(enhanced, str) or not enhanced.strip():
+            raise ApiError(
+                code="ambiguous_response",
+                message="提示词优化成功响应缺少结果文本，结果未知",
+                status=resp.status_code,
+                outcome_unknown=True,
+            )
+        return enhanced.strip()
 
     async def bind(
         self,
@@ -131,35 +230,80 @@ class LumenApi:
         return resp.json()
 
     async def create_generation(
-        self, chat_id: int, payload: dict[str, Any]
+        self,
+        chat_id: int,
+        payload: dict[str, Any],
+        *,
+        tg_user_id: int | str,
     ) -> dict[str, Any]:
         # 生成是 enqueue，立即返回 generation_ids；本身很快。但 worker 4K 任务上限 1500s，
         # 这里只是创建，timeout 30s 足够。
         body = dict(payload)
-        body.setdefault("idempotency_key", f"tg:{chat_id}:{uuid.uuid4().hex}")
-        resp = await self._client.post(
-            "/telegram/generations", json=body, headers=self._hdr(chat_id)
+        idempotency_key = _require_paid_idempotency_key(
+            body.get("idempotency_key"),
+            operation="telegram generation",
+            max_length=64,
         )
+        body["idempotency_key"] = idempotency_key
+        try:
+            resp = await self._client.post(
+                "/telegram/generations",
+                json=body,
+                headers=self._hdr(chat_id, tg_user_id=tg_user_id),
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                code="generation_connection_lost",
+                message="连接中断，提交结果未知",
+                outcome_unknown=True,
+            ) from exc
         self._raise_for(resp)
-        return resp.json()
+        return self._generation_response(resp)
 
-    async def get_generation(self, chat_id: int, gen_id: str) -> dict[str, Any]:
+    async def get_generation(
+        self,
+        chat_id: int,
+        gen_id: str,
+        *,
+        tg_user_id: int | str,
+    ) -> dict[str, Any]:
         resp = await self._client.get(
-            f"/telegram/generations/{gen_id}", headers=self._hdr(chat_id)
+            f"/telegram/generations/{gen_id}",
+            headers=self._hdr(chat_id, tg_user_id=tg_user_id),
         )
         self._raise_for(resp)
         return resp.json()
 
-    async def enhance_prompt(self, chat_id: int, text: str) -> str:
+    async def enhance_prompt(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        idempotency_key: str,
+        tg_user_id: int | str,
+    ) -> str:
         # enhance 内部要打上游 LLM，给 60s 余量；超时则回退给原文
-        resp = await self._client.post(
-            "/telegram/prompts/enhance",
-            json={"text": text},
-            headers=self._hdr(chat_id),
-            timeout=httpx.Timeout(60.0, connect=10.0),
+        stable_key = _require_paid_idempotency_key(
+            idempotency_key,
+            operation="telegram prompt enhancement",
         )
+        headers = self._hdr(chat_id, tg_user_id=tg_user_id)
+        headers["Idempotency-Key"] = stable_key
+        try:
+            resp = await self._client.post(
+                "/telegram/prompts/enhance",
+                json={"text": text},
+                headers=headers,
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                code="enhance_connection_lost",
+                message="提示词优化服务连接中断，结果未知",
+                outcome_unknown=True,
+            ) from exc
         self._raise_for(resp)
-        return str(resp.json().get("enhanced") or "").strip()
+        return self._enhance_response(resp)
 
     async def get_runtime_config(
         self, avoid: list[str] | None = None
@@ -193,17 +337,27 @@ class LumenApi:
         self._raise_for(resp)
         return resp.json()
 
-    async def list_tasks(self, chat_id: int, limit: int = 10) -> dict[str, Any]:
+    async def list_tasks(
+        self,
+        chat_id: int,
+        limit: int = 10,
+        *,
+        tg_user_id: int | str,
+    ) -> dict[str, Any]:
         resp = await self._client.get(
             "/telegram/tasks",
-            headers=self._hdr(chat_id),
+            headers=self._hdr(chat_id, tg_user_id=tg_user_id),
             params={"limit": limit},
         )
         self._raise_for(resp)
         return resp.json()
 
     async def download_image_to_file(
-        self, chat_id: int, image_id: str
+        self,
+        chat_id: int,
+        image_id: str,
+        *,
+        tg_user_id: int | str,
     ) -> tuple[Path, str, int]:
         """流式下载到磁盘临时文件。返回 (path, mime, size_bytes)。
 
@@ -228,7 +382,7 @@ class LumenApi:
                 async with self._client.stream(
                     "GET",
                     f"/telegram/images/{image_id}/binary",
-                    headers=self._hdr(chat_id),
+                    headers=self._hdr(chat_id, tg_user_id=tg_user_id),
                 ) as resp:
                     if not resp.is_success:
                         await resp.aread()

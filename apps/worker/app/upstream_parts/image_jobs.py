@@ -17,7 +17,6 @@ from ..provider_runtime.upstream_services import (
 )
 from ..upstream_clients.image_job_auth import (
     UPSTREAM_AUTH_HEADER,
-    image_job_headers,
 )
 from ..upstream_clients.image_job_client import ImageJobClient, ImageJobClientError
 from ..upstream_clients.image_job_models import (
@@ -25,6 +24,10 @@ from ..upstream_clients.image_job_models import (
     ImageJobExecutionHandle,
     ImageJobHandle,
     ImageJobResultState,
+)
+from .delivery_evidence import (
+    image_job_submit_receipt_reason,
+    map_image_job_submit_evidence_error,
 )
 from .image_execution import (
     ImageExecutionRequest,
@@ -40,8 +43,14 @@ from .image_job_recovery import (
     execution_after_cancel as _execution_after_cancel,
     image_job_recovery_error as _image_job_recovery_error,
     resume_image_job as _resume_image_job,
+    resume_image_jobs as _resume_image_jobs,
 )
-from .image_job_submission import image_job_submit_headers as _image_job_submit_headers
+from .image_job_submission import (
+    image_job_dispatch_attempt_hook as _image_job_dispatch_attempt_hook,
+    image_job_headers as _image_job_headers,
+    image_job_sidecar_token as _image_job_sidecar_token,
+    image_job_submit_headers as _image_job_submit_headers,
+)
 from .transport import ImageProgressCallback
 
 _UPSTREAM_AUTH_HEADER = UPSTREAM_AUTH_HEADER
@@ -64,47 +73,6 @@ async def validate_effective_image_job_configuration(
         return
     services.image_jobs.image_job_sidecar_token()
     await services.direct.resolve_image_job_base_url()
-
-
-def _image_job_sidecar_token(
-    *,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    raw_token = str(
-        getattr(
-            services.infrastructure.settings, "image_job_sidecar_token", ""
-        )
-        or ""
-    )
-    try:
-        return services.infrastructure.validate_image_job_sidecar_token(
-            raw_token
-        )
-    except ValueError as exc:
-        raise services.infrastructure.UpstreamError(
-            f"image job configuration unavailable: {exc}",
-            status_code=503,
-            error_code=services.infrastructure.EC.SERVICE_UNAVAILABLE.value,
-            payload={
-                "path": "image-jobs",
-                "configuration": "sidecar_auth",
-                "reason": "configuration_unavailable",
-            },
-        ) from None
-
-
-def _image_job_headers(
-    *,
-    api_key: str,
-    trace_id: str,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> dict[str, str]:
-    return image_job_headers(
-        service_token=_image_job_sidecar_token(runtime=runtime),
-        upstream_api_key=api_key,
-        trace_id=trace_id,
-    )
 
 
 def _image_job_body_base(
@@ -299,7 +267,19 @@ def _map_image_job_client_error(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> Exception:
     services = _runtime_services(runtime)
-    if submit_failure_result_unknown(exc):
+    receipt_reason = image_job_submit_receipt_reason(exc)
+    if receipt_reason is not None:
+        return map_image_job_submit_evidence_error(
+            exc,
+            reason=receipt_reason,
+            method=method,
+            url=url,
+            job_id=job_id,
+            runtime=runtime,
+        )
+    # The client marker is authoritative for malformed responses; the classifier
+    # also keeps legacy/custom clients fail-closed for any submit 5xx.
+    if exc.result_unknown or submit_failure_result_unknown(exc):
         # 提交结果未知 = 可能已扣费：落进 IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES，
         # 禁止 failover（换 endpoint 换幂等键 = 第二笔上游成本），按 hold 结算。
         # 必须在 payload 分支之前判断：5xx 带响应体 = sidecar 已应答（请求已
@@ -344,6 +324,7 @@ async def _submit_image_job(
     provider_id: str,
     endpoint: str,
     proxy: ProviderProxyDefinition | None,
+    progress_callback: ImageProgressCallback | None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
     request_context: ImageRequestContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
@@ -366,18 +347,22 @@ async def _submit_image_job(
         runtime=runtime,
     )
     started = services.infrastructure.time.monotonic()
+    prepare_attempt = _image_job_dispatch_attempt_hook(
+        progress_callback=progress_callback,
+        before_attempt=before_attempt,
+        runtime=runtime,
+    )
+
     try:
         handle = await client.submit(
             payload,
             upstream_api_key=api_key,
             trace_id=trace_id,
-            before_attempt=before_attempt,
+            before_attempt=prepare_attempt,
             idempotency_key=headers.get("Idempotency-Key"),
         )
     except ImageJobClientError as exc:
-        duration_ms = (
-            services.infrastructure.time.monotonic() - started
-        ) * 1000.0
+        duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
         services.core.log_upstream_call(
             endpoint="image_jobs_submit",
             status=exc.status_code or 0,
@@ -392,10 +377,11 @@ async def _submit_image_job(
             url=submit_url,
             runtime=runtime,
         ) from exc
+    except BaseException:
+        await client.close()
+        raise
 
-    duration_ms = (
-        services.infrastructure.time.monotonic() - started
-    ) * 1000.0
+    duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
     services.core.log_upstream_call(
         endpoint="image_jobs_submit",
         status=handle.status_code,
@@ -550,15 +536,21 @@ async def _finish_image_job(
             runtime=runtime,
         )
     if status != "succeeded":
-        raise services.infrastructure.UpstreamError(
+        unknown_execution = replace(
+            execution,
+            sidecar_status=str(status or "unknown"),
+        )
+        await _emit_image_job_execution(
+            progress_callback,
+            unknown_execution,
+            runtime=runtime,
+        )
+        raise _image_job_recovery_error(
             f"image job returned unknown status: {status!r}",
+            unknown_execution,
+            phase="poll",
             status_code=status_code,
-            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-            payload={
-                **job,
-                "sidecar_execution_accepted": True,
-                "sidecar_execution": execution.to_dict(),
-            },
+            runtime=runtime,
         )
     images = job.get("images")
     first = images[0] if isinstance(images, list) and images else None
@@ -649,8 +641,7 @@ async def _wait_image_job(
     runtime = runtime or context.upstream_runtime
     services = _runtime_services(runtime)
     deadline = (
-        services.infrastructure.time.monotonic()
-        + services.core.IMAGE_JOB_TIMEOUT_S
+        services.infrastructure.time.monotonic() + services.core.IMAGE_JOB_TIMEOUT_S
     )
     status_url = services.requests.image_job_status_url(base_url, execution.job_id)
     while services.infrastructure.time.monotonic() < deadline:
@@ -725,6 +716,7 @@ async def _submit_and_wait_image_job(
         provider_id=provider_id,
         endpoint=endpoint,
         proxy=proxy,
+        progress_callback=progress_callback,
         before_attempt=before_attempt,
         request_context=context,
         runtime=runtime,
@@ -741,6 +733,12 @@ async def _submit_and_wait_image_job(
                 runtime=runtime,
             )
         except Exception as exc:  # noqa: BLE001
+            failure_payload = getattr(exc, "payload", None)
+            if (
+                isinstance(failure_payload, dict)
+                and failure_payload.get("receipt_persist_failed") is True
+            ):
+                raise
             raise _image_job_recovery_error(
                 f"image job accepted but execution persistence failed: {exc}",
                 execution,
@@ -868,9 +866,7 @@ async def _image_job_edit_once(
     sidecar_base_url: str | None = base_url_override
     if sidecar_base_url is None:
         try:
-            sidecar_base_url = (
-                await services.direct.resolve_image_job_base_url()
-            )
+            sidecar_base_url = await services.direct.resolve_image_job_base_url()
         except Exception as exc:  # noqa: BLE001
             services.infrastructure.logger.debug(
                 "reference push base_url resolve fallback err=%s", exc
@@ -885,9 +881,7 @@ async def _image_job_edit_once(
         background=request.background,
         moderation=request.moderation,
     )
-    body[
-        "images"
-    ] = await services.image_jobs.image_job_reference_image_entries(
+    body["images"] = await services.image_jobs.image_job_reference_image_entries(
         request.images,
         base_url=sidecar_base_url,
         api_key=api_key_override,
@@ -897,10 +891,8 @@ async def _image_job_edit_once(
     # inpaint mask 透传给 image-job sidecar：mask 仍用 data URL 即可。images[] 先走
     # refs cache / sidecar URL，mask 则保持单次任务内最短路径，避免额外 cache 写放大。
     if request.mask is not None:
-        mask_b64 = (
-            services.infrastructure.base64.b64encode(request.mask).decode(
-                "ascii"
-            )
+        mask_b64 = services.infrastructure.base64.b64encode(request.mask).decode(
+            "ascii"
         )
         body["mask"] = {"image_url": f"data:image/png;base64,{mask_b64}"}
     submit_base_url = (
@@ -946,8 +938,7 @@ async def _image_job_responses_once(
     services = _runtime_services(runtime)
     context = request.request_context
     sidecar_base_url = (
-        base_url_override
-        or await services.direct.resolve_image_job_base_url()
+        base_url_override or await services.direct.resolve_image_job_base_url()
     )
     # 先 push reference 到 image-job sidecar 拿短 URL；失败时 image_urls=[] 让 build 走 base64 fallback。
     # /v1/refs 只接收 Lumen→sidecar 服务 token；供应商 Bearer 不参与引用上传。
@@ -990,6 +981,7 @@ __all__ = [
     "_image_job_sidecar_token",
     "_finish_image_job",
     "_resume_image_job",
+    "_resume_image_jobs",
     "_submit_and_wait_image_job",
     "_wait_image_job",
     "_image_job_generate_once",

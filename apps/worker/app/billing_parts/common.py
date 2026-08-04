@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,11 @@ from .contracts import CommonDependencies
 
 POST_COMMIT_BALANCE_CACHE_KEY = "lumen_post_commit_balance_cache"
 POST_COMMIT_WINDOW_CACHE_KEY = "lumen_post_commit_window_cache"
+BILLING_OBLIGATION_STATE_KEY = "billing_obligation_state"
+BILLING_OBLIGATION_TERMINAL_AT_KEY = "billing_obligation_terminal_at"
+BILLING_OBLIGATION_TERMINAL_REASON_KEY = "billing_obligation_terminal_reason"
+BILLING_OBLIGATION_UNSETTLEABLE = "unsettleable"
+logger = logging.getLogger(__name__)
 
 
 def audit(
@@ -69,6 +75,76 @@ async def wallet_billing_applies(
         )
         > 0
     )
+
+
+async def terminal_billing_applies(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    ref_type: str,
+    ref_id: str,
+    billing_enabled: bool | Callable[[], Awaitable[bool]],
+    billing_obligation: bool,
+    billing_core: Any,
+) -> bool:
+    """Keep obligations created before a billing switch eligible for closure."""
+    if billing_obligation:
+        return True
+    try:
+        enabled = (
+            await billing_enabled()
+            if callable(billing_enabled)
+            else bool(billing_enabled)
+        )
+    except Exception:
+        logger.exception(
+            "billing_enabled_lookup_failed_during_terminal_closure",
+            extra={
+                "user_id": user_id,
+                "ref_type": ref_type,
+                "ref_id": ref_id,
+            },
+        )
+    else:
+        if enabled:
+            return True
+    return (
+        await billing_core._held_amount_for_ref(  # noqa: SLF001
+            session,
+            user_id,
+            ref_type,
+            ref_id,
+        )
+        > 0
+    )
+
+
+def billing_obligation_is_unsettleable(task: Any) -> bool:
+    request = getattr(task, "upstream_request", None)
+    return bool(
+        isinstance(request, dict)
+        and request.get(BILLING_OBLIGATION_STATE_KEY) == BILLING_OBLIGATION_UNSETTLEABLE
+    )
+
+
+def mark_billing_obligation_unsettleable(
+    task: Any,
+    *,
+    reason: str,
+    at: datetime | None = None,
+) -> bool:
+    """Persist an explicit terminal state when an admitted task cannot be priced."""
+    if billing_obligation_is_unsettleable(task):
+        return False
+    request = getattr(task, "upstream_request", None)
+    updated = dict(request) if isinstance(request, dict) else {}
+    updated[BILLING_OBLIGATION_STATE_KEY] = BILLING_OBLIGATION_UNSETTLEABLE
+    updated[BILLING_OBLIGATION_TERMINAL_REASON_KEY] = str(reason)
+    updated[BILLING_OBLIGATION_TERMINAL_AT_KEY] = (
+        at or datetime.now(timezone.utc)
+    ).isoformat()
+    task.upstream_request = updated
+    return True
 
 
 async def existing_fingerprint_tx(

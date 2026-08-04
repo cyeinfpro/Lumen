@@ -82,8 +82,15 @@ lumen_compose_logs() {
 
 lumen_compose_restart() {
     lumen_require_docker_access
-    log_step "docker compose up -d --force-recreate api worker web"
-    lumenctl_compose up -d --force-recreate api worker web
+    local workdir=""
+    workdir="$(lumenctl_compose_workdir)" || return 1
+    log_step "docker compose up -d --wait --force-recreate api worker web"
+    lumenctl_compose up -d --wait --force-recreate api worker web \
+        && lumen_require_compose_core_readiness \
+            "${workdir}" \
+            "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
+            "${LUMEN_CORE_READINESS_ATTEMPTS:-60}" \
+            "${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}"
 }
 
 lumen_compose_stop() {
@@ -95,8 +102,15 @@ lumen_compose_stop() {
 
 lumen_compose_start() {
     lumen_require_docker_access
+    local workdir=""
+    workdir="$(lumenctl_compose_workdir)" || return 1
     log_step "docker compose up -d --wait api worker web"
-    lumenctl_compose up -d --wait api worker web
+    lumenctl_compose up -d --wait api worker web \
+        && lumen_require_compose_core_readiness \
+            "${workdir}" \
+            "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
+            "${LUMEN_CORE_READINESS_ATTEMPTS:-60}" \
+            "${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}"
 }
 
 lumen_compose_migrate() {
@@ -167,6 +181,108 @@ lumen_compose_restore() {
     run_lumen_script restore.sh "$@"
 }
 
+lumenctl_release_declared_alembic_head() {
+    local release_dir="$1"
+    python3 - "${release_dir}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+release = Path(sys.argv[1])
+declared = []
+metadata = release / ".lumen_release.json"
+manifest = release / "release-manifest.json"
+
+if metadata.is_file() and not metadata.is_symlink():
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(1)
+    expected = payload.get("alembic_head_expected")
+    applied = payload.get("alembic_head_applied")
+    for value in (expected, applied):
+        if value is not None and value != "":
+            if not isinstance(value, str) or not re.fullmatch(
+                r"[0-9A-Za-z_]+", value
+            ):
+                raise SystemExit(1)
+            declared.append(value)
+
+if manifest.is_file() and not manifest.is_symlink():
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    heads = payload.get("alembic_heads") if isinstance(payload, dict) else None
+    if (
+        not isinstance(heads, list)
+        or len(heads) != 1
+        or not isinstance(heads[0], str)
+        or not re.fullmatch(r"[0-9A-Za-z_]+", heads[0])
+    ):
+        raise SystemExit(1)
+    declared.append(heads[0])
+
+if not declared or len(set(declared)) != 1:
+    raise SystemExit(1)
+print(declared[0])
+PY
+}
+
+lumenctl_current_database_alembic_head() {
+    local deploy_root="$1"
+    local current_tag=""
+    current_tag="$(
+        head -n1 "${deploy_root}/current/.image-tag" 2>/dev/null \
+            | tr -d '[:space:]'
+    )"
+    LUMEN_IMAGE_TAG="${current_tag}" \
+        current_alembic_revision "${deploy_root}/current"
+}
+
+lumenctl_guard_rollback_alembic_compatibility() {
+    local deploy_root="$1"
+    local target_release="$2"
+    local declared_head="" database_head=""
+    declared_head="$(
+        lumenctl_release_declared_alembic_head "${target_release}" 2>/dev/null \
+            || true
+    )"
+    database_head="$(
+        lumenctl_current_database_alembic_head "${deploy_root}" 2>/dev/null \
+            || true
+    )"
+    if [[ ! "${declared_head}" =~ ^[0-9A-Za-z_]+$ ]] \
+            || [[ ! "${database_head}" =~ ^[0-9A-Za-z_]+$ ]]; then
+        log_error "rollback Alembic capability 无法证明：release=${declared_head:-<unknown>} database=${database_head:-<unknown>}。"
+        log_error "拒绝切换 current；请先恢复可验证的 release metadata/manifest 和数据库 revision。"
+        return 1
+    fi
+    if [ "${declared_head}" != "${database_head}" ]; then
+        log_error "拒绝 rollback：目标 release Alembic capability=${declared_head}，当前数据库 revision=${database_head}。"
+        log_error "数据库不会自动 downgrade；请使用配套恢复点或先完成受控 schema 回滚。"
+        return 1
+    fi
+    log_info "rollback Alembic capability 已验证：${declared_head}"
+}
+
+lumenctl_tgbot_running() {
+    local compose_dir="$1"
+    lumen_compose_in "${compose_dir}" --profile tgbot \
+        ps --status running --services 2>/dev/null \
+        | grep -Fxq tgbot
+}
+
+lumenctl_restore_tgbot_state() {
+    local compose_dir="$1"
+    local should_run="$2"
+    if [ "${should_run}" = "1" ]; then
+        lumen_compose_in "${compose_dir}" --profile tgbot pull tgbot \
+            || return 1
+        lumen_compose_in "${compose_dir}" --profile tgbot up \
+            --pull missing --no-deps -d --wait --force-recreate tgbot
+    else
+        lumen_compose_in "${compose_dir}" --profile tgbot stop tgbot
+    fi
+}
+
 # Rollback：持有维护锁 + update 锁，事务化切回 previous release。
 _lumen_compose_rollback_locked() {
     local deploy_root="$1"
@@ -176,6 +292,7 @@ _lumen_compose_rollback_locked() {
     fi
 
     local current_target previous_target old_id old_dir old_tag old_version
+    local target_tgbot_enabled=0 original_tgbot_running=0
     local shared_env="${deploy_root}/shared/.env"
     current_target="$(readlink "${deploy_root}/current" 2>/dev/null || true)"
     previous_target="$(readlink "${deploy_root}/previous" 2>/dev/null || true)"
@@ -195,11 +312,23 @@ _lumen_compose_rollback_locked() {
         log_error "rollback 目标缺少 .image-tag 或 VERSION，拒绝产生源码/镜像/版本错位。"
         return 1
     fi
+    if ! lumenctl_guard_rollback_alembic_compatibility \
+            "${deploy_root}" "${old_dir}"; then
+        return 1
+    fi
+    if [ -n "$(
+        lumen_read_dotenv_value TELEGRAM_BOT_TOKEN "${shared_env}"
+    )" ]; then
+        target_tgbot_enabled=1
+    fi
+    if lumenctl_tgbot_running "${deploy_root}/current"; then
+        original_tgbot_running=1
+    fi
 
     if [ "${LUMEN_NONINTERACTIVE:-}" != "1" ] \
             && [ "${LUMEN_ROLLBACK_YES:-}" != "1" ]; then
         printf '\n'
-        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag}, version=${old_version}），并重启 api/worker/web。"
+        log_warn "rollback 将切换到 release ${old_id}（镜像 tag=${old_tag}, version=${old_version}），并重启 api/worker/web/tgbot（按配置）。"
         if ! confirm "继续 rollback？"; then
             log_info "已取消。"
             return 0
@@ -211,6 +340,19 @@ _lumen_compose_rollback_locked() {
         || return 1
     if ! cp -p "${shared_env}" "${env_snapshot}"; then
         rm -f "${env_snapshot}" 2>/dev/null || true
+        return 1
+    fi
+    local runtime_owner="${LUMEN_APP_UID:-10001}"
+    local runtime_group="${LUMEN_APP_GID:-10001}"
+    if id lumen >/dev/null 2>&1; then
+        runtime_owner="lumen"
+        runtime_group="$(id -gn lumen 2>/dev/null || printf 'lumen')"
+    fi
+    if ! lumen_release_harden_ownership \
+            "${deploy_root}" "${old_dir}" "${deploy_root}/shared" \
+            "${runtime_owner}" "${runtime_group}"; then
+        rm -f "${env_snapshot}" 2>/dev/null || true
+        log_error "rollback 目标 ownership 无法收紧，拒绝切换。"
         return 1
     fi
 
@@ -237,6 +379,17 @@ _lumen_compose_rollback_locked() {
         log_step "docker compose up -d --wait api worker web"
         if ! lumen_compose_in "${deploy_root}/current" \
                 up --pull missing -d --wait api worker web; then
+            rollback_rc=1
+        elif ! lumenctl_restore_tgbot_state \
+                "${deploy_root}/current" "${target_tgbot_enabled}"; then
+            log_error "rollback 后 tgbot 状态恢复失败。"
+            rollback_rc=1
+        elif ! lumen_require_compose_core_readiness \
+                "${deploy_root}/current" \
+                "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
+                "${LUMEN_CORE_READINESS_ATTEMPTS:-60}" \
+                "${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}"; then
+            log_error "rollback 后 API/Worker readiness 未通过。"
             rollback_rc=1
         fi
     fi
@@ -265,11 +418,20 @@ _lumen_compose_rollback_locked() {
             || cp "${deploy_root}/current/VERSION" "${deploy_root}/VERSION"
     fi
     if [ "${restore_ok}" -eq 1 ]; then
-        rm -f "${env_snapshot}"
         log_warn "rollback 前状态已恢复，尝试重新拉起原 release 核心服务。"
-        lumen_compose_in "${deploy_root}/current" \
-            up --pull missing -d --wait api worker web \
-            || log_error "原 release 核心服务恢复失败，请人工检查 compose 日志。"
+        if lumen_compose_in "${deploy_root}/current" \
+                up --pull missing -d --wait api worker web \
+                && lumenctl_restore_tgbot_state \
+                    "${deploy_root}/current" "${original_tgbot_running}" \
+                && lumen_require_compose_core_readiness \
+                    "${deploy_root}/current" \
+                    "${LUMEN_API_READY_URL:-http://127.0.0.1:8000/readyz}" \
+                    "${LUMEN_CORE_READINESS_ATTEMPTS:-60}" \
+                    "${LUMEN_CORE_READINESS_INTERVAL_SECONDS:-1}"; then
+            rm -f "${env_snapshot}"
+        else
+            log_error "原 release API/Worker readiness 恢复失败；快照保留在 ${env_snapshot}。"
+        fi
     fi
     return 1
 }

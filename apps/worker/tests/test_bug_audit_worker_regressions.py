@@ -11,6 +11,11 @@ from typing import Any
 
 import pytest
 from redis.exceptions import WatchError
+from lumen_core.upstream_billing import (
+    mark_upstream_dispatch_proven_no_cost,
+    mark_upstream_dispatch_started,
+    mark_upstream_response_received,
+)
 
 from app import account_limiter, observability, sse_publish, video_artifacts
 from app import runtime_settings as worker_runtime_settings
@@ -1891,6 +1896,91 @@ async def test_zero_usage_failed_completion_releases_hold(
     )
 
     assert released == ["upstream_failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_request", "usage_values", "expected"),
+    [
+        ({}, (0, 0, 0), "release"),
+        (
+            mark_upstream_dispatch_started(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            (0, 0, 0),
+            "settle:unknown",
+        ),
+        (
+            mark_upstream_response_received(
+                {},
+                at="2026-08-03T00:00:01+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            (0, 0, 0),
+            "settle:unknown",
+        ),
+        (
+            mark_upstream_dispatch_proven_no_cost(
+                {},
+                at="2026-08-03T00:00:00+00:00",
+                attempt=1,
+                execution_epoch=3,
+            ),
+            (0, 0, 0),
+            "release",
+        ),
+        ({}, (1, 0, 0), "charge"),
+    ],
+)
+async def test_failed_completion_billing_uses_dispatch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_request: dict[str, object],
+    usage_values: tuple[int, ...],
+    expected: str,
+) -> None:
+    calls: list[str] = []
+    completion_row = SimpleNamespace(
+        execution_epoch=3,
+        upstream_request=upstream_request,
+    )
+
+    async def charge(_session: Any, _row: Any) -> None:
+        calls.append("charge")
+
+    async def release(_session: Any, _row: Any, *, reason: str) -> None:
+        assert reason == "upstream_failed"
+        calls.append("release")
+
+    async def settle(
+        _session: Any,
+        _row: Any,
+        *,
+        reason: str,
+        knowledge: str,
+    ) -> None:
+        assert reason == "upstream_failed"
+        calls.append(f"settle:{knowledge}")
+
+    monkeypatch.setattr(completion.worker_billing, "charge_completion", charge)
+    monkeypatch.setattr(completion.worker_billing, "release_completion", release)
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "settle_completion_unknown_upstream",
+        settle,
+    )
+
+    await completion._settle_failed_completion_billing(  # noqa: SLF001
+        object(),
+        completion_row,
+        usage_values=usage_values,
+        reason="upstream_failed",
+    )
+
+    assert calls == [expected]
 
 
 def test_generation_byok_early_failure_releases_hold_and_guards_status() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import ctypes
+import errno
 import json
 import os
 import tempfile
@@ -21,10 +23,33 @@ from .serialization import storage_path as _storage_path  # noqa: F401
 
 
 MODEL_LIBRARY_ROOT_KEY = "apparel-model-library"
+_DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS = frozenset(
+    {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+)
+
+
+def _sync_filesystem(fd: int) -> None:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syncfs = libc.syncfs
+    except (AttributeError, OSError) as exc:
+        raise OSError(
+            errno.ENOTSUP,
+            "syncfs is unavailable for directory durability fallback",
+        ) from exc
+    syncfs.argtypes = [ctypes.c_int]
+    syncfs.restype = ctypes.c_int
+    if syncfs(fd) != 0:
+        code = ctypes.get_errno() or errno.EIO
+        raise OSError(code, os.strerror(code))
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_parents_durable(path.parent)
     payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True).encode(
         "utf-8"
     )
@@ -44,17 +69,36 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
     try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
+                raise
+            _sync_filesystem(fd)
     finally:
         os.close(fd)
+
+
+def _mkdir_parents_durable(path: Path) -> None:
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+        else:
+            _fsync_dir(directory.parent)
 
 
 def _read_file_bytes_bounded(path: Path, max_bytes: int) -> bytes:
@@ -292,7 +336,7 @@ def _preset_thumb_storage_key(
 
 
 def _write_bytes_replace(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_parents_durable(path.parent)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )

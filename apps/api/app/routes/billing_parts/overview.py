@@ -53,7 +53,9 @@ from .orphan_hold_recovery import (
     ensure_admin_recovery_audit,
     load_hold_group,
     recovery_action,
+    recovery_action_for_hold,
     replay_hold_group,
+    resolve_prompt_hold_recovery,
 )
 from .orphan_hold_settlement import (
     admin_settle_orphan_prompt_hold as admin_settle_orphan_prompt_hold,
@@ -333,12 +335,13 @@ async def admin_list_orphan_holds(
         created = hold.created_at
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
+        action = await recovery_action_for_hold(db, hold)
         out.append(
             AdminOrphanHoldOut(
                 tx=queries.tx_out(hold),
                 user_id=hold.user_id,
                 age_seconds=max(0, int((now - created).total_seconds())),
-                recovery_action=recovery_action(hold.ref_type),
+                recovery_action=action,
             )
         )
     wallet_orphan_holds.set(len(out))
@@ -414,7 +417,10 @@ async def admin_release_orphan_hold(
         await db.commit()
         await commands.invalidate_balance_cache(target_user_id)
         return out
-    if recovery_action(hold.ref_type) != "release":
+    if (
+        hold.ref_type != "prompt_enhance"
+        and recovery_action(hold.ref_type) != "release"
+    ):
         raise queries.http(
             "HOLD_RELEASE_NOT_PROVEN_SAFE",
             "this hold cannot be safely released; use its recommended recovery action",
@@ -437,10 +443,19 @@ async def admin_release_orphan_hold(
             "HOLD_ALREADY_CONSUMED", "hold was already settled or released", 409
         )
     group = await load_hold_group(db, hold)
-    release_proof = await ensure_hold_task_is_terminal(
-        db,
-        hold,
-        http=queries.http,
+    release_proof = (
+        await resolve_prompt_hold_recovery(
+            db,
+            hold,
+            action="release",
+            http=queries.http,
+        )
+        if hold.ref_type == "prompt_enhance"
+        else await ensure_hold_task_is_terminal(
+            db,
+            hold,
+            http=queries.http,
+        )
     )
     tx = await billing_core.release(
         db,

@@ -39,7 +39,7 @@ class CorsMiddlewareTests(unittest.TestCase):
             actual.headers.get("access-control-expose-headers", ""),
         )
 
-    def test_preflight_allows_idempotency_key_header_for_put(self) -> None:
+    def test_preflight_allows_idempotency_and_identity_headers_for_put(self) -> None:
         original = settings.cors_allow_origins
         settings.cors_allow_origins = "http://198.51.100.10:3000"
         try:
@@ -49,7 +49,9 @@ class CorsMiddlewareTests(unittest.TestCase):
                 headers={
                     "Origin": "http://198.51.100.10:3000",
                     "Access-Control-Request-Method": "PUT",
-                    "Access-Control-Request-Headers": "Idempotency-Key",
+                    "Access-Control-Request-Headers": (
+                        "Idempotency-Key, X-Lumen-Expected-User-Id"
+                    ),
                 },
             )
         finally:
@@ -59,6 +61,10 @@ class CorsMiddlewareTests(unittest.TestCase):
         self.assertIn("PUT", response.headers["access-control-allow-methods"])
         self.assertIn(
             "Idempotency-Key",
+            response.headers["access-control-allow-headers"],
+        )
+        self.assertIn(
+            "X-Lumen-Expected-User-Id",
             response.headers["access-control-allow-headers"],
         )
 

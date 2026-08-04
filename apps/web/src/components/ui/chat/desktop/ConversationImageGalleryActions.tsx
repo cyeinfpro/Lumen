@@ -46,7 +46,7 @@ export function GalleryActionButton({
       disabled={disabled || loading}
       title={title}
       className={cn(
-        "inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
+        "inline-flex h-7 min-h-11 items-center gap-1.5 rounded-[var(--radius-card)] px-2.5 text-[11px]",
         "border transition-colors disabled:cursor-not-allowed disabled:opacity-55",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         tone === "accent"
@@ -117,7 +117,7 @@ export function FavoriteOptionsForm({
               aria-pressed={gender === value}
               onClick={() => onGenderChange(value)}
               className={cn(
-                "inline-flex h-8 items-center rounded-[var(--radius-card)] border px-3 text-[12px] transition-colors",
+                "inline-flex h-8 min-h-11 items-center rounded-[var(--radius-card)] border px-3 text-[12px] transition-colors",
                 gender === value
                   ? "border-[var(--border-amber)] bg-[var(--amber-soft)] text-[var(--amber-300)]"
                   : "border-[var(--border-subtle)] bg-[var(--bg-1)] text-[var(--fg-1)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -150,7 +150,7 @@ export function FilterButton({
       aria-selected={active}
       onClick={onClick}
       className={cn(
-        "inline-flex h-7 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[11px] transition-colors",
+        "inline-flex h-7 min-h-11 items-center gap-1 rounded-[var(--radius-control)] px-2.5 text-[11px] transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--amber-400)]/60",
         active
           ? "bg-[var(--bg-2)] text-[var(--fg-0)]"

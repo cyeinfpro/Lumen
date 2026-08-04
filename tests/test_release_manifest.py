@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_release_manifest.py"
+GOVERNANCE_SCORE = ROOT / "scripts" / "governance_score.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "docker-release.yml"
 
 
@@ -19,6 +20,18 @@ def _load_script():
     spec = importlib.util.spec_from_file_location("build_release_manifest", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_governance_score():
+    spec = importlib.util.spec_from_file_location(
+        "release_manifest_governance_score",
+        GOVERNANCE_SCORE,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -275,14 +288,11 @@ def test_docker_release_promotes_aliases_only_after_all_signed_builds() -> None:
     assert "--metadata-file" in json.dumps(jobs["merge-web"], sort_keys=True)
 
     release = jobs["release"]
-    assert set(release["needs"]) == {
-        "resolve-ref",
-        "promote",
-        "promote-shared",
-    }
+    assert set(release["needs"]) == {"resolve-ref", "promote"}
     release_encoded = json.dumps(release, sort_keys=True)
     assert "softprops/action-gh-release@" in release_encoded
     assert "needs.promote.outputs.is_prerelease" in release_encoded
+    assert '"make_latest": "false"' in release_encoded
 
 
 def test_docker_release_serializes_sha_and_stable_shared_aliases() -> None:
@@ -341,7 +351,7 @@ def test_docker_release_main_and_release_promotion_are_explicit() -> None:
     }
 
 
-def test_stable_shared_aliases_precede_github_release() -> None:
+def test_github_release_and_manifest_gate_stable_shared_aliases() -> None:
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     release = jobs["release"]
@@ -349,11 +359,7 @@ def test_stable_shared_aliases_precede_github_release() -> None:
     manifest_run = manifest_step["run"]
     assert isinstance(manifest_run, str)
 
-    assert set(release["needs"]) == {
-        "resolve-ref",
-        "promote",
-        "promote-shared",
-    }
+    assert set(release["needs"]) == {"resolve-ref", "promote"}
     manifest_env = manifest_step["env"]
     assert manifest_env["API_DIGEST"] == "${{ needs.promote.outputs.api_digest }}"
     assert manifest_env["WORKER_DIGEST"] == (
@@ -372,16 +378,66 @@ def test_stable_shared_aliases_precede_github_release() -> None:
     )
 
     shared = jobs["promote-shared"]
-    assert set(shared["needs"]) == {"resolve-ref", "promote"}
-    assert shared["if"] == "needs.resolve-ref.outputs.is_release == 'true'"
-    assert shared["permissions"] == {"contents": "read", "packages": "write"}
+    assert set(shared["needs"]) == {"resolve-ref", "promote", "release"}
+    assert shared["if"] == (
+        "needs.resolve-ref.outputs.is_release == 'true' && "
+        "needs.promote.outputs.is_prerelease == 'false'"
+    )
+    assert shared["permissions"] == {"contents": "write", "packages": "write"}
     shared_step = _step(shared, "Publish stable shared aliases")
-    assert shared_step["if"] == "needs.promote.outputs.is_prerelease == 'false'"
+    assert "if" not in shared_step
     shared_run = shared_step["run"]
     assert isinstance(shared_run, str)
     assert "--phase mutable" in shared_run
     assert "--release-tag" in shared_run
+    latest_step = _step(shared, "Mark stable release latest")
+    latest_run = latest_step["run"]
+    assert isinstance(latest_run, str)
+    assert "gh release edit" in latest_run
+    assert "--latest" in latest_run
+    assert shared["steps"].index(shared_step) < shared["steps"].index(latest_step)
     assert "always()" not in json.dumps(shared, sort_keys=True)
+
+
+def test_governance_score_enforces_release_before_stable_aliases() -> None:
+    governance_score = _load_governance_score()
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    check = governance_score._release_publication_dag_check(workflow)
+    assert check.passed is True
+    assert "GitHub latest moves only after aliases" in check.detail
+
+    old_dag = """
+jobs:
+  promote-shared:
+    needs: [resolve-ref, promote]
+    if: needs.resolve-ref.outputs.is_release == 'true'
+  release:
+    needs: [resolve-ref, promote, promote-shared]
+"""
+    assert governance_score._release_publication_dag_check(old_dag).passed is False
+
+    prerelease_unguarded = workflow.replace(
+        " && needs.promote.outputs.is_prerelease == 'false'",
+        "",
+        1,
+    )
+    assert (
+        governance_score._release_publication_dag_check(prerelease_unguarded).passed
+        is False
+    )
+
+    eager_latest = workflow.replace("          make_latest: false\n", "", 1)
+    assert governance_score._release_publication_dag_check(eager_latest).passed is False
+
+
+def test_stable_release_ref_must_be_newest_stable_tag() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "newest_stable_tag" in workflow
+    assert "git tag --merged" in workflow
+    assert "sort -V" in workflow
+    assert "is not the newest stable tag" in workflow
 
 
 def test_alembic_breaking_lint_covers_pr_main_and_release() -> None:
