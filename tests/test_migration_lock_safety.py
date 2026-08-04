@@ -265,7 +265,7 @@ def _write_worker_health_mock(path: Path) -> None:
         textwrap.dedent(
             """\
             #!/usr/bin/env bash
-            printf '%s\n' "$*" >> "${WORKER_HEALTH_LOG:?}"
+            printf '%s\\n' "$*" >> "${WORKER_HEALTH_LOG:?}"
             [[ "${TEST_WORKER_READY:-1}" == "1" ]]
             """
         ),

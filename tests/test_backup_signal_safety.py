@@ -231,18 +231,18 @@ def _write_fake_systemctl(path: Path) -> None:
             """\
             #!/usr/bin/env bash
             set -u
-            printf '%s\n' "$*" >> "${TEST_SYSTEMCTL_LOG:?}"
+            printf '%s\\n' "$*" >> "${TEST_SYSTEMCTL_LOG:?}"
             if [ "${1:-}" != "is-active" ] || [ "$#" -ne 2 ]; then
-                printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+                printf 'unexpected systemctl invocation: %s\\n' "$*" >&2
                 exit 64
             fi
             case " ${TEST_ACTIVE_SYSTEMD_UNITS:-} " in
                 *" $2 "*)
-                    printf 'active\n'
+                    printf 'active\\n'
                     exit 0
                     ;;
             esac
-            printf 'inactive\n'
+            printf 'inactive\\n'
             exit 3
             """
         ),
@@ -280,7 +280,7 @@ def _write_curl_wrapper(path: Path) -> None:
             """\
             #!/usr/bin/env bash
             url="${@: -1}"
-            printf '%s\n' "$url" >> "${TEST_CURL_LOG:?}"
+            printf '%s\\n' "$url" >> "${TEST_CURL_LOG:?}"
             if [[ "$url" == */readyz ]] \
                     && [[ "${TEST_API_READY:-1}" != "1" ]]; then
                 exit 22
