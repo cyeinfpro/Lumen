@@ -159,7 +159,7 @@ export function RequestEventsPanel() {
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] lg:block">
               <table className="w-full min-w-[1040px] type-body-sm">
-                <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg-1)]/95 type-caption uppercase tracking-wider text-[var(--fg-1)] backdrop-blur">
+                <thead className="sticky top-0 z-[var(--z-header)] border-b border-[var(--border)] bg-[var(--bg-1)]/95 type-caption text-[var(--fg-1)] backdrop-blur">
                   <tr>
                     <th className="w-9 py-3 px-3" />
                     <th className="text-left py-3 px-3 font-medium">结束时间</th>

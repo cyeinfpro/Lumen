@@ -335,7 +335,7 @@ export function VideoWorkbenchHeader({
   const serviceValue = loading ? "读取中" : enabled ? "在线" : "离线";
 
   return (
-    <section className="sticky top-0 z-30 flex shrink-0 flex-col items-stretch gap-2 border-b border-[var(--border)] bg-[var(--bg-0)]/96 pb-3 pt-1 backdrop-blur-xl min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:gap-3">
+    <section className="sticky top-0 z-[var(--z-header)] flex shrink-0 flex-col items-stretch gap-2 border-b border-[var(--border)] bg-[var(--bg-0)]/96 pb-3 pt-1 backdrop-blur-xl min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between sm:gap-3">
       <div className="flex min-w-0 items-center gap-3">
         <span className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-card)] border border-[var(--accent-border)] bg-[var(--accent-soft)] text-[var(--accent)] sm:flex">
           <Clapperboard className="h-5 w-5" />

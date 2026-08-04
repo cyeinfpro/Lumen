@@ -124,7 +124,7 @@ export function ProjectsIndex() {
           <Link
             href="/projects/apparel-model-showcase/new"
             aria-label="新建项目"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-black active:scale-[0.96] md:h-9 md:w-9"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-[var(--accent)] text-[var(--accent-on)] active:scale-[0.96] md:h-9 md:w-9"
           >
             <Plus className="h-[18px] w-[18px]" />
           </Link>
@@ -202,7 +202,7 @@ function Hero({ counts }: { counts: Record<FilterKey, number> }) {
       <div className="page-header-actions">
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 type-caption font-medium text-black shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
+          className="group inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-[var(--accent)] px-3 type-caption font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-[transform,box-shadow] duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98]"
         >
           <Plus className="h-3.5 w-3.5" />
           新建项目
@@ -627,7 +627,7 @@ function ProjectCard({ item, order }: { item: WorkflowRunListItem; order: number
         <div
           ref={menuRef}
           role="menu"
-          className="absolute right-2 top-12 z-10 w-[min(15rem,calc(100vw-3rem))] max-w-[calc(100vw-1rem)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
+          className="absolute right-2 top-12 z-[var(--z-tray)] w-[min(15rem,calc(100vw-3rem))] max-w-[calc(100vw-1rem)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
         >
           {renaming ? (
             <form

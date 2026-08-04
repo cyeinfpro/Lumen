@@ -335,14 +335,14 @@ export function PullToRefresh({
       {/* 顶部 1px 琥珀进度线（触发/扫过时显） */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-px z-[6] overflow-hidden"
+        className="pointer-events-none absolute inset-x-0 top-0 z-[var(--z-header)] h-px overflow-hidden"
         style={{
           opacity: sweeping ? 1 : 0,
           transition: "opacity var(--dur-quick) linear",
         }}
       >
         <div
-          className="h-full w-[40%] bg-[var(--amber-400)]"
+            className="h-full w-[40%] bg-[var(--accent)]"
           style={{
             boxShadow: "0 0 10px 1px var(--amber-glow-strong)",
             animation: sweeping
@@ -355,13 +355,13 @@ export function PullToRefresh({
       {/* 琥珀小点（拉动提示） */}
       <div
         aria-hidden
-        className="pointer-events-none sticky top-0 left-0 right-0 h-0 z-[5]"
+        className="pointer-events-none sticky left-0 right-0 top-0 z-[var(--z-header)] h-0"
       >
         <div
           className="absolute inset-x-0 top-0 flex items-center justify-center"
         >
           <div
-            className="h-1.5 w-1.5 rounded-full bg-[var(--amber-400)]"
+            className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]"
             style={{
               opacity: progress,
               transform: `translate3d(0, ${Math.max(

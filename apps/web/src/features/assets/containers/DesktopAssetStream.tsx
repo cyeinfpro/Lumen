@@ -502,7 +502,7 @@ export function DesktopStream() {
         aria-label="回到顶部"
         onClick={scrollToTop}
         className={cn(
-          "fixed bottom-8 right-8 z-30 rounded-full",
+          "fixed bottom-8 right-8 z-[var(--z-tray)] rounded-full",
           "bg-[var(--bg-1)]/80 backdrop-blur-md shadow-[var(--shadow-2)]",
           "border border-[var(--border-subtle)]",
           "transition-[opacity,transform] duration-200",

@@ -617,7 +617,7 @@ export function PosterWorkflowNewPage() {
                       className={cn(
                         "inline-flex min-h-11 items-center rounded-full px-3 type-caption transition-colors md:min-h-9",
                         qualityMode === "standard"
-                          ? "bg-accent text-black"
+                          ? "bg-accent text-[var(--accent-on)]"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                       )}
                     >
@@ -629,7 +629,7 @@ export function PosterWorkflowNewPage() {
                       className={cn(
                         "inline-flex min-h-11 items-center rounded-full px-3 type-caption transition-colors md:min-h-9",
                         qualityMode === "premium"
-                          ? "bg-accent text-black"
+                          ? "bg-accent text-[var(--accent-on)]"
                           : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
                       )}
                     >

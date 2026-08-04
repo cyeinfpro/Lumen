@@ -90,12 +90,6 @@ export function WorkflowStepRailRow({
         ) : (
           <Icon className="h-3 w-3" />
         )}
-        {isCurrent ? (
-          <span
-            aria-hidden
-            className="absolute inset-0 -z-[1] animate-ping rounded-full bg-[var(--amber-glow)] opacity-50"
-          />
-        ) : null}
       </span>
 
       <div className="min-w-0 pt-0.5">

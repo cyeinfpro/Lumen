@@ -459,7 +459,7 @@ export function MobileStream() {
 
       <div
         className={cn(
-          "fixed right-4 z-30 h-11 w-11 transition-[opacity,transform] duration-200",
+          "fixed right-4 z-[var(--z-tray)] h-11 w-11 transition-[opacity,transform] duration-200",
           showScrollTop
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-3 opacity-0",

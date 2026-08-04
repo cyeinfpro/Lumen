@@ -707,7 +707,7 @@ function HistoryOutput({
       <CanvasOutputDownloadButton
         output={output}
         title={`画布输出 ${index + 1}`}
-        className="absolute bottom-1 left-1 z-10"
+        className="absolute bottom-1 left-1 z-[var(--z-header)]"
       />
     </div>
   );

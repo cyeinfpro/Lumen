@@ -84,7 +84,7 @@ export function OutputPreview({
         <CanvasOutputDownloadButton
           output={output}
           title={alt}
-          className="absolute bottom-2 left-2 z-10"
+          className="absolute bottom-2 left-2 z-[var(--z-header)]"
         />
       </div>
       {media.videoSrc ? (

@@ -355,7 +355,7 @@ function PosterDetailHeader({
           {menuOpen ? (
             <div
               role="menu"
-              className="absolute right-0 top-12 z-20 w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
+              className="absolute right-0 top-12 z-[var(--z-tray)] w-[min(18rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] p-1.5 shadow-[var(--shadow-2)]"
             >
               {confirmDelete ? (
                 <div className="grid gap-2 p-2">

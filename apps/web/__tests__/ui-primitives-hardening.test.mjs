@@ -81,9 +81,17 @@ function motionMock() {
   );
 }
 
-test("ConfirmDialog blocks backdrop and modal close while confirming", () => {
-  let modalOptions;
+function dialogMock() {
+  const Dialog = (props) => jsxRuntime.jsx("Dialog", props);
+  Dialog.Header = "Dialog.Header";
+  Dialog.Body = "Dialog.Body";
+  Dialog.Footer = "Dialog.Footer";
+  return Dialog;
+}
+
+test("ConfirmDialog blocks shared dialog close while confirming", () => {
   const calls = [];
+  const Dialog = dialogMock();
   const { ConfirmDialog } = loadModule(
     "src/components/ui/primitives/ConfirmDialog.tsx",
     {
@@ -93,19 +101,9 @@ test("ConfirmDialog blocks backdrop and modal close while confirming", () => {
         useId: () => "dialog-id",
         useRef: (value) => ({ current: value }),
       },
-      "framer-motion": {
-        AnimatePresence: "AnimatePresence",
-        motion: motionMock(),
-      },
-      "@/hooks/useBodyScrollLock": { useBodyScrollLock() {} },
       "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
       "./Button": { Button: "Button" },
-      "./mobile/useModalLayer": {
-        useModalLayer(options) {
-          modalOptions = options;
-          return () => {};
-        },
-      },
+      "./Dialog": { Dialog },
     },
   );
 
@@ -117,24 +115,16 @@ test("ConfirmDialog blocks backdrop and modal close while confirming", () => {
     onOpenChange: (open) => calls.push(["open", open]),
     onCancel: () => calls.push(["cancel"]),
   });
-  const overlay = findElement(
-    tree,
-    (node) =>
-      node.type === "motion.div" &&
-      typeof node.props.onMouseDown === "function",
-  );
-  const dialog = findElement(tree, (node) => node.props?.role === "dialog");
-  const backdrop = {};
-  overlay.props.onMouseDown({ target: backdrop, currentTarget: backdrop });
-  modalOptions.onClose();
+  const dialog = findElement(tree, (node) => node.type === Dialog);
+  dialog.props.onClose();
 
   assert.deepEqual(calls, []);
   assert.equal(dialog.props["aria-busy"], true);
 });
 
 test("ConfirmDialog still closes normally when it is idle", () => {
-  let modalOptions;
   const calls = [];
+  const Dialog = dialogMock();
   const { ConfirmDialog } = loadModule(
     "src/components/ui/primitives/ConfirmDialog.tsx",
     {
@@ -144,30 +134,21 @@ test("ConfirmDialog still closes normally when it is idle", () => {
         useId: () => "dialog-id",
         useRef: (value) => ({ current: value }),
       },
-      "framer-motion": {
-        AnimatePresence: "AnimatePresence",
-        motion: motionMock(),
-      },
-      "@/hooks/useBodyScrollLock": { useBodyScrollLock() {} },
       "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
       "./Button": { Button: "Button" },
-      "./mobile/useModalLayer": {
-        useModalLayer(options) {
-          modalOptions = options;
-          return () => {};
-        },
-      },
+      "./Dialog": { Dialog },
     },
   );
 
-  ConfirmDialog({
+  const tree = ConfirmDialog({
     open: true,
     title: "Delete",
     onConfirm() {},
     onOpenChange: (open) => calls.push(["open", open]),
     onCancel: () => calls.push(["cancel"]),
   });
-  modalOptions.onClose();
+  const dialog = findElement(tree, (node) => node.type === Dialog);
+  dialog.props.onClose();
 
   assert.deepEqual(calls, [["open", false], ["cancel"]]);
 });
@@ -185,16 +166,9 @@ test("ConfirmDialog runs onConfirm once when the button is double-clicked", asyn
         useId: () => "dialog-id",
         useRef: (value) => ({ current: value }),
       },
-      "framer-motion": {
-        AnimatePresence: "AnimatePresence",
-        motion: motionMock(),
-      },
-      "@/hooks/useBodyScrollLock": { useBodyScrollLock() {} },
       "@/lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
       "./Button": { Button: "Button" },
-      "./mobile/useModalLayer": {
-        useModalLayer: () => () => {},
-      },
+      "./Dialog": { Dialog: dialogMock() },
     },
   );
 
@@ -434,7 +408,9 @@ test("global toast keeps actionable and severe notices readable on mobile", () =
   assert.match(toastSource, /error: 8000/);
   assert.match(toastSource, /const ACTION_DURATION_MS = 10000/);
   assert.match(toastSource, /defaultDurationMs\(t\.tone, Boolean\(t\.action\)\)/);
-  assert.match(toastSource, /max-sm:min-h-11 max-sm:px-2/);
+  assert.match(toastSource, /max-sm:min-h-11/);
+  assert.match(toastSource, /max-sm:min-w-11/);
+  assert.match(toastSource, /max-sm:px-2/);
   assert.match(toastSource, /aria-atomic="true"/);
 });
 

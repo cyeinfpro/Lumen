@@ -434,7 +434,7 @@ export function SettingsPanel() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 30 }}
             transition={{ duration: 0.2 }}
-            className="fixed bottom-0 left-0 right-0 z-40 max-w-full px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4"
+            className="fixed bottom-0 left-0 right-0 z-[var(--z-tray)] max-w-full px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:bottom-4 sm:left-1/2 sm:right-auto sm:w-auto sm:max-w-[calc(100vw-2rem)] sm:-translate-x-1/2 sm:px-0 sm:pb-4"
           >
             <div className="surface-panel grid grid-cols-2 items-stretch gap-2 px-3 py-2.5 sm:flex sm:items-center sm:gap-3 sm:px-4">
               <span className="col-span-2 inline-flex items-center gap-1.5 type-caption text-[var(--fg-1)] sm:col-span-1 sm:whitespace-nowrap">

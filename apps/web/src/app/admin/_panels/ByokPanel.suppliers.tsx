@@ -490,7 +490,7 @@ function PurposesField({
               className={
                 "px-2.5 py-1 rounded-[var(--radius-card)] border type-caption transition-colors " +
                 (active
-                  ? "bg-[var(--accent)] text-black border-[var(--accent)]"
+                  ? "bg-[var(--accent)] text-[var(--accent-on)] border-[var(--accent)]"
                   : "bg-[var(--bg-2)] text-[var(--fg-1)] border-[var(--border)] hover:bg-[var(--bg-3)]")
               }
             >

@@ -177,7 +177,7 @@ export function VideoPosterButton({
           <Film className="h-6 w-6" />
         </div>
       )}
-      <span className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/20">
+      <span className="absolute inset-0 flex items-center justify-center bg-transparent transition-colors group-hover:bg-[var(--surface-scrim)]">
         <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--fg-0)]/85 px-3 py-1.5 type-caption font-medium text-[var(--bg-0)] shadow-[var(--shadow-2)]">
           <Play className="h-3.5 w-3.5" />
           播放预览
@@ -370,7 +370,7 @@ export function VideoPreviewDialogContent({
 
   return (
     <div
-      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-black/70 backdrop-blur-md sm:items-center sm:p-5"
+      className="mobile-dialog-shell mobile-perf-surface fixed inset-0 z-[var(--z-dialog)] flex items-end justify-center bg-[var(--surface-scrim)] backdrop-blur-md sm:items-center sm:p-5"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

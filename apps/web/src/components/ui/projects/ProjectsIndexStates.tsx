@@ -187,7 +187,7 @@ export function EmptyHero() {
         </div>
         <Link
           href="/projects/apparel-model-showcase/new"
-          className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full bg-[var(--accent)] px-5 py-2.5 type-body-sm font-medium text-black shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
+          className="group inline-flex shrink-0 items-center gap-2 self-start rounded-full bg-[var(--accent)] px-5 py-2.5 type-body-sm font-medium text-[var(--accent-on)] shadow-[var(--shadow-amber)] transition-transform duration-[var(--dur-base)] hover:scale-[1.02] active:scale-[0.98] md:self-end"
         >
           <Plus className="h-3.5 w-3.5" />
           创建第一个项目
