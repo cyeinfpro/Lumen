@@ -57,16 +57,16 @@ const VARIANTS: Record<Variant, string> = {
 // 兜底 44×44 可点区域。globals.css 虽已对 (pointer:coarse) 注入 min-height/min-width，
 // 但显式 min-h 可避免在视觉层出现"矮按钮 + 外挂 padding"的错位。
 const SIZES: Record<Size, string> = {
-  sm: "h-9 px-3 text-xs max-sm:min-h-11 max-sm:px-3.5",
-  md: "h-10 px-4 max-sm:min-h-11 max-sm:text-[15px]",
-  lg: "h-11 px-6 text-[15px] rounded-[var(--radius-card)] max-sm:min-h-12 max-sm:px-5",
+  sm: "h-9 px-3 max-sm:min-h-11 max-sm:px-3.5",
+  md: "h-10 px-4 max-sm:min-h-11",
+  lg: "h-11 px-6 rounded-[var(--radius-card)] max-sm:min-h-12 max-sm:px-5",
 };
 
 // link variant 专用尺寸：仅控制字号与 inline 行高，绝不引入 h-/px- 让 cn() 覆盖 p-0/h-auto。
 const LINK_SIZES: Record<Size, string> = {
-  sm: "text-xs",
-  md: "text-sm",
-  lg: "text-[15px]",
+  sm: "",
+  md: "",
+  lg: "",
 };
 
 export function Button({

@@ -77,13 +77,13 @@ function ModelSummary({ models }: { models: ModelDraft[] }) {
       {visible.map((model) => (
         <span
           key={model}
-          className="rounded-[var(--radius-card)] border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--fg-1)]"
+          className="rounded-[var(--radius-card)] border border-[var(--border)] px-1.5 py-0.5 font-mono type-caption text-[var(--fg-1)]"
         >
           {model}
         </span>
       ))}
       {names.length > visible.length && (
-        <span className="text-[10px] text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           +{names.length - visible.length}
         </span>
       )}
@@ -108,7 +108,7 @@ function ProviderEditorHeader({
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-[var(--fg-0)]">
+            <p className="type-body-sm font-medium text-[var(--fg-0)]">
               {draft.name.trim() || "未命名供应商"}
             </p>
             <StatusPill tone={tone} label={editorStatusLabel(tone)} />
@@ -351,7 +351,7 @@ function ProviderStateEditor({
         <span>
           <span className="block">启用此供应商</span>
           {draft.kind === "veo" && (
-            <span className="mt-0.5 block text-[11px] text-warning">
+            <span className="mt-0.5 block type-caption text-warning">
               Veo 适配器尚未接入 Worker
             </span>
           )}
@@ -381,7 +381,7 @@ function ProviderStateEditor({
         />
       </div>
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
+        <div className="flex items-center gap-2 type-caption font-medium text-[var(--fg-0)]">
           <KeyRound className="h-4 w-4 text-[var(--fg-2)]" />
           Key 状态
         </div>
@@ -390,7 +390,7 @@ function ProviderStateEditor({
         </p>
       </div>
       <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] px-3 py-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-[var(--fg-0)]">
+        <div className="flex items-center gap-2 type-caption font-medium text-[var(--fg-0)]">
           <Layers3 className="h-4 w-4 text-[var(--fg-2)]" />
           动作覆盖
         </div>

@@ -115,7 +115,7 @@ function FilterChips({
   return (
     <>
       {filters.ratio && (
-        <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+        <span className="inline-flex min-h-8 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-1)]">
           {filters.ratio}
         </span>
       )}
@@ -123,7 +123,7 @@ function FilterChips({
         <button
           type="button"
           onClick={onToggleReferenceFilter}
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-1)] transition-colors hover:text-[var(--fg-0)] focus-visible:outline-none md:min-h-8"
         >
           <ImageIcon className="h-3 w-3" />
           参考图
@@ -133,14 +133,14 @@ function FilterChips({
         <button
           type="button"
           onClick={onToggleFastFilter}
-          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
+          className="inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 type-caption text-[var(--accent)] transition-colors hover:bg-[var(--bg-2)] focus-visible:outline-none md:min-h-9"
         >
           <Gauge className="h-3 w-3" />
           快速
         </button>
       )}
       {hasSearch && (
-        <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 text-[11px] text-[var(--fg-1)]">
+        <span className="inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2 type-caption text-[var(--fg-1)]">
           <Search className="h-3 w-3 shrink-0" />
           <span className="min-w-0 truncate">{searchValue.trim()}</span>
         </span>
@@ -190,7 +190,7 @@ export function StreamOverview({
             <span className="tabular-nums">{promptCount} 提示词</span>
           </span>
           {total > loaded && (
-            <span className="text-[11px] tabular-nums text-[var(--fg-2)]">
+            <span className="type-caption tabular-nums text-[var(--fg-2)]">
               共 {total}，继续下滑加载
             </span>
           )}

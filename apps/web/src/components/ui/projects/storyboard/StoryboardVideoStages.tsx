@@ -70,7 +70,7 @@ function VideoQueueRow({
           </span>
           <StatusPill status={shot.video_status || shot.status} />
         </div>
-        <h3 className="mt-1 truncate text-sm font-semibold">{shot.title}</h3>
+        <h3 className="mt-1 truncate type-body-sm font-semibold">{shot.title}</h3>
         <div className="mt-2 h-2 overflow-hidden rounded-full bg-[var(--bg-2)]">
           <div
             className="h-full bg-[var(--accent)] transition-all"
@@ -84,7 +84,7 @@ function VideoQueueRow({
             href={shot.video.url}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 text-xs hover:bg-[var(--bg-2)] sm:min-h-9"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] px-3 type-caption hover:bg-[var(--bg-2)] sm:min-h-9"
           >
             <Play className="h-3.5 w-3.5" />
             预览
@@ -120,8 +120,8 @@ export function AssemblyStage({ run }: { run: StoryboardRun }) {
       <div className="grid gap-4 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/74 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold">合成状态</p>
-            <p className="mt-1 text-sm text-[var(--fg-1)]">
+            <p className="type-body-sm font-semibold">合成状态</p>
+            <p className="mt-1 type-body-sm text-[var(--fg-1)]">
               {STATUS_TEXT[run.assembly?.status || "waiting_input"] ??
                 run.assembly?.status ??
                 "等待视频段完成"}
@@ -147,7 +147,7 @@ export function AssemblyStage({ run }: { run: StoryboardRun }) {
           <a
             href={run.assembly.video_url}
             download
-            className="inline-flex min-h-11 w-fit items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-on)] sm:min-h-10"
+            className="inline-flex min-h-11 w-fit items-center justify-center rounded-[var(--radius-control)] bg-[var(--accent)] px-4 type-body-sm font-semibold text-[var(--accent-on)] sm:min-h-10"
           >
             下载 mp4
           </a>

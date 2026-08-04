@@ -176,9 +176,9 @@ export function Field({
         value={value}
         inputMode={inputMode}
         onChange={(event) => onChange(event.target.value)}
-        className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 text-sm outline-none transition-colors focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25"
+        className="h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 type-body-sm outline-none transition-colors focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25"
       />
-      <span className="text-[11px] leading-relaxed text-[var(--fg-2)]">
+      <span className="type-caption leading-relaxed text-[var(--fg-2)]">
         {hint}
       </span>
     </label>
@@ -202,7 +202,7 @@ export function FieldInline({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
+      <span className="type-caption text-[var(--fg-2)]">{label}</span>
       <input
         type="text"
         value={value}
@@ -211,7 +211,7 @@ export function FieldInline({
         inputMode={inputMode}
         autoComplete="off"
         className={[
-          "h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 text-sm outline-none transition-colors focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25",
+          "h-9 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/60 px-3 type-body-sm outline-none transition-colors focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25",
           mono ? "font-mono" : "",
         ].join(" ")}
       />
@@ -232,7 +232,7 @@ export function FieldSelect({
 }) {
   return (
     <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] text-[var(--fg-2)]">{label}</span>
+      <span className="type-caption text-[var(--fg-2)]">{label}</span>
       <Select
         value={value}
         onChange={(event) => onChange(event.target.value)}

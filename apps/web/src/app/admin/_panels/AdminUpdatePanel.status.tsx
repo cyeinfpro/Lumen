@@ -155,10 +155,10 @@ export function UpdateConsoleHeader({
         </div>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="type-card-title text-sm">更新控制台</h3>
+            <h3 className="type-card-title ">更新控制台</h3>
             <span
               className={cn(
-                "rounded-[var(--radius-control)] border px-2 py-0.5 text-[11px]",
+                "rounded-[var(--radius-control)] border px-2 py-0.5 type-caption",
                 updateConsolePillClass(state),
               )}
             >
@@ -259,7 +259,7 @@ export function UpdateConsoleMeta({
   logCount: number;
 }) {
   return (
-    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+    <div className="mt-3 flex flex-wrap gap-2 type-caption">
       {running && (
         <span
           className={cn(
@@ -356,14 +356,14 @@ export function ReloadNotice({
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 text-[11px] text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
+          className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1 type-caption text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)]"
         >
           {copy.action.cancel}
         </button>
         <button
           type="button"
           onClick={onReload}
-          className="rounded-[var(--radius-control)] bg-success px-2 py-1 text-[11px] font-medium text-[var(--success-on)] transition-[filter] hover:brightness-110"
+          className="rounded-[var(--radius-control)] bg-success px-2 py-1 type-caption font-medium text-[var(--success-on)] transition-[filter] hover:brightness-110"
         >
           立即刷新
         </button>
@@ -405,10 +405,10 @@ export function UpdateProgress({
   return (
     <div className="mt-3">
       <div className="flex items-center justify-between gap-3">
-        <span className="truncate text-xs font-medium text-[var(--fg-1)]">
+        <span className="truncate type-caption font-medium text-[var(--fg-1)]">
           {progressLabel(running, failed, activePhase)}
         </span>
-        <span className="shrink-0 font-mono text-[11px] text-[var(--fg-2)]">
+        <span className="shrink-0 font-mono type-caption text-[var(--fg-2)]">
           {progressPct}%
         </span>
       </div>

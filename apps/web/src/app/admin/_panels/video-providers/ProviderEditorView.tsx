@@ -164,7 +164,7 @@ export function ProviderEditorView({
         ))}
         {drafts.length === 0 && (
           <div className="rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-1)]/60 px-5 py-8 text-center">
-            <p className="text-sm font-medium text-[var(--fg-0)]">
+            <p className="type-body-sm font-medium text-[var(--fg-0)]">
               暂无编辑中的供应商
             </p>
             <p className="mt-1 type-caption text-[var(--fg-2)]">
@@ -248,7 +248,7 @@ function EditCommandCenter({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-[var(--fg-0)]">
+            <p className="type-body-sm font-medium text-[var(--fg-0)]">
               编辑视频供应商
             </p>
             <StatusPill tone="neutral" label={`${draftCount} 个供应商`} />
@@ -356,10 +356,10 @@ function PresetButton({
         {icon}
       </span>
       <span className="min-w-0">
-        <span className="block truncate text-xs font-medium text-[var(--fg-0)]">
+        <span className="block truncate type-caption font-medium text-[var(--fg-0)]">
           {title}
         </span>
-        <span className="mt-0.5 block truncate text-[11px] text-[var(--fg-2)]">
+        <span className="mt-0.5 block truncate type-caption text-[var(--fg-2)]">
           {detail}
         </span>
       </span>

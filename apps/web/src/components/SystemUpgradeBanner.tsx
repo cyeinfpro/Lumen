@@ -50,7 +50,7 @@ export function SystemUpgradeBanner() {
       role="status"
       aria-live="polite"
       data-system-banner
-      className="fixed inset-x-0 top-0 border-b border-warning-border bg-warning-soft text-sm text-[var(--warning-fg)] shadow-[var(--shadow-2)] backdrop-blur-md"
+      className="fixed inset-x-0 top-0 border-b border-warning-border bg-warning-soft type-body-sm text-[var(--warning-fg)] shadow-[var(--shadow-2)] backdrop-blur-md"
       style={{
         zIndex: "var(--z-banner, 85)",
         paddingTop: "env(safe-area-inset-top, 0px)",

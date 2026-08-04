@@ -377,12 +377,12 @@ export function HealthPanel({ onOpenTab }: HealthPanelProps) {
         </div>
         <div className="divide-y divide-[var(--border-subtle)]">
           {failedEvents.map((event) => (
-            <div key={event.id} className="grid gap-2 px-4 py-3 text-sm md:grid-cols-[160px_1fr_auto]">
+            <div key={event.id} className="grid gap-2 px-4 py-3 type-body-sm md:grid-cols-[160px_1fr_auto]">
               <span className="text-[var(--fg-2)]">{new Date(event.created_at).toLocaleString()}</span>
               <span className="min-w-0 truncate text-[var(--fg-0)]">
                 {event.error_code ?? event.status} · {event.prompt ?? event.conversation_title ?? event.id}
               </span>
-              <span className="font-mono text-xs text-[var(--fg-2)]">{event.kind}</span>
+              <span className="font-mono type-caption text-[var(--fg-2)]">{event.kind}</span>
             </div>
           ))}
           {!failedEventsQ.isLoading && failedEvents.length === 0 && (
@@ -424,8 +424,8 @@ function HealthTile({
         </div>
         <TonePill tone={tone} />
       </div>
-      <p className="mt-3 text-lg font-semibold text-[var(--fg-0)]">{value}</p>
-      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-[var(--fg-2)]">{detail}</p>
+      <p className="mt-3 type-metric text-[var(--fg-0)]">{value}</p>
+      <p className="mt-1 line-clamp-2 type-caption leading-relaxed text-[var(--fg-2)]">{detail}</p>
     </button>
   );
 }
@@ -456,7 +456,7 @@ function TonePill({ tone }: { tone: Tone }) {
       : "border-[var(--border)] bg-[var(--bg-2)] text-[var(--fg-2)]";
   const label = tone === "ok" ? "正常" : tone === "danger" ? "故障" : tone === "warn" ? "提醒" : "未配置";
   return (
-    <span className={`rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>
+    <span className={`rounded-full border px-2 py-0.5 type-caption ${cls}`}>
       {label}
     </span>
   );

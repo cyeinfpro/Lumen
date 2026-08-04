@@ -317,7 +317,7 @@ function InlineNodeTitle({
         event.stopPropagation();
       }}
       className={cn(
-        "nodrag nopan nokey block min-w-0 max-w-full cursor-text rounded-[var(--radius-control)] border border-transparent bg-transparent px-1 py-0.5 font-medium text-[var(--fg-0)] outline-none hover:border-[var(--border)] focus:border-[var(--accent)] focus:bg-[var(--bg-1)] focus:ring-2 focus:ring-[var(--accent-soft)] max-[1199px]:text-base",
+        "nodrag nopan nokey block min-w-0 max-w-full cursor-text rounded-[var(--radius-control)] border border-transparent bg-transparent px-1 py-0.5 font-medium text-[var(--fg-0)] outline-none hover:border-[var(--border)] focus:border-[var(--accent)] focus:bg-[var(--bg-1)] focus:ring-2 focus:ring-[var(--accent-soft)] type-body",
         editingDisabled &&
           "pointer-events-none cursor-default truncate hover:border-transparent",
         compact

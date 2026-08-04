@@ -320,7 +320,7 @@ function ModelLibraryError({
   return (
     <div role="alert" className="border-y border-[var(--danger-border)] py-12">
       <p className="type-page-kicker text-[var(--danger)]">加载失败</p>
-      <p className="mt-2 max-w-xl text-sm text-[var(--fg-1)]">{message}</p>
+      <p className="mt-2 max-w-xl type-body-sm text-[var(--fg-1)]">{message}</p>
       <Button variant="outline" size="sm" onClick={onRetry} className="mt-4">
         重试
       </Button>

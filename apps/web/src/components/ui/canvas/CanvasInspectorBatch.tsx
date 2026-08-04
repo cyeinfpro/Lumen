@@ -205,7 +205,7 @@ function BatchLayoutButton({
     <Button
       size="sm"
       variant="outline"
-      className="min-w-0 px-2 text-[11px]"
+      className="min-w-0 px-2 type-caption"
       leftIcon={<span aria-hidden>{icon}</span>}
       onClick={onClick}
     >

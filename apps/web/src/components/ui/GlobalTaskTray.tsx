@@ -216,7 +216,7 @@ export function GlobalTaskTray() {
               {badge.count > 0 && (
                 <span
                   className={cn(
-                    "absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[10px] font-semibold",
+                    "absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full px-1 type-caption font-semibold",
                     badge.active
                       ? "bg-[var(--accent)] text-[var(--accent-on)]"
                       : "bg-[var(--fg-2)] text-[var(--bg-0)]",

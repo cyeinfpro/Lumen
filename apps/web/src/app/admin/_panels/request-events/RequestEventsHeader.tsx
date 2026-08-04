@@ -122,12 +122,12 @@ function ModelStatBar({ stat }: { stat: RequestEventModelStat }) {
     <div className="min-w-0 rounded-[var(--radius-panel)] border border-[var(--border-subtle)] bg-[var(--bg-2)] px-3 py-2.5">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <span
-          className="min-w-0 truncate font-mono text-xs text-[var(--fg-0)]"
+          className="min-w-0 truncate font-mono type-caption text-[var(--fg-0)]"
           title={stat.model}
         >
           {stat.model}
         </span>
-        <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--fg-2)]">
+        <span className="shrink-0 font-mono type-caption tabular-nums text-[var(--fg-2)]">
           {stat.count} · {formatPercent(stat.share)}
         </span>
       </div>
@@ -153,7 +153,7 @@ function SegmentedControl<T extends string>({
   return (
     <div
       role="tablist"
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] p-0.5 text-xs"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-[var(--radius-panel)] border border-[var(--border)] bg-[var(--bg-2)] p-0.5 type-caption"
     >
       {options.map((option) => {
         const active = option.value === value;
@@ -236,11 +236,11 @@ export function RequestEventsHeader({
         <div className="min-w-0">
           <h2
             id="request-events-title"
-            className="text-lg font-semibold tracking-tight text-[var(--fg-0)]"
+            className="type-card-title font-semibold tracking-tight text-[var(--fg-0)]"
           >
             请求事件
           </h2>
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--fg-2)]">
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 type-caption text-[var(--fg-2)]">
             <span className="inline-flex items-center gap-1.5">
               <Clock3 className="h-3.5 w-3.5" />
               最新 {latestLabel}
@@ -286,7 +286,7 @@ export function RequestEventsHeader({
             value={search}
             onChange={(event) => onSearch(event.target.value)}
             placeholder={FILTERED_SEARCH_PLACEHOLDER}
-            className="min-w-0 flex-1 bg-transparent text-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent type-body-sm text-[var(--fg-0)] placeholder:text-[var(--fg-2)] focus:outline-none"
           />
           {search.trim() && (
             <button
@@ -370,7 +370,7 @@ export function RequestEventsHeader({
 
       {modelStats.length > 0 && (
         <div className="mt-4 border-t border-[var(--border-subtle)] pt-4">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 type-caption">
             <span className="inline-flex items-center gap-1.5 font-medium text-[var(--fg-1)]">
               <BarChart3 className="h-3.5 w-3.5 text-[var(--accent)]" />
               路径统计

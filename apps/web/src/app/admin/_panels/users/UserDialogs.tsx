@@ -84,7 +84,7 @@ export function UserHistoryDialog({
         <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] p-4">
           <div className="min-w-0">
             <h2 className="type-card-title">生成历史</h2>
-            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">
+            <p className="mt-1 break-all type-caption text-[var(--fg-2)]">
               {user.email}
             </p>
           </div>
@@ -119,15 +119,15 @@ export function UserHistoryDialog({
                       <div className="flex flex-wrap items-center gap-2">
                         <StatusPill status={item.status} />
                         <RetentionPill state={item.retention_state} />
-                        <span className="font-mono text-xs text-[var(--fg-2)]">
+                        <span className="font-mono type-caption text-[var(--fg-2)]">
                           {formatISODate(item.created_at)}
                         </span>
                       </div>
-                      <p className="line-clamp-3 text-sm text-[var(--fg-0)]">
+                      <p className="line-clamp-3 type-body-sm text-[var(--fg-0)]">
                         {item.prompt || "无提示词"}
                       </p>
                       {item.conversation_title && (
-                        <p className="text-xs text-[var(--fg-2)]">
+                        <p className="type-caption text-[var(--fg-2)]">
                           {item.conversation_title}
                         </p>
                       )}
@@ -214,7 +214,7 @@ export function PasswordDialog({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="type-card-title">修改密码</h2>
-            <p className="mt-1 break-all text-xs text-[var(--fg-2)]">
+            <p className="mt-1 break-all type-caption text-[var(--fg-2)]">
               {user.email}
             </p>
           </div>
@@ -229,7 +229,7 @@ export function PasswordDialog({
           </button>
         </div>
         <label className="block space-y-1.5">
-          <span className="text-xs text-[var(--fg-2)]">新密码</span>
+          <span className="type-caption text-[var(--fg-2)]">新密码</span>
           <input
             name="new-password"
             type="password"
@@ -239,11 +239,11 @@ export function PasswordDialog({
             maxLength={128}
             autoFocus
             autoComplete="new-password"
-            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-strong)] sm:h-10 sm:text-sm"
+            className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--border-strong)] sm:h-10 "
           />
         </label>
         {error && (
-          <p role="alert" className="text-xs text-[var(--danger)]">
+          <p role="alert" className="type-caption text-[var(--danger)]">
             {error}
           </p>
         )}
@@ -252,14 +252,14 @@ export function PasswordDialog({
             type="button"
             onClick={onClose}
             disabled={pending}
-            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 text-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 sm:h-9 sm:text-xs"
+            className="h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 type-body-sm text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 sm:h-9 "
           >
             取消
           </button>
           <button
             type="submit"
             disabled={!canSubmit}
-            className="inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--fg-0)] px-3 text-sm text-[var(--bg-0)] transition-colors disabled:opacity-50 sm:h-9 sm:text-xs"
+            className="inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--fg-0)] px-3 type-body-sm text-[var(--bg-0)] transition-colors disabled:opacity-50 sm:h-9 "
           >
             {pending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             保存
@@ -272,7 +272,7 @@ export function PasswordDialog({
 
 function StatusPill({ status }: { status: string }) {
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-1)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-1)]">
       {status}
     </span>
   );
@@ -282,7 +282,7 @@ function RetentionPill({ state }: { state: "active" | "hidden" | "deleted" }) {
   const label =
     state === "hidden" ? "已隐藏" : state === "deleted" ? "已删除" : "可见";
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 text-xs text-[var(--fg-2)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-0.5 type-caption text-[var(--fg-2)]">
       {label}
     </span>
   );

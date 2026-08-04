@@ -126,7 +126,7 @@ function ToolSegment({
             title={`${label} (${hint})`}
             className={cn(
               "inline-flex h-8 min-h-11 items-center gap-1.5 rounded-full px-3",
-              "text-[11px] transition-colors disabled:opacity-50",
+              "type-caption transition-colors disabled:opacity-50",
               active
                 ? "bg-[var(--bg-0)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
                 : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",
@@ -185,7 +185,7 @@ function BrushSizeControl({
         aria-label="画笔大小"
         className="h-1.5 w-28 cursor-pointer accent-[var(--accent)] disabled:cursor-not-allowed sm:w-32"
       />
-      <span className="text-[11px] text-[var(--fg-1)] tabular-nums w-9">
+      <span className="type-caption text-[var(--fg-1)] tabular-nums w-9">
         {value}px
       </span>
     </label>
@@ -211,7 +211,7 @@ function CoverageBadge({
     <span
       className={cn(
         "ml-auto inline-flex items-center gap-1 h-7 px-2.5 rounded-full",
-        "text-[11px] tabular-nums border",
+        "type-caption tabular-nums border",
         tone,
       )}
       aria-live="polite"

@@ -81,7 +81,7 @@ function SelectField({
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-11 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-sm"
+        className="h-11 w-full min-w-0 truncate rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 "
       >
         {options.map((item) => (
           <option key={item || "auto"} value={item}>
@@ -108,7 +108,7 @@ function SubmitPanel({
     <div className="space-y-2">
       <p
         className={cn(
-          "flex min-w-0 items-center gap-2 text-xs leading-5",
+          "flex min-w-0 items-center gap-2 type-caption leading-5",
           canSubmit ? "text-success" : "text-[var(--fg-2)]",
         )}
       >
@@ -178,14 +178,14 @@ export function VideoParameterPanelView({
           </span>
           <div className="min-w-0">
             <p className="type-card-title">{children}</p>
-            <p className="mt-0.5 truncate text-xs text-[var(--fg-2)]">
+            <p className="mt-0.5 truncate type-caption text-[var(--fg-2)]">
               {selectedModel || "未选择模型"}
             </p>
           </div>
         </div>
         <span
           className={cn(
-            "shrink-0 whitespace-nowrap rounded-full border px-2 py-1 text-xs",
+            "shrink-0 whitespace-nowrap rounded-full border px-2 py-1 type-caption",
             canSubmit
               ? "border-success-border bg-success-soft text-success"
               : sourceReady
@@ -201,7 +201,7 @@ export function VideoParameterPanelView({
         <section className="space-y-2.5">
           <div className="flex items-center justify-between gap-2">
             <p className="type-caption text-[var(--fg-2)]">模型</p>
-            <span className="text-[11px] text-[var(--fg-2)]">
+            <span className="type-caption text-[var(--fg-2)]">
               自动匹配当前生成方式
             </span>
           </div>
@@ -240,10 +240,10 @@ export function VideoParameterPanelView({
 
         <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/72 px-3">
           <span className="min-w-0">
-            <span className="block text-sm font-medium text-[var(--fg-0)]">
+            <span className="block type-body-sm font-medium text-[var(--fg-0)]">
               生成音频
             </span>
-            <span className="mt-0.5 block text-xs text-[var(--fg-2)]">
+            <span className="mt-0.5 block type-caption text-[var(--fg-2)]">
               同步生成环境声或对白
             </span>
           </span>
@@ -259,7 +259,7 @@ export function VideoParameterPanelView({
         </label>
 
         <details className="group overflow-hidden border-y border-[var(--border-subtle)] bg-transparent">
-          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+          <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 type-caption font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
             <span>高级设置</span>
             <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
           </summary>
@@ -271,10 +271,10 @@ export function VideoParameterPanelView({
                 onChange={(event) => onSeedChange(event.target.value)}
                 inputMode="numeric"
                 placeholder="留空为随机"
-                className="h-11 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-xs"
+                className="h-11 w-full min-w-0 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] px-3 font-mono type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 "
               />
             </label>
-            <p className="mt-2 text-xs leading-5 text-[var(--fg-2)]">
+            <p className="mt-2 type-caption leading-5 text-[var(--fg-2)]">
               使用相同 Seed 可提高同一模型与参数下的结果可复现性。
             </p>
           </div>
@@ -285,13 +285,13 @@ export function VideoParameterPanelView({
         <div className="mb-3 grid grid-cols-2 gap-2 border-y border-[var(--border-subtle)] py-3">
           <div className="min-w-0">
             <p className="type-caption text-[var(--fg-2)]">预计预扣</p>
-            <p className="mt-1 truncate text-lg font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="mt-1 truncate type-card-title font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? formatRmb(estimate.micro / 1_000_000) : "-"}
             </p>
           </div>
           <div className="min-w-0 border-l border-[var(--border-subtle)] pl-3">
             <p className="type-caption text-[var(--fg-2)]">Token 上限</p>
-            <p className="mt-1 truncate text-sm font-semibold tabular-nums text-[var(--fg-0)]">
+            <p className="mt-1 truncate type-body-sm font-semibold tabular-nums text-[var(--fg-0)]">
               {estimate ? estimate.tokens.toLocaleString() : "-"}
             </p>
           </div>
@@ -345,7 +345,7 @@ export function VideoWorkbenchHeader({
             <h1 className="type-page-title-sm">AI 视频</h1>
             <span
               className={cn(
-                "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 type-caption font-medium",
                 enabled
                   ? "border-success-border bg-success-soft text-success"
                   : "border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]",
@@ -360,18 +360,18 @@ export function VideoWorkbenchHeader({
               {serviceValue}
             </span>
           </div>
-          <p className="mt-1 truncate text-xs text-[var(--fg-2)]">
+          <p className="mt-1 truncate type-caption text-[var(--fg-2)]">
             {loading ? "正在读取视频服务" : serviceSummary}
           </p>
         </div>
       </div>
       <div className="grid min-w-0 grid-cols-2 gap-2 min-[390px]:flex min-[390px]:flex-1 min-[390px]:items-center min-[390px]:justify-end sm:flex-none">
         <div className="hidden items-center gap-1.5 lg:flex">
-          <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/72 px-2.5 py-1.5 text-xs text-[var(--fg-1)]">
+          <span className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)]/72 px-2.5 py-1.5 type-caption text-[var(--fg-1)]">
             <Film className="h-3.5 w-3.5 text-[var(--fg-2)]" />
             {mode}
           </span>
-          <span className="max-w-[160px] truncate px-1 text-xs text-[var(--fg-2)]">
+          <span className="max-w-[160px] truncate px-1 type-caption text-[var(--fg-2)]">
             {audio ? "含音频" : "无音频"} · {submitState}
           </span>
         </div>
@@ -445,10 +445,10 @@ export function ModeCard({
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-semibold text-[var(--fg-0)] sm:text-sm">
+        <span className="block truncate type-body-sm font-semibold text-[var(--fg-0)] ">
           {copy.title}
         </span>
-        <span className="mt-0.5 hidden truncate text-[11px] text-[var(--fg-2)] md:block">
+        <span className="mt-0.5 hidden truncate type-caption text-[var(--fg-2)] md:block">
           {copy.eyebrow}
         </span>
       </span>

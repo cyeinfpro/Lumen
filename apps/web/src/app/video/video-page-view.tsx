@@ -201,12 +201,12 @@ function ModeSelector({
     <div className="shrink-0 border-b border-[var(--border-subtle)] p-2.5 sm:p-3">
       <div className="mb-2 flex flex-wrap items-end justify-between gap-2 px-1">
         <div>
-          <p className="text-sm font-semibold text-[var(--fg-0)]">生成方式</p>
-          <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+          <p className="type-body-sm font-semibold text-[var(--fg-0)]">生成方式</p>
+          <p className="mt-0.5 type-caption text-[var(--fg-2)]">
             {MODE_COPY[action].description}
           </p>
         </div>
-        <span className="text-xs font-medium text-[var(--fg-1)]">
+        <span className="type-caption font-medium text-[var(--fg-1)]">
           {MODE_COPY[action].requirement}
         </span>
       </div>
@@ -247,9 +247,9 @@ function FirstFrameSection({
       <div className="flex flex-col items-start gap-1.5 border-b border-[var(--border-subtle)] px-3 py-2.5 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between">
         <div className="flex items-center gap-2">
           <ImageIcon className="h-4 w-4 text-[var(--accent)]" />
-          <p className="text-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
+          <p className="type-body-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
         </div>
-        <span className="text-xs text-[var(--fg-2)]">
+        <span className="type-caption text-[var(--fg-2)]">
           用图片确定构图与起始状态
         </span>
       </div>
@@ -268,10 +268,10 @@ function FirstFrameSection({
             )}
           </span>
           <span className="min-w-0">
-            <span className="block text-sm font-semibold text-[var(--fg-0)]">
+            <span className="block type-body-sm font-semibold text-[var(--fg-0)]">
               {model.inputImageId ? "替换首帧" : "上传首帧图片"}
             </span>
-            <span className="mt-1 block truncate text-xs text-[var(--fg-2)]">
+            <span className="mt-1 block truncate type-caption text-[var(--fg-2)]">
               {model.uploadedLabel || model.inputImageId
                 ? model.uploadedLabel || "已填写图片 ID"
                 : "PNG、JPEG、WEBP"}
@@ -286,7 +286,7 @@ function FirstFrameSection({
             value={model.inputImageId}
             onChange={(event) => model.onInputImageIdChange(event.target.value)}
             placeholder="image_id"
-            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono text-xs text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
+            className="h-10 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-3 font-mono type-caption text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60"
           />
         </label>
       </div>
@@ -316,9 +316,9 @@ function ReferenceSection({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5">
         <div className="flex items-center gap-2">
           <VideoIcon className="h-4 w-4 text-[var(--accent)]" />
-          <p className="text-sm font-semibold text-[var(--fg-0)]">参考素材</p>
+          <p className="type-body-sm font-semibold text-[var(--fg-0)]">参考素材</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--fg-2)]">
+        <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-2)]">
           <span>
             图片 {model.counts.image}/{model.limits.image}
           </span>
@@ -351,7 +351,7 @@ function ReferenceSection({
           >
             火山虚拟素材库
           </Button>
-          <p className="min-w-0 flex-1 text-xs leading-5 text-[var(--fg-2)]">
+          <p className="min-w-0 flex-1 type-caption leading-5 text-[var(--fg-2)]">
             点击素材可预览，点击文字可插入引用。
           </p>
         </div>
@@ -371,7 +371,7 @@ function ReferenceSection({
               type="button"
               disabled={model.pending}
               onClick={() => fileInputRef.current?.click()}
-              className="flex min-h-24 min-w-[min(240px,calc(100vw-3rem))] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center text-xs text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
+              className="flex min-h-24 min-w-[min(240px,calc(100vw-3rem))] flex-col items-center justify-center gap-2 rounded-[var(--radius-control)] border border-dashed border-[var(--border)] bg-[var(--bg-1)]/50 px-5 text-center type-caption text-[var(--fg-2)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] disabled:pointer-events-none disabled:opacity-60"
             >
               <Upload className="h-4 w-4" />
               添加图片或视频参考
@@ -380,7 +380,7 @@ function ReferenceSection({
         </div>
       </div>
       <details className="group border-t border-[var(--border-subtle)]">
-        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-xs font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 type-caption font-medium text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]">
           <span className="inline-flex items-center gap-2">
             <Tags className="h-3.5 w-3.5 text-[var(--fg-2)]" />
             添加官方素材 ID
@@ -399,7 +399,7 @@ function ReferenceSection({
                   disabled={model.pending}
                   onClick={() => model.onKindChange(kind)}
                   className={cn(
-                    "inline-flex min-w-12 flex-1 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 text-xs font-semibold transition-colors",
+                    "inline-flex min-w-12 flex-1 items-center justify-center rounded-[calc(var(--radius-control)-2px)] px-2.5 type-caption font-semibold transition-colors",
                     active
                       ? "bg-[var(--accent)] text-[var(--accent-on)]"
                       : "text-[var(--fg-2)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)]",
@@ -429,7 +429,7 @@ function ReferenceSection({
                 }
               }}
               placeholder="asset://asset-..."
-              className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono text-base text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 sm:text-xs"
+              className="h-11 w-full rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)] pl-9 pr-3 font-mono type-body text-[var(--fg-0)] outline-none transition-colors focus:border-[var(--accent)]/60 sm:h-10 "
             />
           </div>
           <Button
@@ -472,13 +472,13 @@ function PromptEditor({
       <section className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/72 shadow-[var(--shadow-1)]">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2.5 sm:px-4">
           <div>
-            <p className="text-sm font-semibold text-[var(--fg-0)]">镜头描述</p>
-            <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+            <p className="type-body-sm font-semibold text-[var(--fg-0)]">镜头描述</p>
+            <p className="mt-0.5 type-caption text-[var(--fg-2)]">
               描述主体、动作、运镜与时间推进
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-xs tabular-nums text-[var(--fg-2)]">
+            <span className="type-caption tabular-nums text-[var(--fg-2)]">
               {model.value.length.toLocaleString()} / 10,000
             </span>
             <Button
@@ -502,7 +502,7 @@ function PromptEditor({
           maxLength={10000}
           placeholder="写清主体、动作轨迹、镜头运动、首尾时间推进；点击参考素材插入 @图片1 / @视频1 来指定素材。"
           className={cn(
-            "min-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-3 py-3 text-base leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] sm:min-h-[320px] sm:px-4 sm:py-4 sm:text-sm lg:min-h-[360px] landscape:max-md:min-h-[150px]",
+            "min-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-3 py-3 type-body leading-7 text-[var(--fg-0)] outline-none placeholder:text-[var(--fg-2)] sm:min-h-[320px] sm:px-4 sm:py-4  lg:min-h-[360px] landscape:max-md:min-h-[150px]",
             model.enhancing && "cursor-wait",
           )}
         />
@@ -514,7 +514,7 @@ function PromptEditor({
                 type="button"
                 disabled={model.enhancing || model.uploadsPending}
                 onClick={() => model.onInsertChip(chip)}
-                className="min-h-11 shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 text-xs text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50 sm:min-h-0 sm:py-1.5"
+                className="min-h-11 shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-3 type-caption text-[var(--fg-1)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] hover:text-[var(--fg-0)] disabled:pointer-events-none disabled:opacity-50 sm:min-h-0 sm:py-1.5"
               >
                 {chip}
               </button>

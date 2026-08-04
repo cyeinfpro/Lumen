@@ -113,7 +113,7 @@ function WalletListItem({
           className="ml-2 align-middle"
         />
         {item.last_topup_at && (
-          <span className="ml-2 text-xs text-[var(--fg-3)]">
+          <span className="ml-2 type-caption text-[var(--fg-3)]">
             最近充值 {new Date(item.last_topup_at).toLocaleDateString()}
           </span>
         )}
@@ -147,7 +147,7 @@ export function WalletList({
   if (isLoading) {
     return (
       <div className="grid gap-2">
-        <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center text-sm text-[var(--fg-2)]">
+        <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center type-body-sm text-[var(--fg-2)]">
           加载中
         </div>
       </div>
@@ -165,7 +165,7 @@ export function WalletList({
   if (items.length === 0) {
     return (
       <div className="grid gap-2">
-        <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center text-sm text-[var(--fg-2)]">
+        <div className="rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] px-3 py-4 text-center type-body-sm text-[var(--fg-2)]">
           没有匹配用户
         </div>
       </div>
@@ -189,13 +189,13 @@ export function WalletList({
 function WalletSummaryCard({ selected }: { selected: AdminWalletDetailOut }) {
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
-      <p className="truncate text-sm font-medium text-[var(--fg-0)]">
+      <p className="truncate type-body-sm font-medium text-[var(--fg-0)]">
         {selected.email}
       </p>
-      <p className="mt-1 truncate font-mono text-xs text-[var(--fg-3)]">
+      <p className="mt-1 truncate font-mono type-caption text-[var(--fg-3)]">
         {selected.user_id}
       </p>
-      <div className="mt-4 grid gap-2 text-sm">
+      <div className="mt-4 grid gap-2 type-body-sm">
         <div className="flex justify-between">
           <span className="text-[var(--fg-2)]">模式</span>
           <StatusBadge status={selected.account_mode} />
@@ -246,7 +246,7 @@ function WalletAdjustmentCard({
 }) {
   return (
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
-      <p className="text-sm font-medium">调账</p>
+      <p className="type-body-sm font-medium">调账</p>
       <Input
         value={amount}
         onChange={(event) => onAmountChange(event.target.value)}
@@ -288,7 +288,7 @@ function WalletModeCard({
 }) {
   return (
     <div className="space-y-2 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/60 p-4">
-      <p className="text-sm font-medium">切换账号模式</p>
+      <p className="type-body-sm font-medium">切换账号模式</p>
       <Select
         value={nextMode}
         onChange={(event) =>
@@ -336,7 +336,7 @@ function TransactionKindFilter({
           type="button"
           onClick={() => onChange(key)}
           className={[
-            "shrink-0 rounded-full border px-3 py-1 text-xs",
+            "shrink-0 rounded-full border px-3 py-1 type-caption",
             value === key
               ? "border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--fg-0)]"
               : "border-[var(--border)] text-[var(--fg-2)] hover:text-[var(--fg-0)]",
@@ -364,7 +364,7 @@ function WalletTransactionsContent({
 }) {
   if (isLoading) {
     return (
-      <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+      <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
         加载中
       </div>
     );
@@ -378,7 +378,7 @@ function WalletTransactionsContent({
   }
   if (transactions.length === 0) {
     return (
-      <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+      <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
         暂无流水
       </div>
     );
@@ -387,11 +387,11 @@ function WalletTransactionsContent({
   return transactions.map((tx) => (
     <div
       key={tx.id}
-      className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 text-sm"
+      className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 type-body-sm"
     >
       <div className="min-w-0">
         <p className="truncate">{TX_KIND_LABEL[tx.kind] ?? tx.kind}</p>
-        <p className="truncate font-mono text-xs text-[var(--fg-3)]">
+        <p className="truncate font-mono type-caption text-[var(--fg-3)]">
           {tx.ref_type ?? "-"} {tx.ref_id ?? ""}
         </p>
       </div>
@@ -399,7 +399,7 @@ function WalletTransactionsContent({
         <p>
           {tx.amount.micro >= 0 ? "+" : ""}¥{formatMoney(tx.amount.rmb)}
         </p>
-        <p className="text-xs text-[var(--fg-3)]">
+        <p className="type-caption text-[var(--fg-3)]">
           {new Date(tx.created_at).toLocaleString()}
         </p>
       </div>
@@ -422,7 +422,7 @@ function WalletTransactionsCard({
 }) {
   return (
     <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-      <div className="border-b border-[var(--border-subtle)] px-4 py-3 text-sm font-medium">
+      <div className="border-b border-[var(--border-subtle)] px-4 py-3 type-body-sm font-medium">
         流水
       </div>
       <div className="divide-y divide-[var(--border-subtle)]">
@@ -445,16 +445,16 @@ function WalletRedemptionsCard({
 }) {
   return (
     <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border-subtle)]">
-      <div className="border-b border-[var(--border-subtle)] px-4 py-3 text-sm font-medium">
+      <div className="border-b border-[var(--border-subtle)] px-4 py-3 type-body-sm font-medium">
         最近兑换
       </div>
       <div className="divide-y divide-[var(--border-subtle)]">
         {redemptions.map((item) => (
           <div
             key={item.id}
-            className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 text-sm"
+            className="grid grid-cols-[1fr_auto] gap-3 px-4 py-3 type-body-sm"
           >
-            <span className="min-w-0 truncate font-mono text-xs">
+            <span className="min-w-0 truncate font-mono type-caption">
               {item.code_id}
             </span>
             <span className="tabular-nums">
@@ -463,7 +463,7 @@ function WalletRedemptionsCard({
           </div>
         ))}
         {redemptions.length === 0 && (
-          <div className="px-4 py-8 text-center text-sm text-[var(--fg-2)]">
+          <div className="px-4 py-8 text-center type-body-sm text-[var(--fg-2)]">
             暂无兑换记录
           </div>
         )}

@@ -66,7 +66,7 @@ export function BillingPanel() {
                   });
                 }}
                 className={[
-                  "rounded-full px-3.5 py-1.5 text-sm transition-colors",
+                  "rounded-full px-3.5 py-1.5 type-body-sm transition-colors",
                   active
                     ? "bg-[var(--accent)] text-black"
                     : "text-[var(--fg-1)] hover:text-[var(--fg-0)]",

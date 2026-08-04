@@ -103,13 +103,13 @@ export function AllowedEmailsPanel() {
               onChange={(event) => setEmail(event.target.value)}
               placeholder="name@示例.com"
               autoComplete="off"
-              className="flex-1 bg-transparent text-sm placeholder:text-[var(--fg-2)] focus:outline-none"
+              className="flex-1 bg-transparent type-body-sm placeholder:text-[var(--fg-2)] focus:outline-none"
             />
           </div>
           <button
             type="submit"
             disabled={addMutation.isPending}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-accent px-4 text-sm font-medium text-[var(--accent-on)] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-50"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] bg-accent px-4 type-body-sm font-medium text-[var(--accent-on)] transition-[filter,transform] hover:brightness-110 active:scale-[0.97] disabled:opacity-50"
           >
             {addMutation.isPending ? (
               <>
@@ -152,7 +152,7 @@ export function AllowedEmailsPanel() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder="搜索邮箱或邀请人"
-            className="flex-1 bg-transparent text-xs placeholder:text-[var(--fg-2)] focus:outline-none"
+            className="flex-1 bg-transparent type-caption placeholder:text-[var(--fg-2)] focus:outline-none"
           />
         </div>
       </div>
@@ -175,8 +175,8 @@ export function AllowedEmailsPanel() {
         ) : (
           <>
             <div className="hidden overflow-x-auto [-webkit-overflow-scrolling:touch] md:block">
-              <table className="w-full text-sm">
-                <thead className="border-b border-[var(--border)] text-xs uppercase tracking-wider text-[var(--fg-1)]">
+              <table className="w-full type-body-sm">
+                <thead className="border-b border-[var(--border)] type-caption uppercase tracking-wider text-[var(--fg-1)]">
                   <tr>
                     <th className="px-4 py-3 text-left font-medium">邮箱</th>
                     <th className="px-4 py-3 text-left font-medium">邀请人</th>
@@ -202,7 +202,7 @@ export function AllowedEmailsPanel() {
                       <td className="break-all px-4 py-3 text-[var(--fg-1)]">
                         {row.invited_by_email ?? "—"}
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs tabular-nums text-[var(--fg-1)]">
+                      <td className="whitespace-nowrap px-4 py-3 font-mono type-caption tabular-nums text-[var(--fg-1)]">
                         {formatISODate(row.created_at)}
                       </td>
                       <td className="px-4 py-3 text-right">
@@ -228,7 +228,7 @@ export function AllowedEmailsPanel() {
               {filtered.map((row) => (
                 <li key={row.id} className="space-y-2 p-4">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="min-w-0 break-all text-sm text-[var(--fg-0)]">
+                    <span className="min-w-0 break-all type-body-sm text-[var(--fg-0)]">
                       {row.email}
                     </span>
                     <ConfirmInlineRemove
@@ -243,9 +243,9 @@ export function AllowedEmailsPanel() {
                       email={row.email}
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="grid grid-cols-2 gap-2 type-caption">
                     <div>
-                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         邀请人
                       </div>
                       <div className="break-all text-[var(--fg-1)]">
@@ -253,7 +253,7 @@ export function AllowedEmailsPanel() {
                       </div>
                     </div>
                     <div>
-                      <div className="text-[10px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         创建
                       </div>
                       <div className="font-mono tabular-nums text-[var(--fg-1)]">
@@ -308,7 +308,7 @@ function ConfirmInlineRemove({
       transition={{ duration: 0.14 }}
       className="inline-flex shrink-0 items-center gap-2"
     >
-      <span className="hidden text-xs text-[var(--fg-1)] sm:inline">确认?</span>
+      <span className="hidden type-caption text-[var(--fg-1)] sm:inline">确认?</span>
       <button
         type="button"
         onClick={onConfirm}
@@ -321,7 +321,7 @@ function ConfirmInlineRemove({
         type="button"
         onClick={onCancel}
         disabled={disabled}
-        className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-1.5 text-xs text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 md:min-h-8"
+        className="min-h-11 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-3 py-1.5 type-caption text-[var(--fg-1)] transition-colors hover:bg-[var(--bg-3)] disabled:opacity-50 md:min-h-8"
       >
         取消
       </button>

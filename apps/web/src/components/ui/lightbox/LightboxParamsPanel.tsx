@@ -132,13 +132,13 @@ export function LightboxParamsPanel({
             <div>
               <h2
                 id={titleId}
-                className="text-[14px] font-semibold text-[var(--fg-0)]"
+                className="type-body-sm font-semibold text-[var(--fg-0)]"
               >
                 图片信息
               </h2>
               <p
                 id={descriptionId}
-                className="mt-0.5 font-mono text-[10px] text-[var(--fg-2)] tracking-wide"
+                className="mt-0.5 font-mono type-caption text-[var(--fg-2)] tracking-wide"
               >
                 {item.id}
               </p>

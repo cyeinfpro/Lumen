@@ -13,10 +13,10 @@ interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement
   wrapperClassName?: string;
 }
 
-// iOS Safari focus 缩放规避：移动端字号升到 16px。
+// 移动端保持统一 type token，并保留 44px 最小命中区。
 const FIELD =
   "control-shell type-body-sm w-full px-3 py-2.5 leading-relaxed outline-none " +
-  "min-h-11 max-sm:text-base max-sm:leading-6 " +
+  "min-h-11 max-sm:leading-6 " +
   "text-[var(--fg-0)] placeholder:text-[var(--fg-2)] resize-y " +
   "transition-[border-color,box-shadow,background-color] duration-150 " +
   "hover:bg-[var(--bg-1)]/82 " +

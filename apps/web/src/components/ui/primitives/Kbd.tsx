@@ -17,7 +17,7 @@ export function Kbd({
       ref={ref}
       className={cn(
         "inline-flex h-[18px] min-w-[18px] items-center justify-center px-1",
-        "font-mono text-[11px]",
+        "font-mono type-caption",
         "bg-[var(--bg-2)] text-[var(--fg-0)]",
         "border border-[var(--border)]",
         "rounded-[var(--radius-sm)] shadow-[var(--shadow-1)]",

@@ -196,7 +196,7 @@ export function ProjectFunctionHub() {
                 <p className="type-page-kicker">工作流模板</p>
                 <h2 className="type-section-title mt-1">选择工作流</h2>
               </div>
-              <p className="hidden text-xs text-[var(--fg-2)] md:block">
+              <p className="hidden type-caption text-[var(--fg-2)] md:block">
                 每张卡片都可以直接新建，或接回对应的最近项目。
               </p>
             </div>
@@ -289,7 +289,7 @@ function FeatureCard({
         <WorkflowSteps steps={steps} disabled={!feature.available} />
       </div>
 
-      <div className="min-h-8 text-xs text-[var(--fg-2)] md:hidden">
+      <div className="min-h-8 type-caption text-[var(--fg-2)] md:hidden">
         {recentProject ? (
           <span className="flex min-w-0 items-center gap-2">
             <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[var(--success-fg)]" />

@@ -80,7 +80,7 @@ function ActiveVideoTaskSection({
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-3 px-1">
         <p className="type-caption text-[var(--fg-2)]">正在进行</p>
-        <span className="text-xs tabular-nums text-[var(--fg-2)]">
+        <span className="type-caption tabular-nums text-[var(--fg-2)]">
           {items.length} 条
         </span>
       </div>
@@ -144,7 +144,7 @@ function VideoTaskHistorySection({
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-3 px-1">
         <p className="type-caption text-[var(--fg-2)]">历史记录</p>
-        <span className="text-xs tabular-nums text-[var(--fg-2)]">
+        <span className="type-caption tabular-nums text-[var(--fg-2)]">
           {videoHistoryCountText({
             loading,
             count: items.length,
@@ -310,11 +310,11 @@ export function VideoTaskDrawer({
                   <div>
                     <h2
                       id="video-task-panel-title"
-                      className="text-sm font-semibold text-[var(--fg-0)]"
+                      className="type-body-sm font-semibold text-[var(--fg-0)]"
                     >
                       视频任务
                     </h2>
-                    <p className="mt-0.5 text-xs text-[var(--fg-2)]">
+                    <p className="mt-0.5 type-caption text-[var(--fg-2)]">
                       {activeVideoTaskSummary(
                         activeItems.length,
                         historyCounts.all,
@@ -399,8 +399,8 @@ function EmptyPanel({
       <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-1)] text-[var(--fg-2)]">
         {icon}
       </div>
-      <p className="text-sm font-medium text-[var(--fg-0)]">{title}</p>
-      <p className="mt-1 max-w-sm text-xs leading-5 text-[var(--fg-2)]">{description}</p>
+      <p className="type-body-sm font-medium text-[var(--fg-0)]">{title}</p>
+      <p className="mt-1 max-w-sm type-caption leading-5 text-[var(--fg-2)]">{description}</p>
     </div>
   );
 }
@@ -461,7 +461,7 @@ function HistoryFilterTabs({
             type="button"
             onClick={() => onChange(filter.value)}
             className={cn(
-              "min-h-11 rounded-[var(--radius-control)] px-2 text-xs transition-colors sm:min-h-8",
+              "min-h-11 rounded-[var(--radius-control)] px-2 type-caption transition-colors sm:min-h-8",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]",
               active
                 ? "bg-[var(--bg-2)] text-[var(--fg-0)] shadow-[var(--shadow-1)]"
@@ -470,7 +470,7 @@ function HistoryFilterTabs({
           >
             <span className="inline-flex min-w-0 items-center justify-center gap-1.5">
               <span>{filter.label}</span>
-              <span className="rounded-full border border-[var(--border)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
+              <span className="rounded-full border border-[var(--border)] px-1.5 py-0.5 font-mono type-caption tabular-nums">
                 {loading ? "..." : counts[filter.value]}
               </span>
             </span>
@@ -490,14 +490,14 @@ function TaskErrorDetails({
 }) {
   return (
     <details className="group mt-2 overflow-hidden rounded-[var(--radius-control)] border border-danger-border bg-danger-soft">
-      <summary className="flex cursor-pointer list-none items-start gap-2 px-2.5 py-2 text-xs leading-5 text-[var(--danger-fg)]">
+      <summary className="flex cursor-pointer list-none items-start gap-2 px-2.5 py-2 type-caption leading-5 text-[var(--danger-fg)]">
         <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 flex-1">{summary}</span>
         <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <div className="border-t border-danger-border px-2.5 py-2">
         <p className="type-caption text-[var(--danger-fg)]">技术详情</p>
-        <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-2 font-mono text-[10px] leading-4 text-[var(--fg-1)]">
+        <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-all rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-0)] p-2 font-mono type-caption leading-4 text-[var(--fg-1)]">
           {raw}
         </pre>
       </div>
@@ -732,15 +732,15 @@ function TaskRow({
       )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-2)]">
+          <div className="flex flex-wrap items-center gap-2 type-caption text-[var(--fg-2)]">
             <span className="font-medium text-[var(--fg-1)]">{item.model}</span>
             <span>{actionLabel(item.action)}</span>
             <span>{item.resolution}</span>
             <span>{formatDurationLabel(item.duration_s)}</span>
             {elapsedLabel && <span>{elapsedLabel}</span>}
           </div>
-          <p className="mt-1 line-clamp-2 text-sm text-[var(--fg-0)]">{item.prompt}</p>
-          <p className="mt-1 text-xs leading-5 text-[var(--fg-2)]">{copy.detail}</p>
+          <p className="mt-1 line-clamp-2 type-body-sm text-[var(--fg-0)]">{item.prompt}</p>
+          <p className="mt-1 type-caption leading-5 text-[var(--fg-2)]">{copy.detail}</p>
         </div>
         <StatusPill item={item} />
       </div>
@@ -783,7 +783,7 @@ function StatusPill({ item }: { item: VideoGenerationOut }) {
   return (
     <span
       className={[
-        "rounded-full border px-2 py-1 text-xs",
+        "rounded-full border px-2 py-1 type-caption",
         terminalOk
           ? "border-success-border bg-success-soft text-success"
           : terminalBad

@@ -133,7 +133,7 @@ function UpdateMetadata({
 }) {
   const cache = check?.cache;
   return (
-    <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] text-[var(--fg-2)]">
+    <div className="mt-3 flex flex-wrap gap-1.5 type-caption text-[var(--fg-2)]">
       <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-2)] px-2 py-1">
         current {currentVersionFor(check, version)}
       </span>
@@ -186,10 +186,10 @@ function UpdateSummary({
           <UpdateStateIcon state={state} />
         </div>
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-medium text-[var(--fg-0)]">
+          <h3 className="truncate type-body-sm font-medium text-[var(--fg-0)]">
             {stateTitle(state, check)}
           </h3>
-          <p className="mt-1 truncate text-xs leading-5 text-[var(--fg-2)]">
+          <p className="mt-1 truncate type-caption leading-5 text-[var(--fg-2)]">
             {currentLine}
           </p>
         </div>
@@ -288,20 +288,20 @@ function ReleaseSummary({
   if (state !== "UPDATE_AVAILABLE" || !check?.release || compact) return null;
   return (
     <details className="mt-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/70 p-3">
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--fg-1)]">
+      <summary className="flex cursor-pointer list-none items-center gap-2 type-caption text-[var(--fg-1)]">
         <Info className="h-3.5 w-3.5 text-[var(--fg-2)]" />
         查看变更摘要
         <ChevronDown className="ml-auto h-3.5 w-3.5 text-[var(--fg-2)]" />
       </summary>
       <div className="mt-3 space-y-3">
-        <div className="text-[11px] text-[var(--fg-2)]">
+        <div className="type-caption text-[var(--fg-2)]">
           发布于 {check.release.published_at ?? "unknown"}
         </div>
         {/* 传 markdown 源码而非 body_html：预览组件内部走 react-markdown，原始 HTML 会被丢弃 */}
         <MarkdownPreview
           body={check.release.body_md ?? ""}
           limitLines={6}
-          className="overflow-auto rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-3 text-xs leading-6 text-[var(--fg-1)]"
+          className="overflow-auto rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] p-3 type-caption leading-6 text-[var(--fg-1)]"
         />
       </div>
     </details>

@@ -229,7 +229,7 @@ export function TelegramPanel() {
                 }}
                 title={deepLink + "<code>"}
                 leftIcon={<Copy className="w-3 h-3" />}
-                className="h-7 text-[11px]"
+                className="h-7 type-caption"
               >
                 复制绑定链接
               </Button>
@@ -258,7 +258,7 @@ export function TelegramPanel() {
 
         <div>
           <p className="type-caption text-[var(--fg-1)] mb-2">使用哪些代理</p>
-          <p className="text-[11px] text-[var(--fg-2)] mb-3">
+          <p className="type-caption text-[var(--fg-2)] mb-3">
             勾选要用的代理；一个都不勾表示用所有「启用」的代理。
           </p>
           {allProxies.length === 0 ? (
@@ -274,7 +274,7 @@ export function TelegramPanel() {
                     type="button"
                     onClick={() => toggleProxy(p.name)}
                     className={
-                      "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-xs transition-colors " +
+                      "inline-flex items-center gap-1.5 h-8 px-3 rounded-full border type-caption transition-colors " +
                       (sel
                         ? "bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]"
                         : "bg-[var(--bg-2)] border-[var(--border)] text-[var(--fg-1)] hover:bg-[var(--bg-3)]")
@@ -284,7 +284,7 @@ export function TelegramPanel() {
                   >
                     {sel && <Check className="w-3 h-3" />}
                     <span className="font-mono">{p.name}</span>
-                    <span className="text-[10px] uppercase opacity-70">{p.type}</span>
+                    <span className="type-caption uppercase opacity-70">{p.type}</span>
                   </button>
                 );
               })}
@@ -305,7 +305,7 @@ export function TelegramPanel() {
                   type="button"
                   onClick={() => setForm((f) => ({ ...f, proxy_strategy: s.value }))}
                   className={
-                    "text-left p-3 rounded-[var(--radius-card)] border text-xs transition-colors " +
+                    "text-left p-3 rounded-[var(--radius-card)] border type-caption transition-colors " +
                     (active
                       ? "bg-[var(--accent)]/10 border-[var(--accent)]/40"
                       : "bg-[var(--bg-2)] border-[var(--border)] hover:bg-[var(--bg-3)]")
@@ -315,14 +315,14 @@ export function TelegramPanel() {
                     <Icon className="w-3.5 h-3.5 text-[var(--fg-1)]" />
                     <span
                       className={
-                        "text-sm " +
+                        "type-body-sm " +
                         (active ? "text-[var(--accent)] font-medium" : "text-[var(--fg-0)]")
                       }
                     >
                       {s.label}
                     </span>
                   </div>
-                  <p className="text-[11px] text-[var(--fg-2)] leading-relaxed">{s.hint}</p>
+                  <p className="type-caption text-[var(--fg-2)] leading-relaxed">{s.hint}</p>
                 </button>
               );
             })}
@@ -505,7 +505,7 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           autoComplete="off"
           className={
-            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm transition-colors " +
+            "w-full h-9 pr-20 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none type-body-sm transition-colors " +
             (mono ? "font-mono" : "")
           }
         />
@@ -522,7 +522,7 @@ function Field({
         )}
       </div>
       <div className="flex items-start gap-2">
-        <span className="text-[11px] text-[var(--fg-2)] leading-relaxed flex-1">{hint}</span>
+        <span className="type-caption text-[var(--fg-2)] leading-relaxed flex-1">{hint}</span>
         {rightSlot}
       </div>
     </label>
@@ -564,7 +564,7 @@ function ToggleField({
       </button>
       <div className="min-w-0">
         <p className="type-body-sm text-[var(--fg-0)]">{label}</p>
-        <p className="text-[11px] text-[var(--fg-2)] leading-relaxed">{hint}</p>
+        <p className="type-caption text-[var(--fg-2)] leading-relaxed">{hint}</p>
       </div>
     </div>
   );

@@ -62,10 +62,10 @@ export function StageRail({
                   {meta.done ? <Check className="h-3 w-3" /> : meta.count}
                 </span>
               </span>
-              <span className="text-sm font-semibold text-[var(--fg-0)]">
+              <span className="type-body-sm font-semibold text-[var(--fg-0)]">
                 {stage.label}
               </span>
-              <span className="hidden line-clamp-1 text-xs text-[var(--fg-2)] md:block">
+              <span className="hidden line-clamp-1 type-caption text-[var(--fg-2)] md:block">
                 {stage.description}
               </span>
             </button>

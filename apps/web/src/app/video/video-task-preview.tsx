@@ -102,7 +102,7 @@ export function VideoDownloadLink({
       rel={isTemporary ? "noopener noreferrer" : undefined}
       title={expiresTitle}
       className={cn(
-        "inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 text-xs font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:h-9",
+        "inline-flex h-11 items-center justify-center gap-1.5 rounded-[var(--radius-control)] border border-[var(--border)] bg-transparent px-3 type-caption font-medium leading-tight text-[var(--fg-0)] transition-[background-color,border-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--bg-2)] sm:h-9",
         fullWidth && "w-full",
       )}
     >
@@ -178,7 +178,7 @@ export function VideoPosterButton({
         </div>
       )}
       <span className="absolute inset-0 flex items-center justify-center bg-black/0 transition-colors group-hover:bg-black/20">
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--fg-0)]/85 px-3 py-1.5 text-xs font-medium text-[var(--bg-0)] shadow-[var(--shadow-2)]">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--fg-0)]/85 px-3 py-1.5 type-caption font-medium text-[var(--bg-0)] shadow-[var(--shadow-2)]">
           <Play className="h-3.5 w-3.5" />
           播放预览
         </span>
@@ -274,7 +274,7 @@ function PrimaryVideoPlayer({
           <div
             role={status === "error" ? "alert" : "status"}
             aria-live={status === "error" ? "assertive" : "polite"}
-            className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-0)]/90 px-3 py-1.5 text-xs font-medium text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-md"
+            className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--bg-0)]/90 px-3 py-1.5 type-caption font-medium text-[var(--fg-0)] shadow-[var(--shadow-2)] backdrop-blur-md"
           >
             {status === "error" ? (
               <button
@@ -305,7 +305,7 @@ function StatusPill({ item }: { item: VideoGenerationOut }) {
   return (
     <span
       className={[
-        "rounded-full border px-2 py-1 text-xs",
+        "rounded-full border px-2 py-1 type-caption",
         terminalOk
           ? "border-success-border bg-success-soft text-success"
           : terminalBad
@@ -387,19 +387,19 @@ export function VideoPreviewDialogContent({
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap gap-2">
               <StatusPill item={item} />
-              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
+              <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 type-caption text-[var(--fg-2)]">
                 {actionLabel(item.action)} · {item.resolution} ·{" "}
                 {formatDurationLabel(item.duration_s)}
               </span>
               {elapsedLabel && (
-                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 text-xs text-[var(--fg-2)]">
+                <span className="rounded-full border border-[var(--border)] bg-[var(--bg-0)] px-2 py-1 type-caption text-[var(--fg-2)]">
                   {elapsedLabel}
                 </span>
               )}
             </div>
             <h2
               id={`video-preview-${item.id}`}
-              className="truncate text-base font-semibold text-[var(--fg-0)]"
+              className="truncate type-body font-semibold text-[var(--fg-0)]"
             >
               视频播放
             </h2>
@@ -424,10 +424,10 @@ export function VideoPreviewDialogContent({
             </div>
             <aside className="shrink-0 overflow-y-auto rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-0)]/64 p-3 shadow-[var(--shadow-1)] lg:h-full lg:max-h-none">
               <p className="type-caption text-[var(--fg-2)]">提示词</p>
-              <p className="mt-2 text-sm leading-6 text-[var(--fg-0)]">
+              <p className="mt-2 type-body-sm leading-6 text-[var(--fg-0)]">
                 {item.prompt}
               </p>
-              <div className="mt-3 flex flex-wrap gap-1.5 text-xs text-[var(--fg-2)]">
+              <div className="mt-3 flex flex-wrap gap-1.5 type-caption text-[var(--fg-2)]">
                 <span className="rounded-full border border-[var(--border)] bg-[var(--bg-1)] px-2 py-1">
                   {item.video.width}x{item.video.height}
                 </span>

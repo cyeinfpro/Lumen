@@ -141,7 +141,7 @@ export function PosterStyleEditDialog({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               maxLength={120}
-              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="类目">
@@ -150,7 +150,7 @@ export function PosterStyleEditDialog({
               onChange={(event) =>
                 setCategory(event.target.value as PosterStyleCategory)
               }
-              className="control-shell type-body-sm h-10 w-full appearance-none px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
+              className="control-shell type-body-sm h-10 w-full appearance-none px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             >
               {POSTER_STYLE_CATEGORY_OPTIONS.map((value) => (
                 <option key={value} value={value} className="bg-[var(--bg-0)]">
@@ -165,7 +165,7 @@ export function PosterStyleEditDialog({
               onChange={(event) => setMood(event.target.value)}
               maxLength={120}
               placeholder="温暖、冷峻、奇幻"
-              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="提示词模板" wrapperClass="md:col-span-2">
@@ -175,7 +175,7 @@ export function PosterStyleEditDialog({
               maxLength={2000}
               rows={5}
               placeholder="海报构图、用色、字体方向"
-              className="control-shell type-body-sm min-h-11 w-full resize-none px-3 py-2.5 leading-relaxed text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:text-base"
+              className="control-shell type-body-sm min-h-11 w-full resize-none px-3 py-2.5 leading-relaxed text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 "
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="色板（逗号分隔 HEX）" wrapperClass="md:col-span-2">
@@ -183,7 +183,7 @@ export function PosterStyleEditDialog({
               value={palette}
               onChange={(event) => setPalette(event.target.value)}
               placeholder="#8A8378，#2A2A2A"
-              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             />
             <PaletteSwatchRow hexes={parseHexList(palette)} />
           </UnderlineLabeled>
@@ -192,7 +192,7 @@ export function PosterStyleEditDialog({
               value={styleTags}
               onChange={(event) => setStyleTags(event.target.value)}
               placeholder="极简、复古、低饱和"
-              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 max-sm:text-base"
+              className="control-shell type-body-sm h-10 w-full px-3 text-[var(--fg-0)] outline-none transition-[border-color,box-shadow,background-color] placeholder:text-[var(--fg-2)] focus:border-[var(--accent)]/60 focus:ring-2 focus:ring-[var(--accent)]/20 max-sm:min-h-11 "
             />
           </UnderlineLabeled>
           <UnderlineLabeled label="推荐尺寸" wrapperClass="md:col-span-2">

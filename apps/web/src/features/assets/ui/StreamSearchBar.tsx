@@ -87,14 +87,14 @@ export function StreamSearchBar({
             <button
               type="button"
               onClick={closeSearch}
-              className="ml-1 min-h-11 cursor-pointer rounded-full px-2.5 text-[13px] text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:min-h-0"
+              className="ml-1 min-h-11 cursor-pointer rounded-full px-2.5 type-body-sm text-[var(--fg-1)] hover:text-[var(--fg-0)] focus-visible:outline-none md:h-8 md:min-h-0"
               aria-label="关闭搜索"
             >
               取消
             </button>
           </div>
           {typeof resultCount === "number" && value.trim() && (
-            <div className="mt-1.5 flex items-center gap-2 px-1 text-[11px] text-[var(--fg-2)]">
+            <div className="mt-1.5 flex items-center gap-2 px-1 type-caption text-[var(--fg-2)]">
               <span className="inline-flex h-5 items-center rounded-full bg-[var(--bg-2)] px-2 tabular-nums">
                 {resultCount} / {loadedCount ?? resultCount}
               </span>

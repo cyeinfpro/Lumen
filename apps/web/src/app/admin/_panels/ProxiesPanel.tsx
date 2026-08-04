@@ -346,7 +346,7 @@ export function ProxiesPanel() {
         />
       </div>
 
-      <p className="text-xs text-[var(--fg-2)] px-1">
+      <p className="type-caption text-[var(--fg-2)] px-1">
         提示：测试只会发一个空请求验证代理通路，不会消耗 API 配额。
       </p>
     </section>
@@ -629,7 +629,7 @@ function ProxyEditRow({
             mono
           />
           <div className="flex flex-col gap-1.5 col-span-2">
-            <span className="text-[11px] text-[var(--fg-2)]">
+            <span className="type-caption text-[var(--fg-2)]">
               密码{draft.has_password_on_server ? "（留空保留旧值）" : ""}
             </span>
             <div className="relative">
@@ -639,7 +639,7 @@ function ProxyEditRow({
                 onChange={(e) => onChange({ password: e.target.value })}
                 autoComplete="new-password"
                 placeholder={draft.has_password_on_server ? "已设置（留空不改）" : "代理需要鉴权时填"}
-                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none text-sm font-mono transition-colors"
+                className="w-full h-9 pr-9 pl-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:border-[var(--accent)]/50 focus:ring-2 focus:ring-[var(--accent)]/25 outline-none type-body-sm font-mono transition-colors"
               />
               <IconButton
                 variant="ghost"

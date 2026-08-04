@@ -129,7 +129,7 @@ export function BackupsPanel() {
               <p className="type-card-title">备份与恢复</p>
               <p className="type-caption text-[var(--fg-2)] mt-1 leading-relaxed break-words">
                 系统每 4 小时自动备份数据库和缓存到
-                <code className="mx-1 px-1.5 py-0.5 rounded bg-[var(--bg-2)] border border-[var(--border)] text-[11px] break-all">
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-[var(--bg-2)] border border-[var(--border)] type-caption break-all">
                   /opt/lumendata/backup
                 </code>
                 ，最多保留 40 份。恢复会成对还原数据库和缓存。
@@ -195,8 +195,8 @@ export function BackupsPanel() {
           <>
             {/* 桌面端表格 */}
             <div className="hidden md:block overflow-x-auto [-webkit-overflow-scrolling:touch]">
-              <table className="w-full text-sm">
-                <thead className="text-xs uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
+              <table className="w-full type-body-sm">
+                <thead className="type-caption uppercase tracking-wider text-[var(--fg-1)] border-b border-[var(--border)]">
                   <tr>
                     <th className="text-left py-3 px-4 font-medium">时间</th>
                     <th className="text-left py-3 px-4 font-medium">相对</th>
@@ -221,19 +221,19 @@ export function BackupsPanel() {
                       }}
                       className="border-t border-[var(--border-subtle)] hover:bg-[var(--bg-3)] transition-colors"
                     >
-                      <td className="py-3 px-4 text-[var(--fg-0)] font-mono text-xs tabular-nums">
+                      <td className="py-3 px-4 text-[var(--fg-0)] font-mono type-caption tabular-nums">
                         {formatTs(b.timestamp, b.created_at)}
                       </td>
-                      <td className="py-3 px-4 text-[var(--fg-1)] text-xs">
+                      <td className="py-3 px-4 text-[var(--fg-1)] type-caption">
                         <span className="inline-flex items-center gap-1">
                           <Clock className="w-3 h-3" />
                           {relativeFromIso(b.created_at)}
                         </span>
                       </td>
-                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums text-xs">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums type-caption">
                         {formatBytes(b.pg_size)}
                       </td>
-                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums text-xs">
+                      <td className="py-3 px-4 text-right text-[var(--fg-0)] font-mono tabular-nums type-caption">
                         {formatBytes(b.redis_size)}
                       </td>
                       <td className="py-3 px-4 text-right">
@@ -261,7 +261,7 @@ export function BackupsPanel() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatTs(b.timestamp, b.created_at)}
                       </div>
                       <div className="type-caption text-[var(--fg-2)] inline-flex items-center gap-1 mt-1">
@@ -279,20 +279,20 @@ export function BackupsPanel() {
                       恢复
                     </Button>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="grid grid-cols-2 gap-2 type-caption">
                     <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)] inline-flex items-center gap-1">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)] inline-flex items-center gap-1">
                         <Database className="w-2.5 h-2.5" /> 数据库
                       </div>
-                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatBytes(b.pg_size)}
                       </div>
                     </div>
                     <div className="rounded-[var(--radius-control)] bg-[var(--bg-2)] border border-[var(--border-subtle)] px-2 py-1.5">
-                      <div className="text-[11px] uppercase tracking-wider text-[var(--fg-2)]">
+                      <div className="type-caption uppercase tracking-wider text-[var(--fg-2)]">
                         缓存
                       </div>
-                      <div className="text-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
+                      <div className="type-body-sm text-[var(--fg-0)] font-mono tabular-nums break-all">
                         {formatBytes(b.redis_size)}
                       </div>
                     </div>
@@ -386,7 +386,7 @@ function RestoreModal({
                 onChange={(e) => setConfirmText(e.target.value)}
                 disabled={pending}
                 autoFocus
-                className="w-full h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:outline-none focus:border-danger-border focus:ring-2 focus:ring-danger/20 text-sm text-[var(--fg-0)] disabled:opacity-50"
+                className="w-full h-9 px-3 rounded-[var(--radius-control)] bg-[var(--bg-0)]/60 border border-[var(--border)] focus:outline-none focus:border-danger-border focus:ring-2 focus:ring-danger/20 type-body-sm text-[var(--fg-0)] disabled:opacity-50"
                 placeholder="恢复"
               />
             </div>

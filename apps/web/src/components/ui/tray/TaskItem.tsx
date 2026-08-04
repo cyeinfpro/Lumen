@@ -116,7 +116,7 @@ function TaskThumbnail({
           )}
         >
           {presentation.failed && (
-            <span className="text-lg leading-none text-danger">!</span>
+            <span className="type-card-title leading-none text-danger">!</span>
           )}
         </div>
       )}
@@ -137,13 +137,13 @@ function TaskThumbnail({
 function TaskSummary({ presentation }: { presentation: TaskItemPresentation }) {
   return (
     <div className="min-w-0 flex-1">
-      <p className="truncate text-[13px] font-medium leading-tight text-[var(--fg-0)]">
+      <p className="truncate type-body-sm font-medium leading-tight text-[var(--fg-0)]">
         {presentation.title}
       </p>
       <p
         aria-live="polite"
         className={cn(
-          "mt-0.5 break-words text-[11px] sm:truncate",
+          "mt-0.5 break-words type-caption sm:truncate",
           presentation.failed ? "text-danger" : "text-[var(--fg-2)]",
         )}
       >
@@ -238,7 +238,7 @@ function TaskRecoveryAction({
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)]"
       >
         {action.label}
       </button>
@@ -248,14 +248,14 @@ function TaskRecoveryAction({
     return (
       <a
         href={action.href}
-        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 text-[10px] text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)]"
       >
         {action.label}
       </a>
     );
   }
   return (
-    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 text-[10px] text-[var(--fg-2)]">
+    <span className="rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 py-0.5 type-caption text-[var(--fg-2)]">
       {action.label}
     </span>
   );

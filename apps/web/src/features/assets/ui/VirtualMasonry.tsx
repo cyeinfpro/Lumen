@@ -279,11 +279,11 @@ function GenerationMasonryComponent({
           className="absolute left-0 right-0 flex h-[42px] items-center gap-2.5 px-3 md:px-0"
           style={{ transform: `translateY(${header.top}px)` }}
         >
-          <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 text-[11px] font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
+          <span className="flex h-6 items-center rounded-[var(--radius-control)] border border-[var(--border-subtle)] bg-[var(--bg-1)] px-2.5 type-caption font-medium text-[var(--fg-1)] shadow-[var(--shadow-1)]">
             {header.label}
           </span>
           <span
-            className="text-[11px] tabular-nums text-[var(--fg-2)]"
+            className="type-caption tabular-nums text-[var(--fg-2)]"
             aria-label={`${header.count} 张作品`}
           >
             {header.count} 张

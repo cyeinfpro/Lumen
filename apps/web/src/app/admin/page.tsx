@@ -322,10 +322,10 @@ export default function AdminPage() {
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-1)]">
             <ShieldCheck className="w-5 h-5 text-[var(--fg-2)]" />
           </div>
-          <p className="text-lg">仅管理员可访问</p>
+          <p className="type-card-title">仅管理员可访问</p>
           <Link
             href="/"
-            className="text-sm text-[var(--accent)] hover:underline mt-2 inline-block"
+            className="type-body-sm text-[var(--accent)] hover:underline mt-2 inline-block"
           >
             返回首页
           </Link>
@@ -340,7 +340,7 @@ export default function AdminPage() {
 function AdminAccessPending({ message }: { message: string }) {
   return (
     <div className="flex min-h-[100dvh] w-full flex-1 items-center justify-center bg-[var(--bg-0)] px-4 text-[var(--fg-1)]">
-      <div role="status" className="flex items-center gap-2 text-sm">
+      <div role="status" className="flex items-center gap-2 type-body-sm">
         <Loader2 className="h-4 w-4 animate-spin" />
         {message}
       </div>
@@ -367,7 +367,7 @@ function AdminAccessError({
           type="button"
           onClick={onRetry}
           disabled={pending}
-          className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-1)] px-4 text-sm transition-colors hover:bg-[var(--bg-2)] disabled:opacity-50"
+          className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-control)] border border-[var(--border-strong)] bg-[var(--bg-1)] px-4 type-body-sm transition-colors hover:bg-[var(--bg-2)] disabled:opacity-50"
         >
           {pending && <Loader2 className="h-4 w-4 animate-spin" />}
           {pending ? "重试中" : "重新验证"}
@@ -405,7 +405,7 @@ function AdminInner({ me }: { me: MaybeAdminUser | undefined }) {
                   <span className="max-w-[140px] truncate text-[var(--fg-1)] sm:max-w-[180px]">
                     {me.email}
                   </span>
-                  <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                  <span className="rounded-[var(--radius-control)] border border-accent-border bg-accent-soft px-1.5 py-0.5 type-caption font-medium text-accent">
                     管理员
                   </span>
                 </div>

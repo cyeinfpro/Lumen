@@ -234,7 +234,7 @@ export function SwipeRow({
                 resetTo(0);
               }}
               className={[
-                "flex-col h-full text-xs gap-1",
+                "flex-col h-full type-caption gap-1",
                 colorClass(a.color),
                 confirming ? "bg-danger text-[var(--danger-on)]" : "",
               ].join(" ")}
