@@ -394,7 +394,7 @@ function Toolbar({
           );
         })}
       </div>
-      <div className="relative min-w-0 flex-1 lg:max-w-[300px]">
+      <div className="relative w-full min-w-0 basis-full flex-1 lg:max-w-[300px]">
         <Search className="pointer-events-none absolute left-0 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--fg-2)]" />
         <input
           value={keyword}
