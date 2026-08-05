@@ -45,7 +45,9 @@ SILENT_GENERATION_REQUEST_HASH_KEY = "request_hash"
 
 
 class SilentGenerationIn(BaseModel):
-    idempotency_key: str = Field(min_length=1, max_length=64)
+    # Keep retry compatibility with v1.2.87-v1.2.90 browser journals that
+    # persisted ``semantic-`` + SHA-256 keys before the client-side fix.
+    idempotency_key: str = Field(min_length=1, max_length=96)
     parent_message_id: str
     intent: Literal["text_to_image", "image_to_image"] = "text_to_image"
     image_params: ImageParamsIn = Field(default_factory=ImageParamsIn)

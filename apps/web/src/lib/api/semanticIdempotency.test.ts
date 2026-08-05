@@ -298,7 +298,8 @@ test("two stores converge through a shared cross-context lock and reload state",
   ]);
 
   assert.equal(first.key, second.key);
-  assert.match(first.key, /^semantic-[a-f0-9]{64}$/);
+  assert.match(first.key, /^[a-f0-9]{64}$/);
+  assert.equal(first.key.length, 64);
   assert.equal((await firstTab.acquire(scope, payload)).key, second.key);
   assert.equal(
     Object.keys(persistedRoot(storage, options.storageKey).pending).length,

@@ -707,7 +707,10 @@ export class SemanticIdempotencyStore {
         `idempotency-key:${storageNamespace}:${this.requireIdentityDigest()}:${fingerprint}:${generation}`,
       );
       if (!isDigest(value)) throw new Error("key digest is not SHA-256");
-      return `semantic-${value}`;
+      // API idempotency contracts cap client keys at 64 characters. Keep the
+      // full SHA-256 digest instead of adding a prefix that makes the key 73
+      // characters and causes durable-browser requests to fail validation.
+      return value;
     } catch (error) {
       throw durabilityError("idempotency key derivation failed", error);
     }
