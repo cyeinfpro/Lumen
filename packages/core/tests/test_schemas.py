@@ -271,6 +271,22 @@ def test_image_params_support_render_and_output_options():
             raise AssertionError(f"expected validation error for {kwargs}")
 
 
+def test_post_message_accepts_legacy_durable_idempotency_key():
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import PostMessageIn
+
+    legacy_key = f"semantic-{'a' * 64}"
+    assert len(legacy_key) == 73
+    assert (
+        PostMessageIn(idempotency_key=legacy_key, text="retry").idempotency_key
+        == legacy_key
+    )
+
+    with pytest.raises(ValidationError):
+        PostMessageIn(idempotency_key="x" * 97, text="too long")
+
+
 def test_post_message_prompt_limit_uses_shared_constant():
     from pydantic import ValidationError
 

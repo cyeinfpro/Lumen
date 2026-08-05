@@ -3062,6 +3062,25 @@ async def test_admin_adjust_wallet_passes_client_idempotency_key(
     )
     assert seen == [(billing_core.rmb_to_micro("5"), "op-header")]
 
+    # Old durable browser journals used ``semantic-`` + SHA-256 (73 chars).
+    # Accept them during the client rollout so an already-started retry can
+    # finish with its original operation identity.
+    legacy_key = f"semantic-{'a' * 64}"
+    seen.clear()
+    await billing.admin_adjust_wallet(
+        "user-1",
+        AdminWalletAdjustIn(
+            amount_rmb_signed="5",
+            reason="客服补偿",
+            idempotency_key=legacy_key,
+        ),
+        _request(method="POST"),
+        SimpleNamespace(id="admin-1", email="admin@example.test"),
+        Db(),  # type: ignore[arg-type]
+        idempotency_key=legacy_key,
+    )
+    assert seen == [(billing_core.rmb_to_micro("5"), legacy_key)]
+
     # 未传 key 时后端收到 None，走输入派生键兜底。
     seen.clear()
     await billing.admin_adjust_wallet(

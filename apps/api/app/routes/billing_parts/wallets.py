@@ -293,12 +293,12 @@ async def admin_adjust_wallet(
     header_key = idempotency_key.strip() if idempotency_key is not None else None
     if header_key is not None and (
         not header_key
-        or len(header_key) > 64
+        or len(header_key) > 96
         or any(ord(char) < 33 or ord(char) > 126 for char in header_key)
     ):
         raise queries.http(
             "idempotency_key_invalid",
-            "Idempotency-Key must be 1-64 printable ASCII characters",
+            "Idempotency-Key must be 1-96 printable ASCII characters",
             422,
         )
     if (

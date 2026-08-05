@@ -1065,6 +1065,24 @@ def test_silent_generation_prompt_limit_uses_shared_constant() -> None:
         )
 
 
+def test_silent_generation_accepts_legacy_durable_idempotency_key() -> None:
+    legacy_key = f"semantic-{'a' * 64}"
+    assert len(legacy_key) == 73
+    assert (
+        messages.SilentGenerationIn(
+            idempotency_key=legacy_key,
+            parent_message_id="msg-1",
+        ).idempotency_key
+        == legacy_key
+    )
+
+    with pytest.raises(ValidationError):
+        messages.SilentGenerationIn(
+            idempotency_key="x" * 97,
+            parent_message_id="msg-1",
+        )
+
+
 def test_silent_generation_request_hash_is_stable_and_covers_request_fields() -> None:
     body = _silent_body(
         attachment_image_ids=["image-a", "image-b"],

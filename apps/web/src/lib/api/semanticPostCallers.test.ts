@@ -659,7 +659,8 @@ test("video creation survives network loss, 5xx, and reload with the original ke
       "video-generation-1",
     );
     assertReplayPair(harness.calls, 0, { bodyKey: true });
-    assert.match(harness.calls[0]?.key ?? "", /^semantic-[a-f0-9]{64}$/);
+    assert.match(harness.calls[0]?.key ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(harness.calls[0]?.key.length, 64);
 
     const networkPayload = {
       ...fiveHundredPayload,

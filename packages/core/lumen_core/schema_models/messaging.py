@@ -102,7 +102,10 @@ class MessageAttachmentIn(BaseModel):
 class PostMessageIn(BaseModel):
     """DESIGN §5.4 核心写入接口。"""
 
-    idempotency_key: str = Field(min_length=1, max_length=64)
+    # v1.2.87-v1.2.90 durable browser clients emitted
+    # ``semantic-`` + SHA-256 (73 chars). Accept those cached keys while newer
+    # clients return to the canonical 64-character digest.
+    idempotency_key: str = Field(min_length=1, max_length=96)
     # 上游 prompt 上限对齐：单条用户输入限制 10k 字符，避免恶意 / 误粘大文本撑爆 DB / 上游。
     text: str = Field(max_length=MAX_PROMPT_CHARS)
     attachment_image_ids: list[str] = Field(
