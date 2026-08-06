@@ -2191,7 +2191,14 @@ async def test_proxied_client_cache_is_lru_bounded(
         assert len(cache) <= limit
         assert not any(client.closed for client in built[:5])
         assert len(TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks) == 5  # noqa: SLF001
-        await asyncio.sleep(0.05)
+        close_tasks = list(
+            TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
+        )
+        await asyncio.wait_for(
+            asyncio.gather(*close_tasks),
+            timeout=1.0,
+        )
+        await asyncio.sleep(0)
         assert any(client.closed for client in built[:5])
         assert not TEST_UPSTREAM_SERVICES.core.retired_client_close_tasks  # noqa: SLF001
     finally:
