@@ -289,9 +289,9 @@ restore_uncommitted_update_state() {
             || [ "${UPDATE_OLD_SERVICES_STOPPED}" -eq 1 ]; then
         if lumen_update_load_original_service_state; then
             if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE}" -eq 1 ]; then
-                log_warn "rollback：重新拉起更新前 release 的 worker/web/api/tgbot。"
+                log_warn "rollback：重新拉起更新前 release 的 api/worker/web/tgbot。"
             else
-                log_warn "rollback：重新拉起更新前 release 的 worker/web/api；tgbot 原本未运行。"
+                log_warn "rollback：重新拉起更新前 release 的 api/worker/web；tgbot 原本未运行。"
             fi
         else
             log_error "rollback：更新前 tgbot active 状态未知；仅恢复核心服务并要求人工确认 bot。"
@@ -299,7 +299,7 @@ restore_uncommitted_update_state() {
         fi
         if [ "${UPDATE_ORIGINAL_TGBOT_ACTIVE_KNOWN:-0}" -eq 1 ]; then
             if ! lumen_update_restore_original_services \
-                    "${ROOT}/current" worker web api; then
+                    "${ROOT}/current" api worker web; then
                 log_error "rollback：更新前 release 服务恢复失败。"
                 rc=1
             else
@@ -309,7 +309,7 @@ restore_uncommitted_update_state() {
         else
             if ! lumen_compose_in "${ROOT}/current" \
                     up --pull missing -d --wait --force-recreate \
-                    worker web api \
+                    api worker web \
                     || ! lumen_update_wait_for_core_ready "${ROOT}/current"; then
                 log_error "rollback：更新前 release 核心服务未通过 API/Worker readiness。"
                 rc=1

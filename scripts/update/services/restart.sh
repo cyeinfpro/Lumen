@@ -55,11 +55,11 @@ if ! lumen_verify_backup_service_layout_binding; then
     exit 70
 fi
 # --force-recreate：同 start_infra 理由，避免容器名冲突 fail。
-# 服务启动顺序：worker → web → api。lumen-api **必须最后重启**——
-# update.sh 自身就是被 admin_update 通过 lumen-update-runner 触发的，
-# 如果 api 先重启，正在等 update 进度 SSE 的前端会立刻断流；
-# 把 api 放到最后还能用旧 api 把进度写完，再无缝切到新版本。
-# (per project_lumen_update_button.md)
+# 服务启动顺序：api → worker → web。fast 模式使用 --no-deps，因此必须
+# 由 updater 显式建立依赖顺序。Web 若在 API 缺失或仍指向旧容器地址时启动，
+# 长驻的 Next.js 进程可能继续访问失效的 Docker DNS 结果，令更新完成后仍长期
+# 返回 502。API 重启会短暂断开更新进度 SSE，但前端可重连；不能用全站可用性
+# 换取这条单次进度连接不断开。
 _restart_ok=1
 if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-compose.bluegreen.yml" ]; then
     _green_port="${API_GREEN_BIND_PORT:-18001}"
@@ -129,7 +129,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
     fi
     if [ "${_restart_ok}" = "1" ]; then
         emit_start start_blue
-        for _svc in web api; do
+        for _svc in api web; do
             if ! lumen_update_start_bound_service \
                     "${CURRENT_LINK}" "${_svc}"; then
                 _restart_ok=0
@@ -162,7 +162,7 @@ if [ "${LUMEN_UPDATE_BLUE_GREEN:-0}" = "1" ] && [ -f "${CURRENT_LINK}/docker-com
         fi
     fi
 else
-    for _svc in worker web api; do
+    for _svc in api worker web; do
         if ! lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"; then
             _restart_ok=0
             break
@@ -260,8 +260,8 @@ else
                         "${LUMEN_APP_GID:-10001}" \
                     && lumen_release_atomic_switch "${ROOT}" "${CURRENT_ID}" \
                     && lumen_compose_in "${CURRENT_LINK}" pull; then
-                    # 回滚同样按 worker → web → api 顺序逐个 up，保留 api 最后启动的偏好。
-                    for _svc in worker web api; do
+                    # 回滚同样先恢复 API，再恢复依赖它的 worker / web。
+                    for _svc in api worker web; do
                         if ! compose_up_service_standard "${CURRENT_LINK}" "${_svc}"; then
                             _rollback_started=0
                             break
