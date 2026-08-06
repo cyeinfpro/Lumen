@@ -2164,7 +2164,7 @@ case "$*" in
     exit 0
     ;;
 esac
-if [[ "${args}" == *" up "* && "${args}" == *" worker"* ]]; then
+if [[ "${args}" == *" up "* && "${*: -1}" = "api" ]]; then
   if [ ! -f "${TEST_DOCKER_FAIL_STATE:?}" ]; then
     : > "${TEST_DOCKER_FAIL_STATE}"
     marker="missing"
@@ -2957,11 +2957,11 @@ def test_update_script_runs_docker_compose_pull_migrate_up_phases() -> None:
     assert "image_tag_drift_redeploy" in text
     assert 'ln -sfn current/VERSION "${ROOT}/VERSION"' in text
     assert 'stop -t "${LUMEN_UPDATE_STOP_TIMEOUT:-30}" api worker tgbot' in text
-    # restart_services: api 必须最后启动（lumen-api 在跑 update.sh 自身的进度
-    # SSE，先重 api 会让前端断流）。形态：for _svc in worker web api; do up -d
-    # --pull missing --wait --force-recreate "${_svc}"; done。fast 模式通过
-    # compose_up_service helper 加 --no-deps，standard 保留原重建语义。
-    assert "for _svc in worker web api" in text
+    # restart_services: fast 模式使用 --no-deps，因此必须先把 API 启动并等到
+    # healthy，再启动依赖 API 的 worker / web。否则 Web 可能缓存旧 Docker DNS
+    # 地址，令更新完成后仍持续 502。
+    assert "for _svc in api worker web" in text
+    assert "for _svc in api web" in text
     assert 'lumen_update_start_bound_service "${CURRENT_LINK}" "${_svc}"' in text
     assert 'compose_up_service "${compose_dir}" "${service}"' in text
     assert "compose_up_service_fast()" in text

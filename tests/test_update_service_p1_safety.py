@@ -471,7 +471,7 @@ def test_generic_rollback_restores_tgbot_only_if_it_was_active(
     restore = compose_log.read_text(encoding="utf-8").strip()
     assert ("--profile tgbot" in restore) is bool(tgbot_active)
     assert (" tgbot" in restore) is bool(tgbot_active)
-    assert " worker web api" in restore
+    assert " api worker web" in restore
     assert "--wait --force-recreate" in restore
 
 
@@ -529,7 +529,7 @@ def test_generic_rollback_failure_retains_snapshot_and_release_evidence(
     assert result.returncode == 0, result.stderr + result.stdout
     lines = events.read_text(encoding="utf-8").splitlines()
     compose = next(line for line in lines if line.startswith("compose:"))
-    assert "--wait --force-recreate worker web api" in compose
+    assert "--wait --force-recreate api worker web" in compose
     if failure == "compose":
         assert not any(line.startswith("ready:") for line in lines)
     else:
@@ -693,9 +693,9 @@ def test_restart_records_tgbot_as_required_when_it_starts_the_service(
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert events.read_text(encoding="utf-8").splitlines() == [
+        "start:api",
         "start:worker",
         "start:web",
-        "start:api",
         "start:tgbot",
     ]
     assert "required=1" in result.stdout
