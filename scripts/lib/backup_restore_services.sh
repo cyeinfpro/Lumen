@@ -94,7 +94,8 @@ lumen_service_running_state() {
         return 0
     fi
     case "${output}" in
-        *"No such object"*|*"No such container"*|*"not found"*)
+        *"No such object"*|*"No such container"*|\
+        *"no such object"*|*"no such container"*|*"not found"*)
             printf 'absent\n'
             return 0
             ;;
