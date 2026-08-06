@@ -70,6 +70,7 @@ export function useSSE(
           onOpen: options.onOpen,
           onError: options.onError,
           onControl: options.onControl,
+          onProtocolIssue: options.onProtocolIssue,
           onAuthInvalidated: options.onAuthInvalidated,
           setStatus,
         },
@@ -141,6 +142,7 @@ export function useSSE(
     hasRecoveryAdapter,
     options.hiddenCloseDelayMs,
     options.maxRetryCount,
+    options.onProtocolIssue,
     scopeIdentity,
   ]);
 

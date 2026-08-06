@@ -12,6 +12,7 @@ if str(IMAGE_JOB_DIR) not in sys.path:
     sys.path.insert(0, str(IMAGE_JOB_DIR))
 
 from image_job.application.queue_supervisor import QueueSupervisor  # noqa: E402
+from image_job.contracts import JobProcessOutcome  # noqa: E402
 
 
 def _queue(*, queue_max: int = 1) -> QueueSupervisor:
@@ -131,8 +132,9 @@ async def test_successful_processor_attempt_has_distinct_metrics() -> None:
     queue = _queue()
     processed = asyncio.Event()
 
-    async def processor(_job_id: str) -> None:
+    async def processor(_job_id: str) -> JobProcessOutcome:
         processed.set()
+        return JobProcessOutcome.SUCCEEDED
 
     async def reconcile() -> None:
         return None
@@ -146,8 +148,59 @@ async def test_successful_processor_attempt_has_distinct_metrics() -> None:
 
         assert queue.metrics["attempts_finished_total"] == 1
         assert queue.metrics["processor_success_total"] == 1
+        assert queue.metrics["processor_succeeded_total"] == 1
+        assert queue.metrics["processor_failed_total"] == 0
+        assert queue.metrics["processor_uncertain_total"] == 0
+        assert queue.metrics["processor_skipped_total"] == 0
         assert queue.metrics["processor_crash_total"] == 0
         assert queue.metrics["jobs_completed_total"] == 1
+    finally:
+        await queue.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "metric"),
+    [
+        (JobProcessOutcome.SUCCEEDED, "processor_succeeded_total"),
+        (JobProcessOutcome.FAILED, "processor_failed_total"),
+        (JobProcessOutcome.UNCERTAIN, "processor_uncertain_total"),
+        (JobProcessOutcome.SKIPPED_FENCE_LOST, "processor_skipped_total"),
+        (JobProcessOutcome.SKIPPED_NOT_QUEUED, "processor_skipped_total"),
+    ],
+)
+async def test_queue_metrics_follow_business_outcome(
+    outcome: JobProcessOutcome,
+    metric: str,
+) -> None:
+    queue = _queue()
+    processed = asyncio.Event()
+
+    async def processor(_job_id: str) -> JobProcessOutcome:
+        processed.set()
+        return outcome
+
+    async def reconcile() -> None:
+        return None
+
+    queue.bind(processor=processor, reconcile=reconcile)
+    await queue.startup()
+    try:
+        assert await queue.enqueue("job-1") == "enqueued"
+        await asyncio.wait_for(processed.wait(), timeout=1)
+        await asyncio.wait_for(queue.queue.join(), timeout=1)
+
+        assert queue.metrics[metric] == 1
+        assert queue.metrics["processor_succeeded_total"] == int(
+            outcome is JobProcessOutcome.SUCCEEDED
+        )
+        assert queue.metrics["processor_success_total"] == int(
+            outcome is JobProcessOutcome.SUCCEEDED
+        )
+        assert queue.metrics["jobs_completed_total"] == int(
+            outcome is JobProcessOutcome.SUCCEEDED
+        )
+        assert queue.metrics["processor_crash_total"] == 0
     finally:
         await queue.shutdown()
 

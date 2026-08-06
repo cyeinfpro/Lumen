@@ -1,13 +1,10 @@
-"""write_audit(autocommit=False) 事务隔离回归测试。
-
-回归目标：审计行 flush 失败必须 fail closed，同时不得污染调用方事务。
-调用方捕获专用异常后可以继续 commit，也可以显式 rollback 并复用 session。
-"""
+"""write_audit(autocommit=False) 事务原子性回归测试。"""
 
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.audit import AuditPersistenceError, write_audit
@@ -15,8 +12,7 @@ from lumen_core.models import AuditLog
 
 
 @pytest.mark.asyncio
-async def test_audit_flush_failure_raises_but_caller_can_handle_and_commit() -> None:
-    """失败审计行回滚到 savepoint，调用方捕获异常后仍可提交原事务。"""
+async def test_audit_flush_failure_poisoned_transaction_cannot_commit() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -50,12 +46,15 @@ async def test_audit_flush_failure_raises_but_caller_can_handle_and_commit() -> 
                 )
             assert exc_info.value.event_type == "audit.bad"
 
-            # savepoint 已回滚，处理异常后 commit 不会触发 PendingRollbackError。
-            await session.commit()
+            with pytest.raises(PendingRollbackError):
+                await session.commit()
+            await session.rollback()
 
-            rows = (await session.execute(select(AuditLog))).scalars().all()
-            assert [r.event_type for r in rows] == ["caller.row"]
-            assert all(r.user_id == "real-user" for r in rows)
+        async with factory() as verification_session:
+            rows = (
+                await verification_session.execute(select(AuditLog))
+            ).scalars().all()
+            assert rows == []
     finally:
         await engine.dispose()
 
@@ -138,5 +137,52 @@ async def test_audit_session_write_commits_with_caller_transaction() -> None:
             rows = (await session.execute(select(AuditLog))).scalars().all()
             assert len(rows) == 1
             assert rows[0].event_type == "share.create"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_business_commit_failure_leaves_no_ghost_audit() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: AuditLog.metadata.create_all(c, tables=[AuditLog.__table__])
+        )
+        await conn.exec_driver_sql(
+            "CREATE TABLE business_rows (id VARCHAR(36) PRIMARY KEY)"
+        )
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            await session.execute(
+                text("INSERT INTO business_rows (id) VALUES ('business-1')")
+            )
+            await write_audit(
+                session,
+                event_type="business.update",
+                actor_email_hash="h" * 64,
+                autocommit=False,
+            )
+
+            @event.listens_for(engine.sync_engine, "commit", once=True)
+            def _fail_commit(_connection) -> None:
+                raise RuntimeError("injected commit failure")
+
+            with pytest.raises(RuntimeError, match="injected commit failure"):
+                await session.commit()
+            await session.rollback()
+
+        async with factory() as verification_session:
+            business_count = (
+                await verification_session.execute(
+                    text("SELECT COUNT(*) FROM business_rows")
+                )
+            ).scalar_one()
+            audits = (
+                await verification_session.execute(select(AuditLog))
+            ).scalars().all()
+            assert business_count == 0
+            assert audits == []
     finally:
         await engine.dispose()

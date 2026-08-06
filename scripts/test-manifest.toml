@@ -565,11 +565,13 @@ paths = [
   "scripts/restore_runner.py",
   "scripts/update_runner.py",
   "scripts/build_release_manifest.py",
+  "scripts/check_immutable_images.py",
   "scripts/promote_release_images.py",
   "scripts/release_manifest_guard.py",
   "scripts/version.py",
   "deploy/**",
   "tools/mock-image-upstream/**",
+  "tests/test_ops_03_06_contracts.py",
 ]
 commands = ["uv run pytest -q tests tools/mock-image-upstream/tests"]
 gates = ["python-ruff"]

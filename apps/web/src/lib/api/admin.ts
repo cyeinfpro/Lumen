@@ -1,6 +1,7 @@
 import { API_BASE, ApiError, apiFetch, apiFetchNoContent } from "./http";
 import { longOperationClient } from "./longOperationClient";
 import { deadline } from "./requestBudget";
+import { validateShare } from "./responseValidators";
 
 const ADMIN_OPERATION_BUDGET = deadline(15 * 60_000);
 import type { NoContent } from "./http";
@@ -341,6 +342,7 @@ export function createShare(
   return apiFetch<ShareOut>(`/images/${imageId}/share`, {
     method: "POST",
     body: JSON.stringify(opts),
+    validate: validateShare,
   });
 }
 
@@ -354,6 +356,7 @@ export function createMultiShare(
       image_ids: imageIds,
       ...opts,
     }),
+    validate: validateShare,
   });
 }
 
@@ -446,14 +449,17 @@ export async function updateAdminProxies(
   });
 }
 
-export function restartTelegramBot(): Promise<{
-  ok: boolean;
-  receivers: number;
-}> {
-  return apiFetch<{ ok: boolean; receivers: number }>(
-    "/admin/telegram/restart",
-    { method: "POST" },
-  );
+export type TelegramControlCommandOut = {
+  command_id: string;
+  command: string;
+  status: "queued" | "accepted" | "failed";
+  error: string | null;
+};
+
+export function restartTelegramBot(): Promise<TelegramControlCommandOut> {
+  return apiFetch<TelegramControlCommandOut>("/admin/telegram/restart", {
+    method: "POST",
+  });
 }
 
 export function testAdminProxy(

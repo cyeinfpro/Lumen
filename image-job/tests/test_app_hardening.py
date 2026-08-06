@@ -36,7 +36,7 @@ def load_app_module():
     from .support import load_harness
 
     app = load_harness()
-    app.ALLOW_LEGACY_BEARER_AUTH = True
+    app.SIDECAR_TOKEN = "sk-test"
     return app
 
 
@@ -1105,6 +1105,7 @@ def test_image_job_create_is_idempotent_per_auth_and_key(monkeypatch, tmp_path) 
             },
             headers={
                 "authorization": authorization,
+                "x-lumen-upstream-authorization": "Bearer sk-upstream",
                 "Idempotency-Key": "stable-job",
             },
         )
@@ -1129,7 +1130,6 @@ def test_image_job_service_auth_is_separate_from_upstream_bearer(
     sidecar_token = "sidecar-token-" + "s" * 32
     upstream_key = "sk-upstream-secret"
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
     monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
     monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
@@ -1171,7 +1171,6 @@ def test_image_job_service_auth_is_separate_from_upstream_bearer(
     assert row["request_hash"] == app.scoped_request_hash(
         app.validate_payload(request.payload),
         f"Bearer {upstream_key}",
-        legacy_auth=False,
     )
 
 
@@ -1182,7 +1181,6 @@ def test_image_job_idempotency_is_scoped_to_upstream_provider(
     app = load_app_module()
     sidecar_token = "sidecar-token-" + "s" * 32
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
     monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
     monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
@@ -1244,21 +1242,18 @@ def test_image_job_service_auth_uses_compare_digest(monkeypatch) -> None:
         fake_compare_digest,
     )
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
 
-    owner, legacy = app.authenticate_caller(
+    owner = app.authenticate_caller(
         SimpleNamespace(headers={"authorization": f"Bearer {sidecar_token}"})
     )
 
     assert owner == f"Bearer {sidecar_token}"
-    assert legacy is False
     assert calls == [(sidecar_token.encode(), sidecar_token.encode())]
 
 
 def test_image_job_service_auth_fails_closed_without_config(monkeypatch) -> None:
     app = load_app_module()
     monkeypatch.setattr(app, "SIDECAR_TOKEN", "")
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
 
     with pytest.raises(HTTPException) as exc:
         app.authenticate_caller(
@@ -1275,32 +1270,19 @@ def test_image_job_startup_auth_config_is_fail_closed() -> None:
     with pytest.raises(RuntimeError, match="IMAGE_JOB_SIDECAR_TOKEN"):
         app.validate_sidecar_auth_config(
             "",
-            allow_legacy=False,
             min_token_chars=32,
         )
 
-    app.validate_sidecar_auth_config(
-        "",
-        allow_legacy=True,
-        min_token_chars=32,
-    )
 
-
-def test_image_job_legacy_auth_requires_explicit_opt_in(monkeypatch) -> None:
+def test_image_job_arbitrary_bearer_is_always_rejected(monkeypatch) -> None:
     app = load_app_module()
     sidecar_token = "sidecar-token-" + "s" * 32
     request = SimpleNamespace(headers={"authorization": "Bearer sk-legacy-upstream"})
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
 
     with pytest.raises(HTTPException) as exc:
         app.authenticate_caller(request)
     assert exc.value.status_code == 401
-
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", True)
-    owner, legacy = app.authenticate_caller(request)
-    assert owner == "Bearer sk-legacy-upstream"
-    assert legacy is True
 
 
 def test_new_service_auth_can_poll_legacy_job(monkeypatch, tmp_path) -> None:
@@ -1308,7 +1290,6 @@ def test_new_service_auth_can_poll_legacy_job(monkeypatch, tmp_path) -> None:
     sidecar_token = "sidecar-token-" + "s" * 32
     upstream_auth = "Bearer sk-legacy-upstream"
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
     monkeypatch.setattr(app, "DB_PATH", tmp_path / "image_jobs.sqlite3")
     monkeypatch.setattr(app, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(app, "REFS_DIR", tmp_path / "refs")
@@ -1341,7 +1322,6 @@ def test_image_job_service_auth_rejects_missing_upstream_header(monkeypatch) -> 
     app = load_app_module()
     sidecar_token = "sidecar-token-" + "s" * 32
     monkeypatch.setattr(app, "SIDECAR_TOKEN", sidecar_token)
-    monkeypatch.setattr(app, "ALLOW_LEGACY_BEARER_AUTH", False)
     request = _JsonRequest(
         {
             "endpoint": "/v1/images/generations",
@@ -1381,7 +1361,10 @@ def test_image_job_payload_idempotency_key_is_persisted_and_deduped(
                 "idempotency_key": "payload-stable-job",
                 "body": {"prompt": "cat"},
             },
-            headers={"authorization": "Bearer sk-test"},
+            headers={
+                "authorization": "Bearer sk-test",
+                "x-lumen-upstream-authorization": "Bearer sk-test",
+            },
         )
 
     async def _run() -> tuple[dict[str, object], dict[str, object], int, str | None]:
@@ -1417,6 +1400,7 @@ def test_idempotent_duplicate_reschedules_existing_queued_job(
             },
             headers={
                 "authorization": "Bearer sk-test",
+                "x-lumen-upstream-authorization": "Bearer sk-test",
                 "Idempotency-Key": "stable-job",
             },
         )
@@ -1429,7 +1413,7 @@ def test_idempotent_duplicate_reschedules_existing_queued_job(
             payload,
             "Bearer sk-test",
             idempotency_key=hashlib.sha256(b"stable-job").hexdigest(),
-            payload_hash=app.request_hash(payload),
+            payload_hash=app.scoped_request_hash(payload, "Bearer sk-test"),
         )
 
         response = await app.create_image_job(request())
@@ -1468,6 +1452,7 @@ def test_image_job_idempotency_key_conflict_rejects_different_payload(
             },
             headers={
                 "authorization": "Bearer sk-test",
+                "x-lumen-upstream-authorization": "Bearer sk-test",
                 "Idempotency-Key": "stable-job",
             },
         )
@@ -1643,14 +1628,20 @@ def test_save_failure_after_2xx_lands_uncertain_not_refundable(monkeypatch) -> N
 
     monkeypatch.setattr(app, "save_images", failing_save)
 
+    from image_job.contracts import UpstreamDispatchReceipt
+    from image_job.upstream import PreparedUpstreamRequest
+
     with pytest.raises(app.JobFailure) as exc:
         asyncio.run(
             app._call_upstream_once(
                 _upstream_2xx_row(),
-                url="http://upstream.test/v1/images/generations",
-                headers={},
-                body={},
-                endpoint="/v1/images/generations",
+                prepared=PreparedUpstreamRequest(
+                    url="http://upstream.test/v1/images/generations",
+                    endpoint="/v1/images/generations",
+                    headers={},
+                    content=b"{}",
+                ),
+                dispatch=UpstreamDispatchReceipt(),
             )
         )
 
@@ -1696,19 +1687,18 @@ def test_process_job_claims_queued_row_once(monkeypatch, tmp_path) -> None:
     async def fake_call_upstream(row) -> tuple[int, list[dict[str, object]]]:
         calls.append(row["job_id"])
         await asyncio.sleep(0)
-        return (
-            200,
+        images = await app.save_images(
+            row["job_id"],
+            row["created_at"],
+            row["retention_days"],
             [
-                {
-                    "url": "https://example.com/image.png",
-                    "width": 2,
-                    "height": 2,
-                    "bytes": 10,
-                    "format": "png",
-                    "expires_at": "2026-05-05T00:00:00+00:00",
-                }
+                app.ImageCandidate(
+                    base64.b64decode(_tiny_png_b64()),
+                    "image/png",
+                )
             ],
         )
+        return 200, images
 
     monkeypatch.setattr(app, "call_upstream", fake_call_upstream)
 

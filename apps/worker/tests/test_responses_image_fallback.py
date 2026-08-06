@@ -1633,6 +1633,112 @@ def test_transparent_background_converts_to_matte_upstream_options() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_route_control_plane_unavailable_makes_zero_upstream_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import runtime_settings
+
+    calls = 0
+
+    async def unavailable(_key: str) -> str | None:
+        raise runtime_settings.SettingUnavailable("database unavailable")
+
+    async def candidates(*_args: Any, **_kwargs: Any) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", unavailable)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.dispatch,
+        "image_dispatch_candidates",
+        candidates,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await _first_image_result(
+            upstream.generate_image(
+                _image_request(prompt="must not dispatch"),
+            )
+        )
+
+    assert exc_info.value.error_code == "image_control_plane_unavailable"
+    assert exc_info.value.payload["retryable"] is True
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_confirmed_missing_image_route_uses_documented_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def missing_db(_key: str) -> None:
+        return None
+
+    async def missing_legacy(_key: str) -> None:
+        return None
+
+    monkeypatch.delenv("IMAGE_CHANNEL", raising=False)
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", missing_db)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", missing_legacy)
+
+    assert (
+        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
+        == "responses"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("image.channel", "sometimes"),
+        ("image.engine", "imaginary"),
+    ],
+)
+async def test_invalid_image_dispatch_setting_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: str,
+) -> None:
+    async def resolve_db(key: str) -> str | None:
+        return value if key == setting else None
+
+    monkeypatch.delenv("IMAGE_CHANNEL", raising=False)
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", resolve_db)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
+
+    assert exc_info.value.error_code == "image_dispatch_configuration_invalid"
+    assert exc_info.value.payload["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_legacy_primary_route_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def missing_db(_key: str) -> None:
+        return None
+
+    async def invalid_legacy(key: str) -> str | None:
+        if key == "image.primary_route":
+            return "surprise"
+        return None
+
+    monkeypatch.delenv("IMAGE_CHANNEL", raising=False)
+    monkeypatch.delenv("IMAGE_ENGINE", raising=False)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", missing_db)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", invalid_legacy)
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
+
+    assert exc_info.value.error_code == "image_dispatch_configuration_invalid"
+
+
+@pytest.mark.asyncio
 async def test_responses_transparent_background_uses_matte_png_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -12,9 +12,11 @@ import type {
 } from "./types";
 import "./moduleResolution.test-helper.mjs";
 
-const { applySseEventPayload } = await import(
-  new URL("./sseEventActions.ts", import.meta.url).href
-);
+const {
+  applySseEventPayload,
+  clearAppendedMessageRecoveryQueue,
+  pendingAppendedMessageRecoveryCount,
+} = await import(new URL("./sseEventActions.ts", import.meta.url).href);
 const { clearUserScopedRuntime } = await import(
   new URL("./runtime.ts", import.meta.url).href
 );
@@ -138,12 +140,22 @@ function emitCompletionImage(
 }
 
 test.beforeEach(() => {
+  clearAppendedMessageRecoveryQueue();
   clearUserScopedRuntime();
 });
 
 test.after(() => {
+  clearAppendedMessageRecoveryQueue();
   clearUserScopedRuntime();
 });
+
+async function waitForAppendedMessageRecovery(): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (pendingAppendedMessageRecoveryCount() === 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("appended message recovery did not settle");
+}
 
 test("completion.image from user A cannot create or bootstrap ownership in user B state", () => {
   const harness = createHarness(createState());
@@ -159,6 +171,140 @@ test("completion.image from user A cannot create or bootstrap ownership in user 
   assert.deepEqual(harness.state().generations, {});
   assert.deepEqual(harness.state().imagesById, {});
   assert.deepEqual(harness.state().messages, []);
+});
+
+test("appended message remains pending until a bounded retry succeeds once", async () => {
+  let listCalls = 0;
+  const harness = createHarness(
+    createState({
+      currentUserId: "user-b",
+      currentConvId: "conv-b",
+      loadHistoricalMessages: async () => {
+        throw new Error("history unavailable");
+      },
+    }),
+  );
+
+  applySseEventPayload(
+    harness.set,
+    harness.get,
+    "conv.message.appended",
+    {
+      conversation_id: "conv-b",
+      message_id: "message-1",
+    },
+    100,
+    {
+      listMessages: async () => {
+        listCalls += 1;
+        if (listCalls < 3) throw new Error("incremental unavailable");
+        return {
+          items: [
+            {
+              id: "message-1",
+              conversation_id: "conv-b",
+              role: "user" as const,
+              content: { text: "hello" },
+              created_at: "2026-08-06T00:00:00Z",
+            },
+          ],
+          generations: [],
+          completions: [],
+          images: [],
+          next_cursor: null,
+        };
+      },
+      requestRealtimeRecovery: () => {
+        assert.fail("successful bounded retry must not request a snapshot");
+      },
+      retryDelaysMs: [0, 0, 0],
+    },
+    "cursor-1",
+  );
+
+  assert.equal(pendingAppendedMessageRecoveryCount(), 1);
+  await waitForAppendedMessageRecovery();
+
+  assert.equal(listCalls, 3);
+  assert.deepEqual(
+    harness.state().messages.map((message) => message.id),
+    ["message-1"],
+  );
+});
+
+test("appended message retry is canceled on identity cleanup", async () => {
+  let listCalls = 0;
+  const harness = createHarness(
+    createState({
+      currentUserId: "user-b",
+      currentConvId: "conv-b",
+      loadHistoricalMessages: async () => {},
+    }),
+  );
+
+  applySseEventPayload(
+    harness.set,
+    harness.get,
+    "conv.message.appended",
+    {
+      conversation_id: "conv-b",
+      message_id: "message-1",
+    },
+    100,
+    {
+      listMessages: async () => {
+        listCalls += 1;
+        throw new Error("unexpected request");
+      },
+      requestRealtimeRecovery: () => {},
+      retryDelaysMs: [50],
+    },
+    "cursor-1",
+  );
+  clearAppendedMessageRecoveryQueue();
+  harness.set({ currentUserId: "user-c", currentConvId: "conv-c" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 60));
+
+  assert.equal(listCalls, 0);
+  assert.equal(pendingAppendedMessageRecoveryCount(), 0);
+});
+
+test("exhausted appended message recovery requests an authoritative snapshot", async () => {
+  let recoveryRequests = 0;
+  const harness = createHarness(
+    createState({
+      currentUserId: "user-b",
+      currentConvId: "conv-b",
+      loadHistoricalMessages: async () => {
+        throw new Error("history unavailable");
+      },
+    }),
+  );
+
+  applySseEventPayload(
+    harness.set,
+    harness.get,
+    "conv.message.appended",
+    {
+      conversation_id: "conv-b",
+      message_id: "message-1",
+    },
+    100,
+    {
+      listMessages: async () => {
+        throw new Error("incremental unavailable");
+      },
+      requestRealtimeRecovery: () => {
+        recoveryRequests += 1;
+      },
+      retryDelaysMs: [0, 0],
+    },
+    "cursor-1",
+  );
+  await waitForAppendedMessageRecovery();
+
+  assert.equal(recoveryRequests, 1);
+  assert.equal(harness.state().messages.length, 0);
 });
 
 test("completion.image succeeds when the current user already owns the completion message", () => {

@@ -495,7 +495,12 @@ async def test_reference_image_binary_serves_video_reference_variant(
 
     img = SimpleNamespace(
         id="image-1",
-        metadata_jsonb={"video_reference_access_token": "x" * 16},
+        metadata_jsonb={
+            "video_reference_access_token": "x" * 16,
+            "video_reference_access_token_expires_at": (
+                "2099-01-01T00:00:00+00:00"
+            ),
+        },
         storage_key="u/user-1/uploads/image-1.png",
         mime="image/png",
         sha256="orig-sha",
@@ -550,7 +555,12 @@ async def test_reference_image_binary_serves_volcano_asset_variant(
 
     img = SimpleNamespace(
         id="image-1",
-        metadata_jsonb={"video_reference_access_token": "x" * 16},
+        metadata_jsonb={
+            "video_reference_access_token": "x" * 16,
+            "video_reference_access_token_expires_at": (
+                "2099-01-01T00:00:00+00:00"
+            ),
+        },
         storage_key="u/user-1/uploads/image-1.png",
         mime="image/png",
         sha256="orig-sha",
@@ -631,6 +641,7 @@ async def test_reference_image_binary_rate_limits_before_db(
 @pytest.mark.asyncio
 async def test_delete_image_writes_audit_log(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_write_audit(db, **kwargs):
+        assert kwargs.pop("autocommit") is False
         db.add(AuditLog(**kwargs))
         await db.flush()
 

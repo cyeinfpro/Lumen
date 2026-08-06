@@ -39,6 +39,11 @@ GET  /images/temp/...
 GET  /refs/...
 ```
 
+`POST /v1/image-jobs` is a paid side-effecting operation and requires a valid
+`Idempotency-Key`. Replays with the same owner, upstream credential, key, and
+payload return the original job; reusing the key with a changed payload returns
+`409`.
+
 Runtime probes are intentionally small:
 
 ```text
@@ -78,7 +83,10 @@ selected, and falls back to stream if the configuration is unavailable.
 configuration as a fatal configuration error.
 
 Each upstream POST carries a stable `Idempotency-Key` derived from the persisted
-`job_id`. The service does not assume that an upstream honors this key unless
+`job_id`. The service marks dispatch only when the HTTP transport starts writing
+request headers or body; local URL, file, or multipart preparation failures are
+therefore proven absent. The service does not assume that an upstream honors
+this key unless
 `IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED=1` is configured. Ambiguous read,
 gateway, restart, or stream failures are otherwise terminal `uncertain` jobs and
 are not automatically replayed.

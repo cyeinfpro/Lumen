@@ -63,6 +63,8 @@ from .libraries import (
     OutboxDeadLetter,
 )
 
+from .storage_operations import StorageApplyOperation
+
 __all__ = [
     "USER_API_CREDENTIAL_STATUSES",
     "User",
@@ -109,4 +111,5 @@ __all__ = [
     "PosterMaster",
     "PosterRender",
     "OutboxDeadLetter",
+    "StorageApplyOperation",
 ]

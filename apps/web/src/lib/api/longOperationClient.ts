@@ -1,16 +1,18 @@
 import { identityWritePolicy } from "@/lib/auth/identityPolicy";
 import { apiTransport } from "./transport";
 import type { RequestBudget } from "./requestBudget";
+import type { ResponseValidator } from "./response";
 
-type LongOperationOptions = Omit<RequestInit, "method"> & {
+type LongOperationOptions<T = unknown> = Omit<RequestInit, "method"> & {
   method?: "POST" | "PUT" | "PATCH" | "DELETE";
   budget: RequestBudget;
+  validate?: ResponseValidator<T>;
 };
 
 export const longOperationClient = {
   run<TResult>(
     path: string,
-    options: LongOperationOptions,
+    options: LongOperationOptions<TResult>,
   ): Promise<TResult> {
     const method = options.method ?? "POST";
     identityWritePolicy.assertAllowed(method, path);

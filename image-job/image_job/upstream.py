@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
+
+from .contracts import PreDispatchFailure, UpstreamDispatchReceipt
+
+
+_DISPATCH_STARTED_EVENTS = frozenset(
+    {
+        "http11.send_request_headers.started",
+        "http11.send_request_body.started",
+        "http2.send_request_headers.started",
+        "http2.send_request_body.started",
+    }
+)
 
 
 def _row_value(row: Any, key: str) -> Any:
@@ -15,6 +28,14 @@ def _row_value(row: Any, key: str) -> Any:
         return row[key]
     except (IndexError, KeyError, TypeError):
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedUpstreamRequest:
+    url: str
+    endpoint: str
+    headers: dict[str, str]
+    content: bytes
 
 
 @dataclass(frozen=True)
@@ -38,6 +59,7 @@ class UpstreamFacade:
     job_failure: Callable[..., Any]
     job_failure_type: type[BaseException]
     parse_json_bytes: Callable[[bytes], Any | None]
+    json_dump: Callable[[Any], str]
     body_preview: Callable[[bytes], Any]
     read_response_body_bounded: Callable[
         ...,
@@ -53,6 +75,95 @@ class UpstreamFacade:
     call_upstream_once_fn: Callable[..., Awaitable[tuple[int, list[dict[str, Any]]]]]
     log: logging.Logger
 
+    def pre_dispatch_failure(self, exc: BaseException) -> PreDispatchFailure:
+        if isinstance(exc, PreDispatchFailure):
+            return exc
+        if isinstance(exc, self.job_failure_type):
+            return PreDispatchFailure(
+                str(getattr(exc, "error", exc)),
+                upstream_status=getattr(exc, "upstream_status", None),
+                upstream_body=getattr(exc, "upstream_body", None),
+                retryable=bool(getattr(exc, "retryable", False)),
+                retry_requires_idempotency=False,
+                outcome_uncertain=False,
+                cost_proven_absent=True,
+                error_class=str(
+                    getattr(exc, "error_class", self.error_class_internal())
+                ),
+            )
+        return PreDispatchFailure(
+            "upstream request preparation failed: "
+            f"{exc.__class__.__name__}: {exc}",
+            error_class=self.error_class_internal(),
+        )
+
+    async def prepare_upstream_request(
+        self,
+        row: Any,
+        *,
+        authorization: str,
+        dispatch: UpstreamDispatchReceipt,
+    ) -> PreparedUpstreamRequest:
+        client = self.http_client()
+        if client is None:
+            raise PreDispatchFailure(
+                "HTTP client not ready",
+                error_class=self.error_class_internal(),
+            )
+        try:
+            payload = self.parse_json_bytes(row["payload_json"].encode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("job payload is not a strict JSON object")
+            if not authorization:
+                raise ValueError("job is missing Authorization header")
+            endpoint = str(payload["endpoint"])
+            body = payload["body"]
+            if not isinstance(body, dict):
+                raise ValueError("job body is not an object")
+            transport = self.normalize_image_edit_input_transport(
+                payload.get("image_edit_input_transport")
+            )
+            upstream_key = self.upstream_idempotency_key(row["job_id"])
+            dispatch.upstream_idempotency_key_hash = hashlib.sha256(
+                upstream_key.encode("utf-8")
+            ).hexdigest()[:12]
+            headers = {
+                "Authorization": authorization,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream, image/*",
+                "Accept-Encoding": "identity",
+                "Idempotency-Key": upstream_key,
+            }
+            if endpoint == "/v1/images/edits" and transport == "url":
+                body = await self.materialize_edit_input_urls(row, body)
+            url = f"{self.upstream_base_url()}{endpoint}"
+            if endpoint == "/v1/images/edits" and transport == "file":
+                headers.pop("Content-Type", None)
+                data, files = await self.materialize_edit_input_files(client, body)
+                request = httpx.Request(
+                    "POST",
+                    url,
+                    headers=headers,
+                    data=data,
+                    files=files,
+                )
+                content = await request.aread()
+                headers = dict(request.headers)
+            else:
+                content = self.json_dump(body).encode("utf-8")
+            return PreparedUpstreamRequest(
+                url=url,
+                endpoint=endpoint,
+                headers=headers,
+                content=content,
+            )
+        except asyncio.CancelledError:
+            raise
+        except PreDispatchFailure:
+            raise
+        except BaseException as exc:
+            raise self.pre_dispatch_failure(exc) from exc
+
     @staticmethod
     def classify_httpx_error(exc: httpx.HTTPError) -> bool:
         return isinstance(
@@ -66,17 +177,6 @@ class UpstreamFacade:
                 httpx.PoolTimeout,
                 httpx.WriteError,
                 httpx.WriteTimeout,
-            ),
-        )
-
-    @staticmethod
-    def httpx_error_requires_idempotency(exc: httpx.HTTPError) -> bool:
-        return not isinstance(
-            exc,
-            (
-                httpx.ConnectError,
-                httpx.ConnectTimeout,
-                httpx.PoolTimeout,
             ),
         )
 
@@ -151,6 +251,7 @@ class UpstreamFacade:
             retryable=is_5xx,
             retry_requires_idempotency=is_5xx,
             outcome_uncertain=is_5xx,
+            cost_proven_absent=not is_5xx,
             error_class=(
                 self.error_class_upstream_5xx()
                 if is_5xx
@@ -231,29 +332,23 @@ class UpstreamFacade:
         self,
         row: Any,
         *,
-        url: str,
-        headers: dict[str, str],
-        body: dict[str, Any],
-        endpoint: str,
-        image_edit_input_transport: str = "url",
+        prepared: PreparedUpstreamRequest,
+        dispatch: UpstreamDispatchReceipt,
     ) -> tuple[int, list[dict[str, Any]]]:
         client = self.http_client()
         assert client is not None
-        request_headers = headers
-        request_kwargs: dict[str, Any]
-        if endpoint == "/v1/images/edits" and image_edit_input_transport == "file":
-            request_headers = dict(headers)
-            request_headers.pop("Content-Type", None)
-            data, files = await self.materialize_edit_input_files(client, body)
-            request_kwargs = {"data": data, "files": files}
-        else:
-            request_kwargs = {"json": body}
+
+        async def trace(name: str, info: dict[str, Any]) -> None:
+            del info
+            if name in _DISPATCH_STARTED_EVENTS:
+                dispatch.mark_started(name)
 
         async with client.stream(
             "POST",
-            url,
-            headers=request_headers,
-            **request_kwargs,
+            prepared.url,
+            headers=prepared.headers,
+            content=prepared.content,
+            extensions={"trace": trace},
         ) as response:
             status_code = response.status_code
             if response.status_code >= 400:
@@ -262,7 +357,7 @@ class UpstreamFacade:
                 row,
                 response,
                 client,
-                endpoint=endpoint,
+                endpoint=prepared.endpoint,
             )
 
         # 以下三处失败都发生在 `client.stream(...)` 正常退出之后，也就是上游已经
@@ -312,42 +407,15 @@ class UpstreamFacade:
         row: Any,
         *,
         authorization: str,
+        dispatch: UpstreamDispatchReceipt | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
-        if self.http_client() is None:
-            raise self.job_failure(
-                "HTTP client not ready",
-                error_class=self.error_class_internal(),
-            )
-        payload = self.parse_json_bytes(row["payload_json"].encode("utf-8"))
-        if not isinstance(payload, dict):
-            raise self.job_failure(
-                "job payload is not valid strict JSON",
-                error_class=self.error_class_internal(),
-            )
-        if not authorization:
-            raise self.job_failure(
-                "job is missing Authorization header",
-                error_class=self.error_class_internal(),
-            )
-
-        endpoint = payload["endpoint"]
-        headers = {
-            "Authorization": authorization,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream, image/*",
-            "Accept-Encoding": "identity",
-            "Idempotency-Key": self.upstream_idempotency_key(row["job_id"]),
-        }
-        body = payload["body"]
-        image_edit_input_transport = self.normalize_image_edit_input_transport(
-            payload.get("image_edit_input_transport")
+        receipt = dispatch or UpstreamDispatchReceipt()
+        prepared = await self.prepare_upstream_request(
+            row,
+            authorization=authorization,
+            dispatch=receipt,
         )
-        if (
-            endpoint == "/v1/images/edits"
-            and isinstance(body, dict)
-            and image_edit_input_transport == "url"
-        ):
-            body = await self.materialize_edit_input_urls(row, body)
+        endpoint = prepared.endpoint
 
         max_budget = max(
             self.retry_network_max(),
@@ -358,14 +426,11 @@ class UpstreamFacade:
             try:
                 return await self.call_upstream_once_fn(
                     row,
-                    url=f"{self.upstream_base_url()}{endpoint}",
-                    headers=headers,
-                    body=body,
-                    endpoint=endpoint,
-                    image_edit_input_transport=image_edit_input_transport,
+                    prepared=prepared,
+                    dispatch=receipt,
                 )
             except httpx.HTTPError as exc:
-                requires_idempotency = self.httpx_error_requires_idempotency(exc)
+                requires_idempotency = receipt.started
                 failure = self.job_failure(
                     f"上游请求失败: {exc.__class__.__name__}: {exc}",
                     retryable=self.classify_httpx_error(exc),
@@ -375,6 +440,9 @@ class UpstreamFacade:
                 )
             except self.job_failure_type as exc:
                 failure = exc
+                if receipt.started and not failure.cost_proven_absent:
+                    failure.retry_requires_idempotency = True
+                    failure.outcome_uncertain = True
 
             retry_budget = self.retry_budget_for_failure(
                 failure,

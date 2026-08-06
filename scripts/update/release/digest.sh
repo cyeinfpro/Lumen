@@ -38,8 +38,7 @@ lumen_update_tgbot_enabled() {
 }
 
 lumen_update_required_image_references() {
-    local registry="${LUMEN_IMAGE_REGISTRY:-ghcr.io/cyeinfpro}"
-    local images extra="" service expected
+    local images extra="" service expected key
     if ! images="$(
         lumen_compose_in "${NEW_RELEASE:?}" config --images 2>/dev/null
     )"; then
@@ -61,7 +60,15 @@ lumen_update_required_image_references() {
     fi
     images="$(printf '%s\n%s\n' "${images}" "${extra}" | sed '/^$/d')"
     for service in api worker web; do
-        expected="${registry%/}/lumen-${service}:${TARGET_TAG:?}"
+        case "${service}" in
+            api) key="LUMEN_API_IMAGE_REF" ;;
+            worker) key="LUMEN_WORKER_IMAGE_REF" ;;
+            web) key="LUMEN_WEB_IMAGE_REF" ;;
+        esac
+        eval "expected=\${${key}:-}"
+        if ! lumen_image_ref_is_immutable "${expected}"; then
+            expected="${LUMEN_IMAGE_REGISTRY%/}/lumen-${service}:${TARGET_TAG:?}"
+        fi
         if ! printf '%s\n' "${images}" | grep -Fxq "${expected}"; then
             log_error "[pull_images] compose 未声明预期镜像：${expected}"
             return 1
@@ -69,7 +76,10 @@ lumen_update_required_image_references() {
         printf '%s\t%s\n' "${service}" "${expected}"
     done
     if lumen_update_tgbot_enabled; then
-        expected="${registry%/}/lumen-tgbot:${TARGET_TAG}"
+        expected="${LUMEN_TGBOT_IMAGE_REF:-}"
+        if ! lumen_image_ref_is_immutable "${expected}"; then
+            expected="${LUMEN_IMAGE_REGISTRY%/}/lumen-tgbot:${TARGET_TAG:?}"
+        fi
         if ! printf '%s\n' "${images}" | grep -Fxq "${expected}"; then
             log_error "[pull_images] compose 未声明已启用的 tgbot 镜像：${expected}"
             return 1

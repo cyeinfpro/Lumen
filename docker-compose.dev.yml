@@ -1,0 +1,42 @@
+# Explicit local-build override. Never combine this file with production
+# immutable-image checks or deployment commands.
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile.python
+  args:
+    PYTHON_BASE: "${LUMEN_PYTHON_BASE_REF:?Set LUMEN_PYTHON_BASE_REF to name@sha256 digest}"
+    LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+    LUMEN_APP_UID: "${LUMEN_APP_UID:-10001}"
+    LUMEN_APP_GID: "${LUMEN_APP_GID:-10001}"
+
+services:
+  api:
+    image: lumen-api:dev
+    build: *app-build
+
+  worker:
+    image: lumen-worker:dev
+    build: *app-build
+
+  web:
+    image: lumen-web:dev
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        LUMEN_VERSION: "${LUMEN_VERSION:-dev}"
+        LUMEN_BACKEND_URL: "http://api:8000"
+        NPM_VERSION: "${NPM_VERSION:-10.9.0}"
+
+  tgbot:
+    image: lumen-tgbot:dev
+    build: *app-build
+
+  migrate:
+    image: lumen-api:dev
+    build: *app-build
+
+  bootstrap:
+    image: lumen-api:dev
+    build: *app-build

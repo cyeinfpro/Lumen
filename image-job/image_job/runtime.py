@@ -29,7 +29,6 @@ class ImageJobRuntime:
     upstream: HttpUpstreamGateway
     artifacts: FilesystemArtifactStore
     credential_vault: CredentialVault
-    legacy_auth_requests_total: int = 0
     started: bool = False
 
     async def startup(self) -> None:
@@ -37,11 +36,6 @@ class ImageJobRuntime:
             return
         try:
             self.settings.validate()
-            if self.settings.allow_legacy_bearer:
-                LOG.warning(
-                    "legacy Bearer authentication is enabled; remove it before v%s",
-                    self.settings.legacy_auth_removal_version,
-                )
             await self.repository.initialize()
             await self.jobs.fail_interrupted()
             await self.upstream.startup()
@@ -90,13 +84,20 @@ class ImageJobRuntime:
             "image_job_background_tasks_alive": state.background_alive,
             "image_job_accepting": int(state.accepting),
             "image_job_shutdown": int(state.shutdown),
-            "image_job_legacy_auth_requests_total": (self.legacy_auth_requests_total),
             **{f"image_job_{key}": value for key, value in self.queue.metrics.items()},
             # H-19：业务维度指标。jobs_uncertain_total 是纯转嫁下的资金风险量表
             # ——每 +1 代表一笔「上游可能已扣费但没交付」的待对账工单。
             **{f"image_job_{key}": value for key, value in self.jobs.outcomes.items()},
         }
-        return "".join(f"{name} {value}\n" for name, value in values.items())
+        metrics = "".join(f"{name} {value}\n" for name, value in values.items())
+        dispatch_metrics = "".join(
+            "image_job_dispatch_total"
+            f'{{phase="{phase}",outcome="{outcome}"}} {value}\n'
+            for (phase, outcome), value in sorted(
+                self.jobs.dispatch_outcomes.items()
+            )
+        )
+        return metrics + dispatch_metrics
 
 
 def create_runtime(

@@ -8,7 +8,7 @@
 //
 // 注意：本组件不维护任务生命周期；取消 / 重试只是发送 API 调用，store 的 SSE handler 会更新状态。
 
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ListChecks } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -27,6 +27,12 @@ import {
 import { TaskCenter } from "./tray/TaskCenter";
 import { useBodyScrollLock } from "@/hooks/useBodyScrollLock";
 import { useModalLayer } from "./primitives/mobile/useModalLayer";
+import { toast } from "./primitives";
+
+type GenerationActionState = {
+  busy: boolean;
+  error: string | null;
+};
 
 function taskTrayRefetchInterval(minimized: boolean, hasActive: boolean) {
   if (minimized) return false;
@@ -54,8 +60,13 @@ export function GlobalTaskTray() {
   const setTaskTrayMinimized = useUiStore((s) => s.setTaskTrayMinimized);
   const generations = useChatStore((s) => s.generations);
   const retryGeneration = useChatStore((s) => s.retryGeneration);
+  const pollInflightTasks = useChatStore((s) => s.pollInflightTasks);
   const openLightbox = useUiStore((s) => s.openLightbox);
   const userScope = useUserQueryScope();
+  const actionLocksRef = useRef(new Set<string>());
+  const [generationActionStates, setGenerationActionStates] = useState<
+    Record<string, GenerationActionState>
+  >({});
 
   const active = useMemo(() => {
     const activeItems: Generation[] = [];
@@ -83,25 +94,55 @@ export function GlobalTaskTray() {
   const badge = taskTrayBadge(activeCount, recentCount);
 
   // —— 操作：取消 / 重试 ——
-  const handleCancel = async (gen: Generation) => {
+  const runGenerationAction = async (
+    gen: Generation,
+    action: "cancel" | "retry",
+  ) => {
+    if (actionLocksRef.current.has(gen.id)) return;
+    actionLocksRef.current.add(gen.id);
+    setGenerationActionStates((current) => ({
+      ...current,
+      [gen.id]: { busy: true, error: null },
+    }));
     try {
-      await cancelTask("generations", gen.id);
+      if (action === "cancel") {
+        await cancelTask("generations", gen.id);
+      } else {
+        await retryGeneration(gen.id);
+      }
     } catch (err) {
-      logWarn("tray.cancel_failed", {
+      const message = err instanceof Error ? err.message : "任务操作失败";
+      logWarn(`tray.${action}_failed`, {
         scope: "tray",
         extra: { genId: gen.id, err: String(err) },
       });
+      setGenerationActionStates((current) => ({
+        ...current,
+        [gen.id]: { busy: true, error: message },
+      }));
+      toast.error(action === "cancel" ? "取消任务失败" : "重试任务失败", {
+        description: message,
+      });
+    } finally {
+      await Promise.allSettled([
+        pollInflightTasks({ generationIds: [gen.id], maxChecks: 1 }),
+        recentTasks.refetch(),
+      ]);
+      actionLocksRef.current.delete(gen.id);
+      setGenerationActionStates((current) => ({
+        ...current,
+        [gen.id]: {
+          busy: false,
+          error: current[gen.id]?.error ?? null,
+        },
+      }));
     }
   };
-  const handleRetry = async (gen: Generation) => {
-    try {
-      await retryGeneration(gen.id);
-    } catch (err) {
-      logWarn("tray.retry_failed", {
-        scope: "tray",
-        extra: { genId: gen.id, err: String(err) },
-      });
-    }
+  const handleCancel = (gen: Generation) => {
+    void runGenerationAction(gen, "cancel");
+  };
+  const handleRetry = (gen: Generation) => {
+    void runGenerationAction(gen, "retry");
   };
   const handleView = (gen: Generation) => {
     if (!gen.image) return;
@@ -190,6 +231,7 @@ export function GlobalTaskTray() {
               <TaskCenter
                 activeGenerations={active}
                 localGenerations={generations}
+                generationActionStates={generationActionStates}
                 onCancelGeneration={handleCancel}
                 onRetryGeneration={handleRetry}
                 onViewGeneration={handleView}

@@ -52,6 +52,60 @@ def test_image_execution_request_is_the_typed_downstream_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_candidate_type_error_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def resolve_channel() -> str:
+        return TEST_UPSTREAM_SERVICES.core.IMAGE_CHANNEL_AUTO
+
+    async def resolve_engine() -> str:
+        return TEST_UPSTREAM_SERVICES.core.IMAGE_ROUTE_RESPONSES
+
+    async def fail_candidates(
+        _provider_override: object | None,
+        *,
+        engine: str,
+        runtime: object,
+    ) -> list[object]:
+        nonlocal calls
+        calls += 1
+        assert engine == TEST_UPSTREAM_SERVICES.core.IMAGE_ROUTE_RESPONSES
+        assert runtime is TEST_UPSTREAM_RUNTIME
+        raise TypeError("provider selection implementation failed")
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core,
+        "resolve_image_channel",
+        resolve_channel,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.core,
+        "resolve_image_engine",
+        resolve_engine,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.dispatch,
+        "image_dispatch_candidates",
+        fail_candidates,
+    )
+
+    with pytest.raises(TypeError, match="provider selection implementation failed"):
+        async for _ in image_dispatch._dispatch_fresh_image(
+            _request(
+                action="generate",
+                images=None,
+                mask=None,
+                provider_override=None,
+            )
+        ):
+            pass
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_auto_provider_without_image_jobs_does_not_read_sidecar_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

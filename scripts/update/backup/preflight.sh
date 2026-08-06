@@ -91,6 +91,16 @@ emit_done preflight 0
 update_phase_backup_preflight() {
 emit_start backup_preflight
 
+case "${LUMEN_UPDATE_MODE:-}" in
+    fast|standard)
+        ;;
+    *)
+        log_error "[backup_preflight] 非法 LUMEN_UPDATE_MODE=${LUMEN_UPDATE_MODE:-<empty>}，拒绝采用较弱备份策略。"
+        emit_fail backup_preflight 64
+        exit 64
+        ;;
+esac
+
 if lumen_env_truthy "${LUMEN_UPDATE_SKIP_BACKUP:-0}"; then
     log_warn "[backup_preflight] LUMEN_UPDATE_SKIP_BACKUP=1，跳过备份（强烈不推荐）。"
     emit_warn backup_preflight "skipped_by_env"

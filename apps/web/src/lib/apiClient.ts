@@ -28,6 +28,10 @@ import {
   enhanceVideoPrompt as runEnhanceVideoPrompt,
 } from "./api/promptEnhancement";
 import { idempotentPostRequest } from "./api/semanticIdempotency";
+import {
+  validateActiveTasksResponse,
+  validateAuthUser,
+} from "./api/responseValidators";
 import type {
   ImageParams,
   ApiSupplierTemplatePublicListOut,
@@ -95,6 +99,14 @@ export interface AuthUser {
 }
 
 async function acceptAuthenticatedSession(user: AuthUser): Promise<AuthUser> {
+  if (!user.id || typeof user.id !== "string") {
+    throw new ApiError({
+      code: "session_identity_invalid",
+      message: "会话身份响应无效，请重新登录。",
+      status: 502,
+      payload: user,
+    });
+  }
   await resumeSessionClientState(user.id);
   return user;
 }
@@ -115,13 +127,13 @@ function sessionCookieSecureSignal(value: unknown): boolean | null {
   );
 }
 
-function loginSessionError(
-  loginResponse: unknown,
+function sessionVerificationError(
+  authResponse: unknown,
   unauthorized: ApiError,
 ): ApiError {
   const sessionCookieSecure =
     sessionCookieSecureSignal(unauthorized.payload) ??
-    sessionCookieSecureSignal(loginResponse);
+    sessionCookieSecureSignal(authResponse);
   const secureCookieBlockedByHttp =
     sessionCookieSecure === true &&
     typeof window !== "undefined" &&
@@ -131,10 +143,42 @@ function loginSessionError(
       ? "secure_cookie_requires_https"
       : "session_unverified",
     message: secureCookieBlockedByHttp
-      ? "密码验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。改用 HTTPS 地址后重新登录。"
-      : "密码验证成功，但登录会话未能确认。检查 Cookie 或反向代理配置后重试。",
+      ? "身份验证成功，但当前使用 HTTP，浏览器无法保存 Secure 会话 Cookie。改用 HTTPS 地址后重试。"
+      : "身份验证成功，但会话未能确认。检查 Cookie 或反向代理配置后重试。",
     status: 401,
   });
+}
+
+async function verifyAndAcceptSession(
+  authResponse: AuthUser,
+): Promise<AuthUser> {
+  notifyAuthSessionChanged();
+  let verified: AuthUser;
+  try {
+    verified = await getMe();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) {
+      throw sessionVerificationError(authResponse, err);
+    }
+    throw err;
+  }
+  if (
+    !authResponse.id ||
+    !verified.id ||
+    authResponse.id !== verified.id
+  ) {
+    await invalidateSessionClientState();
+    throw new ApiError({
+      code: "session_identity_mismatch",
+      message: "注册或登录响应与当前会话身份不一致，请重新登录。",
+      status: 409,
+      payload: {
+        response_user_id: authResponse.id || null,
+        session_user_id: verified.id || null,
+      },
+    });
+  }
+  return acceptAuthenticatedSession(verified);
 }
 
 export async function login(
@@ -145,18 +189,10 @@ export async function login(
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-  notifyAuthSessionChanged();
-  try {
-    return await acceptAuthenticatedSession(await getMe());
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {
-      throw loginSessionError(loginResponse, err);
-    }
-    throw err;
-  }
+  return verifyAndAcceptSession(loginResponse);
 }
 
-export function signup(
+export async function signup(
   email: string,
   password: string,
   invite_token?: string,
@@ -166,13 +202,11 @@ export function signup(
     password,
   };
   if (invite_token) body.invite_token = invite_token;
-  return apiFetch<AuthUser>("/auth/signup", {
+  const signupResponse = await apiFetch<AuthUser>("/auth/signup", {
     method: "POST",
     body: JSON.stringify(body),
-  }).then((user) => {
-    notifyAuthSessionChanged();
-    return acceptAuthenticatedSession(user);
   });
+  return verifyAndAcceptSession(signupResponse);
 }
 
 export function listPublicApiSuppliers(): Promise<ApiSupplierTemplatePublicListOut> {
@@ -189,19 +223,17 @@ export function verifyApiKey(
   });
 }
 
-export function signupByok(
+export async function signupByok(
   email: string,
   password: string,
   verification_token: string,
   display_name = "",
 ): Promise<AuthUser> {
-  return apiFetch<AuthUser>("/auth/signup/byok", {
+  const signupResponse = await apiFetch<AuthUser>("/auth/signup/byok", {
     method: "POST",
     body: JSON.stringify({ email, password, display_name, verification_token }),
-  }).then((user) => {
-    notifyAuthSessionChanged();
-    return acceptAuthenticatedSession(user);
   });
+  return verifyAndAcceptSession(signupResponse);
 }
 
 export async function logout(): Promise<NoContent> {
@@ -215,7 +247,9 @@ export async function logout(): Promise<NoContent> {
 }
 
 export function getMe(): Promise<AuthUser> {
-  return apiFetch<AuthUser>("/auth/me");
+  return apiFetch<AuthUser>("/auth/me", {
+    validate: validateAuthUser,
+  });
 }
 
 export function deleteVideo(id: string): Promise<NoContent> {
@@ -460,6 +494,7 @@ export function listMyActiveTasks(
 ): Promise<ActiveTasksResponse> {
   return apiFetch<ActiveTasksResponse>(`/tasks/mine/active`, {
     signal: opts.signal,
+    validate: validateActiveTasksResponse,
   });
 }
 

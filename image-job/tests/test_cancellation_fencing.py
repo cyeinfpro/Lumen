@@ -27,7 +27,6 @@ def _settings(tmp_path: Path) -> ImageJobSettings:
         queue_max=2,
         concurrency=1,
         sidecar_token=SecretText(SERVICE_TOKEN),
-        allow_legacy_bearer=False,
         upstream_base_url="http://127.0.0.1:8081",
         public_base_url="https://images.example.test",
         timeouts=ImageJobTimeouts(graceful_shutdown_s=0),
@@ -44,6 +43,18 @@ def _payload() -> dict[str, object]:
         "endpoint": "/v1/images/generations",
         "body": {"prompt": "cat"},
         "retention_days": 1,
+    }
+
+
+def _test_artifact() -> dict[str, object]:
+    return {
+        "url": "https://images.example.test/images/temp/test.png",
+        "width": 1,
+        "height": 1,
+        "bytes": 1,
+        "format": "png",
+        "expires_at": "2026-08-07T00:00:00+00:00",
+        "sha256": "0" * 64,
     }
 
 
@@ -227,12 +238,23 @@ async def test_stale_execution_token_cannot_overwrite_new_attempt(
         "job-fenced",
         execution_token=stale_token,
     )
+
+    async def accept_artifacts(
+        _job_id: str,
+        images: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        return images
+
+    runtime.jobs.persistence = replace(
+        runtime.jobs.persistence,
+        verify_artifacts=accept_artifacts,
+    )
     assert await runtime.jobs.persistence.mark_succeeded(
         "job-fenced",
         execution_token=current_token,
         upstream_status=200,
         elapsed_ms=1,
-        images=[],
+        images=[_test_artifact()],
     )
 
     row = await runtime.repository.one(

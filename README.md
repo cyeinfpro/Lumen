@@ -120,8 +120,11 @@ Stable updates follow the latest GitHub Release tag and GHCR release images. `ma
 
 ```env
 LUMEN_UPDATE_CHANNEL=main
-LUMEN_IMAGE_TAG=main
 ```
+
+`LUMEN_IMAGE_TAG` records update-channel metadata; production Compose does not
+run tags. The updater resolves application images to complete
+`name@sha256:<64hex>` references before changing services.
 
 Stable install/update does not silently fall back to `main`. If a release image is unavailable, fix the release or use an intentional local build:
 
@@ -129,12 +132,24 @@ Stable install/update does not silently fall back to `main`. If a release image 
 LUMEN_UPDATE_BUILD=1 bash scripts/lumenctl.sh update-lumen
 ```
 
+`LUMEN_UPDATE_BUILD=1` is an emergency, pre-call operator override. The updater
+records `build_mode=explicit_local` and `artifact_trust=local_unpublished`,
+uses a `local-unpublished-<source-commit>` image tag, and discards the official
+release manifest binding. This local artifact will not receive or reuse the
+official release signature, SBOM, or artifact proof
+（不会获得或复用官方 release 的签名、SBOM 或 artifact 证明）. Fix and republish
+the official release before treating the deployment as a normal stable update.
+
 Default fast update skips the preflight backup for speed. Use standard mode or trigger a backup first when the deployment requires a restore point:
 
 ```bash
 bash scripts/lumenctl.sh backup
 LUMEN_UPDATE_MODE=standard bash scripts/lumenctl.sh update-lumen
 ```
+
+Only an unset `LUMEN_UPDATE_MODE` selects the documented `fast` default.
+Explicit empty or unknown values fail with exit code `64`; `safe` and `full`
+remain compatibility aliases for `standard`.
 
 ### Backup
 
@@ -146,6 +161,12 @@ LUMEN_UPDATE_MODE=standard bash scripts/lumenctl.sh update-lumen
 ```
 
 `MAX_KEEP=56` by default, about 9.3 days at the default 4-hour timer interval. Media files under `/opt/lumendata/storage` need filesystem, NAS, or object-storage snapshots.
+
+If install/update/uninstall holds the maintenance lock, `backup.sh` returns
+`75` and `lumen-backup.service` retries after 60 seconds without a start-limit
+cutoff. A successful paired backup also updates
+`/opt/lumendata/backup/.backup.last-success.json`; monitor its age rather than
+treating a quiet timer as success.
 
 ### Reverse Proxy
 
@@ -168,12 +189,26 @@ bash scripts/lumenctl.sh nginx-optimize
 
 ## Configuration
 
-Copy `.env.example` to `.env` for manual compose use, or edit `/opt/lumen/shared/.env` after install.
+Copy `.env.example` to `.env` for manual compose use, or edit `/opt/lumen/shared/.env` after install. Fill every `LUMEN_*_IMAGE_REF` with the complete digest reference from the release manifest; blank values, tags, `latest`, and `main` are rejected by production Compose.
+
+Validate the expanded production image set before `pull` or `up`:
+
+```bash
+docker compose --env-file .env config --images \
+  | python3 scripts/check_immutable_images.py
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.bluegreen.yml \
+  config --images | python3 scripts/check_immutable_images.py
+```
+
+Local source builds must opt into `docker-compose.dev.yml` and provide an
+immutable `LUMEN_PYTHON_BASE_REF`.
 
 | Area | Important variables |
 | --- | --- |
 | Runtime | `APP_ENV`, `PUBLIC_BASE_URL`, `CORS_ALLOW_ORIGINS`, `TRUSTED_PROXIES`, `SESSION_COOKIE_SECURE`, `LUMEN_HSTS_ENABLED`, `LUMEN_HSTS_INCLUDE_SUBDOMAINS` |
 | Database/cache | `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DATABASE_URL`, `REDIS_PASSWORD`, `REDIS_URL` |
+| Images | `LUMEN_POSTGRES_IMAGE_REF`, `LUMEN_REDIS_IMAGE_REF`, `LUMEN_API_IMAGE_REF`, `LUMEN_WORKER_IMAGE_REF`, `LUMEN_WEB_IMAGE_REF`, `LUMEN_TGBOT_IMAGE_REF` |
 | Secrets | `SESSION_SECRET`, `IMAGE_PROXY_SECRET`, `BYOK_API_KEY_MASTER_SECRET` |
 | Provider pool | `PROVIDERS`, `UPSTREAM_DEFAULT_MODEL`, `UPSTREAM_GLOBAL_CONCURRENCY`, `IMAGE_GENERATION_CONCURRENCY` |
 | Storage/backup | `LUMEN_DATA_ROOT`, `LUMEN_DB_ROOT`, `STORAGE_ROOT`, `BACKUP_ROOT`, `MAX_KEEP` |

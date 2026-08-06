@@ -1,4 +1,5 @@
 import { API_BASE, apiFetch } from "./http";
+import { validateUploadedImage } from "./responseValidators";
 
 // —— 图像上传 / 反代 ——
 
@@ -30,6 +31,7 @@ export function uploadImage(
     method: "POST",
     signal: opts.signal,
     body: fd,
+    validate: validateUploadedImage,
   });
 }
 

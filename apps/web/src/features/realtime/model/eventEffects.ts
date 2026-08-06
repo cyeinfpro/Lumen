@@ -2,7 +2,11 @@ import type { RealtimeDomainEvent } from "./contracts";
 import type { RealtimeEffectRegistry } from "./eventRouter";
 
 export type LumenRealtimeEffectContext = {
-  applyStoreEvent(name: string, payload: Record<string, unknown>): void;
+  applyStoreEvent(
+    name: string,
+    payload: Record<string, unknown>,
+    cursor?: string,
+  ): void;
   invalidateTasks(): void;
   invalidateConversations(): void;
   invalidateMemorySettings(): void;
@@ -27,7 +31,7 @@ function applyLumenEvent(
   event: RealtimeDomainEvent,
   context: LumenRealtimeEffectContext,
 ): void {
-  context.applyStoreEvent(event.type, event.payload);
+  context.applyStoreEvent(event.type, event.payload, event.cursor);
   if (TASK_EVENTS.has(event.type)) context.invalidateTasks();
   if (event.type === "conv.renamed") context.invalidateConversations();
   if (event.type === "account_settings_updated") {

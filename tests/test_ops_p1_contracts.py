@@ -763,8 +763,8 @@ def test_custom_deploy_root_maintenance_lock_blocks_all_ops(tmp_path: Path) -> N
         holder_stdout, holder_stderr = holder.communicate(timeout=5)
 
     assert holder.returncode in {-15, 143}, holder_stderr + holder_stdout
-    assert backup.returncode == 0, backup.stderr + backup.stdout
-    assert "skipped: maintenance lock held" in backup.stdout
+    assert backup.returncode == 75, backup.stderr + backup.stdout
+    assert "DEFERRED: maintenance lock held" in backup.stdout
     assert restore.returncode != 0
     assert "已有 Lumen 维护脚本" in restore.stderr
     assert update.returncode != 0

@@ -1,4 +1,5 @@
 import { apiFetch } from "./http";
+import { validateMemorySettings } from "./responseValidators";
 
 // ——— Account memory ———
 
@@ -90,7 +91,9 @@ export interface MemoryPatchIn {
 }
 
 export function getMemorySettings(): Promise<MemorySettingsOut> {
-  return apiFetch<MemorySettingsOut>("/me/memory-settings");
+  return apiFetch<MemorySettingsOut>("/me/memory-settings", {
+    validate: validateMemorySettings,
+  });
 }
 
 export function patchMemorySettings(
@@ -101,6 +104,7 @@ export function patchMemorySettings(
   return apiFetch<MemorySettingsOut>("/me/memory-settings", {
     method: "PATCH",
     body: JSON.stringify(body),
+    validate: validateMemorySettings,
   });
 }
 
@@ -110,6 +114,7 @@ export function markMemoryOnboardingSeen(
   return apiFetch<MemorySettingsOut>("/me/onboarding-seen", {
     method: "PATCH",
     body: JSON.stringify({ flag }),
+    validate: validateMemorySettings,
   });
 }
 

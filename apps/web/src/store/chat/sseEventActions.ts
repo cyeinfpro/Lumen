@@ -8,6 +8,7 @@ import {
 } from "@/lib/api/images";
 import { recommendedActionsForError } from "@/lib/errors";
 import { logWarn } from "@/lib/logger";
+import { requestRuntimeRecovery } from "@/lib/runtimeResilience";
 import type {
   AssistantMessage,
   Generation,
@@ -52,6 +53,7 @@ import {
   errorToMessage,
   flushCompletionStreamPatches,
   generationLookupId,
+  invalidateConversationHistoryCache,
   MESSAGE_PAGE_LIMIT,
   optionalRecord,
   queueCompletionStreamPatch,
@@ -74,6 +76,8 @@ type SseEventContext = {
   payload: Record<string, unknown>;
   getId: SseIdGetter;
   eventNow: number;
+  cursor?: string;
+  dependencies: SseEventDependencies;
 };
 
 type SseEventHandler = (context: SseEventContext) => void;
@@ -99,6 +103,56 @@ const COMPLETION_EVENTS = new Set([
   "completion.failed",
   "completion.restarted",
 ]);
+
+type SseEventDependencies = {
+  listMessages: typeof apiListMessages;
+  requestRealtimeRecovery: () => void;
+  retryDelaysMs: readonly number[];
+};
+
+type AppendedMessageRecovery = {
+  key: string;
+  attempt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  context: SseEventContext;
+  userId: string;
+  convId: string;
+  messageId: string | undefined;
+};
+
+const DEFAULT_APPENDED_MESSAGE_RETRY_DELAYS_MS = [0, 250, 1_000] as const;
+const pendingAppendedMessageRecoveries = new Map<
+  string,
+  AppendedMessageRecovery
+>();
+
+export function clearAppendedMessageRecoveryQueue(): void {
+  for (const recovery of pendingAppendedMessageRecoveries.values()) {
+    if (recovery.timer !== null) clearTimeout(recovery.timer);
+  }
+  pendingAppendedMessageRecoveries.clear();
+}
+
+export function pendingAppendedMessageRecoveryCount(): number {
+  return pendingAppendedMessageRecoveries.size;
+}
+
+function resolveSseEventDependencies(
+  facadeDelegates: unknown,
+): SseEventDependencies {
+  const delegates =
+    facadeDelegates && typeof facadeDelegates === "object"
+      ? (facadeDelegates as Partial<SseEventDependencies>)
+      : {};
+  return {
+    listMessages: delegates.listMessages ?? apiListMessages,
+    requestRealtimeRecovery:
+      delegates.requestRealtimeRecovery ??
+      (() => requestRuntimeRecovery("realtime")),
+    retryDelaysMs:
+      delegates.retryDelaysMs ?? DEFAULT_APPENDED_MESSAGE_RETRY_DELAYS_MS,
+  };
+}
 
 export function createSseIdGetter(
   payload: Record<string, unknown>,
@@ -579,7 +633,7 @@ async function syncAppendedMessage(
   try {
     const initialState = context.get();
     if (initialState.currentConvId !== convId) return;
-    const response = await apiListMessages(convId, {
+    const response = await context.dependencies.listMessages(convId, {
       limit: MESSAGE_PAGE_LIMIT,
       since: latestPersistedMessageId(initialState.messages),
       include: ["tasks"],
@@ -610,6 +664,7 @@ async function syncAppendedMessage(
       };
     });
     drainReadyPendingCompletionImages(context.set, context.get);
+    return;
   } catch (err) {
     logWarn("conv.message.appended incremental sync failed", {
       scope: "chat-sse",
@@ -617,6 +672,16 @@ async function syncAppendedMessage(
     });
     try {
       await context.get().loadHistoricalMessages(convId);
+      const current = context.get();
+      if (
+        current.currentConvId !== convId ||
+        (messageId &&
+          !current.messages.some((message) => message.id === messageId))
+      ) {
+        throw new Error("appended message missing after full history reload");
+      }
+      drainReadyPendingCompletionImages(context.set, context.get);
+      return;
     } catch (reloadErr) {
       logWarn("conv.message.appended fallback reload failed", {
         scope: "chat-sse",
@@ -626,7 +691,59 @@ async function syncAppendedMessage(
           err: errorToMessage(reloadErr),
         },
       });
+      throw reloadErr;
     }
+  }
+}
+
+function appendedMessageRecoveryKey(
+  userId: string,
+  convId: string,
+  messageId: string | undefined,
+  cursor: string | undefined,
+): string {
+  return JSON.stringify([userId, convId, messageId ?? null, cursor ?? null]);
+}
+
+function scheduleAppendedMessageRecovery(
+  recovery: AppendedMessageRecovery,
+): void {
+  const delays = recovery.context.dependencies.retryDelaysMs;
+  if (recovery.attempt >= delays.length) {
+    invalidateConversationHistoryCache(recovery.convId);
+    recovery.context.dependencies.requestRealtimeRecovery();
+    pendingAppendedMessageRecoveries.delete(recovery.key);
+    return;
+  }
+  const delayMs = Math.max(0, delays[recovery.attempt] ?? 0);
+  recovery.timer = setTimeout(() => {
+    recovery.timer = null;
+    void runAppendedMessageRecovery(recovery);
+  }, delayMs);
+}
+
+async function runAppendedMessageRecovery(
+  recovery: AppendedMessageRecovery,
+): Promise<void> {
+  if (pendingAppendedMessageRecoveries.get(recovery.key) !== recovery) return;
+  const state = recovery.context.get();
+  if (
+    state.currentUserId !== recovery.userId ||
+    state.currentConvId !== recovery.convId
+  ) {
+    pendingAppendedMessageRecoveries.delete(recovery.key);
+    return;
+  }
+  recovery.attempt += 1;
+  try {
+    await syncAppendedMessage(
+      recovery.context,
+      recovery.convId,
+      recovery.messageId,
+    );
+    pendingAppendedMessageRecoveries.delete(recovery.key);
+  } catch {
+    scheduleAppendedMessageRecovery(recovery);
   }
 }
 
@@ -640,7 +757,26 @@ function handleConversationMessageAppended(context: SseEventContext): void {
     drainReadyPendingCompletionImages(context.set, context.get);
     return;
   }
-  void syncAppendedMessage(context, convId, messageId);
+  const userId = state.currentUserId;
+  if (!userId) return;
+  const key = appendedMessageRecoveryKey(
+    userId,
+    convId,
+    messageId,
+    context.cursor,
+  );
+  if (pendingAppendedMessageRecoveries.has(key)) return;
+  const recovery: AppendedMessageRecovery = {
+    key,
+    attempt: 0,
+    timer: null,
+    context,
+    userId,
+    convId,
+    messageId,
+  };
+  pendingAppendedMessageRecoveries.set(key, recovery);
+  scheduleAppendedMessageRecovery(recovery);
 }
 
 const NOOP_HANDLER: SseEventHandler = () => {};
@@ -663,8 +799,8 @@ export function applySseEventPayload(
   payload: Record<string, unknown>,
   eventNow: number,
   facadeDelegates?: unknown,
+  cursor?: string,
 ): void {
-  void facadeDelegates;
   const context: SseEventContext = {
     set,
     get,
@@ -672,6 +808,8 @@ export function applySseEventPayload(
     payload,
     getId: createSseIdGetter(payload),
     eventNow,
+    cursor,
+    dependencies: resolveSseEventDependencies(facadeDelegates),
   };
   if (GENERATION_LIFECYCLE_EVENTS.has(eventName)) {
     handleGenerationLifecycle(context);

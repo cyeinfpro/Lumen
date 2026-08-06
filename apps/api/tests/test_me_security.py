@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from app.audit import AuditPersistenceError
 from app.config import settings
 from app.routes import admin, me, me_export
 from app.services import account_deletion
@@ -200,7 +201,7 @@ async def test_export_route_rolls_back_before_storage_and_zip_work(
         return me_export.ExportStats(
             messages=501,
             images=2,
-            images_skipped=1,
+            images_skipped=0,
             zip_bytes=8,
         )
 
@@ -215,7 +216,7 @@ async def test_export_route_rolls_back_before_storage_and_zip_work(
         assert kwargs["details"] == {
             "messages": 501,
             "images": 2,
-            "images_skipped": 1,
+            "images_skipped": 0,
             "zip_bytes": 8,
         }
         events.append("audit")
@@ -254,6 +255,8 @@ async def test_export_route_rolls_back_before_storage_and_zip_work(
     assert response.headers["content-disposition"].startswith(
         'attachment; filename="lumen-export-user-1-'
     )
+    assert response.headers["x-lumen-export-complete"] == "true"
+    assert response.headers["x-lumen-export-image-count"] == "2"
     assert events == [
         "active-user",
         "rollback",
@@ -414,27 +417,17 @@ async def test_export_batches_write_outside_transactions_and_preserve_layout(
             assert db.transaction_open is False
             return super().read(*args, **kwargs)
 
-    image_missing = SimpleNamespace(
-        id="image-missing",
-        storage_key="u/user-1/missing.png",
-        mime="image/png",
-        created_at=created_at + timedelta(microseconds=1),
-    )
-    image_escape = SimpleNamespace(
-        id="image-escape",
-        storage_key="../outside.png",
-        mime="image/png",
-        created_at=created_at + timedelta(microseconds=2),
-    )
-    db._responses[2].extend([image_missing, image_escape])
-
-    def open_storage_file(storage_key: str | None) -> io.BytesIO | None:
+    def open_storage_file(image: me_export.ExportImageDescriptor) -> io.BytesIO:
         assert db.transaction_open is False
-        if storage_key == "u/user-1/image.png":
+        if image.storage_key == "u/user-1/image.png":
             return GuardedReader(b"image-data")
-        return None
+        raise AssertionError("unexpected image")
 
-    monkeypatch.setattr(me_export, "open_storage_file_safe", open_storage_file)
+    monkeypatch.setattr(
+        me_export,
+        "open_export_image_required",
+        open_storage_file,
+    )
 
     archive_file = GuardedBuffer()
     stats = await me_export.build_export_archive(
@@ -446,8 +439,19 @@ async def test_export_batches_write_outside_transactions_and_preserve_layout(
     archive_file.seek(0)
     with zipfile.ZipFile(archive_file) as archive:
         message_record = json.loads(archive.read("messages.ndjson"))
-        assert archive.namelist() == ["messages.ndjson", "images/image-1.png"]
+        manifest = json.loads(archive.read("export-manifest.json"))
+        assert archive.namelist() == [
+            "messages.ndjson",
+            "images/image-1.png",
+            "export-manifest.json",
+        ]
         assert archive.read("images/image-1.png") == b"image-data"
+        assert manifest == {
+            "schema": 1,
+            "complete": True,
+            "messages": 1,
+            "images": 1,
+        }
 
     assert message_record == {
         "conversation_id": "conv-1",
@@ -464,7 +468,7 @@ async def test_export_batches_write_outside_transactions_and_preserve_layout(
     assert stats == me_export.ExportStats(
         messages=1,
         images=1,
-        images_skipped=2,
+        images_skipped=0,
         zip_bytes=len(archive_file.getvalue()),
     )
 
@@ -757,6 +761,7 @@ async def test_delete_my_account_keeps_audit_detail_and_post_commit_cleanup(
             "actor_email": user.email,
             "actor_ip_hash": None,
             "target_user_id": user.id,
+            "autocommit": False,
             "details": {
                 "users": 1,
                 "sessions_revoked": 2,
@@ -778,6 +783,66 @@ async def test_delete_my_account_keeps_audit_detail_and_post_commit_cleanup(
     ]
     assert any(header.startswith("session=") for header in cookie_headers)
     assert any(header.startswith("csrf=") for header in cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_delete_my_account_audit_failure_skips_commit_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = SimpleNamespace(
+        id="user-self-delete",
+        email="member@example.com",
+        account_mode="wallet",
+    )
+    db = _AdminDeleteDb(
+        [
+            _AdminDeleteResult(scalar=user.id),
+            _AdminDeleteResult(rowcount=1),
+            _AdminDeleteResult(rowcount=2),
+            _AdminDeleteResult(rowcount=3),
+            _AdminDeleteResult(rowcount=4),
+        ]
+    )
+    cleanup = {
+        "generations_canceled": 0,
+        "completions_canceled": 0,
+        "video_generations_canceled": 0,
+        "videos_deleted": 0,
+        "memory_extractions_canceled": 0,
+    }
+    post_commit: list[dict[str, Any]] = []
+
+    async def cancel_account_active_tasks(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return cleanup
+
+    async def fail_audit(*_args: Any, **kwargs: Any) -> None:
+        assert kwargs["autocommit"] is False
+        raise AuditPersistenceError("me.account.delete")
+
+    async def post_commit_account_task_cleanup(**kwargs: Any) -> None:
+        post_commit.append(kwargs)
+
+    monkeypatch.setattr(me, "get_redis", lambda: object())
+    monkeypatch.setattr(me, "cancel_account_active_tasks", cancel_account_active_tasks)
+    monkeypatch.setattr(me, "write_audit", fail_audit)
+    monkeypatch.setattr(
+        me,
+        "post_commit_account_task_cleanup",
+        post_commit_account_task_cleanup,
+    )
+
+    response = Response()
+    with pytest.raises(AuditPersistenceError):
+        await me.delete_my_account(
+            None,  # type: ignore[arg-type]
+            user,
+            response,
+            db,  # type: ignore[arg-type]
+        )
+
+    assert db.committed is False
+    assert post_commit == []
+    assert all(key != b"set-cookie" for key, _value in response.raw_headers)
 
 
 @pytest.mark.asyncio

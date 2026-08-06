@@ -43,6 +43,43 @@ def test_headers_include_telegram_user_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_control_ack_sends_expected_command_and_requires_typed_receipt() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "command": "restart",
+                "status": "accepted",
+                "newly_accepted": True,
+                "quarantine_id": None,
+            },
+        )
+
+    api = _api_with_transport(httpx.MockTransport(handler))
+    try:
+        result = await api.ack_control_command(
+            "command-1",
+            command="restart",
+        )
+    finally:
+        await api.aclose()
+
+    assert captured == {
+        "path": "/telegram/control/command-1/ack",
+        "json": {
+            "command": "restart",
+            "status": "accepted",
+            "error": None,
+        },
+    }
+    assert result["newly_accepted"] is True
+
+
+@pytest.mark.asyncio
 async def test_bind_sends_tg_user_id_in_header_and_body() -> None:
     captured: dict[str, Any] = {}
 
@@ -335,6 +372,36 @@ async def test_download_rejects_content_length_that_would_exhaust_tmp_space(
         await api.aclose()
 
     assert excinfo.value.code == "disk_full"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_unknown_tmp_capacity_before_http(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, content=b"unexpected")
+
+    def disk_usage(_path: str) -> DiskUsage:
+        raise OSError("storage mount unavailable")
+
+    monkeypatch.setattr(api_client.settings, "download_tmp_dir", str(tmp_path))
+    monkeypatch.setattr(api_client.shutil, "disk_usage", disk_usage)
+    api = _api_with_transport(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(ApiError) as excinfo:
+            await api.download_image_to_file(100, "image-1", tg_user_id=100)
+    finally:
+        await api.aclose()
+
+    assert excinfo.value.code == "download_storage_unavailable"
+    assert excinfo.value.status == 503
+    assert requests == 0
     assert list(tmp_path.iterdir()) == []
 
 

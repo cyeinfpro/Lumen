@@ -194,6 +194,7 @@ class ImageProcessing:
             job_failure=lambda error, **kwargs: JobFailure(error, **kwargs),
             job_failure_type=JobFailure,
             parse_json_bytes=parse_json_bytes,
+            json_dump=json_dump,
             body_preview=body_preview,
             read_response_body_bounded=read_response_body_bounded,
             extract_response_images=(
@@ -287,6 +288,13 @@ class ImageProcessing:
     async def save_images(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return await self.artifact_facade.save_images(*args, **kwargs)
 
+    async def verify_saved_artifacts(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return await self.artifact_facade.verify_saved_artifacts(*args, **kwargs)
+
     async def save_input_image(self, *args: Any, **kwargs: Any) -> str:
         return await self.artifact_facade.save_input_image(*args, **kwargs)
 
@@ -322,8 +330,10 @@ class ImageProcessing:
         row: Any,
         *,
         authorization: str,
+        dispatch: Any | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         return await self.upstream_facade.call_upstream(
             row,
             authorization=authorization,
+            dispatch=dispatch,
         )

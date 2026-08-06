@@ -24,7 +24,10 @@ import { adaptBackendAssistantMessage } from "./chat/messageAdapters";
 import { mergeMessagesById } from "./chat/messageReconciliation";
 import { structuredAttachmentsFromComposer } from "./chat/payload";
 import { createSendMessageAction } from "./chat/sendMessageAction";
-import { applySseEventPayload } from "./chat/sseEventActions";
+import {
+  applySseEventPayload,
+  clearAppendedMessageRecoveryQueue,
+} from "./chat/sseEventActions";
 import { createTaskRecoveryActions } from "./chat/taskRecovery";
 import {
   _conversationMutationFence,
@@ -126,6 +129,7 @@ function createChatStore() {
         }
         _userSessionFence.advance();
         _conversationMutationFence.advance();
+        clearAppendedMessageRecoveryQueue();
         clearUserScopedRuntime();
         set({ ...createInitialChatData(), currentUserId: id });
       },
@@ -245,7 +249,7 @@ function createChatStore() {
       },
 
       // 对齐 DESIGN §5.7；未知事件静默忽略，事件族归并在专用模块完成。
-      applySSEEvent(eventName, data) {
+      applySSEEvent(eventName, data, cursor) {
         const eventNow = Date.now();
         const payload = ssePayloadRecord(eventName, data);
         if (!payload) return;
@@ -258,6 +262,7 @@ function createChatStore() {
             payload,
             eventNow,
             CHAT_FACADE_DELEGATES,
+            cursor,
           );
         } catch (err) {
           logWarn("dropped SSE event after store handler error", {
@@ -279,6 +284,7 @@ function createChatStore() {
         _fastTouchedByUser = false;
         _userSessionFence.advance();
         _conversationMutationFence.advance();
+        clearAppendedMessageRecoveryQueue();
         clearUserScopedRuntime();
         if (typeof window !== "undefined") {
           window.dispatchEvent(new Event("lumen:chat-store-reset"));

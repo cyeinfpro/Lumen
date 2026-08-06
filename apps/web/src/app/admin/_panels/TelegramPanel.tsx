@@ -157,12 +157,14 @@ export function TelegramPanel() {
     setRestartHint(null);
     try {
       const res = await restartMut.mutateAsync();
-      if (res.receivers === 0) {
-        setRestartHint(
-          "已发送重启指令，但当前没有 bot 进程在监听控制通道。手动执行 systemctl restart lumen-tgbot 重新加载配置。",
-        );
+      if (res.status === "accepted") {
+        setRestartHint("机器人已确认重启指令，将在数秒内自动重新启动。");
+      } else if (res.status === "failed") {
+        setRestartHint(res.error || "机器人重启指令执行失败，请检查服务日志。");
       } else {
-        setRestartHint(`已发送重启指令，机器人会在数秒内自动重新启动。`);
+        setRestartHint(
+          `重启指令已进入持久队列（${res.command_id.slice(0, 8)}），机器人上线后会自动接收。`,
+        );
       }
     } catch (err) {
       setRestartHint(err instanceof Error ? err.message : copy.error.unknown);

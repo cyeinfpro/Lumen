@@ -19,6 +19,8 @@ Rollback strategy:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import re
 import shlex
@@ -33,6 +35,7 @@ from typing import Annotated, AsyncIterator, Awaitable, Callable
 from fastapi import APIRouter, Depends, FastAPI, Request
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -63,6 +66,8 @@ from .admin_update import (
 
 
 _MARKER_CLEANUP_RUNTIME_STATE_KEY = "_admin_release_marker_cleanup_runtime"
+_ALEMBIC_REVISION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -137,26 +142,123 @@ class RollbackOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _read_db_alembic_head(db: AsyncSession) -> str | None:
-    """Return the version_num the DB is currently pinned at.
+class RollbackSchemaUnknown(RuntimeError):
+    """The rollback target and live schema cannot be proven compatible."""
 
-    We could go through ``alembic.runtime.migration.MigrationContext`` like
-    ``main._check_alembic_head`` does, but a direct SELECT is far cheaper for
-    this hot endpoint (the DB head is already authoritative — there's only
-    one row in alembic_version). Returns ``None`` if the table is missing,
-    which is the correct answer for a brand-new DB that hasn't been stamped.
-    """
+
+class RollbackGateError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int,
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        self.details = details
+
+
+def _strict_release_expected_heads(
+    release_dir: Path,
+    target_id: str,
+) -> frozenset[str]:
+    manifest = release_dir / ".lumen_release.json"
     try:
-        result = await db.execute(
-            text("SELECT version_num FROM alembic_version LIMIT 1")
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RollbackSchemaUnknown(
+            "release manifest is missing or unreadable"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise RollbackSchemaUnknown("release manifest must be a JSON object")
+
+    manifest_id = str(raw.get("id") or "").strip()
+    if manifest_id and manifest_id != target_id:
+        raise RollbackSchemaUnknown("release manifest id does not match directory")
+
+    expected = str(raw.get("alembic_head_expected") or "").strip()
+    if not expected or not _ALEMBIC_REVISION_RE.fullmatch(expected):
+        raise RollbackSchemaUnknown("release manifest has no valid alembic head")
+    return frozenset({expected})
+
+
+async def _read_db_alembic_heads(db: AsyncSession) -> frozenset[str]:
+    result = await db.execute(text("SELECT version_num FROM alembic_version"))
+    heads = frozenset(
+        str(value).strip()
+        for value in result.scalars().all()
+        if value is not None and str(value).strip()
+    )
+    if not heads or any(not _ALEMBIC_REVISION_RE.fullmatch(head) for head in heads):
+        raise RollbackSchemaUnknown("database alembic head is empty or invalid")
+    return heads
+
+
+async def _validate_rollback_target(
+    *,
+    release_dir: Path,
+    target_id: str,
+    releases: list[ReleaseInfo],
+    db: AsyncSession,
+) -> tuple[ReleaseInfo, str, str]:
+    target = next((release for release in releases if release.id == target_id), None)
+    if target is None:
+        raise RollbackGateError(
+            "release_manifest_unknown",
+            "target release is not present in the validated release inventory",
+            409,
         )
-        row = result.first()
-    except Exception:
-        return None
-    if row is None:
-        return None
-    value = row[0]
-    return str(value) if value is not None else None
+    if target.is_current:
+        raise RollbackGateError(
+            "already_current",
+            f"release '{target_id}' is already current",
+            409,
+        )
+
+    try:
+        expected_heads = await asyncio.to_thread(
+            _strict_release_expected_heads,
+            release_dir,
+            target_id,
+        )
+    except RollbackSchemaUnknown as exc:
+        raise RollbackGateError(
+            "release_manifest_unknown",
+            str(exc),
+            409,
+        ) from exc
+
+    try:
+        db_heads = await _read_db_alembic_heads(db)
+    except RollbackSchemaUnknown as exc:
+        raise RollbackGateError(
+            "database_schema_unknown",
+            str(exc),
+            409,
+        ) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("rollback schema probe failed target=%s", target_id)
+        raise RollbackGateError(
+            "database_schema_probe_failed",
+            "database schema could not be verified",
+            503,
+        ) from exc
+
+    if db_heads != expected_heads:
+        raise RollbackGateError(
+            "schema_mismatch",
+            "database heads do not exactly match the target release",
+            409,
+            details={
+                "db_heads": sorted(db_heads),
+                "release_heads": sorted(expected_heads),
+            },
+        )
+    return target, next(iter(expected_heads)), next(iter(db_heads))
 
 
 # ---------------------------------------------------------------------------
@@ -467,37 +569,21 @@ async def rollback_release(
             raise _http("release_not_found", f"release '{target_id}' not found", 404)
 
         releases = await asyncio.to_thread(update_list_releases, limit=None)
-        target = next((r for r in releases if r.id == target_id), None)
-        if target is None:
-            # update_resolve_release succeeded but the release lacks .lumen_release.json;
-            # fall through with a synthetic entry so the operator at least sees
-            # the swap happen, but flag schema_unknown so they know we couldn't
-            # validate the alembic head.
-            target = ReleaseInfo(id=target_id)
-
-        if target.is_current:
-            release_reason = "already_current"
-            raise _http(
-                "already_current", f"release '{target_id}' is already current", 409
+        try:
+            target, expected_head, db_head = await _validate_rollback_target(
+                release_dir=release_dir,
+                target_id=target_id,
+                releases=releases,
+                db=db,
             )
-
-        # Schema gate. A release whose expected head differs from the live DB
-        # head means rolling back without first running ``alembic downgrade``
-        # would either crash on missing tables or run user code against a
-        # newer-than-expected schema. Either way: refuse and tell the operator.
-        expected_head = (target.alembic_head_expected or "").strip()
-        db_head = await _read_db_alembic_head(db)
-        if expected_head and db_head and expected_head != db_head:
-            release_reason = "schema_mismatch"
+        except RollbackGateError as exc:
+            release_reason = exc.code
             raise _http(
-                "schema_mismatch",
-                (
-                    f"DB head {db_head} != release expected {expected_head}; "
-                    "rollback would cross schema boundary, manual intervention required"
-                ),
-                409,
-                details={"db_head": db_head, "release_head": expected_head},
-            )
+                exc.code,
+                exc.message,
+                exc.status_code,
+                details=exc.details,
+            ) from exc
 
         started_at = datetime.now(timezone.utc)
         inline_script = _build_rollback_script(
@@ -630,6 +716,10 @@ __all__ = [
     "update_router",
     "RollbackIn",
     "RollbackOut",
+    "RollbackGateError",
+    "RollbackSchemaUnknown",
     "_build_rollback_script",
-    "_read_db_alembic_head",
+    "_read_db_alembic_heads",
+    "_strict_release_expected_heads",
+    "_validate_rollback_target",
 ]

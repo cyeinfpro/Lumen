@@ -41,30 +41,24 @@ def authenticate(
         raise AuthFailure(401, "Missing Authorization: Bearer token") from None
 
     expected = settings.sidecar_token.get_secret_value()
-    if expected and hmac.compare_digest(incoming.encode(), expected.encode()):
+    if not expected:
+        raise AuthFailure(
+            503,
+            "image-job service authentication is not configured",
+        )
+    if hmac.compare_digest(incoming.encode(), expected.encode()):
         authorization = f"Bearer {expected}"
         return CallerIdentity(
             service_id="lumen-worker",
             owner_hash=credential_hash(authorization),
             authorization=authorization,
         )
-    if settings.allow_legacy_bearer:
-        authorization = f"Bearer {incoming}"
-        return CallerIdentity(
-            service_id="legacy-bearer",
-            owner_hash=credential_hash(authorization),
-            authorization=authorization,
-            legacy=True,
-        )
     raise AuthFailure(401, "Invalid service credentials")
 
 
 def upstream_credential(
     headers: Mapping[str, str],
-    caller: CallerIdentity,
 ) -> UpstreamCredential:
-    if caller.legacy:
-        return UpstreamCredential(caller.authorization)
     try:
         credential = _credential(headers.get("x-lumen-upstream-authorization", ""))
     except ValueError:

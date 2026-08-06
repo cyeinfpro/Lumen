@@ -27,6 +27,7 @@ from ..byok_service import read_byok_settings_cached, retention_policy_from_sett
 from ..config import settings
 from ..db import get_db
 from ..deps import CurrentUser, durable_session_id, ensure_utc, verify_csrf
+from ..images.domain.artifact import ArtifactStatus
 from ..public_urls import resolve_public_base_url
 from ..ratelimit import (
     PUBLIC_IMAGE_LIMITER,
@@ -183,7 +184,13 @@ def _visible_share_filters(now: datetime) -> tuple:
     return (
         Share.revoked_at.is_(None),
         or_(Share.expires_at.is_(None), Share.expires_at > now),
+    )
+
+
+def _live_share_image_filters() -> tuple:
+    return (
         Image.deleted_at.is_(None),
+        Image.artifact_status == ArtifactStatus.READY.value,
     )
 
 
@@ -258,21 +265,19 @@ def _public_image_out(
 async def _load_share_images(
     db: AsyncSession,
     share: Share,
-    primary_img: Image,
+    owner_user_id: str,
 ) -> list[Image]:
     image_ids = _share_image_ids(share)
     if not image_ids:
-        return [primary_img]
-    if len(image_ids) == 1 and image_ids[0] == primary_img.id:
-        return [primary_img]
+        return []
 
     rows = (
         (
             await db.execute(
                 select(Image).where(
                     Image.id.in_(image_ids),
-                    Image.user_id == primary_img.user_id,
-                    Image.deleted_at.is_(None),
+                    Image.user_id == owner_user_id,
+                    *_live_share_image_filters(),
                 )
             )
         )
@@ -281,6 +286,29 @@ async def _load_share_images(
     )
     by_id = {img.id: img for img in rows}
     return [by_id[image_id] for image_id in image_ids if image_id in by_id]
+
+
+async def _load_live_share_member(
+    db: AsyncSession,
+    share: Share,
+    *,
+    owner_user_id: str,
+    image_id: str,
+) -> Image:
+    if not image_id or image_id not in set(_share_image_ids(share)):
+        raise _http("not_found", "image not found", 404)
+    image = (
+        await db.execute(
+            select(Image).where(
+                Image.id == image_id,
+                Image.user_id == owner_user_id,
+                *_live_share_image_filters(),
+            )
+        )
+    ).scalar_one_or_none()
+    if image is None or not await _public_image_is_visible(db, image):
+        raise _http("not_found", "image not found", 404)
+    return image
 
 
 async def _variant_kinds_for_images(
@@ -382,13 +410,19 @@ async def create_share(
     user: CurrentUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ShareOut:
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request)
+    )
+    user = snapshot.user
     img = (
         await db.execute(
-            select(Image).where(
+            select(Image)
+            .where(
                 Image.id == image_id,
                 Image.user_id == user.id,
-                Image.deleted_at.is_(None),
+                *_live_share_image_filters(),
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if not img:
@@ -400,10 +434,6 @@ async def create_share(
     if expires_at is None:
         expires_at = await _default_share_expires_at(db, now)
 
-    snapshot = await lock_authenticated_user_snapshot(
-        db, user, session_id=durable_session_id(request)
-    )
-    user = snapshot.user
     token = secrets.token_urlsafe(32)
     share = Share(
         image_id=img.id,
@@ -454,14 +484,20 @@ async def create_multi_image_share(
     if len(image_ids) > MAX_MULTI_SHARE_IMAGES:
         raise _http("too_many_images", "too many images in share", 422)
 
+    snapshot = await lock_authenticated_user_snapshot(
+        db, user, session_id=durable_session_id(request)
+    )
+    user = snapshot.user
     rows = (
         (
             await db.execute(
-                select(Image).where(
+                select(Image)
+                .where(
                     Image.id.in_(image_ids),
                     Image.user_id == user.id,
-                    Image.deleted_at.is_(None),
+                    *_live_share_image_filters(),
                 )
+                .with_for_update()
             )
         )
         .scalars()
@@ -478,10 +514,6 @@ async def create_multi_image_share(
     if expires_at is None:
         expires_at = await _default_share_expires_at(db, now)
 
-    snapshot = await lock_authenticated_user_snapshot(
-        db, user, session_id=durable_session_id(request)
-    )
-    user = snapshot.user
     token = secrets.token_urlsafe(32)
     share = Share(
         image_id=image_ids[0],
@@ -536,7 +568,6 @@ async def revoke_share(
             .where(
                 Share.id == share_id,
                 Image.user_id == user.id,
-                Image.deleted_at.is_(None),
             )
             .with_for_update(of=Share)
         )
@@ -577,24 +608,15 @@ async def list_my_shares(
             .join(Image, Image.id == Share.image_id)
             .where(
                 Image.user_id == user.id,
-                Image.deleted_at.is_(None),
                 Share.revoked_at.is_(None),
             )
             .order_by(Share.created_at.desc())
         )
     ).all()
-    visible_image_ids: set[str] | None = None
-    if byok_retention_applies_to_user(user):
-        visible_map = await _public_visible_image_map(db, [img for _, img in rows])
-        visible_image_ids = {
-            image_id for image_id, visible in visible_map.items() if visible
-        }
     # Filter out expired in Python (keeps SQL simple across naive/aware tz)
     items: list[ShareOut] = []
-    for share, img in rows:
+    for share, _img in rows:
         if not _is_share_visible(share, now):
-            continue
-        if visible_image_ids is not None and img.id not in visible_image_ids:
             continue
         items.append(_to_share_out(share, public_base_url))
     return {"items": items}
@@ -615,9 +637,8 @@ async def get_public_share(
     if not row:
         raise _http("not_found", "share not found", 404)
     share, img = row
-    await _ensure_public_image_visible(db, img)
 
-    images = await _load_share_images(db, share, img)
+    images = await _load_share_images(db, share, img.user_id)
     images = await _filter_public_visible_images(db, images)
     if not images:
         raise _http("not_found", "share not found", 404)
@@ -660,8 +681,7 @@ async def get_public_share_image(
     if not row:
         raise _http("not_found", "share not found", 404)
     share, img = row
-    await _ensure_public_image_visible(db, img)
-    images = await _load_share_images(db, share, img)
+    images = await _load_share_images(db, share, img.user_id)
     images = await _filter_public_visible_images(db, images)
     if not images:
         raise _http("not_found", "share not found", 404)
@@ -699,7 +719,6 @@ async def get_public_share_image_variant_by_id(
     if not row:
         raise _http("not_found", "share not found", 404)
     share, primary_img = row
-    await _ensure_public_image_visible(db, primary_img)
     if image_id not in set(_share_image_ids(share)):
         raise _http("not_found", "image not found", 404)
 
@@ -711,7 +730,7 @@ async def get_public_share_image_variant_by_id(
                 ImageVariant.image_id == image_id,
                 ImageVariant.kind == kind,
                 Image.user_id == primary_img.user_id,
-                Image.deleted_at.is_(None),
+                *_live_share_image_filters(),
             )
         )
     ).first()
@@ -749,37 +768,12 @@ async def get_public_share_image_by_id(
     if not row:
         raise _http("not_found", "share not found", 404)
     share, primary_img = row
-    await _ensure_public_image_visible(db, primary_img)
-    # Why: defense-in-depth — guard against empty / falsy image_id slipping
-    # through the membership check via JSONB quirks; also explicitly require
-    # the id to appear in the canonical share.image_ids snapshot.
-    if not image_id:
-        raise _http("not_found", "image not found", 404)
-    allowed_ids = set(_share_image_ids(share))
-    if image_id not in allowed_ids:
-        raise _http("not_found", "image not found", 404)
-
-    if image_id == primary_img.id:
-        img = primary_img
-    else:
-        img = (
-            await db.execute(
-                select(Image).where(
-                    Image.id == image_id,
-                    Image.user_id == primary_img.user_id,
-                    Image.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-    if not img:
-        raise _http("not_found", "image not found", 404)
-    if not await _public_image_is_visible(db, img):
-        raise _http("not_found", "image not found", 404)
-    # Redundant tenancy assertion: even though primary_img.user_id was used in
-    # the WHERE clause above, re-verify to catch any future refactor that
-    # widens the lookup. This is a no-op on the happy path.
-    if img.user_id != primary_img.user_id:
-        raise _http("not_found", "image not found", 404)
+    img = await _load_live_share_member(
+        db,
+        share,
+        owner_user_id=primary_img.user_id,
+        image_id=image_id,
+    )
 
     storage_key = img.storage_key
     media_type = img.mime

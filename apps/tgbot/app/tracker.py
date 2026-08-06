@@ -8,9 +8,10 @@ Schema：
   HSET  tg:track:{gen_id}   user_id / chat_id / tg_user_id / status_message_id / prompt / params_json / is_bonus
   EXPIRE tg:track:{gen_id}  48h
   ZADD  tg:track:active-users <expires_at> <user_id>
-  SET   tg:track:delivering:{gen_id} 1 NX EX 5m  ← crash 后可重试的发送锁
-  SET   tg:track:notified:{gen_id} 1 EX 48h      ← Telegram 已确认终态通知
-  SADD  tg:track:sent-images:{gen_id} <image_id>  ← 已成功送达的图，重投时跳过
+  SET   tg:track:{slot}:delivering <owner> PX 5m  ← owner-fenced terminal lease
+  SET   tg:track:{slot}:notified <owner> EX 48h   ← Telegram 已确认终态通知
+  SET   tg:track:delivering:{gen_id} <owner> PX 5m ← 滚动升级旧实例互斥
+  SET   tg:track:notified:{gen_id} <owner> EX 48h ← 滚动升级旧实例终态
   SET   tg:batch:{batch_id}:remaining <n> EX 48h
   SADD  tg:batch:{batch_id}:done <gen_id>         ← batch 终态按 gen 去重扣数
 
@@ -19,11 +20,13 @@ Schema：
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Literal, cast
 
 from redis import asyncio as aioredis
 
@@ -38,6 +41,7 @@ from .generation_state import (
     DurableGenerationSubmission,
     SubmissionJournalStatus,
 )
+from .listener_metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +49,8 @@ TRACK_RETENTION_SECONDS = 48 * 3600
 TRACK_KEY_PREFIX = "tg:track:"
 _TRACK_TTL_SECONDS = TRACK_RETENTION_SECONDS
 _KEY_PREFIX = TRACK_KEY_PREFIX
-_NOTIFIED_PREFIX = "tg:track:notified:"
-_DELIVERING_PREFIX = "tg:track:delivering:"
-_SENT_IMAGES_PREFIX = "tg:track:sent-images:"
 _BATCH_PREFIX = "tg:batch:"
-_DELIVERY_LOCK_SECONDS = 5 * 60
+DELIVERY_LOCK_MS = 5 * 60 * 1000
 _SUBMIT_ONCE_PREFIX = "tg:submit-once:"
 # 覆盖 HTTP 调用超时（api_client 30 s）加一倍余量；过期后允许合法重试（用户已 /new）
 _SUBMIT_ONCE_TTL_SECONDS = 60
@@ -68,16 +69,24 @@ def _key(gen_id: str) -> str:
     return f"{_KEY_PREFIX}{gen_id}"
 
 
+def _delivery_slot(gen_id: str) -> str:
+    return hashlib.sha256(gen_id.encode("utf-8")).hexdigest()[:32]
+
+
 def _notified_key(gen_id: str) -> str:
-    return f"{_NOTIFIED_PREFIX}{gen_id}"
+    return f"tg:track:{{{_delivery_slot(gen_id)}}}:notified"
 
 
 def _delivering_key(gen_id: str) -> str:
-    return f"{_DELIVERING_PREFIX}{gen_id}"
+    return f"tg:track:{{{_delivery_slot(gen_id)}}}:delivering"
 
 
-def _sent_images_key(gen_id: str) -> str:
-    return f"{_SENT_IMAGES_PREFIX}{gen_id}"
+def _legacy_notified_key(gen_id: str) -> str:
+    return f"tg:track:notified:{gen_id}"
+
+
+def _legacy_delivering_key(gen_id: str) -> str:
+    return f"tg:track:delivering:{gen_id}"
 
 
 def _batch_key(batch_id: str) -> str:
@@ -130,6 +139,46 @@ redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), ARGV[1])
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
 return 1
 """
+
+
+_ACQUIRE_DELIVERY_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return -1
+end
+if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', tonumber(ARGV[2])) then
+  return 1
+end
+return 0
+"""
+
+_RENEW_DELIVERY_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+return redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+"""
+
+_FINALIZE_DELIVERY_LUA = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+redis.call('DEL', KEYS[2])
+return 1
+"""
+
+_RELEASE_DELIVERY_LUA = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+return redis.call('DEL', KEYS[1])
+"""
+
+@dataclass(frozen=True, slots=True)
+class DeliveryClaim:
+    state: Literal["acquired", "already_notified", "busy"]
+    owner_token: str | None = None
+
 
 @dataclass
 class TaskTrack:
@@ -263,7 +312,8 @@ class Tracker:
                 _key(gen_id),
                 _notified_key(gen_id),
                 _delivering_key(gen_id),
-                _sent_images_key(gen_id),
+                _legacy_notified_key(gen_id),
+                _legacy_delivering_key(gen_id),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -405,69 +455,143 @@ class Tracker:
         )
         return value or None
 
-    async def begin_delivery(self, gen_id: str) -> bool:
-        """Acquire a short delivery lock unless this terminal event was delivered."""
+    async def begin_delivery(self, gen_id: str) -> DeliveryClaim:
+        """Acquire the v2 lease while excluding pre-upgrade bot instances."""
+        owner_token = secrets.token_urlsafe(24)
         client = self._client()
-        if await client.exists(_notified_key(gen_id)):
-            return False
-        result = await client.set(
-            _delivering_key(gen_id), b"1", nx=True, ex=_DELIVERY_LOCK_SECONDS
+        legacy_acquired = await client.set(
+            _legacy_delivering_key(gen_id),
+            owner_token,
+            nx=True,
+            px=DELIVERY_LOCK_MS,
         )
-        return bool(result)
+        if not legacy_acquired:
+            if await self.is_notified(gen_id):
+                metrics.delivery_lease.labels(outcome="already_notified").inc()
+                return DeliveryClaim("already_notified")
+            metrics.delivery_lease.labels(outcome="busy").inc()
+            return DeliveryClaim("busy")
 
-    async def mark_notified(self, gen_id: str, *, release_lock: bool = True) -> bool:
-        """Mark terminal delivery sent and optionally release the lock."""
-        client = self._client()
-        pipe = client.pipeline(transaction=True)
-        pipe.set(_notified_key(gen_id), b"1", ex=_TRACK_TTL_SECONDS)
-        if release_lock:
-            pipe.delete(_delivering_key(gen_id))
-        result = await pipe.execute()
-        return bool(result and result[0])
-
-    async def clear_delivery(self, gen_id: str) -> None:
-        client = self._client()
-        await client.delete(_delivering_key(gen_id))
-
-    async def mark_image_sent(self, gen_id: str, image_id: str) -> None:
-        """记下某张图已经成功发给 Telegram（J-4）。
-
-        多图任务发到一半失败会整条事件重投，没有这个集合的话前面已经发出去的
-        图会被重复发一遍（每次重试都发，最多 _DISPATCH_MAX_ATTEMPTS 遍）。
-        """
-        if not gen_id or not image_id:
-            return
-        client = self._client()
-        pipe = client.pipeline(transaction=True)
-        pipe.sadd(_sent_images_key(gen_id), image_id)
-        pipe.expire(_sent_images_key(gen_id), _TRACK_TTL_SECONDS)
-        await pipe.execute()
-
-    async def sent_images(self, gen_id: str) -> set[str]:
-        if not gen_id:
-            return set()
-        client = self._client()
-        raw = await cast(
-            Awaitable[set[Any]],
-            client.smembers(_sent_images_key(gen_id)),
-        )
-        return {
-            (
-                v.decode("utf-8", errors="replace")
-                if isinstance(v, (bytes, bytearray))
-                else str(v)
+        if await client.exists(_legacy_notified_key(gen_id)):
+            await client.set(
+                _notified_key(gen_id),
+                owner_token,
+                ex=_TRACK_TTL_SECONDS,
             )
-            for v in (raw or set())
-        }
+            await self._release_legacy_delivery(gen_id, owner_token)
+            metrics.delivery_lease.labels(outcome="already_notified").inc()
+            return DeliveryClaim("already_notified")
+
+        result = int(
+            await cast(
+                Awaitable[Any],
+                client.eval(
+                    _ACQUIRE_DELIVERY_LUA,
+                    2,
+                    _notified_key(gen_id),
+                    _delivering_key(gen_id),
+                    owner_token,
+                    str(DELIVERY_LOCK_MS),
+                ),
+            )
+        )
+        if result == 1:
+            metrics.delivery_lease.labels(outcome="acquired").inc()
+            return DeliveryClaim("acquired", owner_token)
+        await self._release_legacy_delivery(gen_id, owner_token)
+        if result == -1:
+            metrics.delivery_lease.labels(outcome="already_notified").inc()
+            return DeliveryClaim("already_notified")
+        metrics.delivery_lease.labels(outcome="busy").inc()
+        return DeliveryClaim("busy")
+
+    async def renew_delivery(self, gen_id: str, owner_token: str) -> bool:
+        client = self._client()
+        legacy_result = await client.eval(
+            _RENEW_DELIVERY_LUA,
+            1,
+            _legacy_delivering_key(gen_id),
+            owner_token,
+            str(DELIVERY_LOCK_MS),
+        )
+        if int(legacy_result or 0) != 1:
+            return False
+        result = await client.eval(
+            _RENEW_DELIVERY_LUA,
+            1,
+            _delivering_key(gen_id),
+            owner_token,
+            str(DELIVERY_LOCK_MS),
+        )
+        return int(result or 0) == 1
+
+    async def mark_notified(self, gen_id: str, *, owner_token: str) -> bool:
+        """Finalize a terminal delivery only while the caller owns its lease."""
+        client = self._client()
+        legacy_result = await client.eval(
+            _RENEW_DELIVERY_LUA,
+            1,
+            _legacy_delivering_key(gen_id),
+            owner_token,
+            str(DELIVERY_LOCK_MS),
+        )
+        if int(legacy_result or 0) != 1:
+            return False
+        await client.set(
+            _legacy_notified_key(gen_id),
+            owner_token,
+            ex=_TRACK_TTL_SECONDS,
+        )
+        result = await client.eval(
+            _FINALIZE_DELIVERY_LUA,
+            2,
+            _notified_key(gen_id),
+            _delivering_key(gen_id),
+            owner_token,
+            owner_token,
+            str(_TRACK_TTL_SECONDS),
+        )
+        await self._release_legacy_delivery(gen_id, owner_token)
+        return int(result or 0) == 1
+
+    async def clear_delivery(self, gen_id: str, *, owner_token: str) -> bool:
+        client = self._client()
+        result = await client.eval(
+            _RELEASE_DELIVERY_LUA,
+            1,
+            _delivering_key(gen_id),
+            owner_token,
+        )
+        await self._release_legacy_delivery(gen_id, owner_token)
+        return int(result or 0) == 1
+
+    async def _release_legacy_delivery(
+        self,
+        gen_id: str,
+        owner_token: str,
+    ) -> bool:
+        result = await self._client().eval(
+            _RELEASE_DELIVERY_LUA,
+            1,
+            _legacy_delivering_key(gen_id),
+            owner_token,
+        )
+        return int(result or 0) == 1
 
     async def is_notified(self, gen_id: str) -> bool:
         client = self._client()
-        result = await client.exists(_notified_key(gen_id))
+        result = await client.exists(
+            _notified_key(gen_id),
+            _legacy_notified_key(gen_id),
+        )
         return bool(result)
 
     async def is_delivery_active(self, gen_id: str) -> bool:
         client = self._client()
-        result = await client.exists(_delivering_key(gen_id))
+        result = await client.exists(
+            _delivering_key(gen_id),
+            _legacy_delivering_key(gen_id),
+        )
         return bool(result)
 
     async def remove(self, gen_id: str) -> None:
@@ -476,7 +600,8 @@ class Tracker:
             _key(gen_id),
             _notified_key(gen_id),
             _delivering_key(gen_id),
-            _sent_images_key(gen_id),
+            _legacy_notified_key(gen_id),
+            _legacy_delivering_key(gen_id),
         )
 
     async def init_batch(self, batch_id: str, count: int) -> None:

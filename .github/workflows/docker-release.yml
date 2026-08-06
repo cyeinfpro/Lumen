@@ -28,6 +28,9 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: cyeinfpro
   NPM_VERSION: "10.9.0"
+  PYTHON_BASE_SOURCE: python:3.12-slim
+  POSTGRES_IMAGE_SOURCE: pgvector/pgvector:pg16
+  REDIS_IMAGE_SOURCE: redis:7.4-alpine
 
 jobs:
   resolve-ref:
@@ -200,10 +203,59 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-ref.outputs.release_tag }}
         run: python3 scripts/version.py assert-tag "${RELEASE_TAG}"
 
+  resolve-runtime-images:
+    name: Resolve immutable runtime dependencies
+    runs-on: ubuntu-latest
+    outputs:
+      python_ref: ${{ steps.images.outputs.python_ref }}
+      postgres_ref: ${{ steps.images.outputs.postgres_ref }}
+      redis_ref: ${{ steps.images.outputs.redis_ref }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Resolve immutable dependency images
+        id: images
+        env:
+          PYTHON_SOURCE: ${{ env.PYTHON_BASE_SOURCE }}
+          POSTGRES_SOURCE: ${{ env.POSTGRES_IMAGE_SOURCE }}
+          REDIS_SOURCE: ${{ env.REDIS_IMAGE_SOURCE }}
+        run: |
+          set -euo pipefail
+          resolve_ref() {
+            local output_name="$1"
+            local source_ref="$2"
+            local digest
+            digest="$(
+              docker buildx imagetools inspect "${source_ref}" \
+                --format '{{json .Manifest.Digest}}' \
+                | tr -d '"'
+            )"
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf -v "${output_name}" '%s@%s' "${source_ref}" "${digest}"
+            printf '%s=%s\n' "${output_name}" "${!output_name}" >> "${GITHUB_OUTPUT}"
+          }
+          resolve_ref python_ref "${PYTHON_SOURCE}"
+          resolve_ref postgres_ref "${POSTGRES_SOURCE}"
+          resolve_ref redis_ref "${REDIS_SOURCE}"
+          {
+            printf 'PYTHON_BASE_REF=%s\n' "${python_ref}"
+            printf 'POSTGRES_IMAGE_REF=%s\n' "${postgres_ref}"
+            printf 'REDIS_IMAGE_REF=%s\n' "${redis_ref}"
+          } > /tmp/runtime-image-refs.env
+
+      - name: Upload immutable dependency image refs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-image-refs
+          path: /tmp/runtime-image-refs.env
+          if-no-files-found: error
+          retention-days: 1
+
   quality-gate:
     name: Release quality gate
     runs-on: ubuntu-latest
-    needs: [resolve-ref, version-check]
+    needs: [resolve-ref, version-check, resolve-runtime-images]
     services:
       postgres:
         image: postgres:16
@@ -262,6 +314,24 @@ jobs:
         working-directory: apps/web
         run: npm ci
 
+      - name: Reject vulnerable production dependencies
+        working-directory: apps/web
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Setup Node 24 compatibility gate
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+
+      - name: Verify semantic idempotency on Node 24
+        working-directory: apps/web
+        run: npm test -- src/lib/api/semanticIdempotency.test.ts
+
+      - name: Restore Node 22 build runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+
       - name: Web type-check
         working-directory: apps/web
         run: npm run type-check
@@ -274,6 +344,10 @@ jobs:
         run: npm run build
 
       - name: Prepare compose env file
+        env:
+          PYTHON_BASE_REF: ${{ needs.resolve-runtime-images.outputs.python_ref }}
+          POSTGRES_IMAGE_REF: ${{ needs.resolve-runtime-images.outputs.postgres_ref }}
+          REDIS_IMAGE_REF: ${{ needs.resolve-runtime-images.outputs.redis_ref }}
         run: |
           set -euo pipefail
           cp .env.example .env.ci
@@ -290,14 +364,32 @@ jobs:
             -e "s|^IMAGE_PROXY_SECRET=.*|IMAGE_PROXY_SECRET=${image_proxy_secret}|" \
             -e "s|^BYOK_API_KEY_MASTER_SECRET=.*|BYOK_API_KEY_MASTER_SECRET=${byok_secret}|" \
             -e "s|^TELEGRAM_BOT_SHARED_SECRET=.*|TELEGRAM_BOT_SHARED_SECRET=${telegram_secret}|" \
+            -e "s|^LUMEN_PYTHON_BASE_REF=.*|LUMEN_PYTHON_BASE_REF=${PYTHON_BASE_REF}|" \
+            -e "s|^LUMEN_POSTGRES_IMAGE_REF=.*|LUMEN_POSTGRES_IMAGE_REF=${POSTGRES_IMAGE_REF}|" \
+            -e "s|^LUMEN_REDIS_IMAGE_REF=.*|LUMEN_REDIS_IMAGE_REF=${REDIS_IMAGE_REF}|" \
+            -e "s|^LUMEN_API_IMAGE_REF=.*|LUMEN_API_IMAGE_REF=ghcr.io/cyeinfpro/lumen-api@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
+            -e "s|^LUMEN_WORKER_IMAGE_REF=.*|LUMEN_WORKER_IMAGE_REF=ghcr.io/cyeinfpro/lumen-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
+            -e "s|^LUMEN_WEB_IMAGE_REF=.*|LUMEN_WEB_IMAGE_REF=ghcr.io/cyeinfpro/lumen-web@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
+            -e "s|^LUMEN_TGBOT_IMAGE_REF=.*|LUMEN_TGBOT_IMAGE_REF=ghcr.io/cyeinfpro/lumen-tgbot@sha256:0000000000000000000000000000000000000000000000000000000000000000|" \
             .env.ci
           sed -i "s|^LUMEN_COMPOSE_ENV_FILE=.*|LUMEN_COMPOSE_ENV_FILE=.env.ci|" .env.ci
 
       - name: Compose config
-        run: docker compose --env-file .env.ci config >/tmp/lumen-compose-config.yml
+        run: |
+          set -euo pipefail
+          docker compose --env-file .env.ci config \
+            >/tmp/lumen-compose-config.yml
+          docker compose --env-file .env.ci config --images \
+            | python3 scripts/check_immutable_images.py
+          docker compose --env-file .env.ci \
+            -f docker-compose.yml -f docker-compose.bluegreen.yml \
+            config --images | python3 scripts/check_immutable_images.py
 
       - name: Docker build smoke
-        run: docker compose --env-file .env.ci build api worker web tgbot
+        run: >-
+          docker compose --env-file .env.ci
+          -f docker-compose.yml -f docker-compose.dev.yml
+          build api worker web tgbot
 
       - name: Image start smoke
         env:
@@ -316,10 +408,10 @@ jobs:
           sudo chown -R 10001:10001 "$LUMEN_DATA_ROOT/storage" "$LUMEN_DATA_ROOT/backup"
           # api mounts this host-managed control directory with create_host_path=false.
           sudo install -d -m 0750 -o 10001 -g 10001 /var/lib/lumen-storage
-          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
-          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
-          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
-          docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml up -d --wait api worker web
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml up -d --wait postgres redis
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml --profile migrate run --rm migrate
+          docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml up -d --wait api worker web
           curl -fsS http://127.0.0.1:18000/healthz
           curl -fsS http://127.0.0.1:13000/
 
@@ -329,12 +421,12 @@ jobs:
           LUMEN_DATA_ROOT: /tmp/lumen-ci-data
           LUMEN_DB_ROOT: /tmp/lumen-ci-data
           COMPOSE_PROJECT_NAME: lumen-ci
-        run: docker compose --env-file .env.ci -f docker-compose.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
+        run: docker compose --env-file .env.ci -f docker-compose.yml -f docker-compose.dev.yml -f deploy/docker/docker-compose.local.yml down -v --remove-orphans || true
 
   build:
     name: Build, push & sign ${{ matrix.image.name }}
     runs-on: ubuntu-latest
-    needs: [resolve-ref, quality-gate]
+    needs: [resolve-ref, quality-gate, resolve-runtime-images]
     permissions:
       contents: read
       packages: write
@@ -421,6 +513,7 @@ jobs:
           # 构建慢但变化少的层在下次 build 命中不到，CI 时间会从 ~6min 涨到 ~18min。
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
           build-args: |
+            PYTHON_BASE=${{ needs.resolve-runtime-images.outputs.python_ref }}
             LUMEN_VERSION=${{ steps.meta-vars.outputs.lumen_version }}
             LUMEN_GIT_SHA=${{ needs.resolve-ref.outputs.commit }}
             LUMEN_BUILD_TIME=${{ steps.meta-vars.outputs.build_time }}
@@ -944,6 +1037,26 @@ jobs:
             uv run alembic heads
           ) | tee alembic_heads.txt
 
+      - name: Download immutable dependency image refs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-image-refs
+          path: /tmp/runtime-image-refs
+
+      - name: Load immutable dependency image refs
+        run: |
+          set -euo pipefail
+          refs=/tmp/runtime-image-refs/runtime-image-refs.env
+          [[ -f "${refs}" ]]
+          while IFS='=' read -r key value; do
+            case "${key}" in
+              PYTHON_BASE_REF|POSTGRES_IMAGE_REF|REDIS_IMAGE_REF) ;;
+              *) echo "unexpected runtime image key: ${key}" >&2; exit 1 ;;
+            esac
+            [[ "${value}" =~ ^[^\ @]+@sha256:[0-9a-f]{64}$ ]]
+            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_ENV}"
+          done < "${refs}"
+
       - name: Build release manifest and notes
         id: body
         env:
@@ -967,6 +1080,9 @@ jobs:
             --image-digest "worker=${WORKER_DIGEST}" \
             --image-digest "tgbot=${TGBOT_DIGEST}" \
             --image-digest "web=${WEB_DIGEST}" \
+            --dependency-image "python=${PYTHON_BASE_REF}" \
+            --dependency-image "postgres=${POSTGRES_IMAGE_REF}" \
+            --dependency-image "redis=${REDIS_IMAGE_REF}" \
             --output release-manifest.json \
             --notes-output release_body.md
           echo "path=release_body.md" >> "$GITHUB_OUTPUT"

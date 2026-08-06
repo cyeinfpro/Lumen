@@ -18,6 +18,8 @@ import sys
 import tempfile
 from types import ModuleType
 
+import pytest
+
 WORKER_ROOT = str(Path(__file__).resolve().parents[1])
 TESTS_DIR = str(Path(__file__).resolve().parent)
 APP_ORIGIN = "worker"
@@ -114,3 +116,30 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 _switch_to_worker_app()
+
+
+@pytest.fixture(autouse=True)
+def _runtime_settings_database_defaults_to_confirmed_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Unit tests have no control-plane DB; model that as a successful miss."""
+    from app import runtime_settings
+
+    class Result:
+        def scalar_one_or_none(self) -> None:
+            return None
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, *_args: object, **_kwargs: object) -> Result:
+            return Result()
+
+    monkeypatch.setattr(runtime_settings, "SessionLocal", Session)
+    runtime_settings.invalidate_cache()
+    yield
+    runtime_settings.invalidate_cache()

@@ -42,6 +42,24 @@ CSRF_EXEMPT_WRITE_ROUTES = {
     ("POST", "/telegram/generations"): (
         "bot: X-Bot-Token plus bound chat identity"
     ),
+    ("POST", "/telegram/deliveries/begin"): (
+        "bot: X-Bot-Token plus bound chat identity reserves a durable receipt"
+    ),
+    ("POST", "/telegram/deliveries/{attempt_id}/finish"): (
+        "bot: X-Bot-Token plus bound chat identity finalizes a fenced receipt"
+    ),
+    ("POST", "/telegram/deliveries/reconcile"): (
+        "bot: X-Bot-Token plus bound chat identity reconciles its own receipt"
+    ),
+    ("POST", "/telegram/quarantines"): (
+        "bot service: X-Bot-Token persists a durable delivery quarantine"
+    ),
+    ("POST", "/telegram/quarantines/{quarantine_id}/mirror"): (
+        "bot service: X-Bot-Token records the Redis quarantine mirror"
+    ),
+    ("POST", "/telegram/control/{command_id}/ack"): (
+        "bot service: X-Bot-Token acknowledges a durable control command"
+    ),
 }
 
 _ROUTE_DUMP_SCRIPT = r"""

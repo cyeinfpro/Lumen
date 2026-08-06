@@ -36,7 +36,6 @@ def _settings(tmp_path: Path) -> ImageJobSettings:
         queue_max=2,
         concurrency=1,
         sidecar_token=SecretText("s" * 32),
-        allow_legacy_bearer=False,
         upstream_base_url="http://127.0.0.1:8081",
         public_base_url="https://images.example.test",
         timeouts=ImageJobTimeouts(graceful_shutdown_s=0),

@@ -22,6 +22,23 @@ lumen_compose_project_name() {
 # initdb 错乱清空数据目录。这里探测 caller cwd 没有 docker-compose.yml 时，
 # 自动指向 ${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current 的 compose 文件 + .env。
 lumen_compose() {
+    local build_mode=0
+    if lumen_env_truthy "${LUMEN_UPDATE_BUILD:-0}" \
+            || [ "${INSTALL_BUILD_FLAG:-0}" = "1" ]; then
+        build_mode=1
+    fi
+    if [ "${build_mode}" -eq 1 ]; then
+        : "${LUMEN_API_IMAGE_REF:=lumen-api:dev}"
+        : "${LUMEN_WORKER_IMAGE_REF:=lumen-worker:dev}"
+        : "${LUMEN_WEB_IMAGE_REF:=lumen-web:dev}"
+        : "${LUMEN_TGBOT_IMAGE_REF:=lumen-tgbot:dev}"
+        export LUMEN_API_IMAGE_REF LUMEN_WORKER_IMAGE_REF
+        export LUMEN_WEB_IMAGE_REF LUMEN_TGBOT_IMAGE_REF
+    elif lumen_prepare_missing_app_image_refs; then
+        :
+    else
+        return $?
+    fi
     if ! docker compose version >/dev/null 2>&1; then
         log_error "未检测到 docker compose v2，请安装/升级到 Docker Compose v2 后重试。"
         return 1
@@ -31,8 +48,14 @@ lumen_compose() {
         local _cur="${LUMEN_DEPLOY_ROOT:-/opt/lumen}/current"
         if [ -f "${_cur}/docker-compose.yml" ]; then
             explicit+=("-f" "${_cur}/docker-compose.yml")
+            if [ "${build_mode}" -eq 1 ] \
+                    && [ -f "${_cur}/docker-compose.dev.yml" ]; then
+                explicit+=("-f" "${_cur}/docker-compose.dev.yml")
+            fi
             [ -f "${_cur}/.env" ] && explicit+=("--env-file" "${_cur}/.env")
         fi
+    elif [ "${build_mode}" -eq 1 ] && [ -f "./docker-compose.dev.yml" ]; then
+        explicit+=("-f" "./docker-compose.yml" "-f" "./docker-compose.dev.yml")
     fi
     # ${explicit[@]+"${explicit[@]}"}: 兼容 set -u — 空数组 ${arr[@]} 报
     # unbound variable，需用 + 形式 "如果定义了就展开"。
@@ -109,7 +132,207 @@ lumen_fetch_release_manifest() {
         log_error "缺少 release manifest 校验器：${guard}"
         return 1
     fi
-    python3 "${guard}" fetch --tag "${tag}" --output "${output}"
+    python3 "${guard}" fetch --tag "${tag}" --output "${output}" || return $?
+    local env_file="${LUMEN_ENV_FILE:-${SHARED_ENV:-}}"
+    if [ -z "${env_file}" ] && [ -n "${SHARED_DIR:-}" ]; then
+        env_file="${SHARED_DIR}/.env"
+    fi
+    if [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+        lumen_apply_release_manifest_compose_env \
+            "${output}" "${tag}" "${env_file}" || return $?
+    fi
+}
+
+lumen_image_ref_is_immutable() {
+    printf '%s\n' "${1:-}" \
+        | grep -Eq '^[^[:space:]@]+@sha256:[0-9a-f]{64}$'
+}
+
+lumen_set_compose_image_ref_in_env() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    case "${key}" in
+        LUMEN_POSTGRES_IMAGE_REF|LUMEN_REDIS_IMAGE_REF|\
+        LUMEN_API_IMAGE_REF|LUMEN_WORKER_IMAGE_REF|\
+        LUMEN_WEB_IMAGE_REF|LUMEN_TGBOT_IMAGE_REF|\
+        LUMEN_PYTHON_BASE_REF)
+            ;;
+        *)
+            log_error "拒绝未知镜像引用键：${key}"
+            return 64
+            ;;
+    esac
+    if ! lumen_image_ref_is_immutable "${value}"; then
+        log_error "${key} 必须是完整 name@sha256 引用。"
+        return 64
+    fi
+    lumen_set_env_value_in_file "${file}" "${key}" "${value}" || return 1
+    export "${key}=${value}"
+}
+
+lumen_apply_release_manifest_compose_env() {
+    local manifest="$1"
+    local tag="$2"
+    local env_file="$3"
+    local guard="${LUMEN_RELEASE_MANIFEST_GUARD:-${SCRIPT_DIR}/release_manifest_guard.py}"
+    local rows key value count=0
+    if ! rows="$(
+        python3 "${guard}" compose-env --manifest "${manifest}" --tag "${tag}"
+    )"; then
+        return 1
+    fi
+    while IFS=$'\t' read -r key value; do
+        [ -n "${key}" ] || continue
+        if lumen_set_compose_image_ref_in_env \
+                "${env_file}" "${key}" "${value}"; then
+            :
+        else
+            return $?
+        fi
+        count=$((count + 1))
+    done <<< "${rows}"
+    if [ "${count}" -ne 7 ]; then
+        log_error "release manifest 导出的镜像引用数量为 ${count}，期望 7。"
+        return 1
+    fi
+}
+
+lumen_require_immutable_image_refs() {
+    local env_file="$1"
+    shift
+    local key value failed=0
+    for key in "$@"; do
+        value="$(lumen_env_value "${key}" "${env_file}" 2>/dev/null || true)"
+        if ! lumen_image_ref_is_immutable "${value}"; then
+            log_error "${env_file} 缺少合法 ${key}=name@sha256 引用。"
+            failed=1
+            continue
+        fi
+        export "${key}=${value}"
+    done
+    [ "${failed}" -eq 0 ]
+}
+
+lumen_resolve_ghcr_tag_immutable_ref() {
+    local repository="$1"
+    local tag="$2"
+    local path token digest headers
+    if ! printf '%s\n' "${repository}" \
+            | grep -Eq '^ghcr\.io/[a-z0-9._/-]+$' \
+            || ! lumen_image_tag_is_valid "${tag}"; then
+        return 64
+    fi
+    command -v curl >/dev/null 2>&1 || return 1
+    path="${repository#ghcr.io/}"
+    token="$(
+        curl -fsSL --max-time 15 \
+            "https://ghcr.io/token?scope=repository:${path}:pull" \
+            | python3 -c '
+import json
+import sys
+
+value = json.load(sys.stdin).get("token")
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value)
+'
+    )" || return 1
+    headers="$(
+        curl -fsSL --max-time 20 \
+            -D - -o /dev/null \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${path}/manifests/${tag}"
+    )" || return 1
+    digest="$(
+        printf '%s\n' "${headers}" \
+            | tr -d '\r' \
+            | sed -n -E 's/^[Dd]ocker-[Cc]ontent-[Dd]igest:[[:space:]]*(sha256:[0-9a-f]{64})[[:space:]]*$/\1/p' \
+            | tail -n1
+    )"
+    if ! printf '%s\n' "${digest}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        return 1
+    fi
+    printf '%s@%s\n' "${repository}" "${digest}"
+}
+
+lumen_apply_rolling_app_image_refs() {
+    local registry="$1"
+    local tag="$2"
+    local env_file="$3"
+    local service key ref
+    for service in api worker web tgbot; do
+        case "${service}" in
+            api) key="LUMEN_API_IMAGE_REF" ;;
+            worker) key="LUMEN_WORKER_IMAGE_REF" ;;
+            web) key="LUMEN_WEB_IMAGE_REF" ;;
+            tgbot) key="LUMEN_TGBOT_IMAGE_REF" ;;
+        esac
+        if ! ref="$(
+                lumen_resolve_ghcr_tag_immutable_ref \
+                    "${registry%/}/lumen-${service}" "${tag}"
+        )"; then
+            log_error "无法把 ${registry%/}/lumen-${service}:${tag} 解析为 immutable digest。"
+            return 1
+        fi
+        if lumen_set_compose_image_ref_in_env \
+                "${env_file}" "${key}" "${ref}"; then
+            :
+        else
+            return $?
+        fi
+    done
+}
+
+lumen_prepare_missing_app_image_refs() {
+    local env_file="${LUMEN_ENV_FILE:-${SHARED_ENV:-}}"
+    local registry="${LUMEN_IMAGE_REGISTRY:-}"
+    local tag="${LUMEN_IMAGE_TAG:-}"
+    local key value missing=0
+    if [ -z "${env_file}" ] && [ -n "${SHARED_DIR:-}" ]; then
+        env_file="${SHARED_DIR}/.env"
+    fi
+    if [ -z "${env_file}" ] && [ -f "./.env" ]; then
+        env_file="./.env"
+    fi
+    if [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+        [ -n "${registry}" ] \
+            || registry="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${env_file}" 2>/dev/null || true)"
+        [ -n "${tag}" ] \
+            || tag="$(lumen_env_value LUMEN_IMAGE_TAG "${env_file}" 2>/dev/null || true)"
+    fi
+    for key in \
+        LUMEN_API_IMAGE_REF \
+        LUMEN_WORKER_IMAGE_REF \
+        LUMEN_WEB_IMAGE_REF \
+        LUMEN_TGBOT_IMAGE_REF; do
+        eval "value=\${${key}:-}"
+        if [ -z "${value}" ] && [ -n "${env_file}" ] && [ -f "${env_file}" ]; then
+            value="$(lumen_env_value "${key}" "${env_file}" 2>/dev/null || true)"
+        fi
+        if lumen_image_ref_is_immutable "${value}"; then
+            export "${key}=${value}"
+        else
+            missing=1
+        fi
+    done
+    [ "${missing}" -eq 1 ] || return 0
+    [ -n "${env_file}" ] && [ -f "${env_file}" ] || {
+        log_error "生产 Compose 缺少应用 immutable image refs。"
+        return 64
+    }
+    [ "${registry%/}" = "ghcr.io/cyeinfpro" ] || {
+        log_error "自定义 registry 必须显式提供四个应用 immutable image refs。"
+        return 64
+    }
+    if ! lumen_image_tag_is_valid "${tag}"; then
+        log_error "无法从非法 LUMEN_IMAGE_TAG=${tag:-<empty>} 解析应用 digest。"
+        return 64
+    fi
+    lumen_apply_rolling_app_image_refs "${registry}" "${tag}" "${env_file}"
 }
 
 lumen_release_manifest_commit() {
@@ -157,17 +380,23 @@ lumen_verify_release_manifest_images() {
     fi
     while IFS=$'\t' read -r service image_ref digest immutable_ref; do
         [ -n "${service}" ] || continue
-        inspect_ref="${image_ref%:*}:${inspect_tag}"
+        inspect_ref="${immutable_ref}"
         repo_digests="$(lumen_docker image inspect \
             --format '{{range .RepoDigests}}{{println .}}{{end}}' \
             "${inspect_ref}" 2>/dev/null || true)"
         if ! printf '%s\n' "${repo_digests}" | grep -Fxq "${immutable_ref}"; then
-            alias_source_digest="$(
-                lumen_release_alias_source_digest "${inspect_ref}" || true
-            )"
-            if [ "${alias_source_digest}" != "${digest}" ]; then
-                log_error "镜像 digest 与 release manifest 不一致：service=${service} tag=${inspect_ref} release=${manifest_tag} expected=${digest}"
-                return 1
+            inspect_ref="${image_ref%:*}:${inspect_tag}"
+            repo_digests="$(lumen_docker image inspect \
+                --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+                "${inspect_ref}" 2>/dev/null || true)"
+            if ! printf '%s\n' "${repo_digests}" | grep -Fxq "${immutable_ref}"; then
+                alias_source_digest="$(
+                    lumen_release_alias_source_digest "${inspect_ref}" || true
+                )"
+                if [ "${alias_source_digest}" != "${digest}" ]; then
+                    log_error "镜像 digest 与 release manifest 不一致：service=${service} tag=${inspect_ref} release=${manifest_tag} expected=${digest}"
+                    return 1
+                fi
             fi
         fi
         log_info "release manifest digest 通过：${service} ${digest}"
@@ -202,6 +431,14 @@ lumen_compose_pull_per_image() {
     log_info "拉取 ${total} 个镜像（按镜像分组，docker 进度保留）"
     while IFS= read -r img; do
         [ -z "${img}" ] && continue
+        if [ "${LUMEN_UPDATE_BUILD:-0}" != "1" ] \
+                && [ "${INSTALL_BUILD_FLAG:-0}" != "1" ] \
+                && ! lumen_image_ref_is_immutable "${img}"; then
+            log_error "拒绝拉取可变生产镜像：${img}"
+            failed+=("${img}")
+            rc=1
+            continue
+        fi
         idx=$((idx + 1))
         printf '\n  [%d/%d] %s\n' "${idx}" "${total}" "${img}"
         if ! lumen_docker pull "${img}"; then
@@ -406,11 +643,12 @@ lumen_image_tag_resolve() {
     fi
     local resolved_tag="${LUMEN_UPDATE_RESOLVED_TAG:-}"
     if [ -n "${resolved_tag}" ]; then
-        if lumen_image_tag_is_valid "${resolved_tag}"; then
-            printf '%s\n' "${resolved_tag}"
-            return 0
+        if ! lumen_image_tag_is_valid "${resolved_tag}"; then
+            log_error "LUMEN_UPDATE_RESOLVED_TAG=${resolved_tag} 非法。"
+            return 64
         fi
-        log_warn "LUMEN_UPDATE_RESOLVED_TAG=${resolved_tag} 非法，忽略并继续解析。"
+        printf '%s\n' "${resolved_tag}"
+        return 0
     fi
     local current_tag=""
     if [ -f "${env_file}" ]; then
@@ -422,45 +660,46 @@ lumen_image_tag_resolve() {
             return 0
             ;;
         pinned)
-            if [ -n "${current_tag}" ]; then
-                printf '%s\n' "${current_tag}"
-                return 0
+            if ! lumen_release_manifest_required "${current_tag}"; then
+                log_error "channel=pinned 需要完整 release tag，当前为 ${current_tag:-<empty>}。"
+                return 64
             fi
-            log_warn "channel=pinned 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
+            printf '%s\n' "${current_tag}"
             return 0
             ;;
         minor)
-            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/'
-                return 0
+            if ! printf '%s\n' "${current_tag}" \
+                    | grep -Eq '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+                log_error "channel=minor 需要 vMAJOR.MINOR[.PATCH] 锚点，当前为 ${current_tag:-<empty>}。"
+                return 64
             fi
-            if [ -n "${current_tag}" ]; then
-                log_warn "channel=minor 需要当前 LUMEN_IMAGE_TAG 形如 v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
-                printf '%s\n' "${current_tag}"
-                return 0
-            fi
-            log_warn "channel=minor 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
+            printf '%s\n' "${current_tag}" \
+                | sed -E 's/^(v[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/'
             return 0
             ;;
         major)
-            if printf '%s\n' "${current_tag}" | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}$'; then
-                printf '%s\n' "${current_tag}" | sed -E 's/^(v[0-9]+)(\.[0-9]+){0,2}$/\1/'
-                return 0
+            if ! printf '%s\n' "${current_tag}" \
+                    | grep -Eq '^v[0-9]+(\.[0-9]+){0,2}$'; then
+                log_error "channel=major 需要 vMAJOR[.MINOR[.PATCH]] 锚点，当前为 ${current_tag:-<empty>}。"
+                return 64
             fi
-            if [ -n "${current_tag}" ]; then
-                log_warn "channel=major 需要当前 LUMEN_IMAGE_TAG 形如 v1、v1.2 或 v1.2.3，当前为 ${current_tag}；保持当前 tag。"
-                printf '%s\n' "${current_tag}"
-                return 0
-            fi
-            log_warn "channel=major 但 ${env_file} 未设置 LUMEN_IMAGE_TAG，回退 main。"
-            printf 'main\n'
+            printf '%s\n' "${current_tag}" \
+                | sed -E 's/^(v[0-9]+)(\.[0-9]+){0,2}$/\1/'
             return 0
             ;;
         v[0-9]*)
+            if ! lumen_image_tag_is_valid "${channel}"; then
+                log_error "literal channel=${channel} 不是合法镜像 tag。"
+                return 64
+            fi
             printf '%s\n' "${channel}"
             return 0
+            ;;
+        stable|latest)
+            ;;
+        *)
+            log_error "未知 LUMEN_UPDATE_CHANNEL=${channel}。"
+            return 64
             ;;
     esac
     # stable / latest：查 GitHub Releases API 取 latest tag_name

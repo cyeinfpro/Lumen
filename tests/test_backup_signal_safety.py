@@ -426,6 +426,18 @@ def _start_backup(
             "LUMEN_SERVICE_STATE_INTERVAL_SECONDS": "0",
             "LUMEN_SERVICE_QUIESCE_ATTEMPTS": "4",
             "LUMEN_SERVICE_START_ATTEMPTS": "4",
+            "LUMEN_API_IMAGE_REF": (
+                "example.invalid/lumen-api@sha256:" + ("1" * 64)
+            ),
+            "LUMEN_WORKER_IMAGE_REF": (
+                "example.invalid/lumen-worker@sha256:" + ("2" * 64)
+            ),
+            "LUMEN_WEB_IMAGE_REF": (
+                "example.invalid/lumen-web@sha256:" + ("3" * 64)
+            ),
+            "LUMEN_TGBOT_IMAGE_REF": (
+                "example.invalid/lumen-tgbot@sha256:" + ("4" * 64)
+            ),
         }
     )
     if env_out is not None:
@@ -567,6 +579,11 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
     assert marker_payload["redis"]["sha256"] == hashlib.sha256(
         next((backup_root / "redis").glob("*.redis.tgz")).read_bytes()
     ).hexdigest()
+    success_marker = backup_root / ".backup.last-success.json"
+    success_payload = json.loads(success_marker.read_text(encoding="utf-8"))
+    assert success_payload["completed_at"] == marker_payload["timestamp"]
+    assert success_payload["pair_marker"] == markers[0].name
+    assert success_marker.stat().st_mode & 0o777 == 0o640
 
 
 @pytest.mark.parametrize("unit", SYSTEMD_WRITER_UNITS)

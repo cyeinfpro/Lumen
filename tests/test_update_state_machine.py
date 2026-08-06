@@ -25,6 +25,7 @@ DIGEST_PHASE = ROOT / "scripts" / "update" / "release" / "digest.sh"
 ACTIVATE_PHASE = ROOT / "scripts" / "update" / "release" / "activate.sh"
 SWITCH_PHASE = ROOT / "scripts" / "update" / "services" / "switch.sh"
 RESTART_PHASE = ROOT / "scripts" / "update" / "services" / "restart.sh"
+SELF_UPDATE_PHASE = ROOT / "scripts" / "update" / "release" / "self_update.sh"
 SOURCE_COMMIT = "a" * 40
 SOURCE_PROOF = "test-proof"
 IMAGE_IDS = {
@@ -2114,6 +2115,57 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
         "emit_done  lock 0"
     )
     assert "export LUMEN_UPDATE_RESUME=1" in self_update
+
+
+@pytest.mark.parametrize("failure", ("semantic_failure", "missing_immutable_ref"))
+def test_self_update_failure_stops_before_next_phase(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    release = tmp_path / "current"
+    scripts = release / "scripts"
+    scripts.mkdir(parents=True)
+    next_phase = tmp_path / "check-started"
+    events = tmp_path / "events"
+    ref = SOURCE_COMMIT if failure == "semantic_failure" else "main"
+    self_update_stub = (
+        "LUMEN_SELF_UPDATE_RESULT=failed; return 0"
+        if failure == "semantic_failure"
+        else f": > {shlex.quote(str(tmp_path / 'unexpected-self-update'))}; return 0"
+    )
+
+    result = _run(
+        f"""
+        set -uo pipefail
+        . {shlex.quote(str(SELF_UPDATE_PHASE))}
+        CURRENT_RELEASE={shlex.quote(str(release))}
+        LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=1
+        LUMEN_UPDATE_SCRIPTS_REF={shlex.quote(ref)}
+        _LUMEN_UPDATE_SCRIPT_UNIT_FILES=(update.sh)
+        emit_start() {{ printf 'start:%s\\n' "$1" >> {shlex.quote(str(events))}; }}
+        emit_info() {{ printf 'info:%s:%s:%s\\n' "$1" "$2" "$3" >> {shlex.quote(str(events))}; }}
+        emit_warn() {{ printf 'warn:%s:%s\\n' "$1" "$2" >> {shlex.quote(str(events))}; }}
+        emit_done() {{ printf 'done:%s\\n' "$1" >> {shlex.quote(str(events))}; }}
+        emit_fail() {{ printf 'fail:%s:%s\\n' "$1" "$2" >> {shlex.quote(str(events))}; }}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        log_error() {{ :; }}
+        lumen_self_update_scripts() {{ {self_update_stub}; }}
+        phase_rc=0
+        update_phase_self_update_scripts || phase_rc=$?
+        if [ "$phase_rc" -eq 0 ]; then
+            : > {shlex.quote(str(next_phase))}
+        fi
+        exit "$phase_rc"
+        """
+    )
+
+    assert result.returncode == 78, result.stderr + result.stdout
+    assert not next_phase.exists()
+    assert "fail:self_update_scripts:78" in events.read_text(encoding="utf-8")
+    assert "done:self_update_scripts" not in events.read_text(encoding="utf-8")
+    if failure == "missing_immutable_ref":
+        assert not (tmp_path / "unexpected-self-update").exists()
 
 
 def test_switch_does_not_complete_when_runner_unit_refresh_fails(

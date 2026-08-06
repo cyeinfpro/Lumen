@@ -349,15 +349,26 @@ class TransactionalPipeline:
     ],
 )
 def test_parse_rate_limit_valid(raw: str, expected: tuple[int, int]) -> None:
-    assert account_limiter.parse_rate_limit(raw) == expected
+    parsed = account_limiter.parse_rate_limit(raw)
+    assert parsed.state == "valid"
+    assert (parsed.count, parsed.window_seconds) == expected
 
 
 @pytest.mark.parametrize(
     "raw",
-    [None, "", "abc", "5", "/min", "5/", "0/min", "-1/min", "5/year", "five/min"],
+    ["abc", "5", "/min", "5/", "0/min", "-1/min", "5/year", "five/min", "0.5/min"],
 )
-def test_parse_rate_limit_invalid(raw: str | None) -> None:
-    assert account_limiter.parse_rate_limit(raw) is None
+def test_parse_rate_limit_invalid(raw: str) -> None:
+    assert account_limiter.parse_rate_limit(raw).state == "invalid"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_parse_rate_limit_absent(raw: str | None) -> None:
+    assert account_limiter.parse_rate_limit(raw).state == "absent"
+
+
+def test_parse_rate_limit_non_string_is_invalid() -> None:
+    assert account_limiter.parse_rate_limit(5).state == "invalid"  # type: ignore[arg-type]
 
 
 # --- check_quota ------------------------------------------------------------
@@ -377,12 +388,30 @@ async def test_check_quota_short_circuits_when_no_limits_configured() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_quota_short_circuits_when_redis_is_none() -> None:
-    allowed, retry_after = await account_limiter.check_quota(
-        None, "acc1", rate_limit="5/min", daily_quota=80
-    )
-    assert allowed is True
-    assert retry_after == 0.0
+async def test_check_quota_requires_redis_when_limit_is_configured() -> None:
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            None, "acc1", rate_limit="5/min", daily_quota=80
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_quota_is_not_treated_as_unlimited() -> None:
+    with pytest.raises(account_limiter.AccountLimiterConfigurationError):
+        await account_limiter.check_quota(
+            FakeRedis(),
+            "acc1",
+            rate_limit="50/mni",
+            daily_quota=None,
+        )
+    with pytest.raises(account_limiter.AccountLimiterConfigurationError):
+        await account_limiter.reserve_quota(
+            FakeRedis(),
+            "acc1",
+            rate_limit=None,
+            daily_quota=0,
+            task_id="task-invalid",
+        )
 
 
 @pytest.mark.asyncio
@@ -446,22 +475,35 @@ async def test_check_quota_expires_old_window_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_quota_lua_failure_uses_short_fail_closed_retry() -> None:
+async def test_check_quota_lua_failure_reports_backend_unavailable() -> None:
     class EvalBrokenRedis(FakeRedis):
         async def eval(self, *_a: Any, **_kw: Any) -> Any:
             raise RuntimeError("redis down")
 
     now = 1_700_000_000.0
-    allowed, retry_after = await account_limiter.check_quota(
-        EvalBrokenRedis(), "acc1", rate_limit="5/min", daily_quota=None, now=now
-    )
-
-    assert allowed is False
-    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            EvalBrokenRedis(), "acc1", rate_limit="5/min", daily_quota=None, now=now
+        )
 
 
 @pytest.mark.asyncio
-async def test_check_quota_fallback_failure_uses_short_fail_closed_retry() -> None:
+async def test_check_quota_rejects_malformed_lua_response() -> None:
+    class MalformedRedis(FakeRedis):
+        async def eval(self, *_a: Any, **_kw: Any) -> Any:
+            return 0
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            MalformedRedis(),
+            "acc1",
+            rate_limit="5/min",
+            daily_quota=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_quota_fallback_failure_reports_backend_unavailable() -> None:
     class NoEvalBrokenRedis(FakeRedis):
         eval = None
 
@@ -469,27 +511,59 @@ async def test_check_quota_fallback_failure_uses_short_fail_closed_retry() -> No
             raise RuntimeError("redis down")
 
     now = 1_700_000_000.0
-    allowed, retry_after = await account_limiter.check_quota(
-        NoEvalBrokenRedis(), "acc1", rate_limit="5/min", daily_quota=None, now=now
-    )
-
-    assert allowed is False
-    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            NoEvalBrokenRedis(),
+            "acc1",
+            rate_limit="5/min",
+            daily_quota=None,
+            now=now,
+        )
 
 
 @pytest.mark.asyncio
-async def test_check_quota_daily_redis_error_fails_closed_short_retry() -> None:
+async def test_check_quota_daily_redis_error_reports_backend_unavailable() -> None:
     class DailyGetBrokenRedis(FakeRedis):
         async def get(self, _key: str) -> str | None:
             raise RuntimeError("redis down")
 
     now = 1_700_000_000.0
-    allowed, retry_after = await account_limiter.check_quota(
-        DailyGetBrokenRedis(), "acc1", rate_limit=None, daily_quota=80, now=now
-    )
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            DailyGetBrokenRedis(),
+            "acc1",
+            rate_limit=None,
+            daily_quota=80,
+            now=now,
+        )
 
-    assert allowed is False
-    assert retry_after == account_limiter.REDIS_ERROR_RETRY_AFTER_S
+
+@pytest.mark.asyncio
+async def test_reserve_quota_requires_redis_when_limit_is_configured() -> None:
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.reserve_quota(
+            None,
+            "acc1",
+            rate_limit="5/min",
+            daily_quota=None,
+            task_id="task-no-redis",
+        )
+
+
+@pytest.mark.asyncio
+async def test_reserve_quota_rejects_malformed_lua_response() -> None:
+    class MalformedRedis(FakeRedis):
+        async def eval(self, *_a: Any, **_kw: Any) -> Any:
+            return None
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.reserve_quota(
+            MalformedRedis(),
+            "acc1",
+            rate_limit="5/min",
+            daily_quota=None,
+            task_id="task-malformed",
+        )
 
 
 @pytest.mark.asyncio
@@ -510,7 +584,7 @@ async def test_wall_clock_now_rejects_implausible_large_monotonic(
 
 
 @pytest.mark.asyncio
-async def test_check_quota_fallback_zrange_error_returns_count_limit_retry() -> None:
+async def test_check_quota_fallback_zrange_error_reports_backend_unavailable() -> None:
     class NoEvalZRangeBrokenRedis(FakeRedis):
         eval = None
 
@@ -524,12 +598,14 @@ async def test_check_quota_fallback_zrange_error_returns_count_limit_retry() -> 
     for i in range(5):
         await redis.zadd("lumen:acct:acc1:image:ts", {f"t{i}": now - 10 + i})
 
-    allowed, retry_after = await account_limiter.check_quota(
-        redis, "acc1", rate_limit="5/min", daily_quota=None, now=now
-    )
-
-    assert allowed is False
-    assert 1.0 <= retry_after <= account_limiter.REDIS_ERROR_RETRY_AFTER_S + 0.5
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await account_limiter.check_quota(
+            redis,
+            "acc1",
+            rate_limit="5/min",
+            daily_quota=None,
+            now=now,
+        )
 
 
 # --- record_image_call ------------------------------------------------------

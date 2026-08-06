@@ -16,6 +16,7 @@ UNMANAGED_DIRECT_FILE="${STATE_DIR}/unmanaged-direct"
 DISABLED_FILE="${STATE_DIR}/disabled"
 STATUS_FILE="${STATE_DIR}/status.json"
 APPLY_RESULT_FILE="${STATE_DIR}/last-apply.json"
+APPLY_CLAIM_FILE="${STATE_DIR}/apply.claim.json"
 TEST_RESULT_FILE="${STATE_DIR}/last-test.json"
 TEST_CONF_FILE="${STATE_DIR}/test.conf"
 APPLY_TRIGGER_FILE="${STATE_DIR}/apply.trigger"
@@ -168,6 +169,91 @@ trigger_call_id() {
     return 2
   fi
   printf '%s\n' "$value"
+}
+
+apply_result_terminal_for_call() {
+  local call_id="$1"
+  [[ -f "$APPLY_RESULT_FILE" ]] || return 1
+  python3 - "$APPLY_RESULT_FILE" "$call_id" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if data.get("call_id") == sys.argv[2]
+    and data.get("status") in {"ok", "fail"}
+    else 1
+)
+PY
+}
+
+claim_apply_operation() {
+  local call_id="$1"
+  python3 - "$APPLY_CLAIM_FILE" "$APPLY_RESULT_FILE" "$call_id" <<'PY'
+import json
+import os
+import sys
+import time
+
+claim_path, result_path, call_id = sys.argv[1:]
+
+def terminal(operation_id):
+    try:
+        with open(result_path, encoding="utf-8") as handle:
+            result = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        result.get("call_id") == operation_id
+        and result.get("status") in {"ok", "fail"}
+    )
+
+try:
+    with open(claim_path, encoding="utf-8") as handle:
+        previous = json.load(handle)
+except FileNotFoundError:
+    previous = None
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(11)
+
+if previous is not None:
+    previous_id = previous.get("call_id")
+    if not isinstance(previous_id, str):
+        raise SystemExit(11)
+    if previous_id == call_id and not terminal(previous_id):
+        raise SystemExit(10)
+    if previous_id != call_id and not terminal(previous_id):
+        raise SystemExit(11)
+
+payload = {
+    "call_id": call_id,
+    "claimed_at": int(time.time()),
+}
+tmp_path = f"{claim_path}.{os.getpid()}.tmp"
+try:
+    with open(tmp_path, "x", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, claim_path)
+    directory_fd = os.open(os.path.dirname(claim_path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+PY
 }
 
 normalized_path() {
@@ -1638,8 +1724,32 @@ cmd_apply() {
   exec 8>"${STATE_DIR}/apply.lock"
   if ! flock -n 8; then
     log "another apply in progress, abort"
-    write_apply_result "$call_id" "fail" "another apply in progress" "$started_at"
-    return 1
+    return 75
+  fi
+  if apply_result_terminal_for_call "$call_id"; then
+    log "operation $call_id already has a terminal result; refusing duplicate apply"
+    return 0
+  fi
+  local claim_rc=0
+  claim_apply_operation "$call_id" || claim_rc=$?
+  case "$claim_rc" in
+    0)
+      ;;
+    10)
+      log "operation $call_id has an unresolved prior claim; refusing duplicate apply"
+      write_apply_result "$call_id" "fail" \
+        "previous host attempt did not record a terminal result; duplicate apply refused" \
+        "$started_at"
+      return 1
+      ;;
+    *)
+      log "another unresolved or invalid storage apply claim exists"
+      return 75
+      ;;
+  esac
+  if apply_result_terminal_for_call "$call_id"; then
+    log "operation $call_id became terminal before host side effects"
+    return 0
   fi
   if ! storage_acquire_maintenance_lock; then
     log "another maintenance operation is active, abort"
@@ -1862,14 +1972,21 @@ cmd_status() {
   cat "$STATUS_FILE"
 }
 
+cmd_apply_result_terminal() {
+  local call_id=""
+  call_id="$(trigger_call_id "$APPLY_TRIGGER_FILE")" || return 1
+  apply_result_terminal_for_call "$call_id"
+}
+
 cmd_help() {
   cat <<EOF
-Usage: $(basename "$0") {up|verify|bind-identity|down|apply|test|status|help}
+Usage: $(basename "$0") {up|verify|bind-identity|down|apply|apply-result-terminal|test|status|help}
   up      Mount /opt/lumendata per current conf (idempotent).
   verify  Verify current mount against config and last-good identity.
   bind-identity  Upgrade a verified legacy last-good with a dataset marker.
   down    Unmount /opt/lumendata.
   apply   Stop dependent docker services, swap mount, restart services.
+  apply-result-terminal  Check whether trigger has a matching terminal result.
   test    Test SMB credentials in conf at $TEST_CONF_FILE.
   status  Print current mount status JSON.
 
@@ -1880,6 +1997,7 @@ Files:
   $DISABLED_FILE      escape hatch: forces local mode on $DEFAULT_LOCAL_ROOT
   $STATUS_FILE        status snapshot (read by API)
   $APPLY_RESULT_FILE  last apply result (read by API)
+  $APPLY_CLAIM_FILE   durable host claim for at-most-once operation handling
   $TEST_RESULT_FILE   last test result (read by API)
 EOF
 }
@@ -1892,6 +2010,7 @@ main() {
     bind-identity) cmd_bind_identity ;;
     down)   cmd_down ;;
     apply)  cmd_apply ;;
+    apply-result-terminal) cmd_apply_result_terminal ;;
     test)   cmd_test ;;
     status) cmd_status ;;
     help|-h|--help) cmd_help ;;

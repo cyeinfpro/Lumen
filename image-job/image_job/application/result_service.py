@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 from typing import Any
 
+from ..contracts import ArtifactCorrupt
 from ..domain.identity import CallerIdentity, UpstreamCredential
 from .auth import credential_hash
 
@@ -20,6 +21,22 @@ class ResultService:
     def __init__(self, repository: Any, persistence: Any) -> None:
         self.repository = repository
         self.persistence = persistence
+
+    async def response_for_row(self, row: Any) -> dict[str, Any]:
+        try:
+            return await self.persistence.validated_response(row)
+        except ArtifactCorrupt as exc:
+            await self.persistence.mark_artifact_corrupt(
+                str(row["job_id"]),
+                reason=exc.reason,
+            )
+            current = await self.repository.one(
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (row["job_id"],),
+            )
+            if current is None:
+                raise ResultFailure(404, "image job not found") from exc
+            return self.persistence.row_to_response(current)
 
     async def get(
         self,
@@ -41,4 +58,4 @@ class ResultService:
             for candidate in candidates
         ):
             raise ResultFailure(403, "image job belongs to a different key")
-        return self.persistence.row_to_response(row)
+        return await self.response_for_row(row)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app import proxy_pool
 from lumen_core.providers import ProviderProxyDefinition
@@ -68,22 +69,22 @@ class _AllFailRedis:
     """Redis that fails on every command (full outage)."""
 
     async def eval(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
     async def incr(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
     async def expire(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
     async def set(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
     async def delete(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
     async def exists(self, *_a, **_kw):
-        raise RuntimeError("redis down")
+        raise RedisConnectionError("redis down")
 
 
 @pytest.mark.asyncio

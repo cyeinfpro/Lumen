@@ -66,6 +66,13 @@ class ExportImageDescriptor:
     mime: str
 
 
+class ExportIntegrityError(RuntimeError):
+    def __init__(self, image_id: str, reason: str) -> None:
+        self.image_id = image_id
+        self.reason = reason
+        super().__init__(f"export image {image_id} failed: {reason}")
+
+
 def ext_for(mime: str) -> str:
     return _EXT_BY_MIME.get(mime, "bin")
 
@@ -130,6 +137,34 @@ def open_storage_file_safe(storage_key: str | None) -> BinaryIO | None:
             except OSError:
                 pass
         return None
+
+
+def open_export_image_required(image: ExportImageDescriptor) -> BinaryIO:
+    path = fs_path_safe(image.storage_key)
+    if path is None:
+        raise ExportIntegrityError(image.id, "invalid_storage_key")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode):
+            raise ExportIntegrityError(image.id, "not_regular_file")
+        source = os.fdopen(fd, "rb")
+        fd = -1
+        return source
+    except FileNotFoundError as exc:
+        raise ExportIntegrityError(image.id, "missing_file") from exc
+    except PermissionError as exc:
+        raise ExportIntegrityError(image.id, "permission_denied") from exc
+    except ExportIntegrityError:
+        raise
+    except OSError as exc:
+        raise ExportIntegrityError(image.id, "storage_io_error") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 async def _query_batch_rows(
@@ -270,32 +305,33 @@ async def _export_messages(
 
 async def _write_export_image(
     archive: zipfile.ZipFile,
-    image: Any,
-) -> bool:
-    source = await asyncio.to_thread(open_storage_file_safe, image.storage_key)
-    if source is None:
-        return False
+    image: ExportImageDescriptor,
+) -> None:
+    source = await asyncio.to_thread(open_export_image_required, image)
     extension = ext_for(image.mime)
-    with source, archive.open(f"images/{image.id}.{extension}", "w") as image_file:
-        while chunk := await asyncio.to_thread(source.read, _EXPORT_CHUNK_SIZE):
-            await asyncio.to_thread(image_file.write, chunk)
-    return True
+    try:
+        with source, archive.open(
+            f"images/{image.id}.{extension}", "w"
+        ) as image_file:
+            while chunk := await asyncio.to_thread(source.read, _EXPORT_CHUNK_SIZE):
+                await asyncio.to_thread(image_file.write, chunk)
+    except ExportIntegrityError:
+        raise
+    except OSError as exc:
+        raise ExportIntegrityError(image.id, "read_failed") from exc
 
 
 async def _export_images(
     db: AsyncSession,
     archive: zipfile.ZipFile,
     user_id: str,
-) -> tuple[int, int]:
+) -> int:
     exported = 0
-    skipped = 0
     async for images in iter_export_image_batches(db, user_id):
         for image in images:
-            if await _write_export_image(archive, image):
-                exported += 1
-            else:
-                skipped += 1
-    return exported, skipped
+            await _write_export_image(archive, image)
+            exported += 1
+    return exported
 
 
 async def build_export_archive(
@@ -310,10 +346,24 @@ async def build_export_archive(
         allowZip64=True,
     ) as archive:
         messages = await _export_messages(db, archive, user_id)
-        images, images_skipped = await _export_images(db, archive, user_id)
+        images = await _export_images(db, archive, user_id)
+        archive.writestr(
+            "export-manifest.json",
+            json.dumps(
+                {
+                    "schema": 1,
+                    "complete": True,
+                    "messages": messages,
+                    "images": images,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+        )
     return ExportStats(
         messages=messages,
         images=images,
-        images_skipped=images_skipped,
+        images_skipped=0,
         zip_bytes=tmp.tell(),
     )

@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from ..config import ImageJobSettings
-from ..contracts import JobFailure
+from ..contracts import JobFailure, UpstreamDispatchReceipt
 from ..ports.jobs import JobHeartbeatPort
 from ..processing import ImageProcessing
 from ..url_security import (
@@ -266,11 +266,20 @@ class HttpUpstreamGateway:
         row: Any,
         *,
         authorization: str,
+        dispatch: UpstreamDispatchReceipt | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         return await self.processing.call_upstream(
             row,
             authorization=authorization,
+            dispatch=dispatch,
         )
+
+    async def verify_saved_artifacts(
+        self,
+        job_id: str,
+        images: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return await self.processing.verify_saved_artifacts(job_id, images)
 
     def is_retryable_failure(self, failure: JobFailure) -> bool:
         return self.processing.upstream_facade.is_retryable_job_failure(failure)

@@ -434,7 +434,7 @@ def _timestamp_from_backup_stdout(stdout: str, started_at: datetime) -> str | No
 
 def _backup_script_was_skipped(output: str) -> bool:
     lowered = (output or "").lower()
-    return "skipped:" in lowered and (
+    return ("skipped:" in lowered or "deferred:" in lowered) and (
         "maintenance lock" in lowered or "already running" in lowered
     )
 
@@ -550,33 +550,39 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
         raise
     _unlink_marker(marker)
 
+    output = f"{proc.stdout}\n{proc.stderr}" if proc is not None else ""
+    if proc is not None and _backup_script_was_skipped(output):
+        await write_admin_audit_isolated(
+            request,
+            admin,
+            event_type="admin.backup.create.skipped",
+            details={"reason": "backup_skipped"},
+        )
+        await lock_service.release(lock, succeeded=False, reason="backup_skipped")
+        raise _http(
+            "backup_skipped",
+            "backup was skipped because another maintenance operation is running",
+            409,
+        )
+
     if proc is not None and proc.returncode != 0:
+        release_reason = "backup_script_failed"
         tail = (proc.stderr or proc.stdout or "")[-1000:]
         await write_admin_audit_isolated(
             request,
             admin,
             event_type="admin.backup.create.fail",
-            details={"returncode": proc.returncode},
+            details={"returncode": proc.returncode, "stderr_tail": tail},
         )
         await lock_service.release(lock, succeeded=False, reason=release_reason)
-        return BackupNowOut(ok=False, stderr_tail=tail)
+        raise _http(
+            "backup_script_failed",
+            "backup process exited unsuccessfully",
+            502,
+            details={"returncode": proc.returncode, "stderr_tail": tail},
+        )
 
     if proc is not None and ts is None:
-        output = f"{proc.stdout}\n{proc.stderr}"
-        if _backup_script_was_skipped(output):
-            _unlink_marker(marker)
-            await write_admin_audit_isolated(
-                request,
-                admin,
-                event_type="admin.backup.create.skipped",
-                details={"reason": "backup_skipped"},
-            )
-            await lock_service.release(lock, succeeded=False, reason="backup_skipped")
-            raise _http(
-                "backup_skipped",
-                "backup was skipped because another maintenance operation is running",
-                409,
-            )
         ts = _timestamp_from_backup_stdout(output, started_at)
     if ts is None:
         ts = await _find_latest_paired_backup_after(started_at)

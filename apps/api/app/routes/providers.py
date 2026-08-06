@@ -286,6 +286,7 @@ async def update_video_providers(
             "count": len(rows),
             "names": [item["name"] for item in rows],
         },
+        autocommit=False,
     )
     await db.commit()
     return await list_video_providers(admin, db)
@@ -506,6 +507,7 @@ async def update_providers(
             actor_email_hash=hash_email(admin.email),
             actor_ip_hash=request_ip_hash(request),
             details={},
+            autocommit=False,
         )
         await db.commit()
         admin_model_cache_from_request(request).invalidate()
@@ -543,6 +545,7 @@ async def update_providers(
             "count": len(provider_rows),
             "names": [row["name"] for row in provider_rows],
         },
+        autocommit=False,
     )
     await db.commit()
     admin_model_cache_from_request(request).invalidate()
@@ -612,6 +615,7 @@ async def patch_provider_enabled(
         actor_email_hash=hash_email(admin.email),
         actor_ip_hash=request_ip_hash(request),
         details={"name": provider_name, "enabled": body.enabled},
+        autocommit=False,
     )
     await db.commit()
     admin_model_cache_from_request(request).invalidate()

@@ -352,6 +352,204 @@ class LumenApi:
         self._raise_for(resp)
         return resp.json()
 
+    async def list_delivered_telegram_images(
+        self,
+        chat_id: int,
+        generation_id: str,
+        *,
+        tg_user_id: int | str,
+    ) -> set[str]:
+        resp = await self._client.get(
+            f"/telegram/deliveries/{generation_id}",
+            headers=self._hdr(chat_id, tg_user_id=tg_user_id),
+        )
+        self._raise_for(resp)
+        body = resp.json()
+        image_ids = body.get("image_ids") if isinstance(body, dict) else None
+        if not isinstance(image_ids, list):
+            raise ApiError(
+                "ambiguous_response",
+                "delivery receipt response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return {
+            str(image_id)
+            for image_id in image_ids
+            if isinstance(image_id, str) and image_id
+        }
+
+    async def begin_telegram_delivery(
+        self,
+        chat_id: int,
+        *,
+        tg_user_id: int | str,
+        generation_id: str,
+        image_id: str,
+        owner_token: str,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                "/telegram/deliveries/begin",
+                headers=self._hdr(chat_id, tg_user_id=tg_user_id),
+                json={
+                    "generation_id": generation_id,
+                    "image_id": image_id,
+                    "chat_id": chat_id,
+                    "owner_token": owner_token,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "delivery_begin_connection_lost",
+                "delivery reservation result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if (
+            not isinstance(body, dict)
+            or body.get("state")
+            not in {"send_allowed", "already_delivered", "result_unknown"}
+            or not isinstance(body.get("attempt_id"), str)
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "delivery reservation response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def finish_telegram_delivery(
+        self,
+        chat_id: int,
+        attempt_id: str,
+        *,
+        tg_user_id: int | str,
+        owner_token: str,
+        state: str,
+        telegram_message_id: int | None = None,
+        error_class: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/deliveries/{attempt_id}/finish",
+                headers=self._hdr(chat_id, tg_user_id=tg_user_id),
+                json={
+                    "owner_token": owner_token,
+                    "state": state,
+                    "telegram_message_id": telegram_message_id,
+                    "error_class": error_class,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "delivery_finish_connection_lost",
+                "delivery receipt commit result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or body.get("state") != state:
+            raise ApiError(
+                "ambiguous_response",
+                "delivery receipt response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def persist_delivery_quarantine(
+        self,
+        *,
+        source_stream: str,
+        source_id: str,
+        stream_user_id: str,
+        event: str,
+        generation_id: str,
+        payload_raw: str,
+        reason: str,
+        attempts: int,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                "/telegram/quarantines",
+                json={
+                    "source_stream": source_stream,
+                    "source_id": source_id,
+                    "stream_user_id": stream_user_id,
+                    "event": event,
+                    "generation_id": generation_id or None,
+                    "payload_raw": payload_raw,
+                    "reason": reason,
+                    "attempts": attempts,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "quarantine_connection_lost",
+                "quarantine persistence result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or not isinstance(
+            body.get("quarantine_id"),
+            str,
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "quarantine persistence response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def mark_delivery_quarantine_mirrored(
+        self,
+        quarantine_id: str,
+        redis_stream_id: str,
+    ) -> None:
+        resp = await self._client.post(
+            f"/telegram/quarantines/{quarantine_id}/mirror",
+            json={"redis_stream_id": redis_stream_id},
+        )
+        self._raise_for(resp)
+
+    async def ack_control_command(
+        self,
+        command_id: str,
+        *,
+        command: str,
+        status: str = "accepted",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/ack",
+                json={"command": command, "status": status, "error": error},
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_ack_connection_lost",
+                "control acknowledgement result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or not isinstance(
+            body.get("newly_accepted"),
+            bool,
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "control acknowledgement response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
     async def download_image_to_file(
         self,
         chat_id: int,
@@ -431,8 +629,12 @@ def _ensure_download_space(tmp_root: str, *, required_bytes: int = 0) -> None:
     try:
         usage = shutil.disk_usage(tmp_root)
     except OSError as exc:
-        logger.warning("disk_usage check failed dir=%s err=%s", tmp_root, exc)
-        return
+        logger.error("disk_usage check failed dir=%s err=%s", tmp_root, exc)
+        raise ApiError(
+            code="download_storage_unavailable",
+            message="临时存储状态不可用，请稍后重试。",
+            status=503,
+        ) from exc
     required = max(0, int(required_bytes))
     if usage.free - required < _MIN_FREE_DISK_BYTES:
         raise ApiError(

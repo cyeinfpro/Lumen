@@ -6,6 +6,14 @@ import {
 import { streamClient } from "./streamClient";
 import type { VideoPromptEnhanceIn } from "../types";
 
+const PROMPT_ENHANCEMENT_TOTAL_TIMEOUT_MS = 2 * 60_000;
+const PROMPT_ENHANCEMENT_IDLE_TIMEOUT_MS = 20_000;
+
+type EnhancementStreamTimeouts = {
+  totalMs: number;
+  idleMs: number;
+};
+
 function createSSEDataParser(onData: (data: string) => void): {
   feed: (chunk: string) => void;
   flush: () => void;
@@ -242,15 +250,51 @@ function parseEnhancementEvent(
 async function consumeEnhancementStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   onDelta: (text: string) => void,
+  {
+    signal,
+    idleMs,
+    abortRequest,
+  }: {
+    signal: AbortSignal;
+    idleMs: number;
+    abortRequest: (reason: unknown) => void;
+  },
 ): Promise<void> {
   const decoder = new TextDecoder();
   const state = { hasText: false, streamDone: false };
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const rejectAbort = () =>
+      reject(
+        signal.reason ??
+          new DOMException("The operation was aborted", "AbortError"),
+      );
+    if (signal.aborted) rejectAbort();
+    else signal.addEventListener("abort", rejectAbort, { once: true });
+  });
   const parser = createSSEDataParser((payload) =>
     parseEnhancementEvent(payload, state, onDelta),
   );
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const idleTimeout = new Promise<never>((_resolve, reject) => {
+        idleTimer = setTimeout(() => {
+          const error = new ApiError({
+            code: "enhance_stream_idle_timeout",
+            message: "提示词优化流长时间没有新内容，已自动停止。",
+            status: 0,
+          });
+          abortRequest(error);
+          reject(error);
+        }, idleMs);
+      });
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await Promise.race([reader.read(), aborted, idleTimeout]);
+      } finally {
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
+      }
+      const { done, value } = chunk;
       if (done) {
         const tail = decoder.decode();
         if (tail) parser.feed(tail);
@@ -297,22 +341,65 @@ async function consumeEnhancementStream(
   }
 }
 
+function createEnhancementDeadline(
+  callerSignal: AbortSignal | undefined,
+  totalMs: number,
+): {
+  signal: AbortSignal;
+  abort: (reason: unknown) => void;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const abort = (reason: unknown) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onCallerAbort = () =>
+    abort(
+      callerSignal?.reason ??
+        new DOMException("The operation was aborted", "AbortError"),
+    );
+  if (callerSignal?.aborted) onCallerAbort();
+  else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  const totalTimer = setTimeout(() => {
+    abort(
+      new ApiError({
+        code: "enhance_stream_total_timeout",
+        message: "提示词优化超过最长等待时间，已自动停止。",
+        status: 0,
+      }),
+    );
+  }, totalMs);
+  return {
+    signal: controller.signal,
+    abort,
+    cleanup() {
+      clearTimeout(totalTimer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
 export async function streamPromptEnhancement(
   path: string,
   body: unknown,
   onDelta: (text: string) => void,
   signal?: AbortSignal,
+  timeouts: EnhancementStreamTimeouts = {
+    totalMs: PROMPT_ENHANCEMENT_TOTAL_TIMEOUT_MS,
+    idleMs: PROMPT_ENHANCEMENT_IDLE_TIMEOUT_MS,
+  },
 ): Promise<void> {
   const lease = await semanticPostIdempotency.acquire(
     { operation: "prompt_enhancement.stream", path },
     body,
   );
+  const deadline = createEnhancementDeadline(signal, timeouts.totalMs);
   try {
     await semanticPostIdempotency.markSubmitted(lease);
     const response = await streamClient.postJson(
       path,
       body,
-      signal,
+      deadline.signal,
       lease.key,
     );
     const reader = response.body?.getReader();
@@ -323,11 +410,17 @@ export async function streamPromptEnhancement(
         status: 502,
       });
     }
-    await consumeEnhancementStream(reader, onDelta);
+    await consumeEnhancementStream(reader, onDelta, {
+      signal: deadline.signal,
+      idleMs: timeouts.idleMs,
+      abortRequest: deadline.abort,
+    });
     await semanticPostIdempotency.confirm(lease);
   } catch (error) {
     await semanticPostIdempotency.recordFailure(lease, error);
     throw error;
+  } finally {
+    deadline.cleanup();
   }
 }
 

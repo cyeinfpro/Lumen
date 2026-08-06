@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import sqlite3
 import time
@@ -18,12 +19,16 @@ from ..config import ImageJobSettings
 from ..contracts import (
     ALLOWED_FIXED_ENDPOINTS,
     ALLOWED_PREFIX_ENDPOINTS,
+    ArtifactCorrupt,
     DEFAULT_IMAGE_OUTPUT_COMPRESSION,
     DEFAULT_IMAGE_OUTPUT_FORMAT,
     ERROR_CLASS_INTERNAL,
     ERROR_CLASS_NETWORK,
     IMAGE_OUTPUT_FORMATS,
     JobFailure,
+    JobProcessOutcome,
+    PreDispatchFailure,
+    UpstreamDispatchReceipt,
 )
 from ..credential_vault import CredentialVault, CredentialVaultError
 from ..domain.identity import CallerIdentity, UpstreamCredential
@@ -35,6 +40,7 @@ from .stale_jobs import ActiveStalePolicy
 
 
 LOG = logging.getLogger("image-job.jobs")
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:~-]+\Z")
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ class JobService:
             error_class_internal=lambda: ERROR_CLASS_INTERNAL,
             error_class_network=lambda: ERROR_CLASS_NETWORK,
             job_ttl_days=lambda: settings.job_ttl_days,
+            verify_artifacts=upstream.verify_saved_artifacts,
             log=LOG,
         )
         # H-17：RetentionFacade 过去只在测试脚手架里被实例化过，生产链路根本
@@ -130,11 +137,20 @@ class JobService:
             "images_delivered_total": 0,
             "upstream_latency_ms_total": 0,
         }
+        self.dispatch_outcomes: dict[tuple[str, str], int] = {}
 
     def _record_outcome(self, name: str, elapsed_ms: int, images: int = 0) -> None:
         self.outcomes[name] += 1
         self.outcomes["images_delivered_total"] += images
         self.outcomes["upstream_latency_ms_total"] += elapsed_ms
+
+    def _record_dispatch_outcome(
+        self,
+        dispatch: UpstreamDispatchReceipt,
+        outcome: JobProcessOutcome,
+    ) -> None:
+        key = (dispatch.phase.value, outcome.value)
+        self.dispatch_outcomes[key] = self.dispatch_outcomes.get(key, 0) + 1
 
     def parse_payload(self, raw: bytes) -> tuple[Any, dict[str, Any]]:
         limits = http_bodies.JsonShapeLimits(
@@ -166,29 +182,36 @@ class JobService:
         self,
         headers: Any,
         raw_payload: Any,
-    ) -> str | None:
+    ) -> str:
         raw = str(headers.get("idempotency-key", "") or "").strip()
         if not raw and isinstance(raw_payload, dict):
             candidate = raw_payload.get("idempotency_key")
             raw = candidate.strip() if isinstance(candidate, str) else ""
         if not raw:
-            return None
-        if len(raw.encode()) > self.settings.max_idempotency_key_bytes:
+            raise JobServiceFailure(
+                428,
+                "Idempotency-Key is required for image job creation",
+            )
+        encoded = raw.encode("utf-8")
+        if len(encoded) > self.settings.max_idempotency_key_bytes:
             raise JobServiceFailure(
                 400,
                 "idempotency key exceeds "
                 f"{self.settings.max_idempotency_key_bytes} bytes",
             )
-        return hashlib.sha256(raw.encode()).hexdigest()
+        if _IDEMPOTENCY_KEY_RE.fullmatch(raw) is None:
+            raise JobServiceFailure(
+                400,
+                "idempotency key contains invalid characters",
+            )
+        return hashlib.sha256(encoded).hexdigest()
 
     def _request_hash(
         self,
         payload: dict[str, Any],
-        caller: CallerIdentity,
+        _caller: CallerIdentity,
         upstream: UpstreamCredential,
     ) -> str:
-        if caller.legacy:
-            return request_hash(payload)
         return request_hash(
             {
                 "payload": payload,
@@ -226,7 +249,7 @@ class JobService:
         )
         if row is not None:
             return row, legacy_hash
-        if caller.legacy or hmac.compare_digest(caller.owner_hash, upstream_hash):
+        if hmac.compare_digest(caller.owner_hash, upstream_hash):
             return None, payload_hash
         row = await self.repository.one(
             """
@@ -245,25 +268,26 @@ class JobService:
         caller: CallerIdentity,
         upstream: UpstreamCredential,
         payload: dict[str, Any],
-        idempotency_key: str | None,
+        idempotency_key: str,
     ) -> dict[str, Any]:
+        if not idempotency_key:
+            raise AssertionError("validated idempotency key required")
         payload_hash = self._request_hash(payload, caller, upstream)
-        if idempotency_key is not None:
-            existing, expected = await self._find_idempotent(
-                caller=caller,
-                upstream=upstream,
-                key=idempotency_key,
-                payload=payload,
-                payload_hash=payload_hash,
-            )
-            if existing is not None:
-                if not hmac.compare_digest(str(existing["request_hash"]), expected):
-                    raise JobServiceFailure(
-                        409,
-                        "idempotency key already used for a different image job",
-                    )
-                await self.persistence.ensure_queued_job_scheduled(existing)
-                return self.persistence.row_to_response(existing)
+        existing, expected = await self._find_idempotent(
+            caller=caller,
+            upstream=upstream,
+            key=idempotency_key,
+            payload=payload,
+            payload_hash=payload_hash,
+        )
+        if existing is not None:
+            if not hmac.compare_digest(str(existing["request_hash"]), expected):
+                raise JobServiceFailure(
+                    409,
+                    "idempotency key already used for a different image job",
+                )
+            await self.persistence.ensure_queued_job_scheduled(existing)
+            return await self.results.response_for_row(existing)
 
         job_id = (
             f"img_{datetime.now(timezone.utc).strftime('%Y%m%d')}_"
@@ -286,8 +310,6 @@ class JobService:
         try:
             result = await self.queue.persist_and_enqueue(job_id, persist)
         except sqlite3.IntegrityError:
-            if idempotency_key is None:
-                raise
             existing, expected = await self._find_idempotent(
                 caller=caller,
                 upstream=upstream,
@@ -300,7 +322,7 @@ class JobService:
                 expected,
             ):
                 await self.persistence.ensure_queued_job_scheduled(existing)
-                return self.persistence.row_to_response(existing)
+                return await self.results.response_for_row(existing)
             raise JobServiceFailure(
                 409,
                 "idempotency key already used for a different image job",
@@ -401,39 +423,79 @@ class JobService:
             outcome_uncertain=True,
         )
 
-    async def process(self, job_id: str) -> None:
+    async def _persist_failed_outcome(
+        self,
+        *,
+        job_id: str,
+        execution_token: str,
+        endpoint: str,
+        elapsed_ms: int,
+        dispatch: UpstreamDispatchReceipt,
+        exc: JobFailure,
+        uncertain: bool,
+        request_id: str,
+    ) -> JobProcessOutcome:
+        changed = await self.persistence.mark_failed(
+            job_id,
+            execution_token=execution_token,
+            error=exc.error,
+            upstream_status=exc.upstream_status,
+            upstream_body=exc.upstream_body,
+            elapsed_ms=elapsed_ms,
+            error_class=exc.error_class,
+            endpoint_used=endpoint,
+            retryable=self.upstream.is_retryable_failure(exc),
+            retry_suppressed=bool(exc.retry_suppressed or uncertain),
+            outcome_uncertain=uncertain,
+        )
+        if not changed:
+            outcome = JobProcessOutcome.SKIPPED_FENCE_LOST
+        elif uncertain:
+            self._record_outcome("jobs_uncertain_total", elapsed_ms)
+            outcome = JobProcessOutcome.UNCERTAIN
+            LOG.warning(
+                "image job %s outcome uncertain transport_event=%s "
+                "upstream_idempotency_key_hash=%s request_id=%s",
+                job_id,
+                dispatch.transport_event,
+                dispatch.upstream_idempotency_key_hash,
+                request_id,
+            )
+        else:
+            self._record_outcome("jobs_failed_total", elapsed_ms)
+            outcome = JobProcessOutcome.FAILED
+        self._record_dispatch_outcome(dispatch, outcome)
+        return outcome
+
+    async def process(self, job_id: str) -> JobProcessOutcome:
         row = await self.repository.one(
             "SELECT * FROM jobs WHERE job_id = ?",
             (job_id,),
         )
         if row is None or row["status"] != "queued":
-            return
+            return JobProcessOutcome.SKIPPED_NOT_QUEUED
         execution_token = await self.persistence.mark_running(job_id)
         if execution_token is None:
-            return
+            return JobProcessOutcome.SKIPPED_FENCE_LOST
         started = time.monotonic()
         endpoint = str(row["endpoint"])
         # H-19：worker 是在提交请求结束之后的另一个协程里跑的，ContextVar 已经
         # 失效，只能从落库的那一列把提交侧的 request_id 捞回来接上日志链。
         request_id = row_request_id(row)
-        # H-4：只有「请求还没交给上游」的崩溃才敢断言未扣费。一旦进入
-        # upstream.call（以及其后的 mark_succeeded 落库），上游是否已计费就
-        # 不可知，必须落到 uncertain 终态交对账裁决；默认 failed 等价于
-        # 「确定未扣费」，会让上游侧据此退款、由平台吸收上游成本。
-        upstream_dispatched = False
+        dispatch = UpstreamDispatchReceipt()
         try:
             fresh = await self.repository.one(
                 "SELECT * FROM jobs WHERE job_id = ?",
                 (job_id,),
             )
             if fresh is None:
-                return
+                return JobProcessOutcome.SKIPPED_FENCE_LOST
             if (
                 fresh["status"] != "running"
                 or self.persistence.row_get(fresh, "execution_token")
                 != execution_token
             ):
-                return
+                return JobProcessOutcome.SKIPPED_FENCE_LOST
             try:
                 authorization = self.credential_vault.decrypt_job_row(fresh)
             except CredentialVaultError as exc:
@@ -441,11 +503,18 @@ class JobService:
                     "stored Authorization credential is unavailable",
                     error_class=ERROR_CLASS_INTERNAL,
                 ) from exc
-            upstream_dispatched = True
             status, images = await self.upstream.call(
                 fresh,
                 authorization=authorization,
+                dispatch=dispatch,
             )
+            if not dispatch.started:
+                raise JobFailure(
+                    "upstream returned without a transport dispatch receipt",
+                    retry_requires_idempotency=True,
+                    outcome_uncertain=True,
+                    error_class=ERROR_CLASS_INTERNAL,
+                )
             elapsed_ms = int((time.monotonic() - started) * 1000)
             changed = await self.persistence.mark_succeeded(
                 job_id,
@@ -461,58 +530,76 @@ class JobService:
                     elapsed_ms,
                     images=len(images),
                 )
+                outcome = JobProcessOutcome.SUCCEEDED
+            else:
+                outcome = JobProcessOutcome.SKIPPED_FENCE_LOST
+            self._record_dispatch_outcome(dispatch, outcome)
+            return outcome
         except asyncio.CancelledError:
             raise
+        except ArtifactCorrupt as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            changed = await self.persistence.mark_artifact_corrupt(
+                job_id,
+                execution_token=execution_token,
+                reason=exc.reason,
+                elapsed_ms=elapsed_ms,
+                endpoint_used=endpoint,
+            )
+            if changed:
+                self._record_outcome("jobs_uncertain_total", elapsed_ms)
+                outcome = JobProcessOutcome.UNCERTAIN
+            else:
+                outcome = JobProcessOutcome.SKIPPED_FENCE_LOST
+            self._record_dispatch_outcome(dispatch, outcome)
+            return outcome
+        except PreDispatchFailure as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            return await self._persist_failed_outcome(
+                job_id=job_id,
+                execution_token=execution_token,
+                endpoint=endpoint,
+                elapsed_ms=elapsed_ms,
+                dispatch=dispatch,
+                exc=exc,
+                uncertain=False,
+                request_id=request_id,
+            )
         except JobFailure as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            changed = await self.persistence.mark_failed(
-                job_id,
+            return await self._persist_failed_outcome(
+                job_id=job_id,
                 execution_token=execution_token,
-                error=exc.error,
-                upstream_status=exc.upstream_status,
-                upstream_body=exc.upstream_body,
+                endpoint=endpoint,
                 elapsed_ms=elapsed_ms,
-                error_class=exc.error_class,
-                endpoint_used=endpoint,
-                retryable=self.upstream.is_retryable_failure(exc),
-                retry_suppressed=exc.retry_suppressed,
-                outcome_uncertain=exc.outcome_uncertain,
+                dispatch=dispatch,
+                exc=exc,
+                uncertain=bool(
+                    exc.outcome_uncertain
+                    or (dispatch.started and not exc.cost_proven_absent)
+                ),
+                request_id=request_id,
             )
-            if changed:
-                self._record_outcome(
-                    (
-                        "jobs_uncertain_total"
-                        if exc.outcome_uncertain
-                        else "jobs_failed_total"
-                    ),
-                    elapsed_ms,
-                )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            changed = await self.persistence.mark_failed(
-                job_id,
-                execution_token=execution_token,
+            failure = JobFailure(
                 error=f"image job worker error: {exc.__class__.__name__}: {exc}",
-                elapsed_ms=elapsed_ms,
                 error_class=ERROR_CLASS_INTERNAL,
-                endpoint_used=endpoint,
-                # 已经派发过上游就压制自动重试：重试可能变成第二次上游扣费。
-                retry_suppressed=upstream_dispatched,
-                outcome_uncertain=upstream_dispatched,
             )
-            if changed:
-                self._record_outcome(
-                    (
-                        "jobs_uncertain_total"
-                        if upstream_dispatched
-                        else "jobs_failed_total"
-                    ),
-                    elapsed_ms,
-                )
             LOG.exception(
                 "image job %s crashed request_id=%s",
                 job_id,
                 request_id,
+            )
+            return await self._persist_failed_outcome(
+                job_id=job_id,
+                execution_token=execution_token,
+                endpoint=endpoint,
+                elapsed_ms=elapsed_ms,
+                dispatch=dispatch,
+                exc=failure,
+                uncertain=dispatch.started,
+                request_id=request_id,
             )
 
     async def reconcile(self) -> None:

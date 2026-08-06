@@ -63,6 +63,42 @@ function streamResponse(chunks: string[]): Response {
   );
 }
 
+function stalledStreamResponse(onCancel: () => void): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise(() => undefined);
+      },
+      cancel() {
+        onCancel();
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  );
+}
+
+function delayedStreamResponse(chunks: string[], delayMs: number): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        for (const chunk of chunks) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          controller.enqueue(encoder.encode(chunk));
+        }
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    },
+  );
+}
+
 function markDefinitiveRequestFailure<T extends object>(error: T): T {
   Object.defineProperty(error, "semanticIdempotencyDisposition", {
     configurable: true,
@@ -165,6 +201,8 @@ function loadPromptEnhancement(responses: Array<Response | Error | object>) {
       path: string,
       body: unknown,
       onDelta: (text: string) => void,
+      signal?: AbortSignal,
+      timeouts?: { totalMs: number; idleMs: number },
     ): Promise<void>;
   };
   return { calls, confirmed, failures, promptEnhancementApi };
@@ -361,4 +399,59 @@ test("malformed SSE text and error fields remain ambiguous and emit no object te
     ),
   );
   assert.deepEqual(harness.confirmed, ["semantic-key-1"]);
+});
+
+test("stalled prompt stream aborts and cancels while retaining its semantic key", async () => {
+  let canceled = 0;
+  const harness = loadPromptEnhancement([
+    stalledStreamResponse(() => {
+      canceled += 1;
+    }),
+  ]);
+
+  await assert.rejects(
+    harness.promptEnhancementApi.streamPromptEnhancement(
+      "/prompts/enhance",
+      { text: "prompt" },
+      () => undefined,
+      undefined,
+      { totalMs: 100, idleMs: 10 },
+    ),
+    (error) =>
+      error instanceof TestApiError &&
+      error.code === "enhance_stream_idle_timeout",
+  );
+
+  assert.equal(canceled, 1);
+  assert.deepEqual(harness.confirmed, []);
+  assert.equal(harness.failures.length, 1);
+  assert.equal(harness.failures[0]?.key, "semantic-key-1");
+});
+
+test("regular chunks reset the idle timeout until terminal completion", async () => {
+  const harness = loadPromptEnhancement([
+    delayedStreamResponse(
+      [
+        'data: {"text":"better "}\n\n',
+        'data: {"text":"prompt"}\n\n',
+        "data: [DONE]\n\n",
+      ],
+      5,
+    ),
+  ]);
+  let output = "";
+
+  await harness.promptEnhancementApi.streamPromptEnhancement(
+    "/prompts/enhance",
+    { text: "prompt" },
+    (delta) => {
+      output += delta;
+    },
+    undefined,
+    { totalMs: 100, idleMs: 20 },
+  );
+
+  assert.equal(output, "better prompt");
+  assert.deepEqual(harness.confirmed, ["semantic-key-1"]);
+  assert.deepEqual(harness.failures, []);
 });

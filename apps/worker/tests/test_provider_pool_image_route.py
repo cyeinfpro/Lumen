@@ -312,22 +312,73 @@ async def test_select_image_fail_closed_when_limiter_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app import account_limiter
-    from app.upstream_parts.entrypoints import UpstreamError
 
     pool = _make_pool(_cfg("acc1", rate_limit="5/min"))
     pool.attach_redis(object())
 
     async def boom_check_quota(*_a: Any, **_kw: Any) -> tuple[bool, float]:
-        raise RuntimeError("redis exploded")
+        raise account_limiter.AccountLimiterUnavailable("redis exploded")
 
     monkeypatch.setattr(account_limiter, "check_quota", boom_check_quota)
 
-    with pytest.raises(UpstreamError) as exc_info:
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
         await pool.select(route="image")
 
-    assert exc_info.value.error_code == "all_accounts_failed"
-    h_acc1 = pool._health["acc1"]
-    assert h_acc1.image_rate_limited_until is not None
+    assert pool._health["acc1"].image_rate_limited_until is None
+
+
+@pytest.mark.asyncio
+async def test_select_image_requires_redis_for_configured_quota() -> None:
+    from app import account_limiter
+
+    pool = _make_pool(_cfg("acc1", rate_limit="5/min"))
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await pool.select(route="image")
+
+
+@pytest.mark.asyncio
+async def test_empty_rate_limit_remains_absent_for_task_reservation() -> None:
+    pool = _make_pool(_cfg("acc1", rate_limit=""))
+
+    providers = await pool.select(route="image", task_id="task-1")
+
+    assert [provider.name for provider in providers] == ["acc1"]
+
+
+@pytest.mark.asyncio
+async def test_reservation_backend_failure_aborts_before_next_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import account_limiter
+
+    pool = _make_pool(
+        _cfg("acc1", rate_limit="1/min"),
+        _cfg("acc2", rate_limit="1/min"),
+    )
+    pool.attach_redis(object())
+
+    async def allow_check(*_a: Any, **_kw: Any) -> tuple[bool, float]:
+        return True, 0.0
+
+    reserve_calls: list[str] = []
+
+    async def broken_reserve(
+        _redis: Any,
+        name: str,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> tuple[bool, float, str]:
+        reserve_calls.append(name)
+        raise account_limiter.AccountLimiterUnavailable("redis unavailable")
+
+    monkeypatch.setattr(account_limiter, "check_quota", allow_check)
+    monkeypatch.setattr(account_limiter, "reserve_quota", broken_reserve)
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await pool.select(route="image", task_id="task-1")
+
+    assert reserve_calls == ["acc1"]
 
 
 @pytest.mark.asyncio

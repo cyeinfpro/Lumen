@@ -27,15 +27,14 @@ return val
 def retry_delay_seconds(
     *,
     delivery_attempts: int,
-    fail_count: int,
 ) -> int:
-    attempt = max(1, int(delivery_attempts or 0), int(fail_count or 0))
+    attempt = max(1, int(delivery_attempts or 0))
     exponent = min(attempt - 1, 8)
     delay = min(
         OUTBOX_RETRY_MAX_DELAY_S,
         OUTBOX_RETRY_BASE_DELAY_S * (2**exponent),
     )
-    if fail_count >= OUTBOX_MAX_FAIL_COUNT:
+    if attempt >= OUTBOX_MAX_FAIL_COUNT:
         return max(delay, OUTBOX_DLQ_RETRY_DELAY_S)
     return delay
 
@@ -45,7 +44,7 @@ async def increment_fail_count(
     event_id: str,
     *,
     log: logging.Logger = logger,
-) -> int:
+) -> int | None:
     try:
         value = await redis.eval(
             INCR_FAIL_COUNT_LUA,
@@ -57,7 +56,7 @@ async def increment_fail_count(
     except Exception as exc:  # noqa: BLE001
         outbox_retry_total.labels(outcome="increment_failed").inc()
         log.warning("outbox fail count incr failed event=%s err=%s", event_id, exc)
-        return 0
+        return None
     outbox_retry_total.labels(outcome="incremented").inc()
     return int(value or 0)
 

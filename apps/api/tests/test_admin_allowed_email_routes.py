@@ -27,7 +27,8 @@ def _request() -> Request:
 
 
 def _deps(audit_calls: list[str]) -> AllowedEmailDependencies:
-    async def audit(*_args, **_kwargs) -> None:
+    async def audit(*_args, **kwargs) -> None:
+        assert kwargs["autocommit"] is False
         audit_calls.append("write")
 
     return AllowedEmailDependencies(

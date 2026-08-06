@@ -505,30 +505,11 @@ async def _dispatch_fresh_image(
         engine,
         runtime=runtime,
     )
-    try:
-        providers = await services.dispatch.image_dispatch_candidates(
-            request.provider_override,
-            engine=engine,
-            runtime=runtime,
-        )
-    except TypeError as exc:
-        if "engine" not in str(exc):
-            raise
-        providers = await services.dispatch.image_dispatch_candidates(
-            request.provider_override,
-            engine=engine,
-            runtime=runtime,
-        )
-        endpoint_kind = _image_endpoint_kind_for_engine(engine, runtime=runtime)
-        if endpoint_kind is not None:
-            providers = [
-                provider
-                for provider in providers
-                if services.providers.provider_allows_image_endpoint(
-                    provider,
-                    endpoint_kind,
-                )
-            ]
+    providers = await services.dispatch.image_dispatch_candidates(
+        request.provider_override,
+        engine=engine,
+        runtime=runtime,
+    )
     errors: list[BaseException] = []
     dispatch_owns_inflight = request.provider_override is None
     pool = (

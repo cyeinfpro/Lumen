@@ -34,6 +34,10 @@ import { useTaskCenterActions } from "./useTaskCenterActions";
 interface TaskCenterProps {
   activeGenerations: Generation[];
   localGenerations: Record<string, Generation>;
+  generationActionStates: Record<
+    string,
+    { busy: boolean; error: string | null }
+  >;
   onCancelGeneration: (gen: Generation) => void;
   onRetryGeneration: (gen: Generation) => void;
   onViewGeneration: (gen: Generation) => void;
@@ -43,6 +47,7 @@ interface TaskCenterProps {
 export function TaskCenter({
   activeGenerations,
   localGenerations,
+  generationActionStates,
   onCancelGeneration,
   onRetryGeneration,
   onViewGeneration,
@@ -87,6 +92,8 @@ export function TaskCenter({
             onCancel={onCancelGeneration}
             onRetry={onRetryGeneration}
             onView={onViewGeneration}
+            busy={generationActionStates[generation.id]?.busy}
+            actionError={generationActionStates[generation.id]?.error}
           />
         ))}
         {viewState.visibleHistory.map((task) => (
@@ -96,7 +103,8 @@ export function TaskCenter({
             localGeneration={
               task.kind === "generation" ? localGenerations[task.id] : undefined
             }
-            busy={actions.busy}
+            busy={actions.busy(task.id)}
+            actionError={actions.error(task.id)}
             onRetry={() => actions.retry(task)}
             onCancel={() => actions.cancel(task)}
             onCancelGeneration={onCancelGeneration}
@@ -194,6 +202,7 @@ function TaskCenterHistoryItem({
   task,
   localGeneration,
   busy,
+  actionError,
   onRetry,
   onCancel,
   onCancelGeneration,
@@ -203,6 +212,7 @@ function TaskCenterHistoryItem({
   task: TaskItemResponse;
   localGeneration: Generation | undefined;
   busy: boolean;
+  actionError: string | null;
   onRetry: () => void;
   onCancel: () => void;
   onCancelGeneration: (generation: Generation) => void;
@@ -216,6 +226,8 @@ function TaskCenterHistoryItem({
         onCancel={onCancelGeneration}
         onRetry={onRetryGeneration}
         onView={onViewGeneration}
+        busy={busy}
+        actionError={actionError}
       />
     );
   }
@@ -223,6 +235,7 @@ function TaskCenterHistoryItem({
     <TaskHistoryRow
       task={task}
       busy={busy}
+      actionError={actionError}
       onRetry={onRetry}
       onCancel={onCancel}
     />
@@ -240,11 +253,13 @@ function TaskCenterMessage({ children }: { children: React.ReactNode }) {
 function TaskHistoryRow({
   task,
   busy,
+  actionError,
   onRetry,
   onCancel,
 }: {
   task: TaskItemResponse;
   busy: boolean;
+  actionError: string | null;
   onRetry: () => void;
   onCancel: () => void;
 }) {
@@ -270,6 +285,11 @@ function TaskHistoryRow({
           onCancel={onCancel}
         />
       </div>
+      {actionError && (
+        <p className="mt-1 type-caption text-danger" role="alert">
+          {actionError}
+        </p>
+      )}
       <TaskRecoveryActions
         presentation={presentation}
         retryable={Boolean(task.retryable)}

@@ -227,6 +227,90 @@ test("recovery_required triggers one snapshot and reconnects from its cursor", a
   unsubscribe();
 });
 
+test("unknown protocol versions trigger recovery without domain delivery", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const statuses: RealtimeStatus[] = [];
+  const issues: string[] = [];
+  let deliveries = 0;
+  let recoveryCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe({
+    handlers: {
+      "generation.succeeded": () => {
+        deliveries += 1;
+      },
+    },
+    recoverSnapshot: async (_scopes, reason) => {
+      recoveryCalls += 1;
+      equal(reason.kind, "recovery_required");
+      equal(reason.reason, "protocol_unknown_version");
+      return { cursor: "31-0", syncedAt: 100 };
+    },
+    onProtocolIssue(issue) {
+      issues.push(issue.reason);
+    },
+    setStatus(status) {
+      statuses.push(status);
+    },
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(
+    0,
+    "generation.succeeded",
+    JSON.stringify({ schema_version: 2, generation_id: "gen-1" }),
+    "30-0",
+  );
+  await flushPromises();
+
+  equal(deliveries, 0);
+  equal(recoveryCalls, 1);
+  deepEqual(issues, ["unknown_version"]);
+  ok(statuses.includes("error"));
+  equal(transport.opens[1]?.input.url, "/events?cursor=31-0");
+  unsubscribe();
+});
+
+test("consecutive malformed events emit telemetry then recover at threshold", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const statuses: RealtimeStatus[] = [];
+  const issueCounts: number[] = [];
+  let recoveryCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe({
+    ...subscriber(statuses, async (_scopes, reason) => {
+      recoveryCalls += 1;
+      equal(reason.kind, "recovery_required");
+      equal(reason.reason, "protocol_invalid_json");
+      return { cursor: "44-0", syncedAt: 100 };
+    }),
+    handlers: { "generation.succeeded": () => {} },
+    onProtocolIssue(issue) {
+      issueCounts.push(issue.consecutiveCount);
+    },
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(0, "generation.succeeded", "{", "41-0");
+  transport.emit(0, "generation.succeeded", "{", "42-0");
+  equal(recoveryCalls, 0);
+  equal(statuses.at(-1), "open");
+  transport.emit(0, "generation.succeeded", "{", "43-0");
+  await flushPromises();
+
+  deepEqual(issueCounts, [1, 2, 3]);
+  equal(recoveryCalls, 1);
+  ok(statuses.includes("error"));
+  equal(transport.opens[1]?.input.url, "/events?cursor=44-0");
+  unsubscribe();
+});
+
 test("shared runtime recovers with only the subscribers that provide adapters", async () => {
   const clock = new FakeClock();
   const hub = new FakeBroadcastHub();

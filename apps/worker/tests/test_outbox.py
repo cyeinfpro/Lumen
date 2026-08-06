@@ -1597,6 +1597,7 @@ async def test_permanent_failures_do_not_starve_newer_outbox_event(
             kind="completion",
             payload={"task_id": f"poison-task-{index:03d}"},
             created_at=now - timedelta(minutes=2) + timedelta(milliseconds=index),
+            delivery_attempts=outbox._OUTBOX_MAX_FAIL_COUNT - 1,  # noqa: SLF001
         )
         for index in range(outbox._OUTBOX_BATCH)  # noqa: SLF001
     ]
@@ -1624,11 +1625,6 @@ async def test_permanent_failures_do_not_starve_newer_outbox_event(
             return await super().enqueue_job(job_name, task_id, *args, **kwargs)
 
     redis = SelectiveFailureRedis()
-    for event in poison_events:
-        redis.keys[
-            f"{outbox._OUTBOX_FAIL_COUNT_HASH}:{event.id}"  # noqa: SLF001
-        ] = str(outbox._OUTBOX_MAX_FAIL_COUNT - 1)  # noqa: SLF001
-
     assert await outbox.publish_outbox({"redis": redis}) == 0
     assert healthy_event.published_at is None
 
@@ -1648,11 +1644,9 @@ async def test_storyboard_outbox_dlq_keeps_redrive_until_enqueue_recovers(
         task_id="storyboard-run-1",
         kind="storyboard_assembly",
     )
+    event.delivery_attempts = outbox._OUTBOX_MAX_FAIL_COUNT - 1  # noqa: SLF001
     session = _patch_session_local(monkeypatch, [event])
     redis = FakeRedis(fail_enqueue=True)
-    redis.keys[
-        f"{outbox._OUTBOX_FAIL_COUNT_HASH}:{event.id}"  # noqa: SLF001
-    ] = str(outbox._OUTBOX_MAX_FAIL_COUNT - 1)  # noqa: SLF001
 
     first_processed = await outbox.publish_outbox({"redis": redis})
 
@@ -1679,6 +1673,66 @@ async def test_storyboard_outbox_dlq_keeps_redrive_until_enqueue_recovers(
     assert redis.enqueued == [("run_storyboard_assembly", "storyboard-run-1")]
     assert event.published_at is not None
     assert dead_letter.resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_pg_attempt_threshold_creates_one_dlq_when_redis_counter_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CounterDownRedis(FakeRedis):
+        async def eval(
+            self,
+            script: str,
+            keys: int,
+            key: str,
+            *args: str,
+        ) -> int:
+            if script == outbox._INCR_FAIL_COUNT_LUA:  # noqa: SLF001
+                raise RuntimeError("redis counter unavailable")
+            return await super().eval(script, keys, key, *args)
+
+    event = _event(event_id="event-pg-threshold", task_id="gen-pg-threshold")
+    event.delivery_attempts = outbox._OUTBOX_MAX_FAIL_COUNT - 1  # noqa: SLF001
+    session = _patch_session_local(monkeypatch, [event])
+    redis = CounterDownRedis(fail_enqueue=True)
+
+    assert await outbox.publish_outbox({"redis": redis}) == 0
+    assert event.delivery_attempts == outbox._OUTBOX_MAX_FAIL_COUNT  # noqa: SLF001
+    assert len(session.dead_letters) == 1
+    assert session.dead_letters[0].retry_count == event.delivery_attempts
+
+    event.next_attempt_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert await outbox.publish_outbox({"redis": redis}) == 0
+    assert len(session.dead_letters) == 1
+
+
+@pytest.mark.asyncio
+async def test_redis_counter_cannot_force_early_durable_dlq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HugeCounterRedis(FakeRedis):
+        async def eval(
+            self,
+            script: str,
+            keys: int,
+            key: str,
+            *args: str,
+        ) -> int:
+            if script == outbox._INCR_FAIL_COUNT_LUA:  # noqa: SLF001
+                return 10_000
+            return await super().eval(script, keys, key, *args)
+
+    event = _event(event_id="event-redis-huge", task_id="gen-redis-huge")
+    session = _patch_session_local(monkeypatch, [event])
+
+    assert (
+        await outbox.publish_outbox(
+            {"redis": HugeCounterRedis(fail_enqueue=True)}
+        )
+        == 0
+    )
+    assert event.delivery_attempts == 1
+    assert session.dead_letters == []
 
 
 @pytest.mark.asyncio

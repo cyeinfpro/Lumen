@@ -22,7 +22,7 @@ def load_app_module():
     from .support import load_harness
 
     app = load_harness()
-    app.ALLOW_LEGACY_BEARER_AUTH = True
+    app.SIDECAR_TOKEN = "sk-test"
     return app
 
 
@@ -40,7 +40,10 @@ class _JsonRequest:
         content_length: str | None = None,
     ) -> None:
         self.raw = json.dumps(payload).encode("utf-8")
-        self.headers = {"authorization": "Bearer sk-test"}
+        self.headers = {
+            "authorization": "Bearer sk-test",
+            "x-lumen-upstream-authorization": "Bearer sk-test",
+        }
         if content_length is not None:
             self.headers["content-length"] = content_length
         self.stream_started = False
@@ -237,7 +240,7 @@ def test_upstream_idempotency_key_is_stable_across_safe_retry(monkeypatch) -> No
     seen_keys: list[str] = []
 
     async def fake_once(*_args: object, **kwargs: Any):
-        seen_keys.append(kwargs["headers"]["Idempotency-Key"])
+        seen_keys.append(kwargs["prepared"].headers["Idempotency-Key"])
         if len(seen_keys) == 1:
             raise httpx.ConnectError("connect failed before request dispatch")
         return 200, [{"url": "saved"}]
@@ -812,13 +815,19 @@ def _post_dispatch_failure(
     app.save_images = save_images
 
     async def run() -> Any:
+        from image_job.contracts import UpstreamDispatchReceipt
+        from image_job.upstream import PreparedUpstreamRequest
+
         with pytest.raises(app.JobFailure) as exc:
             await app._call_upstream_once(
                 _job_row_payload(app),
-                url="https://upstream.test/v1/images/generations",
-                headers={"Authorization": "Bearer sk-test"},
-                body={"prompt": "cat"},
-                endpoint="/v1/images/generations",
+                prepared=PreparedUpstreamRequest(
+                    url="https://upstream.test/v1/images/generations",
+                    endpoint="/v1/images/generations",
+                    headers={"Authorization": "Bearer sk-test"},
+                    content=b'{"prompt":"cat"}',
+                ),
+                dispatch=UpstreamDispatchReceipt(),
             )
         return exc.value
 

@@ -1,6 +1,8 @@
 import { apiUrl } from "./baseUrl";
-import { NO_DEADLINE } from "./requestBudget";
+import { deadline } from "./requestBudget";
 import { apiTransport } from "./transport";
+
+const STREAM_RESPONSE_HEADER_TIMEOUT_MS = 30_000;
 
 export const streamClient = {
   url(path: string): string {
@@ -22,7 +24,7 @@ export const streamClient = {
           : undefined,
         signal,
         requestClass: "command",
-        budget: NO_DEADLINE,
+        budget: deadline(STREAM_RESPONSE_HEADER_TIMEOUT_MS),
         applyCsrf: true,
       },
       async (response) => response,

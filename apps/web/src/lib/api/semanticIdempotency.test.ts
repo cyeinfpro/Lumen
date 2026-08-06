@@ -684,21 +684,37 @@ test("no Web Locks or IndexedDB fails closed without using localStorage as a loc
 });
 
 test("unavailable coordination fails before mutating quota-limited storage", async () => {
-  const storage = new MemoryStorage(1);
-  const store = new SemanticIdempotencyStore({
-    storage,
-    storageKey: "semantic-lock-quota",
-    digest,
-    indexedDb: null,
-  });
-
-  await store.activateIdentity("user-a");
-
-  await assert.rejects(
-    store.acquire("scope", { id: "paid" }),
-    SemanticIdempotencyDurabilityError,
+  const originalNavigator = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "navigator",
   );
-  assert.equal(storage.length, 0);
+  const storage = new MemoryStorage(1);
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {},
+  });
+  try {
+    const store = new SemanticIdempotencyStore({
+      storage,
+      storageKey: "semantic-lock-quota",
+      digest,
+      indexedDb: null,
+    });
+
+    await store.activateIdentity("user-a");
+
+    await assert.rejects(
+      store.acquire("scope", { id: "paid" }),
+      SemanticIdempotencyDurabilityError,
+    );
+    assert.equal(storage.length, 0);
+  } finally {
+    if (originalNavigator) {
+      Object.defineProperty(globalThis, "navigator", originalNavigator);
+    } else {
+      Reflect.deleteProperty(globalThis, "navigator");
+    }
+  }
 });
 
 test("unresolved ambiguous entries survive TTL and capacity pressure", async () => {

@@ -271,15 +271,27 @@ else
     fi
     if ! printf '%s\n' "${SELF_UPDATE_REF}" \
             | grep -Eq '^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|[0-9a-f]{40})$'; then
-        log_info "[self_update_scripts] 没有 immutable release tag/commit，拒绝从 branch 自更新。"
+        log_error "[self_update_scripts] 缺少 immutable release tag/commit。"
         emit_info self_update_scripts source_ref "${SELF_UPDATE_REF:-<none>}"
-        emit_done self_update_scripts 0
+        emit_fail self_update_scripts 78
+        return 78
     else
-    lumen_self_update_scripts \
+    local self_update_rc=0
+    if lumen_self_update_scripts \
         "${CURRENT_RELEASE}/scripts" \
         "${SELF_UPDATE_REF}" \
         60 \
-        "${_LUMEN_UPDATE_SCRIPT_UNIT_FILES[@]}"
+        "${_LUMEN_UPDATE_SCRIPT_UNIT_FILES[@]}"; then
+        :
+    else
+        self_update_rc=$?
+    fi
+    if [ "${self_update_rc}" -ne 0 ]; then
+        log_error "[self_update_scripts] 无法取得并验证与 release 绑定的 updater；拒绝继续。"
+        emit_info self_update_scripts result "${LUMEN_SELF_UPDATE_RESULT:-unknown}"
+        emit_fail self_update_scripts "${self_update_rc}"
+        return "${self_update_rc}"
+    fi
     case "${LUMEN_SELF_UPDATE_RESULT:-}" in
         ok)
             if ! lumen_update_bind_expected_scripts_commit \
@@ -303,7 +315,9 @@ else
                             ''|*[!0-9]*) self_update_hops=0 ;;
                         esac
                         if [ "${self_update_hops}" -ge 2 ]; then
-                            log_warn "[self_update_scripts] updater contract 连续变化超过两跳，拒绝继续 re-exec。"
+                            log_error "[self_update_scripts] updater contract 连续变化超过两跳，拒绝继续。"
+                            emit_fail self_update_scripts 78
+                            return 78
                         else
                             if ! lumen_export_borrowed_maintenance_lock \
                                     "${ROOT}"; then
@@ -323,14 +337,6 @@ else
             fi
             emit_done self_update_scripts 0
             ;;
-        failed)
-            if [ -n "${LUMEN_UPDATE_EXPECTED_SCRIPTS_COMMIT:-}" ]; then
-                emit_fail self_update_scripts 78
-                return 78
-            fi
-            emit_warn self_update_scripts "fetch_or_validate_failed_continue_with_local"
-            emit_done self_update_scripts 0
-            ;;
         skipped)
             if ! lumen_update_bind_expected_scripts_commit \
                     "${CURRENT_RELEASE}/scripts"; then
@@ -339,8 +345,11 @@ else
             fi
             emit_done self_update_scripts 0
             ;;
-        disabled|*)
-            emit_done self_update_scripts 0
+        *)
+            log_error "[self_update_scripts] 非成功终态：${LUMEN_SELF_UPDATE_RESULT:-unknown}"
+            emit_info self_update_scripts result "${LUMEN_SELF_UPDATE_RESULT:-unknown}"
+            emit_fail self_update_scripts 78
+            return 78
             ;;
     esac
     fi

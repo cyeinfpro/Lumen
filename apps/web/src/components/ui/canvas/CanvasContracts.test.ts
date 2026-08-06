@@ -203,6 +203,27 @@ test("canvas autosave retries exact batches and only publishes accepted acknowle
   match(persistenceDomainSource, /event\.persisted/);
   match(persistenceDomainSource, /pageshow/);
   match(workspacePersistenceSource, /listCanvasDrafts/);
+  match(
+    workspacePersistenceSource,
+    /type CanvasDraftRecoveryLoadResult[\s\S]*status: "ready"[\s\S]*status: "unavailable"/,
+  );
+  match(
+    workspacePersistenceSource,
+    /CANVAS_RECOVERY_RETRY_DELAYS_MS = \[0, 250, 1_000\]/,
+  );
+  match(
+    workspacePersistenceSource,
+    /if \(canceled \|\| !loaded \|\| loaded\.status !== "ready"\) return/,
+  );
+  match(workspacePersistenceSource, /ready = true;\s*persist\(\);/);
+  doesNotMatch(
+    workspacePersistenceSource,
+    /getCanvasDraft\(canvasId, clientId\)\.catch\(\(\) => null\)/,
+  );
+  doesNotMatch(
+    workspacePersistenceSource,
+    /listCanvasDrafts\(canvasId\)\.catch\(\(\) => \[\]\)/,
+  );
 });
 
 test("canvas workbench exposes mature creation, navigation, and clipboard workflows", () => {
