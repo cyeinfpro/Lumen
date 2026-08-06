@@ -769,13 +769,48 @@ class _MaintenanceLockProof:
         expected: _NodeSnapshot,
         *,
         label: str,
+        allow_timestamp_drift: bool = False,
     ) -> None:
         metadata = _entry_metadata(parent_fd, name)
         if metadata is None:
             raise BackupPermissionError(f"{label} disappeared")
-        if _node_snapshot(metadata) != expected:
+        path_snapshot = _node_snapshot(metadata)
+        descriptor_snapshot = _node_snapshot(os.fstat(descriptor))
+        if allow_timestamp_drift:
+            expected_identity = (
+                expected.device,
+                expected.inode,
+                expected.mode,
+                expected.links,
+                expected.user_id,
+                expected.group_id,
+                expected.size,
+            )
+            path_identity = (
+                path_snapshot.device,
+                path_snapshot.inode,
+                path_snapshot.mode,
+                path_snapshot.links,
+                path_snapshot.user_id,
+                path_snapshot.group_id,
+                path_snapshot.size,
+            )
+            descriptor_identity = (
+                descriptor_snapshot.device,
+                descriptor_snapshot.inode,
+                descriptor_snapshot.mode,
+                descriptor_snapshot.links,
+                descriptor_snapshot.user_id,
+                descriptor_snapshot.group_id,
+                descriptor_snapshot.size,
+            )
+        else:
+            expected_identity = expected
+            path_identity = path_snapshot
+            descriptor_identity = descriptor_snapshot
+        if path_identity != expected_identity:
             raise BackupPermissionError(f"{label} path changed")
-        if _node_snapshot(os.fstat(descriptor)) != expected:
+        if descriptor_identity != expected_identity:
             raise BackupPermissionError(f"{label} descriptor changed")
 
     def verify(self) -> None:
@@ -786,6 +821,7 @@ class _MaintenanceLockProof:
             self.lock_fd,
             self.lock_snapshot,
             label="maintenance lock",
+            allow_timestamp_drift=self.kind == "flock",
         )
         record_parent_fd = self.root_fd
         if self.kind == "mkdir":
@@ -805,6 +841,7 @@ class _MaintenanceLockProof:
             self.record_fd,
             self.record_snapshot,
             label="maintenance lock owner record",
+            allow_timestamp_drift=self.kind == "flock",
         )
         if _read_bounded_file(
             self.record_fd,
