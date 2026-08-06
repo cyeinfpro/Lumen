@@ -35,6 +35,7 @@ _SHARED_DATA_NAMES = ("pg", "redis")
 _LOCK_RECORD_LIMIT = 4096
 _OWNER_TOKEN_PATTERN = re.compile(r"\.owner\.[A-Za-z0-9]+")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_MAX_MIGRATABLE_UID = (1 << 32) - 2
 
 
 class BackupPermissionError(RuntimeError):
@@ -1269,10 +1270,13 @@ def _validate_shared_owner(
     metadata: os.stat_result,
     *,
     target_user_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     label: str,
 ) -> None:
-    if metadata.st_uid not in {target_user_id, legacy_owner_id}:
+    if (
+        metadata.st_uid != target_user_id
+        and metadata.st_uid not in legacy_owner_ids
+    ):
         raise BackupPermissionError(f"shared backup {label} owner mismatch")
 
 
@@ -1281,13 +1285,13 @@ def _set_shared_directory_permissions(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     label: str,
 ) -> None:
     _validate_shared_owner(
         os.fstat(directory_fd),
         target_user_id=target_user_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
         label=label,
     )
     os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
@@ -1310,13 +1314,13 @@ def _set_shared_file_permissions(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     label: str,
 ) -> None:
     _validate_shared_owner(
         os.fstat(file_fd),
         target_user_id=target_user_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
         label=label,
     )
     os.fchmod(file_fd, _SHARED_FILE_MODE)
@@ -1346,7 +1350,7 @@ def _validate_shared_tree(
     directory_fd: int,
     *,
     target_user_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     guard: _TreeStabilityGuard,
     skip_recovery: bool = False,
     relative_path: str = "",
@@ -1370,7 +1374,7 @@ def _validate_shared_tree(
             _validate_shared_owner(
                 metadata,
                 target_user_id=target_user_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
             child_fd = _open_child_directory(directory_fd, name, metadata)
@@ -1378,13 +1382,13 @@ def _validate_shared_tree(
                 _validate_shared_owner(
                     os.fstat(child_fd),
                     target_user_id=target_user_id,
-                    legacy_owner_id=legacy_owner_id,
+                    legacy_owner_ids=legacy_owner_ids,
                     label=label,
                 )
                 _validate_shared_tree(
                     child_fd,
                     target_user_id=target_user_id,
-                    legacy_owner_id=legacy_owner_id,
+                    legacy_owner_ids=legacy_owner_ids,
                     guard=guard,
                     relative_path=label,
                 )
@@ -1396,7 +1400,7 @@ def _validate_shared_tree(
         _validate_shared_owner(
             metadata,
             target_user_id=target_user_id,
-            legacy_owner_id=legacy_owner_id,
+            legacy_owner_ids=legacy_owner_ids,
             label=label,
         )
         file_fd = _open_regular_file(directory_fd, name, metadata)
@@ -1404,7 +1408,7 @@ def _validate_shared_tree(
             _validate_shared_owner(
                 os.fstat(file_fd),
                 target_user_id=target_user_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
         finally:
@@ -1417,7 +1421,7 @@ def _harden_shared_tree(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     guard: _TreeStabilityGuard,
     skip_recovery: bool = False,
     relative_path: str = "",
@@ -1440,7 +1444,7 @@ def _harden_shared_tree(
             _validate_shared_owner(
                 metadata,
                 target_user_id=target_user_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
             child_fd = _open_child_directory(directory_fd, name, metadata)
@@ -1448,14 +1452,14 @@ def _harden_shared_tree(
                 _validate_shared_owner(
                     os.fstat(child_fd),
                     target_user_id=target_user_id,
-                    legacy_owner_id=legacy_owner_id,
+                    legacy_owner_ids=legacy_owner_ids,
                     label=label,
                 )
                 _harden_shared_tree(
                     child_fd,
                     target_user_id=target_user_id,
                     target_group_id=target_group_id,
-                    legacy_owner_id=legacy_owner_id,
+                    legacy_owner_ids=legacy_owner_ids,
                     guard=guard,
                     relative_path=label,
                 )
@@ -1463,7 +1467,7 @@ def _harden_shared_tree(
                     child_fd,
                     target_user_id=target_user_id,
                     target_group_id=target_group_id,
-                    legacy_owner_id=legacy_owner_id,
+                    legacy_owner_ids=legacy_owner_ids,
                     label=label,
                 )
             finally:
@@ -1474,7 +1478,7 @@ def _harden_shared_tree(
         _validate_shared_owner(
             metadata,
             target_user_id=target_user_id,
-            legacy_owner_id=legacy_owner_id,
+            legacy_owner_ids=legacy_owner_ids,
             label=label,
         )
         file_fd = _open_regular_file(directory_fd, name, metadata)
@@ -1483,7 +1487,7 @@ def _harden_shared_tree(
                 file_fd,
                 target_user_id=target_user_id,
                 target_group_id=target_group_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
         finally:
@@ -1495,10 +1499,13 @@ def _validate_private_owner(
     metadata: os.stat_result,
     *,
     target_user_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     label: str,
 ) -> None:
-    if metadata.st_uid not in {target_user_id, legacy_owner_id}:
+    if (
+        metadata.st_uid != target_user_id
+        and metadata.st_uid not in legacy_owner_ids
+    ):
         raise BackupPermissionError(f"{label} owner mismatch")
 
 
@@ -1506,7 +1513,7 @@ def _open_or_create_private_recovery(
     backup_root_fd: int,
     *,
     target_user_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
 ) -> int:
     metadata = _entry_metadata(backup_root_fd, _PRIVATE_RECOVERY_NAME)
     if metadata is None:
@@ -1521,7 +1528,7 @@ def _open_or_create_private_recovery(
     _validate_private_owner(
         metadata,
         target_user_id=target_user_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
         label="private recovery directory",
     )
     recovery_fd = _open_child_directory(
@@ -1533,7 +1540,7 @@ def _open_or_create_private_recovery(
         _validate_private_owner(
             os.fstat(recovery_fd),
             target_user_id=target_user_id,
-            legacy_owner_id=legacy_owner_id,
+            legacy_owner_ids=legacy_owner_ids,
             label="private recovery directory",
         )
     except Exception:
@@ -1546,7 +1553,7 @@ def _validate_private_recovery(
     recovery_fd: int,
     *,
     target_user_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     guard: _TreeStabilityGuard,
 ) -> None:
     snapshot = guard.watch(
@@ -1565,7 +1572,7 @@ def _validate_private_recovery(
         _validate_private_owner(
             child,
             target_user_id=target_user_id,
-            legacy_owner_id=legacy_owner_id,
+            legacy_owner_ids=legacy_owner_ids,
             label=label,
         )
         journal_fd = _open_regular_file(recovery_fd, name, child)
@@ -1573,7 +1580,7 @@ def _validate_private_recovery(
             _validate_private_owner(
                 os.fstat(journal_fd),
                 target_user_id=target_user_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
         finally:
@@ -1586,13 +1593,13 @@ def _set_private_file_permissions(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     label: str,
 ) -> None:
     _validate_private_owner(
         os.fstat(journal_fd),
         target_user_id=target_user_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
         label=label,
     )
     os.fchmod(journal_fd, _PRIVATE_FILE_MODE)
@@ -1613,12 +1620,12 @@ def _set_private_directory_permissions(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
 ) -> None:
     _validate_private_owner(
         os.fstat(recovery_fd),
         target_user_id=target_user_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
         label="private recovery directory",
     )
     os.fchmod(recovery_fd, _PRIVATE_DIRECTORY_MODE)
@@ -1641,7 +1648,7 @@ def _migrate_private_recovery(
     *,
     target_user_id: int,
     target_group_id: int,
-    legacy_owner_id: int,
+    legacy_owner_ids: frozenset[int],
     guard: _TreeStabilityGuard,
 ) -> None:
     snapshot = guard.baseline_for(recovery_fd)
@@ -1657,7 +1664,7 @@ def _migrate_private_recovery(
         _validate_private_owner(
             child,
             target_user_id=target_user_id,
-            legacy_owner_id=legacy_owner_id,
+            legacy_owner_ids=legacy_owner_ids,
             label=label,
         )
         journal_fd = _open_regular_file(recovery_fd, name, child)
@@ -1666,7 +1673,7 @@ def _migrate_private_recovery(
                 journal_fd,
                 target_user_id=target_user_id,
                 target_group_id=target_group_id,
-                legacy_owner_id=legacy_owner_id,
+                legacy_owner_ids=legacy_owner_ids,
                 label=label,
             )
         finally:
@@ -1676,7 +1683,7 @@ def _migrate_private_recovery(
         recovery_fd,
         target_user_id=target_user_id,
         target_group_id=target_group_id,
-        legacy_owner_id=legacy_owner_id,
+        legacy_owner_ids=legacy_owner_ids,
     )
     guard.assert_unchanged(recovery_fd, strict=False)
 
@@ -1842,10 +1849,27 @@ def _resolve_group(name: str) -> grp.struct_group:
         ) from exc
 
 
+def _parse_legacy_owner_uid(value: str) -> int:
+    if re.fullmatch(r"[0-9]+", value) is None:
+        raise argparse.ArgumentTypeError(
+            "legacy owner UID must be a decimal integer"
+        )
+    user_id = int(value, 10)
+    if user_id > _MAX_MIGRATABLE_UID:
+        raise argparse.ArgumentTypeError(
+            "legacy owner UID must be between "
+            f"0 and {_MAX_MIGRATABLE_UID}"
+        )
+    return user_id
+
+
 def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
     target_user = _resolve_user(args.service_user)
     target_group = _resolve_group(args.service_group)
     legacy_owner = _resolve_user(args.legacy_owner_user)
+    legacy_owner_ids = frozenset(
+        (legacy_owner.pw_uid, *args.legacy_owner_uid)
+    )
     backup_root_binding = _open_directory_path_binding(
         args.backup_root,
         create_mode=_SHARED_DIRECTORY_MODE,
@@ -1857,7 +1881,7 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
         _validate_shared_owner(
             os.fstat(backup_root_fd),
             target_user_id=target_user.pw_uid,
-            legacy_owner_id=legacy_owner.pw_uid,
+            legacy_owner_ids=legacy_owner_ids,
             label="root",
         )
         for name in _SHARED_DATA_NAMES:
@@ -1874,7 +1898,7 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
         recovery_fd = _open_or_create_private_recovery(
             backup_root_fd,
             target_user_id=target_user.pw_uid,
-            legacy_owner_id=legacy_owner.pw_uid,
+            legacy_owner_ids=legacy_owner_ids,
         )
         with _TreeStabilityGuard() as guard:
             guard.watch(backup_root_fd, label=_shared_directory_label(""))
@@ -1886,14 +1910,14 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
             _validate_shared_tree(
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
-                legacy_owner_id=legacy_owner.pw_uid,
+                legacy_owner_ids=legacy_owner_ids,
                 guard=guard,
                 skip_recovery=True,
             )
             _validate_private_recovery(
                 recovery_fd,
                 target_user_id=target_user.pw_uid,
-                legacy_owner_id=legacy_owner.pw_uid,
+                legacy_owner_ids=legacy_owner_ids,
                 guard=guard,
             )
             guard.verify_baseline(strict=True)
@@ -1901,14 +1925,14 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
                 recovery_fd,
                 target_user_id=target_user.pw_uid,
                 target_group_id=target_group.gr_gid,
-                legacy_owner_id=legacy_owner.pw_uid,
+                legacy_owner_ids=legacy_owner_ids,
                 guard=guard,
             )
             _harden_shared_tree(
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
                 target_group_id=target_group.gr_gid,
-                legacy_owner_id=legacy_owner.pw_uid,
+                legacy_owner_ids=legacy_owner_ids,
                 guard=guard,
                 skip_recovery=True,
             )
@@ -1916,7 +1940,7 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
                 target_group_id=target_group.gr_gid,
-                legacy_owner_id=legacy_owner.pw_uid,
+                legacy_owner_ids=legacy_owner_ids,
                 label="root",
             )
             guard.verify_baseline(strict=False)
@@ -1964,6 +1988,12 @@ def main() -> int:
     ensure.add_argument("--service-user", required=True)
     ensure.add_argument("--service-group", required=True)
     ensure.add_argument("--legacy-owner-user", default="root")
+    ensure.add_argument(
+        "--legacy-owner-uid",
+        action="append",
+        default=[],
+        type=_parse_legacy_owner_uid,
+    )
     ensure.add_argument("--maintenance-lock-root", required=True)
     ensure.add_argument("--emit-binding-token", action="store_true")
     verify_binding = subparsers.add_parser("verify-path-binding")

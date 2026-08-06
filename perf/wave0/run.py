@@ -106,8 +106,11 @@ async def _api_realtime_child(iterations: int) -> dict[str, Any]:
     }
     encoded = json.dumps(payload, separators=(",", ":"))
 
+    async def is_disconnected() -> bool:
+        return False
+
     state = events._EventStreamState(  # noqa: SLF001
-        request=None,
+        is_disconnected=is_disconnected,
         redis=SimpleNamespace(),
         user_id="user-1",
         valid_channels=["task:task-1", "user:user-1"],
@@ -123,8 +126,10 @@ async def _api_realtime_child(iterations: int) -> dict[str, Any]:
     first = await events._standard_pubsub_events(state, task_message)  # noqa: SLF001
     second = await events._standard_pubsub_events(state, user_message)  # noqa: SLF001
 
+    replay_deduper = events._ConnectionEventDeduper()  # noqa: SLF001
+    replay_deduper.remember(sse_id="1000-1")
     replay_state = events._EventStreamState(  # noqa: SLF001
-        request=None,
+        is_disconnected=is_disconnected,
         redis=SimpleNamespace(),
         user_id="user-1",
         valid_channels=["task:task-1", "user:user-1"],
@@ -134,7 +139,7 @@ async def _api_realtime_child(iterations: int) -> dict[str, Any]:
         stream_key="events:user:user-1",
         last_event_id="999-0",
         connection_slot=None,
-        replayed_sse_ids={"1000-1"},
+        event_deduper=replay_deduper,
     )
     replay_live = await events._standard_pubsub_events(  # noqa: SLF001
         replay_state,
@@ -142,7 +147,7 @@ async def _api_realtime_child(iterations: int) -> dict[str, Any]:
     )
 
     throughput_state = events._EventStreamState(  # noqa: SLF001
-        request=None,
+        is_disconnected=is_disconnected,
         redis=SimpleNamespace(),
         user_id="user-1",
         valid_channels=["task:task-1"],
@@ -202,7 +207,7 @@ async def _api_realtime_child(iterations: int) -> dict[str, Any]:
         "parser_elapsed_seconds": elapsed,
         "parser_events_per_second": frames / elapsed if elapsed else 0.0,
         "payload_bytes": len(encoded.encode("utf-8")),
-        "fanout_channels": list(channels),
+        "fanout_channels": sorted(channels),
         "fanout_bytes_per_event": len(encoded.encode("utf-8")) * len(channels),
         "live_live_frames_for_same_sse_id": len(first) + len(second),
         "replay_live_frames_for_same_sse_id": len(replay_live),
@@ -272,6 +277,8 @@ class _QueueRedis:
     def __init__(self) -> None:
         self.commands: Counter[str] = Counter()
         self.dedupe: set[str] = set()
+        self.dispatch_active: dict[str, str] = {}
+        self.dispatch_revisions: Counter[str] = Counter()
         self.enqueued: list[str] = []
 
     async def zremrangebyscore(self, *_args: Any) -> int:
@@ -282,9 +289,31 @@ class _QueueRedis:
         self.commands["zrange"] += 1
         return []
 
-    async def get(self, _key: str) -> None:
+    async def get(self, key: str) -> str | None:
         self.commands["get"] += 1
-        return None
+        return self.dispatch_active.get(key)
+
+    async def eval(self, script: str, _num_keys: int, *args: Any) -> Any:
+        self.commands["eval"] += 1
+        if "local revision = redis.call('INCR', revision_key)" in script:
+            active_key = str(args[0])
+            revision_key = str(args[1])
+            attempt = int(args[2])
+            self.dispatch_revisions[revision_key] += 1
+            value = (
+                f"{attempt}|{self.dispatch_revisions[revision_key]}|reserved|"
+            )
+            self.dispatch_active[active_key] = value
+            return [1, value]
+        if "local current = redis.call('GET', KEYS[1])" in script:
+            active_key = str(args[0])
+            expected = str(args[1])
+            replacement = str(args[2])
+            if self.dispatch_active.get(active_key) != expected:
+                return 0
+            self.dispatch_active[active_key] = replacement
+            return 1
+        raise AssertionError("unexpected queue benchmark Redis script")
 
     async def set(self, key: str, _value: str, **kwargs: Any) -> bool:
         self.commands["set"] += 1
@@ -294,7 +323,13 @@ class _QueueRedis:
             self.dedupe.add(key)
         return True
 
-    async def enqueue_job(self, _name: str, task_id: str, **_kwargs: Any) -> str:
+    async def enqueue_job(
+        self,
+        _name: str,
+        task_id: str,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> str:
         self.commands["enqueue_job"] += 1
         self.enqueued.append(task_id)
         return f"job:{task_id}"

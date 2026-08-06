@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import contextmanager
 import fcntl
 import grp
@@ -54,6 +55,14 @@ def _nonroot_identity(*, excluding: set[int] | None = None) -> tuple[str, str] |
             continue
         return user.pw_name, group.gr_name
     return None
+
+
+def _user_lookup_fails(user_id: int) -> bool:
+    try:
+        pwd.getpwuid(user_id)
+    except KeyError:
+        return True
+    return False
 
 
 def _write_flock_mock(path: Path) -> None:
@@ -170,6 +179,7 @@ def _run_permissions(
     service_user: str,
     service_group: str,
     legacy_owner_user: str = "root",
+    legacy_owner_uids: tuple[int, ...] = (),
     with_lock: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     maintenance_root = backup_root.parent / f".{backup_root.name}-maintenance"
@@ -188,6 +198,8 @@ def _run_permissions(
         "--maintenance-lock-root",
         str(maintenance_root),
     ]
+    for legacy_owner_uid in legacy_owner_uids:
+        command.extend(("--legacy-owner-uid", str(legacy_owner_uid)))
     if not with_lock:
         return subprocess.run(
             command,
@@ -1074,6 +1086,153 @@ def test_shared_legacy_owner_nodes_migrate_to_target_uid(tmp_path: Path) -> None
         assert path.stat().st_gid == expected_gid
 
 
+def test_explicit_unmapped_legacy_owner_uid_is_allowed_without_passwd_entry(
+    tmp_path: Path,
+) -> None:
+    metadata = (tmp_path / "node")
+    metadata.write_text("payload", encoding="utf-8")
+    unmapped_uid = next(
+        (
+            candidate
+            for candidate in range(10000, 11000)
+            if _user_lookup_fails(candidate)
+        ),
+        None,
+    )
+    if unmapped_uid is None:
+        pytest.skip("no unmapped UID is available in the test range")
+    legacy_owner_ids = frozenset({0, unmapped_uid})
+    synthetic = _metadata_with_uid(metadata.stat(), unmapped_uid)
+
+    BACKUP_PERMISSIONS._validate_shared_owner(
+        synthetic,
+        target_user_id=os.geteuid(),
+        legacy_owner_ids=legacy_owner_ids,
+        label="pg/archive",
+    )
+    BACKUP_PERMISSIONS._validate_private_owner(
+        synthetic,
+        target_user_id=os.geteuid(),
+        legacy_owner_ids=legacy_owner_ids,
+        label="recovery journal archive.json",
+    )
+
+
+def test_cli_collects_repeated_legacy_owner_uids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[int] = []
+
+    def fake_ensure_backup_layout(args: argparse.Namespace) -> str:
+        observed.extend(args.legacy_owner_uid)
+        return "binding-token"
+
+    monkeypatch.setattr(
+        BACKUP_PERMISSIONS,
+        "ensure_backup_layout",
+        fake_ensure_backup_layout,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(PERMISSIONS),
+            "ensure-backup-layout",
+            "/tmp/backup",
+            "--service-user",
+            "backup",
+            "--service-group",
+            "backup",
+            "--legacy-owner-uid",
+            "10001",
+            "--legacy-owner-uid",
+            "10002",
+            "--maintenance-lock-root",
+            "/tmp/maintenance",
+        ],
+    )
+
+    assert BACKUP_PERMISSIONS.main() == 0
+    assert observed == [10001, 10002]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("-1", "decimal integer"),
+        ("uid-10001", "decimal integer"),
+        (str(BACKUP_PERMISSIONS._MAX_MIGRATABLE_UID + 1), "must be between"),
+    ],
+)
+def test_legacy_owner_uid_validation_rejects_unsafe_values(
+    value: str,
+    message: str,
+) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match=message):
+        BACKUP_PERMISSIONS._parse_legacy_owner_uid(value)
+
+
+def test_unmapped_legacy_owner_uid_nodes_migrate_to_target_uid(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() != 0:
+        pytest.skip("numeric UID migration requires root")
+    target = _nonroot_identity()
+    if target is None:
+        pytest.skip("no non-root service identity is available")
+    service_user, service_group = target
+    target_uid = pwd.getpwnam(service_user).pw_uid
+    target_gid = grp.getgrnam(service_group).gr_gid
+    unmapped_uid = next(
+        (
+            candidate
+            for candidate in range(10000, 11000)
+            if candidate != target_uid and _user_lookup_fails(candidate)
+        ),
+        None,
+    )
+    if unmapped_uid is None:
+        pytest.skip("no unmapped UID is available in the test range")
+
+    backup_root = tmp_path / "backup"
+    shared_dir = backup_root / "pg" / "legacy"
+    shared_dir.mkdir(parents=True)
+    archive = shared_dir / "snapshot.dump"
+    archive.write_bytes(b"payload")
+    recovery = backup_root / ".recovery"
+    recovery.mkdir()
+    journal = recovery / "restore.json"
+    journal.write_text('{"legacy":true}\n', encoding="utf-8")
+    for path in (
+        archive,
+        shared_dir,
+        backup_root / "pg",
+        journal,
+        recovery,
+        backup_root,
+    ):
+        os.chown(path, unmapped_uid, 0)
+
+    result = _run_permissions(
+        backup_root,
+        service_user=service_user,
+        service_group=service_group,
+        legacy_owner_uids=(unmapped_uid,),
+    )
+
+    assert result.returncode == 0, result.stderr
+    for path in (
+        backup_root,
+        backup_root / "pg",
+        shared_dir,
+        archive,
+        recovery,
+        journal,
+    ):
+        assert path.stat().st_uid == target_uid
+        assert path.stat().st_gid == target_gid
+
+
 @pytest.mark.parametrize("node_kind", ["directory", "file"])
 def test_deep_shared_third_party_owner_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
@@ -1090,7 +1249,8 @@ def test_deep_shared_third_party_owner_is_rejected(
         foreign.write_bytes(b"payload")
     target_uid = os.geteuid()
     legacy_uid = 0
-    foreign_uid = max(target_uid, legacy_uid) + 1000
+    explicit_legacy_uid = max(target_uid, legacy_uid) + 1000
+    foreign_uid = explicit_legacy_uid + 1000
     real_entry_metadata = BACKUP_PERMISSIONS._entry_metadata
 
     def fake_entry_metadata(directory_fd: int, name: str):
@@ -1114,7 +1274,9 @@ def test_deep_shared_third_party_owner_is_rejected(
                 BACKUP_PERMISSIONS._validate_shared_tree(
                     root_fd,
                     target_user_id=target_uid,
-                    legacy_owner_id=legacy_uid,
+                    legacy_owner_ids=frozenset(
+                        {legacy_uid, explicit_legacy_uid}
+                    ),
                     guard=guard,
                     skip_recovery=True,
                 )
@@ -1704,3 +1866,4 @@ def test_runtime_never_recursively_relaxes_private_recovery_directory() -> None:
     assert "chgrp -R" not in runtime
     assert "backup_permissions.py" in runtime
     assert "--legacy-owner-user root" in runtime
+    assert '--legacy-owner-uid "${LUMEN_APP_UID:-10001}"' in runtime

@@ -2100,6 +2100,12 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
     )
 
     noop_done = check.index("emit_done  check 0")
+    assert switch.index("prepare_update_runner_backup_binding") < switch.index(
+        "lumen_release_atomic_switch"
+    )
+    assert switch.index("lumen_release_atomic_switch") < switch.index(
+        "refresh_update_runner_units"
+    )
     assert check.index("SKIP_TO_CLEANUP=1") < noop_done
     assert switch.index("refresh_update_runner_units") < switch.index(
         "emit_done switch 0"
@@ -2183,6 +2189,7 @@ def test_switch_does_not_complete_when_runner_unit_refresh_fails(
         emit_done() {{ : > {shlex.quote(str(tmp_path / "done"))}; }}
         emit_fail() {{ :; }}
         log_error() {{ :; }}
+        prepare_update_runner_backup_binding() {{ return 0; }}
         lumen_release_atomic_switch() {{ return 0; }}
         lumen_update_fsync_directory() {{ return 0; }}
         refresh_update_runner_units() {{ return 1; }}
@@ -2192,6 +2199,33 @@ def test_switch_does_not_complete_when_runner_unit_refresh_fails(
 
     assert result.returncode != 0
     assert not (tmp_path / "done").exists()
+
+
+def test_switch_does_not_move_link_when_backup_binding_preflight_fails(
+    tmp_path: Path,
+) -> None:
+    result = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(SWITCH_PHASE))}
+        ROOT={shlex.quote(str(tmp_path))}
+        NEW_ID=new
+        CURRENT_ID=old
+        emit_start() {{ :; }}
+        emit_info() {{ :; }}
+        emit_done() {{ :; }}
+        emit_fail() {{ :; }}
+        log_error() {{ :; }}
+        prepare_update_runner_backup_binding() {{ return 1; }}
+        lumen_release_atomic_switch() {{
+            : > {shlex.quote(str(tmp_path / "switched"))}
+        }}
+        update_phase_switch
+        """
+    )
+
+    assert result.returncode != 0
+    assert not (tmp_path / "switched").exists()
 
 
 def test_update_snapshot_restore_and_switch_use_durable_filesystem_commits() -> None:

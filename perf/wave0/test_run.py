@@ -28,7 +28,7 @@ def test_realtime_characterization_covers_duplicate_and_fanout() -> None:
         "task:task-1",
         "user:user-1",
     ]
-    assert result["api"]["live_live_frames_for_same_sse_id"] == 2
+    assert result["api"]["live_live_frames_for_same_sse_id"] == 1
     assert result["api"]["replay_live_frames_for_same_sse_id"] == 0
     assert result["worker"]["fault_user_channel_reached"] is True
 

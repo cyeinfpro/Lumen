@@ -27,6 +27,18 @@ SOURCE_TREE_EXCLUDES = frozenset(
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def _source_tree_entry_excluded(relative: str) -> bool:
+    if relative in SOURCE_TREE_EXCLUDES:
+        return True
+    parts = relative.split("/")
+    return (
+        relative == "scripts.lumen-self-update.lock"
+        or "__pycache__" in parts
+        or relative.endswith(".pyc")
+        or relative.startswith("scripts/.lumen-self-update.")
+    )
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -44,7 +56,7 @@ def source_tree_sha256(root: Path) -> str:
         key=lambda item: item.relative_to(root).as_posix(),
     ):
         relative = path.relative_to(root).as_posix()
-        if relative in SOURCE_TREE_EXCLUDES:
+        if _source_tree_entry_excluded(relative):
             continue
         relative_bytes = relative.encode("utf-8")
         info = path.lstat()

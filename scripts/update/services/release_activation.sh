@@ -88,8 +88,8 @@ PY
 lumen_update_harden_release_ownership() {
     local shared_dir=""
     shared_dir="$(dirname "${SHARED_ENV}")"
-    if ! lumen_ensure_backup_service_user \
-            "${LUMEN_BACKUP_ROOT:-${LUMEN_DATA_ROOT%/}/backup}"; then
+    local backup_root="${LUMEN_BACKUP_ROOT:-${LUMEN_DATA_ROOT%/}/backup}"
+    if ! lumen_ensure_backup_service_user "${backup_root}"; then
         log_error "[restart_services] 备份目录或私有 recovery journal 迁移失败。"
         return 1
     fi
