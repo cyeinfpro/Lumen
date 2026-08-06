@@ -105,8 +105,8 @@ def _write_fake_docker(path: Path) -> None:
 
             if args and args[0] == "exec":
                 index = 1
-                while index < len(args) and args[index] in {"-i", "-e"}:
-                    index += 2 if args[index] == "-e" else 1
+                while index < len(args) and args[index] in {"-i", "-e", "-u"}:
+                    index += 2 if args[index] in {"-e", "-u"} else 1
                 index += 1
                 command = args[index] if index < len(args) else ""
                 rest = args[index + 1 :]

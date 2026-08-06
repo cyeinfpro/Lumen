@@ -303,11 +303,11 @@ lumen_validate_redis_rdb_file() {
     if ! docker cp "${source}" "${container}:${remote}" >/dev/null 2>&1; then
         return 1
     fi
-    if ! docker exec "${container}" redis-check-rdb "${remote}" \
+    if ! docker exec -u 0 "${container}" redis-check-rdb "${remote}" \
             >/dev/null 2>&1; then
         rc=1
     fi
-    if ! docker exec "${container}" rm -f "${remote}" >/dev/null 2>&1; then
+    if ! docker exec -u 0 "${container}" rm -f "${remote}" >/dev/null 2>&1; then
         rc=1
     fi
     return "${rc}"
