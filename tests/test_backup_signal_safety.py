@@ -80,6 +80,9 @@ def _write_fake_docker(path: Path) -> None:
                     if os.environ.get("TEST_WORKER_READY", "1") != "1":
                         raise SystemExit(1)
                     raise SystemExit(0)
+                if "ps" in args and "-q" in args and args[-1] == "worker":
+                    print("legacy-worker-cid")
+                    raise SystemExit(0)
                 action = next(
                     (item for item in args if item in {"start", "stop"}),
                     "",
@@ -91,6 +94,14 @@ def _write_fake_docker(path: Path) -> None:
                 raise SystemExit(0)
 
             if args and args[0] == "inspect":
+                if "--format" in args:
+                    template = args[args.index("--format") + 1]
+                    if template == "{{json .Config.Cmd}}":
+                        print(os.environ["TEST_WORKER_CMD_JSON"])
+                        raise SystemExit(0)
+                    if ".State.Health" in template:
+                        print(os.environ["TEST_WORKER_DOCKER_HEALTH"])
+                        raise SystemExit(0)
                 service = args[-1].removeprefix("lumen-")
                 if os.environ.get("TEST_FAIL_INSPECT_SERVICE") == service:
                     print("docker daemon unavailable", file=sys.stderr)
@@ -351,6 +362,8 @@ def _start_backup(
     failpoint: str = "",
     api_ready: bool = True,
     worker_ready: bool = True,
+    legacy_worker: bool = False,
+    worker_docker_health: str = "healthy",
     rdb_valid: bool = True,
     env_out: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path, Path, Path]:
@@ -418,6 +431,13 @@ def _start_backup(
             "TEST_FAIL_INSPECT_SERVICE": inspect_failure_service,
             "TEST_API_READY": "1" if api_ready else "0",
             "TEST_WORKER_READY": "1" if worker_ready else "0",
+            "TEST_WORKER_CMD_JSON": (
+                '["python","-c","from arq.worker import run_worker; '
+                'health_key=os.getenv(\\"LUMEN_WORKER_HEALTH_KEY\\")"]'
+                if legacy_worker
+                else '["python","-m","app.worker_health","run"]'
+            ),
+            "TEST_WORKER_DOCKER_HEALTH": worker_docker_health,
             "TEST_RDB_VALID": "1" if rdb_valid else "0",
             "LUMEN_BACKUP_FAILPOINT": failpoint,
             "LUMEN_SYSTEMD_RUNTIME_AVAILABLE": "1",
@@ -934,3 +954,59 @@ def test_backup_restart_readiness_failure_retains_journal_and_pair(
     probed = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
     assert probed
     assert set(probed) == {"http://127.0.0.1:8000/readyz"}
+
+
+def test_backup_restart_accepts_healthy_legacy_worker_contract(
+    tmp_path: Path,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        worker_ready=False,
+        legacy_worker=True,
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 0, output
+    assert "Worker 使用旧版健康协议" in output
+    calls = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    assert (
+        "compose --ansi=never exec -T worker "
+        "python -m app.worker_health check"
+    ) in calls
+    assert "compose --ansi=never ps -q worker" in calls
+    assert "inspect --format {{json .Config.Cmd}} legacy-worker-cid" in calls
+    assert ".State.Health" in calls
+    assert len(list(backup_root.glob(".backup-pair.*.json"))) == 1
+
+
+@pytest.mark.parametrize(
+    ("legacy_worker", "worker_docker_health"),
+    [
+        (False, "healthy"),
+        (True, "starting"),
+        (True, "unhealthy"),
+        (True, "none"),
+    ],
+)
+def test_backup_restart_never_uses_unproven_legacy_worker_fallback(
+    tmp_path: Path,
+    legacy_worker: bool,
+    worker_docker_health: str,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        worker_ready=False,
+        legacy_worker=legacy_worker,
+        worker_docker_health=worker_docker_health,
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 70, output
+    assert "Worker python -m app.worker_health check 未通过" in output
+    assert len(list(backup_root.glob(".backup-pair.*.json"))) == 1
