@@ -62,6 +62,7 @@ def test_update_runner_builds_fixed_environment_without_path_overrides(
     assert env["LUMEN_UPDATE_BUILD"] == "0"
     assert env["LUMEN_UPDATE_FAST_BACKUP"] == "1"
     assert env["LUMEN_UPDATE_REQUIRE_MIGRATION_BACKUP"] == "1"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "LUMEN_UPDATE_SKIP_BACKUP" not in env
     assert "LUMEN_UPDATE_ROOT" not in env
     assert "LUMEN_REPO_DIR" not in env
@@ -153,6 +154,7 @@ def test_active_journal_auto_resumes_with_preserved_stale_request(
     assert child_env["LUMEN_UPDATE_RESUME"] == "1"
     assert child_env["LUMEN_IMAGE_TAG"] == "v1.2.3"
     assert child_env["LUMEN_UPDATE_JOURNAL"] == str(journal)
+    assert child_env["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_active_post_check_journal_without_request_file_fails_closed(

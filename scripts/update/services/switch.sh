@@ -5,6 +5,11 @@
 update_phase_switch() {
 emit_start switch
 
+if ! prepare_update_runner_backup_binding; then
+    log_error "[switch] 备份服务绑定预检失败。"
+    emit_fail switch 1
+    exit 1
+fi
 if ! lumen_release_atomic_switch "${ROOT}" "${NEW_ID}"; then
     log_error "[switch] symlink 切换失败。"
     emit_fail switch 1

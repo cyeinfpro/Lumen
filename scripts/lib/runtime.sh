@@ -376,6 +376,18 @@ lumen_ensure_backup_service_user() {
     [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
     [ -x "${shell_path}" ] || shell_path="/bin/false"
 
+    # A single update already proved and migrated this binding before switching
+    # the release link. Re-verify the bound descriptors instead of reopening
+    # the lock path after the switch.
+    if [ "${LUMEN_BACKUP_LAYOUT_BINDING_ROOT:-}" = "${backup_root}" ] \
+            && [ -n "${LUMEN_BACKUP_LAYOUT_BINDING_TOKEN:-}" ]; then
+        if ! lumen_verify_backup_service_layout_binding; then
+            log_error "backup/maintenance root binding 在复用前失效。"
+            return 1
+        fi
+        return 0
+    fi
+
     if ! lumen_require_systemd_flock; then
         log_error "Linux systemd 备份服务需要 flock；请安装 util-linux 后重试。"
         return 1
@@ -457,6 +469,7 @@ lumen_ensure_backup_service_user() {
                 --service-user "${user}" \
                 --service-group "${service_group}" \
                 --legacy-owner-user root \
+                --legacy-owner-uid "${LUMEN_APP_UID:-10001}" \
                 --maintenance-lock-root "${deploy_root}" \
                 --emit-binding-token
         )"; then
@@ -470,6 +483,7 @@ lumen_ensure_backup_service_user() {
             --service-user "${user}" \
             --service-group "${service_group}" \
             --legacy-owner-user root \
+            --legacy-owner-uid "${LUMEN_APP_UID:-10001}" \
             --maintenance-lock-root "${deploy_root}" \
             --emit-binding-token
     )"; then

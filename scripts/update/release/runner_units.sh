@@ -24,6 +24,19 @@ render_update_runner_unit() {
         > "${dst}"
 }
 
+prepare_update_runner_backup_binding() {
+    if ! lumen_systemd_runtime_available; then
+        return 0
+    fi
+    local data_root="${LUMEN_DATA_ROOT%/}"
+    local backup_root="${LUMEN_BACKUP_ROOT:-${data_root}/backup}"
+    backup_root="${backup_root%/}"
+    if ! lumen_ensure_backup_service_user "${backup_root}"; then
+        log_error "[refresh_update_runner] 备份目录权限迁移失败。"
+        return 1
+    fi
+}
+
 refresh_update_runner_units() {
     if ! lumen_systemd_runtime_available; then
         log_info "[refresh_update_runner] 未检测到 Linux systemd，跳过。"
@@ -88,7 +101,7 @@ refresh_update_runner_units() {
         fi
     done
 
-    if ! lumen_ensure_backup_service_user "${backup_root}"; then
+    if ! prepare_update_runner_backup_binding; then
         log_error "[refresh_update_runner] 备份目录权限迁移失败，拒绝完成 switch。"
         rm -rf "${tmp_dir}"
         return 1

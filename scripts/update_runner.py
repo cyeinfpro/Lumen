@@ -388,6 +388,7 @@ def build_environment(request: dict[str, object]) -> dict[str, str]:
         "HOME": "/root",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "LUMEN_UPDATE_NONINTERACTIVE": "1",
         "LUMEN_UPDATE_MODE": "fast",
         "LUMEN_UPDATE_FAST_BACKUP": "1",
