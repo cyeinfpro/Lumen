@@ -1,4 +1,8 @@
 import { apiFetch } from "./http";
+import {
+  validateByokSettings,
+  validateSystemSettings,
+} from "./responseValidators";
 import type {
   AdminContextHealthOut,
   AdminModelsOut,
@@ -28,7 +32,9 @@ import type {
 const SYSTEM_SETTINGS_BASE = "/admin/settings";
 
 export function getSystemSettings(): Promise<SystemSettingsOut> {
-  return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE);
+  return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE, {
+    validate: validateSystemSettings,
+  });
 }
 
 export function updateSystemSettings(
@@ -37,6 +43,7 @@ export function updateSystemSettings(
   return apiFetch<SystemSettingsOut>(SYSTEM_SETTINGS_BASE, {
     method: "PUT",
     body: JSON.stringify({ items }),
+    validate: validateSystemSettings,
   });
 }
 
@@ -109,7 +116,9 @@ export function updateVideoProviders(
 // ——— BYOK ———
 
 export function getByokSettings(): Promise<ByokSettingsOut> {
-  return apiFetch<ByokSettingsOut>("/admin/byok-settings");
+  return apiFetch<ByokSettingsOut>("/admin/byok-settings", {
+    validate: validateByokSettings,
+  });
 }
 
 export function patchByokSettings(
@@ -118,6 +127,7 @@ export function patchByokSettings(
   return apiFetch<ByokSettingsOut>("/admin/byok-settings", {
     method: "PATCH",
     body: JSON.stringify(body),
+    validate: validateByokSettings,
   });
 }
 

@@ -6,11 +6,13 @@ import { coordinateUnauthorized } from "@/lib/auth/authFailureCoordinator";
 import { ApiError } from "./errors";
 import { apiTransport } from "./transport";
 import type { RequestBudget } from "./requestBudget";
+import type { ResponseValidator } from "./response";
 
-type CommandOptions = Omit<RequestInit, "method"> & {
+type CommandOptions<T = unknown> = Omit<RequestInit, "method"> & {
   method?: "POST" | "PUT" | "PATCH" | "DELETE";
   budget?: RequestBudget;
   expectNoContent?: boolean;
+  validate?: ResponseValidator<T>;
 };
 
 export class CommandApiClient {
@@ -20,7 +22,10 @@ export class CommandApiClient {
     this.policy = policy;
   }
 
-  request<T>(path: string, options: CommandOptions = {}): Promise<T | undefined> {
+  request<T>(
+    path: string,
+    options: CommandOptions<T> = {},
+  ): Promise<T | undefined> {
     const method = options.method ?? "POST";
     try {
       this.policy.assertAllowed(method, path);
@@ -45,7 +50,7 @@ export class CommandApiClient {
   post<TBody, TResult>(
     path: string,
     body: TBody,
-    options: Omit<CommandOptions, "method" | "body"> = {},
+    options: Omit<CommandOptions<TResult>, "method" | "body"> = {},
   ): Promise<TResult> {
     return this.request<TResult>(path, {
       ...options,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -15,8 +16,11 @@ from PIL import Image
 from image_job import durable_files
 from image_job.adapters.filesystem_artifacts import FilesystemArtifactStore
 from image_job.adapters.sqlite_jobs import SQLiteJobRepository
+from image_job.application.auth import credential_hash
 from image_job.candidates import ImageCandidate
 from image_job.config import ImageJobSettings, ImageJobTimeouts, SecretText
+from image_job.contracts import UpstreamDispatchReceipt
+from image_job.domain.identity import CallerIdentity
 from image_job.runtime import create_runtime
 
 
@@ -31,7 +35,6 @@ def _settings(tmp_path: Path) -> ImageJobSettings:
         queue_max=2,
         concurrency=1,
         sidecar_token=SecretText("s" * 32),
-        allow_legacy_bearer=False,
         upstream_base_url="http://127.0.0.1:8081",
         public_base_url="https://images.example.test",
         timeouts=ImageJobTimeouts(graceful_shutdown_s=0),
@@ -46,6 +49,41 @@ def _png_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (2, 2), color=(30, 40, 50)).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+async def _seed_succeeded(runtime: Any, job_id: str) -> list[dict[str, Any]]:
+    await runtime.repository.initialize()
+    await runtime.jobs.persistence.insert_job(
+        job_id,
+        {
+            "request_type": "generations",
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+            "retention_days": 1,
+        },
+        "Bearer sk-test",
+    )
+    token = await runtime.jobs.persistence.mark_running(job_id)
+    assert token is not None
+    row = await runtime.repository.one(
+        "SELECT created_at, retention_days FROM jobs WHERE job_id = ?",
+        (job_id,),
+    )
+    assert row is not None
+    images = await runtime.upstream.processing.save_images(
+        job_id,
+        row["created_at"],
+        row["retention_days"],
+        [ImageCandidate(_png_bytes(), "image/png")],
+    )
+    assert await runtime.jobs.persistence.mark_succeeded(
+        job_id,
+        execution_token=token,
+        upstream_status=200,
+        elapsed_ms=1,
+        images=images,
+    )
+    return images
 
 
 def _track_durability_calls(
@@ -226,8 +264,10 @@ async def test_job_success_commit_waits_for_artifact_durability_barrier(
         row: Any,
         *,
         authorization: str,
+        dispatch: UpstreamDispatchReceipt,
     ) -> tuple[int, list[dict[str, Any]]]:
         assert authorization == "Bearer sk-test"
+        dispatch.mark_started("test.send_request_headers.started")
         images = await runtime.upstream.processing.save_images(
             row["job_id"],
             row["created_at"],
@@ -272,3 +312,123 @@ async def test_job_success_commit_waits_for_artifact_durability_barrier(
         "success_commit_started",
         "success_committed",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "images_json_missing",
+        "bad_json",
+        "json_object",
+        "count_mismatch",
+        "file_missing",
+        "size_mismatch",
+        "checksum_invalid",
+        "checksum_mismatch",
+    ],
+)
+async def test_corrupt_success_becomes_durable_artifact_corrupt(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    images = await _seed_succeeded(runtime, "job-corrupt")
+    image = dict(images[0])
+    if corruption == "images_json_missing":
+        await runtime.repository.execute(
+            "UPDATE jobs SET images_json = NULL WHERE job_id = ?",
+            ("job-corrupt",),
+        )
+    elif corruption == "bad_json":
+        await runtime.repository.execute(
+            "UPDATE jobs SET images_json = '{broken' WHERE job_id = ?",
+            ("job-corrupt",),
+        )
+    elif corruption == "json_object":
+        await runtime.repository.execute(
+            "UPDATE jobs SET images_json = ? WHERE job_id = ?",
+            (json.dumps(image), "job-corrupt"),
+        )
+    elif corruption == "count_mismatch":
+        await runtime.repository.execute(
+            "UPDATE jobs SET image_count = 2 WHERE job_id = ?",
+            ("job-corrupt",),
+        )
+    elif corruption == "file_missing":
+        runtime.upstream.processing.artifact_facade._artifact_path(  # noqa: SLF001
+            "job-corrupt",
+            str(image["url"]),
+        ).unlink()
+    else:
+        if corruption == "size_mismatch":
+            image["bytes"] = int(image["bytes"]) + 1
+        elif corruption == "checksum_invalid":
+            image["sha256"] = "not-a-checksum"
+        else:
+            image["sha256"] = "0" * 64
+        await runtime.repository.execute(
+            "UPDATE jobs SET images_json = ? WHERE job_id = ?",
+            (json.dumps([image]), "job-corrupt"),
+        )
+
+    response = await runtime.jobs.results.get(
+        "job-corrupt",
+        CallerIdentity(
+            service_id="test",
+            owner_hash=credential_hash("Bearer sk-test"),
+            authorization="Bearer sk-test",
+        ),
+    )
+    row = await runtime.repository.one(
+        "SELECT status, error_class, outcome_uncertain FROM jobs WHERE job_id = ?",
+        ("job-corrupt",),
+    )
+
+    assert response["status"] == "artifact_corrupt"
+    assert response["error_class"] == "artifact_corrupt"
+    assert response["cost_knowledge"] == "incurred"
+    assert response["outcome_uncertain"] is True
+    assert "images" not in response
+    assert row is not None
+    assert row["status"] == "artifact_corrupt"
+    assert row["error_class"] == "artifact_corrupt"
+    assert bool(row["outcome_uncertain"]) is True
+
+
+@pytest.mark.asyncio
+async def test_valid_legacy_artifact_is_verified_and_upgraded(
+    tmp_path: Path,
+) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    images = await _seed_succeeded(runtime, "job-legacy-artifact")
+    legacy = [{key: value for key, value in images[0].items() if key != "sha256"}]
+    await runtime.repository.execute(
+        """
+        UPDATE jobs
+        SET images_json = ?, artifact_schema = 1
+        WHERE job_id = ?
+        """,
+        (json.dumps(legacy), "job-legacy-artifact"),
+    )
+
+    response = await runtime.jobs.results.get(
+        "job-legacy-artifact",
+        CallerIdentity(
+            service_id="test",
+            owner_hash=credential_hash("Bearer sk-test"),
+            authorization="Bearer sk-test",
+        ),
+    )
+    row = await runtime.repository.one(
+        "SELECT artifact_schema, images_json FROM jobs WHERE job_id = ?",
+        ("job-legacy-artifact",),
+    )
+
+    assert response["status"] == "succeeded"
+    assert response["image_count"] == 1
+    assert len(response["images"]) == 1
+    assert len(response["images"][0]["sha256"]) == 64
+    assert row is not None
+    assert row["artifact_schema"] == 2
+    assert '"sha256":' in row["images_json"]

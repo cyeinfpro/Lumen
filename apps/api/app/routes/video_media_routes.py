@@ -239,7 +239,6 @@ async def reference_video_binary(
         token_key="reference_access_token",
         expires_key="reference_access_token_expires_at",
         token=token,
-        updated_at=video.updated_at,
     ):
         raise _http("not_found", "video not found", 404)
     if variant:

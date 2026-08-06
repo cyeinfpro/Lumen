@@ -288,24 +288,13 @@ class ProviderPoolImageSelectionMixin:
         wall_now: float,
         mono_now: float,
     ) -> str | None:
-        deps = self._image_selection_dependencies()
-        try:
-            allowed, retry_after = await account_limiter.check_quota(
-                redis,
-                provider.name,
-                provider.image_rate_limit,
-                provider.image_daily_quota,
-                now=wall_now,
-            )
-        except Exception as exc:  # noqa: BLE001
-            deps.logger.warning(
-                "account_limiter.check_quota raised provider=%s err=%s — "
-                "treating as temporarily unavailable",
-                provider.name,
-                exc,
-            )
-            allowed = False
-            retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
+        allowed, retry_after = await account_limiter.check_quota(
+            redis,
+            provider.name,
+            provider.image_rate_limit,
+            provider.image_daily_quota,
+            now=wall_now,
+        )
         if allowed:
             return None
         with self._stats_lock:
@@ -500,26 +489,29 @@ class ProviderPoolImageSelectionMixin:
         """Reserve quota for the provider whose inflight slot is claimed."""
         deps = self._image_selection_dependencies()
         if redis is None:
+            quota_providers = [
+                provider.name
+                for provider, _sort_key in candidates
+                if account_limiter.parse_rate_limit(
+                    provider.image_rate_limit
+                ).state
+                == "valid"
+                or provider.image_daily_quota is not None
+            ]
+            if quota_providers:
+                raise account_limiter.AccountLimiterUnavailable(
+                    f"quota Redis unavailable for providers={quota_providers}"
+                )
             return candidates
         for idx, (provider, sort_key) in enumerate(candidates):
-            try:
-                allowed, retry_after, _member = await account_limiter.reserve_quota(
-                    redis,
-                    provider.name,
-                    provider.image_rate_limit,
-                    provider.image_daily_quota,
-                    task_id=task_id,
-                    now=wall_now,
-                )
-            except Exception as exc:  # noqa: BLE001
-                deps.logger.warning(
-                    "account_limiter.reserve_quota raised provider=%s err=%s — "
-                    "treating as temporarily unavailable",
-                    provider.name,
-                    exc,
-                )
-                allowed = False
-                retry_after = float(account_limiter.REDIS_ERROR_RETRY_AFTER_S)
+            allowed, retry_after, _member = await account_limiter.reserve_quota(
+                redis,
+                provider.name,
+                provider.image_rate_limit,
+                provider.image_daily_quota,
+                task_id=task_id,
+                now=wall_now,
+            )
             if allowed:
                 if idx == 0:
                     return candidates

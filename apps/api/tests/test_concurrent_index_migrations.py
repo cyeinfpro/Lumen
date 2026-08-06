@@ -41,6 +41,9 @@ from app.config import settings  # noqa: E402
 
 REPAIR_FILENAME = "0057_repair_concurrent_indexes.py"
 REPAIR_REVISION = "0057_repair_concurrent_indexes"
+STORAGE_OPERATION_REVISION = "0058_storage_apply_operations"
+REFERENCE_TOKEN_REVISION = "0059_reference_token_expiry"
+TELEGRAM_CONTROL_REVISION = "0060_telegram_delivery_control"
 
 
 @dataclass(frozen=True)
@@ -545,13 +548,22 @@ def test_historical_concurrent_index_migrations_are_immutable(
     assert digest == expected_sha256
 
 
-def test_repair_revision_extends_0056_as_the_only_head() -> None:
+def test_repair_revision_remains_in_the_single_head_chain() -> None:
     scripts = _script_directory()
     repair = scripts.get_revision(REPAIR_REVISION)
+    storage_operations = scripts.get_revision(STORAGE_OPERATION_REVISION)
+    reference_tokens = scripts.get_revision(REFERENCE_TOKEN_REVISION)
+    telegram_control = scripts.get_revision(TELEGRAM_CONTROL_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
-    assert scripts.get_heads() == [REPAIR_REVISION]
+    assert storage_operations is not None
+    assert storage_operations.down_revision == REPAIR_REVISION
+    assert reference_tokens is not None
+    assert reference_tokens.down_revision == STORAGE_OPERATION_REVISION
+    assert telegram_control is not None
+    assert telegram_control.down_revision == REFERENCE_TOKEN_REVISION
+    assert scripts.get_heads() == [TELEGRAM_CONTROL_REVISION]
 
 
 @pytest.mark.parametrize(

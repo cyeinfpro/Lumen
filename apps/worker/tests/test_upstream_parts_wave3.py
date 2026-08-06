@@ -9,6 +9,11 @@ import httpx
 import pytest
 
 from app.upstream_clients.image_job_client import ImageJobClientError
+from app.upstream_clients.image_job_models import (
+    ImageJobCostKnowledge,
+    ImageJobExecutionHandle,
+    ImageJobResultState,
+)
 from app.upstream_parts import upstream_impl as upstream
 from app.upstream_parts import (
     direct_failover,
@@ -19,6 +24,7 @@ from app.upstream_parts import (
     provider_selection,
     retry_policy,
 )
+from app.upstream_parts.image_execution import ImageRequestContext
 
 
 TEST_UPSTREAM_RUNTIME = upstream.build_image_upstream_runtime()
@@ -224,10 +230,15 @@ async def test_race_cancel_timeout_is_read_from_late_bound_facade(
 
 async def _finish_job_with_status(status: str) -> Exception:
     """跑 `_finish_image_job` 并把它抛出的错误交回来断言。"""
+    job = {"job_id": "job-1", "status": status, "error": "sidecar said so"}
+    if status == "failed":
+        job["outcome_uncertain"] = False
+    elif status in {"uncertain", "artifact_corrupt"}:
+        job["outcome_uncertain"] = True
     with pytest.raises(upstream.UpstreamError) as excinfo:
         await image_jobs._finish_image_job(
             client=None,
-            job={"job_id": "job-1", "status": status, "error": "sidecar said so"},
+            job=job,
             status_code=200,
             payload={"endpoint": "/v1/images/generations"},
             base_url="http://sidecar.invalid",
@@ -266,6 +277,96 @@ async def test_failed_image_job_stays_refundable() -> None:
         != TEST_UPSTREAM_SERVICES.infrastructure.EC.IMAGE_JOB_RESULT_UNKNOWN.value
     )
     assert TEST_UPSTREAM_SERVICES.direct.is_direct_image_result_unknown(exc) is False
+
+
+@pytest.mark.asyncio
+async def test_artifact_corrupt_is_incurred_and_never_delivered() -> None:
+    exc = await _finish_job_with_status("artifact_corrupt")
+    execution = ImageJobExecutionHandle.from_mapping(
+        exc.payload["sidecar_execution"]
+    )
+
+    assert execution is not None
+    assert execution.result_state is ImageJobResultState.UNCERTAIN
+    assert execution.cost_knowledge is ImageJobCostKnowledge.INCURRED
+    assert execution.sidecar_status == "artifact_corrupt"
+    assert exc.payload["upstream_result_unknown"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "outcome_uncertain"),
+    [("failed", True), ("uncertain", False)],
+)
+async def test_contradictory_sidecar_terminal_cost_evidence_fails_closed(
+    status: str,
+    outcome_uncertain: bool,
+) -> None:
+    with pytest.raises(upstream.UpstreamError) as excinfo:
+        await image_jobs._finish_image_job(
+            client=None,
+            job={
+                "job_id": "job-1",
+                "status": status,
+                "error": "contradictory",
+                "outcome_uncertain": outcome_uncertain,
+            },
+            status_code=200,
+            payload={"endpoint": "/v1/images/generations"},
+            base_url="http://sidecar.invalid",
+            proxy_url=None,
+            job_id="job-1",
+            progress_callback=None,
+            runtime=TEST_UPSTREAM_RUNTIME,
+        )
+
+    execution = ImageJobExecutionHandle.from_mapping(
+        excinfo.value.payload["sidecar_execution"]
+    )
+    assert execution is not None
+    assert execution.cost_knowledge is ImageJobCostKnowledge.UNKNOWN
+    assert execution.sidecar_status == "protocol_error"
+    assert excinfo.value.payload["upstream_result_unknown"] is True
+
+
+def test_image_job_idempotency_key_binds_attempt_provider_and_endpoint() -> None:
+    context = ImageRequestContext.create(
+        trace_id="trace-1",
+        quota_task_id="generation-1",
+        quota_attempt_epoch=7,
+    )
+    first = image_jobs.image_job_idempotency_key(
+        context=context,
+        provider_id="provider-a",
+        endpoint="generations",
+    )
+    replay = image_jobs.image_job_idempotency_key(
+        context=context,
+        provider_id="provider-a",
+        endpoint="generations",
+    )
+    changed_provider = image_jobs.image_job_idempotency_key(
+        context=context,
+        provider_id="provider-b",
+        endpoint="generations",
+    )
+    changed_endpoint = image_jobs.image_job_idempotency_key(
+        context=context,
+        provider_id="provider-a",
+        endpoint="responses",
+    )
+    next_attempt = image_jobs.image_job_idempotency_key(
+        context=ImageRequestContext.create(
+            trace_id="trace-1",
+            quota_task_id="generation-1",
+            quota_attempt_epoch=8,
+        ),
+        provider_id="provider-a",
+        endpoint="generations",
+    )
+
+    assert replay == first
+    assert len({first, changed_provider, changed_endpoint, next_attempt}) == 4
 
 
 @pytest.mark.asyncio

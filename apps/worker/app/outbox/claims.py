@@ -27,7 +27,7 @@ class DeliveryResult:
     dedupe_key: str | None = None
     marker: str | None = None
     should_set_dedupe: bool = False
-    fail_count: int = 0
+    fail_count: int | None = None
     error: str | None = None
     payload: dict[str, Any] | None = None
 
@@ -72,20 +72,23 @@ async def _finalize_owned_row(
     row.last_delivery_error = result.error
 
     if result.state == "retryable_failure":
+        durable_attempts = max(
+            int(row.delivery_attempts or 0),
+            int(result.event.delivery_attempts or 0),
+        )
         row.next_attempt_at = now + timedelta(
             seconds=retry_delay_seconds(
-                delivery_attempts=result.event.delivery_attempts,
-                fail_count=result.fail_count,
+                delivery_attempts=durable_attempts,
             )
         )
-        if result.fail_count >= max_fail_count:
+        if durable_attempts >= max_fail_count:
             record = await persist_once(
                 session,
                 event_id=event_id,
                 kind=result.event.kind,
                 payload=result.payload or {},
-                reason="max_fail_count",
-                fail_count=result.fail_count,
+                reason="max_delivery_attempts",
+                fail_count=durable_attempts,
             )
             if record is not None:
                 accumulator.dlq_records.append(record)

@@ -10,7 +10,6 @@ class CallerIdentity:
     service_id: str
     owner_hash: str
     authorization: str = field(repr=False)
-    legacy: bool = False
 
 
 @dataclass(frozen=True)

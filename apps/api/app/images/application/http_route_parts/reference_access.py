@@ -24,7 +24,6 @@ def video_reference_token_is_valid(
     metadata: dict[str, Any],
     *,
     token: str,
-    updated_at: datetime | None,
 ) -> bool:
     expected = metadata.get("video_reference_access_token")
     if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
@@ -32,14 +31,4 @@ def video_reference_token_is_valid(
     expires_at = parse_video_reference_token_expiry(
         metadata.get("video_reference_access_token_expires_at")
     )
-    now = datetime.now(timezone.utc)
-    if expires_at is not None:
-        return expires_at > now
-    if updated_at is None:
-        return False
-    fallback_updated_at = (
-        updated_at.replace(tzinfo=timezone.utc)
-        if updated_at.tzinfo is None
-        else updated_at.astimezone(timezone.utc)
-    )
-    return fallback_updated_at + VIDEO_REFERENCE_ACCESS_TOKEN_TTL > now
+    return expires_at is not None and expires_at > datetime.now(timezone.utc)

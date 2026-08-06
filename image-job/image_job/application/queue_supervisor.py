@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from ..contracts import JobProcessOutcome
 from ..domain.queue_state import QueueState
 
 
@@ -35,7 +36,7 @@ class QueueSupervisor:
         self.shutdown_event = asyncio.Event()
         self.workers: dict[int, asyncio.Task[None]] = {}
         self.background: dict[str, asyncio.Task[None]] = {}
-        self.processor: Callable[[str], Awaitable[None]] | None = None
+        self.processor: Callable[[str], Awaitable[JobProcessOutcome]] | None = None
         self.reconcile_callback: Callable[[], Awaitable[None]] | None = None
         self.retention_callback: Callable[[], Awaitable[None]] | None = None
         self.started = False
@@ -48,13 +49,17 @@ class QueueSupervisor:
             "jobs_completed_total": 0,
             "attempts_finished_total": 0,
             "processor_success_total": 0,
+            "processor_succeeded_total": 0,
+            "processor_failed_total": 0,
+            "processor_uncertain_total": 0,
+            "processor_skipped_total": 0,
             "processor_crash_total": 0,
         }
 
     def bind(
         self,
         *,
-        processor: Callable[[str], Awaitable[None]],
+        processor: Callable[[str], Awaitable[JobProcessOutcome]],
         reconcile: Callable[[], Awaitable[None]],
         retention: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
@@ -213,15 +218,28 @@ class QueueSupervisor:
                 self.inflight.add(job_id)
             self.metrics["jobs_started_total"] += 1
             try:
-                await self.processor(job_id)
+                outcome = await self.processor(job_id)
             except asyncio.CancelledError:
                 raise
             except BaseException:
                 self.metrics["processor_crash_total"] += 1
                 raise
             else:
-                self.metrics["processor_success_total"] += 1
-                self.metrics["jobs_completed_total"] += 1
+                if outcome is JobProcessOutcome.SUCCEEDED:
+                    self.metrics["processor_success_total"] += 1
+                    self.metrics["processor_succeeded_total"] += 1
+                    self.metrics["jobs_completed_total"] += 1
+                elif outcome is JobProcessOutcome.FAILED:
+                    self.metrics["processor_failed_total"] += 1
+                elif outcome is JobProcessOutcome.UNCERTAIN:
+                    self.metrics["processor_uncertain_total"] += 1
+                elif outcome in {
+                    JobProcessOutcome.SKIPPED_NOT_QUEUED,
+                    JobProcessOutcome.SKIPPED_FENCE_LOST,
+                }:
+                    self.metrics["processor_skipped_total"] += 1
+                else:
+                    raise AssertionError(f"unknown processor outcome: {outcome!r}")
             finally:
                 async with self.lock:
                     self.inflight.discard(job_id)

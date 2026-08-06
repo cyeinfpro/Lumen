@@ -75,6 +75,11 @@ from . import telegram_image_options as _telegram_image_options
 from . import telegram_runtime_values as _telegram_runtime_values
 from .telegram_generation import lock_telegram_generation_context
 from .telegram_prompt_enhance import enhance_telegram_prompt
+from .telegram_runtime_proxy import (
+    RuntimeProxySelectionError,
+    select_runtime_proxy,
+)
+from .telegram_delivery_routes import router as _telegram_delivery_router
 from .telegram_schemas import (
     BindIn,
     BindOut,
@@ -97,6 +102,7 @@ logger = logging.getLogger(__name__)
 # /me/telegram/* 走 session 鉴权；/telegram/* 走 bot-token。
 router_me = APIRouter()
 router_bot = APIRouter()
+router_bot.include_router(_telegram_delivery_router)
 _aspect_ratio_to_size = _telegram_image_options.aspect_ratio_to_size
 _align_pair = _telegram_image_options.align_pair
 _bool_option = _telegram_runtime_values.bool_option
@@ -451,7 +457,20 @@ async def runtime_config(
         candidates = list(pool)
 
     avoid_set = {a.strip() for a in (avoid or "").split(",") if a.strip()}
-    picked = await pick_proxy(redis, candidates, strategy=strategy, avoid=avoid_set)
+    try:
+        picked = await select_runtime_proxy(
+            redis,
+            candidates,
+            strategy=strategy,
+            avoid=avoid_set,
+            picker=pick_proxy,
+        )
+    except RuntimeProxySelectionError as exc:
+        raise _http(
+            exc.code,
+            exc.message,
+            exc.status_code,
+        ) from exc
     proxy_out: RuntimeProxyOut | None = None
     if picked is not None:
         if picked.protocol == "ssh":
@@ -753,8 +772,6 @@ async def list_tasks(
 
 
 # ---------- /telegram/images/{id}/binary ----------
-
-
 @router_bot.get("/telegram/images/{image_id}/binary")
 async def get_image_binary(
     image_id: str,

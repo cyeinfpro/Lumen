@@ -18,6 +18,8 @@ export interface TaskItemProps {
   onCancel?: (gen: Generation) => void;
   onRetry?: (gen: Generation) => void;
   onView?: (gen: Generation) => void;
+  busy?: boolean;
+  actionError?: string | null;
 }
 
 export const TaskItem = memo(function TaskItem({
@@ -25,6 +27,8 @@ export const TaskItem = memo(function TaskItem({
   onCancel,
   onRetry,
   onView,
+  busy,
+  actionError,
 }: TaskItemProps) {
   const presentation = deriveTaskItemPresentation(gen);
 
@@ -35,6 +39,8 @@ export const TaskItem = memo(function TaskItem({
       onCancel={onCancel}
       onRetry={onRetry}
       onView={onView}
+      busy={busy}
+      actionError={actionError}
     />
   );
 });
@@ -45,6 +51,8 @@ function TaskItemView({
   onCancel,
   onRetry,
   onView,
+  busy,
+  actionError,
 }: TaskItemProps & { presentation: TaskItemPresentation }) {
   return (
     <div
@@ -60,17 +68,23 @@ function TaskItemView({
       )}
     >
       <TaskThumbnail gen={gen} presentation={presentation} onView={onView} />
-      <TaskSummary presentation={presentation} />
+      <TaskSummary
+        presentation={presentation}
+        busy={busy}
+        actionError={actionError}
+      />
       <TaskControls
         gen={gen}
         presentation={presentation}
         onCancel={onCancel}
         onRetry={onRetry}
+        busy={busy}
       />
       <TaskRecoveryBar
         gen={gen}
         presentation={presentation}
         onRetry={onRetry}
+        busy={busy}
       />
     </div>
   );
@@ -134,7 +148,15 @@ function TaskThumbnail({
   );
 }
 
-function TaskSummary({ presentation }: { presentation: TaskItemPresentation }) {
+function TaskSummary({
+  presentation,
+  busy,
+  actionError,
+}: {
+  presentation: TaskItemPresentation;
+  busy?: boolean;
+  actionError?: string | null;
+}) {
   return (
     <div className="min-w-0 flex-1">
       <p className="truncate type-body-sm font-medium leading-tight text-[var(--fg-0)]">
@@ -160,6 +182,16 @@ function TaskSummary({ presentation }: { presentation: TaskItemPresentation }) {
         )}
         {!presentation.running && presentation.statusText}
       </p>
+      {busy && (
+        <p className="mt-1 type-caption text-[var(--fg-2)]" role="status">
+          正在确认任务状态
+        </p>
+      )}
+      {actionError && (
+        <p className="mt-1 type-caption text-danger" role="alert">
+          {actionError}
+        </p>
+      )}
     </div>
   );
 }
@@ -169,11 +201,13 @@ function TaskControls({
   presentation,
   onCancel,
   onRetry,
+  busy,
 }: {
   gen: Generation;
   presentation: TaskItemPresentation;
   onCancel?: (gen: Generation) => void;
   onRetry?: (gen: Generation) => void;
+  busy?: boolean;
 }) {
   const recoverable = presentation.failed || presentation.canceled;
 
@@ -182,6 +216,7 @@ function TaskControls({
       {presentation.running && onCancel && (
         <IconBtn
           onClick={() => onCancel(gen)}
+          disabled={busy}
           aria-label="取消任务"
           title="取消"
         >
@@ -191,6 +226,7 @@ function TaskControls({
       {recoverable && onRetry && !presentation.showRecoveryActions && (
         <IconBtn
           onClick={() => onRetry(gen)}
+          disabled={busy}
           aria-label="重试任务"
           title="重试"
           className="text-[var(--accent)] hover:bg-[var(--accent)]/15"
@@ -206,10 +242,12 @@ function TaskRecoveryBar({
   gen,
   presentation,
   onRetry,
+  busy,
 }: {
   gen: Generation;
   presentation: TaskItemPresentation;
   onRetry?: (gen: Generation) => void;
+  busy?: boolean;
 }) {
   if (!presentation.showRecoveryActions) return null;
 
@@ -220,6 +258,7 @@ function TaskRecoveryBar({
           key={action.id}
           action={action}
           onRetry={onRetry ? () => onRetry(gen) : undefined}
+          busy={busy}
         />
       ))}
     </div>
@@ -229,16 +268,19 @@ function TaskRecoveryBar({
 function TaskRecoveryAction({
   action,
   onRetry,
+  busy,
 }: {
   action: RecommendedErrorAction;
   onRetry?: () => void;
+  busy?: boolean;
 }) {
   if (action.kind === "retry" && onRetry) {
     return (
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)]"
+        disabled={busy}
+        className="inline-flex min-h-11 items-center rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-1)] px-1.5 type-caption text-[var(--fg-1)] hover:text-[var(--fg-0)] disabled:opacity-50"
       >
         {action.label}
       </button>
@@ -272,7 +314,7 @@ function IconBtn({
       {...rest}
       className={cn(
         "inline-flex h-11 w-11 items-center justify-center rounded-[var(--radius-control)] text-[var(--fg-1)] transition-all hover:bg-[var(--bg-3)] hover:text-[var(--fg-0)] active:scale-[0.95] sm:h-7 sm:w-7",
-        "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60",
+        "outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/60 disabled:pointer-events-none disabled:opacity-50",
         className,
       )}
     >

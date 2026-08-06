@@ -90,7 +90,7 @@ async def _deliver_claimed_event(
         fail_count = await increment_fail_count(redis, event.id, log=log)
         log.warning(
             "outbox delivery failed; leaving unpublished for retry "
-            "event=%s marker=%s kind=%s attempt=%d fail_count=%d err=%s",
+            "event=%s marker=%s kind=%s pg_attempt=%d redis_fail_count=%s err=%s",
             event.id,
             payload.get("task_id") or payload.get("user_id"),
             event.kind,

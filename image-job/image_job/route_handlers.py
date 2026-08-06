@@ -32,8 +32,6 @@ def make_caller(runtime: ImageJobRuntime):
             identity = authenticate(request.headers, runtime.settings)
         except AuthFailure as exc:
             raise _http_failure(exc) from exc
-        if identity.legacy:
-            runtime.legacy_auth_requests_total += 1
         return identity
 
     return caller
@@ -70,7 +68,7 @@ async def create_image_job_handler(
     from fastapi import HTTPException
 
     try:
-        upstream = upstream_credential(request.headers, identity)
+        upstream = upstream_credential(request.headers)
         raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=runtime.settings.max_request_bytes,
@@ -103,7 +101,7 @@ async def get_image_job_handler(
     upstream = None
     if request.headers.get("x-lumen-upstream-authorization"):
         try:
-            upstream = upstream_credential(request.headers, identity)
+            upstream = upstream_credential(request.headers)
         except AuthFailure as exc:
             raise _http_failure(exc) from exc
     try:
@@ -125,7 +123,7 @@ async def delete_image_job_handler(
     upstream = None
     if request.headers.get("x-lumen-upstream-authorization"):
         try:
-            upstream = upstream_credential(request.headers, identity)
+            upstream = upstream_credential(request.headers)
         except AuthFailure as exc:
             raise _http_failure(exc) from exc
     try:

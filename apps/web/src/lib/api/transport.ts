@@ -18,17 +18,24 @@ import {
   type RequestClass,
 } from "./requestBudget";
 import { createRequestSignal } from "./requestSignal";
-import { readResponseData, sessionCookieSecureSignal } from "./response";
+import {
+  applyResponseValidator,
+  readResponseData,
+  readSuccessResponseData,
+  sessionCookieSecureSignal,
+  type ResponseValidator,
+} from "./response";
 import {
   isReplayableBody,
   retryModeFor,
 } from "./retryPolicy";
 
-export type TransportRequest = RequestInit & {
+export type TransportRequest<T = unknown> = RequestInit & {
   requestClass: RequestClass;
   budget?: RequestBudget;
   expectNoContent?: boolean;
   applyCsrf?: boolean;
+  validate?: ResponseValidator<T>;
 };
 
 function isBinaryBody(body: BodyInit | null | undefined): boolean {
@@ -107,22 +114,29 @@ export class ApiTransport {
 
   async request<T>(
     path: string,
-    init: TransportRequest,
+    init: TransportRequest<T>,
   ): Promise<T | undefined> {
-    const { expectNoContent = false, ...requestInit } = init;
+    const {
+      expectNoContent = false,
+      validate,
+      ...requestInit
+    } = init;
     return this.requestRaw<T | undefined>(
       path,
       requestInit,
-      async (response): Promise<T | undefined> =>
-        expectNoContent
-          ? undefined
-          : ((await readResponseData(response)) as T),
+      async (response): Promise<T | undefined> => {
+        if (expectNoContent) return undefined;
+        const data = await readSuccessResponseData(response);
+        return validate
+          ? applyResponseValidator(response, path, data, validate)
+          : (data as T);
+      },
     );
   }
 
   async requestRaw<T>(
     path: string,
-    init: Omit<TransportRequest, "expectNoContent">,
+    init: Omit<TransportRequest<T>, "expectNoContent" | "validate">,
     readSuccess: (response: Response) => Promise<T>,
     readError: (response: Response) => Promise<unknown> = readResponseData,
   ): Promise<T> {

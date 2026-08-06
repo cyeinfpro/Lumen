@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -14,10 +15,11 @@ from typing import Any
 
 from aiogram import Bot
 from aiogram.enums import ChatAction
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import FSInputFile
 from redis import asyncio as aioredis
 
+from .listener_metrics import metrics
 from .tracker import (
     ACTIVE_USER_STREAMS_KEY,
     ACTIVE_USER_STREAM_TTL_SECONDS,
@@ -62,6 +64,7 @@ _BONUS_PRECHECK_RETRIES: tuple[float, ...] = (0.5, 1.0, 2.0)
 # 协议常量：必须和 worker/sse_publish 的 EVENTS_STREAM_PREFIX 一致
 _STREAM_PREFIX = "events:user:"
 _CURSOR_PREFIX = "tg:bot:cursor:"
+_QUARANTINE_MAXLEN = 10_000
 
 # 新 Bot user stream 被发现的最大延迟。
 _DISCOVERY_INTERVAL_SEC = 10.0
@@ -93,6 +96,28 @@ def _stream_key(user_id: str) -> str:
 
 def _cursor_key(user_id: str) -> str:
     return f"{_CURSOR_PREFIX}{user_id}"
+
+
+def _listener_slot(user_id: str) -> str:
+    return hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+
+
+def _cursor_key_v2(user_id: str) -> str:
+    return f"tg:bot:{{{_listener_slot(user_id)}}}:cursor"
+
+
+def _quarantine_stream(user_id: str) -> str:
+    return f"tg:bot:{{{_listener_slot(user_id)}}}:delivery-quarantine"
+
+
+def _quarantined_key(user_id: str, gen_id: str) -> str:
+    suffix = hashlib.sha256((gen_id or "invalid").encode("utf-8")).hexdigest()[:32]
+    return f"tg:bot:{{{_listener_slot(user_id)}}}:quarantined:{suffix}"
+
+
+def _dispatch_attempt_key(user_id: str, entry_id: str) -> str:
+    suffix = hashlib.sha256(entry_id.encode("utf-8")).hexdigest()[:32]
+    return f"tg:bot:{{{_listener_slot(user_id)}}}:replay:{suffix}"
 
 
 def _fallback_stream_cursor_key(user_id: str) -> str:
@@ -192,17 +217,16 @@ async def _send_document_with_backoff(
     filename: str,
     caption: str | None,
     reply_markup: Any,
-) -> None:
+) -> Any:
     for attempt in range(3):
         await _wait_chat_send_slot(chat_id, runtime=runtime)
         try:
-            await bot.send_document(
+            return await bot.send_document(
                 chat_id=chat_id,
                 document=FSInputFile(str(path), filename=filename),
                 caption=caption,
                 reply_markup=reply_markup,
             )
-            return
         except TelegramRetryAfter as exc:
             wait_for = float(getattr(exc, "retry_after", 1) or 1) + 0.25
             logger.warning(
@@ -212,7 +236,11 @@ async def _send_document_with_backoff(
                 attempt + 1,
             )
             await asyncio.sleep(wait_for)
-    raise RuntimeError(f"send_document exhausted retry-after attempts chat={chat_id}")
+        except TelegramBadRequest as exc:
+            raise TelegramDefinitiveReject(str(exc)) from exc
+    raise TelegramDefinitiveReject(
+        f"send_document exhausted retry-after attempts chat={chat_id}"
+    )
 
 
 async def _load_active_user_ids(
@@ -378,7 +406,9 @@ async def _recover_active_user_ids(
 
 
 async def _load_cursor(redis: aioredis.Redis, user_id: str) -> str:
-    raw = await redis.get(_cursor_key(user_id))
+    raw = await redis.get(_cursor_key_v2(user_id))
+    if raw is None:
+        raw = await redis.get(_cursor_key(user_id))
     if raw is None:
         return _initial_cursor()
     return _decode(raw)
@@ -386,10 +416,79 @@ async def _load_cursor(redis: aioredis.Redis, user_id: str) -> str:
 
 async def _save_cursor(redis: aioredis.Redis, user_id: str, sse_id: str) -> None:
     await redis.set(
-        _cursor_key(user_id),
+        _cursor_key_v2(user_id),
         sse_id,
         ex=_CURSOR_TTL_SECONDS,
     )
+
+
+_QUARANTINE_AND_ADVANCE_LUA = """
+local quarantine_id = redis.call(
+  'XADD', KEYS[1], 'MAXLEN', '~', tonumber(ARGV[1]), '*',
+  'source_stream', ARGV[2],
+  'source_id', ARGV[3],
+  'user_id', ARGV[4],
+  'event', ARGV[5],
+  'reason', ARGV[6],
+  'attempts', ARGV[7],
+  'payload', ARGV[8],
+  'quarantine_id', ARGV[9]
+)
+redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[10]))
+redis.call('SET', KEYS[3], ARGV[3], 'EX', tonumber(ARGV[10]))
+redis.call('DEL', KEYS[4])
+return quarantine_id
+"""
+
+
+async def quarantine_and_advance(
+    redis: aioredis.Redis,
+    *,
+    source_stream: str,
+    entry_id: str,
+    user_id: str,
+    event: str,
+    reason: str,
+    metric_reason: str,
+    attempts: int,
+    payload_raw: str,
+    generation_id: str,
+    quarantine_id: str,
+) -> str:
+    result = await redis.eval(
+        _QUARANTINE_AND_ADVANCE_LUA,
+        4,
+        _quarantine_stream(user_id),
+        _cursor_key_v2(user_id),
+        _quarantined_key(user_id, generation_id),
+        _dispatch_attempt_key(user_id, entry_id),
+        str(_QUARANTINE_MAXLEN),
+        source_stream,
+        entry_id,
+        user_id,
+        event,
+        reason[:500],
+        str(attempts),
+        payload_raw,
+        quarantine_id,
+        str(_CURSOR_TTL_SECONDS),
+    )
+    stream_id = _decode(result)
+    if not stream_id:
+        raise RuntimeError("telegram quarantine transaction was not committed")
+    metrics.quarantine_total.labels(
+        event=event or "schema_error",
+        reason=metric_reason,
+    ).inc()
+    try:
+        metrics.quarantine_depth.set(await redis.xlen(_quarantine_stream(user_id)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "listener: quarantine depth lookup failed uid=%s err=%r",
+            user_id,
+            exc,
+        )
+    return stream_id
 
 
 _RECONNECT_BACKOFF_MAX_SEC = 60.0
@@ -402,3 +501,7 @@ _RECONNECT_ALERT_THRESHOLD = 50
 _DISPATCH_MAX_ATTEMPTS = 5
 # attempt 计数 key TTL：足够覆盖单 entry 重试窗口又不留长期垃圾。
 _DISPATCH_ATTEMPT_TTL_SEC = 30 * 60
+
+
+class TelegramDefinitiveReject(RuntimeError):
+    """Telegram explicitly rejected a document before accepting delivery."""

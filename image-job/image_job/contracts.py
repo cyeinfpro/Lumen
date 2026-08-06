@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 
@@ -25,6 +26,35 @@ DEFAULT_IMAGE_OUTPUT_FORMAT = "jpeg"
 DEFAULT_IMAGE_OUTPUT_COMPRESSION = 0
 
 
+class DispatchPhase(StrEnum):
+    NOT_STARTED = "not_started"
+    STARTED = "started"
+
+
+@dataclass(slots=True)
+class UpstreamDispatchReceipt:
+    phase: DispatchPhase = DispatchPhase.NOT_STARTED
+    transport_event: str | None = None
+    upstream_idempotency_key_hash: str | None = None
+
+    def mark_started(self, event: str) -> None:
+        if self.phase is DispatchPhase.NOT_STARTED:
+            self.phase = DispatchPhase.STARTED
+            self.transport_event = event
+
+    @property
+    def started(self) -> bool:
+        return self.phase is DispatchPhase.STARTED
+
+
+class JobProcessOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNCERTAIN = "uncertain"
+    SKIPPED_NOT_QUEUED = "skipped_not_queued"
+    SKIPPED_FENCE_LOST = "skipped_fence_lost"
+
+
 class JobFailure(Exception):
     def __init__(
         self,
@@ -35,6 +65,7 @@ class JobFailure(Exception):
         retryable: bool = False,
         retry_requires_idempotency: bool = False,
         outcome_uncertain: bool = False,
+        cost_proven_absent: bool = False,
         error_class: str = ERROR_CLASS_INTERNAL,
     ) -> None:
         super().__init__(error)
@@ -44,8 +75,20 @@ class JobFailure(Exception):
         self.retryable = retryable
         self.retry_requires_idempotency = retry_requires_idempotency
         self.outcome_uncertain = outcome_uncertain
+        self.cost_proven_absent = cost_proven_absent
         self.retry_suppressed = False
         self.error_class = error_class
+
+
+class PreDispatchFailure(JobFailure):
+    """Local request preparation failed before transport started writing."""
+
+
+class ArtifactCorrupt(RuntimeError):
+    def __init__(self, job_id: str, reason: str) -> None:
+        super().__init__(f"artifact corrupt job={job_id}: {reason}")
+        self.job_id = job_id
+        self.reason = reason
 
 
 @dataclass

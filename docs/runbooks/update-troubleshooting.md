@@ -5,6 +5,30 @@
 unit 和 runner 日志路径渲染到实际目录；先用
 `systemctl cat lumen-update.path lumen-update-runner.service` 核对后再替换命令中的路径。
 
+## mode 或 channel 配置被拒绝
+
+- `LUMEN_UPDATE_MODE` 未设置时默认 `fast`；显式空值、拼写错误或其他未知值返回 `64`。
+- 合法 mode 为 `fast`、`standard`、`safe`、`full`；后两者等价于 `standard`。
+- `pinned` 必须有完整 `vMAJOR.MINOR.PATCH` 当前 tag。
+- `minor` 必须有 `vMAJOR.MINOR[.PATCH]` 锚点；`major` 必须有 `vMAJOR[.MINOR[.PATCH]]` 锚点。
+- 缺失或非法锚点不会回退 `main`。只有显式 `channel=main` 才使用 rolling main。
+
+修正 `/opt/lumen/shared/.env` 后重试；不要用空字符串试图恢复默认。
+
+## 生产镜像引用被拒绝
+
+生产 `docker-compose.yml` 只接受完整
+`name@sha256:<64 lowercase hex>`。正式 release 的
+`release-manifest.json` 同时声明四个应用镜像以及 Python、Postgres、Redis
+依赖镜像。手工部署可检查：
+
+```bash
+docker compose --env-file /opt/lumen/shared/.env config --images \
+  | python3 /opt/lumen/current/scripts/check_immutable_images.py
+```
+
+出现 tag、`latest`、`main`、短 digest 或空输出都必须先修复，不能继续 `up`。
+
 ## has_update=false 但我知道有新版
 
 先确认 channel：
@@ -53,6 +77,21 @@ rm -f /opt/lumendata/backup/.update.running
 systemctl enable --now lumen-update.path
 systemctl status lumen-update.path
 ```
+
+## 定时备份反复显示 maintenance lock
+
+锁冲突时 `backup.sh` 返回 `75`，`lumen-backup.service` 每 60 秒重试，并且
+`StartLimitIntervalSec=0` 不会在五次后静默停掉。检查：
+
+```bash
+systemctl status lumen-backup.service
+tail -n 120 /opt/lumendata/backup/.backup.log
+cat /opt/lumendata/backup/.backup.last-success.json
+```
+
+只有新的 `.backup-pair.<timestamp>.json` 和同步更新的
+`.backup.last-success.json` 才证明补跑成功。不要把
+`DEFERRED: maintenance lock held` 当成一次成功备份。
 
 ## Idempotency 命中看不到新触发
 

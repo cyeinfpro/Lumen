@@ -21,12 +21,18 @@ if str(IMAGE_JOB_DIR) not in sys.path:
     sys.path.insert(0, str(IMAGE_JOB_DIR))
 
 from image_job.app_factory import create_app  # noqa: E402
+from image_job.application.auth import (  # noqa: E402
+    AuthFailure,
+    authenticate,
+    upstream_credential,
+)
 from image_job.application.queue_supervisor import QueueSupervisor  # noqa: E402
 from image_job.config import (  # noqa: E402
     ImageJobSettings,
     ImageJobTimeouts,
     SecretText,
 )
+from image_job.contracts import JobProcessOutcome, UpstreamDispatchReceipt  # noqa: E402
 from image_job.domain.identity import CallerIdentity, UpstreamCredential  # noqa: E402
 from image_job.runtime import create_runtime  # noqa: E402
 
@@ -42,7 +48,6 @@ def _settings(tmp_path: Path) -> ImageJobSettings:
         queue_max=2,
         concurrency=1,
         sidecar_token=SecretText("s" * 32),
-        allow_legacy_bearer=False,
         upstream_base_url="http://127.0.0.1:8081",
         public_base_url="https://images.example.test",
         timeouts=ImageJobTimeouts(graceful_shutdown_s=0),
@@ -82,6 +87,207 @@ def test_settings_hide_secrets_and_reject_missing_identity(tmp_path: Path) -> No
     )
     with pytest.raises(RuntimeError, match="IMAGE_JOB_SIDECAR_TOKEN is required"):
         invalid.validate()
+
+
+@pytest.mark.parametrize("value", ["0", "1", "true"])
+def test_removed_legacy_auth_config_is_rejected(value: str) -> None:
+    with pytest.raises(RuntimeError, match="no longer supported"):
+        ImageJobSettings.from_env(
+            {"IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH": value}
+        )
+
+
+def test_authentication_requires_trusted_sidecar_identity(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with pytest.raises(AuthFailure) as arbitrary:
+        authenticate(
+            {"authorization": "Bearer sk-arbitrary-provider-key"},
+            settings,
+        )
+    assert arbitrary.value.status_code == 401
+
+    unconfigured = replace(settings, sidecar_token=SecretText(""))
+    with pytest.raises(AuthFailure) as missing:
+        authenticate(
+            {"authorization": "Bearer sk-arbitrary-provider-key"},
+            unconfigured,
+        )
+    assert missing.value.status_code == 503
+
+    trusted = authenticate(
+        {"authorization": f"Bearer {'s' * 32}"},
+        settings,
+    )
+    assert trusted.service_id == "lumen-worker"
+    assert trusted.authorization == f"Bearer {'s' * 32}"
+
+    with pytest.raises(AuthFailure) as upstream_missing:
+        upstream_credential({})
+    assert upstream_missing.value.status_code == 400
+    assert (
+        upstream_credential(
+            {"x-lumen-upstream-authorization": "Bearer sk-upstream"}
+        ).authorization
+        == "Bearer sk-upstream"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trusted_identity_can_read_pre_upgrade_job_only_with_upstream_key(
+    tmp_path: Path,
+) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.repository.initialize()
+    await runtime.jobs.persistence.insert_job(
+        "job-pre-upgrade",
+        {
+            "request_type": "generations",
+            "endpoint": "/v1/images/generations",
+            "body": {"prompt": "cat"},
+            "retention_days": 1,
+        },
+        "Bearer sk-old-provider",
+    )
+    app = create_app(runtime=runtime)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        arbitrary = await client.get(
+            "/v1/image-jobs/job-pre-upgrade",
+            headers={
+                "Authorization": "Bearer sk-old-provider",
+                "X-Lumen-Upstream-Authorization": "Bearer sk-old-provider",
+            },
+        )
+        missing_upstream = await client.get(
+            "/v1/image-jobs/job-pre-upgrade",
+            headers={"Authorization": f"Bearer {'s' * 32}"},
+        )
+        compatible = await client.get(
+            "/v1/image-jobs/job-pre-upgrade",
+            headers={
+                "Authorization": f"Bearer {'s' * 32}",
+                "X-Lumen-Upstream-Authorization": "Bearer sk-old-provider",
+            },
+        )
+
+    assert arbitrary.status_code == 401
+    assert missing_upstream.status_code == 403
+    assert compatible.status_code == 200
+    assert compatible.json()["job_id"] == "job-pre-upgrade"
+
+
+def _job_headers(*, idempotency_key: str | None = None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {'s' * 32}",
+        "X-Lumen-Upstream-Authorization": "Bearer sk-upstream",
+        "Content-Type": "application/json",
+    }
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
+def _job_payload(prompt: str = "cat") -> dict[str, object]:
+    return {
+        "endpoint": "/v1/images/generations",
+        "body": {"prompt": prompt},
+    }
+
+
+@pytest.mark.asyncio
+async def test_paid_job_requires_valid_idempotency_key(tmp_path: Path) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.repository.initialize()
+    app = create_app(runtime=runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        missing = await client.post(
+            "/v1/image-jobs",
+            headers=_job_headers(),
+            json=_job_payload(),
+        )
+        invalid = await client.post(
+            "/v1/image-jobs",
+            headers=_job_headers(idempotency_key="bad key"),
+            json=_job_payload(),
+        )
+
+    count = await runtime.repository.one("SELECT COUNT(*) AS count FROM jobs")
+    assert missing.status_code == 428
+    assert invalid.status_code == 400
+    assert count is not None
+    assert count["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_paid_job_idempotency_replays_and_conflicts(tmp_path: Path) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.repository.initialize()
+    app = create_app(runtime=runtime)
+    transport = httpx.ASGITransport(app=app)
+    headers = _job_headers(idempotency_key="stable-job-1")
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        first = await client.post(
+            "/v1/image-jobs",
+            headers=headers,
+            json=_job_payload("cat"),
+        )
+        second = await client.post(
+            "/v1/image-jobs",
+            headers=headers,
+            json=_job_payload("cat"),
+        )
+        conflict = await client.post(
+            "/v1/image-jobs",
+            headers=headers,
+            json=_job_payload("dog"),
+        )
+
+    count = await runtime.repository.one("SELECT COUNT(*) AS count FROM jobs")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["job_id"] == second.json()["job_id"]
+    assert conflict.status_code == 409
+    assert count is not None
+    assert count["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_key_creates_one_paid_job(tmp_path: Path) -> None:
+    runtime = create_runtime(_settings(tmp_path))
+    await runtime.repository.initialize()
+    app = create_app(runtime=runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        first, second = await asyncio.gather(
+            *(
+                client.post(
+                    "/v1/image-jobs",
+                    headers=_job_headers(idempotency_key="concurrent-stable-1"),
+                    json=_job_payload(),
+                )
+                for _ in range(2)
+            )
+        )
+
+    rows = await runtime.repository.all("SELECT job_id FROM jobs")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["job_id"] == second.json()["job_id"]
+    assert len(rows) == 1
 
 
 def test_responses_stream_limit_cannot_be_lower_than_single_image_limit() -> None:
@@ -239,7 +445,7 @@ def test_sqlite_readiness_connection_opens_database_in_ro_mode(
 async def test_queue_supervisor_replaces_crashed_worker() -> None:
     crashed = asyncio.Event()
 
-    async def processor(_job_id: str) -> None:
+    async def processor(_job_id: str) -> JobProcessOutcome:
         crashed.set()
         raise RuntimeError("boom")
 
@@ -311,10 +517,16 @@ async def test_worker_crash_after_dispatch_marks_job_uncertain(tmp_path: Path) -
     runtime = create_runtime(_settings(tmp_path))
     await _seed_queued_job(runtime, "job-crash-after")
 
-    async def crashing_call(_row):
+    async def dispatched_crashing_call(
+        _row,
+        *,
+        dispatch: UpstreamDispatchReceipt,
+        **_kwargs,
+    ):
+        dispatch.mark_started("test.send_request_headers.started")
         raise RuntimeError("boom after dispatch")
 
-    runtime.jobs.upstream.call = crashing_call
+    runtime.jobs.upstream.call = dispatched_crashing_call
 
     await runtime.jobs.process("job-crash-after")
 
@@ -332,7 +544,13 @@ async def test_persistence_crash_after_success_marks_job_uncertain(
     runtime = create_runtime(_settings(tmp_path))
     await _seed_queued_job(runtime, "job-persist-crash")
 
-    async def succeeding_call(_row):
+    async def succeeding_call(
+        _row,
+        *,
+        dispatch: UpstreamDispatchReceipt,
+        **_kwargs,
+    ):
+        dispatch.mark_started("test.send_request_headers.started")
         return 200, [{"url": "https://images.example.test/a.png"}]
 
     runtime.jobs.upstream.call = succeeding_call
@@ -391,7 +609,7 @@ async def test_submit_reconciles_row_persisted_during_shutdown(
             "body": {"prompt": "cat"},
             "retention_days": 1,
         },
-        idempotency_key=None,
+        idempotency_key="test-submit-reconcile",
     )
 
     assert result["status"] == "queued"
@@ -507,7 +725,11 @@ async def test_request_id_is_echoed_persisted_and_generated(tmp_path: Path) -> N
             generated = await client.get("/livez")
             created = await client.post(
                 "/v1/image-jobs",
-                headers={**headers, "X-Request-Id": "req-from-worker"},
+                headers={
+                    **headers,
+                    "X-Request-Id": "req-from-worker",
+                    "Idempotency-Key": "request-id-persistence",
+                },
                 json={
                     "endpoint": "/v1/images/generations",
                     "body": {"prompt": "cat"},
@@ -527,7 +749,13 @@ async def test_metrics_expose_business_outcomes(tmp_path: Path) -> None:
     runtime = create_runtime(_settings(tmp_path))
     await _seed_queued_job(runtime, "job-metrics")
 
-    async def crashing_call(_row):
+    async def crashing_call(
+        _row,
+        *,
+        dispatch: UpstreamDispatchReceipt,
+        **_kwargs,
+    ):
+        dispatch.mark_started("test.send_request_headers.started")
         raise RuntimeError("boom after dispatch")
 
     runtime.jobs.upstream.call = crashing_call

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 import time
 import uuid
@@ -29,9 +28,7 @@ from lumen_core.byok import (
 )
 from lumen_core.constants import GenerationErrorCode as EC
 from lumen_core.providers import (
-    DEFAULT_LEGACY_PROVIDER_BASE_URL,
     ProviderProxyDefinition,
-    build_effective_provider_config,
     endpoint_kind_allowed,
 )
 from lumen_core.providers_parts.selection import (
@@ -39,7 +36,6 @@ from lumen_core.providers_parts.selection import (
     route_to_purpose,
 )
 
-from .config import settings as _cfg
 from .provider_runtime.contracts import (
     EndpointStat,  # noqa: F401 - compatibility export
     ImageProbeRequest,
@@ -55,6 +51,10 @@ from .provider_runtime.probe_runtime import (
 from .provider_runtime.probes import ProviderProbeMixin
 from .provider_runtime.upstream_services import ImageUpstreamRuntime
 from .provider_pool_parts import image_selection as _image_selection
+from .provider_pool_parts.config_loading import (
+    ProviderConfigLoadingMixin,
+    ProviderLoad,  # noqa: F401 - compatibility export for tests and callers
+)
 from .provider_pool_parts.proxy_lifecycle import ProviderProxyLifecycle
 from .validation import validate_provider_base_url
 
@@ -75,7 +75,6 @@ _CB_COOLDOWN_BASE_S = 30.0
 _CB_COOLDOWN_MAX_S = 300.0
 _PROBE_TIMEOUT_S = 15.0
 _PROBE_MAX_CONCURRENCY = 8
-_CONFIG_TTL_S = 5.0
 
 # image route 独立熔断（多账号场景下 image 失败 3 次内只熔该账号，不影响 text）
 _IMAGE_CB_FAILURE_THRESHOLD = 3
@@ -283,6 +282,7 @@ async def _validate_provider_base_url(raw_base: str) -> str:
 # ProviderPool
 # ---------------------------------------------------------------------------
 class ProviderPool(
+    ProviderConfigLoadingMixin,
     _image_selection.ProviderPoolImageSelectionMixin,
     ProviderProbeMixin,
 ):
@@ -298,6 +298,9 @@ class ProviderPool(
         self._proxies: dict[str, ProviderProxyDefinition] = {}
         self._health: dict[str, ProviderHealth] = {}
         self._config_loaded_at: float = 0.0
+        self._config_last_good_at: float | None = None
+        self._config_error: str | None = None
+        self._config_source = "uninitialized"
         self._config_lock = asyncio.Lock()
         self._stats_lock = threading.Lock()
         self._rr_state: dict[int, dict[str, int]] = {}
@@ -341,138 +344,8 @@ class ProviderPool(
             resolved_provider=_resolved_image_provider,
         )
 
-    # ---- 配置加载 --------------------------------------------------------
-
     async def _validate_provider_base_url(self, raw_base: str) -> str:
         return await _validate_provider_base_url(raw_base)
-
-    async def _load_provider_config(
-        self,
-    ) -> tuple[list[ProviderConfig], dict[str, ProviderProxyDefinition]]:
-        from .runtime_settings import resolve
-
-        raw = await resolve("providers")
-        if not raw:
-            raw = os.environ.get("PROVIDERS") or _cfg.providers
-        provider_defs, proxy_defs, errors = build_effective_provider_config(
-            raw_providers=raw,
-            legacy_base_url=(
-                os.environ.get("UPSTREAM_BASE_URL") or DEFAULT_LEGACY_PROVIDER_BASE_URL
-            ),
-            legacy_api_key=os.environ.get("UPSTREAM_API_KEY"),
-        )
-        for err in errors:
-            logger.warning("%s", err)
-        return [
-            ProviderConfig(
-                name=p.name,
-                base_url=p.base_url,
-                api_key=p.api_key,
-                priority=p.priority,
-                weight=p.weight,
-                enabled=p.enabled,
-                purposes=p.purposes,
-                proxy_name=p.proxy_name,
-                proxy=p.proxy,
-                image_rate_limit=p.image_rate_limit,
-                image_daily_quota=p.image_daily_quota,
-                image_jobs_enabled=p.image_jobs_enabled,
-                image_jobs_endpoint=p.image_jobs_endpoint,
-                image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
-                image_jobs_base_url=p.image_jobs_base_url,
-                image_edit_input_transport=p.image_edit_input_transport,
-                image_concurrency=p.image_concurrency,
-                responses_supported=getattr(p, "responses_supported", None),
-                image_generations_supported=getattr(
-                    p, "image_generations_supported", None
-                ),
-                image_responses_supported=getattr(p, "image_responses_supported", None),
-            )
-            for p in provider_defs
-        ], {p.name: p for p in proxy_defs}
-
-    async def _load_config(self) -> list[ProviderConfig]:
-        providers, _proxies = await self._load_provider_config()
-        return providers
-
-    async def _maybe_reload(self) -> None:
-        now = time.monotonic()
-        if now - self._config_loaded_at < _CONFIG_TTL_S:
-            return
-        async with self._config_lock:
-            if now - self._config_loaded_at < _CONFIG_TTL_S:
-                return
-            new_providers, new_proxies = await self._load_provider_config()
-            validated: list[ProviderConfig] = []
-            for p in new_providers:
-                try:
-                    url = await self._validate_provider_base_url(p.base_url)
-                    validated.append(
-                        ProviderConfig(
-                            name=p.name,
-                            base_url=url,
-                            api_key=p.api_key,
-                            priority=p.priority,
-                            weight=p.weight,
-                            enabled=p.enabled,
-                            purposes=p.purposes,
-                            proxy_name=p.proxy_name,
-                            proxy=p.proxy,
-                            image_rate_limit=p.image_rate_limit,
-                            image_daily_quota=p.image_daily_quota,
-                            image_jobs_enabled=p.image_jobs_enabled,
-                            image_jobs_endpoint=p.image_jobs_endpoint,
-                            image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
-                            image_jobs_base_url=p.image_jobs_base_url,
-                            image_edit_input_transport=p.image_edit_input_transport,
-                            image_concurrency=p.image_concurrency,
-                            responses_supported=p.responses_supported,
-                            image_generations_supported=p.image_generations_supported,
-                            image_responses_supported=p.image_responses_supported,
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "provider %s base URL validation failed, skipping: %s",
-                        p.name,
-                        exc,
-                    )
-            if not validated:
-                if self._providers:
-                    logger.error(
-                        "all providers failed validation, keeping previous config"
-                    )
-                    self._config_loaded_at = now
-                    return
-                raise UpstreamError(
-                    "no valid upstream providers",
-                    error_code=EC.NO_PROVIDERS.value,
-                    status_code=503,
-                )
-
-            old_names = set(self._health.keys())
-            new_names = {p.name for p in validated}
-            for removed in old_names - new_names:
-                del self._health[removed]
-            for name in new_names - old_names:
-                self._health[name] = ProviderHealth()
-            for prio, state in list(self._rr_state.items()):
-                for name in list(state.keys()):
-                    if name not in new_names:
-                        del state[name]
-                if not state:
-                    del self._rr_state[prio]
-
-            changed = [p.name for p in self._providers] != [p.name for p in validated]
-            self._providers = validated
-            self._proxies = new_proxies
-            self._config_loaded_at = now
-            if changed:
-                desc = ", ".join(
-                    f"{p.name}(p={p.priority},w={p.weight},proxy={p.proxy_name or 'none'})"
-                    for p in validated
-                )
-                logger.info("provider_pool reloaded: providers=[%s]", desc)
 
     # ---- 选择算法 --------------------------------------------------------
 

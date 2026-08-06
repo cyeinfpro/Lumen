@@ -578,6 +578,18 @@ def _prepare_restore(
             "LUMEN_SERVICE_STATE_INTERVAL_SECONDS": "0",
             "LUMEN_SERVICE_QUIESCE_ATTEMPTS": "4",
             "LUMEN_SERVICE_START_ATTEMPTS": "4",
+            "LUMEN_API_IMAGE_REF": (
+                f"example.invalid/lumen-api@sha256:{'1' * 64}"
+            ),
+            "LUMEN_WORKER_IMAGE_REF": (
+                f"example.invalid/lumen-worker@sha256:{'2' * 64}"
+            ),
+            "LUMEN_WEB_IMAGE_REF": (
+                f"example.invalid/lumen-web@sha256:{'3' * 64}"
+            ),
+            "LUMEN_TGBOT_IMAGE_REF": (
+                f"example.invalid/lumen-tgbot@sha256:{'4' * 64}"
+            ),
         }
     )
     if env_out is not None:

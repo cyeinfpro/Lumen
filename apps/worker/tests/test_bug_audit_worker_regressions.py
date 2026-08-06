@@ -2578,20 +2578,20 @@ async def test_runtime_settings_db_read_is_bounded_by_timeout(
     monkeypatch.setattr(worker_runtime_settings, "_DB_TIMEOUT_S", 0.05)
     worker_runtime_settings.invalidate_cache()
 
-    value = await asyncio.wait_for(
-        worker_runtime_settings._read_db("upstream.global_concurrency"),
+    resolution = await asyncio.wait_for(
+        worker_runtime_settings._read_db_state("upstream.global_concurrency"),
         5.0,
     )
 
     assert started.is_set()
-    assert value is None
+    assert resolution.state == "unavailable"
 
 
 @pytest.mark.asyncio
-async def test_runtime_settings_falls_back_to_env_when_db_times_out(
+async def test_runtime_settings_does_not_fall_back_when_db_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """超时按「DB 无值」处理：行为必须和该 key 从未写入 DB 时完全一致。"""
+    """DB 状态未知时不得伪装 missing 并回退到环境配置。"""
     started = asyncio.Event()
     monkeypatch.setattr(
         worker_runtime_settings,
@@ -2603,14 +2603,55 @@ async def test_runtime_settings_falls_back_to_env_when_db_times_out(
     worker_runtime_settings.invalidate_cache()
 
     try:
-        resolved = await asyncio.wait_for(
-            worker_runtime_settings.resolve_int("upstream.global_concurrency", 4),
+        resolution = await asyncio.wait_for(
+            worker_runtime_settings.resolve_state("upstream.global_concurrency"),
             5.0,
         )
+        with pytest.raises(worker_runtime_settings.SettingUnavailable):
+            await worker_runtime_settings.resolve_int(
+                "upstream.global_concurrency",
+                4,
+            )
     finally:
         worker_runtime_settings.invalidate_cache()
 
-    assert resolved == 7
+    assert resolution.state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_generation_provider_attach_requires_worker_redis() -> None:
+    from app import account_limiter
+
+    state = SimpleNamespace(redis=None)
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await generation_runner._attach_provider_pool(state)
+
+
+@pytest.mark.asyncio
+async def test_generation_provider_attach_rejects_unbound_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import account_limiter, provider_pool
+
+    redis = object()
+
+    class RejectingPool:
+        def attach_redis(self, _redis: object) -> None:
+            return None
+
+        def get_redis(self) -> None:
+            return None
+
+    async def get_pool() -> RejectingPool:
+        return RejectingPool()
+
+    monkeypatch.setattr(provider_pool, "get_pool", get_pool)
+
+    with pytest.raises(account_limiter.AccountLimiterUnavailable):
+        await generation_runner._attach_provider_pool(
+            SimpleNamespace(redis=redis)
+        )
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from app.upstream_parts.image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
 )
+from app.upstream_parts.image_jobs import image_job_idempotency_key
 from app.upstream_parts.generated_payload import InlineImageBytes
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
 from lumen_core.upstream_billing import UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
@@ -635,7 +636,7 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
 
 
 @pytest.mark.asyncio
-async def test_image_job_submit_uses_payload_idempotency_key(
+async def test_image_job_submit_uses_attempt_scoped_idempotency_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, Any] = {}
@@ -672,10 +673,12 @@ async def test_image_job_submit_uses_payload_idempotency_key(
             request_context=ImageRequestContext.create(trace_id="trace-not-stable"),
         )
 
-    expected = TEST_UPSTREAM_SERVICES.infrastructure.hashlib.sha256(
-        b"generation:stable"
-    ).hexdigest()
-    assert seen["headers"]["Idempotency-Key"] == f"lumen-image-job-{expected[:32]}"
+    expected = image_job_idempotency_key(
+        context=ImageRequestContext.create(trace_id="trace-not-stable"),
+        provider_id="unknown",
+        endpoint="/v1/images/generations",
+    )
+    assert seen["headers"]["Idempotency-Key"] == expected
     assert seen["headers"]["x-trace-id"] == "trace-not-stable"
     assert (
         seen["headers"]["authorization"]

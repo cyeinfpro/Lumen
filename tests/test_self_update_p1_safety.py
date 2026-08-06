@@ -64,7 +64,8 @@ def write_remote_scripts(remote: Path) -> tuple[str, ...]:
 def install_copying_curl(fakebin: Path, *, serialized: bool = False) -> None:
     fakebin.mkdir(parents=True, exist_ok=True)
     curl = fakebin / "curl"
-    guard = """
+    guard = (
+        """
 guard="${TEST_CURL_GUARD:?}"
 if ! mkdir "${guard}" 2>/dev/null; then
     : > "${TEST_CURL_OVERLAP:?}"
@@ -72,7 +73,10 @@ if ! mkdir "${guard}" 2>/dev/null; then
 fi
 sleep 0.05
 trap 'rmdir "${guard}" 2>/dev/null || true' EXIT
-""" if serialized else ""
+"""
+        if serialized
+        else ""
+    )
     curl.write_text(
         f"""#!/usr/bin/env bash
 set -eu
@@ -126,12 +130,13 @@ def invoke_self_update(
     args = " ".join(shlex.quote(item) for item in files)
     return run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LIB))}
+        rc=0
         lumen_self_update_scripts \
-            {shlex.quote(str(target))} {COMMIT} {ttl} {args}
-        printf 'result=%s changed=%s\\n' \
-            "$LUMEN_SELF_UPDATE_RESULT" "$LUMEN_SELF_UPDATE_CHANGED"
+            {shlex.quote(str(target))} {COMMIT} {ttl} {args} || rc=$?
+        printf 'rc=%s result=%s changed=%s\\n' \
+            "$rc" "$LUMEN_SELF_UPDATE_RESULT" "$LUMEN_SELF_UPDATE_CHANGED"
         """,
         env=env,
     )
@@ -159,14 +164,11 @@ def test_integrity_manifest_drives_ttl_repair_and_rejects_symlink(
     ]
     assert {record["path"] for record in records} == set(files)
     assert all(
-        set(record) == {"commit", "path", "type", "mode", "hash"}
-        for record in records
+        set(record) == {"commit", "path", "type", "mode", "hash"} for record in records
     )
     assert all(record["commit"] == COMMIT for record in records)
     assert all(record["type"] == "file" for record in records)
-    assert {
-        record["path"]: record["mode"] for record in records
-    } == {
+    assert {record["path"]: record["mode"] for record in records} == {
         "backup.sh": "0755",
         "lib/backup_journal.sh": "0644",
         "restore.sh": "0755",
@@ -186,9 +188,7 @@ def test_integrity_manifest_drives_ttl_repair_and_rejects_symlink(
     repaired_delete = invoke_self_update(target, files, env=env, ttl=3600)
     assert repaired_delete.returncode == 0, repaired_delete.stderr
     assert "restore.sh" in repaired_delete.stdout
-    assert (target / "restore.sh").read_bytes() == (
-        remote / "restore.sh"
-    ).read_bytes()
+    assert (target / "restore.sh").read_bytes() == (remote / "restore.sh").read_bytes()
 
     (target / "backup.sh").chmod(0o600)
     repaired_mode = invoke_self_update(target, files, env=env, ttl=3600)
@@ -200,6 +200,7 @@ def test_integrity_manifest_drives_ttl_repair_and_rejects_symlink(
     (target / "backup.sh").symlink_to(remote / "backup.sh")
     rejected_symlink = invoke_self_update(target, files, env=env, ttl=3600)
     assert rejected_symlink.returncode == 0
+    assert "rc=78" in rejected_symlink.stdout
     assert "result=failed" in rejected_symlink.stdout
     assert "目标不是普通文件" in rejected_symlink.stderr
     assert (target / "backup.sh").is_symlink()
@@ -341,11 +342,7 @@ def test_expected_scripts_commit_survives_reexec_and_resume(
     assert installed.returncode == 0, installed.stderr + installed.stdout
 
     operation_id = "update-immutable-commit"
-    state_path = (
-        control_root
-        / ".lumen-update-state"
-        / f"scripts-{operation_id}.commit"
-    )
+    state_path = control_root / ".lumen-update-state" / f"scripts-{operation_id}.commit"
     first_hop = run_bash(
         f"""
         set -euo pipefail
@@ -471,30 +468,86 @@ def test_self_update_refuses_older_release_tag_before_download(
     env["LUMEN_SELF_UPDATE_MANIFEST_FILE"] = str(old_manifest)
     rejected = run_bash(
         f"""
-        set -euo pipefail
+        set -uo pipefail
         . {shlex.quote(str(LIB))}
+        rc=0
         lumen_self_update_scripts \
-            {shlex.quote(str(target))} v1.9.9 0 {args}
-        printf '%s\\n' "$LUMEN_SELF_UPDATE_RESULT"
+            {shlex.quote(str(target))} v1.9.9 0 {args} || rc=$?
+        printf 'rc=%s result=%s\\n' "$rc" "$LUMEN_SELF_UPDATE_RESULT"
         """,
         env=env,
     )
 
     assert rejected.returncode == 0, rejected.stderr + rejected.stdout
-    assert rejected.stdout.strip() == "failed"
+    assert "rc=78 result=failed" in rejected.stdout
     assert "拒绝 scripts release tag 降级" in rejected.stderr
     assert not curl_log.exists()
     for relative, content in before.items():
         assert (target / relative).read_bytes() == content
 
 
+def test_self_update_semantic_failures_return_nonzero(tmp_path: Path) -> None:
+    target = tmp_path / "scripts"
+    remote = tmp_path / "remote"
+    fakebin = tmp_path / "bin"
+    target.mkdir()
+    files = write_remote_scripts(remote)
+    install_copying_curl(fakebin)
+    env = self_update_env(fakebin, remote)
+    args = " ".join(shlex.quote(item) for item in files)
+
+    cases = {
+        "manifest": f"""
+            lumen_fetch_release_manifest() {{ return 1; }}
+            lumen_self_update_scripts \
+                {shlex.quote(str(target))} v9.9.9 0 {args}
+        """,
+        "commit_mismatch": f"""
+            LUMEN_SELF_UPDATE_COMMIT={OLDER_COMMIT}
+            lumen_self_update_scripts \
+                {shlex.quote(str(target))} {COMMIT} 0 {args}
+        """,
+        "download": f"""
+            curl() {{ return 22; }}
+            lumen_self_update_scripts \
+                {shlex.quote(str(target))} {COMMIT} 0 {args}
+        """,
+        "validation": f"""
+            lumen_validate_self_update_file() {{ return 1; }}
+            lumen_self_update_scripts \
+                {shlex.quote(str(target))} {COMMIT} 0 {args}
+        """,
+        "install_transaction": f"""
+            lumen_self_update_install_transaction() {{ return 71; }}
+            lumen_self_update_scripts \
+                {shlex.quote(str(target))} {COMMIT} 0 {args}
+        """,
+    }
+
+    for failure, command in cases.items():
+        result = run_bash(
+            f"""
+            set -uo pipefail
+            . {shlex.quote(str(LIB))}
+            rc=0
+            {{
+            {command}
+            }} || rc=$?
+            printf 'failure=%s rc=%s result=%s\\n' \
+                {shlex.quote(failure)} "$rc" "$LUMEN_SELF_UPDATE_RESULT"
+            """,
+            env=env,
+        )
+
+        assert result.returncode == 0, failure + ": " + result.stderr + result.stdout
+        assert f"failure={failure} rc=78 result=failed" in result.stdout
+
+
 def test_journal_resume_skip_requires_complete_manifest_backed_unit() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
-    function = runner.split("update_run_phase() {", 1)[1].split(
-        "\n}\n\n", 1
-    )[0]
+    function = runner.split("update_run_phase() {", 1)[1].split("\n}\n\n", 1)[0]
     validation = function.index("lumen_update_script_unit_complete")
-    resumed_emit = function.index('value=already_completed')
+    resumed_emit = function.index("value=already_completed")
     implementation = function.index('"${implementation}" "$@"')
 
     assert validation < resumed_emit < implementation
@@ -502,12 +555,8 @@ def test_journal_resume_skip_requires_complete_manifest_backed_unit() -> None:
 
 
 def test_lumenctl_branch_first_hop_exports_immutable_expected_commit() -> None:
-    core = (ROOT / "scripts" / "lib" / "self_update.sh").read_text(
-        encoding="utf-8"
-    )
-    branch = core.split(
-        "lumen_self_update_scripts_from_github_branch() {", 1
-    )[1]
+    core = (ROOT / "scripts" / "lib" / "self_update.sh").read_text(encoding="utf-8")
+    branch = core.split("lumen_self_update_scripts_from_github_branch() {", 1)[1]
     branch = branch.split("\n}", 1)[0]
     lumenctl = LUMENCTL.read_text(encoding="utf-8")
 
@@ -670,12 +719,15 @@ esac
     )
     try:
         deadline = time.monotonic() + 5
-        while process.poll() is None and not ready.exists() and time.monotonic() < deadline:
+        while (
+            process.poll() is None
+            and not ready.exists()
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.02)
         if ready.exists():
             assert {
-                relative: (target / relative).read_bytes()
-                for relative in files
+                relative: (target / relative).read_bytes() for relative in files
             } == originals
         go.touch()
         stdout, stderr = process.communicate(timeout=10)
@@ -714,10 +766,7 @@ def test_self_update_fsync_order_and_sigkill_worker_rollback(
         "old_tree_removed",
     ]
 
-    before = {
-        relative: (target / relative).read_bytes()
-        for relative in files
-    }
+    before = {relative: (target / relative).read_bytes() for relative in files}
     (remote / "backup.sh").write_text(
         "#!/usr/bin/env bash\nREMOTE_BACKUP=2\n",
         encoding="utf-8",

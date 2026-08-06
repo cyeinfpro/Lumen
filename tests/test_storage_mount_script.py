@@ -1198,9 +1198,53 @@ def test_storage_apply_unit_clears_trigger_only_after_success() -> None:
         encoding="utf-8"
     )
 
-    assert 'if [ "$SERVICE_RESULT" = success ]' in unit
+    assert "lumen-storage-mount apply-result-terminal" in unit
     assert "rm -f /var/lib/lumen-storage/apply.trigger" in unit
-    assert "trigger retained after service result=$SERVICE_RESULT" in unit
+    assert "trigger retained without terminal result" in unit
+
+
+def test_repeated_storage_operation_id_returns_terminal_without_remount(
+    tmp_path: Path,
+) -> None:
+    harness = StorageHarness(tmp_path)
+    call_id = "a" * 32
+    (harness.state_dir / "last-apply.json").write_text(
+        json.dumps(
+            {
+                "call_id": call_id,
+                "status": "ok",
+                "message": "already applied",
+                "started_at": 1,
+                "finished_at": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = harness.run("apply")
+
+    assert result.returncode == 0
+    assert "already has a terminal result" in result.stderr
+    assert harness.log_lines("events.log") == []
+
+
+def test_unresolved_storage_claim_fails_duplicate_without_remount(
+    tmp_path: Path,
+) -> None:
+    harness = StorageHarness(tmp_path)
+    call_id = "a" * 32
+    (harness.state_dir / "apply.claim.json").write_text(
+        json.dumps({"call_id": call_id, "claimed_at": 1}),
+        encoding="utf-8",
+    )
+
+    result = harness.run("apply")
+
+    assert result.returncode == 1
+    assert "unresolved prior claim" in result.stderr
+    assert harness.apply_result()["call_id"] == call_id
+    assert harness.apply_result()["status"] == "fail"
+    assert harness.log_lines("events.log") == []
 
 
 def test_storage_startup_units_require_verified_mount_before_docker_and_workers() -> (

@@ -130,7 +130,6 @@ IMAGE_JOB_DB_PATH=/var/lib/image-job/state/image_jobs.sqlite3
 IMAGE_JOB_SIDECAR_TOKEN=<至少32字符的独立随机值>
 IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID=v1
 IMAGE_JOB_CREDENTIAL_MASTER_SECRET=<至少32字节的独立随机值，升级时必须保留>
-IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=0
 IMAGE_JOB_CONCURRENCY=2
 IMAGE_JOB_UPSTREAM_TIMEOUT_S=1800
 IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED=0
@@ -163,8 +162,6 @@ IMAGE_JOB_CREDENTIAL_ACTIVE_KEY_ID
                              新写入 Authorization 密文使用的 key id
 IMAGE_JOB_CREDENTIAL_MASTER_SECRET
                              AES-GCM master secret，至少 32 字节，升级/恢复时必须保留原值
-IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH
-                             仅滚动升级期间临时设为 1，默认 0
 IMAGE_JOB_CONCURRENCY        同时处理的图片任务数
 IMAGE_JOB_UPSTREAM_TIMEOUT_S 单个上游请求最长等待时间
 IMAGE_JOB_UPSTREAM_IDEMPOTENCY_GUARANTEED
@@ -194,14 +191,16 @@ AES-GCM `ciphertext + nonce + key_id`；AAD 绑定 `job_id + owner hash`。
 
 推荐升级顺序：
 
-1. 生成一个至少 32 字符的随机 sidecar token，并同时准备 Lumen worker 配置。
-2. 先升级 sidecar，设置 token，并临时设置
-   `IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1`，让尚未升级的旧 worker 继续工作。
-3. 再升级所有 Lumen worker，使其发送 sidecar token 和独立的上游 Bearer。
-4. 确认没有旧 worker 后，把 legacy 开关改回 `0` 并重启 sidecar。
+1. 生成一个至少 32 字符的随机 sidecar token，并预先写入所有 Lumen worker。
+2. 确认每个 worker 都会发送 sidecar token 和独立的上游 Bearer，再升级 sidecar。
+3. 从环境文件、systemd override 和密钥管理中删除
+   `IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH`；该配置已移除，即使设为 `0` 也会拒绝启动。
+4. 如果现有 sidecar 太旧、不能识别拆分后的两个请求头，使用维护窗口协调升级，
+   不要把供应商 API Key 临时复用为 sidecar 身份。
 
-默认情况下，sidecar token 缺失会拒绝启动；legacy 模式不会自动启用。新 worker
-若未配置 token，也会在调用 image-job 前失败，不会回退为发送供应商 API Key。
+sidecar token 缺失会拒绝启动。任意 Bearer 不会回退为供应商凭证，也没有 legacy
+认证开关。升级前创建的存量任务仍可由新 worker 使用正确 sidecar token，并附带
+原上游 Bearer 查询；该兼容只用于任务所有权校验，不会授权创建新任务。
 
 Lumen worker 的通道语义：
 
@@ -458,7 +457,8 @@ X-Lumen-Upstream-Authorization: Bearer <UPSTREAM_API_KEY>
 POST 时 image-job 保存 sidecar token 的哈希作为任务所有权。
 上游 Bearer 只临时保存在 SQLite 中，用于实际转发上游。
 任务进入 `succeeded`、`failed` 或 `uncertain` 终态后，上游 Bearer 会从 SQLite 中清掉。
-GET 必须带正确的 sidecar token；迁移期间可同时带上游头以查询升级前创建的任务。
+GET 必须带正确的 sidecar token；查询升级前创建的存量任务时，可同时带原上游头
+完成旧 owner hash 校验。
 ```
 
 调用方不要把 sidecar token、内部上游头或供应商 key 写进日志。
@@ -507,11 +507,13 @@ endpoint        必填，上游 API path，只能是允许的图片 endpoint。
 body            必填，原本要发给上游的 JSON body。
 request_type    可选，不传时按 endpoint 推断。
 retention_days  可选，线上建议固定为 1；默认 1。
-idempotency_key 可选，也可使用同名 HTTP header；同一服务身份和同一上游凭证下重复提交会返回同一 job。
+idempotency_key 必填，也可使用同名 HTTP header；仅允许字母、数字和 `._:~-`。同一服务身份和同一上游凭证下重复提交会返回同一 job。
 ```
 
-调用方应为一次业务生图意图生成稳定的 `Idempotency-Key`。网络超时后重提
+调用方必须为一次业务生图意图生成稳定的 `Idempotency-Key`；缺失时返回
+`428`，非法字符或超长时返回 `400`。网络超时后重提
 `POST /v1/image-jobs` 时复用该 key，可以拿回原 job，而不是创建第二个计费任务。
+同一 key 改变 payload 会返回 `409`。
 
 允许的 endpoint：
 
@@ -767,8 +769,8 @@ sidecar token 混用。
 
 ### GET 返回 403
 
-查询使用了错误的 sidecar token。滚动升级期间查询旧任务时，还要保留对应的
-`X-Lumen-Upstream-Authorization`，待旧任务完成后即可停止发送该迁移兼容头。
+查询使用了错误的 sidecar token。查询升级前创建的存量任务时，还要保留对应的
+`X-Lumen-Upstream-Authorization`，待旧任务完成后即可停止发送该兼容头。
 
 ### 图片 URL 404
 

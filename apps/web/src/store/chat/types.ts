@@ -46,6 +46,11 @@ export type PollInflightOptions = {
   maxChecks?: number;
 };
 
+export type TaskRecoveryOutcome =
+  | { status: "complete" }
+  | { status: "aborted" }
+  | { status: "failed"; error: unknown };
+
 export type InpaintSubmissionResult =
   | { status: "submitted" }
   | { status: "cancelled" };
@@ -129,10 +134,14 @@ export interface ChatState {
     generationId: string,
     image: GeneratedImage,
   ) => void;
-  applySSEEvent: (eventName: string, data: unknown) => void;
+  applySSEEvent: (eventName: string, data: unknown, cursor?: string) => void;
 
-  pollInflightTasks: (opts?: PollInflightOptions) => Promise<void>;
-  hydrateActiveTasks: (opts?: { signal?: AbortSignal }) => Promise<void>;
+  pollInflightTasks: (
+    opts?: PollInflightOptions,
+  ) => Promise<TaskRecoveryOutcome>;
+  hydrateActiveTasks: (opts?: {
+    signal?: AbortSignal;
+  }) => Promise<TaskRecoveryOutcome>;
   refreshCompletionText: (
     completionId: string,
     opts?: { signal?: AbortSignal },

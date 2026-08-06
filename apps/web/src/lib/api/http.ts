@@ -14,6 +14,7 @@ import {
   deadline,
   type RequestBudget,
 } from "./requestBudget";
+import type { ResponseValidator } from "./response";
 import { uploadClient } from "./uploadClient";
 
 export {
@@ -26,8 +27,9 @@ export {
 
 export type NoContent = undefined;
 
-export type ApiFetchInit = RequestInit & {
+export type ApiFetchInit<T = unknown> = RequestInit & {
   expectNoContent?: boolean;
+  validate?: ResponseValidator<T>;
   /**
    * @deprecated Prefer a typed client and RequestBudget. Omitted requests use
    * the standard 30 second total deadline.
@@ -71,15 +73,15 @@ export function resumeSessionClientState(userId: string): Promise<void> {
 
 export async function apiFetch(
   path: string,
-  init: ApiFetchInit & { expectNoContent: true },
+  init: ApiFetchInit<NoContent> & { expectNoContent: true },
 ): Promise<NoContent>;
 export async function apiFetch<T = unknown>(
   path: string,
-  init?: ApiFetchInit,
+  init?: ApiFetchInit<T>,
 ): Promise<T>;
 export async function apiFetch<T = unknown>(
   path: string,
-  init: ApiFetchInit = {},
+  init: ApiFetchInit<T> = {},
 ): Promise<T | NoContent> {
   const {
     expectNoContent = false,
@@ -108,7 +110,7 @@ export async function apiFetch<T = unknown>(
 
 export function apiFetchNoContent(
   path: string,
-  init: ApiFetchInit = {},
+  init: ApiFetchInit<NoContent> = {},
 ): Promise<NoContent> {
   return apiFetch(path, { ...init, expectNoContent: true });
 }

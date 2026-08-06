@@ -31,7 +31,6 @@ import asyncio  # noqa: F401 - composed infrastructure dependency
 import base64  # noqa: F401 - late-bound image-job facade
 import hashlib  # noqa: F401 - late-bound image-job facade
 import logging
-import os
 import re
 import shutil
 import tempfile  # noqa: F401 - compatibility facade for transport tests/hooks
@@ -86,7 +85,15 @@ from ..provider_runtime.upstream_services import (
 )
 from ..provider_runtime.errors import UpstreamCancelled, UpstreamError
 from ..provider_runtime.http_headers import upstream_auth_headers
+from ..provider_pool_parts.provider_control_plane import (
+    image_control_plane_error as _image_control_plane_error,
+    legacy_route_to_channel_engine as _legacy_route_to_channel_engine,
+    resolve_explicit_image_dispatch_setting,
+    resolve_legacy_image_primary_route as resolve_legacy_route_setting,
+    validated_image_dispatch_value as _validated_image_dispatch_value,
+)
 from ..runtime_settings import (
+    SettingResolution,
     resolve,  # noqa: F401 - composed infrastructure dependency
     resolve_db,  # noqa: F401 - composed core dependency
 )
@@ -468,15 +475,19 @@ def _runtime_provider_name(runtime: Any) -> str | None:
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
-def _legacy_route_to_channel_engine(route: str | None) -> tuple[str, str]:
-    value = (route or "").strip().lower()
-    if value == _IMAGE_ROUTE_IMAGE2:
-        return _IMAGE_CHANNEL_AUTO, _IMAGE_ROUTE_IMAGE2
-    if value == _IMAGE_ROUTE_IMAGE_JOBS:
-        return _IMAGE_CHANNEL_IMAGE_JOBS_ONLY, _IMAGE_ROUTE_RESPONSES
-    if value == _IMAGE_ROUTE_DUAL_RACE:
-        return _IMAGE_CHANNEL_AUTO, _IMAGE_ROUTE_DUAL_RACE
-    return _IMAGE_CHANNEL_AUTO, _IMAGE_ROUTE_RESPONSES
+async def _explicit_image_dispatch_setting(
+    key: str,
+    env_name: str,
+    *,
+    runtime: ImageUpstreamRuntime | None = None,
+) -> SettingResolution:
+    services = _runtime_services(runtime)
+    return await resolve_explicit_image_dispatch_setting(
+        services.core.resolve_db,
+        key,
+        env_name,
+        logger=logger,
+    )
 
 
 async def _resolve_legacy_image_primary_route(
@@ -484,15 +495,19 @@ async def _resolve_legacy_image_primary_route(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> str | None:
     services = _runtime_services(runtime)
-    for key in (_IMAGE_PRIMARY_ROUTE_KEY, _IMAGE_PRIMARY_ROUTE_LEGACY_KEY):
-        try:
-            raw = await services.infrastructure.resolve(key)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("image route setting resolve fallback key=%s err=%s", key, exc)
-            raw = None
-        if raw is not None and str(raw).strip() != "":
-            return str(raw).strip().lower()
-    return None
+    return await resolve_legacy_route_setting(
+        services.infrastructure.resolve,
+        keys=(_IMAGE_PRIMARY_ROUTE_KEY, _IMAGE_PRIMARY_ROUTE_LEGACY_KEY),
+        allowed=frozenset(
+            {
+            _IMAGE_ROUTE_RESPONSES,
+            _IMAGE_ROUTE_IMAGE2,
+            _IMAGE_ROUTE_IMAGE_JOBS,
+            _IMAGE_ROUTE_DUAL_RACE,
+            }
+        ),
+        logger=logger,
+    )
 
 
 async def _has_explicit_image_dispatch_setting(
@@ -501,15 +516,14 @@ async def _has_explicit_image_dispatch_setting(
     *,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> bool:
-    services = _runtime_services(runtime)
-    if os.environ.get(env_name, "").strip():
-        return True
-    try:
-        raw = await services.core.resolve_db(key)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("image dispatch db setting lookup failed key=%s err=%s", key, exc)
-        return False
-    return raw is not None and str(raw).strip() != ""
+    resolution = await _explicit_image_dispatch_setting(
+        key,
+        env_name,
+        runtime=runtime,
+    )
+    if resolution.state == "unavailable":
+        raise _image_control_plane_error(key)
+    return resolution.state == "value"
 
 
 async def _resolve_image_channel(
@@ -517,30 +531,21 @@ async def _resolve_image_channel(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> str:
     """Resolve async channel strategy with legacy primary_route fallback."""
-    services = _runtime_services(runtime)
-    has_explicit = await _has_explicit_image_dispatch_setting(
+    resolution = await _explicit_image_dispatch_setting(
         _IMAGE_CHANNEL_KEY,
         "IMAGE_CHANNEL",
         runtime=runtime,
     )
-    raw = (
-        await services.infrastructure.resolve(_IMAGE_CHANNEL_KEY)
-        if has_explicit
-        else None
+    channel = _validated_image_dispatch_value(
+        resolution,
+        key=_IMAGE_CHANNEL_KEY,
+        allowed=_IMAGE_CHANNELS,
     )
-    channel = (raw or "").strip().lower()
-    if channel in _IMAGE_CHANNELS:
+    if channel is not None:
         return channel
 
     legacy_route = await _resolve_legacy_image_primary_route(runtime=runtime)
     legacy_channel, _legacy_engine = _legacy_route_to_channel_engine(legacy_route)
-    if channel:
-        logger.warning(
-            "invalid %s=%r; falling back to %s",
-            _IMAGE_CHANNEL_KEY,
-            raw,
-            legacy_channel,
-        )
     return legacy_channel
 
 
@@ -549,30 +554,21 @@ async def _resolve_image_engine(
     runtime: ImageUpstreamRuntime | None = None,
 ) -> str:
     """Resolve image engine with legacy primary_route fallback."""
-    services = _runtime_services(runtime)
-    has_explicit = await _has_explicit_image_dispatch_setting(
+    resolution = await _explicit_image_dispatch_setting(
         _IMAGE_ENGINE_KEY,
         "IMAGE_ENGINE",
         runtime=runtime,
     )
-    raw = (
-        await services.infrastructure.resolve(_IMAGE_ENGINE_KEY)
-        if has_explicit
-        else None
+    engine = _validated_image_dispatch_value(
+        resolution,
+        key=_IMAGE_ENGINE_KEY,
+        allowed=_IMAGE_ENGINES,
     )
-    engine = (raw or "").strip().lower()
-    if engine in _IMAGE_ENGINES:
+    if engine is not None:
         return engine
 
     legacy_route = await _resolve_legacy_image_primary_route(runtime=runtime)
     _legacy_channel, legacy_engine = _legacy_route_to_channel_engine(legacy_route)
-    if engine:
-        logger.warning(
-            "invalid %s=%r; falling back to %s",
-            _IMAGE_ENGINE_KEY,
-            raw,
-            legacy_engine,
-        )
     return legacy_engine
 
 

@@ -41,7 +41,9 @@ FAILURE_MATRIX = (
         published=False,
         persist_dlq=True,
         retry=True,
-        invariant="retryable events remain unpublished even after alert threshold",
+        invariant=(
+            "PostgreSQL delivery_attempts drives retry and the durable DLQ threshold"
+        ),
     ),
     FailurePolicy(
         failure="invalid_payload",

@@ -7,7 +7,7 @@ import logging
 import re
 import secrets
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,11 @@ from .credential_migration import (
 )
 from .credential_vault import CredentialVault
 from .durable_files import durable_mkdir
+from .persistence_parts.artifact_integrity import (
+    ARTIFACT_SCHEMA_CURRENT,
+    artifact_integrity_facade as _artifact_integrity_facade,
+    validated_images as _validated_images_impl,
+)
 from .persistence_parts import common as _persistence_common
 from .persistence_parts.references import (
     ReferencePersistenceFacade as ReferencePersistenceFacade,
@@ -54,6 +59,7 @@ TERMINAL_JOB_STATUSES = frozenset(
         "cancelled",
         "cancel_requested",
         "uncertain",
+        "artifact_corrupt",
     }
 )
 _SQLITE_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -62,11 +68,26 @@ _REFERENCE_TIMESTAMP_COLUMN_SQL = (
     "strftime('%Y-%m-%dT%H:%M:%fZ', created_at)"
 )
 
-
 def _sqlite_identifier(value: str) -> str:
     if _SQLITE_IDENTIFIER_RE.fullmatch(value) is None:
         raise ValueError(f"invalid SQLite identifier: {value!r}")
     return f'"{value}"'
+
+
+def _validated_images(
+    *,
+    job_id: str,
+    raw_json: str | None,
+    expected_count: int,
+    require_checksum: bool,
+) -> list[dict[str, Any]]:
+    return _validated_images_impl(
+        job_id=job_id,
+        raw_json=raw_json,
+        expected_count=expected_count,
+        require_checksum=require_checksum,
+        strict_json_loads=_strict_json_loads,
+    )
 
 
 def sqlite_tuning_pragmas(journal_mode: str) -> tuple[str, ...]:
@@ -312,6 +333,7 @@ def init_storage(
                 upstream_status INTEGER,
                 image_count INTEGER NOT NULL DEFAULT 0,
                 images_json TEXT,
+                artifact_schema INTEGER NOT NULL DEFAULT 1,
                 error TEXT,
                 upstream_body TEXT,
                 retryable INTEGER NOT NULL DEFAULT 0,
@@ -352,6 +374,12 @@ def init_storage(
             "INTEGER NOT NULL DEFAULT 0",
         )
         _ensure_column(conn, "jobs", "retention_expires_at", "TEXT")
+        _ensure_column(
+            conn,
+            "jobs",
+            "artifact_schema",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS jobs_retention_expiry_idx
@@ -438,6 +466,10 @@ class JobPersistenceFacade:
     error_class_internal: Callable[[], str]
     error_class_network: Callable[[], str]
     job_ttl_days: Callable[[], int]
+    verify_artifacts: Callable[
+        [str, list[dict[str, Any]]],
+        Awaitable[list[dict[str, Any]]],
+    ]
     log: logging.Logger
 
     async def insert_job(
@@ -555,11 +587,39 @@ class JobPersistenceFacade:
         images: list[dict[str, Any]],
         endpoint_used: str | None = None,
     ) -> bool:
+        owned = await self.db_exec(
+            """
+            UPDATE jobs
+            SET updated_at = updated_at
+            WHERE job_id = ?
+              AND status = 'running'
+              AND execution_token = ?
+            """,
+            (job_id, execution_token),
+        )
+        if owned != 1:
+            return False
+        serialized = self.json_dump(images)
+        validated = _validated_images(
+            job_id=job_id,
+            raw_json=serialized,
+            expected_count=len(images),
+            require_checksum=True,
+        )
+        verified = await self.verify_artifacts(job_id, validated)
+        serialized = self.json_dump(
+            _validated_images(
+                job_id=job_id,
+                raw_json=self.json_dump(verified),
+                expected_count=len(verified),
+                require_checksum=True,
+            )
+        )
         now = self.now_iso()
         retention_expires_at = _terminal_retention_expiry(
             now,
             job_ttl_days=self.job_ttl_days(),
-            images=images,
+            images=verified,
         )
         changed = await self.db_exec(
             """
@@ -572,6 +632,7 @@ class JobPersistenceFacade:
                 execution_token = NULL,
                 finished_at = ?, updated_at = ?, elapsed_ms = ?,
                 upstream_status = ?, image_count = ?, images_json = ?,
+                artifact_schema = ?,
                 error = NULL, upstream_body = NULL, error_class = NULL,
                 retryable = 0, retry_suppressed = 0, outcome_uncertain = 0,
                 retention_expires_at = CASE
@@ -590,8 +651,9 @@ class JobPersistenceFacade:
                 now,
                 elapsed_ms,
                 upstream_status,
-                len(images),
-                self.json_dump(images),
+                len(verified),
+                serialized,
+                ARTIFACT_SCHEMA_CURRENT,
                 retention_expires_at,
                 retention_expires_at,
                 endpoint_used,
@@ -600,6 +662,28 @@ class JobPersistenceFacade:
             ),
         )
         return changed == 1
+
+    async def mark_artifact_corrupt(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        execution_token: str | None = None,
+        elapsed_ms: int | None = None,
+        endpoint_used: str | None = None,
+    ) -> bool:
+        integrity = _artifact_integrity_facade(self, _strict_json_loads)
+        return await integrity.mark_corrupt(
+            job_id,
+            reason=reason,
+            execution_token=execution_token,
+            elapsed_ms=elapsed_ms,
+            endpoint_used=endpoint_used,
+        )
+
+    async def validated_response(self, row: sqlite3.Row) -> dict[str, Any]:
+        integrity = _artifact_integrity_facade(self, _strict_json_loads)
+        return await integrity.validated_response(row)
 
     async def mark_failed(
         self,
@@ -833,7 +917,12 @@ class JobPersistenceFacade:
                 failed,
             )
 
-    def row_to_response(self, row: sqlite3.Row) -> dict[str, Any]:
+    def row_to_response(
+        self,
+        row: sqlite3.Row,
+        *,
+        succeeded_images: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "job_id": row["job_id"],
             "status": row["status"],
@@ -846,26 +935,28 @@ class JobPersistenceFacade:
         if endpoint_used:
             payload["endpoint_used"] = endpoint_used
         if row["status"] == "succeeded":
-            try:
-                images = _strict_json_loads(row["images_json"] or "[]")
-            except (
-                json.JSONDecodeError,
-                RecursionError,
-                TypeError,
-                ValueError,
-            ):
-                images = []
-            if not isinstance(images, list):
-                images = []
+            images = succeeded_images
+            if images is None:
+                images = _validated_images(
+                    job_id=str(row["job_id"]),
+                    raw_json=row["images_json"],
+                    expected_count=int(row["image_count"]),
+                    require_checksum=True,
+                )
             payload.update(
                 {
                     "upstream_status": row["upstream_status"],
                     "elapsed_ms": row["elapsed_ms"],
-                    "image_count": row["image_count"],
+                    "image_count": len(images),
                     "images": images,
                 }
             )
-        elif row["status"] in {"failed", "uncertain", "cancel_requested"}:
+        elif row["status"] in {
+            "failed",
+            "uncertain",
+            "cancel_requested",
+            "artifact_corrupt",
+        }:
             upstream_body: Any = None
             if row["upstream_body"]:
                 try:
@@ -891,6 +982,8 @@ class JobPersistenceFacade:
                     "outcome_uncertain": bool(self.row_get(row, "outcome_uncertain")),
                 }
             )
+            if row["status"] == "artifact_corrupt":
+                payload["cost_knowledge"] = "incurred"
             if payload["retry_suppressed"]:
                 payload["retry_policy"] = (
                     "automatic retry suppressed because upstream "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -93,7 +94,8 @@ async def test_get_removes_dirty_tracker_hashes(raw: dict[bytes, bytes]) -> None
             tracker_mod._key("gen-bad"),
             tracker_mod._notified_key("gen-bad"),
             tracker_mod._delivering_key("gen-bad"),
-            tracker_mod._sent_images_key("gen-bad"),
+            tracker_mod._legacy_notified_key("gen-bad"),
+            tracker_mod._legacy_delivering_key("gen-bad"),
         )
     ]
 
@@ -357,3 +359,122 @@ async def test_retry_marker_roundtrip_with_long_ttl() -> None:
         == tracker_mod._RETRY_SOURCE_TTL_SECONDS
     )
     assert tracker_mod._RETRY_SOURCE_TTL_SECONDS > tracker_mod.TRACK_RETENTION_SECONDS
+
+
+class LuaPipeline:
+    def __init__(self, redis: LuaRedis) -> None:
+        self.redis = redis
+        self.reads: list[tuple[str, str]] = []
+
+    def hget(self, key: str, field: str) -> LuaPipeline:
+        self.reads.append((key, field))
+        return self
+
+    async def execute(self) -> list[bytes | None]:
+        return [
+            (
+                value.encode()
+                if (
+                    value := self.redis.hashes.get(key, {}).get(field)
+                )
+                is not None
+                else None
+            )
+            for key, field in self.reads
+        ]
+
+
+class LuaRedis:
+    def __init__(self) -> None:
+        self.strings: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+
+    def pipeline(self, *, transaction: bool) -> LuaPipeline:
+        assert transaction is False
+        return LuaPipeline(self)
+
+    async def set(
+        self,
+        key: str,
+        value: object,
+        *,
+        nx: bool = False,
+        ex: int | None = None,
+        px: int | None = None,
+    ) -> bool | None:
+        del ex, px
+        if nx and key in self.strings:
+            return None
+        self.strings[key] = str(value)
+        return True
+
+    async def exists(self, *keys: str) -> int:
+        return sum(
+            int(key in self.strings or key in self.hashes)
+            for key in keys
+        )
+
+    async def eval(self, script: str, numkeys: int, *args: Any) -> Any:
+        keys = [str(value) for value in args[:numkeys]]
+        argv = [str(value) for value in args[numkeys:]]
+        if script == tracker_mod._ACQUIRE_DELIVERY_LUA:
+            notified_key, delivering_key = keys
+            if notified_key in self.strings:
+                return -1
+            if delivering_key in self.strings:
+                return 0
+            self.strings[delivering_key] = argv[0]
+            return 1
+        if script == tracker_mod._RENEW_DELIVERY_LUA:
+            return int(self.strings.get(keys[0]) == argv[0])
+        if script == tracker_mod._FINALIZE_DELIVERY_LUA:
+            notified_key, delivering_key = keys
+            if self.strings.get(delivering_key) != argv[0]:
+                return 0
+            self.strings[notified_key] = argv[1]
+            self.strings.pop(delivering_key, None)
+            return 1
+        if script == tracker_mod._RELEASE_DELIVERY_LUA:
+            if self.strings.get(keys[0]) != argv[0]:
+                return 0
+            self.strings.pop(keys[0], None)
+            return 1
+        raise AssertionError("unexpected Lua script")
+
+    def force_expire(self, key: str) -> None:
+        self.strings.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_old_owner_cannot_finalize_release_or_renew_takeover() -> None:
+    redis = LuaRedis()
+    tr = tracker_mod.Tracker()
+    tr._redis = redis  # type: ignore[assignment]
+
+    first = await tr.begin_delivery("gen-1")
+    assert first.state == "acquired"
+    assert first.owner_token is not None
+    redis.force_expire(tracker_mod._delivering_key("gen-1"))
+    redis.force_expire(tracker_mod._legacy_delivering_key("gen-1"))
+
+    second = await tr.begin_delivery("gen-1")
+    assert second.state == "acquired"
+    assert second.owner_token is not None
+    assert second.owner_token != first.owner_token
+
+    assert (
+        await tr.mark_notified("gen-1", owner_token=first.owner_token) is False
+    )
+    assert await tr.clear_delivery("gen-1", owner_token=first.owner_token) is False
+    assert await tr.renew_delivery("gen-1", first.owner_token) is False
+    assert await tr.renew_delivery("gen-1", second.owner_token) is True
+    assert await tr.mark_notified("gen-1", owner_token=second.owner_token) is True
+    assert (await tr.begin_delivery("gen-1")).state == "already_notified"
+
+
+def test_delivery_lua_keys_share_cluster_hash_slot() -> None:
+    gen_id = "gen-1"
+    slot = tracker_mod._delivery_slot(gen_id)
+
+    assert f"{{{slot}}}" in tracker_mod._notified_key(gen_id)
+    assert f"{{{slot}}}" in tracker_mod._delivering_key(gen_id)

@@ -23,7 +23,7 @@ from lumen_core.models import (
 )
 from lumen_core.schemas import SessionOut, SessionsOut, UsageOut
 
-from ..audit import request_ip_hash, write_audit
+from ..audit import request_ip_hash, write_audit, write_audit_isolated
 from ..db import get_db
 from ..deps import CurrentUser, verify_csrf_session
 from ..ratelimit import RateLimiter
@@ -48,9 +48,19 @@ _fs_path_safe = _me_export.fs_path_safe
 _open_storage_file_safe = _me_export.open_storage_file_safe
 
 
-def _http(code: str, msg: str, http: int = 400) -> HTTPException:
+def _http(
+    code: str,
+    msg: str,
+    http: int = 400,
+    *,
+    details: dict[str, object] | None = None,
+) -> HTTPException:
+    error: dict[str, object] = {"code": code, "message": msg}
+    if details:
+        error["details"] = details
     return HTTPException(
-        status_code=http, detail={"error": {"code": code, "message": msg}}
+        status_code=http,
+        detail={"error": error},
     )
 
 
@@ -236,7 +246,8 @@ async def export_my_data(
 
     Layout:
       messages.ndjson           — one JSON object per line, asc by created_at
-      images/{image_id}.{ext}   — binary blobs (skips entries whose file is gone)
+      images/{image_id}.{ext}   — binary blobs
+      export-manifest.json      — complete export counts
     """
     user_id = user.id
     user_email = user.email
@@ -269,6 +280,22 @@ async def export_my_data(
             autocommit=True,
         )
         tmp.seek(0)
+    except _me_export.ExportIntegrityError as exc:
+        tmp.close()
+        await write_audit_isolated(
+            event_type="me.data.export.fail",
+            user_id=user_id,
+            actor_email=user_email,
+            actor_ip_hash=request_ip_hash(request),
+            target_user_id=user_id,
+            details={"image_id": exc.image_id, "reason": exc.reason},
+        )
+        raise _http(
+            "export_incomplete",
+            "data export could not be completed",
+            500,
+            details={"image_id": exc.image_id, "reason": exc.reason},
+        ) from exc
     except Exception:
         tmp.close()
         raise
@@ -279,6 +306,8 @@ async def export_my_data(
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Content-Length": str(stats.zip_bytes),
+        "X-Lumen-Export-Complete": "true",
+        "X-Lumen-Export-Image-Count": str(stats.images),
     }
     return StreamingResponse(
         _iter_tempfile_and_close(tmp),
@@ -368,6 +397,7 @@ async def delete_my_account(
             "videos_deleted": task_cleanup["videos_deleted"],
             "memory_extractions_canceled": task_cleanup["memory_extractions_canceled"],
         },
+        autocommit=False,
     )
     await db.commit()
 
@@ -453,6 +483,7 @@ async def revoke_my_session(
                 "session_id": sid,
                 "is_current": sid == getattr(request.state, "session_id", None),
             },
+            autocommit=False,
         )
         await db.commit()
     return None

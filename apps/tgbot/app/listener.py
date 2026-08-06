@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, AsyncIterator
 
 from aiogram import Bot
 from aiogram.enums import ChatAction
@@ -42,9 +45,10 @@ from redis import asyncio as aioredis
 from .api_client import ApiError, LumenApi
 from .config import settings
 from .handlers._helpers import mime_extension, truncate_text
+from .listener_metrics import metrics
 from .keyboards import post_success_keyboard, retry_keyboard
 from . import listener_runtime as _listener_support
-from .tracker import TaskTrack, tracker
+from .tracker import DELIVERY_LOCK_MS, TaskTrack, tracker
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +102,9 @@ _FALLBACK_ACTIVE_SCAN_BATCHES = _listener_support._FALLBACK_ACTIVE_SCAN_BATCHES
 _FALLBACK_EVENTS_PER_STREAM = _listener_support._FALLBACK_EVENTS_PER_STREAM
 _stream_key = _listener_support._stream_key
 _cursor_key = _listener_support._cursor_key
+_cursor_key_v2 = _listener_support._cursor_key_v2
+_quarantine_stream = _listener_support._quarantine_stream
+_quarantined_key = _listener_support._quarantined_key
 _fallback_stream_cursor_key = _listener_support._fallback_stream_cursor_key
 _initial_cursor = _listener_support._initial_cursor
 _decode = _listener_support._decode
@@ -105,10 +112,13 @@ _chat_action_heartbeat = _listener_support._chat_action_heartbeat
 _stream_generation_ids = _listener_support._stream_generation_ids
 _load_cursor = _listener_support._load_cursor
 _save_cursor = _listener_support._save_cursor
+_quarantine_and_advance = _listener_support.quarantine_and_advance
+_dispatch_attempt_key = _listener_support._dispatch_attempt_key
 _RECONNECT_BACKOFF_MAX_SEC = _listener_support._RECONNECT_BACKOFF_MAX_SEC
 _RECONNECT_ALERT_THRESHOLD = _listener_support._RECONNECT_ALERT_THRESHOLD
 _DISPATCH_MAX_ATTEMPTS = _listener_support._DISPATCH_MAX_ATTEMPTS
 _DISPATCH_ATTEMPT_TTL_SEC = _listener_support._DISPATCH_ATTEMPT_TTL_SEC
+TelegramDefinitiveReject = _listener_support.TelegramDefinitiveReject
 
 
 def _should_throttle_progress(gen_id: str) -> bool:
@@ -140,8 +150,8 @@ async def _send_document_with_backoff(
     filename: str,
     caption: str | None,
     reply_markup: Any,
-) -> None:
-    await _listener_support._send_document_with_backoff(
+) -> Any:
+    return await _listener_support._send_document_with_backoff(
         bot,
         runtime=_listener_runtime(),
         chat_id=chat_id,
@@ -172,11 +182,146 @@ class _TerminalDeliveryBusy(RuntimeError):
     """A sibling listener owns this terminal event's short delivery lock."""
 
 
-def _dispatch_attempt_key(user_id: str, entry_id: str) -> str:
-    return f"tg:bot:replay:{user_id}:{entry_id}"
+class _AlreadyTerminallyDelivered(RuntimeError):
+    """The terminal delivery receipt already exists."""
 
 
-async def _notify_dispatch_drop(bot: Bot, event: str, gen_id: str) -> None:
+class DeliveryResultUnknown(RuntimeError):
+    """Telegram may have accepted a document, so automatic resend is forbidden."""
+
+
+class TelegramEventSchemaError(ValueError):
+    """A stream entry does not satisfy the Telegram delivery event schema."""
+
+
+class DispatchDisposition(StrEnum):
+    DELIVERED = "delivered"
+    HANDLED_NOOP = "handled_noop"
+    IGNORED_NOT_BOT_OWNED = "ignored_not_bot_owned"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedTelegramEvent:
+    event: str
+    data: dict[str, Any]
+    envelope: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DropNoticeReceipt:
+    delivered: bool
+    telegram_message_id: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveDeliveryLease:
+    owner_token: str
+    lost: asyncio.Event
+
+    def assert_owned(self, gen_id: str) -> None:
+        if self.lost.is_set():
+            raise DeliveryResultUnknown(f"delivery lease lost gen={gen_id}")
+
+
+_SUPPORTED_EVENTS = frozenset(
+    {
+        "generation.queued",
+        "generation.started",
+        "generation.progress",
+        "generation.retrying",
+        "generation.partial_image",
+        "generation.attached",
+        "generation.succeeded",
+        "generation.failed",
+    }
+)
+
+
+def _parse_telegram_event(payload_raw: str) -> ParsedTelegramEvent:
+    try:
+        envelope = json.loads(payload_raw)
+    except (json.JSONDecodeError, RecursionError, TypeError) as exc:
+        raise TelegramEventSchemaError("invalid_json") from exc
+    return _validate_telegram_envelope(envelope)
+
+
+def _validate_telegram_envelope(envelope: Any) -> ParsedTelegramEvent:
+    if not isinstance(envelope, dict):
+        raise TelegramEventSchemaError("envelope_not_object")
+    event = envelope.get("event")
+    data = envelope.get("data")
+    if not isinstance(event, str) or not event.strip():
+        raise TelegramEventSchemaError("event_missing")
+    normalized_event = event.strip()
+    if normalized_event not in _SUPPORTED_EVENTS:
+        raise TelegramEventSchemaError("unsupported_event")
+    if not isinstance(data, dict):
+        raise TelegramEventSchemaError("data_not_object")
+    id_field = (
+        "parent_generation_id"
+        if normalized_event == "generation.attached"
+        else "generation_id"
+    )
+    identifier = data.get(id_field)
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise TelegramEventSchemaError(f"{id_field}_missing")
+    return ParsedTelegramEvent(normalized_event, data, envelope)
+
+
+@contextlib.asynccontextmanager
+async def _delivery_lease(gen_id: str) -> AsyncIterator[ActiveDeliveryLease]:
+    claim = await tracker.begin_delivery(gen_id)
+    if claim.state == "already_notified":
+        raise _AlreadyTerminallyDelivered(gen_id)
+    if claim.state != "acquired" or claim.owner_token is None:
+        raise _TerminalDeliveryBusy(gen_id)
+
+    owner_token = claim.owner_token
+    lost = asyncio.Event()
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(DELIVERY_LOCK_MS / 3000)
+            try:
+                renewed = await tracker.renew_delivery(gen_id, owner_token)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "delivery lease renewal failed gen=%s token=%s err=%r",
+                    gen_id,
+                    _token_fingerprint(owner_token),
+                    exc,
+                )
+                lost.set()
+                metrics.delivery_lease.labels(outcome="lost").inc()
+                return
+            if not renewed:
+                logger.error(
+                    "delivery lease ownership lost gen=%s token=%s",
+                    gen_id,
+                    _token_fingerprint(owner_token),
+                )
+                lost.set()
+                metrics.delivery_lease.labels(outcome="lost").inc()
+                return
+
+    task = asyncio.create_task(renew(), name=f"tg-delivery-renew-{gen_id[:8]}")
+    lease = ActiveDeliveryLease(owner_token, lost)
+    try:
+        yield lease
+        lease.assert_owned(gen_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _notify_dispatch_drop(
+    bot: Bot,
+    event: str,
+    gen_id: str,
+) -> DropNoticeReceipt:
     """放弃重投前，给用户留一句能自救的话。
 
     J-3/J-4：终态事件连续失败 _DISPATCH_MAX_ATTEMPTS 次后 cursor 会被强推，
@@ -186,12 +331,12 @@ async def _notify_dispatch_drop(bot: Bot, event: str, gen_id: str) -> None:
     只对 succeeded 说这句话：failed 事件本来就没有图可取。
     """
     if event != "generation.succeeded":
-        return
+        return DropNoticeReceipt(delivered=False, error="not_applicable")
     try:
         track = await tracker.get(gen_id)
         if track is None:
-            return
-        await _replace_status(
+            return DropNoticeReceipt(delivered=False, error="tracker_missing")
+        message_id = await _replace_status_with_receipt(
             bot,
             track,
             "⚠️ 结果推送失败，但任务本身已经完成，不用重新生成（会重复计费）。\n"
@@ -199,6 +344,11 @@ async def _notify_dispatch_drop(bot: Bot, event: str, gen_id: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("drop notice failed gen=%s err=%r", gen_id, exc)
+        return DropNoticeReceipt(
+            delivered=False,
+            error=f"{exc.__class__.__name__}: {exc}",
+        )
+    return DropNoticeReceipt(delivered=True, telegram_message_id=message_id)
 
 
 async def run_listener(bot: Bot, api: LumenApi, stop_event: asyncio.Event) -> None:
@@ -341,19 +491,35 @@ async def _user_worker(
                 fields = {_decode(k): _decode(v) for k, v in fields_raw.items()}
                 payload_raw = fields.get("data") or "{}"
                 try:
-                    envelope = json.loads(payload_raw)
-                except (TypeError, ValueError):
+                    parsed = _parse_telegram_event(payload_raw)
+                except TelegramEventSchemaError as exc:
+                    await _durably_quarantine_and_advance(
+                        api,
+                        redis,
+                        source_stream=stream_key,
+                        entry_id=entry_id,
+                        user_id=user_id,
+                        event="schema_error",
+                        reason=f"schema:{exc}",
+                        metric_reason=str(exc),
+                        attempts=1,
+                        payload_raw=payload_raw,
+                        generation_id="",
+                    )
                     cursor = entry_id
-                    await _save_cursor(redis, user_id, entry_id)
                     continue
                 try:
                     async with _listener_runtime().dispatch_semaphore:
-                        await _dispatch(
+                        disposition = await _dispatch(
                             bot,
                             api,
-                            envelope,
+                            parsed.envelope,
                             stream_user_id=user_id,
                         )
+                        if not isinstance(disposition, DispatchDisposition):
+                            raise AssertionError(
+                                f"unhandled dispatch disposition: {disposition!r}"
+                            )
                 except asyncio.CancelledError:
                     raise
                 except _TerminalDeliveryBusy as exc:
@@ -366,12 +532,6 @@ async def _user_worker(
                     await asyncio.sleep(1.0)
                     continue
                 except Exception as exc:  # noqa: BLE001
-                    # 终态 _dispatch 把异常重抛上来 → cursor 不前进，下轮
-                    # XREAD 会重新读到这条 entry 再走一次。如果是确定性失败
-                    # （下游挂 / payload 构造 bug），消息流会永久卡在这里，
-                    # 每轮重下 4K 图。给一条 attempt 计数兜底：超过阈值直
-                    # 接放弃这条 event，cursor 推进 + mark_notified 防止
-                    # tracker 残留导致后续重投又触发。
                     attempts = 0
                     try:
                         attempts = int(
@@ -388,16 +548,15 @@ async def _user_worker(
                             entry_id,
                             cnt_exc,
                         )
+                    retry_reason = _dispatch_retry_reason(parsed.event, exc)
+                    metrics.dispatch_retry.labels(
+                        event=parsed.event,
+                        reason=retry_reason,
+                    ).inc()
                     if attempts >= _DISPATCH_MAX_ATTEMPTS:
-                        gen_id_for_drop = ""
-                        try:
-                            data_for_drop = envelope.get("data") or {}
-                            if isinstance(data_for_drop, dict):
-                                gen_id_for_drop = str(
-                                    data_for_drop.get("generation_id") or ""
-                                )
-                        except Exception:  # noqa: BLE001
-                            pass
+                        gen_id_for_drop = str(
+                            parsed.data.get("generation_id") or ""
+                        )
                         logger.warning(
                             "dispatch giving up uid=%s id=%s attempts=%d gen=%s err=%r",
                             user_id,
@@ -406,20 +565,29 @@ async def _user_worker(
                             gen_id_for_drop,
                             exc,
                         )
-                        if gen_id_for_drop:
-                            await _notify_dispatch_drop(
-                                bot, str(envelope.get("event") or ""), gen_id_for_drop
-                            )
-                            try:
-                                await tracker.mark_notified(gen_id_for_drop)
-                            except Exception as nt_exc:  # noqa: BLE001
-                                logger.warning(
-                                    "mark_notified on drop failed gen=%s err=%r",
-                                    gen_id_for_drop,
-                                    nt_exc,
-                                )
+                        notice = await _notify_dispatch_drop(
+                            bot,
+                            parsed.event,
+                            gen_id_for_drop,
+                        )
+                        notice_error = notice.error or "delivered"
+                        await _durably_quarantine_and_advance(
+                            api,
+                            redis,
+                            source_stream=stream_key,
+                            entry_id=entry_id,
+                            user_id=user_id,
+                            event=parsed.event,
+                            reason=(
+                                f"{exc.__class__.__name__}: {exc}; "
+                                f"drop_notice={notice_error}"
+                            ),
+                            metric_reason=retry_reason,
+                            attempts=attempts,
+                            payload_raw=payload_raw,
+                            generation_id=gen_id_for_drop,
+                        )
                         cursor = entry_id
-                        await _save_cursor(redis, user_id, entry_id)
                         continue
                     logger.warning(
                         "dispatch err uid=%s id=%s attempts=%d err=%r; cursor not advanced",
@@ -434,80 +602,142 @@ async def _user_worker(
                 await _save_cursor(redis, user_id, entry_id)
 
 
+async def _durably_quarantine_and_advance(
+    api: LumenApi,
+    redis: aioredis.Redis,
+    *,
+    source_stream: str,
+    entry_id: str,
+    user_id: str,
+    event: str,
+    reason: str,
+    metric_reason: str,
+    attempts: int,
+    payload_raw: str,
+    generation_id: str,
+) -> None:
+    durable = await api.persist_delivery_quarantine(
+        source_stream=source_stream,
+        source_id=entry_id,
+        stream_user_id=user_id,
+        event=event,
+        generation_id=generation_id,
+        payload_raw=payload_raw,
+        reason=reason,
+        attempts=attempts,
+    )
+    quarantine_id = str(durable["quarantine_id"])
+    redis_stream_id = await _quarantine_and_advance(
+        redis,
+        source_stream=source_stream,
+        entry_id=entry_id,
+        user_id=user_id,
+        event=event,
+        reason=reason,
+        metric_reason=metric_reason,
+        attempts=attempts,
+        payload_raw=payload_raw,
+        generation_id=generation_id,
+        quarantine_id=quarantine_id,
+    )
+    try:
+        await api.mark_delivery_quarantine_mirrored(
+            quarantine_id,
+            redis_stream_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "quarantine mirror receipt failed id=%s redis_id=%s err=%r",
+            quarantine_id,
+            redis_stream_id,
+            exc,
+        )
+
+
 async def _dispatch(
     bot: Bot,
     api: LumenApi,
     envelope: dict[str, Any],
     *,
     stream_user_id: str = "",
-) -> None:
+) -> DispatchDisposition:
     """单事件处理。
 
     stream 已经按 user 分流，但同一 user 的事件可能不属于 bot tracker（比如
     web 端用户也用 bot 这个账号在浏览器里跑 web 任务），用 tracker.get 做归属
     过滤。
     """
-    event = envelope.get("event") or ""
-    data = envelope.get("data") or {}
-    if not isinstance(data, dict):
-        return
+    parsed = _validate_telegram_envelope(envelope)
+    event = parsed.event
+    data = parsed.data
+    precheck_id = _precheck_generation_id(event, data)
+    if not await _wait_for_bot_owned_track(event, precheck_id):
+        return DispatchDisposition.IGNORED_NOT_BOT_OWNED
+    if not await _refresh_stream_track(
+        event,
+        precheck_id,
+        stream_user_id,
+    ):
+        return DispatchDisposition.IGNORED_NOT_BOT_OWNED
 
     if event == "generation.attached":
-        precheck_id = data.get("parent_generation_id") or ""
-    else:
-        precheck_id = data.get("generation_id") or ""
-    if not precheck_id:
-        return
-    if await tracker.get(precheck_id) is None:
-        # attached 把 bonus_id 注册进 tracker（先注册后发消息）；若注册当时
-        # 失败（Redis 抖动），succeeded(bonus_id) 会暂时查不到 track，留小
-        # 重试兜底。stream 内顺序保证 attached 先于 bonus succeeded。
-        if event not in ("generation.succeeded", "generation.attached"):
-            return
-        found = False
-        for delay in _BONUS_PRECHECK_RETRIES:
-            await asyncio.sleep(delay)
-            if await tracker.get(precheck_id) is not None:
-                found = True
-                break
-        if not found:
-            return
+        await _on_attached(bot, data)
+        return DispatchDisposition.DELIVERED
 
-    if stream_user_id and event in {
-        "generation.queued",
-        "generation.started",
-        "generation.progress",
-        "generation.retrying",
-        "generation.partial_image",
-        "generation.attached",
-    }:
-        if not await tracker.refresh(precheck_id, stream_user_id):
-            return
-
-    if event == "generation.attached":
-        try:
-            await _on_attached(bot, data)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("listener attached error data=%s err=%r", data, exc)
-        return
-
-    gen_id = data.get("generation_id") or ""
+    gen_id = str(data["generation_id"])
     track = await tracker.get(gen_id)
     if track is None:
-        return
+        return DispatchDisposition.IGNORED_NOT_BOT_OWNED
+    return await _dispatch_tracked_event(bot, api, event, gen_id, track, data)
 
+
+async def redrive_quarantined_event(
+    bot: Bot,
+    api: LumenApi,
+    *,
+    payload_raw: str,
+    stream_user_id: str,
+) -> None:
+    if not payload_raw or not stream_user_id:
+        raise TelegramEventSchemaError("redrive payload is incomplete")
+    try:
+        envelope = json.loads(payload_raw)
+    except (TypeError, ValueError) as exc:
+        raise TelegramEventSchemaError("redrive payload is invalid JSON") from exc
+    if not isinstance(envelope, dict):
+        raise TelegramEventSchemaError("redrive payload must be an object")
+    disposition = await _dispatch(
+        bot,
+        api,
+        envelope,
+        stream_user_id=stream_user_id,
+    )
+    if disposition is DispatchDisposition.IGNORED_NOT_BOT_OWNED:
+        raise RuntimeError("redrive event no longer belongs to a Telegram task")
+
+
+async def _dispatch_tracked_event(
+    bot: Bot,
+    api: LumenApi,
+    event: str,
+    gen_id: str,
+    track: Any,
+    data: dict[str, Any],
+) -> DispatchDisposition:
     try:
         if event in ("generation.progress", "generation.started"):
             if track.batch_id:
                 # 批量任务共享 placeholder，不在 progress 里编辑（多 gen 同时刷会乱）
-                return
+                return DispatchDisposition.HANDLED_NOOP
             if _should_throttle_progress(gen_id):
-                return
+                return DispatchDisposition.HANDLED_NOOP
             await _on_progress(bot, track, data)
         elif event == "generation.succeeded":
             await _on_succeeded(bot, api, gen_id, track, data)
         elif event == "generation.failed":
             await _on_failed(bot, gen_id, track, data)
+        else:
+            return DispatchDisposition.HANDLED_NOOP
     except _TerminalDeliveryBusy:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -516,6 +746,45 @@ async def _dispatch(
         )
         if event in ("generation.succeeded", "generation.failed"):
             raise
+    return DispatchDisposition.DELIVERED
+
+
+def _precheck_generation_id(event: str, data: dict[str, Any]) -> str:
+    field = (
+        "parent_generation_id"
+        if event == "generation.attached"
+        else "generation_id"
+    )
+    return str(data[field])
+
+
+async def _wait_for_bot_owned_track(event: str, gen_id: str) -> bool:
+    if await tracker.get(gen_id) is not None:
+        return True
+    if event not in ("generation.succeeded", "generation.attached"):
+        return False
+    for delay in _BONUS_PRECHECK_RETRIES:
+        await asyncio.sleep(delay)
+        if await tracker.get(gen_id) is not None:
+            return True
+    return False
+
+
+async def _refresh_stream_track(
+    event: str,
+    gen_id: str,
+    stream_user_id: str,
+) -> bool:
+    if not stream_user_id or event not in {
+        "generation.queued",
+        "generation.started",
+        "generation.progress",
+        "generation.retrying",
+        "generation.partial_image",
+        "generation.attached",
+    }:
+        return True
+    return await tracker.refresh(gen_id, stream_user_id)
 
 
 async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
@@ -529,42 +798,39 @@ async def _on_attached(bot: Bot, data: dict[str, Any]) -> None:
     用户会收到两条一模一样的「🎁」。注册先行后，重投命中上面的「已注册」
     跳过分支，消息最多发一次。status_message_id 发完消息后补写。
     """
-    parent_id = data.get("parent_generation_id") or ""
-    bonus_id = data.get("generation_id") or ""
+    parent_id = str(data.get("parent_generation_id") or "").strip()
+    bonus_id = str(data.get("generation_id") or "").strip()
     if not parent_id or not bonus_id:
-        return
+        raise ValueError(
+            "generation.attached requires parent_generation_id and generation_id"
+        )
     parent = await tracker.get(parent_id)
     if parent is None:
         return  # 不是 bot 跟踪的任务
-    # 已经注册过（异常重投 / replay），跳过
-    if await tracker.get(bonus_id) is not None:
+    existing = await tracker.get(bonus_id)
+    if existing is not None and existing.status_message_id is not None:
         return
-    try:
+    if existing is None:
+        existing = TaskTrack(
+            chat_id=parent.chat_id,
+            tg_user_id=getattr(parent, "tg_user_id", None),
+            status_message_id=None,
+            prompt=parent.prompt,
+            params=parent.params,
+            is_bonus=True,
+            user_id=parent.user_id,
+        )
         await tracker.add(
             bonus_id,
-            TaskTrack(
-                chat_id=parent.chat_id,
-                tg_user_id=getattr(parent, "tg_user_id", None),
-                status_message_id=None,
-                prompt=parent.prompt,
-                params=parent.params,
-                is_bonus=True,
-                user_id=parent.user_id,
-            ),
+            existing,
         )
-    except Exception as exc:  # noqa: BLE001
-        # 注册不成功绝不能先发消息：会留下「发了 🎁 但 tracker 里没有 bonus」的
-        # 悬挂态，后续 succeeded(bonus_id) 也找不到 chat。等 attached 重投再补。
-        logger.warning("bonus tracker registration failed gen=%s err=%r", bonus_id, exc)
-        return
-    try:
-        text = f"🎁 双引擎也跑出了一张副本，正在收尾…\n\n📝 {_truncate(parent.prompt, 200)}"
-        bonus_status = await bot.send_message(chat_id=parent.chat_id, text=text)
-        await tracker.update_status_message(bonus_id, bonus_status.message_id)
-    except Exception as exc:  # noqa: BLE001
-        # 消息已发但 message_id 没补上：重投会命中「已注册」跳过分支，不会重复
-        # 发；track 里 id 为空时 progress/终态编辑走 TelegramBadRequest 兜底。
-        logger.warning("bonus status message failed gen=%s err=%r", bonus_id, exc)
+    status_track = existing
+    text = (
+        "🎁 双引擎也跑出了一张副本，正在收尾…\n\n"
+        f"📝 {_truncate(status_track.prompt, 200)}"
+    )
+    bonus_status = await bot.send_message(chat_id=status_track.chat_id, text=text)
+    await tracker.update_status_message(bonus_id, bonus_status.message_id)
 
 
 async def _on_progress(bot: Bot, track, data: dict[str, Any]) -> None:
@@ -642,41 +908,49 @@ async def _resolve_succeeded_image_ids(
     return image_ids, detail, False
 
 
-async def _already_sent_image_ids(gen_id: str) -> set[str]:
-    """已送达图片集合；读失败退化成空集（最坏回到「可能重发」的老行为）。"""
-    try:
-        return await tracker.sent_images(gen_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sent image lookup failed gen=%s err=%r", gen_id, exc)
-        return set()
-
-
-async def _remember_sent_image(gen_id: str, image_id: str) -> None:
-    try:
-        await tracker.mark_image_sent(gen_id, image_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "sent image marker failed gen=%s img=%s err=%r", gen_id, image_id, exc
-        )
-
-
 async def _on_succeeded(
     bot: Bot, api: LumenApi, gen_id: str, track, data: dict[str, Any]
 ) -> None:
-    if not await tracker.begin_delivery(gen_id):
-        # Already notified means Telegram confirmed the terminal delivery.
-        # If the sender still holds the delivery lock, keep the cursor here
-        # until its cleanup completes.
-        if await tracker.is_notified(gen_id):
-            if await tracker.is_delivery_active(gen_id):
-                raise _TerminalDeliveryBusy(
-                    f"succeeded delivery still active gen={gen_id}"
+    lease: ActiveDeliveryLease | None = None
+    try:
+        async with _delivery_lease(gen_id) as lease:
+            delivered = await _deliver_succeeded_under_lease(
+                bot,
+                api,
+                gen_id,
+                track,
+                data,
+                lease,
+            )
+            if not delivered:
+                raise RuntimeError(f"terminal delivery failed gen={gen_id}")
+            lease.assert_owned(gen_id)
+            if not await tracker.mark_notified(
+                gen_id,
+                owner_token=lease.owner_token,
+            ):
+                raise DeliveryResultUnknown(
+                    f"stale delivery owner cannot finalize gen={gen_id}"
                 )
-            await _finish_succeeded_cleanup(bot, gen_id, track)
-            return
-        raise _TerminalDeliveryBusy(f"succeeded delivery lock held gen={gen_id}")
+            metrics.terminal_notified.labels(event="generation.succeeded").inc()
+    except _AlreadyTerminallyDelivered:
+        await _finish_succeeded_cleanup(bot, gen_id, track)
+        return
+    except Exception:
+        await _release_delivery_if_owned(gen_id, lease)
+        raise
+    await _finish_succeeded_cleanup(bot, gen_id, track)
+
+
+async def _deliver_succeeded_under_lease(
+    bot: Bot,
+    api: LumenApi,
+    gen_id: str,
+    track: Any,
+    data: dict[str, Any],
+    lease: ActiveDeliveryLease,
+) -> bool:
     delivered = False
-    # (path, mime, size, filename, image_id)
     downloads: list[tuple[Path, str, int, str, str]] = []
     heartbeat = asyncio.create_task(
         _chat_action_heartbeat(bot, track.chat_id, ChatAction.UPLOAD_DOCUMENT),
@@ -684,28 +958,32 @@ async def _on_succeeded(
     )
     try:
         tg_user_id = getattr(track, "tg_user_id", None) or track.chat_id
-        # 偶尔事件里没带 images（如 attached 之前的 race），fallback 查 API
+        lease.assert_owned(gen_id)
         image_ids, detail, lookup_failed = await _resolve_succeeded_image_ids(
             api, gen_id, track, data
         )
-        already_sent = await _already_sent_image_ids(gen_id)
+        lease.assert_owned(gen_id)
+        already_sent = await api.list_delivered_telegram_images(
+            track.chat_id,
+            gen_id,
+            tg_user_id=tg_user_id,
+        )
         pending_ids = [
             image_id for image_id in image_ids if image_id not in already_sent
         ]
 
         if lookup_failed:
-            # delivered 保持 False → 走下面的 clear_delivery + RuntimeError，
-            # 由 _user_worker 的 attempt 计数重投。不能给用户「没有图片」的结论。
             logger.warning("succeeded image lookup failed gen=%s; will retry", gen_id)
         elif not image_ids:
+            lease.assert_owned(gen_id)
             await _replace_status(
                 bot,
                 track,
                 f"⚠️ 生成完成但没有图片返回。\n\n📝 {_truncate(track.prompt, 200)}",
             )
+            lease.assert_owned(gen_id)
             delivered = True
         elif not pending_ids:
-            # J-4：重投到这里说明这些图上一轮已经全部送达，只是终态标记没落盘。
             logger.info("succeeded replay: all images already sent gen=%s", gen_id)
             delivered = True
         else:
@@ -720,19 +998,10 @@ async def _on_succeeded(
                     logger.warning(
                         "succeeded link detail get failed gen=%s err=%s", gen_id, exc
                     )
-            # batch 模式 placeholder 已经把 prompt 显示过一次；每张图的 caption 不再带原文，
-            # 让会话更紧凑。单任务保持完整 caption（用户没有别处能看到 prompt）。
-            if track.batch_id:
-                if track.is_bonus:
-                    caption = f"🎁 #{gen_id[:8]} 双引擎副本"
-                else:
-                    caption = f"✅ #{gen_id[:8]}"
-            elif track.is_bonus:
-                caption = f"🎁 双引擎副本（同提示词的第二张）\n\n📝 {_truncate(track.prompt, 800)}"
-            else:
-                caption = f"✅ 生成完成\n\n📝 {_truncate(track.prompt, 800)}"
+            caption = _success_caption(gen_id, track)
 
             for image_id in pending_ids:
+                lease.assert_owned(gen_id)
                 try:
                     path, mime, size = await api.download_image_to_file(
                         track.chat_id,
@@ -747,7 +1016,7 @@ async def _on_succeeded(
                         exc,
                     )
                     continue
-                # 序号按整批的原始位置算，重投只补发缺的那几张也不会串号
+                lease.assert_owned(gen_id)
                 filename = (
                     f"{gen_id[:8]}-{image_ids.index(image_id) + 1}."
                     f"{mime_extension(mime)}"
@@ -767,8 +1036,6 @@ async def _on_succeeded(
                     "succeeded all downloads failed gen=%s; will retry", gen_id
                 )
             else:
-                # 一律 sendDocument：TG 的 sendPhoto 不论大小都强制缩到 ~1280px + JPEG
-                # 重编码（协议设计），4K 图发出去会糊得不能看。Document 通道原样保留。
                 actions_kb = (
                     None
                     if track.is_bonus
@@ -778,10 +1045,7 @@ async def _on_succeeded(
                         project_url=str((detail or {}).get("project_url") or ""),
                     )
                 )
-                sent_count = 0
-                # J-4：caption + 操作键盘只挂在整批的第一条消息上。重投时那条
-                # 已经发出去了（already_sent 非空），不能再挂一次，否则用户会
-                # 收到两套「🔁 重画 / ✏️ 迭代」按钮。
+                completed_count = 0
                 head_pending = not already_sent
                 for idx, (path, _mime, _size, filename, image_id) in enumerate(
                     downloads
@@ -790,26 +1054,29 @@ async def _on_succeeded(
                     kb = actions_kb if attach_head else None
                     cap = caption if attach_head else None
                     try:
-                        await _send_document_with_backoff(
+                        await _deliver_one_image(
                             bot,
+                            api,
+                            gen_id=gen_id,
+                            image_id=image_id,
                             chat_id=track.chat_id,
+                            tg_user_id=tg_user_id,
                             path=path,
                             filename=filename,
                             caption=cap,
                             reply_markup=kb,
+                            lease=lease,
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except TelegramDefinitiveReject as exc:
                         logger.warning(
-                            "send_document failed gen=%s err=%r", gen_id, exc
+                            "send_document rejected gen=%s img=%s err=%r",
+                            gen_id,
+                            image_id,
+                            exc,
                         )
                         break
-                    sent_count += 1
-                    # 先记账再继续：后面任何一张失败都会整条事件重投，
-                    # 已经落到用户手里的图不能再发第二遍。
-                    await _remember_sent_image(gen_id, image_id)
-                # 下载失败的图同样算没送到：现在重投不会重复发送，
-                # 补发比「悄悄少给用户一张已付费的图」更合适。
-                delivered = sent_count == len(downloads) == len(pending_ids)
+                    completed_count += 1
+                delivered = completed_count == len(downloads) == len(pending_ids)
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -820,58 +1087,165 @@ async def _on_succeeded(
                     path.unlink()
             except OSError as exc:
                 logger.warning("tmp cleanup failed path=%s err=%s", path, exc)
+    return delivered
 
-    if not delivered:
-        await tracker.clear_delivery(gen_id)
-        raise RuntimeError(f"terminal delivery failed gen={gen_id}")
-    if not await tracker.mark_notified(gen_id, release_lock=False):
-        await tracker.clear_delivery(gen_id)
-        raise RuntimeError(f"terminal delivery marker failed gen={gen_id}")
-    await tracker.clear_delivery(gen_id)
-    await _finish_succeeded_cleanup(bot, gen_id, track)
+
+async def _deliver_one_image(
+    bot: Bot,
+    api: LumenApi,
+    *,
+    gen_id: str,
+    image_id: str,
+    chat_id: int,
+    tg_user_id: int,
+    path: Path,
+    filename: str,
+    caption: str | None,
+    reply_markup: Any,
+    lease: ActiveDeliveryLease,
+) -> None:
+    lease.assert_owned(gen_id)
+    decision = await api.begin_telegram_delivery(
+        chat_id,
+        tg_user_id=tg_user_id,
+        generation_id=gen_id,
+        image_id=image_id,
+        owner_token=lease.owner_token,
+    )
+    decision_state = str(decision.get("state") or "")
+    attempt_id = str(decision.get("attempt_id") or "")
+    if decision_state == "already_delivered":
+        return
+    if decision_state == "result_unknown":
+        metrics.delivery_result_unknown.labels(reason="existing_unknown").inc()
+        raise DeliveryResultUnknown(
+            f"delivery result unknown gen={gen_id} image={image_id}"
+        )
+    if decision_state != "send_allowed" or not attempt_id:
+        raise DeliveryResultUnknown(
+            f"invalid delivery decision gen={gen_id} image={image_id}"
+        )
+    lease.assert_owned(gen_id)
+    try:
+        message = await _send_document_with_backoff(
+            bot,
+            chat_id=chat_id,
+            path=path,
+            filename=filename,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
+    except TelegramDefinitiveReject as exc:
+        try:
+            await api.finish_telegram_delivery(
+                chat_id,
+                attempt_id,
+                tg_user_id=tg_user_id,
+                owner_token=lease.owner_token,
+                state="failed_before_accept",
+                error_class=exc.__class__.__name__,
+            )
+        except Exception as finish_exc:  # noqa: BLE001
+            metrics.delivery_result_unknown.labels(reason="reject_write").inc()
+            raise DeliveryResultUnknown(
+                f"definitive reject state write failed gen={gen_id} image={image_id}"
+            ) from finish_exc
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await _record_unknown_image_delivery(
+            api=api,
+            chat_id=chat_id,
+            tg_user_id=tg_user_id,
+            attempt_id=attempt_id,
+            gen_id=gen_id,
+            image_id=image_id,
+            owner_token=lease.owner_token,
+            reason="send_error",
+            error_class=exc.__class__.__name__,
+        )
+        raise DeliveryResultUnknown(
+            f"delivery result unknown gen={gen_id} image={image_id}"
+        ) from exc
+
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(message_id, int) or message_id <= 0:
+        await _record_unknown_image_delivery(
+            api=api,
+            chat_id=chat_id,
+            tg_user_id=tg_user_id,
+            attempt_id=attempt_id,
+            gen_id=gen_id,
+            image_id=image_id,
+            owner_token=lease.owner_token,
+            reason="missing_receipt",
+            error_class="MissingTelegramMessageId",
+        )
+        raise DeliveryResultUnknown(
+            f"Telegram delivery receipt missing gen={gen_id} image={image_id}"
+        )
+    try:
+        lease.assert_owned(gen_id)
+        await api.finish_telegram_delivery(
+            chat_id,
+            attempt_id,
+            tg_user_id=tg_user_id,
+            owner_token=lease.owner_token,
+            state="delivered",
+            telegram_message_id=message_id,
+        )
+    except Exception as exc:
+        metrics.delivery_result_unknown.labels(reason="receipt_write").inc()
+        raise DeliveryResultUnknown(
+            f"delivery receipt write failed gen={gen_id} image={image_id}"
+        ) from exc
+    lease.assert_owned(gen_id)
 
 
 async def _on_failed(bot: Bot, gen_id: str, track, data: dict[str, Any]) -> None:
-    if not await tracker.begin_delivery(gen_id):
-        if await tracker.is_notified(gen_id):
-            if await tracker.is_delivery_active(gen_id):
-                raise _TerminalDeliveryBusy(
-                    f"failed delivery still active gen={gen_id}"
-                )
-            await _maybe_finalize_batch(bot, track, gen_id)
-            asyncio.create_task(_expire_tracker(gen_id, 300))
-            return
-        raise _TerminalDeliveryBusy(f"failed delivery lock held gen={gen_id}")
     code = str(data.get("code") or "unknown_error")
     msg = str(data.get("message") or "未知错误")
     text = (
         f"❌ 生成失败 #{gen_id[:8]}\n\n📝 {_truncate(track.prompt, 200)}\n\n"
         f"原因：{code}\n{msg}"
     )
+    lease: ActiveDeliveryLease | None = None
     try:
-        if track.batch_id:
-            # batch 模式 placeholder 不动，失败单独发一条
-            await bot.send_message(
-                chat_id=track.chat_id, text=text, reply_markup=retry_keyboard(gen_id)
-            )
-        else:
-            try:
-                await bot.edit_message_text(
-                    chat_id=track.chat_id,
-                    message_id=track.status_message_id,
-                    text=text,
-                    reply_markup=retry_keyboard(gen_id),
-                )
-            except TelegramBadRequest:
+        async with _delivery_lease(gen_id) as lease:
+            lease.assert_owned(gen_id)
+            if track.batch_id:
                 await bot.send_message(
                     chat_id=track.chat_id,
                     text=text,
                     reply_markup=retry_keyboard(gen_id),
                 )
-        if not await tracker.mark_notified(gen_id, release_lock=False):
-            raise RuntimeError(f"terminal delivery marker failed gen={gen_id}")
-    finally:
-        await tracker.clear_delivery(gen_id)
+            else:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=track.chat_id,
+                        message_id=track.status_message_id,
+                        text=text,
+                        reply_markup=retry_keyboard(gen_id),
+                    )
+                except TelegramBadRequest:
+                    await bot.send_message(
+                        chat_id=track.chat_id,
+                        text=text,
+                        reply_markup=retry_keyboard(gen_id),
+                    )
+            lease.assert_owned(gen_id)
+            if not await tracker.mark_notified(
+                gen_id,
+                owner_token=lease.owner_token,
+            ):
+                raise DeliveryResultUnknown(
+                    f"stale delivery owner cannot finalize gen={gen_id}"
+                )
+            metrics.terminal_notified.labels(event="generation.failed").inc()
+    except _AlreadyTerminallyDelivered:
+        pass
+    except Exception:
+        await _release_delivery_if_owned(gen_id, lease)
+        raise
     await _maybe_finalize_batch(bot, track, gen_id)
     # 失败保留 tracker 一会儿，让重试能拿到原 prompt（5 分钟后过期清理）
     asyncio.create_task(_expire_tracker(gen_id, 300))
@@ -906,12 +1280,106 @@ async def _expire_tracker(gen_id: str, delay: float) -> None:
 
 
 async def _replace_status(bot: Bot, track, text: str) -> None:
+    await _replace_status_with_receipt(bot, track, text)
+
+
+async def _replace_status_with_receipt(bot: Bot, track, text: str) -> int | None:
     try:
         await bot.edit_message_text(
             chat_id=track.chat_id, message_id=track.status_message_id, text=text
         )
+        message_id = getattr(track, "status_message_id", None)
+        return message_id if isinstance(message_id, int) and message_id > 0 else None
     except TelegramBadRequest:
-        await bot.send_message(chat_id=track.chat_id, text=text)
+        message = await bot.send_message(chat_id=track.chat_id, text=text)
+        message_id = getattr(message, "message_id", None)
+        return message_id if isinstance(message_id, int) and message_id > 0 else None
+
+
+async def _record_unknown_image_delivery(
+    *,
+    api: LumenApi,
+    chat_id: int,
+    tg_user_id: int,
+    attempt_id: str,
+    gen_id: str,
+    image_id: str,
+    owner_token: str,
+    reason: str,
+    error_class: str,
+) -> None:
+    metrics.delivery_result_unknown.labels(reason=reason).inc()
+    try:
+        await api.finish_telegram_delivery(
+            chat_id,
+            attempt_id,
+            tg_user_id=tg_user_id,
+            owner_token=owner_token,
+            state="delivery_result_unknown",
+            error_class=error_class,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "delivery unknown state write failed gen=%s img=%s token=%s err=%r",
+            gen_id,
+            image_id,
+            _token_fingerprint(owner_token),
+            exc,
+        )
+
+
+async def _release_delivery_if_owned(
+    gen_id: str,
+    lease: ActiveDeliveryLease | None,
+) -> None:
+    if lease is None or lease.lost.is_set():
+        return
+    try:
+        released = await tracker.clear_delivery(
+            gen_id,
+            owner_token=lease.owner_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delivery lease release failed gen=%s token=%s err=%r",
+            gen_id,
+            _token_fingerprint(lease.owner_token),
+            exc,
+        )
+        return
+    if not released:
+        logger.warning(
+            "delivery lease release rejected stale owner gen=%s token=%s",
+            gen_id,
+            _token_fingerprint(lease.owner_token),
+        )
+
+
+def _dispatch_retry_reason(event: str, exc: Exception) -> str:
+    if event == "generation.attached":
+        return "tracker_write"
+    if isinstance(exc, DeliveryResultUnknown):
+        return "delivery_unknown"
+    return "dispatch_error"
+
+
+def _success_caption(gen_id: str, track: Any) -> str:
+    if track.batch_id:
+        return (
+            f"🎁 #{gen_id[:8]} 双引擎副本"
+            if track.is_bonus
+            else f"✅ #{gen_id[:8]}"
+        )
+    if track.is_bonus:
+        return (
+            "🎁 双引擎副本（同提示词的第二张）\n\n"
+            f"📝 {_truncate(track.prompt, 800)}"
+        )
+    return f"✅ 生成完成\n\n📝 {_truncate(track.prompt, 800)}"
+
+
+def _token_fingerprint(owner_token: str) -> str:
+    return hashlib.sha256(owner_token.encode("utf-8")).hexdigest()[:12]
 
 
 def _truncate(s: str, n: int) -> str:

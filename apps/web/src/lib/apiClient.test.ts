@@ -44,7 +44,7 @@ test("download and streaming prompt paths no longer own raw fetch calls", () => 
   match(source, /downloadClient\.postBlob\("\/me\/export"\)/);
   match(
     promptSource,
-    /streamClient\.postJson\(\s*path,\s*body,\s*signal,\s*lease\.key,\s*\)/,
+    /streamClient\.postJson\(\s*path,\s*body,\s*deadline\.signal,\s*lease\.key,\s*\)/,
   );
 });
 
@@ -82,17 +82,22 @@ test("logical idempotent POSTs derive matching headers and bodies centrally", ()
 
 test("cookie-changing auth flows notify other tabs before accepting an identity", () => {
   const loginResponse = source.indexOf("const loginResponse");
-  const loginNotification = source.indexOf(
-    "notifyAuthSessionChanged();",
-    loginResponse,
-  );
-  const loginIdentity = source.indexOf("await getMe()", loginResponse);
+  const verifier = source.indexOf("async function verifyAndAcceptSession");
+  const loginNotification = source.indexOf("notifyAuthSessionChanged();", verifier);
+  const loginIdentity = source.indexOf("await getMe()", verifier);
 
   ok(loginResponse >= 0);
-  ok(loginNotification > loginResponse);
+  ok(verifier >= 0);
+  ok(loginNotification > verifier);
   ok(loginIdentity > loginNotification);
-  match(source, /auth\/signup[\s\S]*?notifyAuthSessionChanged/);
-  match(source, /auth\/signup\/byok[\s\S]*?notifyAuthSessionChanged/);
+  match(source, /loginResponse[\s\S]*?verifyAndAcceptSession\(loginResponse\)/);
+  match(source, /signupResponse[\s\S]*?verifyAndAcceptSession\(signupResponse\)/);
+  match(
+    source,
+    /auth\/signup\/byok[\s\S]*?verifyAndAcceptSession\(signupResponse\)/,
+  );
+  match(source, /authResponse\.id !== verified\.id/);
+  match(source, /session_identity_mismatch/);
   match(source, /export async function logout[\s\S]*?notifyAuthSessionChanged/);
   const logoutRequest = source.indexOf('apiFetchNoContent("/auth/logout"');
   const logoutNotification = source.indexOf(

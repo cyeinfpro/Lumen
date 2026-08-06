@@ -476,6 +476,72 @@ async def test_backup_now_reports_skipped_script_as_busy(
 
 
 @pytest.mark.asyncio
+async def test_backup_now_nonzero_exit_returns_http_502(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "backup.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
+    monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: False)
+
+    release_calls: list[dict[str, object]] = []
+
+    class FakeLockService:
+        def __init__(self, *, fallback_busy):
+            self.fallback_busy = fallback_busy
+
+        async def acquire(self, **_kwargs):
+            return object()
+
+        async def release(self, *_args, **kwargs) -> None:
+            release_calls.append(kwargs)
+
+    async def fake_run_script(*_args, **_kwargs):
+        return admin_backups._ScriptResult(7, "", "disk full")
+
+    audit_calls: list[tuple[str, dict[str, object] | None]] = []
+
+    async def fake_audit(
+        *_args,
+        event_type: str,
+        details: dict[str, object] | None = None,
+        **_kwargs,
+    ) -> None:
+        audit_calls.append((event_type, details))
+
+    monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
+    monkeypatch.setattr(admin_backups, "_run_script", fake_run_script)
+    monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
+
+    with pytest.raises(Exception) as exc_info:
+        await admin_backups.backup_now(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            SimpleNamespace(id="admin-1", email="admin@example.test"),  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 502
+    assert exc_info.value.detail["error"]["code"] == "backup_script_failed"
+    assert exc_info.value.detail["error"]["details"] == {
+        "returncode": 7,
+        "stderr_tail": "disk full",
+    }
+    assert release_calls == [
+        {"succeeded": False, "reason": "backup_script_failed"}
+    ]
+    assert audit_calls == [
+        (
+            "admin.backup.create.fail",
+            {"returncode": 7, "stderr_tail": "disk full"},
+        )
+    ]
+    assert not (backup_root / ".backup.running").exists()
+
+
+@pytest.mark.asyncio
 async def test_direct_api_backup_cannot_overlap_host_maintenance_lock(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

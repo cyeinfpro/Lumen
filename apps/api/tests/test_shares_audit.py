@@ -98,8 +98,13 @@ def _request(method: str, client_host: str = "127.0.0.1") -> Request:
 def test_public_share_select_does_not_take_write_lock() -> None:
     stmt = shares._select_public_share("token-1", datetime.now(timezone.utc))
     sql = str(stmt.compile(dialect=postgresql.dialect())).upper()
+    where_sql = str(
+        stmt.whereclause.compile(dialect=postgresql.dialect())
+    ).upper()
 
     assert "FOR UPDATE" not in sql
+    assert "IMAGES.DELETED_AT IS NULL" not in where_sql
+    assert "IMAGES.ARTIFACT_STATUS" not in where_sql
 
 
 def test_share_image_ids_dedupes_and_falls_back_to_single_image() -> None:
@@ -398,6 +403,8 @@ async def test_public_share_prompt_query_is_scoped_to_image_owner(
 
     share = SimpleNamespace(
         token="token-1",
+        image_id="img-1",
+        image_ids=["img-1"],
         show_prompt=True,
         created_at=datetime.now(timezone.utc),
         expires_at=None,
@@ -411,7 +418,7 @@ async def test_public_share_prompt_query_is_scoped_to_image_owner(
         height=100,
         mime="image/png",
     )
-    db = _Db([(share, img), [], "safe prompt"])
+    db = _Db([(share, img), [img], [], "safe prompt"])
 
     await shares.get_public_share(
         "token-1",
@@ -422,6 +429,96 @@ async def test_public_share_prompt_query_is_scoped_to_image_owner(
     rendered = str(db.last_statement)
     assert "generations.user_id" in rendered
     assert "images.id" in rendered
+
+
+@pytest.mark.asyncio
+async def test_share_member_loader_requires_ready_live_images() -> None:
+    share = SimpleNamespace(image_id="img-1", image_ids=["img-1"])
+    image = SimpleNamespace(id="img-1")
+    db = _Db([[image]])
+
+    loaded = await shares._load_share_images(  # noqa: SLF001
+        db,  # type: ignore[arg-type]
+        share,
+        "user-1",
+    )
+
+    assert loaded == [image]
+    sql = str(
+        db.last_statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+    assert "IMAGES.DELETED_AT IS NULL" in sql
+    assert "IMAGES.ARTIFACT_STATUS" in sql
+    assert "'READY'" in sql
+
+
+@pytest.mark.asyncio
+async def test_deleted_primary_does_not_hide_surviving_ready_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(shares, "get_redis", lambda: object())
+    share = SimpleNamespace(
+        token="token-1",
+        image_id="img-a",
+        image_ids=["img-a", "img-b"],
+        show_prompt=False,
+        created_at=datetime.now(timezone.utc),
+        expires_at=None,
+    )
+    deleted_anchor = SimpleNamespace(id="img-a", user_id="user-1")
+    survivor = SimpleNamespace(
+        id="img-b",
+        user_id="user-1",
+        source="upload",
+        owner_generation_id=None,
+        width=200,
+        height=100,
+        mime="image/png",
+    )
+    db = _Db([(share, deleted_anchor), [survivor], []])
+
+    out = await shares.get_public_share(
+        "token-1",
+        _request("GET"),
+        db,  # type: ignore[arg-type]
+    )
+
+    assert [item.id for item in out.images] == ["img-b"]
+    assert out.image_url == "/api/share/token-1/image"
+
+
+@pytest.mark.asyncio
+async def test_public_share_is_hidden_when_no_ready_member_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_rate_limit(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(shares.PUBLIC_PREVIEW_LIMITER, "check", no_rate_limit)
+    monkeypatch.setattr(shares, "get_redis", lambda: object())
+    share = SimpleNamespace(
+        token="token-1",
+        image_id="img-a",
+        image_ids=["img-a", "img-b"],
+    )
+    deleted_anchor = SimpleNamespace(id="img-a", user_id="user-1")
+    db = _Db([(share, deleted_anchor), []])
+
+    with pytest.raises(Exception) as exc_info:
+        await shares.get_public_share(
+            "token-1",
+            _request("GET"),
+            db,  # type: ignore[arg-type]
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 404
 
 
 @pytest.mark.asyncio

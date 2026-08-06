@@ -11,7 +11,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { getTask, type BackendCompletion } from "@/lib/apiClient";
-import { logError } from "@/lib/logger";
+import { logError, logWarn } from "@/lib/logger";
 import {
   AUTH_USER_QUERY_KEY,
   userBillingQueryKeys,
@@ -32,6 +32,7 @@ import {
   disposeChatStoreRuntime,
   useChatStore,
 } from "@/store/useChatStore";
+import type { TaskRecoveryOutcome } from "@/store/chat/types";
 import type {
   AssistantMessage,
   Message,
@@ -139,6 +140,20 @@ function assertSnapshotCurrent(
   ) {
     throw staleSnapshotError();
   }
+}
+
+function requireCompleteTaskRecovery(
+  outcome: TaskRecoveryOutcome,
+  label: string,
+  signal: AbortSignal,
+): void {
+  if (outcome.status === "complete") return;
+  if (outcome.status === "aborted") {
+    signal.throwIfAborted();
+    throw staleSnapshotError();
+  }
+  if (outcome.error instanceof Error) throw outcome.error;
+  throw new Error(`${label} failed`);
 }
 
 function sortedTaskIds(ids: Iterable<string>): string[] {
@@ -338,9 +353,9 @@ export function useLumenRealtime(): void {
 
   const effectContext = useMemo<LumenRealtimeEffectContext>(
     () => ({
-      applyStoreEvent(name, payload) {
+      applyStoreEvent(name, payload, cursor) {
         if (!isRealtimeScopeCurrent(userScope)) return;
-        useChatStore.getState().applySSEEvent(name, payload);
+        useChatStore.getState().applySSEEvent(name, payload, cursor);
       },
       invalidateTasks() {
         if (!isRealtimeScopeCurrent(userScope)) return;
@@ -417,9 +432,21 @@ export function useLumenRealtime(): void {
         identityEpoch,
       );
       const store = useChatStore.getState();
+      const hydration = await store.hydrateActiveTasks({ signal });
+      requireCompleteTaskRecovery(hydration, "active task hydration", signal);
+      assertSnapshotCurrent(
+        signal,
+        context,
+        userScope,
+        userId,
+        identityEpoch,
+      );
+      const polling = await store.pollInflightTasks({
+        maxChecks: 50,
+        signal,
+      });
+      requireCompleteTaskRecovery(polling, "active task polling", signal);
       const results = await Promise.allSettled([
-        store.hydrateActiveTasks({ signal }),
-        store.pollInflightTasks({ maxChecks: 50, signal }),
         refreshCompletions(
           signal,
           context,
@@ -462,6 +489,13 @@ export function useLumenRealtime(): void {
     scopeIdentity: userScope,
     isScopeCurrent: isRealtimeScopeCurrent,
     recoverSnapshot,
+    onProtocolIssue: (issue) => {
+      logWarn("realtime protocol validation failed", {
+        scope: "sse-protocol",
+        code: issue.reason,
+        extra: issue,
+      });
+    },
     onAuthInvalidated: () => {
       notifyAuthSessionChanged();
       requestSessionInvalidation("realtime_auth_invalidated");
@@ -533,9 +567,15 @@ export function useLumenRealtime(): void {
   useEffect(
     () =>
       registerRuntimeRecovery("realtime", () => {
+        lastSnapshot.current = {
+          userScope,
+          userId,
+          identityEpoch,
+          syncedAt: 0,
+        };
         reconnect();
       }),
-    [reconnect],
+    [identityEpoch, reconnect, userId, userScope],
   );
 
   useEffect(

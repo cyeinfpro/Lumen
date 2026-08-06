@@ -34,6 +34,7 @@ from redis import asyncio as aioredis
 
 from .api_client import ApiError, LumenApi
 from .config import settings
+from .control_consumer import run_control_listener
 from .handlers import GenerationRuntime, build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
@@ -51,7 +52,6 @@ from .tracker import tracker
 _FSM_STATE_TTL_SEC = 3600
 
 
-_CONTROL_CHANNEL = "admin:tgbot:control"
 _PAUSED_CONFIG_REFRESH_INTERVAL_SEC = 20.0
 _POLLING_NETWORK_BACKOFF_MAX_SEC = 60.0
 
@@ -310,74 +310,16 @@ def _stop_metrics_server(server: object | None) -> None:
 async def _run_control_listener(
     stop_event: asyncio.Event,
     *,
+    api: LumenApi | None = None,
+    bot: Bot | None = None,
     sleep_or_stop: Callable[[asyncio.Event, float], Awaitable[bool]] = _sleep_or_stop,
 ) -> None:
-    """订阅 admin 通道；收到 restart 命令则 clean-exit，systemd Restart=always 会拉起。
-
-    任何错误（包括 Redis 抖动）都不应该让进程退出；记 warning 后继续重连。
-    """
-    from redis import asyncio as aioredis
-
-    logger = logging.getLogger("lumen-tgbot.control")
-    backoff = 1.0
-    consecutive_failures = 0
-    # control 通道丢消息只影响管理面（一键重启），重要性低于 listener；上限 60s
-    # 重试，连续 50 次失败后告警一次便于排查，但继续重试不退出。
-    backoff_max = 60.0
-    alert_threshold = 50
-    while not stop_event.is_set():
-        pubsub = None
-        client = None
-        try:
-            client = aioredis.from_url(settings.redis_url, decode_responses=False)
-            pubsub = client.pubsub()
-            await pubsub.subscribe(_CONTROL_CHANNEL)
-            logger.info("control: subscribed to %s", _CONTROL_CHANNEL)
-            backoff = 1.0
-            consecutive_failures = 0
-            async for msg in pubsub.listen():
-                if stop_event.is_set():
-                    break
-                if msg.get("type") != "message":
-                    continue
-                data = msg.get("data")
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8", errors="replace")
-                cmd = (str(data) or "").strip().lower()
-                if cmd == "restart":
-                    logger.info("control: restart received → clean exit")
-                    stop_event.set()
-                    # 让 main 走 finally 清理；最外层 _amain 会 return，进程退出码 0，
-                    # systemd 拉起。这里不直接 sys.exit，避免和 main 关闭逻辑打架。
-                    return
-        except Exception as exc:  # noqa: BLE001
-            consecutive_failures += 1
-            level = (
-                logging.ERROR
-                if consecutive_failures >= alert_threshold
-                else logging.WARNING
-            )
-            logger.log(
-                level,
-                "control listener error: %s; reconnect in %.1fs (failures=%d)",
-                exc,
-                backoff,
-                consecutive_failures,
-            )
-            if await sleep_or_stop(stop_event, backoff):
-                return
-            backoff = min(backoff * 2, backoff_max)
-        finally:
-            try:
-                if pubsub is not None:
-                    await pubsub.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                if client is not None:
-                    await client.aclose()
-            except Exception:  # noqa: BLE001
-                pass
+    await run_control_listener(
+        stop_event,
+        api=api,
+        bot=bot,
+        sleep_or_stop=sleep_or_stop,
+    )
 
 
 def _redact_proxy(url: str) -> str:
@@ -686,7 +628,7 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
         )
         stack.push_async_callback(_cancel_task, listener_task)
         control_task = asyncio.create_task(
-            _run_control_listener(stop_event),
+            _run_control_listener(stop_event, api=api, bot=bot),
             name="lumen-control",
         )
         stack.push_async_callback(_cancel_task, control_task)

@@ -266,10 +266,7 @@ async def _prepare_provider_reservation(
 
 
 async def _resolve_route(state: GenerationRunState) -> None:
-    try:
-        state.raw_image_route = await state.services.provider.resolve_primary_route()
-    except Exception:  # noqa: BLE001
-        state.raw_image_route = "responses"
+    state.raw_image_route = await state.services.provider.resolve_primary_route()
     state.image_route = state.raw_image_route
 
 
@@ -406,13 +403,15 @@ def _apply_route_constraints(state: GenerationRunState) -> None:
 
 
 async def _attach_provider_pool(state: GenerationRunState) -> None:
-    try:
-        from ...provider_pool import get_pool
+    from ...account_limiter import AccountLimiterUnavailable
+    from ...provider_pool import get_pool
 
-        provider_pool = await get_pool()
-        provider_pool.attach_redis(state.redis)
-    except Exception:  # noqa: BLE001
-        logger.debug("provider_pool attach_redis failed", exc_info=True)
+    if state.redis is None:
+        raise AccountLimiterUnavailable("worker Redis missing before provider attach")
+    provider_pool = await get_pool()
+    provider_pool.attach_redis(state.redis)
+    if provider_pool.get_redis() is not state.redis:
+        raise AccountLimiterUnavailable("provider pool rejected Redis attachment")
 
 
 async def _reserve_provider_slot(state: GenerationRunState) -> bool:

@@ -27,6 +27,7 @@ import type {
   ChatStateGetter,
   ChatStateSetter,
   PollInflightOptions,
+  TaskRecoveryOutcome,
 } from "./types";
 
 export type TaskRecoveryActions = Pick<
@@ -62,9 +63,26 @@ type TaskRecoveryRuntime = Required<
   >;
 
 type ActiveTaskHydrateRequest = {
-  promise: Promise<void>;
+  promise: Promise<TaskRecoveryOutcome>;
   signal?: AbortSignal;
 };
+
+type TaskPollResult =
+  | { status: "complete"; refetchConvId: string | null }
+  | { status: "aborted"; refetchConvId: null }
+  | { status: "failed"; refetchConvId: null; error: unknown };
+
+type HydrateSnapshotContext = {
+  requestedUserId: string;
+  userFence: number;
+  signal: AbortSignal | undefined;
+  get: ChatStateGetter;
+  set: ChatStateSetter;
+  dependencies: TaskRecoveryRuntime;
+};
+
+const COMPLETE_RECOVERY: TaskRecoveryOutcome = { status: "complete" };
+const ABORTED_RECOVERY: TaskRecoveryOutcome = { status: "aborted" };
 
 function withDefaultApis(
   dependencies: TaskRecoveryDependencies,
@@ -250,18 +268,25 @@ async function pollGenerationTask(
   get: ChatStateGetter,
   set: ChatStateSetter,
   dependencies: TaskRecoveryRuntime,
-): Promise<string | null> {
+): Promise<TaskPollResult> {
   try {
-    if (opts?.signal?.aborted) return null;
+    if (opts?.signal?.aborted) {
+      return { status: "aborted", refetchConvId: null };
+    }
     const fresh = await dependencies.getGenerationTask(generationId, {
       signal: opts?.signal,
     });
     const state = get();
     const local = state.generations[generationId];
-    if (!local || !isInflightGeneration(local)) return null;
+    if (!local || !isInflightGeneration(local)) {
+      return { status: "complete", refetchConvId: null };
+    }
     const terminal = isTerminalTaskStatus(fresh.status);
     if (terminal && hasOwningGenerationMessage(state, fresh.message_id)) {
-      return state.currentConvId;
+      return {
+        status: "complete",
+        refetchConvId: state.currentConvId,
+      };
     }
     updatePolledGeneration(
       set,
@@ -276,7 +301,7 @@ async function pollGenerationTask(
       opts?.signal &&
       dependencies.isAbortRequest(error, opts.signal)
     ) {
-      return null;
+      return { status: "aborted", refetchConvId: null };
     }
     logWarn("pollInflightTasks generation check failed", {
       scope: "chat-poll",
@@ -286,8 +311,9 @@ async function pollGenerationTask(
         err: dependencies.errorToMessage(error),
       },
     });
+    return { status: "failed", refetchConvId: null, error };
   }
-  return null;
+  return { status: "complete", refetchConvId: null };
 }
 
 function owningCompletionMessage(
@@ -307,9 +333,11 @@ async function pollCompletionTask(
   get: ChatStateGetter,
   set: ChatStateSetter,
   dependencies: TaskRecoveryRuntime,
-): Promise<string | null> {
+): Promise<TaskPollResult> {
   try {
-    if (opts?.signal?.aborted) return null;
+    if (opts?.signal?.aborted) {
+      return { status: "aborted", refetchConvId: null };
+    }
     const fresh = await dependencies.getCompletionTask(completionId, {
       signal: opts?.signal,
     });
@@ -334,13 +362,13 @@ async function pollCompletionTask(
         snapshotNow,
       ),
     }));
-    return terminalHistoryConvId;
+    return { status: "complete", refetchConvId: terminalHistoryConvId };
   } catch (error) {
     if (
       opts?.signal &&
       dependencies.isAbortRequest(error, opts.signal)
     ) {
-      return null;
+      return { status: "aborted", refetchConvId: null };
     }
     logWarn("pollInflightTasks completion check failed", {
       scope: "chat-poll",
@@ -350,8 +378,273 @@ async function pollCompletionTask(
         err: dependencies.errorToMessage(error),
       },
     });
+    return { status: "failed", refetchConvId: null, error };
+  }
+}
+
+function activeCompletionIdentityError(
+  completion: BackendCompletion,
+): Error | null {
+  if (
+    !completion.id ||
+    !completion.message_id ||
+    !completion.conversation_id
+  ) {
+    return new Error(
+      `active completion ${completion.id || "unknown"} lacks ownership identity`,
+    );
+  }
+  return null;
+}
+
+function registerAndApplyActiveCompletions(
+  messages: ChatState["messages"],
+  completions: BackendCompletion[],
+): ChatState["messages"] | Error {
+  let registered = messages;
+  for (const completion of completions) {
+    const owner = registered.find(
+      (message): message is AssistantMessage =>
+        message.role === "assistant" && message.id === completion.message_id,
+    );
+    if (!owner) {
+      return new Error(
+        `active completion ${completion.id} has no owning message`,
+      );
+    }
+    if (owner.completion_id && owner.completion_id !== completion.id) {
+      return new Error(
+        `active completion ${completion.id} conflicts with owning message`,
+      );
+    }
+    if (!owner.completion_id) {
+      registered = registered.map((message) =>
+        message.role === "assistant" && message.id === owner.id
+          ? { ...message, completion_id: completion.id }
+          : message,
+      );
+    }
+    registered = applyCompletionSnapshot(
+      registered,
+      completion.id,
+      completion,
+      Date.now(),
+    );
+  }
+  return registered;
+}
+
+function hydrateSnapshotIsCurrent(
+  state: ChatState,
+  context: HydrateSnapshotContext,
+  currentConversationId: string | null,
+): boolean {
+  return (
+    !context.signal?.aborted &&
+    context.dependencies.userSessionFence.isCurrent(context.userFence) &&
+    state.currentUserId === context.requestedUserId &&
+    state.currentConvId === currentConversationId
+  );
+}
+
+function mergeHydratedTaskSnapshot(
+  state: ChatState,
+  context: HydrateSnapshotContext,
+  currentConversationId: string | null,
+  messages: ChatState["messages"],
+  incoming: BackendGeneration[],
+): Partial<ChatState> | ChatState {
+  if (!hydrateSnapshotIsCurrent(state, context, currentConversationId)) {
+    return state;
+  }
+  const generations = mergeUnknownActiveGenerations(
+    state.generations,
+    incoming,
+  );
+  return {
+    messages,
+    ...(generations ? { generations } : {}),
+  };
+}
+
+function activeTaskIdentityFailure(
+  completions: BackendCompletion[],
+): TaskRecoveryOutcome | null {
+  for (const completion of completions) {
+    const error = activeCompletionIdentityError(completion);
+    if (error) return { status: "failed", error };
+  }
+  return null;
+}
+
+function hydrateUserIsCurrent(context: HydrateSnapshotContext): boolean {
+  const { userSessionFence } = context.dependencies;
+  const { userFence } = context;
+  return (
+    !context.signal?.aborted &&
+    userSessionFence.isCurrent(userFence) &&
+    context.get().currentUserId === context.requestedUserId
+  );
+}
+
+function completionOwnerIsMissing(
+  messages: ChatState["messages"],
+  completions: BackendCompletion[],
+): boolean {
+  const ownerIds = new Set(
+    messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.id),
+  );
+  return completions.some(
+    (completion) => !ownerIds.has(completion.message_id),
+  );
+}
+
+async function loadMissingCompletionOwners(
+  currentConversationId: string | null,
+  currentCompletions: BackendCompletion[],
+  context: HydrateSnapshotContext,
+): Promise<TaskRecoveryOutcome | null> {
+  if (
+    !currentConversationId ||
+    !completionOwnerIsMissing(context.get().messages, currentCompletions)
+  ) {
     return null;
   }
+  try {
+    await context.get().loadHistoricalMessages(currentConversationId);
+    return null;
+  } catch (error) {
+    return { status: "failed", error };
+  }
+}
+
+async function hydrateActiveTaskSnapshot(
+  response: Awaited<ReturnType<typeof apiListMyActiveTasks>>,
+  context: HydrateSnapshotContext,
+): Promise<TaskRecoveryOutcome> {
+  const completions = response.completions ?? [];
+  const identityFailure = activeTaskIdentityFailure(completions);
+  if (identityFailure) return identityFailure;
+  if (!hydrateUserIsCurrent(context)) return ABORTED_RECOVERY;
+
+  const currentConversationId = context.get().currentConvId;
+  const currentCompletions = completions.filter(
+    (completion) => completion.conversation_id === currentConversationId,
+  );
+  const loadFailure = await loadMissingCompletionOwners(
+    currentConversationId,
+    currentCompletions,
+    context,
+  );
+  if (loadFailure) return loadFailure;
+  if (
+    !hydrateSnapshotIsCurrent(
+      context.get(),
+      context,
+      currentConversationId,
+    )
+  ) {
+    return ABORTED_RECOVERY;
+  }
+  const messages = registerAndApplyActiveCompletions(
+    context.get().messages,
+    currentCompletions,
+  );
+  if (messages instanceof Error) {
+    return { status: "failed", error: messages };
+  }
+  const incoming = response.generations ?? [];
+  context.set((state) =>
+    mergeHydratedTaskSnapshot(
+      state,
+      context,
+      currentConversationId,
+      messages,
+      incoming,
+    ),
+  );
+  return COMPLETE_RECOVERY;
+}
+
+function pollFailureOutcome(
+  results: TaskPollResult[],
+): TaskRecoveryOutcome | null {
+  const failed = results.find(
+    (result): result is Extract<TaskPollResult, { status: "failed" }> =>
+      result.status === "failed",
+  );
+  if (failed) return { status: "failed", error: failed.error };
+  if (results.some((result) => result.status === "aborted")) {
+    return ABORTED_RECOVERY;
+  }
+  return null;
+}
+
+function refetchConversationId(results: TaskPollResult[]): string | null {
+  return (
+    results.find(
+      (result) =>
+        result.status === "complete" && Boolean(result.refetchConvId),
+    )?.refetchConvId ?? null
+  );
+}
+
+async function refetchPolledConversation(
+  conversationId: string | null,
+  opts: PollInflightOptions | undefined,
+  get: ChatStateGetter,
+  dependencies: TaskRecoveryRuntime,
+): Promise<TaskRecoveryOutcome | null> {
+  if (!conversationId || opts?.signal?.aborted) return null;
+  try {
+    await get().loadHistoricalMessages(conversationId);
+    return null;
+  } catch (error) {
+    logWarn("pollInflightTasks refetch failed", {
+      scope: "chat-poll",
+      code: error instanceof ApiError ? error.code : undefined,
+      extra: {
+        convId: conversationId,
+        err: dependencies.errorToMessage(error),
+      },
+    });
+    return { status: "failed", error };
+  }
+}
+
+async function pollInflightTaskSnapshot(
+  opts: PollInflightOptions | undefined,
+  get: ChatStateGetter,
+  set: ChatStateSetter,
+  dependencies: TaskRecoveryRuntime,
+): Promise<TaskRecoveryOutcome> {
+  const checks = selectInflightTaskChecks(get(), opts);
+  if (
+    checks.generationIds.length === 0 &&
+    checks.completionIds.length === 0
+  ) {
+    return COMPLETE_RECOVERY;
+  }
+  const results = await Promise.all([
+    ...checks.generationIds.map((generationId) =>
+      pollGenerationTask(generationId, opts, get, set, dependencies),
+    ),
+    ...checks.completionIds.map((completionId) =>
+      pollCompletionTask(completionId, opts, get, set, dependencies),
+    ),
+  ]);
+  const failed = pollFailureOutcome(results);
+  if (failed) return failed;
+  const refetchFailure = await refetchPolledConversation(
+    refetchConversationId(results),
+    opts,
+    get,
+    dependencies,
+  );
+  if (refetchFailure) return refetchFailure;
+  return opts?.signal?.aborted ? ABORTED_RECOVERY : COMPLETE_RECOVERY;
 }
 
 export function createTaskRecoveryActions(
@@ -397,51 +690,20 @@ export function createTaskRecoveryActions(
     },
 
     async pollInflightTasks(opts) {
-      const checks = selectInflightTaskChecks(get(), opts);
-      if (
-        checks.generationIds.length === 0 &&
-        checks.completionIds.length === 0
-      ) {
-        return;
-      }
-      const refetchCandidates = await Promise.all([
-        ...checks.generationIds.map((generationId) =>
-          pollGenerationTask(generationId, opts, get, set, dependencies),
-        ),
-        ...checks.completionIds.map((completionId) =>
-          pollCompletionTask(completionId, opts, get, set, dependencies),
-        ),
-      ]);
-      const needRefetchConvId =
-        refetchCandidates.find((convId): convId is string => Boolean(convId)) ??
-        null;
-      if (needRefetchConvId && !opts?.signal?.aborted) {
-        try {
-          await get().loadHistoricalMessages(needRefetchConvId);
-        } catch (error) {
-          logWarn("pollInflightTasks refetch failed", {
-            scope: "chat-poll",
-            code: error instanceof ApiError ? error.code : undefined,
-            extra: {
-              convId: needRefetchConvId,
-              err: dependencies.errorToMessage(error),
-            },
-          });
-        }
-      }
+      return pollInflightTaskSnapshot(opts, get, set, dependencies);
     },
 
     async hydrateActiveTasks(opts) {
-      if (opts?.signal?.aborted) return;
+      if (opts?.signal?.aborted) return ABORTED_RECOVERY;
       const requestedUserId = get().currentUserId;
-      if (requestedUserId === null) return;
+      if (requestedUserId === null) return COMPLETE_RECOVERY;
       const userFence = dependencies.userSessionFence.snapshot();
       const requestKey = JSON.stringify([userFence, requestedUserId]);
       const existing = hydrateRequests.get(requestKey);
       if (existing && !existing.signal?.aborted) return existing.promise;
 
       const request: ActiveTaskHydrateRequest = {
-        promise: Promise.resolve(),
+        promise: Promise.resolve(COMPLETE_RECOVERY),
         signal: opts?.signal,
       };
       request.promise = (async () => {
@@ -455,37 +717,22 @@ export function createTaskRecoveryActions(
             opts?.signal &&
             dependencies.isAbortRequest(error, opts.signal)
           ) {
-            return;
+            return ABORTED_RECOVERY;
           }
           logWarn("hydrateActiveTasks fetch failed", {
             scope: "chat-hydrate",
             code: error instanceof ApiError ? error.code : undefined,
             extra: { err: dependencies.errorToMessage(error) },
           });
-          return;
+          return { status: "failed" as const, error };
         }
-        if (
-          opts?.signal?.aborted ||
-          !dependencies.userSessionFence.isCurrent(userFence) ||
-          get().currentUserId !== requestedUserId
-        ) {
-          return;
-        }
-        const incoming = response.generations ?? [];
-        if (incoming.length === 0) return;
-        set((state) => {
-          if (
-            opts?.signal?.aborted ||
-            !dependencies.userSessionFence.isCurrent(userFence) ||
-            state.currentUserId !== requestedUserId
-          ) {
-            return state;
-          }
-          const generations = mergeUnknownActiveGenerations(
-            state.generations,
-            incoming,
-          );
-          return generations ? { generations } : state;
+        return hydrateActiveTaskSnapshot(response, {
+          requestedUserId,
+          userFence,
+          signal: opts?.signal,
+          get,
+          set,
+          dependencies,
         });
       })().finally(() => {
         if (hydrateRequests.get(requestKey) === request) {

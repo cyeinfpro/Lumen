@@ -49,6 +49,103 @@ test("request budgets default queries and commands to one 30 second total deadli
   });
 });
 
+test("successful response parsing rejects malformed or non-JSON payloads", async () => {
+  class TestApiError extends Error {
+    code: string;
+    status: number;
+    payload: unknown;
+
+    constructor(options: {
+      code: string;
+      message: string;
+      status: number;
+      payload?: unknown;
+    }) {
+      super(options.message);
+      this.code = options.code;
+      this.status = options.status;
+      this.payload = options.payload;
+    }
+  }
+  const responseModule = compile("./response.ts", {
+    "./errors": { ApiError: TestApiError },
+  }) as {
+    applyResponseValidator<T>(
+      response: Response,
+      path: string,
+      data: unknown,
+      validate: (value: unknown) => T,
+    ): T;
+    readSuccessResponseData(response: Response): Promise<unknown>;
+  };
+
+  await rejects(
+    responseModule.readSuccessResponseData(
+      new Response("{", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+    (error: unknown) =>
+      error instanceof TestApiError && error.code === "response_parse_error",
+  );
+  await rejects(
+    responseModule.readSuccessResponseData(
+      new Response("null", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+    (error: unknown) =>
+      error instanceof TestApiError && error.code === "response_schema_error",
+  );
+  await rejects(
+    responseModule.readSuccessResponseData(
+      new Response("<html>ok</html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    ),
+    (error: unknown) =>
+      error instanceof TestApiError &&
+      error.code === "response_content_type_error",
+  );
+  const validJsonWrongShape = await responseModule.readSuccessResponseData(
+    new Response(JSON.stringify({ id: 42 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  throws(
+    () =>
+      responseModule.applyResponseValidator(
+        new Response(null, { status: 200 }),
+        "/auth/me",
+        validJsonWrongShape,
+        (value) => {
+          if (
+            !value ||
+            typeof value !== "object" ||
+            typeof (value as { id?: unknown }).id !== "string"
+          ) {
+            throw new TypeError("id must be a string");
+          }
+          return value;
+        },
+      ),
+    (error: unknown) =>
+      error instanceof TestApiError &&
+      error.code === "response_schema_error" &&
+      error.status === 200,
+  );
+  equal(
+    await responseModule.readSuccessResponseData(
+      new Response(null, { status: 204 }),
+    ),
+    undefined,
+  );
+});
+
 test("caller abort reason wins over timeout and timeout is typed", async () => {
   class TimeoutApiError extends Error {
     code = "request_timeout";
@@ -248,7 +345,9 @@ test("download and stream clients use the typed raw transport adapters", async (
   };
   const streamModule = compile("./streamClient.ts", {
     "./baseUrl": { apiUrl: (path: string) => `/api${path}` },
-    "./requestBudget": { NO_DEADLINE: { kind: "none" } },
+    "./requestBudget": {
+      deadline: (totalMs: number) => ({ kind: "deadline", totalMs }),
+    },
     "./transport": { apiTransport: fakeTransport },
   }) as {
     streamClient: {

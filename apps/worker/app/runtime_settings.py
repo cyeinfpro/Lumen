@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from typing import Literal
 
 from sqlalchemy import select
 
@@ -27,6 +28,7 @@ from .task_runtime import RuntimeSlot
 logger = logging.getLogger(__name__)
 
 _TTL_S = 5.0
+_UNAVAILABLE_TTL_S = 1.0
 # _read_db 是在 cache.lock 里跑的：DB 慢查询 / 锁等待会把同进程所有 settings
 # 解析一起堵死（上游调用前几乎每条路径都要 resolve 一次）。PG 侧没有
 # statement_timeout 时这个等待没有上限，所以本地加硬上限，超时按「DB 无值」
@@ -34,11 +36,24 @@ _TTL_S = 5.0
 _DB_TIMEOUT_S = 5.0
 
 
-# key -> (expires_at, raw_str_or_None)
+class SettingUnavailable(RuntimeError):
+    """The authoritative runtime setting store could not be read."""
+
+
+@dataclass(frozen=True, slots=True)
+class SettingResolution:
+    state: Literal["value", "missing", "unavailable"]
+    value: str | None = None
+    source: Literal["database", "environment", "config", "none"] = "none"
+
+
+# key -> (expires_at, typed resolution)
 @dataclass(slots=True)
 class RuntimeSettingsCache:
-    values: dict[str, tuple[float, str | None]] = field(default_factory=dict)
-    db_only_values: dict[str, tuple[float, str | None]] = field(default_factory=dict)
+    values: dict[str, tuple[float, SettingResolution]] = field(default_factory=dict)
+    db_only_values: dict[str, tuple[float, SettingResolution]] = field(
+        default_factory=dict
+    )
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def shutdown(self) -> None:
@@ -68,21 +83,23 @@ def _runtime_cache() -> RuntimeSettingsCache:
     return _RUNTIME_CACHE_SLOT.current()
 
 
-def _config_fallback(spec: SettingSpec) -> str | None:
+def _config_fallback(spec: SettingSpec) -> SettingResolution:
     """先看 env（与 SettingSpec.env_fallback 同名），再看 config.py 的 settings 属性。"""
     env_val = os.environ.get(spec.env_fallback)
     if env_val is not None and env_val != "":
-        return env_val
+        return SettingResolution("value", env_val, "environment")
     # 把 'upstream.pixel_budget' 转成 'upstream_pixel_budget' 去 config.py 取
     attr = spec.key.replace(".", "_")
     val = getattr(_config_settings, attr, None)
     if val is None:
-        return None
+        return SettingResolution("missing")
     s = str(val)
-    return s if s != "" else None
+    if s == "":
+        return SettingResolution("missing")
+    return SettingResolution("value", s, "config")
 
 
-async def _read_db(spec_key: str) -> str | None:
+async def _read_db_state(spec_key: str) -> SettingResolution:
     try:
         async with SessionLocal() as session:
             row = (
@@ -93,25 +110,44 @@ async def _read_db(spec_key: str) -> str | None:
                     _DB_TIMEOUT_S,
                 )
             ).scalar_one_or_none()
-    except TimeoutError:
+    except Exception:  # noqa: BLE001
         # SQLAlchemy 把 CancelledError/TimeoutError 当 exit exception，会 invalidate
         # 这条连接而不是把半死的连接放回池子，所以这里超时是安全的。
-        logger.warning(
-            "runtime settings DB read timed out key=%s after=%ss",
+        logger.error(
+            "runtime settings DB read unavailable key=%s timeout=%ss",
             spec_key,
             _DB_TIMEOUT_S,
+            exc_info=True,
         )
-        return None
-    if row is not None and row != "":
-        return row
-    return None
+        return SettingResolution("unavailable")
+    if row is None:
+        return SettingResolution("missing")
+    return SettingResolution("value", str(row), "database")
 
 
-async def resolve(spec_key: str) -> str | None:
-    """检查缓存；过期则查 DB；DB 无则 env / config fallback。"""
+def _resolution_ttl(resolution: SettingResolution) -> float:
+    return _UNAVAILABLE_TTL_S if resolution.state == "unavailable" else _TTL_S
+
+
+def _resolved_value(
+    spec_key: str,
+    resolution: SettingResolution,
+) -> str | None:
+    if resolution.state == "unavailable":
+        raise SettingUnavailable(f"runtime setting unavailable: {spec_key}")
+    return resolution.value if resolution.state == "value" else None
+
+
+async def _read_db(spec_key: str) -> str | None:
+    """Compatibility wrapper around the typed DB resolution contract."""
+    return _resolved_value(spec_key, await _read_db_state(spec_key))
+
+
+async def resolve_state(spec_key: str) -> SettingResolution:
+    """Resolve a setting without conflating missing and unavailable."""
     spec = get_spec(spec_key)
     if spec is None:
-        return None
+        return SettingResolution("missing")
 
     cache = _runtime_cache()
     now = time.monotonic()
@@ -125,20 +161,28 @@ async def resolve(spec_key: str) -> str | None:
         if cached is not None and cached[0] > now:
             return cached[1]
 
-        db_val = await _read_db(spec_key)
-        if db_val is not None:
-            value: str | None = db_val
+        db_resolution = await _read_db_state(spec_key)
+        if db_resolution.state == "missing":
+            resolution = _config_fallback(spec)
         else:
-            value = _config_fallback(spec)
+            resolution = db_resolution
 
-        cache.values[spec_key] = (now + _TTL_S, value)
-        return value
+        cache.values[spec_key] = (
+            now + _resolution_ttl(resolution),
+            resolution,
+        )
+        return resolution
 
 
-async def resolve_db(spec_key: str) -> str | None:
-    """Return the raw DB value only, bypassing env/config fallback."""
+async def resolve(spec_key: str) -> str | None:
+    """Return the resolved value, raising when the control plane is unavailable."""
+    return _resolved_value(spec_key, await resolve_state(spec_key))
+
+
+async def resolve_db_state(spec_key: str) -> SettingResolution:
+    """Return typed raw DB state, bypassing env/config fallback."""
     if get_spec(spec_key) is None:
-        return None
+        return SettingResolution("missing")
     cache = _runtime_cache()
     now = time.monotonic()
     cached = cache.db_only_values.get(spec_key)
@@ -149,9 +193,17 @@ async def resolve_db(spec_key: str) -> str | None:
         cached = cache.db_only_values.get(spec_key)
         if cached is not None and cached[0] > now:
             return cached[1]
-        value = await _read_db(spec_key)
-        cache.db_only_values[spec_key] = (now + _TTL_S, value)
-        return value
+        resolution = await _read_db_state(spec_key)
+        cache.db_only_values[spec_key] = (
+            now + _resolution_ttl(resolution),
+            resolution,
+        )
+        return resolution
+
+
+async def resolve_db(spec_key: str) -> str | None:
+    """Return the raw DB value only, raising when the DB is unavailable."""
+    return _resolved_value(spec_key, await resolve_db_state(spec_key))
 
 
 async def resolve_int(spec_key: str, default: int) -> int:
@@ -173,10 +225,14 @@ def invalidate_cache() -> None:
 
 __all__ = [
     "RuntimeSettingsCache",
+    "SettingResolution",
+    "SettingUnavailable",
     "configure_cache",
     "resolve",
     "resolve_db",
+    "resolve_db_state",
     "resolve_int",
+    "resolve_state",
     "invalidate_cache",
     "shutdown_cache",
 ]

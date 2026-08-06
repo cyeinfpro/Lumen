@@ -4,6 +4,7 @@ import type {
   SnapshotExecutionContext,
 } from "./replayCoordinator";
 import type {
+  RealtimeProtocolIssue,
   RealtimeStatus,
   RuntimeSubscriber,
 } from "./runtime";
@@ -20,6 +21,7 @@ export interface UseSSEOptions {
   onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
   onError?: (event: Event) => void;
   onControl?: (event: RealtimeControlEvent) => void;
+  onProtocolIssue?: (issue: RealtimeProtocolIssue) => void;
   onAuthInvalidated?: () => void;
   recoverSnapshot?: SnapshotAdapter;
   hiddenCloseDelayMs?: number;
@@ -35,6 +37,7 @@ export type SSECallbackInvocation =
     }
   | { kind: "error"; event: Event }
   | { kind: "control"; event: RealtimeControlEvent }
+  | { kind: "protocol-issue"; issue: RealtimeProtocolIssue }
   | { kind: "auth-invalidated" }
   | { kind: "status"; status: SSEStatus };
 
@@ -43,6 +46,7 @@ type SSECallbackBindings = {
   onOpen?: UseSSEOptions["onOpen"];
   onError?: UseSSEOptions["onError"];
   onControl?: UseSSEOptions["onControl"];
+  onProtocolIssue?: UseSSEOptions["onProtocolIssue"];
   onAuthInvalidated?: UseSSEOptions["onAuthInvalidated"];
   setStatus: (status: SSEStatus) => void;
 };
@@ -135,6 +139,8 @@ export function dispatchSSECallbackForScope(
       return invokeCallback(bindings.onError, invocation.event);
     case "control":
       return invokeCallback(bindings.onControl, invocation.event);
+    case "protocol-issue":
+      return invokeCallback(bindings.onProtocolIssue, invocation.issue);
     case "auth-invalidated":
       return invokeCallback(bindings.onAuthInvalidated);
     case "status":
@@ -187,6 +193,8 @@ export function createSSESubscriber({
       emit(subscribedScope, { kind: "error", event }),
     onControl: (event) =>
       emit(subscribedScope, { kind: "control", event }),
+    onProtocolIssue: (issue) =>
+      emit(subscribedScope, { kind: "protocol-issue", issue }),
     onAuthInvalidated: () =>
       emit(subscribedScope, { kind: "auth-invalidated" }),
     recoverSnapshot: snapshotAdapter

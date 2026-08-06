@@ -5,18 +5,22 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import os
 import secrets
+import stat
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from PIL import Image, UnidentifiedImageError
 
+from .contracts import ArtifactCorrupt
 from .durable_files import atomic_write_bytes, durable_mkdir
 
 
@@ -242,9 +246,103 @@ class ImageArtifactFacade:
                 "bytes": size,
                 "format": fmt,
                 "expires_at": expires_at,
+                "sha256": hashlib.sha256(candidate.data).hexdigest(),
             }
-            for filename, _, size, width, height, fmt in plan
+            for filename, candidate, size, width, height, fmt in plan
         ]
+
+    def _artifact_path(self, job_id: str, url: str) -> Path:
+        base = urlsplit(self.public_base_url())
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != base.scheme
+            or parsed.netloc != base.netloc
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ArtifactCorrupt(job_id, "artifact_url_outside_public_base")
+        prefix = base.path.rstrip("/") + "/"
+        if not parsed.path.startswith(prefix):
+            raise ArtifactCorrupt(job_id, "artifact_url_outside_public_base")
+        relative = PurePosixPath(unquote(parsed.path[len(prefix) :]))
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise ArtifactCorrupt(job_id, "artifact_url_path_invalid")
+        return self.data_dir().joinpath(*relative.parts)
+
+    def _verify_artifact_sync(
+        self,
+        job_id: str,
+        image: dict[str, Any],
+    ) -> dict[str, Any]:
+        target = self._artifact_path(job_id, str(image["url"]))
+        try:
+            root = self.data_dir().resolve(strict=True)
+        except OSError as exc:
+            raise ArtifactCorrupt(job_id, "artifact_root_missing") from exc
+        try:
+            parent = target.parent.resolve(strict=True)
+        except OSError as exc:
+            raise ArtifactCorrupt(job_id, "artifact_file_missing") from exc
+        if parent != root and root not in parent.parents:
+            raise ArtifactCorrupt(job_id, "artifact_path_escape")
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise ArtifactCorrupt(job_id, "artifact_nofollow_unavailable")
+        try:
+            fd = os.open(
+                parent / target.name,
+                os.O_RDONLY
+                | no_follow
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+        except OSError as exc:
+            raise ArtifactCorrupt(job_id, "artifact_file_missing") from exc
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ArtifactCorrupt(job_id, "artifact_not_regular_file")
+            if before.st_size != int(image["bytes"]):
+                raise ArtifactCorrupt(job_id, "artifact_size_mismatch")
+            digest = hashlib.sha256()
+            while chunk := os.read(fd, 1024 * 1024):
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if (
+                after.st_dev != before.st_dev
+                or after.st_ino != before.st_ino
+                or after.st_size != before.st_size
+                or after.st_mtime_ns != before.st_mtime_ns
+                or after.st_ctime_ns != before.st_ctime_ns
+            ):
+                raise ArtifactCorrupt(job_id, "artifact_changed_during_verify")
+            actual = digest.hexdigest()
+            expected = image.get("sha256")
+            if expected is not None and not secrets.compare_digest(
+                str(expected),
+                actual,
+            ):
+                raise ArtifactCorrupt(job_id, "artifact_checksum_mismatch")
+            return {**image, "sha256": actual}
+        except OSError as exc:
+            raise ArtifactCorrupt(job_id, "artifact_read_failed") from exc
+        finally:
+            os.close(fd)
+
+    async def verify_saved_artifacts(
+        self,
+        job_id: str,
+        images: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            lambda: [
+                self._verify_artifact_sync(job_id, image) for image in images
+            ]
+        )
 
     async def save_input_image(
         self,

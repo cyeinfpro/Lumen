@@ -34,11 +34,23 @@ export type RealtimeStatus =
   | "closed"
   | "error";
 
+export type RealtimeProtocolIssue = {
+  reason:
+    | "invalid_json"
+    | "invalid_shape"
+    | "unknown_version"
+    | "unknown_event";
+  eventName: string;
+  cursor?: string;
+  consecutiveCount: number;
+};
+
 export type RuntimeSubscriber = {
   handlers: Record<string, (data: unknown, id: string) => void>;
   onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
   onError?: (event: Event) => void;
   onControl?: (event: RealtimeControlEvent) => void;
+  onProtocolIssue?: (issue: RealtimeProtocolIssue) => void;
   onAuthInvalidated?: () => void;
   recoverSnapshot?: SnapshotAdapter;
   hiddenCloseDelayMs?: number;
@@ -57,6 +69,7 @@ export type RealtimeRuntimeOptions = {
 };
 
 const MAX_SEEN_EVENT_IDS = 2_000;
+const INVALID_EVENT_RECOVERY_THRESHOLD = 3;
 
 export function retryBaseDelay(attempt: number): number {
   return Math.min(30_000, 1000 * 2 ** Math.min(5, Math.max(0, attempt)));
@@ -140,6 +153,7 @@ export class RealtimeRuntime {
   > | null = null;
   private unsubscribeBus: (() => void) | null = null;
   private unsubscribeLeader: (() => void) | null = null;
+  private consecutiveInvalidEvents = 0;
 
   constructor(options: RealtimeRuntimeOptions) {
     this.options = options;
@@ -253,6 +267,7 @@ export class RealtimeRuntime {
     this.activeSourceGeneration = null;
     this.seen.clear();
     this.seenQueue = [];
+    this.consecutiveInvalidEvents = 0;
   }
 
   private dispatch(event: Parameters<typeof transitionConnection>[1]): void {
@@ -408,7 +423,42 @@ export class RealtimeRuntime {
       cursor,
       allowedDomainEvents: allowed,
     });
-    if (parsed.kind !== "event") return;
+    if (parsed.kind !== "event") {
+      const reason =
+        parsed.kind === "unknown" ? "unknown_event" : parsed.reason;
+      this.consecutiveInvalidEvents += 1;
+      const issue: RealtimeProtocolIssue = {
+        reason,
+        eventName: name,
+        cursor,
+        consecutiveCount: this.consecutiveInvalidEvents,
+      };
+      for (const subscriber of this.subscribers) {
+        subscriber.onProtocolIssue?.(issue);
+      }
+      if (
+        reason === "unknown_version" ||
+        this.consecutiveInvalidEvents >= INVALID_EVENT_RECOVERY_THRESHOLD
+      ) {
+        this.consecutiveInvalidEvents = 0;
+        const event: RealtimeControlEvent = {
+          kind: "control",
+          type: "recovery_required",
+          version: 1,
+          reason: `protocol_${reason}`,
+          message: "realtime protocol validation failed",
+          cursor,
+        };
+        const recoveryId = this.createRecoveryId();
+        this.handleControl(event, recoveryId);
+        this.bus.post(
+          { type: "control_event", event, recoveryId },
+          this.now(),
+        );
+      }
+      return;
+    }
+    this.consecutiveInvalidEvents = 0;
     if (parsed.event.kind === "control") {
       const recoveryId = recoveryReason(parsed.event)
         ? this.createRecoveryId()

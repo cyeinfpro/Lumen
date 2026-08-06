@@ -21,9 +21,10 @@ import inspect
 import logging
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 from types import MappingProxyType
+from typing import Any, Literal
 from uuid import uuid4
 
 from redis.exceptions import WatchError
@@ -158,6 +159,23 @@ class AccountLimiterUnavailable(RuntimeError):
     """Quota accounting could not be recorded reliably."""
 
 
+class AccountLimiterConfigurationError(ValueError):
+    """A configured quota cannot be interpreted safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedRateLimit:
+    state: Literal["absent", "valid", "invalid"]
+    count: int | None = None
+    window_seconds: int | None = None
+    reason: str | None = None
+
+    def __iter__(self):
+        """Keep legacy metric readers working while callers migrate to state."""
+        yield self.count
+        yield self.window_seconds
+
+
 def _today_utc_key(now: float) -> str:
     return datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%d")
 
@@ -197,27 +215,47 @@ def _wall_clock_now(now: float | None = None) -> float:
     return cur_now
 
 
-def parse_rate_limit(s: str | None) -> tuple[int, int] | None:
-    """Parse "5/min" / "50/h" / "200/d" → (count, window_seconds). None on invalid.
-
-    Note: only integer coefficients are supported (e.g. "5/min" not "0.5/min").
-    ``int("0.5")`` would raise ValueError → None, effectively ignoring the limit.
-    Decimal coefficients are not currently used in production; if needed, switch
-    to ``float(count_s)`` and treat the parsed count as a fractional window permit.
-    """
-    if not isinstance(s, str) or "/" not in s:
-        return None
-    count_s, _, unit_s = s.partition("/")
+def parse_rate_limit(raw: str | None) -> ParsedRateLimit:
+    """Parse a configured rate without treating malformed values as absent."""
+    if raw is None:
+        return ParsedRateLimit("absent")
+    if not isinstance(raw, str):
+        return ParsedRateLimit("invalid", reason="wrong_type")
+    if raw.strip() == "":
+        return ParsedRateLimit("absent")
+    if "/" not in raw:
+        return ParsedRateLimit("invalid", reason="missing_slash")
+    count_s, _, unit_s = raw.partition("/")
     try:
         count = int(count_s.strip())
     except ValueError:
-        return None
+        return ParsedRateLimit("invalid", reason="count_not_integer")
     if count <= 0:
-        return None
+        return ParsedRateLimit("invalid", reason="count_not_positive")
     window = _UNIT_SECONDS.get(unit_s.strip().lower())
     if window is None:
-        return None
-    return count, window
+        return ParsedRateLimit("invalid", reason="unknown_unit")
+    return ParsedRateLimit("valid", count=count, window_seconds=window)
+
+
+def _quota_spec(
+    rate_limit: str | None,
+    daily_quota: int | None,
+) -> tuple[ParsedRateLimit, bool]:
+    parsed = parse_rate_limit(rate_limit)
+    if parsed.state == "invalid":
+        raise AccountLimiterConfigurationError(
+            f"invalid image_rate_limit {rate_limit!r}: {parsed.reason}"
+        )
+    if daily_quota is not None and (
+        isinstance(daily_quota, bool)
+        or not isinstance(daily_quota, int)
+        or daily_quota <= 0
+    ):
+        raise AccountLimiterConfigurationError(
+            f"invalid image_daily_quota {daily_quota!r}"
+        )
+    return parsed, daily_quota is not None
 
 
 async def _check_window_fallback(
@@ -232,25 +270,25 @@ async def _check_window_fallback(
     try:
         await redis.zremrangebyscore(ts_key, 0, cutoff)
         zcard_raw = await redis.zcard(ts_key)
-    except Exception:  # noqa: BLE001
-        return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota check unavailable") from exc
     try:
         used = int(zcard_raw or 0)
-    except (TypeError, ValueError):
-        used = 0
+    except (TypeError, ValueError) as exc:
+        raise AccountLimiterUnavailable("quota counter is invalid") from exc
     if used < count_limit:
         return used, None
     try:
         head = await redis.zrange(ts_key, 0, 0, withscores=True)
-    except Exception:  # noqa: BLE001
-        return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("quota check unavailable") from exc
     if not head:
         return used, None
     _member, oldest = head[0]
     try:
         return used, float(oldest)
-    except (TypeError, ValueError):
-        return used, None
+    except (TypeError, ValueError) as exc:
+        raise AccountLimiterUnavailable("quota window state is invalid") from exc
 
 
 def _make_redis_blip_retry_after(cur_now: float, window_s: float) -> float:
@@ -283,6 +321,8 @@ async def _check_window(
                 str(cutoff),
                 str(count_limit),
             )
+            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                raise AccountLimiterUnavailable("quota response is invalid")
             used_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else 0
             oldest_raw = (
                 raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else None
@@ -291,10 +331,8 @@ async def _check_window(
             if oldest_raw is None or oldest_raw == "" or oldest_raw == b"":
                 return used, None
             return used, float(oldest_raw)
-        except Exception:  # noqa: BLE001
-            # Redis 短暂不可达时仍 fail-closed，但只冷却几秒；旧行为把 oldest=None
-            # 交给上层，导致整段 window_s 都被视为不可用，放大一次 Redis 抖动。
-            return count_limit, _make_redis_blip_retry_after(cur_now, window_s)
+        except Exception as exc:  # noqa: BLE001
+            raise AccountLimiterUnavailable("quota check unavailable") from exc
     return await _check_window_fallback(
         redis,
         ts_key,
@@ -599,19 +637,19 @@ async def check_quota(
           ProviderHealth.image_rate_limited_until 缓存，避免下次选号再查一遍 Redis）
 
     rate_limit / daily_quota 都未配置 → 短路 (True, 0.0)，不查 Redis。
-    redis=None（测试或启动早期未注入）→ 同样短路，让 limiter 不阻塞主路径。
+    配置任一 quota 时 redis=None 或 Redis 状态未知都会 fail closed。
 
     P2-5 时间源约定：参数 ``now`` 必须是 wall-clock 秒（``time.time()``），不要混入
     ``time.monotonic()``——daily_quota 是按 UTC 日切换的、滑动窗口的成员也是 wall
     clock 戳，monotonic 不能直接进 ZSET 用 score 算窗口边界。provider_pool 那侧
     显式 cache 了 ``wall_now = time.time()`` 传入，本函数不应再做单位混用。
     """
-    parsed = parse_rate_limit(rate_limit)
-    has_daily = isinstance(daily_quota, int) and daily_quota > 0
-    if parsed is None and not has_daily:
+    parsed, has_daily = _quota_spec(rate_limit, daily_quota)
+    has_window = parsed.state == "valid"
+    if not has_window and not has_daily:
         return True, 0.0
     if redis is None:
-        return True, 0.0
+        raise AccountLimiterUnavailable("quota Redis is not attached")
 
     # P2-5: 防御式校验——如果调用方误传 monotonic（小数量级，比如 worker 启动后
     # 几十秒），会被识别为 1970 年附近时间戳，直接退回 wall clock 兜底。判断阈值
@@ -624,20 +662,24 @@ async def check_quota(
         day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
         try:
             raw = await redis.get(day_key)
-        except Exception:  # noqa: BLE001
-            return False, REDIS_ERROR_RETRY_AFTER_S
+        except Exception as exc:  # noqa: BLE001
+            raise AccountLimiterUnavailable("quota check unavailable") from exc
         used = 0
         if raw is not None:
             try:
                 used = int(raw)
-            except (TypeError, ValueError):
-                used = 0
+            except (TypeError, ValueError) as exc:
+                raise AccountLimiterUnavailable(
+                    "daily quota counter is invalid"
+                ) from exc
         if used >= daily_quota:
             return False, _seconds_until_next_utc_day(cur_now)
 
     # 2) 滑动窗口
-    if parsed is not None:
-        count_limit, window_s = parsed
+    if has_window:
+        count_limit = parsed.count
+        window_s = parsed.window_seconds
+        assert count_limit is not None and window_s is not None
         ts_key = _KEY_TS.format(name=account)
         used, oldest = await _check_window(
             redis,
@@ -679,18 +721,20 @@ async def reserve_quota(
     Returns:
         (allowed, retry_after_s, reservation_member)
     """
-    parsed = parse_rate_limit(rate_limit)
-    has_daily = isinstance(daily_quota, int) and daily_quota > 0
-    if parsed is None and not has_daily:
+    parsed, has_daily = _quota_spec(rate_limit, daily_quota)
+    has_window = parsed.state == "valid"
+    if not has_window and not has_daily:
         return True, 0.0, ""
     if redis is None:
-        return True, 0.0, ""
+        raise AccountLimiterUnavailable("quota Redis is not attached")
 
     cur_now = _wall_clock_now(now)
     member = task_id or f"reserve:{cur_now:.6f}:{uuid4().hex}"
     ts_key = _KEY_TS.format(name=account)
     day_key = _KEY_DAILY.format(name=account, day=_today_utc_key(cur_now))
-    count_limit, window_s = parsed if parsed is not None else (0, _TS_TTL_S)
+    count_limit = parsed.count if has_window else 0
+    window_s = parsed.window_seconds if has_window else _TS_TTL_S
+    assert count_limit is not None and window_s is not None
     cutoff = cur_now - float(window_s)
 
     eval_fn = getattr(redis, "eval", None)
@@ -703,7 +747,7 @@ async def reserve_quota(
                 day_key,
                 str(cutoff),
                 str(count_limit),
-                "1" if parsed is not None else "0",
+                "1" if has_window else "0",
                 str(int(daily_quota or 0)),
                 "1" if has_daily else "0",
                 member,
@@ -711,7 +755,13 @@ async def reserve_quota(
                 str(_TS_TTL_S),
                 str(_daily_expire_at(cur_now)),
             )
+            if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+                raise AccountLimiterUnavailable(
+                    "quota reservation response is invalid"
+                )
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, AccountLimiterUnavailable):
+                raise
             raise AccountLimiterUnavailable("quota reservation unavailable") from exc
         allowed_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else 0
         reason_raw = raw[1] if isinstance(raw, (list, tuple)) and len(raw) > 1 else ""
@@ -739,7 +789,7 @@ async def reserve_quota(
             member=member,
             cur_now=cur_now,
             cutoff=cutoff,
-            parsed=parsed,
+            parsed=(count_limit, window_s) if has_window else None,
             has_daily=has_daily,
             daily_quota=daily_quota,
         )
@@ -876,11 +926,13 @@ async def release_quota(
 
 
 __all__ = [
+    "AccountLimiterConfigurationError",
+    "AccountLimiterUnavailable",
+    "ParsedRateLimit",
     "parse_rate_limit",
     "check_quota",
     "reserve_quota",
     "release_quota",
     "record_image_call",
-    "AccountLimiterUnavailable",
     "REDIS_ERROR_RETRY_AFTER_S",
 ]

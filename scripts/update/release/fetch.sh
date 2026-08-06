@@ -195,7 +195,17 @@ ln -sfn "${SHARED_ENV}" "${NEW_RELEASE}/.env"
 LUMEN_IMAGE_REGISTRY="$(lumen_env_value LUMEN_IMAGE_REGISTRY "${SHARED_ENV}" 2>/dev/null || echo "")"
 [ -n "${LUMEN_IMAGE_REGISTRY}" ] || LUMEN_IMAGE_REGISTRY="ghcr.io/cyeinfpro"
 
-if [ "${RELEASE_SOURCE_IMAGE_EXTRACT:-0}" = "1" ]; then
+if [ "${LUMEN_UPDATE_BUILD:-0}" = "1" ]; then
+    local_build_rc=0
+    require_official_image_or_explicit_local_build \
+        "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}" \
+        || local_build_rc=$?
+    if [ "${local_build_rc}" -ne 0 ]; then
+        emit_fail fetch_release "${local_build_rc}"
+        exit "${local_build_rc}"
+    fi
+    emit_info fetch_release tag_probe "skipped_explicit_local_build"
+elif [ "${RELEASE_SOURCE_IMAGE_EXTRACT:-0}" = "1" ]; then
     log_info "[fetch_release] image_extract 已验证 ${TARGET_TAG} 可拉取，跳过 GHCR manifest 探测。"
     emit_info fetch_release tag_probe "skipped_image_extract_verified"
 elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
@@ -208,14 +218,28 @@ elif ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
             exit 1
         fi
         if ! probe_ghcr_tag "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}"; then
-            enable_local_build_fallback
+            local_build_rc=0
+            require_official_image_or_explicit_local_build \
+                "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}" \
+                || local_build_rc=$?
+            if [ "${local_build_rc}" -ne 0 ]; then
+                emit_fail fetch_release "${local_build_rc}"
+                exit "${local_build_rc}"
+            fi
         fi
     else
         if [ "${TARGET_TAG}" != "main" ]; then
             log_warn "[fetch_release] 目标镜像 tag=${TARGET_TAG} 不存在；stable 通道不会自动回退 main。"
             emit_info fetch_release target_tag_fallback "disabled"
         fi
-        enable_local_build_fallback
+        local_build_rc=0
+        require_official_image_or_explicit_local_build \
+            "${LUMEN_IMAGE_REGISTRY}/lumen-api" "${TARGET_TAG}" \
+            || local_build_rc=$?
+        if [ "${local_build_rc}" -ne 0 ]; then
+            emit_fail fetch_release "${local_build_rc}"
+            exit "${local_build_rc}"
+        fi
     fi
 fi
 

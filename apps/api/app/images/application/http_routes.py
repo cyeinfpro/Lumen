@@ -616,7 +616,6 @@ async def reference_image_binary_impl(
     if not _video_reference_token_is_valid(
         metadata,
         token=token,
-        updated_at=getattr(img, "updated_at", None),
     ):
         raise _http("not_found", "image not found", 404)
     if variant:
@@ -802,6 +801,7 @@ async def delete_image_impl(
             "source": img.source,
             "owner_generation_id": img.owner_generation_id,
         },
+        autocommit=False,
     )
     await db.commit()
     return {"ok": True}

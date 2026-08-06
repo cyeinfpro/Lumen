@@ -389,6 +389,7 @@ async def retry_dlq(
             "task_id": task_id,
             "outbox_id": outbox.id,
         },
+        autocommit=False,
     )
     await db.commit()
     return {
@@ -460,6 +461,7 @@ async def sweep_dlq_for_deleted_users(
         admin,
         event_type="admin.dlq.sweep_deleted_users",
         details={"swept": len(swept_ids), "scanned": scanned},
+        autocommit=False,
     )
     await db.commit()
     deps.logger.info(

@@ -330,13 +330,18 @@ def test_call_upstream_image_edits_file_mode_uses_multipart(monkeypatch) -> None
     call = calls[0]
     assert call["url"].endswith("/v1/images/edits")
     assert "json" not in call
-    assert call["data"]["prompt"] == "edit"  # type: ignore[index]
-    assert call["files"][0][0] == "image[]"  # type: ignore[index]
-    assert call["headers"]["Authorization"] == "Bearer sk-test"  # type: ignore[index]
-    assert call["headers"]["Idempotency-Key"] == app.upstream_idempotency_key(
+    content = call["content"]  # type: ignore[assignment]
+    headers = call["headers"]  # type: ignore[assignment]
+    assert b'name="prompt"' in content
+    assert b"edit" in content
+    assert b'name="image[]"' in content
+    assert b'filename="ref-0.png"' in content
+    assert tiny_png in content
+    assert headers["authorization"] == "Bearer sk-test"
+    assert headers["idempotency-key"] == app.upstream_idempotency_key(
         "job_file"
-    )  # type: ignore[index]
-    assert "Content-Type" not in call["headers"]  # type: ignore[operator]
+    )
+    assert headers["content-type"].startswith("multipart/form-data; boundary=")
 
 
 class _BufferedSseResponse:

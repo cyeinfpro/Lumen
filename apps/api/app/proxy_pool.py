@@ -12,9 +12,7 @@ Redis 存活：
   - failover     按入参 candidates 顺序，第一个 healthy 的就用
   - round_robin  全局 INCR % len(healthy)
 
-healthy = enabled 且 不在 cooldown 且 不在 caller 的 avoid set。
-若全部不可用则降级到 enabled+不在 avoid 的全集（cooldown 不阻塞），
-再不行返回 None。
+Only proxies with a proven available cooldown state are selectable.
 """
 
 from __future__ import annotations
@@ -24,7 +22,10 @@ import random
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any, Iterable
+
+from redis.exceptions import RedisError
 
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.providers_parts.proxy_runtime import (
@@ -75,6 +76,18 @@ class _ProxyPoolState:
 
 
 _proxy_pool_state = _ProxyPoolState()
+
+
+class CooldownState(StrEnum):
+    AVAILABLE = "available"
+    COOLED = "cooled"
+    UNKNOWN = "unknown"
+
+
+class ProxyStateUnavailable(RuntimeError):
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        super().__init__("proxy cooldown state unavailable: " + ",".join(names))
 
 
 async def resolve_provider_proxy_url(
@@ -150,29 +163,27 @@ def fail_key(name: str) -> str:
     return f"{_FAIL_PREFIX}{name}"
 
 
-async def _is_in_cooldown(redis: Any, name: str) -> bool:
-    # Local fallback first: even if Redis read succeeds, an in-process record
-    # from a recent local cooldown mark (set when Redis write previously failed)
-    # is honoured — Redis being healthy now doesn't undo a known-bad proxy.
+async def _cooldown_state(redis: Any, name: str) -> CooldownState:
     if _local_cooldown_active(name):
-        return True
+        return CooldownState.COOLED
+    if redis is None:
+        return CooldownState.UNKNOWN
     try:
-        return bool(await redis.exists(cooldown_key(name)))
-    except Exception as exc:  # noqa: BLE001
-        # Redis read failed: fall back to whatever local state we have. We do
-        # NOT mark the proxy bad here — only known-failed proxies (recorded
-        # via report_failure when SET also failed) live in _local_cooldown.
-        # Marking everything on read-failure would knock out the whole pool
-        # the moment Redis blips.
-        logger.warning("proxy cooldown check failed name=%s err=%s", name, exc)
-        return False
+        exists = await redis.exists(cooldown_key(name))
+    except RedisError:
+        logger.exception("proxy cooldown lookup unavailable name=%s", name)
+        return CooldownState.UNKNOWN
+    return CooldownState.COOLED if bool(exists) else CooldownState.AVAILABLE
 
 
-async def get_health(redis: Any, name: str) -> dict[str, Any]:
-    try:
-        raw = await redis.hgetall(health_key(name))
-    except Exception:  # noqa: BLE001
-        return {}
+async def _is_in_cooldown(redis: Any, name: str) -> bool:
+    state = await _cooldown_state(redis, name)
+    if state is CooldownState.UNKNOWN:
+        raise ProxyStateUnavailable([name])
+    return state is CooldownState.COOLED
+
+
+def _decode_health(raw: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in (raw or {}).items():
         ks = k.decode() if isinstance(k, (bytes, bytearray)) else str(k)
@@ -184,6 +195,24 @@ async def get_health(redis: Any, name: str) -> dict[str, Any]:
         except ValueError:
             out["last_latency_ms"] = None
     return out
+
+
+async def get_health(redis: Any, name: str) -> dict[str, Any]:
+    try:
+        raw = await redis.hgetall(health_key(name))
+    except Exception:  # noqa: BLE001
+        return {}
+    return _decode_health(raw)
+
+
+async def _get_health_for_selection(redis: Any, name: str) -> dict[str, Any]:
+    if redis is None:
+        raise ProxyStateUnavailable([name])
+    try:
+        raw = await redis.hgetall(health_key(name))
+    except RedisError as exc:
+        raise ProxyStateUnavailable([name]) from exc
+    return _decode_health(raw)
 
 
 async def set_health(redis: Any, name: str, *, latency_ms: float, target: str) -> None:
@@ -276,20 +305,28 @@ async def pick_proxy(
     strategy: str = DEFAULT_STRATEGY,
     avoid: Iterable[str] = (),
 ) -> ProviderProxyDefinition | None:
-    """从 candidates（已是按入参顺序的有序列表）中挑一个。失败返回 None。"""
+    """Select only from candidates with a proven available cooldown state."""
     avoid_set = {a for a in avoid if a}
     enabled = [p for p in candidates if p.enabled and p.name not in avoid_set]
     if not enabled:
         return None
 
-    healthy: list[ProviderProxyDefinition] = []
+    available: list[ProviderProxyDefinition] = []
+    unknown: list[str] = []
     for p in enabled:
-        if not await _is_in_cooldown(redis, p.name):
-            healthy.append(p)
-    pool = healthy or enabled  # 全冷却时降级到 enabled，避免完全不可用
+        state = await _cooldown_state(redis, p.name)
+        if state is CooldownState.AVAILABLE:
+            available.append(p)
+        elif state is CooldownState.UNKNOWN:
+            unknown.append(p.name)
+    if not available:
+        if unknown:
+            raise ProxyStateUnavailable(unknown)
+        return None
+    pool = available
 
     if strategy not in ALLOWED_STRATEGIES:
-        strategy = DEFAULT_STRATEGY
+        raise ValueError(f"unsupported proxy strategy: {strategy}")
 
     if strategy == "failover":
         return pool[0]
@@ -298,14 +335,14 @@ async def pick_proxy(
     if strategy == "round_robin":
         try:
             idx = int(await redis.incr(_RR_KEY))
-        except Exception:  # noqa: BLE001
-            idx = random.randint(0, len(pool) - 1)
+        except RedisError as exc:
+            raise ProxyStateUnavailable([proxy.name for proxy in pool]) from exc
         return pool[idx % len(pool)]
     if strategy == "latency":
         # 取最低延迟的 1/3 候选；未测过的延迟视为 inf
         latencies: list[tuple[ProviderProxyDefinition, float]] = []
         for p in pool:
-            h = await get_health(redis, p.name)
+            h = await _get_health_for_selection(redis, p.name)
             ms = h.get("last_latency_ms")
             latencies.append((p, ms if isinstance(ms, (int, float)) else float("inf")))
         latencies.sort(key=lambda x: x[1])
@@ -347,8 +384,10 @@ async def measure_latency(
 
 __all__ = [
     "ALLOWED_STRATEGIES",
+    "CooldownState",
     "DEFAULT_STRATEGY",
     "DEFAULT_TEST_TARGET",
+    "ProxyStateUnavailable",
     "get_health",
     "measure_latency",
     "pick_proxy",

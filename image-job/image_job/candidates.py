@@ -608,11 +608,17 @@ class ImageCandidateFacade:
         if parsed is not None:
             stream_error = self.first_stream_error([parsed])
             if stream_error is not None:
+                error_class = self.classify_stream_error(stream_error)
                 raise self.job_failure(
                     self.stream_error_message(stream_error),
                     upstream_status=response.status_code,
                     upstream_body=self.body_preview(response.content),
-                    error_class=self.classify_stream_error(stream_error),
+                    cost_proven_absent=error_class
+                    in {
+                        self.error_class_validation(),
+                        self.error_class_upstream_4xx(),
+                    },
+                    error_class=error_class,
                 )
             return await self.extract_candidates_fn(parsed, client, budget=budget)
 
@@ -621,11 +627,17 @@ class ImageCandidateFacade:
         )
         stream_error = self.first_stream_error(events)
         if stream_error is not None:
+            error_class = self.classify_stream_error(stream_error)
             raise self.job_failure(
                 self.stream_error_message(stream_error),
                 upstream_status=response.status_code,
                 upstream_body=self.body_preview(response.content),
-                error_class=self.classify_stream_error(stream_error),
+                cost_proven_absent=error_class
+                in {
+                    self.error_class_validation(),
+                    self.error_class_upstream_4xx(),
+                },
+                error_class=error_class,
             )
         cache: dict[str, Any] = {}
         candidates: list[Any] = []
@@ -673,11 +685,17 @@ class ImageCandidateFacade:
     ) -> None:
         stream_error = self.first_stream_error([event])
         if stream_error is not None:
+            error_class = self.classify_stream_error(stream_error)
             raise self.job_failure(
                 self.stream_error_message(stream_error),
                 upstream_status=response.status_code,
                 upstream_body=stream_error,
-                error_class=self.classify_stream_error(stream_error),
+                cost_proven_absent=error_class
+                in {
+                    self.error_class_validation(),
+                    self.error_class_upstream_4xx(),
+                },
+                error_class=error_class,
             )
         if self.is_responses_success_terminal(event):
             state.saw_success_terminal = True

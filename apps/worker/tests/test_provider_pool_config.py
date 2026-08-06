@@ -279,10 +279,13 @@ async def test_provider_pool_uses_configured_providers_without_legacy_merge(
         ),
     }
 
-    async def fake_resolve(key: str) -> str | None:
-        return values.get(key)
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        value = values.get(key)
+        if value is None:
+            return runtime_settings.SettingResolution("missing")
+        return runtime_settings.SettingResolution("value", value, "database")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
 
     providers = await ProviderPool()._load_config()
 
@@ -322,10 +325,13 @@ async def test_provider_pool_loads_provider_proxy(
         ),
     }
 
-    async def fake_resolve(key: str) -> str | None:
-        return values.get(key)
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        value = values.get(key)
+        if value is None:
+            return runtime_settings.SettingResolution("missing")
+        return runtime_settings.SettingResolution("value", value, "database")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
 
     providers = await ProviderPool()._load_config()
 
@@ -338,7 +344,7 @@ async def test_provider_pool_loads_provider_proxy(
 async def test_provider_pool_reload_preserves_image_job_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, runtime_settings
+    from app import runtime_settings
 
     values = {
         "providers": json.dumps(
@@ -358,13 +364,16 @@ async def test_provider_pool_reload_preserves_image_job_fields(
         ),
     }
 
-    async def fake_resolve(key: str) -> str | None:
-        return values.get(key)
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        value = values.get(key)
+        if value is None:
+            return runtime_settings.SettingResolution("missing")
+        return runtime_settings.SettingResolution("value", value, "database")
 
     async def fake_validate_provider_base_url(raw_base: str) -> str:
         return raw_base.rstrip("/")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
     monkeypatch.setattr(
         provider_pool,
         "_validate_provider_base_url",
@@ -393,7 +402,7 @@ async def test_provider_pool_reload_preserves_image_job_fields(
 async def test_provider_pool_filters_candidates_by_purpose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, runtime_settings
+    from app import runtime_settings
 
     values = {
         "providers": json.dumps(
@@ -416,13 +425,16 @@ async def test_provider_pool_filters_candidates_by_purpose(
         ),
     }
 
-    async def fake_resolve(key: str) -> str | None:
-        return values.get(key)
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        value = values.get(key)
+        if value is None:
+            return runtime_settings.SettingResolution("missing")
+        return runtime_settings.SettingResolution("value", value, "database")
 
     async def fake_validate_provider_base_url(raw_base: str) -> str:
         return raw_base.rstrip("/")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
     monkeypatch.setattr(
         provider_pool,
         "_validate_provider_base_url",
@@ -439,7 +451,7 @@ async def test_provider_pool_filters_candidates_by_purpose(
 async def test_provider_endpoint_lock_filters_text_and_image_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import provider_pool, runtime_settings
+    from app import runtime_settings
 
     values = {
         "providers": json.dumps(
@@ -464,13 +476,16 @@ async def test_provider_endpoint_lock_filters_text_and_image_routes(
         ),
     }
 
-    async def fake_resolve(key: str) -> str | None:
-        return values.get(key)
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        value = values.get(key)
+        if value is None:
+            return runtime_settings.SettingResolution("missing")
+        return runtime_settings.SettingResolution("value", value, "database")
 
     async def fake_validate_provider_base_url(raw_base: str) -> str:
         return raw_base.rstrip("/")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
     monkeypatch.setattr(
         provider_pool,
         "_validate_provider_base_url",
@@ -493,11 +508,11 @@ async def test_provider_pool_uses_legacy_env_only_when_providers_absent(
 ) -> None:
     from app import runtime_settings
 
-    async def fake_resolve(key: str) -> str | None:
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
         assert key == "providers"
-        return None
+        return runtime_settings.SettingResolution("missing")
 
-    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
     monkeypatch.setenv("UPSTREAM_BASE_URL", "https://legacy.example")
     monkeypatch.setenv("UPSTREAM_API_KEY", "sk-legacy")
 
@@ -506,6 +521,169 @@ async def test_provider_pool_uses_legacy_env_only_when_providers_absent(
     assert [(p.name, p.base_url, p.api_key) for p in providers] == [
         ("default", "https://legacy.example", "sk-legacy")
     ]
+
+
+@pytest.mark.asyncio
+async def test_authoritative_empty_disables_legacy_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import runtime_settings
+    from app.upstream_parts.entrypoints import UpstreamError
+
+    async def fake_resolve_state(key: str) -> runtime_settings.SettingResolution:
+        assert key == "providers"
+        return runtime_settings.SettingResolution("value", "[]", "database")
+
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
+    monkeypatch.setenv("UPSTREAM_API_KEY", "sk-legacy")
+    pool = ProviderPool()
+
+    await pool._maybe_reload()
+
+    assert pool.enabled_provider_names() == []
+    assert pool.config_status()["source"] == "authoritative_empty"
+    with pytest.raises(UpstreamError) as exc_info:
+        await pool.select(route="image")
+    assert exc_info.value.error_code == "no_providers"
+
+
+@pytest.mark.asyncio
+async def test_invalid_config_fences_previous_and_legacy_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, runtime_settings
+    from app.upstream_parts.entrypoints import UpstreamError
+
+    values = iter(
+        [
+            runtime_settings.SettingResolution(
+                "value",
+                json.dumps(
+                    [
+                        {
+                            "name": "good",
+                            "base_url": "https://good.example",
+                            "api_key": "sk-good",
+                        }
+                    ]
+                ),
+                "database",
+            ),
+            runtime_settings.SettingResolution(
+                "value",
+                '{"providers":[{"name":"broken"}]}',
+                "database",
+            ),
+        ]
+    )
+
+    async def fake_resolve_state(_key: str) -> runtime_settings.SettingResolution:
+        return next(values)
+
+    async def valid_url(raw: str) -> str:
+        return raw
+
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
+    monkeypatch.setattr(provider_pool, "_validate_provider_base_url", valid_url)
+    monkeypatch.setenv("UPSTREAM_API_KEY", "sk-legacy")
+    pool = ProviderPool()
+    await pool._maybe_reload()
+    assert pool.enabled_provider_names() == ["good"]
+
+    pool._config_loaded_at = 0.0
+    with pytest.raises(UpstreamError) as exc_info:
+        await pool._maybe_reload()
+
+    assert exc_info.value.error_code == "provider_configuration_invalid"
+    assert pool.enabled_provider_names() == []
+    assert pool.config_status()["source"] == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_config_uses_only_bounded_lkg_without_refreshing_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import provider_pool, runtime_settings
+    from app.upstream_parts.entrypoints import UpstreamError
+
+    clock = [100.0]
+    states = iter(
+        [
+            runtime_settings.SettingResolution(
+                "value",
+                json.dumps(
+                    [
+                        {
+                            "name": "good",
+                            "base_url": "https://good.example",
+                            "api_key": "sk-good",
+                        }
+                    ]
+                ),
+                "database",
+            ),
+            runtime_settings.SettingResolution("unavailable"),
+            runtime_settings.SettingResolution("unavailable"),
+        ]
+    )
+
+    async def fake_resolve_state(_key: str) -> runtime_settings.SettingResolution:
+        return next(states)
+
+    async def valid_url(raw: str) -> str:
+        return raw
+
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
+    monkeypatch.setattr(provider_pool, "_validate_provider_base_url", valid_url)
+    monkeypatch.setattr(provider_pool.time, "monotonic", lambda: clock[0])
+    pool = ProviderPool()
+    await pool._maybe_reload()
+    assert pool._config_last_good_at == 100.0
+
+    clock[0] = 120.0
+    pool._config_loaded_at = 0.0
+    await pool._maybe_reload()
+    assert pool.enabled_provider_names() == ["good"]
+    assert pool._config_last_good_at == 100.0
+    assert pool.config_status()["source"] == "lkg"
+
+    clock[0] = 170.0
+    pool._config_loaded_at = 0.0
+    with pytest.raises(UpstreamError) as exc_info:
+        await pool._maybe_reload()
+    assert exc_info.value.error_code == "provider_control_plane_unavailable"
+    assert pool._config_last_good_at == 100.0
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_rate_limit_invalidates_entire_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import runtime_settings
+    from app.upstream_parts.entrypoints import UpstreamError
+
+    async def fake_resolve_state(_key: str) -> runtime_settings.SettingResolution:
+        return runtime_settings.SettingResolution(
+            "value",
+            json.dumps(
+                [
+                    {
+                        "name": "good-looking",
+                        "base_url": "https://good.example",
+                        "api_key": "sk-good",
+                        "image_rate_limit": "50/mni",
+                    }
+                ]
+            ),
+            "database",
+        )
+
+    monkeypatch.setattr(runtime_settings, "resolve_state", fake_resolve_state)
+
+    with pytest.raises(UpstreamError) as exc_info:
+        await ProviderPool()._maybe_reload()
+
+    assert exc_info.value.error_code == "provider_configuration_invalid"
 
 
 @pytest.mark.asyncio
@@ -520,18 +698,21 @@ async def test_provider_pool_reload_cleans_orphan_health_entries(
     }
 
     async def fake_load_provider_config():
-        return [
-            ProviderConfig(
-                name="valid",
-                base_url="https://valid.example",
-                api_key="sk-valid",
+        return provider_pool.ProviderLoad(
+            "configured",
+            providers=(
+                ProviderConfig(
+                    name="valid",
+                    base_url="https://valid.example",
+                    api_key="sk-valid",
+                ),
+                ProviderConfig(
+                    name="invalid",
+                    base_url="https://invalid.example",
+                    api_key="sk-invalid",
+                ),
             ),
-            ProviderConfig(
-                name="invalid",
-                base_url="https://invalid.example",
-                api_key="sk-invalid",
-            ),
-        ], {}
+        )
 
     async def fake_validate_provider_base_url(raw_base: str) -> str:
         if "invalid" in raw_base:
@@ -543,6 +724,10 @@ async def test_provider_pool_reload_cleans_orphan_health_entries(
         pool, "_validate_provider_base_url", fake_validate_provider_base_url
     )
 
-    await pool._maybe_reload()
+    with pytest.raises(
+        provider_pool.UpstreamError,
+        match="provider configuration is invalid",
+    ):
+        await pool._maybe_reload()
 
-    assert set(pool._health) == {"valid"}
+    assert pool._health == {}

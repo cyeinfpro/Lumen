@@ -70,6 +70,7 @@ def persist(
         "malformed_payload": "OutboxMalformedPayload",
         "invalid_payload": "OutboxInvalidPayload",
         "max_fail_count": "OutboxEnqueueFailed",
+        "max_delivery_attempts": "OutboxEnqueueFailed",
     }.get(reason, "OutboxPublishFailed")
     session.add(
         OutboxDeadLetter(

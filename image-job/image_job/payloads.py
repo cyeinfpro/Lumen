@@ -147,7 +147,6 @@ def require_auth(request: Request) -> str:
 def validate_sidecar_auth_config(
     expected_token: str,
     *,
-    allow_legacy: bool,
     min_token_chars: int,
 ) -> None:
     if expected_token:
@@ -159,44 +158,32 @@ def validate_sidecar_auth_config(
                 f"with at least {min_token_chars} characters"
             )
         return
-    if not allow_legacy:
-        raise RuntimeError(
-            "IMAGE_JOB_SIDECAR_TOKEN is required unless "
-            "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1 is explicitly enabled"
-        )
+    raise RuntimeError("IMAGE_JOB_SIDECAR_TOKEN is required")
 
 
 def require_sidecar_auth(
     request: Request,
     *,
     expected_token: str,
-    allow_legacy: bool,
-) -> tuple[str, bool]:
+) -> str:
     incoming = require_auth(request)
     incoming_credential = _bearer_credential(incoming)
-    if expected_token and hmac.compare_digest(
-        incoming_credential.encode("utf-8"),
-        expected_token.encode("utf-8"),
-    ):
-        return f"Bearer {expected_token}", False
-    if allow_legacy:
-        return incoming, True
     if not expected_token:
         raise HTTPException(
             status_code=503,
             detail="image-job service authentication is not configured",
         )
+    if expected_token and hmac.compare_digest(
+        incoming_credential.encode("utf-8"),
+        expected_token.encode("utf-8"),
+    ):
+        return f"Bearer {expected_token}"
     raise HTTPException(status_code=401, detail="Invalid service credentials")
 
 
 def require_upstream_auth(
     request: Request,
-    *,
-    caller_auth_header: str,
-    legacy_auth: bool,
 ) -> str:
-    if legacy_auth:
-        return caller_auth_header
     upstream_auth = request.headers.get(UPSTREAM_AUTH_HEADER, "")
     try:
         credential = _bearer_credential(upstream_auth)

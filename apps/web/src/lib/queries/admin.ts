@@ -42,6 +42,7 @@ import {
   testAllAdminProxies,
   triggerAdminUpdate,
   updateAdminProxies,
+  type TelegramControlCommandOut,
 } from "../api/admin";
 import {
   getAdminModels,
@@ -576,11 +577,11 @@ export function useUpdateAdminProxiesMutation(
 
 export function useRestartTelegramBotMutation(
   options?: Omit<
-    UseMutationOptions<{ ok: boolean; receivers: number }, Error, void>,
+    UseMutationOptions<TelegramControlCommandOut, Error, void>,
     "mutationFn"
   >,
 ) {
-  return useMutation<{ ok: boolean; receivers: number }, Error, void>({
+  return useMutation<TelegramControlCommandOut, Error, void>({
     mutationFn: () => restartTelegramBot(),
     ...options,
   });

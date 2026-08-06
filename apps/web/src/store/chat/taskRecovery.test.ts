@@ -52,6 +52,30 @@ function activeBackendGeneration(
   };
 }
 
+function activeBackendCompletion(
+  id: string,
+  messageId: string,
+  conversationId: string | null = "conv-1",
+): BackendCompletion {
+  return {
+    id,
+    message_id: messageId,
+    conversation_id: conversationId,
+    model: "test",
+    input_image_ids: [],
+    text: "partial response",
+    tokens_in: 0,
+    tokens_out: 0,
+    status: "streaming",
+    progress_stage: "streaming",
+    attempt: 1,
+    error_code: null,
+    error_message: null,
+    started_at: null,
+    finished_at: null,
+  };
+}
+
 test("task recovery resolves loadHistoricalMessages dynamically from get()", async () => {
   const generation: Generation = {
     id: "gen-1",
@@ -287,6 +311,147 @@ test("hydrate defers until auth resolves and coalesces one user request", async 
 
   assert.deepEqual(Object.keys(state.generations), ["user-generation"]);
   assert.equal(requests.length, 1);
+});
+
+test("hydrate materializes active completions after loading their owning message", async () => {
+  let state = {
+    currentUserId: "user-1",
+    currentConvId: "conv-1",
+    messages: [],
+    generations: {},
+    loadHistoricalMessages: async (convId: string) => {
+      assert.equal(convId, "conv-1");
+      state = {
+        ...state,
+        messages: [
+          {
+            id: "assistant-1",
+            role: "assistant",
+            parent_user_message_id: "user-1",
+            intent_resolved: "chat",
+            text: "",
+            status: "pending",
+            created_at: 1,
+          } as AssistantMessage,
+        ],
+      };
+    },
+  } as unknown as ChatState;
+  const get: ChatStateGetter = () => state;
+  const set: ChatStateSetter = (partial) => {
+    const next = typeof partial === "function" ? partial(state) : partial;
+    if (next === state) return;
+    state = { ...state, ...next };
+  };
+  const actions = createTaskRecoveryActions(set, get, {
+    flushCompletionStreamPatches: () => {},
+    userSessionFence: createRequestFence(),
+    isAbortRequest: () => false,
+    errorToMessage: String,
+    getGenerationTask: async () => {
+      throw new Error("generation lookup should not run");
+    },
+    getCompletionTask: async () => {
+      throw new Error("completion lookup should not run");
+    },
+    listActiveTasks: async () => ({
+      generations: [],
+      completions: [
+        activeBackendCompletion("completion-1", "assistant-1"),
+      ],
+    }),
+  });
+
+  const outcome = await actions.hydrateActiveTasks();
+
+  assert.deepEqual(outcome, { status: "complete" });
+  const assistant = state.messages[0] as AssistantMessage;
+  assert.equal(assistant.completion_id, "completion-1");
+  assert.equal(assistant.status, "streaming");
+  assert.equal(assistant.text, "partial response");
+});
+
+test("hydrate fails closed when an active completion has no ownership identity", async () => {
+  let state = {
+    currentUserId: "user-1",
+    currentConvId: "conv-1",
+    messages: [],
+    generations: {},
+    loadHistoricalMessages: async () => {},
+  } as unknown as ChatState;
+  const get: ChatStateGetter = () => state;
+  const set: ChatStateSetter = (partial) => {
+    const next = typeof partial === "function" ? partial(state) : partial;
+    if (next === state) return;
+    state = { ...state, ...next };
+  };
+  const actions = createTaskRecoveryActions(set, get, {
+    flushCompletionStreamPatches: () => {},
+    userSessionFence: createRequestFence(),
+    isAbortRequest: () => false,
+    errorToMessage: String,
+    getGenerationTask: async () => {
+      throw new Error("generation lookup should not run");
+    },
+    getCompletionTask: async () => {
+      throw new Error("completion lookup should not run");
+    },
+    listActiveTasks: async () => ({
+      generations: [],
+      completions: [
+        activeBackendCompletion("completion-1", "assistant-1", null),
+      ],
+    }),
+  });
+
+  const outcome = await actions.hydrateActiveTasks();
+
+  assert.equal(outcome.status, "failed");
+  assert.equal(state.messages.length, 0);
+});
+
+test("authoritative polling and hydration surface dependency failures", async () => {
+  const generation = activeBackendGeneration("generation-1", "assistant-1");
+  let state = {
+    currentUserId: "user-1",
+    currentConvId: "conv-1",
+    messages: [],
+    generations: {
+      [generation.id]: {
+        ...generation,
+        stage: "queued",
+        started_at: 0,
+      } as unknown as Generation,
+    },
+    loadHistoricalMessages: async () => {},
+  } as unknown as ChatState;
+  const get: ChatStateGetter = () => state;
+  const set: ChatStateSetter = (partial) => {
+    const next = typeof partial === "function" ? partial(state) : partial;
+    if (next === state) return;
+    state = { ...state, ...next };
+  };
+  const actions = createTaskRecoveryActions(set, get, {
+    flushCompletionStreamPatches: () => {},
+    userSessionFence: createRequestFence(),
+    isAbortRequest: () => false,
+    errorToMessage: String,
+    getGenerationTask: async () => {
+      throw new Error("generation snapshot unavailable");
+    },
+    getCompletionTask: async () => {
+      throw new Error("completion lookup should not run");
+    },
+    listActiveTasks: async () => {
+      throw new Error("active task list unavailable");
+    },
+  });
+
+  const pollOutcome = await actions.pollInflightTasks();
+  const hydrateOutcome = await actions.hydrateActiveTasks();
+
+  assert.equal(pollOutcome.status, "failed");
+  assert.equal(hydrateOutcome.status, "failed");
 });
 
 test("aborted hydrate cannot swallow its replacement or merge stale data", async () => {

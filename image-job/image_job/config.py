@@ -19,6 +19,7 @@ _PRIVATE_UPSTREAM_NETWORKS = tuple(
         "fc00::/7",
     )
 )
+_REMOVED_AUTH_ENV = "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH"
 
 
 def _flag(env: Mapping[str, str], name: str, default: str = "0") -> bool:
@@ -115,7 +116,6 @@ class ImageJobSettings:
     queue_max: int
     concurrency: int
     sidecar_token: SecretText
-    allow_legacy_bearer: bool
     upstream_base_url: str
     public_base_url: str
     timeouts: ImageJobTimeouts
@@ -156,7 +156,6 @@ class ImageJobSettings:
     upstream_idempotency_guaranteed: bool = False
     stuck_reconcile_interval_s: float = 60.0
     retention_sweep_interval_s: float = 3600.0
-    legacy_auth_removal_version: str = "2.0.0"
 
     @classmethod
     def from_env(
@@ -164,6 +163,11 @@ class ImageJobSettings:
         environ: Mapping[str, str] | None = None,
     ) -> ImageJobSettings:
         env = os.environ if environ is None else environ
+        if _REMOVED_AUTH_ENV in env:
+            raise RuntimeError(
+                f"{_REMOVED_AUTH_ENV} is no longer supported; remove it and "
+                "configure IMAGE_JOB_SIDECAR_TOKEN"
+            )
         root_dir = Path(env.get("IMAGE_JOB_ROOT_DIR", "/opt/image-job"))
         data_dir = Path(env.get("IMAGE_JOB_DATA_DIR", str(root_dir / "data")))
         state_dir = Path(env.get("IMAGE_JOB_STATE_DIR", "/var/lib/image-job/state"))
@@ -200,7 +204,6 @@ class ImageJobSettings:
             queue_max=_int_env(env, "IMAGE_JOB_QUEUE_MAX", 1000),
             concurrency=_int_env(env, "IMAGE_JOB_CONCURRENCY", 2),
             sidecar_token=SecretText(env.get("IMAGE_JOB_SIDECAR_TOKEN", "").strip()),
-            allow_legacy_bearer=_flag(env, "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH"),
             upstream_base_url=_validate_upstream_base_url(
                 env.get("IMAGE_JOB_UPSTREAM_BASE_URL", "http://127.0.0.1:8081")
             ),
@@ -309,11 +312,8 @@ class ImageJobSettings:
                 "IMAGE_JOB_SIDECAR_TOKEN must be a whitespace-free token "
                 "with at least 32 characters"
             )
-        if not token and not self.allow_legacy_bearer:
-            raise RuntimeError(
-                "IMAGE_JOB_SIDECAR_TOKEN is required unless "
-                "IMAGE_JOB_ALLOW_LEGACY_BEARER_AUTH=1 is explicitly enabled"
-            )
+        if not token:
+            raise RuntimeError("IMAGE_JOB_SIDECAR_TOKEN is required")
         vault = CredentialVault(
             active_key_id=self.credential_active_key_id,
             master_secret=self.credential_master_secret.get_secret_value(),

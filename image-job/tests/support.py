@@ -77,7 +77,6 @@ class ImageJobHarness:
         "CONCURRENCY": "concurrency",
         "GRACEFUL_SHUTDOWN_S": "graceful_shutdown_s",
         "SIDECAR_TOKEN": "sidecar_token",
-        "ALLOW_LEGACY_BEARER_AUTH": "allow_legacy_bearer",
         "DB_PATH": "db_path",
         "DATA_DIR": "data_dir",
         "REFS_DIR": "refs_dir",
@@ -137,6 +136,12 @@ class ImageJobHarness:
                 error_class_internal=lambda: ERROR_CLASS_INTERNAL,
                 error_class_network=lambda: ERROR_CLASS_NETWORK,
                 job_ttl_days=lambda: self.settings.job_ttl_days,
+                verify_artifacts=(
+                    lambda job_id, images: self.processing.verify_saved_artifacts(
+                        job_id,
+                        images,
+                    )
+                ),
                 log=self.log,
             ),
         )
@@ -415,22 +420,17 @@ class ImageJobHarness:
         )
         return payloads.validate_payload(payload, policy)
 
-    def authenticate_caller(self, request: Request) -> tuple[str, bool]:
+    def authenticate_caller(self, request: Request) -> str:
         return payloads.require_sidecar_auth(
             request,
             expected_token=self.settings.sidecar_token.get_secret_value(),
-            allow_legacy=self.settings.allow_legacy_bearer,
         )
 
     def scoped_request_hash(
         self,
         payload: dict[str, Any],
         upstream_auth_header: str,
-        *,
-        legacy_auth: bool,
     ) -> str:
-        if legacy_auth:
-            return request_hash(payload)
         return request_hash(
             {
                 "payload": payload,
@@ -478,12 +478,8 @@ class ImageJobHarness:
             )
 
     async def create_image_job(self, request: Request) -> dict[str, Any]:
-        owner, legacy_auth = self.authenticate_caller(request)
-        upstream = payloads.require_upstream_auth(
-            request,
-            caller_auth_header=owner,
-            legacy_auth=legacy_auth,
-        )
+        owner = self.authenticate_caller(request)
+        upstream = payloads.require_upstream_auth(request)
         raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=self.settings.max_request_bytes,
@@ -494,7 +490,6 @@ class ImageJobHarness:
         request_hash_value = self.scoped_request_hash(
             payload,
             upstream,
-            legacy_auth=legacy_auth,
         )
         queue = self.__dict__.get("_queue")
         if queue is not None and queue.full():
@@ -579,15 +574,14 @@ class ImageJobHarness:
         )
 
     async def get_image_job(self, job_id: str, request: Request) -> dict[str, Any]:
-        owner, legacy_auth = self.authenticate_caller(request)
+        owner = self.authenticate_caller(request)
         row = await self.db_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
         if row is None:
             raise HTTPException(status_code=404, detail="image job not found")
         candidate_hashes = [credential_hash(owner)]
-        if not legacy_auth:
-            upstream = payloads.optional_upstream_auth(request)
-            if upstream is not None:
-                candidate_hashes.append(credential_hash(upstream))
+        upstream = payloads.optional_upstream_auth(request)
+        if upstream is not None:
+            candidate_hashes.append(credential_hash(upstream))
         if not any(
             hmac.compare_digest(str(row["auth_hash"]), candidate)
             for candidate in candidate_hashes
@@ -599,7 +593,7 @@ class ImageJobHarness:
         return self.row_to_response(row)
 
     async def upload_reference(self, request: Request) -> dict[str, Any]:
-        owner, _legacy_auth = self.authenticate_caller(request)
+        owner = self.authenticate_caller(request)
         raw = await http_bodies.read_request_body_bounded(
             request,
             max_bytes=self.settings.max_ref_bytes,

@@ -82,23 +82,12 @@ def reference_token_is_valid(
     token_key: str,
     expires_key: str,
     token: str,
-    updated_at: datetime | None,
 ) -> bool:
     expected = metadata.get(token_key)
     if not isinstance(expected, str) or not secrets.compare_digest(expected, token):
         return False
     expires_at = parse_reference_token_expiry(metadata.get(expires_key))
-    now = datetime.now(timezone.utc)
-    if expires_at is not None:
-        return expires_at > now
-    if updated_at is None:
-        return False
-    fallback_updated_at = (
-        updated_at.replace(tzinfo=timezone.utc)
-        if updated_at.tzinfo is None
-        else updated_at.astimezone(timezone.utc)
-    )
-    return fallback_updated_at + REFERENCE_ACCESS_TOKEN_TTL > now
+    return expires_at is not None and expires_at > datetime.now(timezone.utc)
 
 
 def ensure_reference_access_token(
@@ -110,12 +99,13 @@ def ensure_reference_access_token(
     token = metadata.get(token_key)
     expires_at = parse_reference_token_expiry(metadata.get(expires_key))
     if (
-        not isinstance(token, str)
-        or not token
-        or expires_at is None
-        or expires_at <= datetime.now(timezone.utc)
+        isinstance(token, str)
+        and token
+        and expires_at is not None
+        and expires_at > datetime.now(timezone.utc)
     ):
-        token = secrets.token_urlsafe(32)
+        return token
+    token = secrets.token_urlsafe(32)
     metadata[token_key] = token
     metadata[expires_key] = reference_token_expiry()
     return token

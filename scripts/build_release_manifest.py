@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 SERVICES = ("api", "worker", "tgbot", "web")
+DEPENDENCIES = ("python", "postgres", "redis")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+IMMUTABLE_REF_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
@@ -57,6 +59,19 @@ def _parse_image_digest(value: str) -> tuple[str, str]:
     return service, digest
 
 
+def _parse_dependency_image(value: str) -> tuple[str, str]:
+    name, separator, reference = value.partition("=")
+    if not separator or name not in DEPENDENCIES:
+        raise ReleaseManifestError(
+            f"dependency image must be NAME=name@sha256:..., got {value!r}"
+        )
+    if not IMMUTABLE_REF_RE.fullmatch(reference):
+        raise ReleaseManifestError(
+            f"invalid immutable dependency image for {name}: {reference!r}"
+        )
+    return name, reference
+
+
 def resolve_image_digest(reference: str) -> str:
     result = subprocess.run(
         ["docker", "buildx", "imagetools", "inspect", "--raw", reference],
@@ -81,6 +96,7 @@ def build_release_manifest(
     registry: str,
     alembic_heads: list[str],
     image_digests: dict[str, str],
+    dependency_images: dict[str, str],
     generated_at: str,
 ) -> dict[str, object]:
     if not VERSION_RE.fullmatch(version):
@@ -97,6 +113,17 @@ def build_release_manifest(
         raise ReleaseManifestError(
             f"image digest set mismatch; missing={missing}, extra={extra}"
         )
+    if set(dependency_images) != set(DEPENDENCIES):
+        missing = sorted(set(DEPENDENCIES) - set(dependency_images))
+        extra = sorted(set(dependency_images) - set(DEPENDENCIES))
+        raise ReleaseManifestError(
+            f"dependency image set mismatch; missing={missing}, extra={extra}"
+        )
+    for name, reference in dependency_images.items():
+        if not IMMUTABLE_REF_RE.fullmatch(reference):
+            raise ReleaseManifestError(
+                f"invalid immutable dependency image for {name}: {reference!r}"
+            )
 
     clean_registry = registry.rstrip("/")
     images: dict[str, dict[str, str]] = {}
@@ -119,6 +146,10 @@ def build_release_manifest(
         "short_sha": short_sha,
         "generated_at": generated_at,
         "alembic_heads": alembic_heads,
+        "dependencies": {
+            name: {"immutable_ref": dependency_images[name]}
+            for name in DEPENDENCIES
+        },
         "images": images,
     }
     if "todo" in json.dumps(manifest, ensure_ascii=True).lower():
@@ -132,7 +163,12 @@ def render_release_notes(manifest: dict[str, object]) -> str:
     short_sha = str(manifest["short_sha"])
     heads = manifest["alembic_heads"]
     images = manifest["images"]
-    if not isinstance(heads, list) or not isinstance(images, dict):
+    dependencies = manifest["dependencies"]
+    if (
+        not isinstance(heads, list)
+        or not isinstance(images, dict)
+        or not isinstance(dependencies, dict)
+    ):
         raise ReleaseManifestError("invalid release manifest structure")
 
     lines = [
@@ -149,6 +185,11 @@ def render_release_notes(manifest: dict[str, object]) -> str:
         if not isinstance(image, dict):
             raise ReleaseManifestError(f"missing image metadata for {service}")
         lines.append(str(image["immutable_ref"]))
+    for name in DEPENDENCIES:
+        dependency = dependencies.get(name)
+        if not isinstance(dependency, dict):
+            raise ReleaseManifestError(f"missing dependency metadata for {name}")
+        lines.append(str(dependency["immutable_ref"]))
     lines.extend(
         [
             "```",
@@ -189,6 +230,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Provide a digest directly; intended for tests or offline generation.",
     )
     parser.add_argument(
+        "--dependency-image",
+        action="append",
+        default=[],
+        metavar="NAME=REF",
+        help="Provide python/postgres/redis as complete name@sha256 references.",
+    )
+    parser.add_argument(
         "--resolve-images",
         action="store_true",
         help="Resolve release tags with docker buildx imagetools inspect.",
@@ -210,6 +258,11 @@ def main(argv: list[str] | None = None) -> int:
         digests = dict(_parse_image_digest(value) for value in args.image_digest)
         if len(digests) != len(args.image_digest):
             raise ReleaseManifestError("duplicate image digest service")
+        dependencies = dict(
+            _parse_dependency_image(value) for value in args.dependency_image
+        )
+        if len(dependencies) != len(args.dependency_image):
+            raise ReleaseManifestError("duplicate dependency image name")
 
         if args.resolve_images:
             for service in SERVICES:
@@ -232,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             registry=args.registry,
             alembic_heads=heads,
             image_digests=digests,
+            dependency_images=dependencies,
             generated_at=generated_at,
         )
         args.output.write_text(

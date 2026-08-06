@@ -58,6 +58,8 @@ interface SavePayload {
   operations: CanvasOperation[];
 }
 
+const CANVAS_RECOVERY_RETRY_DELAYS_MS = [0, 250, 1_000] as const;
+
 export function useRemoteDocumentSync(
   document: CanvasDocument,
   store: CanvasEditorStore,
@@ -163,23 +165,39 @@ export function useCanvasDraftPersistence({
     });
 
     const setup = async () => {
-      try {
-        const recovery = await loadCanvasDraftRecovery(canvasId, clientId);
+      let loaded: CanvasDraftRecoveryLoadResult | null = null;
+      for (const delayMs of CANVAS_RECOVERY_RETRY_DELAYS_MS) {
+        if (delayMs > 0) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, delayMs);
+          });
+        }
         if (canceled) return;
+        loaded = await tryLoadCanvasDraftRecovery(canvasId, clientId);
+        if (loaded.status === "ready") break;
+        onDurabilityWarning(
+          "浏览器本地恢复存储暂时不可用；恢复完成前不会覆盖或删除本地草稿。",
+        );
+      }
+      if (canceled || !loaded || loaded.status !== "ready") return;
+      try {
         migratedDraftClientId = await applyCanvasDraftRecovery({
           canvasId,
           clientId,
           initialDocument: initialDocumentRef.current,
           recoveredSaveBatchRef,
-          recovery,
+          recovery: loaded.recovery,
           store,
         });
-      } finally {
-        if (!canceled) {
-          ready = true;
-          persist();
-        }
+      } catch {
+        onDurabilityWarning(
+          "浏览器本地草稿恢复失败；当前页面不会覆盖或删除恢复数据。",
+        );
+        return;
       }
+      if (canceled) return;
+      ready = true;
+      persist();
     };
 
     const persistOnPageHide = () => {
@@ -232,13 +250,31 @@ interface LoadedCanvasDraftRecovery {
   persistedSaveBatch: PersistedCanvasSaveBatch | null;
 }
 
+type CanvasDraftRecoveryLoadResult =
+  | { status: "ready"; recovery: LoadedCanvasDraftRecovery }
+  | { status: "unavailable"; error: unknown };
+
+async function tryLoadCanvasDraftRecovery(
+  canvasId: string,
+  clientId: string,
+): Promise<CanvasDraftRecoveryLoadResult> {
+  try {
+    return {
+      status: "ready",
+      recovery: await loadCanvasDraftRecovery(canvasId, clientId),
+    };
+  } catch (error) {
+    return { status: "unavailable", error };
+  }
+}
+
 async function loadCanvasDraftRecovery(
   canvasId: string,
   clientId: string,
 ): Promise<LoadedCanvasDraftRecovery> {
-  let draft = await getCanvasDraft(canvasId, clientId).catch(() => null);
+  let draft = await getCanvasDraft(canvasId, clientId);
   if (!draft) {
-    const drafts = await listCanvasDrafts(canvasId).catch(() => []);
+    const drafts = await listCanvasDrafts(canvasId);
     for (const candidate of drafts) {
       if (
         candidate.client_id !== clientId &&
@@ -265,7 +301,7 @@ async function loadCanvasDraftRecovery(
   const persistedSaveBatch = await getCanvasSaveBatch(
     canvasId,
     draftClientId,
-  ).catch(() => null);
+  );
   return { draft, draftClientId, persistedSaveBatch };
 }
 
