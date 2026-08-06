@@ -1376,6 +1376,54 @@ exit 1
     assert result.stdout.strip() == "absent"
 
 
+def test_redis_rdb_validation_uses_root_for_check_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fakebin / "docker"
+    docker.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> {shlex.quote(str(docker_log))}
+if [ "$1" = "cp" ]; then
+    exit 0
+fi
+if [ "$1" = "exec" ] \
+        && [ "$2" = "-u" ] \
+        && [ "$3" = "0" ] \
+        && [ "$4" = "lumen-redis" ]; then
+    exit 0
+fi
+exit 64
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    rdb = tmp_path / "dump.rdb"
+    rdb.write_bytes(b"valid-rdb")
+
+    result = _run_bash(
+        f"""
+        set -u
+        export PATH={shlex.quote(str(fakebin))}:$PATH
+        . {shlex.quote(str(BACKUP_RESTORE_SERVICES))}
+        lumen_validate_redis_rdb_file \
+            lumen-redis {shlex.quote(str(rdb))}
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert calls[0].startswith(f"cp {rdb} lumen-redis:/tmp/lumen-rdb-check-")
+    assert calls[1].startswith(
+        "exec -u 0 lumen-redis redis-check-rdb /tmp/lumen-rdb-check-"
+    )
+    assert calls[2].startswith(
+        "exec -u 0 lumen-redis rm -f /tmp/lumen-rdb-check-"
+    )
+
+
 def test_systemd_fallback_writer_blocks_update_even_when_storage_skip_is_set(
     tmp_path: Path,
 ) -> None:

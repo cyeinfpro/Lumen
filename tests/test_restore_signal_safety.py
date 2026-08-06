@@ -176,8 +176,8 @@ def _write_fake_docker(path: Path) -> None:
                 raise SystemExit(0)
 
             index = 1
-            while index < len(args) and args[index] in {"-i", "-e"}:
-                if args[index] == "-e":
+            while index < len(args) and args[index] in {"-i", "-e", "-u"}:
+                if args[index] in {"-e", "-u"}:
                     index += 2
                 else:
                     index += 1
