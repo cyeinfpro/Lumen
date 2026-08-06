@@ -1339,6 +1339,43 @@ exit 3
     assert not docker_log.exists()
 
 
+@pytest.mark.parametrize(
+    "missing_message",
+    (
+        "Error response from daemon: No such object: lumen-tgbot",
+        "error: no such object: lumen-tgbot",
+        "error: no such container: lumen-tgbot",
+    ),
+)
+def test_missing_docker_writer_container_is_absent_for_known_messages(
+    tmp_path: Path,
+    missing_message: str,
+) -> None:
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    docker = fakebin / "docker"
+    docker.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' {shlex.quote(missing_message)} >&2
+exit 1
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    result = _run_bash(
+        f"""
+        set -u
+        export PATH={shlex.quote(str(fakebin))}:$PATH
+        . {shlex.quote(str(BACKUP_RESTORE_SERVICES))}
+        lumen_service_running_state tgbot
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.strip() == "absent"
+
+
 def test_systemd_fallback_writer_blocks_update_even_when_storage_skip_is_set(
     tmp_path: Path,
 ) -> None:
