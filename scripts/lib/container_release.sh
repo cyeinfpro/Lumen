@@ -579,16 +579,62 @@ lumen_compose_api_readiness_once() {
         "${ready_url}" 2>/dev/null
 }
 
+lumen_compose_legacy_worker_readiness_once() {
+    local compose_dir="$1"
+    local cid=""
+    local command=""
+    local health=""
+    if [ -n "${compose_dir}" ]; then
+        cid="$(
+            lumen_compose_in "${compose_dir}" ps -q worker 2>/dev/null \
+                | head -n 1
+        )"
+    else
+        cid="$(lumen_compose ps -q worker 2>/dev/null | head -n 1)"
+    fi
+    [ -n "${cid}" ] || return 1
+    command="$(
+        lumen_docker inspect --format '{{json .Config.Cmd}}' \
+            "${cid}" 2>/dev/null
+    )" || return 1
+    case "${command}" in
+        *"app.worker_health"*)
+            return 1
+            ;;
+        *"from arq.worker import run_worker"*"LUMEN_WORKER_HEALTH_KEY"*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    health="$(
+        lumen_docker inspect \
+            --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "${cid}" 2>/dev/null
+    )" || return 1
+    [ "${health}" = "healthy" ]
+}
+
 lumen_compose_worker_readiness_once() {
     local compose_dir="$1"
     local _ready_url="$2"
     if [ -n "${compose_dir}" ]; then
-        lumen_compose_in "${compose_dir}" exec -T worker \
-            python -m app.worker_health check >/dev/null 2>&1
+        if lumen_compose_in "${compose_dir}" exec -T worker \
+                python -m app.worker_health check >/dev/null 2>&1; then
+            return 0
+        fi
     else
-        lumen_compose exec -T worker \
-            python -m app.worker_health check >/dev/null 2>&1
+        if lumen_compose exec -T worker \
+                python -m app.worker_health check >/dev/null 2>&1; then
+            return 0
+        fi
     fi
+    if lumen_compose_legacy_worker_readiness_once "${compose_dir}"; then
+        log_warn \
+            "Worker 使用旧版健康协议；Docker healthy 已验证，兼容放行本次恢复。"
+        return 0
+    fi
+    return 1
 }
 
 lumen_compose_core_readiness_state() {
