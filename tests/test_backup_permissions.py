@@ -1510,6 +1510,46 @@ def test_backup_layout_accepts_held_flock_and_rejects_released_flock(
     assert "maintenance root-local flock is not held" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("mutate_record", [False, True])
+def test_flock_proof_tolerates_only_identical_owner_record_rewrites(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    mutate_record: bool,
+) -> None:
+    backup_root = tmp_path / "backup"
+    original = BACKUP_PERMISSIONS._ensure_backup_layout_locked
+    with _maintenance_flock_environment(
+        monkeypatch,
+        tmp_path / "maintenance",
+    ) as (maintenance_root, descriptor):
+        payload = os.pread(descriptor, os.fstat(descriptor).st_size, 0)
+
+        def rewrite_after_layout(args: argparse.Namespace) -> str:
+            binding_token = original(args)
+            replacement = (
+                payload.replace(b"script=pytest", b"script=attack")
+                if mutate_record
+                else payload
+            )
+            os.ftruncate(descriptor, 0)
+            os.pwrite(descriptor, replacement, 0)
+            os.fsync(descriptor)
+            return binding_token
+
+        monkeypatch.setattr(
+            BACKUP_PERMISSIONS,
+            "_ensure_backup_layout_locked",
+            rewrite_after_layout,
+        )
+        _set_permissions_argv(monkeypatch, backup_root, maintenance_root)
+        result = BACKUP_PERMISSIONS.main()
+
+    assert result == (2 if mutate_record else 0)
+    if mutate_record:
+        assert "owner record changed" in capsys.readouterr().err
+
+
 def test_recovery_parent_entry_replacement_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
