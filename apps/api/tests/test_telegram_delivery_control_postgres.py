@@ -512,13 +512,7 @@ def test_telegram_control_migration_round_trips_on_postgres() -> None:
                         "WHERE id='active-command'"
                     )
                 )
-                export_path = Path(f"/tmp/{schema}-telegram-export.json")
-                os.environ["LUMEN_MIGRATION_EXPORT_PATH"] = str(export_path)
-                try:
-                    migration.downgrade()
-                finally:
-                    os.environ.pop("LUMEN_MIGRATION_EXPORT_PATH", None)
-                    export_path.unlink(missing_ok=True)
+                migration.downgrade()
                 remaining = set(sa.inspect(connection).get_table_names())
                 assert "telegram_control_commands" not in remaining
                 assert "telegram_delivery_attempts" not in remaining

@@ -27,6 +27,10 @@ from concurrent_index_retry import (  # noqa: E402
     prepare_concurrent_index_retry_boundary,
 )
 from lumen_core.models import Base  # noqa: E402
+from telegram_downgrade_guard import (  # noqa: E402
+    TELEGRAM_CONTROL_REVISION,
+    guard_telegram_downgrade,
+)
 
 config = context.config
 if config.config_file_name is not None:
@@ -142,6 +146,30 @@ def _prepare_concurrent_index_retry() -> None:
     )
 
 
+def _prepare_downgrade_guards(*, online: bool) -> None:
+    migration_context = context.get_context()
+    current_heads = tuple(migration_context.get_current_heads())
+    if len(current_heads) != 1:
+        return
+    command, pending_revision_ids = _pending_revision_ids(
+        migration_context,
+        current_heads,
+    )
+    if command != "downgrade" or not pending_revision_ids:
+        return
+    if not online:
+        if TELEGRAM_CONTROL_REVISION in pending_revision_ids:
+            raise RuntimeError(
+                "Telegram destructive downgrade requires an online database "
+                "and the explicit export command"
+            )
+        return
+    guard_telegram_downgrade(
+        context.get_bind(),
+        pending_revision_ids=pending_revision_ids,
+    )
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=sync_url,
@@ -150,6 +178,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
+        _prepare_downgrade_guards(online=False)
         context.run_migrations()
 
 
@@ -175,6 +204,7 @@ def run_migrations_online() -> None:
         connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
+            _prepare_downgrade_guards(online=True)
             _prepare_concurrent_index_retry()
             context.run_migrations()
 
