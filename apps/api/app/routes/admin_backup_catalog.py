@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,8 +10,14 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
+from lumen_core.backup_integrity import (
+    BackupPairInvalid,
+    TIMESTAMP_RE as COMMITTED_TIMESTAMP_RE,
+    validate_backup_pair,
+)
 
-TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
+
+TIMESTAMP_RE = COMMITTED_TIMESTAMP_RE
 PAIR_MTIME_WINDOW_SEC = 600
 
 
@@ -66,11 +71,16 @@ def regular_file_lstat(path: Path) -> os.stat_result:
 
 
 def backup_pair_for_timestamp(backup_root: Path, timestamp: str) -> BackupPair:
+    try:
+        binding = validate_backup_pair(backup_root, timestamp)
+    except BackupPairInvalid as exc:
+        if "missing" in str(exc):
+            raise FileNotFoundError(str(exc)) from exc
+        raise
     pg_dir = resolved_backup_dir(backup_root, "pg")
     redis_dir = resolved_backup_dir(backup_root, "redis")
-    pg = pg_dir / f"{timestamp}.pg.dump.gz"
-    redis = redis_dir / f"{timestamp}.redis.tgz"
-
+    pg = binding.pg_path
+    redis = binding.redis_path
     pg.resolve(strict=True).relative_to(pg_dir)
     redis.resolve(strict=True).relative_to(redis_dir)
 
@@ -118,8 +128,17 @@ def list_backup_items(backup_root: Path) -> BackupListOut:
             )
         except ValueError:
             continue
-        pg_size, pg_mtime = pg_map[timestamp]
-        redis_size, redis_mtime = redis_map[timestamp]
+        try:
+            binding = validate_backup_pair(backup_root, timestamp)
+        except (BackupPairInvalid, OSError, ValueError):
+            # Same-timestamp files without a durable pair marker are not a
+            # restore point and must not appear as a valid catalog item.
+            continue
+        pg_size, pg_mtime = binding.pg_size, binding.pg_path.stat().st_mtime
+        redis_size, redis_mtime = (
+            binding.redis_size,
+            binding.redis_path.stat().st_mtime,
+        )
         skew = int(abs(pg_mtime - redis_mtime))
         items.append(
             BackupItem(
@@ -128,7 +147,7 @@ def list_backup_items(backup_root: Path) -> BackupListOut:
                 pg_size=pg_size,
                 redis_size=redis_size,
                 mtime_skew_sec=skew,
-                consistent=skew <= PAIR_MTIME_WINDOW_SEC,
+                consistent=True,
             )
         )
     return BackupListOut(items=items, total=len(items))

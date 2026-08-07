@@ -8,6 +8,9 @@ Create Date: 2026-08-06
 from __future__ import annotations
 
 from collections.abc import Sequence
+import json
+import os
+from pathlib import Path
 
 from alembic import op
 import sqlalchemy as sa
@@ -17,6 +20,38 @@ revision: str = "0060_telegram_delivery_control"
 down_revision: str | None = "0059_reference_token_expiry"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+def _export_before_drop(bind: sa.Connection) -> None:
+    target_raw = os.environ.get("LUMEN_MIGRATION_EXPORT_PATH", "").strip()
+    if not target_raw:
+        raise RuntimeError(
+            "destructive Telegram downgrade requires "
+            "LUMEN_MIGRATION_EXPORT_PATH"
+        )
+    target = Path(target_raw)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload: dict[str, object] = {}
+    for table in (
+        "telegram_control_commands",
+        "telegram_delivery_attempts",
+        "telegram_delivery_quarantines",
+    ):
+        rows = bind.execute(sa.text(f"SELECT * FROM {table}")).mappings().all()
+        payload[table] = [dict(row) for row in rows]
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, default=str, ensure_ascii=True, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with temporary.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+    directory_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def upgrade() -> None:
@@ -230,11 +265,12 @@ def downgrade() -> None:
     active_quarantines = bind.execute(
         sa.text(
             "SELECT count(*) FROM telegram_delivery_quarantines "
-            "WHERE status = 'redrive_queued'"
+            "WHERE status <> 'resolved'"
         )
     ).scalar_one()
     if active_commands or active_deliveries or active_quarantines:
         raise RuntimeError("cannot downgrade with active Telegram operations")
+    _export_before_drop(bind)
     op.drop_index(
         "ix_tg_quarantine_status_created",
         table_name="telegram_delivery_quarantines",

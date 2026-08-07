@@ -35,6 +35,9 @@ class UpdateMarker:
     pid: int
     started_at: str | None
     unit: str | None = None
+    operation_id: str | None = None
+    owner: str | None = None
+    generation: int = 0
 
 
 def pid_is_running(pid: int) -> bool:
@@ -79,6 +82,9 @@ def parse_marker_text(raw: str) -> UpdateMarker:
     pid = 0
     started_at: str | None = None
     unit: str | None = None
+    operation_id: str | None = None
+    owner: str | None = None
+    generation = 0
     for line in raw.splitlines():
         key, sep, value = line.partition("=")
         if not sep:
@@ -92,7 +98,23 @@ def parse_marker_text(raw: str) -> UpdateMarker:
             started_at = value.strip() or None
         elif key == "unit":
             unit = value.strip() or None
-    return UpdateMarker(pid=pid, started_at=started_at, unit=unit)
+        elif key == "operation_id":
+            operation_id = value.strip() or None
+        elif key == "owner":
+            owner = value.strip() or None
+        elif key == "generation":
+            try:
+                generation = int(value)
+            except ValueError:
+                generation = 0
+    return UpdateMarker(
+        pid=pid,
+        started_at=started_at,
+        unit=unit,
+        operation_id=operation_id,
+        owner=owner,
+        generation=generation,
+    )
 
 
 def marker_is_live(
@@ -178,6 +200,9 @@ def write_marker(
     pid: int,
     started_at: str,
     unit: str | None,
+    operation_id: str | None = None,
+    owner: str = "api",
+    generation: int = 0,
 ) -> bool:
     """Atomically claim the update/rollback marker.
 
@@ -191,6 +216,15 @@ def write_marker(
     lines = [f"pid={pid}", f"started_at={started_at}"]
     if unit:
         lines.append(f"unit={unit}")
+    if operation_id is None:
+        operation_id = f"update-{started_at.replace(':', '').replace('-', '')}"
+    lines.extend(
+        [
+            f"operation_id={operation_id}",
+            f"owner={owner}",
+            f"generation={generation}",
+        ]
+    )
     payload = ("\n".join(lines) + "\n").encode()
     with maintenance_marker_lock(marker.parent):
         for name in MAINTENANCE_MARKER_NAMES:
@@ -204,15 +238,15 @@ def write_marker(
         except OSError:
             return False
         try:
-            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
         except FileExistsError:
             return False
         try:
             try:
-                os.fchmod(fd, 0o600)
+                os.fchmod(fd, 0o660)
             except PermissionError:
                 # Squashed CIFS mounts pin the mode; O_CREAT already set
-                # 0o600 and non-owner fchmod there returns EPERM.
+                # 0o660 and non-owner fchmod there returns EPERM.
                 pass
             os.write(fd, payload)
             return True

@@ -15,6 +15,7 @@ MAINTENANCE_MARKER_NAMES = (
     ".restore.running",
 )
 _MAINTENANCE_MARKER_LOCK_NAME = ".maintenance-markers.lock"
+_MAINTENANCE_MARKER_MODE = 0o660
 
 
 @contextmanager
@@ -25,11 +26,11 @@ def maintenance_marker_lock(root: Path) -> Iterator[None]:
     fd = os.open(
         root / _MAINTENANCE_MARKER_LOCK_NAME,
         os.O_RDWR | os.O_CREAT,
-        0o600,
+        _MAINTENANCE_MARKER_MODE,
     )
     try:
         try:
-            os.fchmod(fd, 0o600)
+            os.fchmod(fd, _MAINTENANCE_MARKER_MODE)
         except PermissionError:
             pass
         fcntl.flock(fd, fcntl.LOCK_EX)

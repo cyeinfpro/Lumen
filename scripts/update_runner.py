@@ -15,6 +15,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from maintenance_marker_lock import marker_lock
 
 _DEFAULT_REQUEST = Path("/opt/lumendata/backup/.update.request.json")
 _DEFAULT_SCRIPT = Path("/opt/lumen/current/scripts/update.sh")
@@ -447,6 +450,22 @@ def _unlink_claimed_artifact(
     name: str,
     expected_path: Path,
 ) -> None:
+    if name == "running":
+        with marker_lock(expected_path.parent):
+            try:
+                values: dict[str, str] = {}
+                for line in expected_path.read_text(encoding="utf-8").splitlines():
+                    key, sep, value = line.partition("=")
+                    if sep:
+                        values[key] = value.strip()
+                if values.get("owner") == "host" and int(
+                    values.get("generation", "0")
+                ) >= 1:
+                    expected_path.unlink()
+                    _fsync_directory(expected_path.parent)
+                    return
+            except (FileNotFoundError, OSError, ValueError):
+                pass
     artifacts = claim.get("artifacts")
     if not isinstance(artifacts, dict):
         raise UpdateRequestError("runtime claim artifacts are invalid")
@@ -561,6 +580,66 @@ def _load_current_request(
         return None
 
 
+def _adopt_running_marker_unlocked(path: Path) -> str | None:
+    """Adopt the API marker before reading or mutating slow update state."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise UpdateRequestError("cannot read update ownership marker") from exc
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key] = value.strip()
+    operation_id = values.get("operation_id")
+    try:
+        generation = int(values.get("generation", "0"))
+    except ValueError as exc:
+        raise UpdateRequestError("update ownership generation is invalid") from exc
+    if values.get("owner") != "api" or generation != 0 or not operation_id:
+        return None
+    values["owner"] = "host"
+    values["generation"] = str(generation + 1)
+    values["pid"] = str(os.getpid())
+    values["adopted_at"] = datetime.now(timezone.utc).isoformat()
+    payload = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_raw)
+    try:
+        os.fchmod(descriptor, 0o660)
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    return operation_id
+
+
+def adopt_running_marker(path: Path) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    with marker_lock(path.parent):
+        return _adopt_running_marker_unlocked(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--cleanup"]:
@@ -578,6 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     ) = _runtime_paths()
     update_script = Path(os.environ.get("LUMEN_UPDATE_SCRIPT", _DEFAULT_SCRIPT))
     try:
+        adopt_running_marker(running_path)
         journal = load_journal(journal_path)
         active = journal_is_active(journal)
         request = _load_current_request(request_path, allow_stale=active)

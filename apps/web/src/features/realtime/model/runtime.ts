@@ -46,7 +46,11 @@ export type RealtimeProtocolIssue = {
 };
 
 export type RuntimeSubscriber = {
-  handlers: Record<string, (data: unknown, id: string) => void>;
+  handlers: Record<
+    string,
+    (data: unknown, id: string) => void | Promise<void>
+  >;
+  optionalHandlers?: ReadonlySet<string>;
   onOpen?: (event: Event, context: SnapshotExecutionContext) => void;
   onError?: (event: Event) => void;
   onControl?: (event: RealtimeControlEvent) => void;
@@ -66,6 +70,7 @@ export type RealtimeRuntimeOptions = {
   leaderClock?: LeaderClock;
   now?: () => number;
   retryDelay?: (attempt: number) => number;
+  saveCursor?: (cursor: string) => void | Promise<void>;
 };
 
 const MAX_SEEN_EVENT_IDS = 2_000;
@@ -154,6 +159,11 @@ export class RealtimeRuntime {
   private unsubscribeBus: (() => void) | null = null;
   private unsubscribeLeader: (() => void) | null = null;
   private consecutiveInvalidEvents = 0;
+  private domainQueue: Array<{
+    event: RealtimeDomainEvent;
+    broadcast: boolean;
+  }> = [];
+  private domainBusy = false;
 
   constructor(options: RealtimeRuntimeOptions) {
     this.options = options;
@@ -267,6 +277,8 @@ export class RealtimeRuntime {
     this.activeSourceGeneration = null;
     this.seen.clear();
     this.seenQueue = [];
+    this.domainQueue = [];
+    this.domainBusy = false;
     this.consecutiveInvalidEvents = 0;
   }
 
@@ -470,7 +482,7 @@ export class RealtimeRuntime {
       );
       return;
     }
-    this.deliverDomain(parsed.event, true);
+    this.enqueueDomain(parsed.event, true);
   }
 
   private handleControl(
@@ -490,6 +502,9 @@ export class RealtimeRuntime {
       if (event.cursor) this.dispatch({ type: "cursor", cursor: event.cursor });
       return;
     }
+    // Events queued behind a failed apply must be replayed from the recovery
+    // cursor, not applied against the state that just failed.
+    this.domainQueue = [];
     this.pendingRecoveryId = recoveryId ?? this.createRecoveryId();
     try {
       if (reason.kind === "server_epoch_changed") {
@@ -710,25 +725,93 @@ export class RealtimeRuntime {
     this.leaderRecoveryComplete = null;
   }
 
-  private deliverDomain(event: RealtimeDomainEvent, broadcast: boolean): void {
-    if (event.cursor && !this.markSeen(event.cursor)) return;
-    for (const subscriber of this.subscribers) {
-      subscriber.handlers[event.type]?.(event.payload, event.cursor ?? "");
+  private enqueueDomain(event: RealtimeDomainEvent, broadcast: boolean): void {
+    this.domainQueue.push({ event, broadcast });
+    if (this.domainBusy) return;
+    this.domainBusy = true;
+    void this.drainDomainQueue();
+  }
+
+  private async drainDomainQueue(): Promise<void> {
+    try {
+      while (this.domainQueue.length > 0) {
+        const next = this.domainQueue.shift();
+        if (!next) continue;
+        try {
+          await this.deliverDomain(next.event, next.broadcast);
+        } catch {
+          // Required handler failures are converted into recovery_required by
+          // deliverDomain. Keep later stream events processable.
+        }
+      }
+    } finally {
+      this.domainBusy = false;
     }
+  }
+
+  private async deliverDomain(
+    event: RealtimeDomainEvent,
+    broadcast: boolean,
+  ): Promise<void> {
+    if (event.cursor && this.seen.has(event.cursor)) return;
+    try {
+      for (const subscriber of this.subscribers) {
+        const handler = subscriber.handlers[event.type];
+        if (!handler) continue;
+        try {
+          const result = handler(event.payload, event.cursor ?? "");
+          if (
+            result &&
+            typeof (result as PromiseLike<void>).then === "function"
+          ) {
+            await result;
+          }
+        } catch (error) {
+          if (subscriber.optionalHandlers?.has(event.type)) continue;
+          throw error;
+        }
+      }
+      if (event.cursor && this.options.saveCursor) {
+        await this.options.saveCursor(event.cursor);
+      }
+      if (event.cursor) {
+        this.dispatch({ type: "cursor", cursor: event.cursor });
+      }
+    } catch (error) {
+      const recoveryEvent: RealtimeControlEvent = {
+        kind: "control",
+        type: "recovery_required",
+        version: 1,
+        reason: "domain_apply_failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "realtime domain event application failed",
+        cursor: event.cursor,
+      };
+      const recoveryId = this.createRecoveryId();
+      this.handleControl(recoveryEvent, recoveryId);
+      if (this.leader) {
+        this.bus.post(
+          { type: "control_event", event: recoveryEvent, recoveryId },
+          this.now(),
+        );
+      }
+      return;
+    }
+    if (event.cursor) this.commitSeen(event.cursor);
     if (broadcast && event.cursor) {
       this.bus.post({ type: "domain_event", event }, this.now());
     }
   }
 
-  private markSeen(id: string): boolean {
-    if (this.seen.has(id)) return false;
+  private commitSeen(id: string): void {
     this.seen.add(id);
     this.seenQueue.push(id);
     while (this.seenQueue.length > MAX_SEEN_EVENT_IDS) {
       const stale = this.seenQueue.shift();
       if (stale) this.seen.delete(stale);
     }
-    return true;
   }
 
   private onBusMessage(message: CrossTabMessage): void {
@@ -737,7 +820,7 @@ export class RealtimeRuntime {
       return;
     }
     if (message.type === "domain_event") {
-      this.deliverDomain(message.event, false);
+      this.enqueueDomain(message.event, false);
       return;
     }
     if (message.type === "control_event") {

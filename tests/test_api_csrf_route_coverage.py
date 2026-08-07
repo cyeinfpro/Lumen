@@ -60,6 +60,12 @@ CSRF_EXEMPT_WRITE_ROUTES = {
     ("POST", "/telegram/control/{command_id}/ack"): (
         "bot service: X-Bot-Token acknowledges a durable control command"
     ),
+    ("POST", "/telegram/control/{command_id}/effect/claim"): (
+        "bot service: X-Bot-Token claims a fenced control effect"
+    ),
+    ("POST", "/telegram/control/{command_id}/effect/finish"): (
+        "bot service: X-Bot-Token finalizes a fenced control effect"
+    ),
 }
 
 _ROUTE_DUMP_SCRIPT = r"""

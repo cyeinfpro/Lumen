@@ -638,3 +638,82 @@ test("explicit session invalidation closes the local stream without retrying", (
   equal(statuses.at(-1), "error");
   unsubscribe();
 });
+
+test("ordinary domain events commit their cursor only after required handlers succeed", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const delivered: string[] = [];
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe({
+    handlers: {
+      asset_updated: async (_data, id) => {
+        await Promise.resolve();
+        delivered.push(id);
+      },
+    },
+    setStatus() {},
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(
+    0,
+    "asset_updated",
+    JSON.stringify({ asset_id: "asset-1" }),
+    "50-0",
+  );
+  await flushPromises();
+
+  deepEqual(delivered, ["50-0"]);
+  instance.reconnect();
+  equal(transport.opens[1]?.input.url, "/events?cursor=50-0");
+  unsubscribe();
+});
+
+test("required domain handler failure requests snapshot recovery without broadcasting the event", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  let recoveryCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe({
+    handlers: {
+      asset_updated: () => {
+        throw new Error("store apply failed");
+      },
+    },
+    recoverSnapshot: async (_scopes, reason) => {
+      recoveryCalls += 1;
+      equal(reason.kind, "recovery_required");
+      equal(reason.reason, "domain_apply_failed");
+      equal(reason.cursor, "60-0");
+      return { cursor: "61-0", syncedAt: 100 };
+    },
+    setStatus() {},
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+
+  transport.emit(
+    0,
+    "asset_updated",
+    JSON.stringify({ asset_id: "asset-1" }),
+    "60-0",
+  );
+  await flushPromises();
+
+  equal(recoveryCalls, 1);
+  equal(
+    hub.messages.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        message.type === "domain_event",
+    ),
+    false,
+  );
+  equal(transport.opens[1]?.input.url, "/events?cursor=61-0");
+  unsubscribe();
+});

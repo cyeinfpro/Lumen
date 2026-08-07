@@ -5,15 +5,41 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import secrets
 import shlex
 import stat
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_CORE_CANDIDATES = (
+    Path(__file__).resolve().parents[1]
+    / "packages"
+    / "core"
+    / "lumen_core"
+    / "backup_integrity.py",
+    Path.cwd() / "packages" / "core" / "lumen_core" / "backup_integrity.py",
+)
+_CORE_MODULE_PATH = next(
+    (candidate for candidate in _CORE_CANDIDATES if candidate.is_file()),
+    _CORE_CANDIDATES[0],
+)
+_CORE_SPEC = importlib.util.spec_from_file_location(
+    "_lumen_backup_integrity",
+    _CORE_MODULE_PATH,
+)
+if _CORE_SPEC is None or _CORE_SPEC.loader is None:
+    raise RuntimeError("backup integrity helper cannot be loaded")
+_CORE_MODULE = importlib.util.module_from_spec(_CORE_SPEC)
+sys.modules[_CORE_SPEC.name] = _CORE_MODULE
+_CORE_SPEC.loader.exec_module(_CORE_MODULE)
+BackupPairInvalid = _CORE_MODULE.BackupPairInvalid
+validate_backup_pair = _CORE_MODULE.validate_backup_pair
 
 _SCHEMA_VERSION = 1
 _TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
@@ -728,52 +754,15 @@ def _load_backup_pair_binding(
     backup_root: Path,
     timestamp: str,
 ) -> dict[str, Any]:
-    if not backup_root.is_absolute():
-        raise ValueError("backup root must be absolute")
-    pg_path, redis_path, marker_path = _backup_pair_paths(
-        backup_root,
-        timestamp,
-    )
-    marker = _read_small_regular_json(marker_path)
-    operation_id = _validate_text(
-        marker.get("operation_id"),
-        "backup_operation_id",
-    )
-    if not operation_id or len(operation_id) > 240:
-        raise ValueError("backup pair operation identity is invalid")
-    pg_payload = marker.get("pg")
-    redis_payload = marker.get("redis")
-    if not isinstance(pg_payload, dict) or not isinstance(redis_payload, dict):
-        raise ValueError("backup pair marker payload is invalid")
-    pg_size = _positive_size(pg_payload.get("size"), "pg_size")
-    redis_size = _positive_size(redis_payload.get("size"), "redis_size")
-    pg_hash = _sha256_text(pg_payload.get("sha256"), "pg_sha256")
-    redis_hash = _sha256_text(redis_payload.get("sha256"), "redis_sha256")
-    actual_pg_hash, _ = _digest_regular_file(pg_path, pg_size)
-    actual_redis_hash, _ = _digest_regular_file(redis_path, redis_size)
-    if actual_pg_hash != pg_hash or actual_redis_hash != redis_hash:
-        raise ValueError("backup payload hash does not match pair marker")
-    _validate_backup_pair_marker(
-        marker_path,
-        operation_id=operation_id,
-        timestamp=timestamp,
-        pg_path=pg_path,
-        redis_path=redis_path,
-        pg_size=pg_size,
-        redis_size=redis_size,
-        pg_hash=pg_hash,
-        redis_hash=redis_hash,
-    )
-    return {
-        "backup_operation_id": operation_id,
-        "backup_pair_marker": str(marker_path),
-        "pg_backup_path": str(pg_path),
-        "redis_backup_path": str(redis_path),
-        "pg_backup_size": pg_size,
-        "redis_backup_size": redis_size,
-        "pg_backup_sha256": pg_hash,
-        "redis_backup_sha256": redis_hash,
-    }
+    try:
+        return validate_backup_pair(backup_root, timestamp).as_dict()
+    except BackupPairInvalid as exc:
+        message = str(exc)
+        if "marker is missing" in message:
+            raise ValueError("cannot stat JSON state") from exc
+        if "size does not match" in message:
+            raise ValueError("backup payload size or type changed") from exc
+        raise
 
 
 def _emit_backup_pair_binding(binding: dict[str, Any]) -> None:

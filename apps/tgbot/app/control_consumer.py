@@ -29,6 +29,7 @@ _READ_BLOCK_MS = 5_000
 _BATCH_SIZE = 10
 _BACKOFF_MAX_SECONDS = 60.0
 _ALERT_THRESHOLD = 50
+_CONTROL_STREAM_MAXLEN = 10_000
 
 
 def _decode(value: Any) -> str:
@@ -112,7 +113,33 @@ async def _ack_and_xack(
         error=error,
     )
     await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
+    xdel = getattr(redis, "xdel", None)
+    if callable(xdel):
+        await xdel(CONTROL_STREAM, stream_id)
+    await _trim_control_stream(redis)
     return acknowledgement
+
+
+async def _xack_and_xdel(redis: Any, stream_id: str) -> None:
+    await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
+    xdel = getattr(redis, "xdel", None)
+    if callable(xdel):
+        await xdel(CONTROL_STREAM, stream_id)
+    await _trim_control_stream(redis)
+
+
+async def _trim_control_stream(redis: Any) -> None:
+    xtrim = getattr(redis, "xtrim", None)
+    if not callable(xtrim):
+        return
+    try:
+        await xtrim(
+            CONTROL_STREAM,
+            maxlen=_CONTROL_STREAM_MAXLEN,
+            approximate=True,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("control stream trim failed", exc_info=True)
 
 
 async def process_control_entry(
@@ -143,7 +170,101 @@ async def process_control_entry(
             fields=fields,
             reason="malformed Telegram control transport entry",
         )
-        await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
+        await _xack_and_xdel(redis, stream_id)
+        return False
+
+    claim_effect = getattr(api, "claim_control_effect", None)
+    finish_effect = getattr(api, "finish_control_effect", None)
+    if callable(claim_effect) and callable(finish_effect):
+        owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
+        claim = await claim_effect(
+            command_id,
+            command=command,
+            owner=owner,
+        )
+        effect_status = str(claim.get("status") or "pending")
+        acquired = bool(claim.get("acquired"))
+        if not acquired and effect_status == "running":
+            raise RuntimeError("control effect is owned by another live consumer")
+        if not acquired and effect_status not in {"succeeded", "failed"}:
+            raise RuntimeError("control effect claim response is invalid")
+        effect_fence = int(claim.get("fence") or 0)
+        if acquired:
+            try:
+                if command == "redrive_quarantine":
+                    if bot is None:
+                        raise RuntimeError(
+                            "Telegram bot is unavailable for quarantine redrive"
+                        )
+                    effect_payload = claim.get("payload")
+                    if not isinstance(effect_payload, dict):
+                        raise RuntimeError("control effect payload is invalid")
+                    await redrive_quarantined_event(
+                        bot,
+                        api,
+                        payload_raw=str(effect_payload.get("payload_raw") or ""),
+                        stream_user_id=str(
+                            effect_payload.get("stream_user_id") or ""
+                        ),
+                    )
+                elif command != "restart":
+                    raise RuntimeError(f"unsupported control command: {command}")
+            except Exception as exc:  # noqa: BLE001
+                error = f"{type(exc).__name__}: {exc}"
+                await finish_effect(
+                    command_id,
+                    command=command,
+                    owner=owner,
+                    fence=effect_fence,
+                    status="failed",
+                    error=error,
+                )
+                await _ack_and_xack(
+                    api,
+                    redis,
+                    stream_id=stream_id,
+                    command_id=command_id,
+                    command=command,
+                    status="failed",
+                    error=error,
+                )
+                return False
+            await finish_effect(
+                command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                status="succeeded",
+            )
+            effect_status = "succeeded"
+
+        if effect_status == "succeeded":
+            await _ack_and_xack(
+                api,
+                redis,
+                stream_id=stream_id,
+                command_id=command_id,
+                command=command,
+                status="accepted",
+            )
+            if command == "restart":
+                logger.info("control: restart effect committed command_id=%s", command_id)
+                stop_event.set()
+                return True
+            logger.info(
+                "control: quarantine redrive effect committed command_id=%s",
+                command_id,
+            )
+            return False
+        await _ack_and_xack(
+            api,
+            redis,
+            stream_id=stream_id,
+            command_id=command_id,
+            command=command,
+            status="failed",
+            error="control effect previously failed",
+        )
         return False
 
     if command == "restart":
@@ -216,7 +337,7 @@ async def process_control_entry(
             fields=fields,
             reason=f"unsupported Telegram control command: {command}",
         )
-        await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
+        await _xack_and_xdel(redis, stream_id)
     return False
 
 

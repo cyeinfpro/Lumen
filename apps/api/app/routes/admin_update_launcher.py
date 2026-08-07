@@ -13,6 +13,7 @@ import time
 from typing import TextIO
 
 from .admin_update_marker import UpdateMarkerBusy
+from .admin_maintenance_marker_lock import maintenance_marker_lock
 
 
 def _unlink_all(paths: tuple[Path, ...]) -> None:
@@ -20,6 +21,37 @@ def _unlink_all(paths: tuple[Path, ...]) -> None:
         try:
             path.unlink()
         except OSError:
+            pass
+
+
+def _marker_is_host_adopted(path: Path) -> bool:
+    with maintenance_marker_lock(path.parent):
+        try:
+            values: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    values[key] = value.strip()
+            return values.get("owner") == "host" and int(
+                values.get("generation", "0")
+            ) >= 1
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+
+
+def _unlink_api_marker(path: Path) -> None:
+    with maintenance_marker_lock(path.parent):
+        try:
+            values: dict[str, str] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    values[key] = value.strip()
+            if values.get("owner") == "api" and int(
+                values.get("generation", "0")
+            ) == 0:
+                path.unlink()
+        except (FileNotFoundError, OSError, ValueError):
             pass
 
 
@@ -84,14 +116,16 @@ def start_update_via_path_unit(
     chmod(trigger_tmp, 0o600)
     trigger_tmp.replace(trigger_path)
 
-    staged_paths = (trigger_path, request_path, marker_path)
     if trigger_only_mode():
-        if wait_for_log_append(
-            log_path,
-            initial_size=initial_log_size,
-            timeout_sec=trigger_timeout_sec,
-        ):
-            return 0, unit
+        deadline = time.monotonic() + trigger_timeout_sec
+        while time.monotonic() < deadline:
+            if _marker_is_host_adopted(marker_path) or wait_for_log_append(
+                log_path,
+                initial_size=initial_log_size,
+                timeout_sec=0.25,
+            ):
+                return 0, unit
+            time.sleep(0.25)
         log_fh.write(
             f"\n[{unit}] trigger file was written, but the host runner did not "
             f"append output within {int(trigger_timeout_sec)}s. "
@@ -99,7 +133,8 @@ def start_update_via_path_unit(
             "the same backup directory mounted into lumen-api.\n"
         )
         log_fh.flush()
-        _unlink_all(staged_paths)
+        _unlink_all((trigger_path, request_path))
+        _unlink_api_marker(marker_path)
         return None
 
     deadline = time.monotonic() + 15.0
@@ -111,7 +146,8 @@ def start_update_via_path_unit(
         f"\n[{unit}] path-unit trigger did not activate within 15s; falling through.\n"
     )
     log_fh.flush()
-    _unlink_all(staged_paths)
+    _unlink_all((trigger_path, request_path))
+    _unlink_api_marker(marker_path)
     return None
 
 

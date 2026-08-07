@@ -515,7 +515,7 @@ def _assert_flock_released(path: Path) -> None:
 
 
 @pytest.mark.parametrize("block_phase", ["pg_dump", "redis_archive"])
-def test_sighup_removes_partial_pair_markers_and_releases_both_locks(
+def test_sighup_retains_host_claim_and_releases_both_locks(
     tmp_path: Path,
     block_phase: str,
 ) -> None:
@@ -535,7 +535,11 @@ def test_sighup_removes_partial_pair_markers_and_releases_both_locks(
 
     assert process.returncode == 129, output
     assert "interrupted by SIGHUP" in output
-    assert not (backup_root / ".backup.running").exists()
+    running_marker = backup_root / ".backup.running"
+    assert running_marker.exists()
+    running_text = running_marker.read_text(encoding="utf-8")
+    assert "owner=host\n" in running_text
+    assert "generation=1\n" in running_text
     assert not list((backup_root / "pg").glob("*"))
     assert not list((backup_root / "redis").glob("*"))
     assert not list(backup_root.glob(".pg-dump*"))

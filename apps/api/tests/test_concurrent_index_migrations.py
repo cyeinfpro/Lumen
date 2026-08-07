@@ -45,6 +45,8 @@ STORAGE_OPERATION_REVISION = "0058_storage_apply_operations"
 REFERENCE_TOKEN_REVISION = "0059_reference_token_expiry"
 TELEGRAM_CONTROL_REVISION = "0060_telegram_delivery_control"
 VIDEO_JSONB_TYPES_REVISION = "0061_video_jsonb_types"
+TELEGRAM_EFFECT_REVISION = "0062_tg_control_effect_fence"
+STORAGE_RETRY_REVISION = "0063_storage_apply_retry_fence"
 
 
 @dataclass(frozen=True)
@@ -556,6 +558,8 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     reference_tokens = scripts.get_revision(REFERENCE_TOKEN_REVISION)
     telegram_control = scripts.get_revision(TELEGRAM_CONTROL_REVISION)
     video_jsonb_types = scripts.get_revision(VIDEO_JSONB_TYPES_REVISION)
+    telegram_effect = scripts.get_revision(TELEGRAM_EFFECT_REVISION)
+    storage_retry = scripts.get_revision(STORAGE_RETRY_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -567,7 +571,11 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert telegram_control.down_revision == REFERENCE_TOKEN_REVISION
     assert video_jsonb_types is not None
     assert video_jsonb_types.down_revision == TELEGRAM_CONTROL_REVISION
-    assert scripts.get_heads() == [VIDEO_JSONB_TYPES_REVISION]
+    assert telegram_effect is not None
+    assert telegram_effect.down_revision == VIDEO_JSONB_TYPES_REVISION
+    assert storage_retry is not None
+    assert storage_retry.down_revision == TELEGRAM_EFFECT_REVISION
+    assert scripts.get_heads() == [STORAGE_RETRY_REVISION]
 
 
 @pytest.mark.parametrize(

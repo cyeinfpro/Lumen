@@ -31,6 +31,20 @@ _PUBLISH_LEASE_SECONDS = 30
 _RECONCILE_INTERVAL_SECONDS = 2.0
 _RECONCILE_BATCH_SIZE = 10
 _ERROR_LIMIT = 2000
+_CONTROL_PUBLISH_ONCE_LUA = """
+local existing = redis.call("GET", KEYS[1])
+if existing then
+  return existing
+end
+local stream_id = redis.call(
+  "XADD", KEYS[2], "*",
+  "command_id", ARGV[1],
+  "command", ARGV[2],
+  "payload", ARGV[3]
+)
+redis.call("SET", KEYS[1], stream_id)
+return stream_id
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,18 +219,37 @@ async def publish_telegram_command(
     client = redis or get_redis()
     try:
         await ensure_control_consumer_group(client)
-        stream_id = await client.xadd(
-            CONTROL_STREAM,
-            {
-                "command_id": claim.command_id,
-                "command": claim.command,
-                "payload": json.dumps(
-                    claim.payload,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-            },
+        payload = json.dumps(
+            claim.payload,
+            separators=(",", ":"),
+            sort_keys=True,
         )
+        dedup_key = f"{CONTROL_STREAM}:command:{claim.command_id}"
+        eval_fn = getattr(client, "eval", None)
+        if callable(eval_fn):
+            stream_id = await eval_fn(
+                _CONTROL_PUBLISH_ONCE_LUA,
+                2,
+                dedup_key,
+                CONTROL_STREAM,
+                claim.command_id,
+                claim.command,
+                payload,
+            )
+        else:
+            existing = await client.get(dedup_key)
+            if existing:
+                stream_id = existing
+            else:
+                stream_id = await client.xadd(
+                    CONTROL_STREAM,
+                    {
+                        "command_id": claim.command_id,
+                        "command": claim.command,
+                        "payload": payload,
+                    },
+                )
+                await client.set(dedup_key, stream_id, nx=True)
         await mark_telegram_command_published(
             claim,
             stream_id=_decode(stream_id),

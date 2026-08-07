@@ -62,6 +62,19 @@ local score = tonumber(ARGV[2])
 local ts_ttl_s = tonumber(ARGV[3])
 local day_expire_at = tonumber(ARGV[4])
 
+local ts_type = redis.call("TYPE", ts_key)["ok"]
+if ts_type ~= "none" and ts_type ~= "zset" then
+  return redis.error_reply("CORRUPT_IMAGE_WINDOW_TYPE")
+end
+local day_type = redis.call("TYPE", day_key)["ok"]
+if day_type ~= "none" and day_type ~= "string" then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_TYPE")
+end
+local day_raw = redis.call("GET", day_key)
+if day_raw and not string.match(day_raw, "^%d+$") then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_VALUE")
+end
+
 local added = redis.call("ZADD", ts_key, "NX", score, member)
 redis.call("EXPIRE", ts_key, ts_ttl_s)
 if added == 1 then
@@ -83,6 +96,19 @@ local member = ARGV[6]
 local score = tonumber(ARGV[7])
 local ts_ttl_s = tonumber(ARGV[8])
 local day_expire_at = tonumber(ARGV[9])
+
+local ts_type = redis.call("TYPE", ts_key)["ok"]
+if ts_type ~= "none" and ts_type ~= "zset" then
+  return redis.error_reply("CORRUPT_IMAGE_WINDOW_TYPE")
+end
+local day_type = redis.call("TYPE", day_key)["ok"]
+if day_type ~= "none" and day_type ~= "string" then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_TYPE")
+end
+local day_raw = redis.call("GET", day_key)
+if day_raw and not string.match(day_raw, "^%d+$") then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_VALUE")
+end
 
 redis.call("ZREMRANGEBYSCORE", ts_key, 0, cutoff)
 
@@ -121,6 +147,19 @@ _RELEASE_IMAGE_CALL_LUA = """
 local ts_key = KEYS[1]
 local day_key = KEYS[2]
 local member = ARGV[1]
+
+local ts_type = redis.call("TYPE", ts_key)["ok"]
+if ts_type ~= "none" and ts_type ~= "zset" then
+  return redis.error_reply("CORRUPT_IMAGE_WINDOW_TYPE")
+end
+local day_type = redis.call("TYPE", day_key)["ok"]
+if day_type ~= "none" and day_type ~= "string" then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_TYPE")
+end
+local day_raw = redis.call("GET", day_key)
+if day_raw and not string.match(day_raw, "^%d+$") then
+  return redis.error_reply("CORRUPT_DAILY_COUNTER_VALUE")
+end
 
 local removed = redis.call("ZREM", ts_key, member)
 if removed == 1 then
@@ -161,6 +200,26 @@ class AccountLimiterUnavailable(RuntimeError):
 
 class AccountLimiterConfigurationError(ValueError):
     """A configured quota cannot be interpreted safely."""
+
+
+async def _validate_daily_counter(redis: Any, day_key: str) -> None:
+    getter = getattr(redis, "get", None)
+    pipe: Any | None = None
+    try:
+        if callable(getter):
+            raw = await getter(day_key)
+        else:
+            pipe = _make_transaction_pipeline(redis, "counter-validation")
+            await pipe.watch(day_key)
+            raw = await pipe.get(day_key)
+        _parse_counter(raw)
+    except AccountLimiterUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise AccountLimiterUnavailable("daily quota counter is invalid") from exc
+    finally:
+        if pipe is not None:
+            await _reset_pipeline(pipe)
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +414,7 @@ async def _record_image_call_fallback(
     for attempt in range(_ATOMIC_FALLBACK_RETRIES):
         pipe: Any | None = None
         try:
+            await _validate_daily_counter(redis, day_key)
             pipe = _make_transaction_pipeline(redis, "accounting")
             await pipe.watch(ts_key)
             if await pipe.zscore(ts_key, member) is not None:
@@ -433,7 +493,7 @@ def _parse_counter(raw: Any) -> int:
     try:
         return int(raw or 0)
     except (TypeError, ValueError):
-        return 0
+        raise AccountLimiterUnavailable("quota counter is invalid") from None
 
 
 def _window_retry_after(
@@ -464,6 +524,7 @@ async def _reserve_quota_fallback(
 ) -> tuple[bool, float, str]:
     """Reserve quota with an optimistic, server-side atomic transaction."""
     try:
+        await _validate_daily_counter(redis, day_key)
         await redis.zremrangebyscore(ts_key, 0, cutoff)
     except Exception as exc:  # noqa: BLE001
         raise AccountLimiterUnavailable("quota reservation unavailable") from exc
@@ -564,6 +625,7 @@ async def _release_quota_fallback(
     for attempt in range(_ATOMIC_FALLBACK_RETRIES):
         pipe: Any | None = None
         try:
+            await _validate_daily_counter(redis, day_key)
             pipe = _make_transaction_pipeline(redis, "release")
             await pipe.watch(ts_key, day_key)
             if await pipe.zscore(ts_key, reservation_member) is None:

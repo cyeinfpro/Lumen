@@ -17,6 +17,7 @@ import re
 import shutil
 import signal
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -170,6 +171,34 @@ def _read_pid_marker_unlocked(path: Path) -> bool:
     return False
 
 
+def _marker_claim(path: Path) -> tuple[str | None, int | None, str | None]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None, None, None
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key] = value.strip()
+    try:
+        generation = int(values.get("generation", "0"))
+    except ValueError:
+        generation = None
+    return values.get("owner"), generation, values.get("operation_id")
+
+
+def _marker_is_adopted(path: Path, operation_id: str) -> bool:
+    with maintenance_marker_lock(path.parent):
+        owner, generation, marker_operation_id = _marker_claim(path)
+    return (
+        marker_operation_id == operation_id
+        and owner == "host"
+        and generation is not None
+        and generation >= 1
+    )
+
+
 def _read_pid_marker(path: Path) -> bool:
     with maintenance_marker_lock(path.parent):
         return _read_pid_marker_unlocked(path)
@@ -181,6 +210,9 @@ def _try_write_pid_marker(
     started_at: datetime,
     *,
     unit: str | None = None,
+    operation_id: str | None = None,
+    owner: str = "api",
+    generation: int = 0,
 ) -> bool:
     """Atomically create a maintenance marker.
 
@@ -192,18 +224,22 @@ def _try_write_pid_marker(
     lines = [f"pid={pid}", f"started_at={started_at.isoformat()}"]
     if unit:
         lines.append(f"unit={unit}")
+    if operation_id:
+        lines.append(f"operation_id={operation_id}")
+        lines.append(f"owner={owner}")
+        lines.append(f"generation={generation}")
     payload = ("\n".join(lines) + "\n").encode()
     with maintenance_marker_lock(path.parent):
         for name in MAINTENANCE_MARKER_NAMES:
             if _read_pid_marker_unlocked(path.parent / name):
                 return False
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
         except FileExistsError:
             return False
         try:
             try:
-                os.fchmod(fd, 0o600)
+                os.fchmod(fd, 0o660)
             except PermissionError:
                 pass
             os.write(fd, payload)
@@ -223,6 +259,20 @@ def _unlink_marker(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def _unlink_owned_marker(path: Path, operation_id: str) -> None:
+    with maintenance_marker_lock(path.parent):
+        owner, generation, marker_operation_id = _marker_claim(path)
+        if (
+            marker_operation_id == operation_id
+            and owner == "api"
+            and generation == 0
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def _maintenance_marker_busy() -> bool:
@@ -355,13 +405,11 @@ async def _find_latest_paired_backup_after(started_at: datetime) -> str | None:
         ts = _parse_ts(p.name, ".pg.dump.gz")
         if ts is None:
             continue
-        redis_file = redis_dir / f"{ts}.redis.tgz"
-        if not redis_file.is_file():
-            continue
         try:
-            pg_stat = p.stat()
-            redis_stat = redis_file.stat()
-        except OSError:
+            binding = _backup_catalog.validate_backup_pair(backup_root, ts)
+            pg_stat = binding.pg_path.stat()
+            redis_stat = binding.redis_path.stat()
+        except (OSError, ValueError):
             continue
         newest_mtime = max(pg_stat.st_mtime, redis_stat.st_mtime)
         if newest_mtime >= started_ts:
@@ -439,10 +487,26 @@ def _backup_script_was_skipped(output: str) -> bool:
     )
 
 
-def _write_backup_trigger(path: Path, started_at: datetime) -> None:
+def _write_backup_trigger(
+    path: Path,
+    started_at: datetime,
+    operation_id: str,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(started_at.isoformat() + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps(
+            {
+                "operation_id": operation_id,
+                "owner": "api",
+                "generation": 0,
+                "started_at": started_at.isoformat(),
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _chmod_tolerate_eperm(tmp, 0o600)
     tmp.replace(path)
 
@@ -476,7 +540,13 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
             409,
         )
     marker = _maintenance_marker_path(_BACKUP_RUNNING_MARKER)
-    if not _try_write_pid_marker(marker, os.getpid(), datetime.now(timezone.utc)):
+    operation_id = f"backup-{uuid.uuid4().hex}"
+    if not _try_write_pid_marker(
+        marker,
+        os.getpid(),
+        datetime.now(timezone.utc),
+        operation_id=operation_id,
+    ):
         await lock_service.release(lock, succeeded=False, reason="maintenance_busy")
         raise _http(
             "maintenance_busy",
@@ -488,27 +558,29 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
     started_at = datetime.now(timezone.utc)
     proc: _ScriptResult | None = None
     ts: str | None = None
+    adopted = False
     try:
+        trigger_mode = _backup_trigger_only_mode()
         if _backup_trigger_only_mode():
             backup_root = _backup_root()
             backup_root.mkdir(parents=True, exist_ok=True)
-            log_path = _backup_log_path()
-            try:
-                initial_log_size = log_path.stat().st_size
-            except OSError:
-                initial_log_size = 0
             trigger_path = _backup_trigger_path()
-            _write_backup_trigger(trigger_path, started_at)
-            if not await _wait_for_log_append(
-                log_path,
-                initial_size=initial_log_size,
-                timeout_sec=_BACKUP_TRIGGER_START_TIMEOUT_SECONDS,
-            ):
+            _write_backup_trigger(trigger_path, started_at, operation_id)
+            deadline = asyncio.get_running_loop().time() + (
+                _BACKUP_TRIGGER_START_TIMEOUT_SECONDS
+            )
+            while asyncio.get_running_loop().time() < deadline:
+                if _marker_is_adopted(marker, operation_id):
+                    adopted = True
+                    break
+                await asyncio.sleep(0.25)
+            if not adopted:
                 release_reason = "backup_trigger_not_started"
                 _unlink_marker(trigger_path)
+                _unlink_owned_marker(marker, operation_id)
                 raise _http(
                     "backup_trigger_not_started",
-                    "backup trigger was written, but host backup service did not start",
+                    "backup trigger was written, but host backup service did not adopt it",
                     504,
                 )
             ts = await _wait_for_latest_paired_backup_after(
@@ -533,11 +605,13 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
                 env={
                     "BACKUP_ROOT": str(backup_root),
                     "LUMEN_BACKUP_ROOT": str(backup_root),
+                    "LUMEN_BACKUP_OPERATION_ID": operation_id,
                 },
             )
     except TimeoutError:
         release_reason = "backup_timeout"
-        _unlink_marker(marker)
+        if not adopted:
+            _unlink_owned_marker(marker, operation_id)
         await lock_service.release(lock, succeeded=False, reason=release_reason)
         raise _http(
             "backup_timeout",
@@ -545,10 +619,12 @@ async def backup_now(request: Request, admin: AdminUser) -> BackupNowOut:
             504,
         )
     except Exception:
-        _unlink_marker(marker)
+        if not adopted:
+            _unlink_owned_marker(marker, operation_id)
         await lock_service.release(lock, succeeded=False, reason=release_reason)
         raise
-    _unlink_marker(marker)
+    if not trigger_mode:
+        _unlink_marker(marker)
 
     output = f"{proc.stdout}\n{proc.stderr}" if proc is not None else ""
     if proc is not None and _backup_script_was_skipped(output):
@@ -645,7 +721,7 @@ async def restore_backup(
 
     backup_root = _backup_root().resolve()
     try:
-        pair = _backup_pair_for_timestamp(backup_root, ts)
+        _backup_pair_for_timestamp(backup_root, ts)
     except FileNotFoundError:
         await lock_service.release(lock, succeeded=False, reason="backup_not_found")
         raise _http("backup_not_found", f"no paired backup for {ts}", 404)
@@ -656,23 +732,17 @@ async def restore_backup(
         await lock_service.release(lock, succeeded=False, reason="backup_stat_failed")
         raise _http("backup_stat_failed", f"cannot stat backup files: {exc}", 500)
 
-    skew = int(abs(pair.pg_stat.st_mtime - pair.redis_stat.st_mtime))
-    if skew > _PAIR_MTIME_WINDOW_SEC:
-        await lock_service.release(lock, succeeded=False, reason="backup_inconsistent")
-        raise _http(
-            "backup_inconsistent",
-            f"PG/Redis mtime skew {skew}s exceeds {_PAIR_MTIME_WINDOW_SEC}s window",
-            409,
-        )
-
     marker = _maintenance_marker_path(_RESTORE_RUNNING_MARKER)
     started_at = datetime.now(timezone.utc)
+    operation_id = f"restore-{uuid.uuid4().hex}"
+    adopted = False
     if _restore_trigger_only_mode():
         if not _try_write_pid_marker(
             marker,
             0,
             started_at,
             unit=_RESTORE_RUNNER_UNIT,
+            operation_id=operation_id,
         ):
             await lock_service.release(lock, succeeded=False, reason="maintenance_busy")
             raise _http(
@@ -680,26 +750,25 @@ async def restore_backup(
                 "another maintenance operation is running",
                 409,
             )
-        log_path = _restore_log_path()
-        try:
-            initial_log_size = log_path.stat().st_size
-        except OSError:
-            initial_log_size = 0
         trigger_path = _restore_trigger_path()
         _write_restore_trigger(trigger_path, ts)
-        if not await _wait_for_log_append(
-            log_path,
-            initial_size=initial_log_size,
-            timeout_sec=_BACKUP_TRIGGER_START_TIMEOUT_SECONDS,
-        ):
+        deadline = asyncio.get_running_loop().time() + (
+            _BACKUP_TRIGGER_START_TIMEOUT_SECONDS
+        )
+        while asyncio.get_running_loop().time() < deadline:
+            if _marker_is_adopted(marker, operation_id):
+                adopted = True
+                break
+            await asyncio.sleep(0.25)
+        if not adopted:
             _unlink_marker(trigger_path)
-            _unlink_marker(marker)
+            _unlink_owned_marker(marker, operation_id)
             await lock_service.release(
                 lock, succeeded=False, reason="restore_trigger_not_started"
             )
             raise _http(
                 "restore_trigger_not_started",
-                "restore trigger was written, but host restore service did not start",
+                "restore trigger was written, but host restore service did not adopt it",
                 504,
             )
         await lock_service.release(lock, succeeded=True, reason="restore_launched")
@@ -741,7 +810,12 @@ async def restore_backup(
             start_new_session=True,
             close_fds=True,
         )
-        if not _try_write_pid_marker(marker, proc.pid, started_at):
+        if not _try_write_pid_marker(
+            marker,
+            proc.pid,
+            started_at,
+            operation_id=operation_id,
+        ):
             # Another maintenance op won the marker claim while the Redis
             # lock was degraded; never let a second restore.sh run.
             _kill_launched_script(proc)

@@ -10,14 +10,19 @@ import secrets
 import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Sequence, Union
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from maintenance_marker_lock import marker_lock
 
 _DEFAULT_TRIGGER = Path("/opt/lumendata/backup/.restore.trigger")
 _DEFAULT_JOURNAL = Path("/var/lib/lumen/restore/active.json")
 _DEFAULT_BACKUP_ROOT = Path("/opt/lumendata/backup")
+_DEFAULT_RUNNING = Path("/opt/lumendata/backup/.restore.running")
 _TIMESTAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{6}$")
 _MAX_TRIGGER_AGE = timedelta(minutes=5)
 _MAX_JOURNAL_BYTES = 64 * 1024
@@ -268,6 +273,73 @@ def sanitized_restore_environment(source: Mapping[str, str]) -> Dict[str, str]:
     return env
 
 
+def _adopt_running_marker_unlocked(path: Path) -> str | None:
+    """Fence the API claim before any slow backup binding or restore work."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RestoreTriggerError("cannot read restore ownership marker") from exc
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key] = value.strip()
+    operation_id = values.get("operation_id")
+    try:
+        generation = int(values.get("generation", "0"))
+    except ValueError as exc:
+        raise RestoreTriggerError("restore ownership generation is invalid") from exc
+    if values.get("owner") != "api" or generation != 0 or not operation_id:
+        return None
+    values["owner"] = "host"
+    values["generation"] = str(generation + 1)
+    values["pid"] = str(os.getpid())
+    values["adopted_at"] = datetime.now(timezone.utc).isoformat()
+    payload = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_raw)
+    try:
+        os.fchmod(descriptor, 0o660)
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        os.replace(temporary, path)
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    return operation_id
+
+
+def adopt_running_marker(path: Path) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    with marker_lock(path.parent):
+        return _adopt_running_marker_unlocked(path)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) > 1:
@@ -275,6 +347,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     trigger = Path(args[0]) if args else _DEFAULT_TRIGGER
     journal = Path(os.environ.get("LUMEN_RESTORE_JOURNAL_FILE", _DEFAULT_JOURNAL))
+    running = Path(os.environ.get("LUMEN_RESTORE_RUNNING", _DEFAULT_RUNNING))
     script = trusted_restore_script()
     helper = trusted_journal_helper()
     timestamp: Optional[str] = None
@@ -286,6 +359,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         helper_info = helper.lstat()
         if not stat.S_ISREG(helper_info.st_mode):
             raise RestoreTriggerError("restore journal helper is not a regular file")
+        adopt_running_marker(running)
         recovery = load_journal(journal)
         if recovery is None:
             try:
