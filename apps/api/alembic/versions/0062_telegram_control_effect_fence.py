@@ -34,10 +34,26 @@ def _export_before_drop(bind: sa.Connection) -> None:
     rows = bind.execute(
         sa.text("SELECT * FROM telegram_control_commands")
     ).mappings().all()
+    payload: dict[str, object] = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"refusing to merge into invalid migration export: {target}"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise RuntimeError(
+                f"refusing to merge into non-object migration export: {target}"
+            )
+        payload.update(existing)
+    payload["telegram_control_commands_effect_fence"] = [
+        dict(row) for row in rows
+    ]
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     temporary.write_text(
         json.dumps(
-            {"telegram_control_commands": [dict(row) for row in rows]},
+            payload,
             default=str,
             ensure_ascii=True,
             sort_keys=True,
@@ -103,7 +119,15 @@ def upgrade() -> None:
         "ck_tg_control_effect_status",
         "telegram_control_commands",
         "effect_status IN ('pending','running','succeeded','failed')",
+        postgresql_not_valid=True,
     )
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            sa.text(
+                'ALTER TABLE "telegram_control_commands" '
+                'VALIDATE CONSTRAINT "ck_tg_control_effect_status"'
+            )
+        )
     op.create_index(
         "ix_tg_control_effect_due",
         "telegram_control_commands",

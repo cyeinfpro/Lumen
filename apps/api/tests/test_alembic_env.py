@@ -31,6 +31,19 @@ def test_alembic_prepares_historical_concurrent_index_retry_before_run() -> None
     assert "scripts._downgrade_revs" in source
 
 
+def test_alembic_prepares_downgrade_guards_before_any_migration() -> None:
+    source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
+        encoding="utf-8"
+    )
+    guard_pos = source.index("_prepare_downgrade_guards(online=True)")
+    retry_pos = source.index("_prepare_concurrent_index_retry()", guard_pos)
+    run_pos = source.index("context.run_migrations()", retry_pos)
+
+    assert guard_pos < retry_pos < run_pos
+    assert "guard_telegram_downgrade" in source
+    assert "TELEGRAM_CONTROL_REVISION" in source
+
+
 def test_alembic_escapes_percent_encoded_socket_urls() -> None:
     source = (Path(__file__).resolve().parents[1] / "alembic" / "env.py").read_text(
         encoding="utf-8"

@@ -34,10 +34,24 @@ def _export_before_drop(bind: sa.Connection) -> None:
     rows = bind.execute(
         sa.text("SELECT * FROM storage_apply_operations")
     ).mappings().all()
+    payload: dict[str, object] = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"refusing to merge into invalid migration export: {target}"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise RuntimeError(
+                f"refusing to merge into non-object migration export: {target}"
+            )
+        payload.update(existing)
+    payload["storage_apply_operations"] = [dict(row) for row in rows]
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     temporary.write_text(
         json.dumps(
-            {"storage_apply_operations": [dict(row) for row in rows]},
+            payload,
             default=str,
             ensure_ascii=True,
             sort_keys=True,
