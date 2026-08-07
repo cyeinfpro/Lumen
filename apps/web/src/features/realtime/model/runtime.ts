@@ -749,54 +749,62 @@ export class RealtimeRuntime {
     }
   }
 
+  private async applyDomainHandlers(
+    event: RealtimeDomainEvent,
+  ): Promise<void> {
+    for (const subscriber of this.subscribers) {
+      const handler = subscriber.handlers[event.type];
+      if (!handler) continue;
+      try {
+        await handler(event.payload, event.cursor ?? "");
+      } catch (error) {
+        if (subscriber.optionalHandlers?.has(event.type)) continue;
+        throw error;
+      }
+    }
+  }
+
+  private async persistDomainCursor(event: RealtimeDomainEvent): Promise<void> {
+    if (!event.cursor) return;
+    if (this.options.saveCursor) await this.options.saveCursor(event.cursor);
+    this.dispatch({ type: "cursor", cursor: event.cursor });
+  }
+
+  private requestDomainRecovery(
+    event: RealtimeDomainEvent,
+    error: unknown,
+  ): void {
+    const recoveryEvent: RealtimeControlEvent = {
+      kind: "control",
+      type: "recovery_required",
+      version: 1,
+      reason: "domain_apply_failed",
+      message:
+        error instanceof Error
+          ? error.message
+          : "realtime domain event application failed",
+      cursor: event.cursor,
+    };
+    const recoveryId = this.createRecoveryId();
+    this.handleControl(recoveryEvent, recoveryId);
+    if (this.leader) {
+      this.bus.post(
+        { type: "control_event", event: recoveryEvent, recoveryId },
+        this.now(),
+      );
+    }
+  }
+
   private async deliverDomain(
     event: RealtimeDomainEvent,
     broadcast: boolean,
   ): Promise<void> {
     if (event.cursor && this.seen.has(event.cursor)) return;
     try {
-      for (const subscriber of this.subscribers) {
-        const handler = subscriber.handlers[event.type];
-        if (!handler) continue;
-        try {
-          const result = handler(event.payload, event.cursor ?? "");
-          if (
-            result &&
-            typeof (result as PromiseLike<void>).then === "function"
-          ) {
-            await result;
-          }
-        } catch (error) {
-          if (subscriber.optionalHandlers?.has(event.type)) continue;
-          throw error;
-        }
-      }
-      if (event.cursor && this.options.saveCursor) {
-        await this.options.saveCursor(event.cursor);
-      }
-      if (event.cursor) {
-        this.dispatch({ type: "cursor", cursor: event.cursor });
-      }
+      await this.applyDomainHandlers(event);
+      await this.persistDomainCursor(event);
     } catch (error) {
-      const recoveryEvent: RealtimeControlEvent = {
-        kind: "control",
-        type: "recovery_required",
-        version: 1,
-        reason: "domain_apply_failed",
-        message:
-          error instanceof Error
-            ? error.message
-            : "realtime domain event application failed",
-        cursor: event.cursor,
-      };
-      const recoveryId = this.createRecoveryId();
-      this.handleControl(recoveryEvent, recoveryId);
-      if (this.leader) {
-        this.bus.post(
-          { type: "control_event", event: recoveryEvent, recoveryId },
-          this.now(),
-        );
-      }
+      this.requestDomainRecovery(event, error);
       return;
     }
     if (event.cursor) this.commitSeen(event.cursor);
