@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from sqlalchemy import desc, select
@@ -37,6 +37,17 @@ class ControlAckResult:
     newly_terminal: bool
     status: ControlTerminalStatus
     quarantine_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ControlEffectClaim:
+    command_id: str
+    command: str
+    payload: dict[str, Any]
+    owner: str | None
+    fence: int
+    acquired: bool
+    status: str
 
 
 def _now() -> datetime:
@@ -218,6 +229,112 @@ async def queue_quarantine_redrive(
     return command
 
 
+async def claim_control_effect(
+    db: AsyncSession,
+    *,
+    command_id: str,
+    expected_command: str,
+    owner: str,
+    lease_seconds: int = 60,
+) -> ControlEffectClaim:
+    command = (
+        await db.execute(
+            select(TelegramControlCommand)
+            .where(
+                TelegramControlCommand.id == command_id,
+                TelegramControlCommand.target == "tgbot",
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if command is None:
+        raise LookupError("control command not found")
+    if command.command != expected_command:
+        raise QuarantineConflict("control command type does not match transport")
+    now = _now()
+    if command.effect_status in {"succeeded", "failed"}:
+        return ControlEffectClaim(
+            command_id=command.id,
+            command=command.command,
+            payload=dict(command.payload or {}),
+            owner=None,
+            fence=int(command.effect_fence or 0),
+            acquired=False,
+            status=command.effect_status,
+        )
+    if (
+        command.effect_status == "running"
+        and command.effect_lease_until is not None
+        and command.effect_lease_until > now
+    ):
+        return ControlEffectClaim(
+            command_id=command.id,
+            command=command.command,
+            payload=dict(command.payload or {}),
+            owner=command.effect_owner,
+            fence=int(command.effect_fence or 0),
+            acquired=False,
+            status="running",
+        )
+    command.effect_status = "running"
+    command.effect_owner = owner
+    command.effect_lease_until = now + timedelta(seconds=lease_seconds)
+    command.effect_fence = int(command.effect_fence or 0) + 1
+    command.effect_attempts = int(command.effect_attempts or 0) + 1
+    command.effect_error = None
+    await db.flush()
+    return ControlEffectClaim(
+        command_id=command.id,
+        command=command.command,
+        payload=dict(command.payload or {}),
+        owner=owner,
+        fence=int(command.effect_fence),
+        acquired=True,
+        status="running",
+    )
+
+
+async def finish_control_effect(
+    db: AsyncSession,
+    *,
+    command_id: str,
+    expected_command: str,
+    owner: str,
+    fence: int,
+    status: Literal["succeeded", "failed"],
+    error: str | None = None,
+) -> str:
+    command = (
+        await db.execute(
+            select(TelegramControlCommand)
+            .where(
+                TelegramControlCommand.id == command_id,
+                TelegramControlCommand.target == "tgbot",
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if command is None:
+        raise LookupError("control command not found")
+    if command.command != expected_command:
+        raise QuarantineConflict("control command type does not match transport")
+    if command.effect_status == status:
+        return status
+    if (
+        command.effect_status != "running"
+        or command.effect_owner != owner
+        or int(command.effect_fence or 0) != fence
+    ):
+        raise QuarantineConflict("control effect lease or fence was lost")
+    command.effect_status = status
+    command.effect_owner = None
+    command.effect_lease_until = None
+    command.effect_completed_at = _now()
+    command.effect_error = (error or "")[:2000] or None
+    await db.flush()
+    return status
+
+
 async def finish_control_command(
     db: AsyncSession,
     *,
@@ -321,10 +438,13 @@ async def cleanup_quarantine(
 
 __all__ = [
     "ControlAckResult",
+    "ControlEffectClaim",
     "QuarantineConflict",
     "QuarantineNotFound",
     "cleanup_quarantine",
     "finish_control_command",
+    "claim_control_effect",
+    "finish_control_effect",
     "list_quarantines",
     "mark_quarantine_mirrored",
     "persist_quarantine",

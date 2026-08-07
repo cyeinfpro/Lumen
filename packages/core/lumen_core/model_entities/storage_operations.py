@@ -41,6 +41,11 @@ class StorageApplyOperation(Base, TimestampMixin):
             "dispatch_lease_until",
             "created_at",
         ),
+        Index(
+            "ix_storage_apply_next_attempt",
+            "status",
+            "next_attempt_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -91,6 +96,14 @@ class StorageApplyOperation(Base, TimestampMixin):
     host_started_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     host_finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    failure_class: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
 
 
 __all__ = ["StorageApplyOperation"]

@@ -550,6 +550,73 @@ class LumenApi:
             )
         return body
 
+    async def claim_control_effect(
+        self,
+        command_id: str,
+        *,
+        command: str,
+        owner: str,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/claim",
+                json={"command": command, "owner": owner},
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_effect_claim_connection_lost",
+                "control effect claim result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or not isinstance(body.get("acquired"), bool):
+            raise ApiError(
+                "ambiguous_response",
+                "control effect claim response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def finish_control_effect(
+        self,
+        command_id: str,
+        *,
+        command: str,
+        owner: str,
+        fence: int,
+        status: str,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/finish",
+                json={
+                    "command": command,
+                    "owner": owner,
+                    "fence": fence,
+                    "status": status,
+                    "error": error,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_effect_finish_connection_lost",
+                "control effect finish result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or body.get("status") != status:
+            raise ApiError(
+                "ambiguous_response",
+                "control effect finish response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
     async def download_image_to_file(
         self,
         chat_id: int,

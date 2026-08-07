@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +15,52 @@ from app.routes import admin_backups
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _write_committed_pair(backup_root: Path, timestamp: str) -> None:
+    pg_path = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
+    redis_path = backup_root / "redis" / f"{timestamp}.redis.tgz"
+    pg_path.parent.mkdir(parents=True, exist_ok=True)
+    redis_path.parent.mkdir(parents=True, exist_ok=True)
+    if not pg_path.exists():
+        pg_path.write_bytes(b"pg")
+    if not redis_path.exists():
+        redis_path.write_bytes(b"redis")
+    marker = {
+        "schema": 1,
+        "operation_id": f"backup-{timestamp}",
+        "timestamp": timestamp,
+        "pg": {
+            "name": pg_path.name,
+            "size": pg_path.stat().st_size,
+            "sha256": hashlib.sha256(pg_path.read_bytes()).hexdigest(),
+        },
+        "redis": {
+            "name": redis_path.name,
+            "size": redis_path.stat().st_size,
+            "sha256": hashlib.sha256(redis_path.read_bytes()).hexdigest(),
+        },
+    }
+    (backup_root / f".backup-pair.{timestamp}.json").write_text(
+        json.dumps(marker) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _simulate_host_adoption(path: Path, operation_id: str) -> bool:
+    values = dict(
+        line.split("=", 1)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    assert values["operation_id"] == operation_id
+    values["owner"] = "host"
+    values["generation"] = "1"
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+        encoding="utf-8",
+    )
+    return True
 
 
 def test_backup_paths_resolve_from_settings_at_call_time(
@@ -267,8 +315,7 @@ async def test_find_latest_paired_backup_after_uses_filesystem_fallback(
 
     started_at = datetime.now(timezone.utc)
     ts = "20260519-010203"
-    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
-    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    _write_committed_pair(backup_root, ts)
 
     assert await admin_backups._find_latest_paired_backup_after(started_at) == ts
 
@@ -286,6 +333,7 @@ def test_backup_pair_for_timestamp_rejects_symlinked_backup_leaf(
     real_pg.write_bytes(b"pg")
     (pg_dir / f"{ts}.pg.dump.gz").symlink_to(real_pg)
     (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    _write_committed_pair(backup_root, ts)
 
     with pytest.raises(ValueError):
         admin_backups._backup_pair_for_timestamp(backup_root.resolve(), ts)
@@ -350,7 +398,7 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
         return None
 
     monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
-    monkeypatch.setattr(admin_backups, "_wait_for_log_append", fake_wait_for_log_append)
+    monkeypatch.setattr(admin_backups, "_marker_is_adopted", _simulate_host_adoption)
     monkeypatch.setattr(
         admin_backups,
         "_wait_for_latest_paired_backup_after",
@@ -366,7 +414,9 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     assert out.ok is True
     assert out.timestamp == "20260519-010203"
     assert (backup_root / ".backup.trigger").is_file()
-    assert not (backup_root / ".backup.running").exists()
+    marker = (backup_root / ".backup.running").read_text(encoding="utf-8")
+    assert "owner=host\n" in marker
+    assert "generation=1\n" in marker
     assert release_calls[-1] == {"succeeded": True, "reason": "backup_complete"}
 
 
@@ -639,8 +689,7 @@ async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
     pg_dir.mkdir(parents=True)
     redis_dir.mkdir()
     ts = "20260519-010203"
-    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
-    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    _write_committed_pair(backup_root, ts)
     monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
     monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
     monkeypatch.setenv("LUMEN_RESTORE_VIA_TRIGGER", "1")
@@ -664,7 +713,7 @@ async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
         return None
 
     monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
-    monkeypatch.setattr(admin_backups, "_wait_for_log_append", fake_wait_for_log_append)
+    monkeypatch.setattr(admin_backups, "_marker_is_adopted", _simulate_host_adoption)
     monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
 
     out = await admin_backups.restore_backup(
@@ -677,6 +726,8 @@ async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
     assert (backup_root / ".restore.trigger").read_text(encoding="utf-8") == f"{ts}\n"
     marker = (backup_root / ".restore.running").read_text(encoding="utf-8")
     assert f"unit={admin_backups._RESTORE_RUNNER_UNIT}" in marker
+    assert "owner=host\n" in marker
+    assert "generation=1\n" in marker
     assert release_calls == [{"succeeded": True, "reason": "restore_launched"}]
 
 
@@ -695,8 +746,7 @@ async def test_restore_without_host_runner_or_docker_fails_before_false_accept(
     pg_dir.mkdir(parents=True)
     redis_dir.mkdir()
     ts = "20260519-010203"
-    (pg_dir / f"{ts}.pg.dump.gz").write_bytes(b"pg")
-    (redis_dir / f"{ts}.redis.tgz").write_bytes(b"redis")
+    _write_committed_pair(backup_root, ts)
     monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
     monkeypatch.setattr(admin_backups.settings, "lumen_scripts_dir", str(scripts_dir))
     monkeypatch.delenv("LUMEN_RESTORE_VIA_TRIGGER", raising=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -32,6 +33,9 @@ _REDISPATCH_AFTER_SECONDS = 60
 _RECONCILE_INTERVAL_SECONDS = 5.0
 _RECONCILE_BATCH_SIZE = 10
 _ERROR_LIMIT = 2000
+_MAX_DISPATCH_ATTEMPTS = 8
+_DISPATCH_HEARTBEAT_SECONDS = 10
+_DISPATCH_BACKOFF_CAP_SECONDS = 15 * 60
 
 LoadConfText = Callable[[AsyncSession], Awaitable[str]]
 StageOperation = Callable[[str, str], None]
@@ -44,6 +48,7 @@ class StorageDispatchClaim:
     desired_config_sha256: str
     owner: str
     fence: int
+    attempts: int
 
 
 @dataclass(slots=True)
@@ -101,6 +106,8 @@ def _operation_apply_record(operation: StorageApplyOperation) -> dict[str, Any]:
         "desired_config_sha256": operation.desired_config_sha256,
         "dispatch_attempts": operation.dispatch_attempts,
         "last_error": operation.last_error,
+        "next_attempt_at": operation.next_attempt_at,
+        "failure_class": operation.failure_class,
     }
 
 
@@ -170,6 +177,8 @@ async def _ingest_host_result(result: dict[str, Any]) -> bool:
         operation.host_started_at = _host_timestamp(result.get("started_at"))
         operation.host_finished_at = _host_timestamp(result.get("finished_at"))
         operation.last_error = message if terminal_status == "failed" else None
+        operation.next_attempt_at = None
+        operation.failure_class = None
         await write_audit(
             session,
             event_type=f"admin.storage.apply.{terminal_status}",
@@ -206,6 +215,10 @@ async def _due_operation_ids() -> list[str]:
                 or_(
                     StorageApplyOperation.dispatch_lease_until.is_(None),
                     StorageApplyOperation.dispatch_lease_until <= now,
+                ),
+                or_(
+                    StorageApplyOperation.next_attempt_at.is_(None),
+                    StorageApplyOperation.next_attempt_at <= now,
                 ),
             )
             .order_by(
@@ -248,6 +261,10 @@ async def _claim_operation(operation_id: str) -> StorageDispatchClaim | None:
                         StorageApplyOperation.dispatch_lease_until.is_(None),
                         StorageApplyOperation.dispatch_lease_until <= now,
                     ),
+                    or_(
+                        StorageApplyOperation.next_attempt_at.is_(None),
+                        StorageApplyOperation.next_attempt_at <= now,
+                    ),
                 )
                 .values(
                     dispatch_owner=owner,
@@ -260,6 +277,7 @@ async def _claim_operation(operation_id: str) -> StorageDispatchClaim | None:
                 .returning(
                     StorageApplyOperation.desired_config_sha256,
                     StorageApplyOperation.dispatch_fence,
+                    StorageApplyOperation.dispatch_attempts,
                 )
             )
         ).one_or_none()
@@ -271,13 +289,95 @@ async def _claim_operation(operation_id: str) -> StorageDispatchClaim | None:
         desired_config_sha256=str(row[0]),
         owner=owner,
         fence=int(row[1]),
+        attempts=int(row[2]),
     )
 
 
 async def _record_dispatch_failure(
     claim: StorageDispatchClaim,
     error: str,
+    *,
+    permanent: bool,
 ) -> None:
+    terminal = permanent or claim.attempts >= _MAX_DISPATCH_ATTEMPTS
+    retry_seconds = 0 if claim.attempts <= 1 else min(
+        _DISPATCH_BACKOFF_CAP_SECONDS,
+        2 ** max(0, min(claim.attempts - 1, 10)),
+    )
+    async with SessionLocal() as session:
+        values: dict[str, Any] = {
+            "dispatch_owner": None,
+            "dispatch_lease_until": None,
+            "last_error": error[:_ERROR_LIMIT],
+            "failure_class": "permanent" if permanent else "transient",
+        }
+        if terminal:
+            values.update(
+                {
+                    "status": "failed",
+                    "active_slot": None,
+                    "completed_at": _now(),
+                    "result_message": (
+                        "dispatch_failed_permanent"
+                        if permanent
+                        else "dispatch_retry_limit_exhausted"
+                    ),
+                    "next_attempt_at": None,
+                }
+            )
+        else:
+            values["status"] = "pending"
+            values["next_attempt_at"] = _now() + timedelta(seconds=retry_seconds)
+        result = await session.execute(
+            update(StorageApplyOperation)
+            .where(
+                StorageApplyOperation.id == claim.operation_id,
+                StorageApplyOperation.active_slot == 1,
+                StorageApplyOperation.dispatch_owner == claim.owner,
+                StorageApplyOperation.dispatch_fence == claim.fence,
+            )
+            .values(**values)
+        )
+        if affected_rows(result) != 1:
+            await session.rollback()
+            raise RuntimeError("storage dispatch fence was lost after failure")
+        if terminal:
+            await write_audit(
+                session,
+                event_type="admin.storage.apply.failed",
+                user_id=(
+                    await session.execute(
+                        select(StorageApplyOperation.requested_by).where(
+                            StorageApplyOperation.id == claim.operation_id
+                        )
+                    )
+                ).scalar_one_or_none(),
+                details={
+                    "operation_id": claim.operation_id,
+                    "failure_class": values["failure_class"],
+                    "error": error[:_ERROR_LIMIT],
+                },
+                autocommit=False,
+            )
+        await session.commit()
+
+
+def _is_permanent_dispatch_error(exc: BaseException) -> bool:
+    if isinstance(exc, (PermissionError, FileNotFoundError, IsADirectoryError, ValueError)):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {
+            errno.EACCES,
+            errno.EPERM,
+            errno.EROFS,
+            errno.ENOENT,
+            errno.ENOTDIR,
+            errno.EISDIR,
+        }
+    return False
+
+
+async def _renew_dispatch_lease(claim: StorageDispatchClaim) -> None:
     async with SessionLocal() as session:
         result = await session.execute(
             update(StorageApplyOperation)
@@ -288,15 +388,54 @@ async def _record_dispatch_failure(
                 StorageApplyOperation.dispatch_fence == claim.fence,
             )
             .values(
-                dispatch_owner=None,
-                dispatch_lease_until=None,
-                last_error=error[:_ERROR_LIMIT],
+                dispatch_lease_until=_now()
+                + timedelta(seconds=_DISPATCH_LEASE_SECONDS),
             )
         )
         if affected_rows(result) != 1:
             await session.rollback()
-            raise RuntimeError("storage dispatch fence was lost after failure")
+            raise RuntimeError("storage dispatch lease was fenced")
         await session.commit()
+
+
+async def _stage_with_heartbeat(
+    claim: StorageDispatchClaim,
+    stage_operation: StageOperation,
+    conf_text: str,
+) -> None:
+    stage_task = asyncio.create_task(
+        asyncio.to_thread(stage_operation, claim.operation_id, conf_text)
+    )
+    heartbeat_task = asyncio.create_task(
+        _dispatch_heartbeat(claim),
+        name=f"storage-dispatch-heartbeat-{claim.operation_id}",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {stage_task, heartbeat_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat_task in done:
+            heartbeat_task.result()
+        if stage_task in done:
+            stage_task.result()
+        else:
+            await stage_task
+    finally:
+        heartbeat_task.cancel()
+        if not stage_task.done():
+            stage_task.cancel()
+        await asyncio.gather(
+            heartbeat_task,
+            stage_task,
+            return_exceptions=True,
+        )
+
+
+async def _dispatch_heartbeat(claim: StorageDispatchClaim) -> None:
+    while True:
+        await asyncio.sleep(_DISPATCH_HEARTBEAT_SECONDS)
+        await _renew_dispatch_lease(claim)
 
 
 async def _mark_digest_mismatch(claim: StorageDispatchClaim) -> None:
@@ -322,6 +461,8 @@ async def _mark_digest_mismatch(claim: StorageDispatchClaim) -> None:
         operation.last_error = "desired_config_hash_mismatch"
         operation.dispatch_owner = None
         operation.dispatch_lease_until = None
+        operation.next_attempt_at = None
+        operation.failure_class = None
         await write_audit(
             session,
             event_type="admin.storage.apply.failed",
@@ -351,6 +492,8 @@ async def _mark_dispatched(claim: StorageDispatchClaim) -> None:
                 dispatch_owner=None,
                 dispatch_lease_until=None,
                 last_error=None,
+                next_attempt_at=None,
+                failure_class=None,
             )
         )
         if affected_rows(result) != 1:
@@ -380,14 +523,18 @@ async def dispatch_storage_apply_operation(
                 operation_id,
             )
             return False
-        await asyncio.to_thread(stage_operation, operation_id, conf_text)
+        await _stage_with_heartbeat(claim, stage_operation, conf_text)
         await _mark_dispatched(claim)
         return True
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         try:
-            await _record_dispatch_failure(claim, _error_text(exc))
+            await _record_dispatch_failure(
+                claim,
+                _error_text(exc),
+                permanent=_is_permanent_dispatch_error(exc),
+            )
         except Exception:
             logger.exception(
                 "storage dispatch failure state could not be persisted "

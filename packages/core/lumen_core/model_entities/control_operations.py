@@ -98,6 +98,15 @@ class TelegramControlCommand(Base, TimestampMixin):
             "publish_lease_until",
             "created_at",
         ),
+        CheckConstraint(
+            "effect_status IN ('pending','running','succeeded','failed')",
+            name="ck_tg_control_effect_status",
+        ),
+        Index(
+            "ix_tg_control_effect_due",
+            "effect_status",
+            "effect_lease_until",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -157,6 +166,34 @@ class TelegramControlCommand(Base, TimestampMixin):
         nullable=True,
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effect_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    effect_owner: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    effect_lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    effect_fence: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    effect_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    effect_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    effect_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TelegramDeliveryQuarantine(Base, TimestampMixin):

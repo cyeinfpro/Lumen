@@ -141,14 +141,90 @@ mark_backup_running() {
     [ "${LUMEN_BACKUP_SERVICE_MODE:-0}" = "1" ] || return 0
     mkdir -p "$BACKUP_ROOT"
     local tmp="${BACKUP_RUNNING_FILE}.$$"
+    local marker_lock_mode=""
+    if command -v flock >/dev/null 2>&1; then
+        exec 5>>"${BACKUP_ROOT}/.maintenance-markers.lock"
+        if ! chmod 0660 "${BACKUP_ROOT}/.maintenance-markers.lock"; then
+            marker_lock_mode="$(
+                stat -c '%a' "${BACKUP_ROOT}/.maintenance-markers.lock" 2>/dev/null \
+                    || stat -f '%Lp' "${BACKUP_ROOT}/.maintenance-markers.lock" 2>/dev/null \
+                    || printf '%s' ""
+            )"
+            case "$marker_lock_mode" in
+                660|0660)
+                    ;;
+                *)
+                    log "ERROR: backup ownership lock permissions are unsafe"
+                    exec 5>&-
+                    return 75
+                    ;;
+            esac
+        fi
+        if ! flock -n 5; then
+            log "ERROR: backup ownership marker is busy"
+            exec 5>&-
+            return 75
+        fi
+    fi
+    local existing_operation_id=""
+    if [ -f "$BACKUP_RUNNING_FILE" ]; then
+        while IFS= read -r _marker_line; do
+            case "$_marker_line" in
+                operation_id=*)
+                    existing_operation_id="${_marker_line#operation_id=}"
+                    ;;
+            esac
+        done < "$BACKUP_RUNNING_FILE"
+    fi
+    if [ -z "${LUMEN_BACKUP_OPERATION_ID:-}" ] \
+            && [ -n "$existing_operation_id" ]; then
+        case "$existing_operation_id" in
+            *[!A-Za-z0-9._:-]*)
+                ;;
+            *)
+                BACKUP_OPERATION_ID="$existing_operation_id"
+                ;;
+        esac
+    fi
     {
         printf 'pid=%s\n' "$$"
         printf 'started_at=%s\n' "$(date -u +%FT%TZ)"
+        printf 'operation_id=%s\n' "$BACKUP_OPERATION_ID"
+        printf 'owner=host\n'
+        printf 'generation=1\n'
     } > "$tmp"
+    chmod 0660 "$tmp"
     mv -f "$tmp" "$BACKUP_RUNNING_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        flock -u 5
+        exec 5>&-
+    fi
     BACKUP_TRIGGER_FINGERPRINT="$(trigger_fingerprint "$BACKUP_TRIGGER_FILE")"
     BACKUP_SERVICE_MARKER_ACTIVE=1
 }
+
+if [ -z "${LUMEN_BACKUP_OPERATION_ID:-}" ] && [ -f "$BACKUP_TRIGGER_FILE" ]; then
+    _trigger_operation_id="$(
+        python3 - "$BACKUP_TRIGGER_FILE" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    payload = None
+if isinstance(payload, dict):
+    value = payload.get("operation_id")
+    if isinstance(value, str) and value and "\n" not in value and "\r" not in value:
+        print(value)
+PY
+    )"
+    if [ -n "${_trigger_operation_id:-}" ]; then
+        BACKUP_OPERATION_ID="$_trigger_operation_id"
+    fi
+    unset _trigger_operation_id
+fi
 
 mark_backup_pending_if_retriggered() {
     [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ] || return 0
@@ -197,8 +273,10 @@ cleanup() {
         WRITERS_STOPPED=0
     fi
     mark_backup_pending_if_retriggered
-    if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ]; then
+    if [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ] && [ "$backup_rc" -eq 0 ]; then
         rm -f "$BACKUP_RUNNING_FILE" 2>/dev/null || true
+    elif [ "$BACKUP_SERVICE_MARKER_ACTIVE" = "1" ]; then
+        log "retaining host ownership marker after failed backup operation"
     fi
     if [ "$backup_rc" -ne 0 ]; then
         [ -n "${PG_TMP:-}" ] && rm -f "$PG_TMP" 2>/dev/null || true
@@ -1005,13 +1083,26 @@ prune_paired() {
         rm -f "$redis_dir/$ts.redis.tgz" "$BACKUP_ROOT/.backup-pair.$ts.json"
     done <<< "$orphan_redis"
 
+    local committed=""
+    local ts
+    while IFS= read -r ts; do
+        [ -z "$ts" ] && continue
+        if python3 -I "${SCRIPT_DIR}/restore_journal.py" \
+                backup-pair-bind-json "$BACKUP_ROOT" "$ts" \
+                >/dev/null 2>&1; then
+            committed="${committed}${ts}"$'\n'
+        else
+            log "retention ignores uncommitted backup pair: $ts"
+        fi
+    done <<< "$paired"
+
     local total excess
-    total="$(printf '%s\n' "$paired" | grep -c . || true)"
+    total="$(printf '%s\n' "$committed" | grep -c . || true)"
     if [ "$total" -le "$keep" ]; then
         return 0
     fi
     excess=$((total - keep))
-    printf '%s\n' "$paired" | sort | sed -n "1,${excess}p" | while IFS= read -r ts; do
+    printf '%s\n' "$committed" | sort | sed -n "1,${excess}p" | while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune old paired: $ts"
         rm -f \

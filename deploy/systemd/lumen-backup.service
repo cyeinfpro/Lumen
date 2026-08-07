@@ -28,7 +28,7 @@ ExecStartPre=/bin/sh -c 'log=/opt/lumendata/backup/.backup.log; max=10485760; if
 ExecStart=/usr/bin/env bash /opt/lumen/current/scripts/backup.sh
 StandardOutput=append:/opt/lumendata/backup/.backup.log
 StandardError=append:/opt/lumendata/backup/.backup.log
-ExecStopPost=/bin/sh -c 'if [ -f /opt/lumendata/backup/.backup.pending ]; then rm -f /opt/lumendata/backup/.backup.pending /opt/lumendata/backup/.backup.running; touch /opt/lumendata/backup/.backup.trigger; else rm -f /opt/lumendata/backup/.backup.running; fi'
+ExecStopPost=/bin/sh -c 'if [ "$SERVICE_RESULT" = success ]; then if [ -f /opt/lumendata/backup/.backup.pending ]; then rm -f /opt/lumendata/backup/.backup.pending /opt/lumendata/backup/.backup.running; touch /opt/lumendata/backup/.backup.trigger; else rm -f /opt/lumendata/backup/.backup.running; fi; else echo "backup ownership marker retained after service result=$SERVICE_RESULT" >&2; fi'
 TimeoutStartSec=900
 TimeoutStopSec=120
 KillSignal=SIGTERM

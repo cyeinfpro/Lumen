@@ -305,6 +305,22 @@ if [ -L "$ROOT/current" ]; then
   CURRENT_ID="$(basename "$CURRENT_TARGET")"
 fi
 echo "::lumen-info:: phase=rollback key=previous_current value=$CURRENT_ID"
+SHARED_ENV="$ROOT/shared/.env"
+ENV_BACKUP="$ROOT/.rollback-env.$$"
+if [ -f "$SHARED_ENV" ]; then
+  cp -p "$SHARED_ENV" "$ENV_BACKUP"
+fi
+
+restore_original_link() {{
+  if [ -n "$CURRENT_ID" ] && [ -d "$ROOT/releases/$CURRENT_ID" ]; then
+    TMP_RESTORE="$ROOT/.current.restore.$$"
+    ln -s "releases/$CURRENT_ID" "$TMP_RESTORE"
+    mv -T "$TMP_RESTORE" "$ROOT/current"
+    echo "::lumen-info:: phase=recovery key=current value=$CURRENT_ID"
+    return 0
+  fi
+  return 1
+}}
 
 # 1. Atomic switch of ``current`` → releases/<target>.
 SWITCH_START="$(ts)"
@@ -342,7 +358,6 @@ if [ -f "$ROOT/current/docker-compose.yml" ] && command -v docker >/dev/null 2>&
     # shellcheck source=/dev/null
     . "$ROOT/current/scripts/lib.sh"
   fi
-  SHARED_ENV="$ROOT/shared/.env"
   TARGET_IMAGE_TAG=""
   TARGET_VERSION=""
   if [ -f "$ROOT/current/.image-tag" ]; then
@@ -376,7 +391,8 @@ if [ -f "$ROOT/current/docker-compose.yml" ] && command -v docker >/dev/null 2>&
     echo "docker compose up failed; rollback continues but containers may be stale" >&2
   fi
 else
-  echo "::lumen-info:: phase=containers key=note value=skipped"
+  compose_rc=1
+  echo "docker compose is unavailable; rollback cannot prove runtime alignment" >&2
 fi
 COMPOSE_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=containers status=done rc=$compose_rc dur_ms=$((COMPOSE_T1-COMPOSE_T0)) ts=$(ts)"
@@ -404,35 +420,80 @@ fi
 RESTART_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=restart status=done rc=$restart_rc dur_ms=$((RESTART_T1-RESTART_T0)) ts=$(ts)"
 
-# 4. Best-effort post-restart healthz. Failure does not abort rollback —
-#    the operator can recover via the existing /admin/update plumbing.
+# 4. Readiness is part of rollback success. A HTTP 200 alone is not enough:
+#    require the expected JSON status from both liveness and dependency checks.
 HEALTH_START="$(ts)"
 HEALTH_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=health_post status=start ts=$HEALTH_START"
 health_rc=0
 if command -v curl >/dev/null 2>&1; then
   for _ in $(seq 1 30); do
-    if curl -fsS --max-time 2 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+    health_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
+    ready_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
+    if printf '%s' "$health_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
+      && printf '%s' "$ready_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
       break
     fi
     sleep 1
   done
-  if ! curl -fsS --max-time 2 http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
+  health_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
+  ready_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
+  if ! printf '%s' "$health_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
+    || ! printf '%s' "$ready_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
     health_rc=1
   fi
+else
+  health_rc=1
+  echo "curl is unavailable; rollback readiness cannot be proven" >&2
 fi
 HEALTH_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=health_post status=done rc=$health_rc dur_ms=$((HEALTH_T1-HEALTH_T0)) ts=$(ts)"
 
-# 5. Final phase marker so the SSE stream sees a clean terminal event.
+# 5. A rollback is successful only when every required phase succeeded.
+rollback_rc=0
+rollback_status=done
+if [ "$compose_rc" -ne 0 ] || [ "$restart_rc" -ne 0 ] || [ "$health_rc" -ne 0 ]; then
+  rollback_rc=1
+  rollback_status=manual_required
+  echo "::lumen-step:: phase=rollback_recovery status=start ts=$(ts)"
+  if restore_original_link \
+    && {{ [ ! -f "$ENV_BACKUP" ] || cp -p "$ENV_BACKUP" "$SHARED_ENV"; }} \
+    && {{ [ ! -f "$ROOT/current/docker-compose.yml" ] \
+      || ! command -v docker >/dev/null 2>&1 \
+      || (cd "$ROOT/current" && docker compose up -d --wait); }} \
+    && systemctl restart lumen-worker.service \
+    && systemctl restart lumen-web.service \
+    && systemctl restart lumen-tgbot.service \
+    && systemctl --no-block restart lumen-api.service; then
+    recovery_health="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
+    recovery_ready="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
+    if printf '%s' "$recovery_health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
+      && printf '%s' "$recovery_ready" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+      rollback_rc=0
+      rollback_status=rolled_back
+      echo "::lumen-info:: phase=rollback_recovery key=status value=ready"
+    else
+      echo "original release was restored but readiness is still unproven" >&2
+    fi
+  else
+    echo "rollback recovery could not restore the original runtime" >&2
+  fi
+  echo "::lumen-step:: phase=rollback_recovery status=done rc=$rollback_rc ts=$(ts)"
+fi
+
+# 6. Final phase marker. Keep the marker on manual_required so operators and
+#    the status endpoint cannot mistake a mixed runtime for a completed action.
 ROLLBACK_T1=$(date +%s%3N)
 ROLLBACK_T0_S=$(date -d "$ROLLBACK_START" +%s 2>/dev/null || echo 0)
 ROLLBACK_T1_S=$(date +%s)
 ROLLBACK_DUR=$(((ROLLBACK_T1_S - ROLLBACK_T0_S) * 1000))
-echo "::lumen-step:: phase=rollback status=done rc=$restart_rc dur_ms=$ROLLBACK_DUR ts=$(ts)"
+echo "::lumen-step:: phase=rollback status=$rollback_status rc=$rollback_rc dur_ms=$ROLLBACK_DUR ts=$(ts)"
 
-# Clean the marker so the SSE stream / status endpoint flips back to running=False.
-rm -f "{shlex.quote(str(update_update_marker_path()))}"
+if [ "$rollback_status" != "manual_required" ]; then
+  rm -f "{shlex.quote(str(update_update_marker_path()))}"
+fi
+rm -f "$ENV_BACKUP"
+exit "$rollback_rc"
 """
 
 

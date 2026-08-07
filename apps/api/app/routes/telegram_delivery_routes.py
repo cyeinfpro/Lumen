@@ -25,7 +25,9 @@ from ..services.telegram_delivery import (
 from ..services.telegram_quarantine import (
     QuarantineConflict,
     QuarantineNotFound,
+    claim_control_effect,
     finish_control_command,
+    finish_control_effect,
     mark_quarantine_mirrored,
     persist_quarantine,
 )
@@ -115,6 +117,28 @@ class ControlAckOut(BaseModel):
     status: str
     newly_accepted: bool
     quarantine_id: str | None = None
+
+
+class ControlEffectClaimIn(BaseModel):
+    command: str = Field(min_length=1, max_length=32)
+    owner: str = Field(min_length=1, max_length=96)
+
+
+class ControlEffectClaimOut(BaseModel):
+    command: str
+    status: str
+    acquired: bool
+    owner: str | None = None
+    fence: int
+    payload: dict[str, object]
+
+
+class ControlEffectFinishIn(BaseModel):
+    command: str = Field(min_length=1, max_length=32)
+    owner: str = Field(min_length=1, max_length=96)
+    fence: int = Field(ge=1)
+    status: Literal["succeeded", "failed"]
+    error: str | None = Field(default=None, max_length=2000)
 
 
 async def _require_generation_owner(
@@ -333,6 +357,73 @@ async def ack_control_command(
         status=result.status,
         newly_accepted=result.newly_terminal and result.status == "accepted",
         quarantine_id=result.quarantine_id,
+    )
+
+
+@router.post(
+    "/telegram/control/{command_id}/effect/claim",
+    response_model=ControlEffectClaimOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def claim_control_effect_route(
+    command_id: str,
+    body: ControlEffectClaimIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlEffectClaimOut:
+    try:
+        result = await claim_control_effect(
+            db,
+            command_id=command_id,
+            expected_command=body.command,
+            owner=body.owner,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except QuarantineConflict as exc:
+        raise _http("effect_not_claimable", str(exc), 409) from exc
+    return ControlEffectClaimOut(
+        command=result.command,
+        status=result.status,
+        acquired=result.acquired,
+        owner=result.owner,
+        fence=result.fence,
+        payload=result.payload,
+    )
+
+
+@router.post(
+    "/telegram/control/{command_id}/effect/finish",
+    response_model=ControlEffectClaimOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def finish_control_effect_route(
+    command_id: str,
+    body: ControlEffectFinishIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlEffectClaimOut:
+    try:
+        status = await finish_control_effect(
+            db,
+            command_id=command_id,
+            expected_command=body.command,
+            owner=body.owner,
+            fence=body.fence,
+            status=body.status,
+            error=body.error,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except QuarantineConflict as exc:
+        raise _http("effect_fence_lost", str(exc), 409) from exc
+    return ControlEffectClaimOut(
+        command=body.command,
+        status=status,
+        acquired=False,
+        owner=None,
+        fence=body.fence,
+        payload={},
     )
 
 
