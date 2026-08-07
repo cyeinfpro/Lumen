@@ -277,13 +277,6 @@ async def list_releases(_admin: AdminUser) -> list[ReleaseInfo]:
 
 
 def _build_rollback_script(*, target_id: str, lumen_root: Path) -> str:
-    """Compose the shell snippet that performs the symlink swap + restart.
-
-    We use the same step-protocol verbs ``update.sh`` emits so the SSE stream
-    can colour the rollback identically to a forward update. ``mv -T`` is
-    atomic on Linux for the same filesystem, so a crash mid-rollback leaves
-    either the old or the new ``current`` — never a half-swapped symlink.
-    """
     if not re.fullmatch(r"[0-9]{8}-[0-9]{6}", target_id):
         raise ValueError("invalid release id")
     root_q = shlex.quote(str(lumen_root))
@@ -298,7 +291,6 @@ ROLLBACK_START="$(ts)"
 echo "::lumen-step:: phase=rollback status=start ts=$ROLLBACK_START"
 echo "::lumen-info:: phase=rollback key=target value=$TARGET"
 
-# Capture the current release id so we can flip ``previous`` at the same time.
 CURRENT_ID=""
 if [ -L "$ROOT/current" ]; then
   CURRENT_TARGET="$(readlink "$ROOT/current")"
@@ -322,7 +314,6 @@ restore_original_link() {{
   return 1
 }}
 
-# 1. Atomic switch of ``current`` → releases/<target>.
 SWITCH_START="$(ts)"
 SWITCH_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=switch status=start ts=$SWITCH_START"
@@ -344,11 +335,6 @@ fi
 SWITCH_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=switch status=done rc=0 dur_ms=$((SWITCH_T1-SWITCH_T0)) ts=$(ts)"
 
-# 2. Re-sync docker compose to the rollback target's compose file. If a prior
-#    update bumped postgres/redis image versions, a naked symlink swap would
-#    leave systemd services pointing at containers that don't match the rolled-
-#    back code's expectations. ``docker compose up -d --wait`` is idempotent —
-#    if the compose config matches what's already running, it returns instantly.
 COMPOSE_START="$(ts)"
 COMPOSE_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=containers status=start ts=$COMPOSE_START"
@@ -397,10 +383,6 @@ fi
 COMPOSE_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=containers status=done rc=$compose_rc dur_ms=$((COMPOSE_T1-COMPOSE_T0)) ts=$(ts)"
 
-# 3. Restart services. systemctl restart sends SIGTERM and waits up to
-#    TimeoutStopSec — for lumen-worker that's 180s, enough for arq to finish
-#    most in-flight image jobs gracefully. lumen-api is restarted last so we
-#    don't kill the process that owns this systemd-run invocation mid-rollback.
 RESTART_START="$(ts)"
 RESTART_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=restart status=start ts=$RESTART_START"
@@ -411,8 +393,6 @@ for unit in lumen-worker.service lumen-web.service lumen-tgbot.service; do
     echo "restart $unit failed" >&2
   fi
 done
-# lumen-api last; --no-block lets systemd return immediately so this script
-# doesn't block forever waiting on a restart that may itself be us.
 if ! systemctl --no-block restart lumen-api.service; then
   restart_rc=1
   echo "restart lumen-api failed" >&2
@@ -420,8 +400,6 @@ fi
 RESTART_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=restart status=done rc=$restart_rc dur_ms=$((RESTART_T1-RESTART_T0)) ts=$(ts)"
 
-# 4. Readiness is part of rollback success. A HTTP 200 alone is not enough:
-#    require the expected JSON status from both liveness and dependency checks.
 HEALTH_START="$(ts)"
 HEALTH_T0=$(date +%s%3N)
 echo "::lumen-step:: phase=health_post status=start ts=$HEALTH_START"
@@ -449,7 +427,6 @@ fi
 HEALTH_T1=$(date +%s%3N)
 echo "::lumen-step:: phase=health_post status=done rc=$health_rc dur_ms=$((HEALTH_T1-HEALTH_T0)) ts=$(ts)"
 
-# 5. A rollback is successful only when every required phase succeeded.
 rollback_rc=0
 rollback_status=done
 if [ "$compose_rc" -ne 0 ] || [ "$restart_rc" -ne 0 ] || [ "$health_rc" -ne 0 ]; then
@@ -481,8 +458,6 @@ if [ "$compose_rc" -ne 0 ] || [ "$restart_rc" -ne 0 ] || [ "$health_rc" -ne 0 ];
   echo "::lumen-step:: phase=rollback_recovery status=done rc=$rollback_rc ts=$(ts)"
 fi
 
-# 6. Final phase marker. Keep the marker on manual_required so operators and
-#    the status endpoint cannot mistake a mixed runtime for a completed action.
 ROLLBACK_T1=$(date +%s%3N)
 ROLLBACK_T0_S=$(date -d "$ROLLBACK_START" +%s 2>/dev/null || echo 0)
 ROLLBACK_T1_S=$(date +%s)

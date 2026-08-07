@@ -79,41 +79,28 @@ def unit_is_running(unit: str) -> bool:
 
 
 def parse_marker_text(raw: str) -> UpdateMarker:
-    pid = 0
-    started_at: str | None = None
-    unit: str | None = None
-    operation_id: str | None = None
-    owner: str | None = None
-    generation = 0
+    values: dict[str, str] = {}
     for line in raw.splitlines():
         key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        if key == "pid":
-            try:
-                pid = int(value)
-            except ValueError:
-                pid = 0
-        elif key == "started_at":
-            started_at = value.strip() or None
-        elif key == "unit":
-            unit = value.strip() or None
-        elif key == "operation_id":
-            operation_id = value.strip() or None
-        elif key == "owner":
-            owner = value.strip() or None
-        elif key == "generation":
-            try:
-                generation = int(value)
-            except ValueError:
-                generation = 0
+        if sep:
+            values[key] = value.strip()
+
+    def int_value(key: str) -> int:
+        try:
+            return int(values.get(key, "0"))
+        except ValueError:
+            return 0
+
+    def optional_value(key: str) -> str | None:
+        return values.get(key) or None
+
     return UpdateMarker(
-        pid=pid,
-        started_at=started_at,
-        unit=unit,
-        operation_id=operation_id,
-        owner=owner,
-        generation=generation,
+        pid=int_value("pid"),
+        started_at=optional_value("started_at"),
+        unit=optional_value("unit"),
+        operation_id=optional_value("operation_id"),
+        owner=optional_value("owner"),
+        generation=int_value("generation"),
     )
 
 
