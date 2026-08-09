@@ -266,6 +266,12 @@ audit_write_failures_total = _counter(
     labelnames=("mode",),
 )
 
+telegram_control_dedup_maintenance_total = _counter(
+    "lumen_telegram_control_dedup_maintenance_total",
+    "Telegram control dedup-key maintenance outcomes.",
+    labelnames=("action",),
+)
+
 wallet_balance_total = _gauge(
     "wallet_balance_total",
     "Total wallet balance across all users, in micro RMB.",
@@ -433,6 +439,7 @@ __all__ = [
     "http_errors_total",
     "apparel_model_library_generate_mode_total",
     "apparel_model_library_reference_extract_total",
+    "telegram_control_dedup_maintenance_total",
     "wallet_balance_total",
     "wallet_hold_active",
     "wallet_hold_micro",

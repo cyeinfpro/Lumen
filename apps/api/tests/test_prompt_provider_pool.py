@@ -3457,3 +3457,127 @@ async def test_prompt_enhance_charge_settles_existing_hold(
     assert calls["settle"]["idempotency_key"] == "prompt_enhance:settle:enhance-1"
     assert calls["audit"]["details"]["response_id"] == "resp-1"
     assert calls["invalidated"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_missing_strict_pricing_preserves_hold_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.routes import prompts
+
+    calls: dict[str, Any] = {}
+
+    class Db:
+        async def commit(self) -> None:
+            calls["committed"] = True
+
+    async def missing_price(*_args: Any, **_kwargs: Any) -> None:
+        raise prompts.billing_core.BillingError(
+            "PRICING_MISSING",
+            "pricing disappeared",
+            503,
+        )
+
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("strict pricing failure must not settle the hold")
+
+    async def write_audit(_db: object, **kwargs: Any) -> bool:
+        calls["audit"] = kwargs
+        return True
+
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        missing_price,
+    )
+    monkeypatch.setattr(prompts.billing_core, "settle", fail_settle)
+    monkeypatch.setattr(prompts, "write_audit", write_audit)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-pricing-pending",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    capture = prompts._EnhanceUsageCapture(
+        provider_name="primary",
+        model="gpt-5.5",
+        response_id="resp-1",
+        usage={"input_tokens": 12, "output_tokens": 5},
+    )
+
+    result = await prompts._charge_prompt_enhance(billing, capture)  # noqa: SLF001
+
+    assert result is True
+    assert calls["committed"] is True
+    assert calls["audit"]["event_type"] == "billing.reconciliation.pending"
+    assert calls["audit"]["details"]["hold_micro"] == 10_000
+    assert calls["audit"]["details"]["reason"] == "pricing_missing"
+    assert billing.settle_outcome.attempted is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_enhance_pricing_db_abort_rolls_back_before_pending_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.routes import prompts
+
+    calls: list[str] = []
+
+    class Db:
+        async def rollback(self) -> None:
+            calls.append("rollback")
+
+        async def commit(self) -> None:
+            calls.append("commit")
+
+    async def db_failure(*_args: Any, **_kwargs: Any) -> None:
+        raise SQLAlchemyError("pricing db unavailable")
+
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("aborted pricing transaction must preserve the hold")
+
+    async def write_audit(_db: object, **kwargs: Any) -> bool:
+        calls.append(f"audit:{kwargs['event_type']}")
+        return True
+
+    monkeypatch.setattr(
+        prompts.billing_core,
+        "estimate_completion_breakdown",
+        db_failure,
+    )
+    monkeypatch.setattr(prompts.billing_core, "settle", fail_settle)
+    monkeypatch.setattr(prompts, "write_audit", write_audit)
+
+    billing = prompts._EnhanceBillingContext(
+        db=Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        user_email="u@example.com",
+        request_id="enhance-db-pending",
+        rate_multiplier_x10000=10_000,
+        cache_aware=True,
+        allow_negative=False,
+        hold_amount_micro=10_000,
+    )
+    capture = prompts._EnhanceUsageCapture(
+        provider_name="primary",
+        model="gpt-5.5",
+        response_id="resp-1",
+        usage={"input_tokens": 12, "output_tokens": 5},
+    )
+
+    result = await prompts._charge_prompt_enhance(billing, capture)  # noqa: SLF001
+
+    assert result is True
+    assert calls == [
+        "rollback",
+        "audit:billing.reconciliation.pending",
+        "commit",
+    ]
+    assert billing.settle_outcome.attempted is True

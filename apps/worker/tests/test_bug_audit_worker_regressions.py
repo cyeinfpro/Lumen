@@ -515,13 +515,12 @@ def test_completion_tool_image_budget_converts_to_image_tokens() -> None:
         )
         == 0
     )
-    assert (
+    with pytest.raises(completion.billing_core.BillingError) as exc_info:
         completion._image_output_tokens_for_budget(  # noqa: SLF001
             1_000,
             image_output_per_1k_micro=0,
         )
-        == 1
-    )
+    assert exc_info.value.code == "PRICING_MISSING"
 
 
 def test_generation_retry_delay_is_jittered() -> None:

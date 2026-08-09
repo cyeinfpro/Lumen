@@ -16,6 +16,7 @@ import type {
   RealtimeStatus,
   RuntimeSubscriber,
 } from "./runtime";
+import type { SnapshotAdapter } from "./replayCoordinator";
 
 const { RealtimeRuntime } = loadTsModule(
   new URL("./runtime.ts", import.meta.url),
@@ -38,6 +39,8 @@ const { RealtimeRuntime } = loadTsModule(
     broadcastFactory(name: string): BroadcastChannelLike;
     leaderClock: LeaderClock;
     now(): number;
+    retryDelay?(attempt: number): number;
+    saveCursor?(cursor: string): void | Promise<void>;
   }) => RealtimeRuntimeType;
 };
 
@@ -165,10 +168,22 @@ function subscriber(
 ): RuntimeSubscriber {
   return {
     handlers: {},
-    recoverSnapshot,
+    recoverSnapshot: recoverSnapshot
+      ? afterInitialSnapshot(recoverSnapshot)
+      : undefined,
     setStatus(status) {
       statuses.push(status);
     },
+  };
+}
+
+function afterInitialSnapshot(adapter: SnapshotAdapter): SnapshotAdapter {
+  return async (...args) => {
+    const reason = args[1];
+    if (reason.kind === "initial_snapshot") {
+      return { syncedAt: 1 };
+    }
+    return adapter(...args);
   };
 }
 
@@ -177,6 +192,10 @@ function runtime(
   transport: FakeTransport,
   hub: FakeBroadcastHub,
   clock: FakeClock,
+  options: {
+    retryDelay?: (attempt: number) => number;
+    saveCursor?: (cursor: string) => void | Promise<void>;
+  } = {},
 ): RealtimeRuntimeType {
   return new RealtimeRuntime({
     channels: ["user:u1"],
@@ -185,12 +204,302 @@ function runtime(
     broadcastFactory: hub.create,
     leaderClock: clock,
     now: clock.now,
+    ...options,
   });
 }
 
 async function flushPromises(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+async function openWithInitialSnapshot(
+  transport: FakeTransport,
+  sourceIndex = 0,
+): Promise<number> {
+  transport.opens[sourceIndex].sink.onOpen({} as Event);
+  await flushPromises();
+  const readySourceIndex = transport.opens.length - 1;
+  ok(readySourceIndex > sourceIndex);
+  transport.opens[readySourceIndex].sink.onOpen({} as Event);
+  return readySourceIndex;
+}
+
+test("initial snapshot failure retries and cannot report open before recovery", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const statuses: RealtimeStatus[] = [];
+  const retryAttempts: number[] = [];
+  let recoveryCalls = 0;
+  const instance = runtime("tab-a", transport, hub, clock, {
+    retryDelay(attempt) {
+      retryAttempts.push(attempt);
+      return 0;
+    },
+  });
+  const unsubscribe = instance.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason) => {
+      equal(reason.kind, "initial_snapshot");
+      recoveryCalls += 1;
+      if (recoveryCalls === 1) throw new Error("snapshot unavailable");
+      return { cursor: "initial-20-0", syncedAt: 100 };
+    },
+    setStatus(status) {
+      statuses.push(status);
+    },
+  });
+  clock.tick(50);
+
+  transport.opens[0].sink.onOpen({} as Event);
+  await flushPromises();
+
+  equal(recoveryCalls, 2);
+  deepEqual(retryAttempts, [0]);
+  equal(transport.opens[0].closed, true);
+  equal(transport.opens[1].input.url, "/events?cursor=initial-20-0");
+  equal(statuses.includes("error"), true);
+  equal(statuses.includes("open"), false);
+
+  transport.opens[1].sink.onOpen({} as Event);
+  equal(statuses.at(-1), "open");
+  unsubscribe();
+});
+
+test("unmount aborts an in-flight initial snapshot and drops stale completion", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const transport = new FakeTransport();
+  const statuses: RealtimeStatus[] = [];
+  let release!: () => void;
+  let recoverySignal: AbortSignal | undefined;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const instance = runtime("tab-a", transport, hub, clock);
+  const unsubscribe = instance.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason, signal) => {
+      equal(reason.kind, "initial_snapshot");
+      recoverySignal = signal;
+      await pending;
+      return { cursor: "stale-initial-20-0", syncedAt: 100 };
+    },
+    setStatus(status) {
+      statuses.push(status);
+    },
+  });
+  clock.tick(50);
+  transport.opens[0].sink.onOpen({} as Event);
+  equal(recoverySignal?.aborted, false);
+
+  unsubscribe();
+  equal(recoverySignal?.aborted, true);
+  const statusCountAfterStop = statuses.length;
+  release();
+  await flushPromises();
+
+  equal(instance.active(), false);
+  equal(transport.opens.length, 1);
+  equal(statuses.length, statusCountAfterStop);
+  equal(
+    hub.messages.some(
+      (message) =>
+        (message as { type?: string }).type === "recovery_complete",
+    ),
+    false,
+  );
+});
+
+test("two tabs complete the same initial snapshot round before follower opens", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const leaderTransport = new FakeTransport();
+  const followerTransport = new FakeTransport();
+  const leaderStatuses: RealtimeStatus[] = [];
+  const followerStatuses: RealtimeStatus[] = [];
+  let leaderCalls = 0;
+  let followerCalls = 0;
+  let releaseFollower!: () => void;
+  const followerPending = new Promise<void>((resolve) => {
+    releaseFollower = resolve;
+  });
+  const leaderRuntime = runtime("tab-a", leaderTransport, hub, clock);
+  const followerRuntime = runtime("tab-b", followerTransport, hub, clock);
+  const unsubscribeLeader = leaderRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason) => {
+      equal(reason.kind, "initial_snapshot");
+      leaderCalls += 1;
+      return { cursor: "initial-30-0", syncedAt: 200 };
+    },
+    setStatus(status) {
+      leaderStatuses.push(status);
+    },
+  });
+  const unsubscribeFollower = followerRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason) => {
+      equal(reason.kind, "initial_snapshot");
+      followerCalls += 1;
+      await followerPending;
+      return { cursor: "initial-30-0", syncedAt: 200 };
+    },
+    setStatus(status) {
+      followerStatuses.push(status);
+    },
+  });
+  clock.tick(50);
+
+  leaderTransport.opens[0].sink.onOpen({} as Event);
+  await flushPromises();
+
+  equal(leaderCalls, 1);
+  equal(followerCalls, 1);
+  equal(followerTransport.opens.length, 0);
+  equal(leaderStatuses.includes("open"), false);
+  equal(followerStatuses.includes("open"), false);
+
+  leaderTransport.opens[1].sink.onOpen({} as Event);
+  equal(leaderStatuses.at(-1), "open");
+  equal(followerStatuses.includes("open"), false);
+
+  releaseFollower();
+  await flushPromises();
+  equal(followerStatuses.at(-1), "open");
+  unsubscribeLeader();
+  unsubscribeFollower();
+});
+
+test("a late follower joins an open leader through a fresh initial snapshot round", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const leaderTransport = new FakeTransport();
+  const followerTransport = new FakeTransport();
+  const leaderStatuses: RealtimeStatus[] = [];
+  const followerStatuses: RealtimeStatus[] = [];
+  let leaderCalls = 0;
+  let followerCalls = 0;
+  let releaseFollower!: () => void;
+  const followerPending = new Promise<void>((resolve) => {
+    releaseFollower = resolve;
+  });
+  const leaderRuntime = runtime("tab-a", leaderTransport, hub, clock);
+  const unsubscribeLeader = leaderRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason) => {
+      equal(reason.kind, "initial_snapshot");
+      leaderCalls += 1;
+      return { cursor: `initial-${leaderCalls}-0`, syncedAt: clock.now() };
+    },
+    setStatus(status) {
+      leaderStatuses.push(status);
+    },
+  });
+  clock.tick(50);
+  const readySourceIndex = await openWithInitialSnapshot(leaderTransport);
+  equal(leaderStatuses.at(-1), "open");
+  equal(leaderCalls, 1);
+  const lateRoundStart = hub.messages.length;
+
+  const followerRuntime = runtime("tab-b", followerTransport, hub, clock);
+  const unsubscribeFollower = followerRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason) => {
+      equal(reason.kind, "initial_snapshot");
+      followerCalls += 1;
+      await followerPending;
+      return { cursor: "initial-2-0", syncedAt: clock.now() };
+    },
+    setStatus(status) {
+      followerStatuses.push(status);
+    },
+  });
+  await flushPromises();
+
+  equal(leaderCalls, 2);
+  equal(followerCalls, 1);
+  equal(leaderTransport.opens[readySourceIndex].closed, true);
+  equal(followerTransport.opens.length, 0);
+  equal(followerStatuses.includes("open"), false);
+  const lateRoundMessages = hub.messages.slice(lateRoundStart) as Array<{
+    type?: string;
+    recoveryId?: string;
+    event?: { type?: string; reason?: string };
+  }>;
+  const control = lateRoundMessages.find(
+    (message) =>
+      message.type === "control_event" &&
+      message.event?.type === "recovery_required" &&
+      message.event.reason === "initial_snapshot",
+  );
+  const complete = lateRoundMessages.find(
+    (message) => message.type === "recovery_complete",
+  );
+  ok(control?.recoveryId);
+  equal(complete?.recoveryId, control.recoveryId);
+
+  const reopenedSourceIndex = leaderTransport.opens.length - 1;
+  leaderTransport.opens[reopenedSourceIndex].sink.onOpen({} as Event);
+  equal(leaderStatuses.at(-1), "open");
+  equal(followerStatuses.includes("open"), false);
+
+  releaseFollower();
+  await flushPromises();
+  equal(followerStatuses.at(-1), "open");
+  unsubscribeFollower();
+  unsubscribeLeader();
+});
+
+test("aborting a late follower snapshot prevents stale open", async () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const leaderTransport = new FakeTransport();
+  const followerTransport = new FakeTransport();
+  const followerStatuses: RealtimeStatus[] = [];
+  let releaseFollower!: () => void;
+  let followerSignal: AbortSignal | undefined;
+  const followerPending = new Promise<void>((resolve) => {
+    releaseFollower = resolve;
+  });
+  const leaderRuntime = runtime("tab-a", leaderTransport, hub, clock);
+  const unsubscribeLeader = leaderRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async () => ({ cursor: "late-10-0", syncedAt: 100 }),
+    setStatus() {},
+  });
+  clock.tick(50);
+  await openWithInitialSnapshot(leaderTransport);
+
+  const followerRuntime = runtime("tab-b", followerTransport, hub, clock);
+  const unsubscribeFollower = followerRuntime.subscribe({
+    handlers: {},
+    recoverSnapshot: async (_scopes, reason, signal) => {
+      equal(reason.kind, "initial_snapshot");
+      followerSignal = signal;
+      await followerPending;
+      return { cursor: "late-10-0", syncedAt: 100 };
+    },
+    setStatus(status) {
+      followerStatuses.push(status);
+    },
+  });
+  await flushPromises();
+  equal(followerSignal?.aborted, false);
+
+  unsubscribeFollower();
+  equal(followerSignal?.aborted, true);
+  const statusCountAfterAbort = followerStatuses.length;
+  const reopenedSourceIndex = leaderTransport.opens.length - 1;
+  leaderTransport.opens[reopenedSourceIndex].sink.onOpen({} as Event);
+  releaseFollower();
+  await flushPromises();
+
+  equal(followerTransport.opens.length, 0);
+  equal(followerStatuses.length, statusCountAfterAbort);
+  equal(followerStatuses.includes("open"), false);
+  unsubscribeLeader();
+});
 
 test("recovery_required triggers one snapshot and reconnects from its cursor", async () => {
   const clock = new FakeClock();
@@ -242,12 +551,12 @@ test("unknown protocol versions trigger recovery without domain delivery", async
         deliveries += 1;
       },
     },
-    recoverSnapshot: async (_scopes, reason) => {
+    recoverSnapshot: afterInitialSnapshot(async (_scopes, reason) => {
       recoveryCalls += 1;
       equal(reason.kind, "recovery_required");
       equal(reason.reason, "protocol_unknown_version");
       return { cursor: "31-0", syncedAt: 100 };
-    },
+    }),
     onProtocolIssue(issue) {
       issues.push(issue.reason);
     },
@@ -256,10 +565,10 @@ test("unknown protocol versions trigger recovery without domain delivery", async
     },
   });
   clock.tick(50);
-  transport.opens[0].sink.onOpen({} as Event);
+  const sourceIndex = await openWithInitialSnapshot(transport);
 
   transport.emit(
-    0,
+    sourceIndex,
     "generation.succeeded",
     JSON.stringify({ schema_version: 2, generation_id: "gen-1" }),
     "30-0",
@@ -270,7 +579,7 @@ test("unknown protocol versions trigger recovery without domain delivery", async
   equal(recoveryCalls, 1);
   deepEqual(issues, ["unknown_version"]);
   ok(statuses.includes("error"));
-  equal(transport.opens[1]?.input.url, "/events?cursor=31-0");
+  equal(transport.opens[sourceIndex + 1]?.input.url, "/events?cursor=31-0");
   unsubscribe();
 });
 
@@ -295,19 +604,19 @@ test("consecutive malformed events emit telemetry then recover at threshold", as
     },
   });
   clock.tick(50);
-  transport.opens[0].sink.onOpen({} as Event);
+  const sourceIndex = await openWithInitialSnapshot(transport);
 
-  transport.emit(0, "generation.succeeded", "{", "41-0");
-  transport.emit(0, "generation.succeeded", "{", "42-0");
+  transport.emit(sourceIndex, "generation.succeeded", "{", "41-0");
+  transport.emit(sourceIndex, "generation.succeeded", "{", "42-0");
   equal(recoveryCalls, 0);
   equal(statuses.at(-1), "open");
-  transport.emit(0, "generation.succeeded", "{", "43-0");
+  transport.emit(sourceIndex, "generation.succeeded", "{", "43-0");
   await flushPromises();
 
   deepEqual(issueCounts, [1, 2, 3]);
   equal(recoveryCalls, 1);
   ok(statuses.includes("error"));
-  equal(transport.opens[1]?.input.url, "/events?cursor=44-0");
+  equal(transport.opens[sourceIndex + 1]?.input.url, "/events?cursor=44-0");
   unsubscribe();
 });
 
@@ -339,23 +648,23 @@ test("shared runtime recovers with only the subscribers that provide adapters", 
     },
   });
   clock.tick(50);
-  transport.opens[0].sink.onOpen({} as Event);
+  const sourceIndex = await openWithInitialSnapshot(transport);
 
   transport.emit(
-    0,
+    sourceIndex,
     "replay_truncated",
     JSON.stringify({ reason: "history_pruned", cursor: "10-0" }),
   );
   await flushPromises();
 
   equal(recoveryCalls, 1);
-  equal(transport.opens.length, 2);
-  equal(transport.opens[1].input.url, "/events?cursor=42-0");
+  equal(transport.opens.length, sourceIndex + 2);
+  equal(transport.opens[sourceIndex + 1].input.url, "/events?cursor=42-0");
   equal(passiveStatuses.at(-1), "connecting");
 
-  transport.opens[1].sink.onOpen({} as Event);
+  transport.opens[sourceIndex + 1].sink.onOpen({} as Event);
   transport.emit(
-    1,
+    sourceIndex + 1,
     "asset_updated",
     JSON.stringify({ asset_id: "asset-1" }),
     "43-0",
@@ -453,7 +762,6 @@ test("shared runtime fails recovery when any real adapter fails", async () => {
     }),
   );
   clock.tick(50);
-  transport.opens[0].sink.onOpen({} as Event);
 
   transport.emit(
     0,
@@ -683,20 +991,20 @@ test("required domain handler failure requests snapshot recovery without broadca
         throw new Error("store apply failed");
       },
     },
-    recoverSnapshot: async (_scopes, reason) => {
+    recoverSnapshot: afterInitialSnapshot(async (_scopes, reason) => {
       recoveryCalls += 1;
       equal(reason.kind, "recovery_required");
       equal(reason.reason, "domain_apply_failed");
       equal(reason.cursor, "60-0");
       return { cursor: "61-0", syncedAt: 100 };
-    },
+    }),
     setStatus() {},
   });
   clock.tick(50);
-  transport.opens[0].sink.onOpen({} as Event);
+  const sourceIndex = await openWithInitialSnapshot(transport);
 
   transport.emit(
-    0,
+    sourceIndex,
     "asset_updated",
     JSON.stringify({ asset_id: "asset-1" }),
     "60-0",
@@ -714,6 +1022,6 @@ test("required domain handler failure requests snapshot recovery without broadca
     ),
     false,
   );
-  equal(transport.opens[1]?.input.url, "/events?cursor=61-0");
+  equal(transport.opens[sourceIndex + 1]?.input.url, "/events?cursor=61-0");
   unsubscribe();
 });

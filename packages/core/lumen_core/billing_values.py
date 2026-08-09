@@ -97,7 +97,11 @@ def rmb_to_micro(value: str | int | float | Decimal) -> int:
     return int(micro)
 
 
-def parse_rate_multiplier_x10000(raw: Any) -> int:
+def parse_rate_multiplier_x10000(
+    raw: Any,
+    *,
+    strict: bool = True,
+) -> int:
     """把 users.billing_rate_multiplier 换算成万分比整数，全程 Decimal。
 
     该列是 Numeric(8, 4)：asyncpg 回 Decimal，aiosqlite 等驱动可能回 float。
@@ -107,27 +111,36 @@ def parse_rate_multiplier_x10000(raw: Any) -> int:
     差额由平台承担——与「纯转嫁」相悖。改成 Decimal(str(raw)) 后换算精确，
     不再需要任何取整让步。
 
-    非法值一律退回 1.0（原价转嫁）而不是 0：0 是「这个账号免费」的**显式**配置，
-    只能由运营真的写下 0.0000 才生效；解析失败、NaN、负数、超出列值域的脏数据
-    都属于「不知道该收多少」，此时按原价收才不会让平台白替用户垫上游成本。
+    财务路径默认严格拒绝未知值。调用方只有在明确的非结算兼容路径中传入
+    ``strict=False``，才允许退回 1.0。0 仍是运营显式配置的免费倍率。
     """
-    if raw is None:
-        return 10_000
-    try:
-        dec = Decimal(str(raw))
-    except (InvalidOperation, ValueError, TypeError):
-        return 10_000
-    if not dec.is_finite():
-        return 10_000
-    # 负倍率会算出负费用（倒贴），超上界会算出天价账单，两者都不是合法配置。
-    # 早先的实现把负数夹到 0，等于让一条脏数据把该账号变成永久免费——上游照扣，
-    # 平台全额吸收，正是纯转嫁禁止的方向。改成与其它非法输入一致退回 1.0 并告警。
-    if dec < 0 or dec > MAX_RATE_MULTIPLIER:
+
+    def invalid(reason: str) -> int:
+        if strict:
+            raise BillingError(
+                "RATE_MULTIPLIER_INVALID",
+                f"billing rate multiplier is invalid: {reason}",
+                503,
+            )
         logger.warning(
-            "billing rate multiplier out of range; falling back to 1.0 (raw=%r)",
+            "billing rate multiplier invalid; falling back to 1.0 "
+            "(reason=%s raw=%r)",
+            reason,
             raw,
         )
         return 10_000
+
+    if raw is None:
+        return invalid("missing")
+    try:
+        dec = Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return invalid("not a decimal")
+    if not dec.is_finite():
+        return invalid("not finite")
+    # 负倍率会算出负费用（倒贴），超上界会算出天价账单，两者都不是合法配置。
+    if dec < 0 or dec > MAX_RATE_MULTIPLIER:
+        return invalid("out of range")
     # 该列只保留 4 位小数，乘 10000 后本就是整数；万一上游写入了更高精度，
     # 向上取整把零头判给用户，与视频取整方向保持一致。
     scaled = (dec * Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_UP)

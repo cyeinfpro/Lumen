@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import time
 
 from .admin_maintenance_marker_lock import (
@@ -18,6 +20,29 @@ from .admin_maintenance_marker_lock import (
 
 
 _STALE_AFTER_SECONDS = 24 * 60 * 60
+_MANUAL_STATES = frozenset({"failed_original_unhealthy", "manual_required"})
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while persisting update marker")
+        view = view[written:]
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+                raise
+    finally:
+        os.close(descriptor)
 
 
 class UpdateMarkerBusy(RuntimeError):
@@ -36,7 +61,9 @@ class UpdateMarker:
     started_at: str | None
     unit: str | None = None
     operation_id: str | None = None
+    request_sha256: str | None = None
     owner: str | None = None
+    state: str | None = None
     generation: int = 0
 
 
@@ -99,7 +126,9 @@ def parse_marker_text(raw: str) -> UpdateMarker:
         started_at=optional_value("started_at"),
         unit=optional_value("unit"),
         operation_id=optional_value("operation_id"),
+        request_sha256=optional_value("request_sha256"),
         owner=optional_value("owner"),
+        state=optional_value("state"),
         generation=int_value("generation"),
     )
 
@@ -112,6 +141,8 @@ def marker_is_live(
     unit_is_running_fn: Callable[[str], bool],
     pid_is_running_fn: Callable[[int], bool],
 ) -> bool:
+    if marker.owner == "manual" and marker.state in _MANUAL_STATES:
+        return True
     if marker.unit:
         if trigger_only_mode() and not marker_is_stale_fn(marker.started_at):
             return True
@@ -160,6 +191,8 @@ def _existing_marker_is_live(marker: Path) -> bool:
         parsed = parse_marker_text(raw)
     except (FileNotFoundError, OSError):
         return False
+    if parsed.owner == "manual" and parsed.state in _MANUAL_STATES:
+        return True
     if parsed.unit and not marker_is_stale(
         parsed.started_at, stale_after_seconds=_STALE_AFTER_SECONDS
     ):
@@ -188,6 +221,7 @@ def write_marker(
     started_at: str,
     unit: str | None,
     operation_id: str | None = None,
+    request_sha256: str | None = None,
     owner: str = "api",
     generation: int = 0,
 ) -> bool:
@@ -208,6 +242,11 @@ def write_marker(
     lines.extend(
         [
             f"operation_id={operation_id}",
+            *(
+                [f"request_sha256={request_sha256}"]
+                if request_sha256 is not None
+                else []
+            ),
             f"owner={owner}",
             f"generation={generation}",
         ]
@@ -224,24 +263,48 @@ def write_marker(
             pass
         except OSError:
             return False
-        try:
-            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
-        except FileExistsError:
-            return False
+        descriptor, temporary_raw = tempfile.mkstemp(
+            prefix=f".{marker.name}.",
+            suffix=".tmp",
+            dir=marker.parent,
+        )
+        temporary = Path(temporary_raw)
+        reserved = False
+        replaced = False
         try:
             try:
-                os.fchmod(fd, 0o660)
+                os.fchmod(descriptor, 0o660)
             except PermissionError:
                 # Squashed CIFS mounts pin the mode; O_CREAT already set
                 # 0o660 and non-owner fchmod there returns EPERM.
                 pass
-            os.write(fd, payload)
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            try:
+                reservation = os.open(
+                    marker,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o660,
+                )
+            except FileExistsError:
+                return False
+            os.close(reservation)
+            reserved = True
+            os.replace(temporary, marker)
+            replaced = True
+            _fsync_directory(marker.parent)
             return True
         except Exception:
-            try:
-                marker.unlink()
-            except OSError:
-                pass
+            if reserved and not replaced:
+                try:
+                    marker.unlink()
+                    _fsync_directory(marker.parent)
+                except OSError:
+                    pass
             raise
         finally:
-            os.close(fd)
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)

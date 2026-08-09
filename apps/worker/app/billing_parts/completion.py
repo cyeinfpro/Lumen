@@ -14,7 +14,11 @@ from lumen_core.pricing import CostBreakdown, UsageTokens
 
 from .common import terminal_billing_applies
 from .contracts import CompletionDependencies
-from .helpers import task_pricing_snapshot
+from .helpers import (
+    completion_billing_pending,
+    mark_completion_billing_pending,
+    task_pricing_snapshot,
+)
 
 
 async def record_completion_settlement(
@@ -131,6 +135,8 @@ async def charge_completion(
     allow_negative: bool | None = None,
     window_rate_limit: bool | None = None,
 ) -> None:
+    if completion_billing_pending(completion):
+        return
     billing_ref_id = deps.completion_billing_ref_id(completion)
     if not await deps.wallet_billing_applies(
         session,
@@ -140,9 +146,7 @@ async def charge_completion(
     ):
         return
     terminal_billing_enabled = (
-        deps.billing_enabled
-        if billing_enabled is None
-        else bool(billing_enabled)
+        deps.billing_enabled if billing_enabled is None else bool(billing_enabled)
     )
     if not await terminal_billing_applies(
         session,
@@ -178,7 +182,29 @@ async def charge_completion(
         else bool(cache_aware)
     )
     usage = deps.completion_usage(completion, cache_aware=resolved_cache_aware)
-    rate_multiplier = await deps.completion_rate_multiplier_x10000(session, completion)
+    try:
+        rate_multiplier = await deps.completion_rate_multiplier_x10000(
+            session,
+            completion,
+        )
+    except deps.billing_core.BillingError as exc:
+        reason = getattr(exc, "code", type(exc).__name__)
+        mark_completion_billing_pending(
+            completion,
+            reason=f"rate_multiplier:{reason}",
+        )
+        session.add(
+            deps.audit(
+                event_type="billing.reconciliation.pending",
+                user_id=completion.user_id,
+                details={
+                    "completion_id": completion.id,
+                    "model": completion.model,
+                    "reason": f"rate_multiplier:{reason}",
+                },
+            )
+        )
+        return
     service_tier = deps.completion_service_tier(completion)
     breakdown = await deps.resolve_completion_breakdown(
         session,
@@ -277,6 +303,8 @@ async def release_completion(
     reason: str,
     deps: CompletionDependencies,
 ) -> None:
+    if completion_billing_pending(completion):
+        return
     billing_ref_id = deps.completion_billing_ref_id(completion)
     if not await deps.wallet_billing_applies(
         session,

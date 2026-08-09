@@ -16,6 +16,7 @@ from .billing_parts import completion as completion_service
 from .billing_parts import completion_pricing
 from .billing_parts import generation as generation_service
 from .billing_parts import helpers
+from .billing_parts import rate_multipliers
 from .billing_parts.helpers import (
     allow_negative_balance as _allow_negative_balance,
     apply_rate_multiplier_micro as _apply_rate_multiplier_micro,
@@ -117,15 +118,17 @@ async def existing_ref_consumption_tx(
     )
 
 
-async def _rate_multiplier_x10000(session: AsyncSession, user_id: str) -> int:
-    if not isinstance(session, AsyncSession):
-        return 10_000
-    raw = (
-        await session.execute(
-            select(User.billing_rate_multiplier).where(User.id == user_id)
-        )
-    ).scalar_one_or_none()
-    return billing_core.parse_rate_multiplier_x10000(raw)
+async def _rate_multiplier_x10000(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    strict: bool = False,
+) -> int:
+    return await rate_multipliers.dynamic_rate_multiplier_x10000(
+        session,
+        user_id,
+        strict=strict,
+    )
 
 
 async def generation_rate_multiplier_x10000(
@@ -142,10 +145,14 @@ async def completion_rate_multiplier_x10000(
     session: AsyncSession,
     completion: Completion,
 ) -> int:
-    snapshot = _snapshot_rate_multiplier_x10000(completion)
+    snapshot = _snapshot_rate_multiplier_x10000(completion, strict=True)
     if snapshot is not None:
         return snapshot
-    return await _rate_multiplier_x10000(session, completion.user_id)
+    return await _rate_multiplier_x10000(
+        session,
+        completion.user_id,
+        strict=True,
+    )
 
 
 def _common_dependencies() -> CommonDependencies:
@@ -386,6 +393,8 @@ async def settle_completion_unknown_upstream(
     reason: str,
     knowledge: str,
 ) -> None:
+    if helpers.completion_billing_pending(completion):
+        return
     billing_ref_id = _completion_billing_ref_id(completion)
     await _settle_unknown_upstream_hold(
         session,
@@ -409,6 +418,75 @@ async def settle_completion_unknown_upstream(
             knowledge=knowledge,
         ),
     )
+
+
+async def reconcile_completion_billing(
+    session: AsyncSession,
+    completion: Completion,
+) -> bool:
+    if not helpers.completion_billing_pending(completion):
+        return False
+    pending_reason = helpers.completion_billing_pending_reason(completion) or "unknown"
+    usage_unknown = helpers.completion_usage_unknown(completion)
+    helpers.begin_completion_billing_reconciliation(completion)
+    if usage_unknown:
+        await settle_completion_unknown_upstream(
+            session,
+            completion,
+            reason="billing_reconciliation_usage_unknown",
+            knowledge=pending_reason,
+        )
+        source = "reserved_hold"
+    else:
+        if pending_reason.startswith("tool_image_pricing:"):
+            from . import completion_billing as completion_billing_runtime
+
+            upstream_request = (
+                completion.upstream_request
+                if isinstance(completion.upstream_request, dict)
+                else {}
+            )
+            try:
+                reserved_tool_micro = max(
+                    0,
+                    int(upstream_request.get("tool_image_reserved_micro") or 0),
+                )
+            except (TypeError, ValueError):
+                reserved_tool_micro = 0
+            if (
+                reserved_tool_micro > 0
+                and int(getattr(completion, "image_output_tokens", 0) or 0) <= 0
+            ):
+                image_tokens = await completion_billing_runtime.fallback_completion_tool_image_tokens(
+                    session,
+                    completion,
+                    budget_micro=reserved_tool_micro,
+                )
+                if helpers.completion_billing_pending(completion):
+                    return False
+                completion.image_output_tokens = image_tokens
+                completion.tokens_out = max(
+                    int(getattr(completion, "tokens_out", 0) or 0),
+                    image_tokens,
+                )
+        await charge_completion(session, completion)
+        source = "strict_pricing"
+    if helpers.completion_billing_pending(completion):
+        return False
+    helpers.mark_completion_billing_reconciled(completion, source=source)
+    session.add(
+        _audit(
+            event_type="billing.reconciliation.resolved",
+            user_id=completion.user_id,
+            details={
+                "completion_id": completion.id,
+                "billing_ref_id": _completion_billing_ref_id(completion),
+                "pending_reason": pending_reason,
+                "source": source,
+            },
+        )
+    )
+    return True
 
 
 async def _completion_cost_breakdown(

@@ -2061,6 +2061,55 @@ async def test_retry_completion_holds_new_retry_billing_ref(
 
 
 @pytest.mark.asyncio
+async def test_retry_completion_rejects_pending_billing_before_new_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comp = SimpleNamespace(
+        id="comp-pending",
+        user_id="user-1",
+        message_id="assistant-1",
+        status=CompletionStatus.FAILED.value,
+        progress_stage=CompletionStage.FINALIZING.value,
+        attempt=2,
+        execution_epoch=4,
+        error_code="billing_pending",
+        error_message="billing pending",
+        started_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        upstream_request={
+            "billing_retry_count": 1,
+            "completion_billing_state": "pending_reconciliation",
+            "completion_billing_pending_reason": "pricing_missing",
+        },
+    )
+    db = _Db([_Result(comp)])
+
+    async def fail_hold(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("pending completion must not create another hold")
+
+    async def fail_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("pending completion must not be requeued")
+
+    monkeypatch.setattr(tasks, "_hold_completion_retry_wallet", fail_hold)
+    monkeypatch.setattr(tasks, "_publish_queued", fail_publish)
+
+    with pytest.raises(tasks.HTTPException) as exc_info:
+        await tasks.retry_completion(
+            "comp-pending",
+            _user(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["error"]["code"] == ("billing_reconciliation_pending")
+    assert comp.status == CompletionStatus.FAILED.value
+    assert comp.execution_epoch == 4
+    assert comp.upstream_request["billing_retry_count"] == 1
+    assert db.added == []
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_generation_retry_advances_execution_epoch_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

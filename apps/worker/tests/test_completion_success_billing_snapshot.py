@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from app import billing as worker_billing
 from app.billing_parts.contracts import CompletionBillingRuntimeSnapshot
@@ -429,3 +430,68 @@ async def test_charge_completion_explicit_runtime_snapshot_skips_dynamic_setting
     assert settle_kwargs["meta"]["tokens_in"] == 150
     assert settle_kwargs["meta"]["cache_read_tokens"] == 0
     assert settle_kwargs["meta"]["cache_creation_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_charge_completion_pricing_db_failure_propagates_without_fake_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        def __init__(self) -> None:
+            self.added: list[Any] = []
+            self.info: dict[str, Any] = {}
+
+        def add(self, row: Any) -> None:
+            self.added.append(row)
+
+    completion = SimpleNamespace(
+        id="comp-db-pending",
+        user_id="user-1",
+        model="gpt-4o",
+        tokens_in=100,
+        tokens_out=50,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        user_api_credential_id=None,
+        upstream_request={
+            "billing_rate_multiplier_x10000": 10_000,
+            "tool_image_reserved_micro": 2_000,
+        },
+    )
+    session = Session()
+
+    async def account_mode(*_args: Any) -> str:
+        return "wallet"
+
+    async def no_existing(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fail_breakdown(*_args: Any, **_kwargs: Any) -> CostBreakdown:
+        raise SQLAlchemyError("pricing db unavailable")
+
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("pricing DB failure must not settle the hold")
+
+    monkeypatch.setattr(worker_billing, "AsyncSession", Session)
+    monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
+    monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
+    monkeypatch.setattr(worker_billing, "_completion_cost_breakdown", fail_breakdown)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", fail_settle)
+
+    with pytest.raises(SQLAlchemyError, match="pricing db unavailable"):
+        await worker_billing.charge_completion(  # type: ignore[arg-type]
+            session,
+            completion,
+            billing_enabled=True,
+            cache_aware=True,
+            allow_negative=False,
+            window_rate_limit=False,
+        )
+
+    assert completion.upstream_request["tool_image_reserved_micro"] == 2_000
+    assert "completion_billing_state" not in completion.upstream_request
+    assert session.added == []

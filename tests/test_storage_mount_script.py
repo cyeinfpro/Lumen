@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -55,14 +56,14 @@ class StorageHarness:
             self.maintenance_root,
         ):
             path.mkdir()
+        (self.state_dir / "requests").mkdir()
+        (self.state_dir / "results").mkdir()
         (self.compose_dir / "docker-compose.yml").write_text(
             "services: {}\n",
             encoding="utf-8",
         )
-        (self.state_dir / "apply.trigger").write_text(
-            "a" * 32 + "\n",
-            encoding="ascii",
-        )
+        self.apply_operation_id = "a" * 32
+        self.apply_fence = 0
         self.write_config(mode)
         self.set_running_services(running_services)
         (self.mock_state / "containers").write_text("", encoding="utf-8")
@@ -224,6 +225,34 @@ lumen_release_lock() { :; }
         else:
             raise ValueError(mode)
         (self.state_dir / "storage.conf").write_text(text, encoding="utf-8")
+        self.write_apply_request(text)
+
+    def write_apply_request(
+        self,
+        conf_text: str,
+        *,
+        operation_id: str | None = None,
+        fence: int | None = None,
+    ) -> Path:
+        if fence is None:
+            self.apply_fence += 1
+            fence = self.apply_fence
+        else:
+            self.apply_fence = max(self.apply_fence, fence)
+        operation_id = operation_id or self.apply_operation_id
+        payload = {
+            "schema": 1,
+            "operation_id": operation_id,
+            "fence": fence,
+            "config_sha256": hashlib.sha256(conf_text.encode("utf-8")).hexdigest(),
+            "config": conf_text,
+        }
+        path = self.state_dir / "requests" / f"{operation_id}.{fence}.json"
+        path.write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return path
 
     def write_last_good_smb(self) -> None:
         dataset_identity = "a" * 64
@@ -1037,7 +1066,7 @@ def test_storage_apply_readiness_failure_stops_writers_before_rollback(
         "new mount readiness failed; restored and verified previous mount"
     )
     assert "API/Worker readiness failed; rolling back" in result.stderr
-    assert (harness.state_dir / "apply.trigger").is_file()
+    assert not any((harness.state_dir / "requests").glob("*.json"))
     assert harness.running_services() == set(ALL_SERVICES)
     assert harness.status()["source"] == "//old.example/archive/images"
     assert (harness.state_dir / "last-good.conf").read_bytes() == previous_last_good
@@ -1193,14 +1222,17 @@ def test_storage_apply_promotes_last_good_only_after_core_readiness(
     assert b"//old.example/archive/images" not in promoted_last_good
 
 
-def test_storage_apply_unit_clears_trigger_only_after_success() -> None:
+def test_storage_apply_unit_watches_immutable_request_directory() -> None:
+    path_unit = (ROOT / "deploy/systemd/lumen-storage-apply.path").read_text(
+        encoding="utf-8"
+    )
     unit = (ROOT / "deploy/systemd/lumen-storage-apply.service").read_text(
         encoding="utf-8"
     )
 
-    assert "lumen-storage-mount apply-result-terminal" in unit
-    assert "rm -f /var/lib/lumen-storage/apply.trigger" in unit
-    assert "trigger retained without terminal result" in unit
+    assert "DirectoryNotEmpty=/var/lib/lumen-storage/requests" in path_unit
+    assert "apply.trigger" not in path_unit
+    assert "apply.trigger" not in unit
 
 
 def test_repeated_storage_operation_id_returns_terminal_without_remount(
@@ -1208,14 +1240,44 @@ def test_repeated_storage_operation_id_returns_terminal_without_remount(
 ) -> None:
     harness = StorageHarness(tmp_path)
     call_id = "a" * 32
+    result = {
+        "call_id": call_id,
+        "operation_id": call_id,
+        "fence": 1,
+        "status": "ok",
+        "message": "already applied",
+        "started_at": 1,
+        "finished_at": 2,
+    }
+    (harness.state_dir / "results" / f"{call_id}.1.json").write_text(
+        json.dumps(result),
+        encoding="utf-8",
+    )
     (harness.state_dir / "last-apply.json").write_text(
+        json.dumps(result),
+        encoding="utf-8",
+    )
+
+    completed = harness.run("apply")
+
+    assert completed.returncode == 0
+    assert "no pending storage apply request" in completed.stderr
+    assert harness.log_lines("events.log") == []
+    assert not any((harness.state_dir / "requests").glob("*.json"))
+
+
+def test_unresolved_storage_claim_resumes_after_config_activation_crash(
+    tmp_path: Path,
+) -> None:
+    harness = StorageHarness(tmp_path)
+    call_id = "a" * 32
+    (harness.state_dir / "apply.claim.json").write_text(
         json.dumps(
             {
                 "call_id": call_id,
-                "status": "ok",
-                "message": "already applied",
-                "started_at": 1,
-                "finished_at": 2,
+                "operation_id": call_id,
+                "fence": 1,
+                "claimed_at": 1,
             }
         ),
         encoding="utf-8",
@@ -1223,28 +1285,83 @@ def test_repeated_storage_operation_id_returns_terminal_without_remount(
 
     result = harness.run("apply")
 
-    assert result.returncode == 0
-    assert "already has a terminal result" in result.stderr
-    assert harness.log_lines("events.log") == []
+    assert result.returncode == 0, result.stderr
+    assert "apply done" in result.stderr
+    assert harness.apply_result()["call_id"] == call_id
+    assert harness.apply_result()["fence"] == 1
+    assert harness.apply_result()["status"] == "ok"
+    claim = json.loads(
+        (harness.state_dir / "apply.claim.json").read_text(encoding="utf-8")
+    )
+    assert claim["resume_count"] == 1
+    assert harness.log_lines("events.log")
+    assert not any((harness.state_dir / "requests").glob("*.json"))
 
 
-def test_unresolved_storage_claim_fails_duplicate_without_remount(
+def test_unresolved_storage_claim_resumes_after_services_stopped_crash(
     tmp_path: Path,
 ) -> None:
-    harness = StorageHarness(tmp_path)
-    call_id = "a" * 32
+    harness = StorageHarness(tmp_path, running_services=())
+    call_id = harness.apply_operation_id
     (harness.state_dir / "apply.claim.json").write_text(
-        json.dumps({"call_id": call_id, "claimed_at": 1}),
+        json.dumps(
+            {
+                "operation_id": call_id,
+                "fence": 1,
+                "claimed_at": 1,
+            }
+        ),
         encoding="utf-8",
     )
 
     result = harness.run("apply")
 
-    assert result.returncode == 1
-    assert "unresolved prior claim" in result.stderr
-    assert harness.apply_result()["call_id"] == call_id
-    assert harness.apply_result()["status"] == "fail"
-    assert harness.log_lines("events.log") == []
+    assert result.returncode == 0, result.stderr
+    assert harness.apply_result()["status"] == "ok"
+    assert harness.apply_result()["fence"] == 1
+    assert harness.running_services() == set(ALL_SERVICES)
+    claim = json.loads(
+        (harness.state_dir / "apply.claim.json").read_text(encoding="utf-8")
+    )
+    assert claim["resume_count"] == 1
+    assert not any((harness.state_dir / "requests").glob("*.json"))
+
+
+def test_stale_storage_request_cannot_overwrite_newer_fence(
+    tmp_path: Path,
+) -> None:
+    harness = StorageHarness(tmp_path)
+    newer_conf = (
+        "MODE=smb\n"
+        "SMB_HOST=nas.example\n"
+        "SMB_SHARE=media\n"
+        "SMB_SUBPATH=/images\n"
+        "SMB_USERNAME=lumen\n"
+        "SMB_PASSWORD=secret\n"
+    )
+    harness.write_apply_request(newer_conf, fence=2)
+
+    newer = harness.run("apply")
+
+    assert newer.returncode == 0, newer.stderr
+    assert harness.apply_result()["fence"] == 2
+    assert "MODE=smb" in (harness.state_dir / "storage.conf").read_text(
+        encoding="utf-8"
+    )
+
+    stale = harness.run("apply")
+
+    assert stale.returncode == 0, stale.stderr
+    stale_result = json.loads(
+        (harness.state_dir / "results" / f"{harness.apply_operation_id}.1.json")
+        .read_text(encoding="utf-8")
+    )
+    assert stale_result["status"] == "fail"
+    assert stale_result["fence"] == 1
+    assert "stale storage apply fence" in stale_result["message"]
+    active_conf = (harness.state_dir / "storage.conf").read_text(encoding="utf-8")
+    assert "MODE=smb" in active_conf
+    assert "MODE=local" not in active_conf
 
 
 def test_storage_startup_units_require_verified_mount_before_docker_and_workers() -> (

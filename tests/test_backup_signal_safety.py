@@ -26,6 +26,50 @@ SYSTEMD_WRITER_UNITS = (
 APPLICATION_SERVICES = ("api", "worker", "tgbot", "web")
 
 
+def _write_committed_pair(backup_root: Path, timestamp: str) -> None:
+    pg_path = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
+    redis_path = backup_root / "redis" / f"{timestamp}.redis.tgz"
+    pg_path.parent.mkdir(parents=True, exist_ok=True)
+    redis_path.parent.mkdir(parents=True, exist_ok=True)
+    pg_path.write_bytes(f"pg-{timestamp}".encode())
+    redis_path.write_bytes(f"redis-{timestamp}".encode())
+    marker = {
+        "schema": 1,
+        "operation_id": f"backup-{timestamp}",
+        "timestamp": timestamp,
+        "pg": {
+            "name": pg_path.name,
+            "size": pg_path.stat().st_size,
+            "sha256": hashlib.sha256(pg_path.read_bytes()).hexdigest(),
+        },
+        "redis": {
+            "name": redis_path.name,
+            "size": redis_path.stat().st_size,
+            "sha256": hashlib.sha256(redis_path.read_bytes()).hexdigest(),
+        },
+    }
+    (backup_root / f".backup-pair.{timestamp}.json").write_text(
+        json.dumps(marker) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _assert_all_markers_reference_complete_pairs(backup_root: Path) -> None:
+    markers = list(backup_root.glob(".backup-pair.*.json"))
+    assert markers
+    for marker_path in markers:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        pg_path = backup_root / "pg" / marker["pg"]["name"]
+        redis_path = backup_root / "redis" / marker["redis"]["name"]
+        assert pg_path.is_file()
+        assert redis_path.is_file()
+        assert hashlib.sha256(pg_path.read_bytes()).hexdigest() == marker["pg"]["sha256"]
+        assert (
+            hashlib.sha256(redis_path.read_bytes()).hexdigest()
+            == marker["redis"]["sha256"]
+        )
+
+
 def _wait_for_file(path: Path, timeout: float = 8.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -365,6 +409,9 @@ def _start_backup(
     legacy_worker: bool = False,
     worker_docker_health: str = "healthy",
     rdb_valid: bool = True,
+    max_keep: int = 56,
+    existing_timestamps: tuple[str, ...] = (),
+    last_success_is_directory: bool = False,
     env_out: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path, Path, Path]:
     backup_root = tmp_path / "backup"
@@ -377,6 +424,10 @@ def _start_backup(
     running_file = backup_root / ".backup.running"
     lock_file = tmp_path / "backup-restore.lock"
     backup_root.mkdir()
+    for timestamp in existing_timestamps:
+        _write_committed_pair(backup_root, timestamp)
+    if last_success_is_directory:
+        (backup_root / ".backup.last-success.json").mkdir()
     maint_root.mkdir()
     fakebin.mkdir()
     _write_fake_docker(fakebin / "docker")
@@ -407,6 +458,7 @@ def _start_backup(
             "LC_ALL": "C",
             "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
             "BACKUP_ROOT": str(backup_root),
+            "MAX_KEEP": str(max_keep),
             "TMPDIR": str(tmp_path / "tmp"),
             "LUMEN_MAINT_ROOT": str(maint_root),
             "LUMEN_BACKUP_RESTORE_LOCKFILE": str(lock_file),
@@ -685,30 +737,88 @@ def test_backup_aborts_when_preexisting_bgsave_never_becomes_idle(
     assert state["bgsave_started"] == "0"
 
 
-def test_backup_publication_fsyncs_payloads_and_marker_before_retention() -> None:
-    text = BACKUP.read_text(encoding="utf-8")
-    pg_temp_fsync = text.index('backup_fsync_file "$PG_TMP"')
-    pg_rename = text.index('mv -f "$PG_TMP" "$PG_OUT"', pg_temp_fsync)
-    pg_dir_fsync = text.index('backup_fsync_directory "$PG_DIR"', pg_rename)
-    redis_temp_fsync = text.index('backup_fsync_file "$REDIS_TMP"', pg_dir_fsync)
-    redis_rename = text.index('mv -f "$REDIS_TMP" "$REDIS_OUT"', redis_temp_fsync)
-    redis_dir_fsync = text.index(
-        'backup_fsync_directory "$REDIS_DIR"',
-        redis_rename,
+def test_backup_receipt_failure_preserves_new_pair_and_skips_retention(
+    tmp_path: Path,
+) -> None:
+    old_timestamp = "20200101-000000"
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        max_keep=1,
+        existing_timestamps=(old_timestamp,),
+        last_success_is_directory=True,
     )
-    marker_commit = text.index("publish_backup_pair_marker", redis_dir_fsync)
-    retention = text.index("prune_paired", marker_commit)
 
-    assert (
-        pg_temp_fsync
-        < pg_rename
-        < pg_dir_fsync
-        < redis_temp_fsync
-        < redis_rename
-        < redis_dir_fsync
-        < marker_commit
-        < retention
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 70, stdout + stderr
+    assert "terminal receipt failure" in stdout + stderr
+    assert len(list(backup_root.glob(".backup-pair.*.json"))) == 2
+    _assert_all_markers_reference_complete_pairs(backup_root)
+
+
+@pytest.mark.parametrize("max_keep", [1, 2])
+def test_backup_retention_keeps_complete_pairs(
+    tmp_path: Path,
+    max_keep: int,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        max_keep=max_keep,
+        existing_timestamps=(
+            "20200101-000000",
+            "20200102-000000",
+            "20200103-000000",
+        ),
     )
+
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 0, stdout + stderr
+    assert len(list(backup_root.glob(".backup-pair.*.json"))) == max_keep
+    _assert_all_markers_reference_complete_pairs(backup_root)
+
+
+def test_backup_retention_protects_receipt_pair_when_future_pair_exists(
+    tmp_path: Path,
+) -> None:
+    future_timestamp = "20990101-000000"
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        max_keep=1,
+        existing_timestamps=(future_timestamp,),
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == 0, stdout + stderr
+    receipt = json.loads(
+        (backup_root / ".backup.last-success.json").read_text(encoding="utf-8")
+    )
+    current_timestamp = receipt["completed_at"]
+    assert (backup_root / f".backup-pair.{current_timestamp}.json").is_file()
+    assert not (backup_root / f".backup-pair.{future_timestamp}.json").exists()
+    _assert_all_markers_reference_complete_pairs(backup_root)
+
+
+def test_retention_crash_never_leaves_marker_for_partial_pair(
+    tmp_path: Path,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        max_keep=1,
+        existing_timestamps=("20200101-000000", "20200102-000000"),
+        failpoint="after_prune_marker",
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+
+    assert process.returncode == -signal.SIGKILL, stdout + stderr
+    assert (backup_root / ".backup.last-success.json").is_file()
+    _assert_all_markers_reference_complete_pairs(backup_root)
 
 
 @pytest.mark.parametrize(

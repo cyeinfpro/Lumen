@@ -209,6 +209,10 @@ def _action_init(store: Journal, args: list[str], now: str) -> None:
             )
         if not payload.get("operation_id"):
             raise SystemExit("update journal operation_id is missing")
+        if payload.get("operation_id") != operation_id:
+            raise SystemExit(
+                "update journal operation_id does not match the API request"
+            )
         _validate_checkpoint(payload)
         payload["status"] = "running"
         payload["resumed_at"] = now

@@ -13,6 +13,11 @@ from lumen_core.pricing import (
     parse_canonical_nonnegative_int,
     parse_usage,
 )
+from lumen_core.pricing_resolver import (
+    PRICING_MODE_BEST_EFFORT_DISPLAY,
+    PRICING_MODE_STRICT_BILLING,
+    PricingResolver,
+)
 
 NONCANONICAL_USAGE_VALUES = (
     True,
@@ -240,3 +245,29 @@ def test_realistic_usage_stays_well_below_the_guard() -> None:
     )
 
     assert breakdown.total_cost_micro > 0
+
+
+@pytest.mark.asyncio
+async def test_strict_pricing_never_reuses_source_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = PricingResolver(process_ttl_sec=60)
+
+    async def no_db_rule(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(resolver, "_resolve_from_db", no_db_rule)
+
+    display = await resolver.resolve(
+        object(),  # type: ignore[arg-type]
+        "gpt-4o",
+        mode=PRICING_MODE_BEST_EFFORT_DISPLAY,
+    )
+    strict = await resolver.resolve(
+        object(),  # type: ignore[arg-type]
+        "gpt-4o",
+        mode=PRICING_MODE_STRICT_BILLING,
+    )
+
+    assert display.pricing_source == "fallback"
+    assert strict.pricing_source == "missing"

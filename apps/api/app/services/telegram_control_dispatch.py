@@ -19,6 +19,7 @@ from sqlalchemy import or_, select, update
 from lumen_core.model_entities.control_operations import TelegramControlCommand
 
 from ..db import SessionLocal, affected_rows
+from ..observability import telegram_control_dedup_maintenance_total
 from ..redis_client import get_redis
 
 
@@ -31,6 +32,10 @@ _PUBLISH_LEASE_SECONDS = 30
 _RECONCILE_INTERVAL_SECONDS = 2.0
 _RECONCILE_BATCH_SIZE = 10
 _ERROR_LIMIT = 2000
+_CONTROL_DEDUP_PREFIX = f"{CONTROL_STREAM}:command:"
+_CONTROL_DEDUP_TERMINAL_TTL_SECONDS = 90 * 24 * 60 * 60
+_CONTROL_DEDUP_ORPHAN_TTL_SECONDS = 7 * 24 * 60 * 60
+_CONTROL_DEDUP_SCAN_COUNT = 100
 _CONTROL_PUBLISH_ONCE_LUA = """
 local existing = redis.call("GET", KEYS[1])
 if existing then
@@ -61,6 +66,7 @@ class TelegramControlRuntime:
     wakeup: asyncio.Event
     stop: asyncio.Event
     task: asyncio.Task[None] | None = None
+    dedup_scan_cursor: int = 0
 
 
 def _now() -> datetime:
@@ -71,6 +77,66 @@ def _decode(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def control_dedup_key(command_id: str) -> str:
+    return f"{_CONTROL_DEDUP_PREFIX}{command_id}"
+
+
+async def _control_command_statuses(
+    command_ids: list[str],
+) -> dict[str, str]:
+    if not command_ids:
+        return {}
+    async with SessionLocal() as session:
+        rows = await session.execute(
+            select(
+                TelegramControlCommand.id,
+                TelegramControlCommand.status,
+            ).where(TelegramControlCommand.id.in_(command_ids))
+        )
+        return {str(command_id): str(status) for command_id, status in rows}
+
+
+async def maintain_control_dedup_keys(
+    redis: Any,
+    *,
+    cursor: int = 0,
+) -> int:
+    next_cursor, raw_keys = await redis.scan(
+        cursor=cursor,
+        match=f"{_CONTROL_DEDUP_PREFIX}*",
+        count=_CONTROL_DEDUP_SCAN_COUNT,
+    )
+    keys = [_decode(key) for key in raw_keys]
+    command_ids = [
+        key.removeprefix(_CONTROL_DEDUP_PREFIX)
+        for key in keys
+        if key.startswith(_CONTROL_DEDUP_PREFIX)
+    ]
+    statuses = await _control_command_statuses(command_ids)
+    for key, command_id in zip(keys, command_ids, strict=False):
+        status = statuses.get(command_id)
+        if status in {"accepted", "failed"}:
+            ttl_seconds = _CONTROL_DEDUP_TERMINAL_TTL_SECONDS
+            action = "terminal_expiry_set"
+        elif status is None:
+            ttl_seconds = _CONTROL_DEDUP_ORPHAN_TTL_SECONDS
+            action = "orphan_expiry_set"
+        else:
+            telegram_control_dedup_maintenance_total.labels(
+                action="active_preserved"
+            ).inc()
+            continue
+        current_ttl = int(await redis.ttl(key))
+        if current_ttl < 0:
+            await redis.expire(key, ttl_seconds)
+            telegram_control_dedup_maintenance_total.labels(action=action).inc()
+        else:
+            telegram_control_dedup_maintenance_total.labels(
+                action="finite_ttl_preserved"
+            ).inc()
+    return int(next_cursor)
 
 
 async def ensure_control_consumer_group(redis: Any) -> None:
@@ -129,8 +195,7 @@ async def claim_telegram_command(
                 )
                 .values(
                     publish_owner=owner,
-                    publish_lease_until=now
-                    + timedelta(seconds=_PUBLISH_LEASE_SECONDS),
+                    publish_lease_until=now + timedelta(seconds=_PUBLISH_LEASE_SECONDS),
                     publish_fence=TelegramControlCommand.publish_fence + 1,
                     publish_attempts=TelegramControlCommand.publish_attempts + 1,
                     last_error=None,
@@ -224,7 +289,7 @@ async def publish_telegram_command(
             separators=(",", ":"),
             sort_keys=True,
         )
-        dedup_key = f"{CONTROL_STREAM}:command:{claim.command_id}"
+        dedup_key = control_dedup_key(claim.command_id)
         eval_fn = getattr(client, "eval", None)
         if callable(eval_fn):
             stream_id = await eval_fn(
@@ -265,8 +330,7 @@ async def publish_telegram_command(
             )
         except Exception:
             logger.exception(
-                "telegram command publish failure could not be persisted "
-                "command_id=%s",
+                "telegram command publish failure could not be persisted command_id=%s",
                 command_id,
             )
         raise
@@ -296,9 +360,14 @@ async def telegram_control_reconciler_loop(
         runtime.wakeup.clear()
         try:
             await run_telegram_control_reconciler_once()
+            runtime.dedup_scan_cursor = await maintain_control_dedup_keys(
+                get_redis(),
+                cursor=runtime.dedup_scan_cursor,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
+            telegram_control_dedup_maintenance_total.labels(action="error").inc()
             logger.exception("telegram control reconciliation iteration failed")
         if runtime.stop.is_set() or runtime.wakeup.is_set():
             continue
@@ -337,9 +406,7 @@ def create_telegram_control_lifespan() -> Callable[[FastAPI], AsyncIterator[None
 def wake_telegram_control_publisher(request: Request) -> bool:
     runtime = getattr(request.app.state, _RUNTIME_STATE_KEY, None)
     if not isinstance(runtime, TelegramControlRuntime):
-        logger.error(
-            "telegram command persisted but publisher runtime is unavailable"
-        )
+        logger.error("telegram command persisted but publisher runtime is unavailable")
         return False
     runtime.wakeup.set()
     return True
@@ -350,8 +417,10 @@ __all__ = [
     "CONTROL_STREAM",
     "TelegramCommandClaim",
     "claim_telegram_command",
+    "control_dedup_key",
     "create_telegram_control_lifespan",
     "ensure_control_consumer_group",
+    "maintain_control_dedup_keys",
     "mark_telegram_command_published",
     "publish_telegram_command",
     "run_telegram_control_reconciler_once",

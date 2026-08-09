@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from app import task_billing
 from app.routes import billing
 from app.services.billing import errors, pricing_values, redemption_values, usage
+from lumen_core.billing import BillingError
 from lumen_core.schemas import AdminRedemptionCodeCreateIn, BillingUsageByKindOut
 
 
@@ -415,7 +416,9 @@ def test_price_rows_defer_non_finite_literals_to_downstream_validation() -> None
 
 def test_task_rate_multiplier_delegates_to_decimal_conversion() -> None:
     """API 侧倍率换算必须与 lumen_core 一致，不得再走 float 中转。"""
-    assert task_billing.rate_multiplier_x10000(None) == 10_000
+    with pytest.raises(BillingError) as exc_info:
+        task_billing.rate_multiplier_x10000(None)
+    assert exc_info.value.code == "RATE_MULTIPLIER_INVALID"
     assert task_billing.rate_multiplier_x10000(Decimal("1.0009")) == 10_009
     # 旧的 int(float(raw) * 10_000) 在这里会算成 10008，少收一档。
     assert task_billing.rate_multiplier_x10000("1.0009") != 10_008

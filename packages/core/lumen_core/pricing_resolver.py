@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import Mapping
 from fnmatch import fnmatchcase
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,11 @@ from .pricing import (
 )
 from .pricing_fallback import fallback_pricing_for
 from .immutables import immutable_mapping
+
+
+PRICING_MODE_STRICT_BILLING = "strict_billing"
+PRICING_MODE_BEST_EFFORT_DISPLAY = "best_effort_display"
+PricingResolutionMode = Literal["strict_billing", "best_effort_display"]
 
 
 UNIT_FIELD_MAP: Mapping[str, str] = immutable_mapping(
@@ -138,8 +143,13 @@ class PricingResolver:
         self.process_ttl_sec = max(0.0, process_ttl_sec)
         self._cache: dict[str, tuple[float, ModelPricing]] = {}
 
-    def _cache_key(self, model: str, channel: str | None) -> str:
-        return f"{channel or 'default'}:{model}"
+    def _cache_key(
+        self,
+        model: str,
+        channel: str | None,
+        mode: PricingResolutionMode,
+    ) -> str:
+        return f"{mode}:{channel or 'default'}:{model}"
 
     async def resolve(
         self,
@@ -147,15 +157,21 @@ class PricingResolver:
         model: str,
         *,
         channel: str | None = None,
+        mode: PricingResolutionMode = PRICING_MODE_BEST_EFFORT_DISPLAY,
     ) -> ModelPricing:
+        if mode not in {
+            PRICING_MODE_STRICT_BILLING,
+            PRICING_MODE_BEST_EFFORT_DISPLAY,
+        }:
+            raise ValueError(f"unsupported pricing resolution mode: {mode}")
         model_key = (model or "").strip()
-        cache_key = self._cache_key(model_key, channel)
+        cache_key = self._cache_key(model_key, channel, mode)
         now = time.monotonic()
         cached = self._cache.get(cache_key)
         if cached and cached[0] > now:
             return cached[1]
 
-        redis_key = f"lumen:pricing:v1:{cache_key}"
+        redis_key = f"lumen:pricing:v1:{channel or 'default'}:{model_key}"
         if self.redis is not None:
             try:
                 raw = await self.redis.get(redis_key)
@@ -181,7 +197,7 @@ class PricingResolver:
                 pass
 
         pricing = await self._resolve_from_db(db, model_key, channel=channel)
-        if pricing is None:
+        if pricing is None and mode == PRICING_MODE_BEST_EFFORT_DISPLAY:
             pricing = fallback_pricing_for(model_key)
         if pricing is None:
             pricing = ModelPricing(

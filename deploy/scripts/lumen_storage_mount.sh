@@ -17,9 +17,10 @@ DISABLED_FILE="${STATE_DIR}/disabled"
 STATUS_FILE="${STATE_DIR}/status.json"
 APPLY_RESULT_FILE="${STATE_DIR}/last-apply.json"
 APPLY_CLAIM_FILE="${STATE_DIR}/apply.claim.json"
+APPLY_REQUESTS_DIR="${STATE_DIR}/requests"
+APPLY_RESULTS_DIR="${STATE_DIR}/results"
 TEST_RESULT_FILE="${STATE_DIR}/last-test.json"
 TEST_CONF_FILE="${STATE_DIR}/test.conf"
-APPLY_TRIGGER_FILE="${STATE_DIR}/apply.trigger"
 TEST_TRIGGER_FILE="${STATE_DIR}/test.trigger"
 TARGET="${LUMEN_STORAGE_TARGET:-/opt/lumendata}"
 DATASET_IDENTITY_FILE="${TARGET}/.lumen-storage-dataset-id"
@@ -43,8 +44,14 @@ CIFS_OPTS_BASE="vers=3.0,soft,rsize=4194304,wsize=4194304,actimeo=60,cache=stric
 LUMEN_DOCKER_COMPOSE_DIR="${LUMEN_DOCKER_COMPOSE_DIR:-/opt/lumen/current}"
 LUMEN_DOCKER_SERVICES="${LUMEN_DOCKER_SERVICES:-api worker tgbot web}"
 
-mkdir -p "$STATE_DIR"
+APPLY_REQUEST_FILE=""
+APPLY_OPERATION_ID=""
+APPLY_FENCE=""
+APPLY_CONFIG_SHA256=""
+
+mkdir -p "$STATE_DIR" "$APPLY_REQUESTS_DIR" "$APPLY_RESULTS_DIR"
 chmod 0775 "$STATE_DIR" 2>/dev/null || true
+chmod 0770 "$APPLY_REQUESTS_DIR" "$APPLY_RESULTS_DIR" 2>/dev/null || true
 
 log() {
   printf '[lumen-storage] %s\n' "$*" >&2
@@ -160,6 +167,9 @@ LUMEN_UID="${LUMEN_APP_UID:-$(deploy_env_value LUMEN_APP_UID 2>/dev/null || prin
 LUMEN_GID="${LUMEN_APP_GID:-$(deploy_env_value LUMEN_APP_GID 2>/dev/null || printf '10001')}"
 LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS="${LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS:-$(deploy_env_value LUMEN_STORAGE_ALLOWED_LOCAL_ROOTS 2>/dev/null || printf '%s' "$DEFAULT_ALLOWED_LOCAL_ROOTS")}:${DEFAULT_LOCAL_ROOT}"
 LUMEN_DB_ROOT="${LUMEN_DB_ROOT:-$(deploy_env_value LUMEN_DB_ROOT 2>/dev/null || deploy_env_value LUMEN_DATA_ROOT 2>/dev/null || printf '%s' "$TARGET")}"
+chown "$LUMEN_UID:$LUMEN_GID" \
+  "$APPLY_REQUESTS_DIR" "$APPLY_RESULTS_DIR" 2>/dev/null || true
+chmod 0770 "$APPLY_REQUESTS_DIR" "$APPLY_RESULTS_DIR" 2>/dev/null || true
 
 trigger_call_id() {
   local path="$1" value=""
@@ -171,10 +181,16 @@ trigger_call_id() {
   printf '%s\n' "$value"
 }
 
-apply_result_terminal_for_call() {
-  local call_id="$1"
-  [[ -f "$APPLY_RESULT_FILE" ]] || return 1
-  python3 - "$APPLY_RESULT_FILE" "$call_id" <<'PY'
+apply_result_path() {
+  local call_id="$1" fence="$2"
+  printf '%s/%s.%s.json\n' "$APPLY_RESULTS_DIR" "$call_id" "$fence"
+}
+
+apply_result_terminal_for_identity() {
+  local call_id="$1" fence="$2" result_path=""
+  result_path="$(apply_result_path "$call_id" "$fence")"
+  [[ -f "$result_path" ]] || return 1
+  python3 - "$result_path" "$call_id" "$fence" <<'PY'
 import json
 import sys
 
@@ -185,31 +201,177 @@ except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit(1)
 raise SystemExit(
     0
-    if data.get("call_id") == sys.argv[2]
+    if (data.get("operation_id") or data.get("call_id")) == sys.argv[2]
+    and data.get("fence") == int(sys.argv[3])
     and data.get("status") in {"ok", "fail"}
     else 1
 )
 PY
 }
 
+select_apply_request() {
+  local selected=""
+  selected="$(
+    python3 - "$APPLY_REQUESTS_DIR" "$APPLY_RESULTS_DIR" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+requests_dir = Path(sys.argv[1])
+results_dir = Path(sys.argv[2])
+pattern = re.compile(r"^(?P<operation_id>[0-9a-f]{32})\.(?P<fence>[1-9][0-9]*)\.json$")
+candidates = []
+
+for path in requests_dir.glob("*.json"):
+    match = pattern.fullmatch(path.name)
+    if match is None:
+        print(f"ignoring invalid storage apply request name: {path}", file=sys.stderr)
+        path.unlink(missing_ok=True)
+        continue
+    operation_id = match.group("operation_id")
+    fence = int(match.group("fence"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        config = data["config"]
+        config_sha256 = data["config_sha256"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+        print(f"discarding unreadable storage apply request: {path}", file=sys.stderr)
+        path.unlink(missing_ok=True)
+        continue
+    valid = (
+        data.get("schema") == 1
+        and data.get("operation_id") == operation_id
+        and data.get("fence") == fence
+        and isinstance(config, str)
+        and isinstance(config_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", config_sha256) is not None
+        and hashlib.sha256(config.encode("utf-8")).hexdigest() == config_sha256
+    )
+    if not valid:
+        print(f"discarding invalid storage apply request: {path}", file=sys.stderr)
+        path.unlink(missing_ok=True)
+        continue
+    result_path = results_dir / path.name
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        result = None
+    if (
+        isinstance(result, dict)
+        and (result.get("operation_id") or result.get("call_id")) == operation_id
+        and result.get("fence") == fence
+        and result.get("status") in {"ok", "fail"}
+    ):
+        path.unlink(missing_ok=True)
+        continue
+    candidates.append((fence, operation_id, path, config_sha256))
+
+if not candidates:
+    raise SystemExit(1)
+
+fence, operation_id, path, config_sha256 = max(candidates)
+print(f"{path}\t{operation_id}\t{fence}\t{config_sha256}")
+PY
+  )" || return 1
+  IFS=$'\t' read -r \
+    APPLY_REQUEST_FILE APPLY_OPERATION_ID APPLY_FENCE APPLY_CONFIG_SHA256 \
+    <<< "$selected"
+  [[ -f "$APPLY_REQUEST_FILE" \
+    && "$APPLY_OPERATION_ID" =~ ^[0-9a-f]{32}$ \
+    && "$APPLY_FENCE" =~ ^[1-9][0-9]*$ \
+    && "$APPLY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+}
+
+activate_apply_request() {
+  python3 - \
+    "$APPLY_REQUEST_FILE" "$CONF_FILE" \
+    "$APPLY_OPERATION_ID" "$APPLY_FENCE" "$APPLY_CONFIG_SHA256" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+request_path = Path(sys.argv[1])
+conf_path = Path(sys.argv[2])
+operation_id = sys.argv[3]
+fence = int(sys.argv[4])
+expected_sha256 = sys.argv[5]
+
+try:
+    data = json.loads(request_path.read_text(encoding="utf-8"))
+    config = data["config"]
+except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+    raise SystemExit(1)
+
+if not (
+    data.get("schema") == 1
+    and data.get("operation_id") == operation_id
+    and data.get("fence") == fence
+    and isinstance(config, str)
+    and re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+    and data.get("config_sha256") == expected_sha256
+    and hashlib.sha256(config.encode("utf-8")).hexdigest() == expected_sha256
+):
+    raise SystemExit(1)
+
+conf_path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_name = tempfile.mkstemp(
+    prefix=f".{conf_path.name}.",
+    suffix=".tmp",
+    dir=conf_path.parent,
+    text=True,
+)
+tmp_path = Path(tmp_name)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(config)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(tmp_path, 0o660)
+    except OSError:
+        pass
+    os.replace(tmp_path, conf_path)
+    directory_fd = os.open(conf_path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    tmp_path.unlink(missing_ok=True)
+PY
+}
+
 claim_apply_operation() {
-  local call_id="$1"
-  python3 - "$APPLY_CLAIM_FILE" "$APPLY_RESULT_FILE" "$call_id" <<'PY'
+  local call_id="$1" fence="$2"
+  python3 - \
+    "$APPLY_CLAIM_FILE" "$APPLY_RESULTS_DIR" "$call_id" "$fence" <<'PY'
 import json
 import os
 import sys
 import time
 
-claim_path, result_path, call_id = sys.argv[1:]
+claim_path, results_dir, call_id, fence_raw = sys.argv[1:]
+fence = int(fence_raw)
 
-def terminal(operation_id):
+def terminal(operation_id, operation_fence):
+    result_path = os.path.join(
+        results_dir,
+        f"{operation_id}.{operation_fence}.json",
+    )
     try:
         with open(result_path, encoding="utf-8") as handle:
             result = json.load(handle)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
     return (
-        result.get("call_id") == operation_id
+        (result.get("operation_id") or result.get("call_id")) == operation_id
+        and result.get("fence") == operation_fence
         and result.get("status") in {"ok", "fail"}
     )
 
@@ -221,18 +383,51 @@ except FileNotFoundError:
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit(11)
 
+claimed_at = int(time.time())
+resume_count = 0
 if previous is not None:
-    previous_id = previous.get("call_id")
-    if not isinstance(previous_id, str):
+    previous_id = previous.get("operation_id") or previous.get("call_id")
+    previous_fence = previous.get("fence")
+    if (
+        not isinstance(previous_id, str)
+        or isinstance(previous_fence, bool)
+        or not isinstance(previous_fence, int)
+        or previous_fence <= 0
+    ):
         raise SystemExit(11)
-    if previous_id == call_id and not terminal(previous_id):
-        raise SystemExit(10)
-    if previous_id != call_id and not terminal(previous_id):
+    if previous_fence > fence:
+        raise SystemExit(12)
+    if previous_fence == fence and previous_id != call_id:
         raise SystemExit(11)
+    if (
+        previous_fence == fence
+        and previous_id == call_id
+        and not terminal(previous_id, previous_fence)
+    ):
+        previous_claimed_at = previous.get("claimed_at")
+        if (
+            not isinstance(previous_claimed_at, bool)
+            and isinstance(previous_claimed_at, int)
+            and previous_claimed_at > 0
+        ):
+            claimed_at = previous_claimed_at
+        previous_resume_count = previous.get("resume_count")
+        if (
+            not isinstance(previous_resume_count, bool)
+            and isinstance(previous_resume_count, int)
+            and previous_resume_count >= 0
+        ):
+            resume_count = previous_resume_count + 1
+        else:
+            resume_count = 1
 
 payload = {
     "call_id": call_id,
-    "claimed_at": int(time.time()),
+    "operation_id": call_id,
+    "fence": fence,
+    "claimed_at": claimed_at,
+    "resumed_at": int(time.time()) if resume_count else None,
+    "resume_count": resume_count,
 }
 tmp_path = f"{claim_path}.{os.getpid()}.tmp"
 try:
@@ -1078,19 +1273,133 @@ write_status() {
 
 write_apply_result() {
   local call_id="$1" status="$2" message="$3" started_at="$4"
-  local now
+  local now result_path=""
   now=$(date -u +%s)
-  {
-    printf '{\n'
-    printf '  "call_id": %s,\n' "$(json_str "$call_id")"
-    printf '  "status": %s,\n' "$(json_str "$status")"
-    printf '  "message": %s,\n' "$(json_str "$message")"
-    printf '  "started_at": %s,\n' "$started_at"
-    printf '  "finished_at": %s\n' "$now"
-    printf '}\n'
-  } > "${APPLY_RESULT_FILE}.tmp"
-  mv "${APPLY_RESULT_FILE}.tmp" "$APPLY_RESULT_FILE"
-  chmod 0644 "$APPLY_RESULT_FILE" 2>/dev/null || true
+  if [[ "$call_id" != "$APPLY_OPERATION_ID" \
+    || ! "$APPLY_FENCE" =~ ^[1-9][0-9]*$ ]]; then
+    log "refusing storage result without a valid operation identity and fence"
+    return 1
+  fi
+  result_path="$(apply_result_path "$call_id" "$APPLY_FENCE")"
+  python3 - \
+    "$result_path" "$APPLY_RESULT_FILE" \
+    "$call_id" "$APPLY_FENCE" "$status" "$message" "$started_at" "$now" <<'PY'
+import errno
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+(
+    result_raw,
+    latest_raw,
+    operation_id,
+    fence_raw,
+    status,
+    message,
+    started_raw,
+    finished_raw,
+) = sys.argv[1:]
+result_path = Path(result_raw)
+latest_path = Path(latest_raw)
+fence = int(fence_raw)
+payload = {
+    "call_id": operation_id,
+    "operation_id": operation_id,
+    "fence": fence,
+    "status": status,
+    "message": message,
+    "started_at": int(started_raw),
+    "finished_at": int(finished_raw),
+}
+if status not in {"ok", "fail"}:
+    raise SystemExit(2)
+
+result_path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_name = tempfile.mkstemp(
+    prefix=f".{result_path.name}.",
+    suffix=".tmp",
+    dir=result_path.parent,
+    text=True,
+)
+tmp_path = Path(tmp_name)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(tmp_path, 0o644)
+    except OSError:
+        pass
+    try:
+        os.link(tmp_path, result_path)
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+        try:
+            existing = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise SystemExit(3) from exc
+        if not (
+            (existing.get("operation_id") or existing.get("call_id"))
+            == operation_id
+            and existing.get("fence") == fence
+            and existing.get("status") == status
+        ):
+            raise SystemExit(3) from exc
+    directory_fd = os.open(result_path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    tmp_path.unlink(missing_ok=True)
+
+replace_latest = True
+try:
+    current = json.loads(latest_path.read_text(encoding="utf-8"))
+except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+    current = None
+if isinstance(current, dict):
+    current_fence = current.get("fence")
+    if (
+        not isinstance(current_fence, bool)
+        and isinstance(current_fence, int)
+        and current_fence > fence
+    ):
+        replace_latest = False
+if replace_latest:
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, latest_tmp_name = tempfile.mkstemp(
+        prefix=f".{latest_path.name}.",
+        suffix=".tmp",
+        dir=latest_path.parent,
+        text=True,
+    )
+    latest_tmp = Path(latest_tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(latest_tmp, 0o644)
+        except OSError:
+            pass
+        os.replace(latest_tmp, latest_path)
+        directory_fd = os.open(latest_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        latest_tmp.unlink(missing_ok=True)
+PY
+  rm -f -- "$APPLY_REQUEST_FILE"
 }
 
 write_test_result() {
@@ -1712,43 +2021,47 @@ fail_started_replacement_apply() {
 
 # Full reload cycle: stop dependent docker services, swap mount, start them.
 cmd_apply() {
-  local call_id=""
+  local call_id="" fence=""
   local started_at
   started_at=$(date -u +%s)
-  if ! call_id="$(trigger_call_id "$APPLY_TRIGGER_FILE")"; then
-    log "invalid or missing apply trigger"
-    write_apply_result "" "fail" "invalid or missing apply trigger" "$started_at"
-    return 2
-  fi
 
   exec 8>"${STATE_DIR}/apply.lock"
   if ! flock -n 8; then
     log "another apply in progress, abort"
     return 75
   fi
-  if apply_result_terminal_for_call "$call_id"; then
-    log "operation $call_id already has a terminal result; refusing duplicate apply"
+  if ! select_apply_request; then
+    log "no pending storage apply request"
+    return 0
+  fi
+  call_id="$APPLY_OPERATION_ID"
+  fence="$APPLY_FENCE"
+  if apply_result_terminal_for_identity "$call_id" "$fence"; then
+    log "operation $call_id fence=$fence already has a terminal result"
+    rm -f -- "$APPLY_REQUEST_FILE"
     return 0
   fi
   local claim_rc=0
-  claim_apply_operation "$call_id" || claim_rc=$?
+  claim_apply_operation "$call_id" "$fence" || claim_rc=$?
   case "$claim_rc" in
     0)
       ;;
-    10)
-      log "operation $call_id has an unresolved prior claim; refusing duplicate apply"
+    12)
+      log "operation $call_id fence=$fence is older than the host fence"
       write_apply_result "$call_id" "fail" \
-        "previous host attempt did not record a terminal result; duplicate apply refused" \
-        "$started_at"
-      return 1
+        "stale storage apply fence rejected by host" "$started_at"
+      return 0
       ;;
     *)
       log "another unresolved or invalid storage apply claim exists"
-      return 75
+      write_apply_result "$call_id" "fail" \
+        "another unresolved or invalid storage apply claim exists" "$started_at"
+      return 1
       ;;
   esac
-  if apply_result_terminal_for_call "$call_id"; then
+  if apply_result_terminal_for_identity "$call_id" "$fence"; then
     log "operation $call_id became terminal before host side effects"
+    rm -f -- "$APPLY_REQUEST_FILE"
     return 0
   fi
   if ! storage_acquire_maintenance_lock; then
@@ -1764,8 +2077,14 @@ cmd_apply() {
     return 1
   fi
 
+  if ! activate_apply_request; then
+    log "storage apply request failed identity/hash validation"
+    write_apply_result "$call_id" "fail" \
+      "storage apply request failed identity/hash validation" "$started_at"
+    return 2
+  fi
   load_conf
-  log "apply start mode=$MODE"
+  log "apply start operation=$call_id fence=$fence mode=$MODE"
 
   # docker compose stop/start 加 timeout 防卡死。stop 用 -t 30 + 整体 timeout 60s
   # （worker stop_grace_period=1830s 但我们必须跳过这个 grace 否则 apply 一卡半小时）。
@@ -1973,9 +2292,10 @@ cmd_status() {
 }
 
 cmd_apply_result_terminal() {
-  local call_id=""
-  call_id="$(trigger_call_id "$APPLY_TRIGGER_FILE")" || return 1
-  apply_result_terminal_for_call "$call_id"
+  if ! select_apply_request; then
+    return 0
+  fi
+  apply_result_terminal_for_identity "$APPLY_OPERATION_ID" "$APPLY_FENCE"
 }
 
 cmd_help() {
@@ -1986,7 +2306,7 @@ Usage: $(basename "$0") {up|verify|bind-identity|down|apply|apply-result-termina
   bind-identity  Upgrade a verified legacy last-good with a dataset marker.
   down    Unmount /opt/lumendata.
   apply   Stop dependent docker services, swap mount, restart services.
-  apply-result-terminal  Check whether trigger has a matching terminal result.
+  apply-result-terminal  Check whether the highest request has a terminal result.
   test    Test SMB credentials in conf at $TEST_CONF_FILE.
   status  Print current mount status JSON.
 
@@ -1996,8 +2316,10 @@ Files:
   $TEST_CONF_FILE     test mount config (transient, removed after test)
   $DISABLED_FILE      escape hatch: forces local mode on $DEFAULT_LOCAL_ROOT
   $STATUS_FILE        status snapshot (read by API)
-  $APPLY_RESULT_FILE  last apply result (read by API)
-  $APPLY_CLAIM_FILE   durable host claim for at-most-once operation handling
+  $APPLY_REQUESTS_DIR  immutable API apply requests named operation_id.fence.json
+  $APPLY_RESULTS_DIR   immutable host results with the same identity and fence
+  $APPLY_RESULT_FILE   compatibility snapshot of the newest apply result
+  $APPLY_CLAIM_FILE    durable monotonic host fence and operation claim
   $TEST_RESULT_FILE   last test result (read by API)
 EOF
 }

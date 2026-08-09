@@ -7,26 +7,23 @@ PUT /admin/storage          — 持久化 desired operation，后台触发 host 
 写入流程：
   1. 同一事务写 storage.* desired settings、operation row 和 audit。
   2. durable commit 后只唤醒 router-owned reconciler。
-  3. reconciler 用 owner + lease + fence claim operation，再写 conf + trigger。
-  4. host 写原子 terminal result；reconciler 回写 succeeded/failed。
+  3. reconciler 用 owner + lease + fence claim operation，再写不可变 request。
+  4. host 单调 claim fence、激活配置并写同 identity/fence 的 terminal result。
+  5. reconciler 只接收当前 operation/fence 的 result。
 """
 
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
-import json
 import logging
 import os
 import re
-import tempfile
 import time
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Iterator
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
@@ -57,14 +54,24 @@ from ..services.storage_apply_dispatch import (
     latest_storage_apply_record,
     wake_storage_apply_reconciler,
 )
+from .admin_storage_apply_files import (
+    read_host_fence_floor,
+    read_json as _read_json,
+    stage_lock,
+    stage_storage_apply,
+    storage_apply_request_path,
+    storage_apply_result_path,
+    write_atomic as _write_atomic,
+)
 
 
 logger = logging.getLogger(__name__)
 
 STATE_DIR = Path(os.environ.get("LUMEN_STORAGE_STATE_DIR", "/var/lib/lumen-storage"))
-STORAGE_CONF = STATE_DIR / "storage.conf"
 STATUS_FILE = STATE_DIR / "status.json"
-APPLY_TRIGGER = STATE_DIR / "apply.trigger"
+APPLY_REQUESTS_DIR = STATE_DIR / "requests"
+APPLY_RESULTS_DIR = STATE_DIR / "results"
+APPLY_CLAIM_FILE = STATE_DIR / "apply.claim.json"
 LAST_APPLY_FILE = STATE_DIR / "last-apply.json"
 TEST_TRIGGER = STATE_DIR / "test.trigger"
 TEST_CONF = STATE_DIR / "test.conf"
@@ -209,15 +216,6 @@ def _validate_smb_inputs(host: str, share: str) -> None:
         )
 
 
-def _read_json(path: Path) -> dict | None:
-    try:
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 async def _load_config(db: AsyncSession) -> StorageConfigOut:
     backend = await get_setting(db, _spec("storage.backend")) or ""
     local_root = (
@@ -291,34 +289,6 @@ def _format_kv_file(content: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_atomic(path: Path, content: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-        text=True,
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            os.chmod(tmp, mode)
-        except OSError:
-            # CIFS forceuid mounts can EPERM on chmod; STATE_DIR isn't on CIFS but
-            # tolerate to avoid future surprises.
-            pass
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def _ensure_state_dir() -> None:
     if not STATE_DIR.is_dir():
         raise _http(
@@ -327,18 +297,6 @@ def _ensure_state_dir() -> None:
             f"and that lumen-storage-mount.service is installed on host",
             500,
         )
-
-
-@contextmanager
-def _stage_lock(name: str) -> Iterator[None]:
-    lock_path = STATE_DIR / f".{name}.stage.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
 
 
 def _clear_stale_trigger(path: Path, *, stale_after: float) -> None:
@@ -396,18 +354,39 @@ async def _load_storage_conf_text(db: AsyncSession) -> str:
     return _build_storage_conf(cfg, smb_password)
 
 
-def _stage_storage_apply(operation_id: str, conf_text: str) -> None:
+def _storage_apply_request_path(operation_id: str, fence: int) -> Path:
+    return storage_apply_request_path(APPLY_REQUESTS_DIR, operation_id, fence)
+
+
+def _storage_apply_result_path(operation_id: str, fence: int) -> Path:
+    return storage_apply_result_path(APPLY_RESULTS_DIR, operation_id, fence)
+
+
+def _stage_storage_apply(
+    operation_id: str,
+    fence: int,
+    desired_config_sha256: str,
+    conf_text: str,
+) -> None:
     _ensure_state_dir()
-    with _stage_lock("apply"):
-        if APPLY_TRIGGER.exists():
-            try:
-                current_id = APPLY_TRIGGER.read_text(encoding="ascii").strip()
-            except OSError as exc:
-                raise RuntimeError("cannot read existing storage apply trigger") from exc
-            if current_id != operation_id:
-                _clear_stale_trigger(APPLY_TRIGGER, stale_after=15 * 60)
-        _write_atomic(STORAGE_CONF, conf_text, mode=0o660)
-        _write_atomic(APPLY_TRIGGER, f"{operation_id}\n", mode=0o600)
+    stage_storage_apply(
+        state_dir=STATE_DIR,
+        requests_dir=APPLY_REQUESTS_DIR,
+        operation_id=operation_id,
+        fence=fence,
+        desired_config_sha256=desired_config_sha256,
+        conf_text=conf_text,
+    )
+
+
+def _read_storage_host_fence() -> int:
+    _ensure_state_dir()
+    return read_host_fence_floor(
+        claim_path=APPLY_CLAIM_FILE,
+        results_dir=APPLY_RESULTS_DIR,
+        requests_dir=APPLY_REQUESTS_DIR,
+        latest_result_path=LAST_APPLY_FILE,
+    )
 
 
 router = APIRouter(
@@ -416,7 +395,10 @@ router = APIRouter(
     lifespan=create_storage_apply_lifespan(
         load_conf_text=_load_storage_conf_text,
         stage_operation=_stage_storage_apply,
-        read_host_result=lambda: _read_json(LAST_APPLY_FILE),
+        read_host_result=lambda operation_id, fence: _read_json(
+            _storage_apply_result_path(operation_id, fence)
+        ),
+        read_host_fence=_read_storage_host_fence,
     ),
 )
 
@@ -467,7 +449,7 @@ async def test_storage_endpoint(
         "SMB_USERNAME": body.username.strip(),
         "SMB_PASSWORD": password,
     }
-    with _stage_lock("test"):
+    with stage_lock(STATE_DIR, "test"):
         _clear_stale_trigger(TEST_TRIGGER, stale_after=_TEST_TIMEOUT_SEC + 30)
         _write_atomic(TEST_CONF, _format_kv_file(fields), mode=0o600)
         _write_atomic(TEST_TRIGGER, f"{call_id}\n", mode=0o600)
@@ -716,9 +698,7 @@ async def put_storage_endpoint(
     operation = StorageApplyOperation(
         id=operation_id,
         requested_by=admin.id,
-        desired_config_sha256=hashlib.sha256(
-            conf_text.encode("utf-8")
-        ).hexdigest(),
+        desired_config_sha256=hashlib.sha256(conf_text.encode("utf-8")).hexdigest(),
         status="pending",
         active_slot=1,
     )

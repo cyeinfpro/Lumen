@@ -78,6 +78,50 @@ test("failed snapshot remains retryable", async () => {
   equal(calls, 2);
 });
 
+test("initial snapshot uses the full recovery scope set", async () => {
+  const coordinator = new ReplayCoordinator(async (scopes, reason) => {
+    deepStrictEqual(scopes, [
+      "identity",
+      "conversations",
+      "activeTasks",
+      "wallet",
+      "runtimeDefaults",
+    ]);
+    equal(reason.kind, "initial_snapshot");
+    return { syncedAt: 65 };
+  });
+
+  deepStrictEqual(
+    await coordinator.recover(
+      { kind: "initial_snapshot" },
+      new AbortController().signal,
+      snapshotContext(),
+    ),
+    { syncedAt: 65 },
+  );
+});
+
+test("an already-aborted recovery never invokes the snapshot adapter", async () => {
+  let calls = 0;
+  const coordinator = new ReplayCoordinator(async () => {
+    calls += 1;
+    return {};
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  await rejects(
+    async () =>
+      coordinator.recover(
+        { kind: "initial_snapshot" },
+        controller.signal,
+        snapshotContext(),
+      ),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  equal(calls, 0);
+});
+
 test("stale connection generation cannot commit a snapshot result", async () => {
   let release!: () => void;
   let current = true;

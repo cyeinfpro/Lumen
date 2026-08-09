@@ -136,6 +136,14 @@ _COMPLETION_EXECUTION_REQUEST_KEYS = frozenset(
         "tool_image_reserved_micro",
         "completion_usage_execution_epoch",
         "completion_usage_attempt_epoch",
+        "completion_billing_state",
+        "completion_billing_pending_reason",
+        "completion_billing_pending_at",
+        "completion_billing_reconcile_attempts",
+        "completion_billing_reconciled_at",
+        "completion_billing_reconciled_source",
+        "completion_usage_state",
+        "completion_usage_unknown_reason",
         "context",
         "memory",
     }
@@ -717,6 +725,16 @@ async def retry_completion(
         CompletionStatus.CANCELED.value,
     ):
         raise _http("not_retryable", f"status is {comp.status}", 409)
+    if (
+        isinstance(comp.upstream_request, dict)
+        and comp.upstream_request.get("completion_billing_state")
+        == "pending_reconciliation"
+    ):
+        raise _http(
+            "billing_reconciliation_pending",
+            "completion billing must be reconciled before retry",
+            409,
+        )
 
     redis = get_redis()
 

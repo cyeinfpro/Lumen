@@ -1,52 +1,20 @@
 import type { RecoveryReason } from "./contracts";
+import { recoveryTransition } from "./connectionRecovery";
+import type {
+  ConnectionEffect,
+  ConnectionEvent,
+  ConnectionMachineConfig,
+  ConnectionState,
+  ConnectionTransition,
+} from "./connectionTypes";
 
-export type ConnectionState =
-  | { kind: "idle"; cursor?: string }
-  | { kind: "connecting"; attempt: number; cursor?: string }
-  | { kind: "open"; cursor?: string; openedAt: number }
-  | { kind: "recovering"; reason: RecoveryReason; cursor?: string }
-  | { kind: "backoff"; attempt: number; retryAt: number; cursor?: string }
-  | { kind: "offline"; cursor?: string }
-  | { kind: "unauthorized" }
-  | { kind: "closed"; cursor?: string };
-
-export type ConnectionEvent =
-  | { type: "start" }
-  | { type: "open"; at: number }
-  | { type: "error"; at: number }
-  | { type: "retry_timer" }
-  | { type: "offline" }
-  | { type: "online" }
-  | { type: "hidden" }
-  | { type: "visible" }
-  | { type: "replay_gap"; reason: string; cursor?: string }
-  | { type: "recovery_required"; reason: string; cursor?: string }
-  | { type: "epoch_change"; epoch: string; cursor?: string }
-  | { type: "snapshot_success"; cursor?: string }
-  | { type: "snapshot_failure" }
-  | { type: "unauthorized" }
-  | { type: "manual_reconnect" }
-  | { type: "cursor"; cursor: string }
-  | { type: "stop" };
-
-export type ConnectionEffect =
-  | { kind: "openSource"; cursor?: string }
-  | { kind: "closeSource" }
-  | { kind: "scheduleRetry"; delayMs: number }
-  | { kind: "cancelRetry" }
-  | { kind: "recoverSnapshot"; reason: RecoveryReason }
-  | { kind: "publishStatus" };
-
-export type ConnectionMachineConfig = {
-  now: () => number;
-  retryDelay: (attempt: number) => number;
-  maxRetryCount?: number;
-};
-
-export type ConnectionTransition = {
-  state: ConnectionState;
-  effects: ConnectionEffect[];
-};
+export type {
+  ConnectionEffect,
+  ConnectionEvent,
+  ConnectionMachineConfig,
+  ConnectionState,
+  ConnectionTransition,
+} from "./connectionTypes";
 
 function cursorOf(state: ConnectionState): string | undefined {
   return "cursor" in state ? state.cursor : undefined;
@@ -73,7 +41,7 @@ export function transitionConnection(
   }
   const terminal = terminalTransition(event, cursor);
   if (terminal) return terminal;
-  const recovery = recoveryTransition(event, state, cursor);
+  const recovery = recoveryTransition(event, state, cursor, config);
   if (recovery) return recovery;
   return activeTransition(state, event, config);
 }
@@ -98,56 +66,6 @@ function terminalTransition(
   return null;
 }
 
-function recoveryTransition(
-  event: ConnectionEvent,
-  state: ConnectionState,
-  cursor?: string,
-): ConnectionTransition | null {
-  if (event.type === "snapshot_failure" && state.kind === "recovering") {
-    return publish(state, []);
-  }
-  if (event.type === "snapshot_success" && state.kind === "recovering") {
-    const nextCursor = event.cursor ?? state.cursor;
-    return publish(
-      { kind: "connecting", attempt: 0, cursor: nextCursor },
-      [{ kind: "openSource", cursor: nextCursor }],
-    );
-  }
-  if (
-    event.type !== "replay_gap" &&
-    event.type !== "recovery_required" &&
-    event.type !== "epoch_change"
-  ) {
-    return null;
-  }
-  const reason: RecoveryReason =
-    event.type === "epoch_change"
-      ? {
-          kind: "server_epoch_changed",
-          epoch: event.epoch,
-          cursor: event.cursor ?? cursor,
-        }
-      : event.type === "recovery_required"
-        ? {
-            kind: "recovery_required",
-            reason: event.reason,
-            cursor: event.cursor ?? cursor,
-          }
-        : {
-            kind: "replay_gap",
-            reason: event.reason,
-            cursor: event.cursor ?? cursor,
-          };
-  return publish(
-    { kind: "recovering", reason, cursor },
-    [
-      { kind: "cancelRetry" },
-      { kind: "closeSource" },
-      { kind: "recoverSnapshot", reason },
-    ],
-  );
-}
-
 function errorTransition(
   state: ConnectionState,
   at: number,
@@ -158,6 +76,10 @@ function errorTransition(
     state.kind === "connecting" || state.kind === "backoff"
       ? state.attempt
       : 0;
+  const snapshotReady =
+    state.kind === "connecting" || state.kind === "backoff"
+      ? state.snapshotReady
+      : false;
   const max = config.maxRetryCount ?? Number.POSITIVE_INFINITY;
   if (priorAttempt >= max) {
     return publish(
@@ -172,6 +94,7 @@ function errorTransition(
       attempt: priorAttempt + 1,
       retryAt: at + delayMs,
       cursor,
+      snapshotReady,
     },
     [{ kind: "closeSource" }, { kind: "scheduleRetry", delayMs }],
   );
@@ -184,6 +107,29 @@ function activeTransition(
 ): ConnectionTransition {
   const cursor = cursorOf(state);
   if (event.type === "open") {
+    if (state.kind !== "connecting") return { state, effects: [] };
+    if (
+      event.snapshotRequired &&
+      !state.snapshotReady
+    ) {
+      const reason: RecoveryReason = {
+        kind: "initial_snapshot",
+        cursor,
+      };
+      return publish(
+        {
+          kind: "snapshot_recovering",
+          reason,
+          attempt: 0,
+          cursor,
+        },
+        [
+          { kind: "cancelRetry" },
+          { kind: "closeSource" },
+          { kind: "recoverSnapshot", reason },
+        ],
+      );
+    }
     return publish(
       { kind: "open", cursor, openedAt: event.at },
       [{ kind: "cancelRetry" }],
@@ -192,14 +138,24 @@ function activeTransition(
   if (event.type === "error") return errorTransition(state, event.at, config);
   if (event.type === "retry_timer" && state.kind === "backoff") {
     return publish(
-      { kind: "connecting", attempt: state.attempt, cursor },
+      {
+        kind: "connecting",
+        attempt: state.attempt,
+        cursor,
+        snapshotReady: state.snapshotReady,
+      },
       [{ kind: "openSource", cursor }],
     );
   }
   if (!isConnectEvent(event)) return { state, effects: [] };
   if (state.kind === "unauthorized") return { state, effects: [] };
   return publish(
-    { kind: "connecting", attempt: 0, cursor },
+    {
+      kind: "connecting",
+      attempt: 0,
+      cursor,
+      snapshotReady: false,
+    },
     [
       { kind: "cancelRetry" },
       { kind: "closeSource" },

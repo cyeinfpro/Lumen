@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -37,9 +38,7 @@ from lumen_core.schemas import StorageConfigUpdateIn
 
 
 ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_PATH = (
-    ROOT / "apps/api/alembic/versions/0058_storage_apply_operations.py"
-)
+MIGRATION_PATH = ROOT / "apps/api/alembic/versions/0058_storage_apply_operations.py"
 ADMIN_ID = "00000000-0000-4000-8000-000000000058"
 
 
@@ -73,15 +72,20 @@ def _patch_state_paths(
     state_dir.mkdir()
     monkeypatch.setattr(admin_storage, "STATE_DIR", state_dir)
     for attr, filename in (
-        ("STORAGE_CONF", "storage.conf"),
         ("STATUS_FILE", "status.json"),
-        ("APPLY_TRIGGER", "apply.trigger"),
         ("LAST_APPLY_FILE", "last-apply.json"),
         ("TEST_TRIGGER", "test.trigger"),
         ("TEST_CONF", "test.conf"),
         ("LAST_TEST_FILE", "last-test.json"),
     ):
         monkeypatch.setattr(admin_storage, attr, state_dir / filename)
+    monkeypatch.setattr(admin_storage, "APPLY_REQUESTS_DIR", state_dir / "requests")
+    monkeypatch.setattr(admin_storage, "APPLY_RESULTS_DIR", state_dir / "results")
+    monkeypatch.setattr(
+        admin_storage,
+        "APPLY_CLAIM_FILE",
+        state_dir / "apply.claim.json",
+    )
 
 
 @pytest_asyncio.fixture
@@ -139,6 +143,7 @@ async def test_storage_commit_failure_writes_no_files_or_rows(
     )
 
     async with factory() as session:
+
         async def fail_commit() -> None:
             raise RuntimeError("injected commit failure")
 
@@ -151,8 +156,7 @@ async def test_storage_commit_failure_writes_no_files_or_rows(
                 session,
             )
 
-    assert not (state_dir / "storage.conf").exists()
-    assert not (state_dir / "apply.trigger").exists()
+    assert not (state_dir / "requests").exists()
     assert wakeups == []
     async with factory() as session:
         assert (
@@ -218,13 +222,12 @@ async def test_second_desired_config_rolls_back_while_first_is_active(
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail["error"]["code"] == "storage_operation_pending"
     assert wakeups == [True]
-    assert not (state_dir / "storage.conf").exists()
-    assert not (state_dir / "apply.trigger").exists()
+    assert not (state_dir / "requests").exists()
 
     async with factory() as session:
         operations = (
-            await session.execute(sa.select(StorageApplyOperation))
-        ).scalars().all()
+            (await session.execute(sa.select(StorageApplyOperation))).scalars().all()
+        )
         assert len(operations) == 1
         assert operations[0].status == "pending"
         local_root = await session.scalar(
@@ -261,14 +264,19 @@ async def test_storage_crash_after_commit_replays_same_operation_once(
             session,
         )
 
-    def fail_before_trigger(_operation_id: str, _conf_text: str) -> None:
-        raise OSError("injected trigger staging failure")
+    def fail_before_request(
+        _operation_id: str,
+        _fence: int,
+        _config_sha256: str,
+        _conf_text: str,
+    ) -> None:
+        raise OSError("injected request staging failure")
 
     assert (
         await storage_apply_dispatch.run_storage_apply_reconciler_once(
             load_conf_text=admin_storage._load_storage_conf_text,
-            stage_operation=fail_before_trigger,
-            read_host_result=lambda: None,
+            stage_operation=fail_before_request,
+            read_host_result=lambda _operation_id, _fence: None,
         )
         == 0
     )
@@ -277,31 +285,50 @@ async def test_storage_crash_after_commit_replays_same_operation_once(
         assert operation is not None
         assert operation.status == "pending"
         assert operation.dispatch_attempts == 1
-        assert "injected trigger staging failure" in (operation.last_error or "")
+        assert "injected request staging failure" in (operation.last_error or "")
 
-    staged_ids: list[str] = []
+    staged_identities: list[tuple[str, int]] = []
 
-    def stage_once(operation_id: str, conf_text: str) -> None:
-        staged_ids.append(operation_id)
-        admin_storage._stage_storage_apply(operation_id, conf_text)
+    def stage_once(
+        operation_id: str,
+        fence: int,
+        config_sha256: str,
+        conf_text: str,
+    ) -> None:
+        staged_identities.append((operation_id, fence))
+        admin_storage._stage_storage_apply(
+            operation_id,
+            fence,
+            config_sha256,
+            conf_text,
+        )
 
     assert (
         await storage_apply_dispatch.run_storage_apply_reconciler_once(
             load_conf_text=admin_storage._load_storage_conf_text,
             stage_operation=stage_once,
-            read_host_result=lambda: None,
+            read_host_result=lambda _operation_id, _fence: None,
         )
         == 1
     )
-    assert staged_ids == [response.call_id]
-    assert (state_dir / "apply.trigger").read_text(encoding="ascii").strip() == (
-        response.call_id
+    assert staged_identities == [(response.call_id, 2)]
+    request_path = state_dir / "requests" / f"{response.call_id}.2.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["operation_id"] == response.call_id
+    assert request["fence"] == 2
+    assert (
+        request["config_sha256"]
+        == hashlib.sha256(request["config"].encode("utf-8")).hexdigest()
     )
 
-    (state_dir / "last-apply.json").write_text(
+    result_path = state_dir / "results" / f"{response.call_id}.2.json"
+    result_path.parent.mkdir()
+    result_path.write_text(
         json.dumps(
             {
                 "call_id": response.call_id,
+                "operation_id": response.call_id,
+                "fence": 2,
                 "status": "ok",
                 "message": "applied mode=local",
                 "started_at": 1_786_000_000,
@@ -310,8 +337,8 @@ async def test_storage_crash_after_commit_replays_same_operation_once(
         ),
         encoding="utf-8",
     )
-    read_result = lambda: admin_storage._read_json(  # noqa: E731
-        state_dir / "last-apply.json"
+    read_result = lambda operation_id, fence: admin_storage._read_json(  # noqa: E731
+        state_dir / "results" / f"{operation_id}.{fence}.json"
     )
     assert (
         await storage_apply_dispatch.run_storage_apply_reconciler_once(
@@ -329,7 +356,7 @@ async def test_storage_crash_after_commit_replays_same_operation_once(
         )
         == 0
     )
-    assert staged_ids == [response.call_id]
+    assert staged_identities == [(response.call_id, 2)]
     async with factory() as session:
         operation = await session.get(StorageApplyOperation, response.call_id)
         assert operation is not None
@@ -362,17 +389,21 @@ async def test_storage_cancel_before_trigger_replays_after_lease_expiry(
     current = datetime(2026, 8, 6, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(storage_apply_dispatch, "_now", lambda: current)
 
-    def cancel_before_trigger(_operation_id: str, _conf_text: str) -> None:
+    def cancel_before_request(
+        _operation_id: str,
+        _fence: int,
+        _config_sha256: str,
+        _conf_text: str,
+    ) -> None:
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
         await storage_apply_dispatch.dispatch_storage_apply_operation(
             response.call_id,
             load_conf_text=admin_storage._load_storage_conf_text,
-            stage_operation=cancel_before_trigger,
+            stage_operation=cancel_before_request,
         )
-    assert not (state_dir / "storage.conf").exists()
-    assert not (state_dir / "apply.trigger").exists()
+    assert not (state_dir / "requests").exists()
     async with factory() as session:
         operation = await session.get(StorageApplyOperation, response.call_id)
         assert operation is not None
@@ -385,18 +416,167 @@ async def test_storage_cancel_before_trigger_replays_after_lease_expiry(
         await storage_apply_dispatch.run_storage_apply_reconciler_once(
             load_conf_text=admin_storage._load_storage_conf_text,
             stage_operation=admin_storage._stage_storage_apply,
-            read_host_result=lambda: None,
+            read_host_result=lambda _operation_id, _fence: None,
         )
         == 1
     )
-    assert (state_dir / "apply.trigger").read_text(encoding="ascii").strip() == (
-        response.call_id
-    )
+    request_path = state_dir / "requests" / f"{response.call_id}.2.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["operation_id"] == response.call_id
+    assert request["fence"] == 2
     async with factory() as session:
         operation = await session.get(StorageApplyOperation, response.call_id)
         assert operation is not None
         assert operation.status == "dispatched"
         assert operation.dispatch_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_storage_lease_failure_waits_for_slow_request_write(
+    storage_factory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, state_dir = storage_factory
+    monkeypatch.setattr(
+        admin_storage,
+        "wake_storage_apply_reconciler",
+        lambda _request: True,
+    )
+    async with factory() as session:
+        response = await admin_storage.put_storage_endpoint(
+            _body(tmp_path / "desired"),
+            _request(),
+            SimpleNamespace(id=ADMIN_ID, email="storage-admin@example.test"),
+            session,
+        )
+
+    loop = asyncio.get_running_loop()
+    stage_started = asyncio.Event()
+    heartbeat_failed = asyncio.Event()
+    finish_stage = Event()
+
+    def slow_stage(
+        operation_id: str,
+        fence: int,
+        config_sha256: str,
+        conf_text: str,
+    ) -> None:
+        loop.call_soon_threadsafe(stage_started.set)
+        assert finish_stage.wait(timeout=5)
+        admin_storage._stage_storage_apply(
+            operation_id,
+            fence,
+            config_sha256,
+            conf_text,
+        )
+
+    async def fail_heartbeat(
+        _claim: storage_apply_dispatch.StorageDispatchClaim,
+    ) -> None:
+        await stage_started.wait()
+        heartbeat_failed.set()
+        raise RuntimeError("injected storage dispatch lease loss")
+
+    monkeypatch.setattr(
+        storage_apply_dispatch,
+        "_dispatch_heartbeat",
+        fail_heartbeat,
+    )
+    dispatch_task = asyncio.create_task(
+        storage_apply_dispatch.dispatch_storage_apply_operation(
+            response.call_id,
+            load_conf_text=admin_storage._load_storage_conf_text,
+            stage_operation=slow_stage,
+        )
+    )
+    await asyncio.wait_for(heartbeat_failed.wait(), timeout=2)
+    await asyncio.sleep(0)
+    assert not dispatch_task.done()
+    async with factory() as session:
+        operation = await session.get(StorageApplyOperation, response.call_id)
+        assert operation is not None
+        assert operation.dispatch_owner is not None
+        assert operation.dispatch_lease_until is not None
+
+    finish_stage.set()
+    with pytest.raises(
+        RuntimeError,
+        match="injected storage dispatch lease loss",
+    ):
+        await asyncio.wait_for(dispatch_task, timeout=2)
+
+    request_path = state_dir / "requests" / f"{response.call_id}.1.json"
+    assert request_path.is_file()
+    async with factory() as session:
+        operation = await session.get(StorageApplyOperation, response.call_id)
+        assert operation is not None
+        assert operation.status == "pending"
+        assert operation.dispatch_owner is None
+        assert operation.dispatch_lease_until is None
+
+
+@pytest.mark.asyncio
+async def test_storage_database_restore_uses_host_fence_as_dispatch_floor(
+    storage_factory,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, state_dir = storage_factory
+    monkeypatch.setattr(
+        admin_storage,
+        "wake_storage_apply_reconciler",
+        lambda _request: True,
+    )
+    async with factory() as session:
+        response = await admin_storage.put_storage_endpoint(
+            _body(tmp_path / "desired"),
+            _request(),
+            SimpleNamespace(id=ADMIN_ID, email="storage-admin@example.test"),
+            session,
+        )
+
+    host_operation_id = "f" * 32
+    (state_dir / "apply.claim.json").write_text(
+        json.dumps(
+            {
+                "operation_id": host_operation_id,
+                "fence": 40,
+                "claimed_at": 1_786_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    results_dir = state_dir / "results"
+    results_dir.mkdir()
+    (results_dir / f"{host_operation_id}.43.json").write_text(
+        json.dumps(
+            {
+                "operation_id": host_operation_id,
+                "fence": 43,
+                "status": "ok",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        await storage_apply_dispatch.run_storage_apply_reconciler_once(
+            load_conf_text=admin_storage._load_storage_conf_text,
+            stage_operation=admin_storage._stage_storage_apply,
+            read_host_result=lambda _operation_id, _fence: None,
+            read_host_fence=admin_storage._read_storage_host_fence,
+        )
+        == 1
+    )
+
+    request_path = state_dir / "requests" / f"{response.call_id}.44.json"
+    assert request_path.is_file()
+    async with factory() as session:
+        operation = await session.get(StorageApplyOperation, response.call_id)
+        assert operation is not None
+        assert operation.dispatch_fence == 44
+        assert operation.status == "dispatched"
 
 
 def _load_migration() -> ModuleType:
@@ -439,9 +619,7 @@ def _schema_url(url: URL, schema: str) -> URL:
 
 def _create_control_tables(engine: Engine) -> None:
     with engine.begin() as connection:
-        connection.exec_driver_sql(
-            "CREATE TABLE users (id varchar(36) PRIMARY KEY)"
-        )
+        connection.exec_driver_sql("CREATE TABLE users (id varchar(36) PRIMARY KEY)")
         connection.exec_driver_sql(
             """
             CREATE TABLE system_settings (
@@ -575,25 +753,34 @@ def test_storage_active_operation_conflict_rolls_back_postgres_transaction() -> 
                 future.result(timeout=5)
 
         with schema_engine.connect() as connection:
-            assert connection.scalar(
-                sa.text("SELECT count(*) FROM storage_apply_operations")
-            ) == 1
-            assert connection.scalar(
-                sa.text(
-                    """
+            assert (
+                connection.scalar(
+                    sa.text("SELECT count(*) FROM storage_apply_operations")
+                )
+                == 1
+            )
+            assert (
+                connection.scalar(
+                    sa.text(
+                        """
                     SELECT count(*) FROM system_settings
                     WHERE key = 'storage.local.root'
                     """
+                    )
                 )
-            ) == 0
-            assert connection.scalar(
-                sa.text(
-                    """
+                == 0
+            )
+            assert (
+                connection.scalar(
+                    sa.text(
+                        """
                     SELECT count(*) FROM audit_logs
                     WHERE event_type = 'admin.storage.update.loser'
                     """
+                    )
                 )
-            ) == 0
+                == 0
+            )
     finally:
         if schema_engine is not None:
             schema_engine.dispose()

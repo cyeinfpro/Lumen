@@ -28,8 +28,12 @@ from concurrent_index_retry import (  # noqa: E402
 )
 from lumen_core.models import Base  # noqa: E402
 from telegram_downgrade_guard import (  # noqa: E402
-    TELEGRAM_CONTROL_REVISION,
+    DESTRUCTIVE_EXPORT_REVISIONS,
+    MigrationExportSession,
+    commit_migration_export,
     guard_telegram_downgrade,
+    mark_migration_export_failed,
+    migration_export_environment,
 )
 
 config = context.config
@@ -71,6 +75,21 @@ def _configured_revision_steps(
     # run does not resolve or import the revision sequence a second time.
     migration_context._migrations_fn = cached_migration_fn
     return steps
+
+
+def _migration_command_hint(migration_context: Any) -> str:
+    migration_fn = getattr(migration_context, "_migrations_fn", None)
+    function_name = getattr(migration_fn, "__name__", "")
+    if function_name in {"upgrade", "downgrade"}:
+        return function_name
+
+    options = getattr(config, "cmd_opts", None)
+    command_spec = getattr(options, "cmd", None)
+    if isinstance(command_spec, tuple) and command_spec:
+        command_name = getattr(command_spec[0], "__name__", "")
+        if command_name in {"upgrade", "downgrade"}:
+            return command_name
+    return ""
 
 
 def _revision_plan_from_steps(
@@ -123,7 +142,23 @@ def _pending_revision_ids(
     steps = _configured_revision_steps(migration_context, current_heads)
     if steps is not None:
         return _revision_plan_from_steps(steps)
+    if len(current_heads) != 1:
+        return _migration_command_hint(migration_context), set()
     return _cli_revision_plan(current_heads[0])
+
+
+def _target_revision(migration_context: Any) -> str:
+    target = getattr(migration_context, "opts", {}).get("destination_rev")
+    if isinstance(target, str) and target:
+        return target
+    if isinstance(target, tuple):
+        revisions = sorted(str(item) for item in target if item)
+        return ",".join(revisions) if revisions else "base"
+    options = getattr(config, "cmd_opts", None)
+    configured_target = getattr(options, "revision", None)
+    if isinstance(configured_target, str) and configured_target:
+        return configured_target
+    return "unknown"
 
 
 def _prepare_concurrent_index_retry() -> None:
@@ -146,27 +181,38 @@ def _prepare_concurrent_index_retry() -> None:
     )
 
 
-def _prepare_downgrade_guards(*, online: bool) -> None:
+def _prepare_downgrade_guards(
+    *,
+    online: bool,
+) -> MigrationExportSession | None:
     migration_context = context.get_context()
     current_heads = tuple(migration_context.get_current_heads())
+    command_hint = _migration_command_hint(migration_context)
+    if command_hint == "downgrade" and len(current_heads) != 1:
+        raise RuntimeError(
+            "destructive downgrade is blocked because the database has "
+            f"{len(current_heads)} Alembic heads"
+        )
     if len(current_heads) != 1:
-        return
+        return None
     command, pending_revision_ids = _pending_revision_ids(
         migration_context,
         current_heads,
     )
     if command != "downgrade" or not pending_revision_ids:
-        return
+        return None
     if not online:
-        if TELEGRAM_CONTROL_REVISION in pending_revision_ids:
+        if pending_revision_ids & DESTRUCTIVE_EXPORT_REVISIONS:
             raise RuntimeError(
-                "Telegram destructive downgrade requires an online database "
-                "and the explicit export command"
+                "destructive downgrade requires an online database and the "
+                "explicit export command"
             )
-        return
-    guard_telegram_downgrade(
+        return None
+    return guard_telegram_downgrade(
         context.get_bind(),
         pending_revision_ids=pending_revision_ids,
+        source_revision=current_heads[0],
+        target_revision=_target_revision(migration_context),
     )
 
 
@@ -203,10 +249,36 @@ def run_migrations_online() -> None:
         # transaction instead of rolling it back when the connection closes.
         connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            _prepare_downgrade_guards(online=True)
-            _prepare_concurrent_index_retry()
-            context.run_migrations()
+        export_session: MigrationExportSession | None = None
+        try:
+            with context.begin_transaction():
+                export_session = _prepare_downgrade_guards(online=True)
+                with migration_export_environment(export_session):
+                    _prepare_concurrent_index_retry()
+                    context.run_migrations()
+        except BaseException as error:
+            if export_session is not None:
+                try:
+                    mark_migration_export_failed(export_session, error)
+                except Exception as export_error:  # noqa: BLE001
+                    error.add_note(
+                        "failed to persist migration export failure context: "
+                        f"{export_error}"
+                    )
+            raise
+        else:
+            if export_session is not None:
+                try:
+                    commit_migration_export(export_session)
+                except BaseException as error:
+                    try:
+                        mark_migration_export_failed(export_session, error)
+                    except Exception as export_error:  # noqa: BLE001
+                        error.add_note(
+                            "database downgrade committed but export status "
+                            f"could not be finalized: {export_error}"
+                        )
+                    raise
 
 
 if context.is_offline_mode():

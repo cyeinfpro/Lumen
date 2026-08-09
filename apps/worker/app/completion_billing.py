@@ -5,10 +5,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from lumen_core import billing as billing_core
 from lumen_core.models import Completion
-from lumen_core.pricing_resolver import PricingResolver
+from lumen_core.pricing import (
+    UsageTokens,
+    missing_pricing_buckets,
+    model_pricing_from_snapshot,
+)
+from lumen_core.pricing_resolver import (
+    PRICING_MODE_STRICT_BILLING,
+    PricingResolver,
+)
 
-from . import billing as worker_billing
+from .billing_parts import helpers as billing_helpers
+from .billing_parts import rate_multipliers
 
 
 logger = logging.getLogger(__name__)
@@ -26,9 +36,61 @@ def image_output_tokens_for_budget(
     if budget <= 0:
         return 0
     if rate <= 0 or multiplier <= 0:
-        return 1
+        raise billing_core.BillingError(
+            "PRICING_MISSING",
+            "image output rate or billing multiplier is unavailable",
+            503,
+        )
     denominator = rate * multiplier
     return max(1, (budget * 1000 * 10_000 + denominator - 1) // denominator)
+
+
+def mark_completion_billing_pending(
+    completion: Completion,
+    *,
+    reason: str,
+    usage_unknown: bool = False,
+) -> None:
+    billing_helpers.mark_completion_billing_pending(
+        completion,
+        reason=reason,
+        usage_unknown=usage_unknown,
+    )
+
+
+def completion_billing_pending(completion: Completion) -> bool:
+    return billing_helpers.completion_billing_pending(completion)
+
+
+async def _completion_tool_image_pricing(
+    session: Any,
+    completion: Completion,
+) -> Any:
+    upstream_request = getattr(completion, "upstream_request", None)
+    snapshot = (
+        upstream_request.get("billing_pricing_snapshot")
+        if isinstance(upstream_request, dict)
+        else None
+    )
+    if isinstance(snapshot, dict):
+        pricing = model_pricing_from_snapshot(snapshot)
+    else:
+        pricing = await PricingResolver().resolve(
+            session,
+            getattr(completion, "model", ""),
+            mode=PRICING_MODE_STRICT_BILLING,
+        )
+    missing = missing_pricing_buckets(
+        pricing,
+        UsageTokens(input_tokens=0, output_tokens=0, image_output_tokens=1),
+    )
+    if missing:
+        raise billing_core.BillingError(
+            "PRICING_MISSING",
+            "missing enabled image output pricing rule",
+            503,
+        )
+    return pricing.with_defaults()
 
 
 async def fallback_completion_tool_image_tokens(
@@ -41,10 +103,8 @@ async def fallback_completion_tool_image_tokens(
     if budget <= 0:
         return 0
     try:
-        pricing = (
-            await PricingResolver().resolve(session, getattr(completion, "model", ""))
-        ).with_defaults()
-        rate_multiplier = await worker_billing.completion_rate_multiplier_x10000(
+        pricing = await _completion_tool_image_pricing(session, completion)
+        rate_multiplier = await rate_multipliers.completion_rate_multiplier_x10000(
             session,
             completion,
         )
@@ -53,10 +113,16 @@ async def fallback_completion_tool_image_tokens(
             image_output_per_1k_micro=pricing.image_output_per_1k_micro,
             rate_multiplier_x10000=rate_multiplier,
         )
-    except Exception:  # noqa: BLE001
+    except (billing_core.BillingError, ValueError) as exc:
+        reason = getattr(exc, "code", type(exc).__name__)
+        mark_completion_billing_pending(
+            completion,
+            reason=f"tool_image_pricing:{reason}",
+        )
         logger.warning(
-            "completion tool image fallback usage estimate failed comp=%s",
+            "completion tool image pricing pending comp=%s reason=%s",
             getattr(completion, "id", None),
+            reason,
             exc_info=True,
         )
-        return 1
+        return 0

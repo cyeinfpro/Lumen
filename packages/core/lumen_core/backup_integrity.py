@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -99,7 +100,11 @@ def _sha256(value: Any, label: str) -> str:
     return value
 
 
-def _digest(path: Path, expected_size: int, label: str) -> str:
+def _digest(
+    path: Path,
+    expected_size: int,
+    label: str,
+) -> str:
     metadata = _regular_path(path, label)
     if metadata.st_size != expected_size:
         raise BackupPairInvalid(f"{label} size does not match committed marker")
@@ -119,6 +124,19 @@ def _digest(path: Path, expected_size: int, label: str) -> str:
             raise BackupPairInvalid(f"{label} changed while opening")
         for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
             digest.update(chunk)
+        finished = os.fstat(descriptor)
+        if (
+            finished.st_dev,
+            finished.st_ino,
+            finished.st_size,
+            finished.st_mtime_ns,
+        ) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        ):
+            raise BackupPairInvalid(f"{label} changed while reading")
     finally:
         os.close(descriptor)
     return digest.hexdigest()
@@ -135,8 +153,10 @@ def backup_pair_paths(backup_root: Path, timestamp: str) -> tuple[Path, Path, Pa
     )
 
 
-def validate_backup_pair(backup_root: Path, timestamp: str) -> BackupPairBinding:
-    """Return a binding only after marker identity and both payload hashes match."""
+def _inspect_backup_pair(
+    backup_root: Path,
+    timestamp: str,
+) -> BackupPairBinding:
     if not backup_root.is_absolute():
         raise BackupPairInvalid("backup root must be absolute")
     root = backup_root.resolve()
@@ -156,16 +176,21 @@ def validate_backup_pair(backup_root: Path, timestamp: str) -> BackupPairBinding
     redis_payload = marker.get("redis")
     if not isinstance(pg_payload, dict) or not isinstance(redis_payload, dict):
         raise BackupPairInvalid("backup pair marker payload is invalid")
-    if pg_payload.get("name") != pg_path.name or redis_payload.get("name") != redis_path.name:
+    if (
+        pg_payload.get("name") != pg_path.name
+        or redis_payload.get("name") != redis_path.name
+    ):
         raise BackupPairInvalid("backup pair marker paths do not match timestamp")
     pg_size = _positive_size(pg_payload.get("size"), "pg_size")
     redis_size = _positive_size(redis_payload.get("size"), "redis_size")
     pg_sha256 = _sha256(pg_payload.get("sha256"), "pg_sha256")
     redis_sha256 = _sha256(redis_payload.get("sha256"), "redis_sha256")
-    if _digest(pg_path, pg_size, "postgres backup") != pg_sha256:
-        raise BackupPairInvalid("postgres backup hash does not match marker")
-    if _digest(redis_path, redis_size, "redis backup") != redis_sha256:
-        raise BackupPairInvalid("redis backup hash does not match marker")
+    pg_metadata = _regular_path(pg_path, "postgres backup")
+    redis_metadata = _regular_path(redis_path, "redis backup")
+    if pg_metadata.st_size != pg_size:
+        raise BackupPairInvalid("postgres backup size does not match committed marker")
+    if redis_metadata.st_size != redis_size:
+        raise BackupPairInvalid("redis backup size does not match committed marker")
     return BackupPairBinding(
         timestamp=timestamp,
         operation_id=operation_id,
@@ -179,10 +204,52 @@ def validate_backup_pair(backup_root: Path, timestamp: str) -> BackupPairBinding
     )
 
 
+def validate_backup_pair_metadata(
+    backup_root: Path,
+    timestamp: str,
+) -> BackupPairBinding:
+    """Validate marker identity, file type, names, and sizes without hashing payloads."""
+    return _inspect_backup_pair(backup_root, timestamp)
+
+
+def validate_backup_pair(backup_root: Path, timestamp: str) -> BackupPairBinding:
+    """Return a binding only after marker identity and both payload hashes match."""
+    binding = _inspect_backup_pair(backup_root, timestamp)
+    if (
+        _digest(
+            binding.pg_path,
+            binding.pg_size,
+            "postgres backup",
+        )
+        != binding.pg_sha256
+    ):
+        raise BackupPairInvalid("postgres backup hash does not match marker")
+    if (
+        _digest(
+            binding.redis_path,
+            binding.redis_size,
+            "redis backup",
+        )
+        != binding.redis_sha256
+    ):
+        raise BackupPairInvalid("redis backup hash does not match marker")
+    return binding
+
+
+async def validate_backup_pair_async(
+    backup_root: Path,
+    timestamp: str,
+) -> BackupPairBinding:
+    """Run full read-only validation off the event loop."""
+    return await asyncio.to_thread(validate_backup_pair, backup_root, timestamp)
+
+
 __all__ = [
     "BackupPairBinding",
     "BackupPairInvalid",
     "TIMESTAMP_RE",
     "backup_pair_paths",
     "validate_backup_pair",
+    "validate_backup_pair_async",
+    "validate_backup_pair_metadata",
 ]

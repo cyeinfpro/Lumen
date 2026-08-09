@@ -1726,10 +1726,7 @@ async def test_redis_counter_cannot_force_early_durable_dlq(
     session = _patch_session_local(monkeypatch, [event])
 
     assert (
-        await outbox.publish_outbox(
-            {"redis": HugeCounterRedis(fail_enqueue=True)}
-        )
-        == 0
+        await outbox.publish_outbox({"redis": HugeCounterRedis(fail_enqueue=True)}) == 0
     )
     assert event.delivery_attempts == 1
     assert session.dead_letters == []
@@ -1986,7 +1983,7 @@ async def test_reconcile_requeues_stale_generation_with_string_status(monkeypatc
     assert redis.enqueued == [("run_generation", "gen-1")]
     assert generation.status == GenerationStatus.QUEUED.value
     assert isinstance(generation.status, str)
-    assert fake_session.select_skip_locked == [False, True, False, True]
+    assert fake_session.select_skip_locked == [False, True, False, True, True]
     published_outbox_id = published[0]["data"].pop("outbox_id")
     assert published[0]["data"].pop("event_id") == published_outbox_id
     assert published == [

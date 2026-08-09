@@ -1,5 +1,6 @@
 import {
   deepEqual,
+  doesNotMatch,
   equal,
   match,
   ok,
@@ -17,6 +18,10 @@ const subscriptionSource = readFileSync(
 );
 const lumenSource = readFileSync(
   new URL("./useLumenRealtime.ts", import.meta.url),
+  "utf8",
+);
+const runtimeSource = readFileSync(
+  new URL("./runtime.ts", import.meta.url),
   "utf8",
 );
 
@@ -303,10 +308,10 @@ test("same-user recovery after a fail-closed reset bypasses the recent snapshot 
     ),
     false,
   );
-  match(lumenSource, /void recoverSnapshot\(/);
+  match(lumenSource, /reason\.kind === "initial_snapshot"/);
   match(
     lumenSource,
-    /shouldSkipRecentSnapshot\(\s*recent,\s*\{[\s\S]*?identityEpoch,\s*\}\s*\)/,
+    /shouldSkipRecentSnapshot\(\s*lastSnapshot\.current,\s*\{[\s\S]*?identityEpoch,\s*\}\s*\)/,
   );
 });
 
@@ -366,14 +371,14 @@ test("SSE subscriber adapter binds scope and registers only real recovery", asyn
   );
 });
 
-test("initial snapshots are abortable and fenced by connection generation, user scope, and identity epoch", () => {
-  match(lumenSource, /initialSnapshotFlight\.current\?\.controller\.abort\(\)/);
-  match(lumenSource, /connectionGeneration:/);
-  match(lumenSource, /userScope:/);
-  match(lumenSource, /identityEpoch:/);
+test("initial snapshots are runtime-owned and fenced by connection, scope, and identity", () => {
+  doesNotMatch(lumenSource, /onOpen:\s*\(/);
+  match(runtimeSource, /snapshotRequired: this\.hasSnapshotAdapters\(\)/);
+  match(runtimeSource, /const controller = new AbortController\(\)/);
+  match(runtimeSource, /this\.recoveryAbort\?\.abort\(\)/);
   match(
     lumenSource,
     /assertSnapshotCurrent\(\s*signal,\s*context,\s*userScope,\s*userId,\s*identityEpoch,\s*\)/,
   );
-  match(lumenSource, /connectionContext\.isCurrent\(\)/);
+  match(lumenSource, /!context\.isCurrent\(\)/);
 });

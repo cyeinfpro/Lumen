@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from lumen_core import billing as billing_core
@@ -9,8 +10,21 @@ from lumen_core.model_entities import (
     Completion,
     Generation,
 )
+from lumen_core.pricing import parse_canonical_nonnegative_int
 
 from .. import runtime_settings
+
+
+COMPLETION_BILLING_STATE_KEY = "completion_billing_state"
+COMPLETION_BILLING_PENDING = "pending_reconciliation"
+COMPLETION_BILLING_PENDING_REASON_KEY = "completion_billing_pending_reason"
+COMPLETION_BILLING_PENDING_AT_KEY = "completion_billing_pending_at"
+COMPLETION_BILLING_RECONCILE_ATTEMPTS_KEY = "completion_billing_reconcile_attempts"
+COMPLETION_BILLING_RECONCILED_AT_KEY = "completion_billing_reconciled_at"
+COMPLETION_BILLING_RECONCILED_SOURCE_KEY = "completion_billing_reconciled_source"
+COMPLETION_USAGE_STATE_KEY = "completion_usage_state"
+COMPLETION_USAGE_UNKNOWN = "unknown"
+COMPLETION_USAGE_UNKNOWN_REASON_KEY = "completion_usage_unknown_reason"
 
 
 async def setting_bool(key: str, default: bool = False) -> bool:
@@ -108,18 +122,110 @@ def completion_billing_retry_count(completion: Completion) -> int:
     return billing_core.completion_billing_retry_count(completion)
 
 
-def snapshot_rate_multiplier_x10000(task: Generation | Completion) -> int | None:
+def snapshot_rate_multiplier_x10000(
+    task: Generation | Completion,
+    *,
+    strict: bool = False,
+) -> int | None:
     upstream_request = getattr(task, "upstream_request", None)
     if not isinstance(upstream_request, dict):
         return None
+    if "billing_rate_multiplier_x10000" not in upstream_request:
+        return None
     raw = upstream_request.get("billing_rate_multiplier_x10000")
-    if raw is None:
+    value = parse_canonical_nonnegative_int(raw)
+    max_value = int(billing_core.MAX_RATE_MULTIPLIER * 10_000)
+    if value is not None and value <= max_value:
+        return value
+    if strict:
+        raise billing_core.BillingError(
+            "RATE_MULTIPLIER_INVALID",
+            "billing rate multiplier snapshot is invalid",
+            503,
+        )
+    return None
+
+
+def completion_billing_pending(task: Any) -> bool:
+    upstream_request = getattr(task, "upstream_request", None)
+    return bool(
+        isinstance(upstream_request, dict)
+        and upstream_request.get(COMPLETION_BILLING_STATE_KEY)
+        == COMPLETION_BILLING_PENDING
+    )
+
+
+def completion_billing_pending_reason(task: Any) -> str | None:
+    upstream_request = getattr(task, "upstream_request", None)
+    if not isinstance(upstream_request, dict):
         return None
+    reason = upstream_request.get(COMPLETION_BILLING_PENDING_REASON_KEY)
+    return reason if isinstance(reason, str) and reason else None
+
+
+def completion_usage_unknown(task: Any) -> bool:
+    upstream_request = getattr(task, "upstream_request", None)
+    return bool(
+        isinstance(upstream_request, dict)
+        and upstream_request.get(COMPLETION_USAGE_STATE_KEY) == COMPLETION_USAGE_UNKNOWN
+    )
+
+
+def mark_completion_billing_pending(
+    task: Any,
+    *,
+    reason: str,
+    usage_unknown: bool = False,
+) -> None:
+    upstream_request = getattr(task, "upstream_request", None)
+    updated = dict(upstream_request) if isinstance(upstream_request, dict) else {}
+    updated[COMPLETION_BILLING_STATE_KEY] = COMPLETION_BILLING_PENDING
+    updated[COMPLETION_BILLING_PENDING_REASON_KEY] = str(reason)
+    updated.setdefault(
+        COMPLETION_BILLING_PENDING_AT_KEY,
+        datetime.now(timezone.utc).isoformat(),
+    )
+    if usage_unknown:
+        updated[COMPLETION_USAGE_STATE_KEY] = COMPLETION_USAGE_UNKNOWN
+        updated[COMPLETION_USAGE_UNKNOWN_REASON_KEY] = str(reason)
+    task.upstream_request = updated
+
+
+def begin_completion_billing_reconciliation(task: Any) -> None:
+    upstream_request = getattr(task, "upstream_request", None)
+    updated = dict(upstream_request) if isinstance(upstream_request, dict) else {}
     try:
-        value = int(raw)
+        attempts = max(
+            0,
+            int(updated.get(COMPLETION_BILLING_RECONCILE_ATTEMPTS_KEY) or 0),
+        )
     except (TypeError, ValueError):
-        return None
-    return value if value >= 0 else None
+        attempts = 0
+    updated[COMPLETION_BILLING_RECONCILE_ATTEMPTS_KEY] = attempts + 1
+    updated.pop(COMPLETION_BILLING_STATE_KEY, None)
+    task.upstream_request = updated
+
+
+def mark_completion_billing_reconciled(
+    task: Any,
+    *,
+    source: str,
+) -> None:
+    upstream_request = getattr(task, "upstream_request", None)
+    updated = dict(upstream_request) if isinstance(upstream_request, dict) else {}
+    for key in (
+        COMPLETION_BILLING_STATE_KEY,
+        COMPLETION_BILLING_PENDING_REASON_KEY,
+        COMPLETION_BILLING_PENDING_AT_KEY,
+        COMPLETION_USAGE_STATE_KEY,
+        COMPLETION_USAGE_UNKNOWN_REASON_KEY,
+    ):
+        updated.pop(key, None)
+    updated[COMPLETION_BILLING_RECONCILED_AT_KEY] = datetime.now(
+        timezone.utc
+    ).isoformat()
+    updated[COMPLETION_BILLING_RECONCILED_SOURCE_KEY] = str(source)
+    task.upstream_request = updated
 
 
 def completion_service_tier(completion: Completion) -> str:

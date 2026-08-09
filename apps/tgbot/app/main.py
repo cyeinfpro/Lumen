@@ -34,7 +34,7 @@ from redis import asyncio as aioredis
 
 from .api_client import ApiError, LumenApi
 from .config import settings
-from .control_consumer import run_control_listener
+from .control_consumer import new_control_generation, run_control_listener
 from .handlers import GenerationRuntime, build_root_router
 from .listener import run_listener
 from .middlewares import AccessGate
@@ -274,6 +274,41 @@ async def _run_polling_supervisor(
     return PollingTerminationClass.NORMAL_STOP
 
 
+async def _run_ready_polling(
+    *,
+    bot: Bot,
+    dispatcher: Dispatcher,
+    runtime_health: TgbotHealthReporter,
+    restart_ready: asyncio.Event,
+) -> None:
+    await bot.me()
+    polling = asyncio.create_task(
+        dispatcher.start_polling(
+            bot,
+            allowed_updates=dispatcher.resolve_used_update_types(),
+            close_bot_session=False,
+        ),
+        name="lumen-aiogram-polling",
+    )
+    try:
+        await asyncio.sleep(0)
+        if polling.done():
+            await polling
+            return
+        _set_runtime_health(
+            runtime_health,
+            TgbotRuntimeStatus.POLLING,
+            "telegram_identity_verified",
+        )
+        restart_ready.set()
+        await polling
+    finally:
+        restart_ready.clear()
+        if not polling.done():
+            polling.cancel()
+        await asyncio.gather(polling, return_exceptions=True)
+
+
 async def _runtime_config_has_replacement_token(
     api: LumenApi,
     rejected_token: str,
@@ -312,12 +347,16 @@ async def _run_control_listener(
     *,
     api: LumenApi | None = None,
     bot: Bot | None = None,
+    generation: str | None = None,
+    restart_ready: asyncio.Event | None = None,
     sleep_or_stop: Callable[[asyncio.Event, float], Awaitable[bool]] = _sleep_or_stop,
 ) -> None:
     await run_control_listener(
         stop_event,
         api=api,
         bot=bot,
+        generation=generation,
+        restart_ready=restart_ready,
         sleep_or_stop=sleep_or_stop,
     )
 
@@ -408,13 +447,19 @@ async def _pause_until_restart_or_stop(
     level: int,
     recovery_check: Callable[[], Awaitable[bool]] | None = None,
     refresh_interval_sec: float = _PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+    generation: str | None = None,
+    restart_ready: asyncio.Event | None = None,
 ) -> None:
     """Stay active until stopped, restarted, or runtime configuration recovers."""
     stop_event = asyncio.Event()
     _install_stop_signal_handlers(stop_event)
     tasks = [
         asyncio.create_task(
-            _run_control_listener(stop_event),
+            _run_control_listener(
+                stop_event,
+                generation=generation,
+                restart_ready=restart_ready,
+            ),
             name="lumen-control-paused",
         )
     ]
@@ -446,6 +491,8 @@ async def _pause_until_restart_or_stop(
 async def _amain(runtime_health: TgbotHealthReporter) -> None:
     _setup_logging()
     logger = logging.getLogger("lumen-tgbot")
+    process_generation = new_control_generation()
+    restart_ready = asyncio.Event()
 
     if not settings.telegram_bot_shared_secret.strip():
         _set_runtime_health(
@@ -457,6 +504,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
             logger,
             "configuration error: TELEGRAM_BOT_SHARED_SECRET is empty",
             level=logging.ERROR,
+            generation=process_generation,
+            restart_ready=restart_ready,
         )
         return
     async with AsyncExitStack() as stack:
@@ -488,6 +537,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
                     "configuration error: TELEGRAM_BOT_SHARED_SECRET was "
                     "rejected by lumen-api",
                     level=logging.ERROR,
+                    generation=process_generation,
+                    restart_ready=restart_ready,
                 )
                 return
             logger.warning(
@@ -512,6 +563,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
                 "telegram.bot_enabled=0 in runtime configuration",
                 level=logging.INFO,
                 recovery_check=lambda: _runtime_config_is_runnable(api),
+                generation=process_generation,
+                restart_ready=restart_ready,
             )
             return
         if not bot_token:
@@ -526,6 +579,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
                 "TELEGRAM_BOT_TOKEN",
                 level=logging.ERROR,
                 recovery_check=lambda: _runtime_config_is_runnable(api),
+                generation=process_generation,
+                restart_ready=restart_ready,
             )
             return
 
@@ -573,6 +628,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
                     api,
                     bot_token,
                 ),
+                generation=process_generation,
+                restart_ready=restart_ready,
             )
             return
         stack.push_async_callback(bot.session.close)
@@ -628,7 +685,13 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
         )
         stack.push_async_callback(_cancel_task, listener_task)
         control_task = asyncio.create_task(
-            _run_control_listener(stop_event, api=api, bot=bot),
+            _run_control_listener(
+                stop_event,
+                api=api,
+                bot=bot,
+                generation=process_generation,
+                restart_ready=restart_ready,
+            ),
             name="lumen-control",
         )
         stack.push_async_callback(_cancel_task, control_task)
@@ -638,16 +701,11 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
         logger.info("starting polling; api=%s", settings.lumen_api_base)
 
         async def start_polling() -> None:
-            await bot.me()
-            _set_runtime_health(
-                runtime_health,
-                TgbotRuntimeStatus.POLLING,
-                "telegram_identity_verified",
-            )
-            await dp.start_polling(
-                bot,
-                allowed_updates=dp.resolve_used_update_types(),
-                close_bot_session=False,
+            await _run_ready_polling(
+                bot=bot,
+                dispatcher=dp,
+                runtime_health=runtime_health,
+                restart_ready=restart_ready,
             )
 
         async def pause_invalid_configuration(error: BaseException) -> None:
@@ -662,6 +720,8 @@ async def _amain(runtime_health: TgbotHealthReporter) -> None:
                     api,
                     bot_token,
                 ),
+                generation=process_generation,
+                restart_ready=restart_ready,
             )
 
         await _run_polling_supervisor(

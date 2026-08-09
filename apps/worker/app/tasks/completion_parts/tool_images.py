@@ -11,6 +11,7 @@ from typing import Any, NotRequired, TypedDict, Unpack
 
 from PIL import Image as PILImage
 
+from lumen_core.billing_values import BillingError
 from lumen_core.context_window import count_tokens
 from lumen_core.pricing import UsageTokens
 from lumen_core.upstream_billing import decide_dispatch_evidence_billing
@@ -304,6 +305,70 @@ class ToolImageUsageHooks:
     fallback_image_tokens: Callable[..., Awaitable[int]]
 
 
+@dataclass(frozen=True)
+class _UnknownTokenEstimate:
+    code: str
+    message: str
+
+
+TokenEstimate = int | _UnknownTokenEstimate
+
+
+def _unknown_token_reason(estimate: TokenEstimate) -> str | None:
+    if isinstance(estimate, _UnknownTokenEstimate):
+        return f"{estimate.code}:{estimate.message}"
+    return None
+
+
+def _require_known_token_estimate(estimate: TokenEstimate) -> int:
+    if isinstance(estimate, _UnknownTokenEstimate):
+        status_code = 422 if estimate.code == "USAGE_SERIALIZATION_INVALID" else 503
+        raise BillingError(estimate.code, estimate.message, status_code)
+    return max(0, int(estimate))
+
+
+def _canonical_usage_json(value: Any) -> str | _UnknownTokenEstimate:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (OverflowError, TypeError, ValueError) as exc:
+        return _UnknownTokenEstimate(
+            "USAGE_SERIALIZATION_INVALID",
+            f"canonical usage serialization failed: {exc}",
+        )
+
+
+def _count_usage_tokens(text: str) -> TokenEstimate:
+    try:
+        value = count_tokens(text)
+    except Exception as exc:  # noqa: BLE001
+        return _UnknownTokenEstimate(
+            "TOKENIZER_UNAVAILABLE",
+            f"usage tokenizer failed: {type(exc).__name__}",
+        )
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return _UnknownTokenEstimate(
+            "TOKENIZER_INVALID_RESULT",
+            "usage tokenizer returned a noncanonical token count",
+        )
+    return value
+
+
+def _estimate_serialized_usage_tokens(value: Any) -> TokenEstimate:
+    serialized = _canonical_usage_json(value)
+    if isinstance(serialized, _UnknownTokenEstimate):
+        return serialized
+    estimate = _count_usage_tokens(serialized)
+    if isinstance(estimate, _UnknownTokenEstimate):
+        return estimate
+    return max(1, estimate)
+
+
 async def _record_completion_tool_image_usage(
     *,
     session: Any,
@@ -371,20 +436,23 @@ class _CompletionUsageAccumulator:
     _round_input_fallback_tokens: int = 0
     _round_tool_output_tokens_start: int = 0
     _round_dispatched: bool = False
+    _usage_unknown_reason: str | None = None
 
     def start_round(
         self,
         *,
-        input_fallback_tokens: int,
-        tool_output_tokens: int = 0,
+        input_fallback_tokens: TokenEstimate,
+        tool_output_tokens: TokenEstimate = 0,
     ) -> None:
+        input_tokens = _require_known_token_estimate(input_fallback_tokens)
+        output_tokens = _require_known_token_estimate(tool_output_tokens)
         self._round_active = True
         self._round_input_reported = False
         self._round_output_reported = False
         self._round_reasoning_reported = False
         self._round_reasoning_usage_tokens = 0
-        self._round_input_fallback_tokens = max(0, int(input_fallback_tokens or 0))
-        self._round_tool_output_tokens_start = max(0, int(tool_output_tokens or 0))
+        self._round_input_fallback_tokens = input_tokens
+        self._round_tool_output_tokens_start = output_tokens
         self._round_dispatched = False
 
     def mark_round_dispatched(self) -> None:
@@ -426,7 +494,7 @@ class _CompletionUsageAccumulator:
         *,
         output_text: str = "",
         reasoning_text: str = "",
-        tool_output_tokens: int = 0,
+        tool_output_tokens: TokenEstimate = 0,
     ) -> None:
         if not self._round_active:
             return
@@ -434,15 +502,29 @@ class _CompletionUsageAccumulator:
             self.tokens_in += self._round_input_fallback_tokens
         reasoning_fallback = 0
         if not self._round_reasoning_reported:
-            reasoning_fallback = _estimate_completion_text_tokens(reasoning_text)
-            self.reasoning_tokens += reasoning_fallback
+            reasoning_estimate = _estimate_completion_text_tokens(reasoning_text)
+            reasoning_unknown = _unknown_token_reason(reasoning_estimate)
+            if reasoning_unknown is not None:
+                self._usage_unknown_reason = reasoning_unknown
+            else:
+                reasoning_fallback = int(reasoning_estimate)
+                self.reasoning_tokens += reasoning_fallback
         if not self._round_output_reported:
-            self.tokens_out += _estimate_completion_text_tokens(output_text)
-            self.tokens_out += max(
-                0,
-                int(tool_output_tokens or 0) - self._round_tool_output_tokens_start,
-            )
-            self.tokens_out += self._round_reasoning_usage_tokens + reasoning_fallback
+            output_estimate = _estimate_completion_text_tokens(output_text)
+            output_unknown = _unknown_token_reason(output_estimate)
+            tool_output_unknown = _unknown_token_reason(tool_output_tokens)
+            unknown_reason = output_unknown or tool_output_unknown
+            if unknown_reason is not None:
+                self._usage_unknown_reason = unknown_reason
+            else:
+                self.tokens_out += int(output_estimate)
+                self.tokens_out += max(
+                    0,
+                    int(tool_output_tokens) - self._round_tool_output_tokens_start,
+                )
+                self.tokens_out += (
+                    self._round_reasoning_usage_tokens + reasoning_fallback
+                )
         self._round_active = False
         self._round_input_reported = False
         self._round_output_reported = False
@@ -485,13 +567,19 @@ class _CompletionUsageAccumulator:
     def apply_to(self, completion: Any) -> None:
         for name, value in self.model_values().items():
             setattr(completion, name, value)
+        if self._usage_unknown_reason is not None:
+            completion_billing.mark_completion_billing_pending(
+                completion,
+                reason=self._usage_unknown_reason,
+                usage_unknown=True,
+            )
 
 
 def _estimate_completion_request_input_tokens(
     input_list: list[dict[str, Any]],
     *,
     instructions: str | None = None,
-) -> int:
+) -> TokenEstimate:
     if not input_list and instructions is None:
         return 0
     request_input: Any = input_list
@@ -500,23 +588,24 @@ def _estimate_completion_request_input_tokens(
             "input": input_list,
             "instructions": instructions,
         }
-    try:
-        return max(1, count_tokens(json.dumps(request_input, ensure_ascii=False)))
-    except Exception:  # noqa: BLE001
-        return 1
+    return _estimate_serialized_usage_tokens(request_input)
 
 
-def _estimate_completion_text_tokens(text: str) -> int:
-    return max(1, count_tokens(text)) if text else 0
+def _estimate_completion_text_tokens(text: str) -> TokenEstimate:
+    if not text:
+        return 0
+    estimate = _count_usage_tokens(text)
+    if isinstance(estimate, _UnknownTokenEstimate):
+        return estimate
+    return max(1, estimate)
 
 
-def _estimate_completion_tool_output_tokens(tool_calls: list[dict[str, Any]]) -> int:
+def _estimate_completion_tool_output_tokens(
+    tool_calls: list[dict[str, Any]],
+) -> TokenEstimate:
     if not tool_calls:
         return 0
-    try:
-        return max(1, count_tokens(json.dumps(tool_calls, ensure_ascii=False)))
-    except Exception:  # noqa: BLE001
-        return 1
+    return _estimate_serialized_usage_tokens(tool_calls)
 
 
 def _completion_usage_presence(
@@ -567,11 +656,15 @@ def _fallback_completion_usage_tokens(
     next_in = tokens_in
     next_out = tokens_out
     if next_out <= 0 and output_text:
-        next_out = _estimate_completion_text_tokens(output_text)
+        next_out = _require_known_token_estimate(
+            _estimate_completion_text_tokens(output_text)
+        )
     if next_in <= 0:
-        next_in = _estimate_completion_request_input_tokens(
-            input_list,
-            instructions=instructions,
+        next_in = _require_known_token_estimate(
+            _estimate_completion_request_input_tokens(
+                input_list,
+                instructions=instructions,
+            )
         )
     return next_in, next_out
 
@@ -628,6 +721,8 @@ async def _settle_zero_usage_completion(
     *,
     reason: str,
 ) -> None:
+    if completion_billing.completion_billing_pending(completion):
+        return
     decision = decide_dispatch_evidence_billing(
         completion,
         actual_cost_known=False,
@@ -708,17 +803,38 @@ async def _settle_cancelled_completion_billing(
         return
 
     if request.input_list is not None and not request.usage_is_finalized:
-        tokens_in, tokens_out = _fallback_completion_usage_tokens(
-            request.input_list,
-            request.accumulated_text,
-            instructions=request.instructions,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-        )
+        try:
+            tokens_in, tokens_out = _fallback_completion_usage_tokens(
+                request.input_list,
+                request.accumulated_text,
+                instructions=request.instructions,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            )
+        except BillingError as exc:
+            if exc.code not in {
+                "TOKENIZER_INVALID_RESULT",
+                "TOKENIZER_UNAVAILABLE",
+                "USAGE_SERIALIZATION_INVALID",
+            }:
+                raise
+            completion_billing.mark_completion_billing_pending(
+                completion,
+                reason=f"{exc.code}:{exc.message}",
+                usage_unknown=True,
+            )
     elif (
         request.accumulated_text and tokens_out <= 0 and not request.usage_is_finalized
     ):
-        tokens_out = max(1, count_tokens(request.accumulated_text))
+        output_estimate = _estimate_completion_text_tokens(request.accumulated_text)
+        if isinstance(output_estimate, _UnknownTokenEstimate):
+            completion_billing.mark_completion_billing_pending(
+                completion,
+                reason=f"{output_estimate.code}:{output_estimate.message}",
+                usage_unknown=True,
+            )
+        else:
+            tokens_out = output_estimate
     if (
         request.tool_images
         and image_output_tokens <= 0
@@ -741,6 +857,8 @@ async def _settle_cancelled_completion_billing(
     completion.cache_creation_1h_tokens = cache_creation_1h_tokens
     completion.reasoning_tokens = reasoning_tokens
     completion.image_output_tokens = image_output_tokens
+    if completion_billing.completion_billing_pending(completion):
+        return
     if any(
         value > 0
         for value in (

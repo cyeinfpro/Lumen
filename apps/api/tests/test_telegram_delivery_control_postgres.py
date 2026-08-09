@@ -27,12 +27,20 @@ from app.services.telegram_delivery import (
 )
 from app.services.telegram_quarantine import (
     QuarantineConflict,
+    claim_control_effect,
+    commit_restart_intent,
     finish_control_command,
+    finish_control_effect,
     persist_quarantine,
+    prepare_redrive_control_effect,
     queue_quarantine_redrive,
+    reconcile_redrive_control_effect,
+    renew_control_effect,
 )
 from lumen_core.models import AuditLog
 from lumen_core.model_entities.control_operations import (
+    TELEGRAM_CONTROL_EFFECT_RECEIPT_KEY,
+    TELEGRAM_CONTROL_RESTART_INTENT_KEY,
     TelegramControlCommand,
     TelegramDeliveryAttempt,
     TelegramDeliveryQuarantine,
@@ -130,9 +138,7 @@ async def _postgres_fixture():
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
-            await connection.execute(
-                text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
-            )
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin_engine.dispose()
 
 
@@ -348,6 +354,9 @@ async def test_control_active_slot_ack_and_command_type_are_durable() -> None:
             await session.rollback()
 
         async with factory() as session:
+            row = await session.get(TelegramControlCommand, "command-a")
+            assert row is not None
+            row.effect_status = "succeeded"
             accepted = await finish_control_command(
                 session,
                 command_id="command-a",
@@ -417,6 +426,12 @@ async def test_quarantine_is_idempotent_redrivable_and_operator_visible() -> Non
             first_command_id = command.id
 
         async with factory() as session:
+            effect = await session.get(
+                TelegramControlCommand,
+                first_command_id,
+            )
+            assert effect is not None
+            effect.effect_status = "failed"
             failed = await finish_control_command(
                 session,
                 command_id=first_command_id,
@@ -441,6 +456,12 @@ async def test_quarantine_is_idempotent_redrivable_and_operator_visible() -> Non
             second_command_id = command.id
 
         async with factory() as session:
+            effect = await session.get(
+                TelegramControlCommand,
+                second_command_id,
+            )
+            assert effect is not None
+            effect.effect_status = "succeeded"
             accepted = await finish_control_command(
                 session,
                 command_id=second_command_id,
@@ -454,6 +475,336 @@ async def test_quarantine_is_idempotent_redrivable_and_operator_visible() -> Non
             assert row.status == "resolved"
             assert row.resolved_at is not None
             assert row.redrive_count == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_intent_is_completed_only_by_a_new_generation() -> None:
+    async for engine, factory in _postgres_fixture():
+        await _seed_delivery_target(engine)
+        async with factory() as session:
+            session.add(
+                TelegramControlCommand(
+                    id="restart-intent",
+                    target="tgbot",
+                    command="restart",
+                    requested_by="user-1",
+                    payload={},
+                    status="published",
+                    active_slot=1,
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            old_claim = await claim_control_effect(
+                session,
+                command_id="restart-intent",
+                expected_command="restart",
+                owner="owner-old",
+                lease_seconds=6,
+            )
+            assert old_claim.acquired is True
+            intent = await commit_restart_intent(
+                session,
+                command_id="restart-intent",
+                owner="owner-old",
+                fence=old_claim.fence,
+                generation="generation-old",
+            )
+            await session.commit()
+            assert intent.action == "stop_current_generation"
+
+        async with factory() as session:
+            row = await session.get(TelegramControlCommand, "restart-intent")
+            assert row is not None
+            assert row.effect_status == "running"
+            assert row.effect_owner is None
+            assert row.effect_lease_until is None
+            restart_intent = row.payload[TELEGRAM_CONTROL_RESTART_INTENT_KEY]
+            assert restart_intent["state"] == "stop_intent_committed"
+            assert restart_intent["requested_generation"] == "generation-old"
+
+            new_claim = await claim_control_effect(
+                session,
+                command_id="restart-intent",
+                expected_command="restart",
+                owner="owner-new",
+                lease_seconds=6,
+            )
+            await session.commit()
+            assert new_claim.acquired is True
+
+        async with factory() as session:
+            with pytest.raises(
+                QuarantineConflict,
+                match="new process generation",
+            ):
+                await finish_control_effect(
+                    session,
+                    command_id="restart-intent",
+                    expected_command="restart",
+                    owner="owner-new",
+                    fence=new_claim.fence,
+                    status="succeeded",
+                    generation="generation-old",
+                )
+            await session.rollback()
+
+        async with factory() as session:
+            status = await finish_control_effect(
+                session,
+                command_id="restart-intent",
+                expected_command="restart",
+                owner="owner-new",
+                fence=new_claim.fence,
+                status="succeeded",
+                generation="generation-new",
+            )
+            accepted = await finish_control_command(
+                session,
+                command_id="restart-intent",
+                expected_command="restart",
+                status="accepted",
+            )
+            await session.commit()
+            assert status == "succeeded"
+            assert accepted.status == "accepted"
+            row = await session.get(TelegramControlCommand, "restart-intent")
+            assert row is not None
+            restart_intent = row.payload[TELEGRAM_CONTROL_RESTART_INTENT_KEY]
+            assert restart_intent["state"] == "new_generation_ready"
+            assert restart_intent["completed_by_generation"] == "generation-new"
+
+
+@pytest.mark.asyncio
+async def test_redrive_unknown_stays_nonterminal_until_retry_reconciliation() -> None:
+    async for engine, factory in _postgres_fixture():
+        await _seed_delivery_target(engine)
+        async with factory() as session:
+            quarantine = await persist_quarantine(
+                session,
+                source_stream="events:user:user-1",
+                source_id="redrive-source",
+                stream_user_id="user-1",
+                event="generation.succeeded",
+                generation_id="generation-1",
+                payload_raw='{"event":"generation.succeeded","data":{}}',
+                reason="delivery failed",
+                attempts=1,
+            )
+            command = await queue_quarantine_redrive(
+                session,
+                quarantine_id=quarantine.id,
+                requested_by="user-1",
+            )
+            await session.commit()
+            command_id = command.id
+            quarantine_id = quarantine.id
+
+        async with factory() as session:
+            first_claim = await claim_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-a",
+                lease_seconds=6,
+            )
+            renewal = await renew_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-a",
+                fence=first_claim.fence,
+                lease_seconds=6,
+            )
+            preparation = await prepare_redrive_control_effect(
+                session,
+                command_id=command_id,
+                owner="owner-a",
+                fence=first_claim.fence,
+            )
+            await session.commit()
+            assert renewal.renewed is True
+            assert preparation.action == "execute"
+
+        async with factory() as session:
+            row = await session.get(TelegramControlCommand, command_id)
+            assert row is not None
+            row.effect_lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+            await session.commit()
+
+        async with factory() as session:
+            with pytest.raises(QuarantineConflict, match="lease or fence"):
+                await renew_control_effect(
+                    session,
+                    command_id=command_id,
+                    expected_command="redrive_quarantine",
+                    owner="owner-a",
+                    fence=first_claim.fence,
+                    lease_seconds=6,
+                )
+            await session.rollback()
+
+        async with factory() as session:
+            second_claim = await claim_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-b",
+                lease_seconds=6,
+            )
+            preparation = await prepare_redrive_control_effect(
+                session,
+                command_id=command_id,
+                owner="owner-b",
+                fence=second_claim.fence,
+            )
+            assert preparation.action == "outcome_unknown"
+            await session.commit()
+
+        async with factory() as session:
+            row = await session.get(TelegramControlCommand, command_id)
+            assert row is not None
+            assert row.status in {"pending", "published"}
+            assert row.effect_status == "running"
+            receipt = row.payload[TELEGRAM_CONTROL_EFFECT_RECEIPT_KEY]
+            assert receipt["state"] == "outcome_unknown"
+
+            retriable = await reconcile_redrive_control_effect(
+                session,
+                command_id=command_id,
+                resolution="retry",
+                note="Telegram confirmed no message was accepted",
+            )
+            await session.commit()
+            assert retriable.command_status in {"pending", "published"}
+            assert retriable.effect_status == "pending"
+
+        async with factory() as session:
+            retry_claim = await claim_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-c",
+                lease_seconds=6,
+            )
+            retry_preparation = await prepare_redrive_control_effect(
+                session,
+                command_id=command_id,
+                owner="owner-c",
+                fence=retry_claim.fence,
+            )
+            assert retry_preparation.action == "execute"
+            status = await finish_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-c",
+                fence=retry_claim.fence,
+                status="succeeded",
+            )
+            accepted = await finish_control_command(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                status="accepted",
+            )
+            await session.commit()
+            assert status == "succeeded"
+            assert accepted.status == "accepted"
+
+        async with factory() as session:
+            row = await session.get(TelegramControlCommand, command_id)
+            quarantine = await session.get(
+                TelegramDeliveryQuarantine,
+                quarantine_id,
+            )
+            assert row is not None
+            assert quarantine is not None
+            receipt = row.payload[TELEGRAM_CONTROL_EFFECT_RECEIPT_KEY]
+            assert receipt["state"] == "succeeded"
+            assert receipt["attempt"] == 2
+            assert quarantine.status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_redrive_unknown_manual_success_reconciliation_is_idempotent() -> None:
+    async for engine, factory in _postgres_fixture():
+        await _seed_delivery_target(engine)
+        async with factory() as session:
+            quarantine = await persist_quarantine(
+                session,
+                source_stream="events:user:user-1",
+                source_id="manual-success-source",
+                stream_user_id="user-1",
+                event="generation.succeeded",
+                generation_id="generation-1",
+                payload_raw='{"event":"generation.succeeded","data":{}}',
+                reason="delivery failed",
+                attempts=1,
+            )
+            command = await queue_quarantine_redrive(
+                session,
+                quarantine_id=quarantine.id,
+                requested_by="user-1",
+            )
+            await session.commit()
+            command_id = command.id
+            quarantine_id = quarantine.id
+
+        async with factory() as session:
+            claim = await claim_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-a",
+                lease_seconds=6,
+            )
+            await prepare_redrive_control_effect(
+                session,
+                command_id=command_id,
+                owner="owner-a",
+                fence=claim.fence,
+            )
+            await finish_control_effect(
+                session,
+                command_id=command_id,
+                expected_command="redrive_quarantine",
+                owner="owner-a",
+                fence=claim.fence,
+                status="outcome_unknown",
+                error="connection closed after Telegram request",
+            )
+            await session.commit()
+
+        async with factory() as session:
+            first = await reconcile_redrive_control_effect(
+                session,
+                command_id=command_id,
+                resolution="succeeded",
+                note="operator verified Telegram message id 123",
+            )
+            second = await reconcile_redrive_control_effect(
+                session,
+                command_id=command_id,
+                resolution="succeeded",
+                note="duplicate reconciliation request",
+            )
+            await session.commit()
+            assert first.command_status == "accepted"
+            assert second.command_status == "accepted"
+
+        async with factory() as session:
+            row = await session.get(TelegramControlCommand, command_id)
+            quarantine = await session.get(
+                TelegramDeliveryQuarantine,
+                quarantine_id,
+            )
+            assert row is not None
+            assert quarantine is not None
+            assert row.status == "accepted"
+            assert row.effect_status == "succeeded"
+            assert quarantine.status == "resolved"
 
 
 def test_telegram_control_migration_round_trips_on_postgres() -> None:
