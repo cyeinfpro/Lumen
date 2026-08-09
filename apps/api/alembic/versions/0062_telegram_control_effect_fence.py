@@ -8,17 +8,67 @@ Create Date: 2026-08-07
 from __future__ import annotations
 
 from collections.abc import Sequence
+import json
+import os
+from pathlib import Path
 
 from alembic import op
 import sqlalchemy as sa
-
-from telegram_downgrade_guard import require_prepared_downgrade_export
 
 
 revision: str = "0062_tg_control_effect_fence"
 down_revision: str | None = "0061_video_jsonb_types"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+def _export_before_drop(bind: sa.Connection) -> None:
+    target_raw = os.environ.get("LUMEN_MIGRATION_EXPORT_PATH", "").strip()
+    if not target_raw:
+        raise RuntimeError(
+            "destructive Telegram effect downgrade requires "
+            "LUMEN_MIGRATION_EXPORT_PATH"
+        )
+    target = Path(target_raw)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    rows = bind.execute(
+        sa.text("SELECT * FROM telegram_control_commands")
+    ).mappings().all()
+    payload: dict[str, object] = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"refusing to merge into invalid migration export: {target}"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise RuntimeError(
+                f"refusing to merge into non-object migration export: {target}"
+            )
+        payload.update(existing)
+    payload["telegram_control_commands_effect_fence"] = [
+        dict(row) for row in rows
+    ]
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(
+            payload,
+            default=str,
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with temporary.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+    directory_fd = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def upgrade() -> None:
@@ -90,24 +140,12 @@ def downgrade() -> None:
     active = bind.execute(
         sa.text(
             "SELECT count(*) FROM telegram_control_commands "
-            "WHERE status IN ('pending','published') "
-            "AND effect_status IN ('pending','running')"
+            "WHERE effect_status IN ('pending','running')"
         )
     ).scalar_one()
     if active:
         raise RuntimeError("cannot downgrade with active Telegram control effects")
-    invalid_terminal = bind.execute(
-        sa.text(
-            "SELECT count(*) FROM telegram_control_commands "
-            "WHERE status IN ('accepted','failed') "
-            "AND effect_status IN ('pending','running')"
-        )
-    ).scalar_one()
-    if invalid_terminal:
-        raise RuntimeError(
-            "cannot downgrade with non-terminal effects on terminal Telegram commands"
-        )
-    require_prepared_downgrade_export(revision)
+    _export_before_drop(bind)
     op.drop_index(
         "ix_tg_control_effect_due",
         table_name="telegram_control_commands",
