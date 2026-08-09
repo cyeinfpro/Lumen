@@ -149,6 +149,16 @@ def test_docker_release_publishes_verified_release_manifest() -> None:
     assert "populate alembic heads" not in workflow.lower()
 
 
+def test_docker_release_quality_gate_uses_resolved_pgvector_image() -> None:
+    workflow = _load_workflow()
+    quality_gate = workflow["jobs"]["quality-gate"]
+
+    assert "resolve-runtime-images" in quality_gate["needs"]
+    assert quality_gate["services"]["postgres"]["image"] == (
+        "${{ needs.resolve-runtime-images.outputs.postgres_ref }}"
+    )
+
+
 def test_docker_release_prepares_storage_state_bind_before_starting_apps() -> None:
     workflow = _load_workflow()
     quality_gate = workflow["jobs"]["quality-gate"]
