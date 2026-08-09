@@ -15,12 +15,24 @@ from .model_entities import PricingRule
 from .pricing import (
     CostBreakdown,
     ModelPricing,
+    PRICING_SOURCE_DB,
+    PRICING_SOURCE_PROCESS,
+    PRICING_SOURCE_REDIS,
     UsageTokens,
     compute_breakdown,
     missing_pricing_buckets,
     model_pricing_from_snapshot,
 )
-from .pricing_resolver import PricingResolver
+from .pricing_resolver import PRICING_MODE_STRICT_BILLING, PricingResolver
+
+
+_STRICT_BILLING_SOURCES = frozenset(
+    {
+        PRICING_SOURCE_DB,
+        PRICING_SOURCE_PROCESS,
+        PRICING_SOURCE_REDIS,
+    }
+)
 
 
 async def pricing_price_micro(
@@ -122,13 +134,18 @@ async def estimate_completion_breakdown(
     channel: str | None = None,
     resolver: PricingResolver | None = None,
 ) -> CostBreakdown:
-    pricing = await (resolver or PricingResolver()).resolve(db, model, channel=channel)
+    pricing = await (resolver or PricingResolver()).resolve(
+        db,
+        model,
+        channel=channel,
+        mode=PRICING_MODE_STRICT_BILLING,
+    )
     missing_buckets = missing_pricing_buckets(
         pricing,
         tokens,
         service_tier=service_tier,
     )
-    if pricing.pricing_source == "missing" or missing_buckets:
+    if pricing.pricing_source not in _STRICT_BILLING_SOURCES or missing_buckets:
         detail = (
             f"; missing rates for {', '.join(missing_buckets)}"
             if missing_buckets
@@ -165,6 +182,7 @@ async def completion_pricing_snapshot(
         db,
         model,
         channel=channel,
+        mode=PRICING_MODE_STRICT_BILLING,
     )
     probe_usage = UsageTokens(input_tokens=1, output_tokens=1)
     missing_buckets = missing_pricing_buckets(
@@ -172,7 +190,7 @@ async def completion_pricing_snapshot(
         probe_usage,
         service_tier=service_tier,
     )
-    if pricing.pricing_source == "missing" or missing_buckets:
+    if pricing.pricing_source not in _STRICT_BILLING_SOURCES or missing_buckets:
         detail = (
             f"; missing rates for {', '.join(missing_buckets)}"
             if missing_buckets

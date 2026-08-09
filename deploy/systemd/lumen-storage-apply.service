@@ -7,11 +7,8 @@ Wants=network-online.target
 Type=oneshot
 Environment=LUMEN_STORAGE_TARGET=/opt/lumendata
 ExecStart=/usr/local/sbin/lumen-storage-mount apply
-# 1) Clean up the trigger only after a matching terminal result exists. This
-#    includes explicit host failures; a crash without a result retains the
-#    trigger so the API reconciler can replay the same operation id.
-# 2) Restart every watcher whose inotify handle points inside the swapped
+# Restart every watcher whose inotify handle points inside the swapped
 #    backup mount. A mount replacement can leave path units active but attached
 #    to the old inode, so update/warm/backup/restore must all be re-armed.
-ExecStopPost=/bin/sh -c 'if /usr/local/sbin/lumen-storage-mount apply-result-terminal; then rm -f /var/lib/lumen-storage/apply.trigger; else echo "lumen-storage-apply: trigger retained without terminal result (service result=$SERVICE_RESULT)" >&2; fi; for unit in lumen-update.path lumen-update-warm.path lumen-backup.path lumen-restore.path; do if ! systemctl try-restart "$$unit"; then echo "lumen-storage-apply: failed to restart $$unit" >&2; fi; done; exit 0'
+ExecStopPost=/bin/sh -c 'for unit in lumen-update.path lumen-update-warm.path lumen-backup.path lumen-restore.path; do if ! systemctl try-restart "$$unit"; then echo "lumen-storage-apply: failed to restart $$unit" >&2; fi; done; exit 0'
 TimeoutStartSec=600

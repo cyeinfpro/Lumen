@@ -12,12 +12,18 @@ from types import SimpleNamespace
 import pytest
 
 from app.routes import admin_backups
+from lumen_core import backup_integrity
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _write_committed_pair(backup_root: Path, timestamp: str) -> None:
+def _write_committed_pair(
+    backup_root: Path,
+    timestamp: str,
+    *,
+    operation_id: str | None = None,
+) -> None:
     pg_path = backup_root / "pg" / f"{timestamp}.pg.dump.gz"
     redis_path = backup_root / "redis" / f"{timestamp}.redis.tgz"
     pg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,7 +34,7 @@ def _write_committed_pair(backup_root: Path, timestamp: str) -> None:
         redis_path.write_bytes(b"redis")
     marker = {
         "schema": 1,
-        "operation_id": f"backup-{timestamp}",
+        "operation_id": operation_id or f"backup-{timestamp}",
         "timestamp": timestamp,
         "pg": {
             "name": pg_path.name,
@@ -153,6 +159,32 @@ def test_try_write_pid_marker_refuses_live_update_marker(tmp_path: Path) -> None
     assert not backup_marker.exists()
 
 
+def test_try_write_pid_marker_retries_short_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / ".backup.running"
+    started_at = datetime(2026, 8, 9, tzinfo=timezone.utc)
+    real_write = admin_backups.os.write
+    writes: list[int] = []
+
+    def short_write(descriptor: int, payload: object) -> int:
+        view = memoryview(payload)
+        writes.append(len(view))
+        return real_write(descriptor, view[: max(1, len(view) // 2)])
+
+    monkeypatch.setattr(admin_backups.os, "write", short_write)
+
+    assert admin_backups._try_write_pid_marker(
+        marker,
+        12345,
+        started_at,
+        operation_id="backup-short-write",
+    )
+    assert len(writes) > 1
+    assert "operation_id=backup-short-write\n" in marker.read_text(encoding="utf-8")
+
+
 def test_open_private_append_tolerates_fchmod_eperm_for_non_owner_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -265,30 +297,59 @@ async def test_backup_now_unlinks_marker_before_releasing_lock(
     assert release_marker_states == [False]
 
 
-def test_timestamp_from_backup_stdout_accepts_json_and_legacy_lines() -> None:
-    started_at = datetime(2026, 5, 19, tzinfo=timezone.utc)
+def test_timestamp_from_backup_stdout_requires_current_operation_and_time() -> None:
+    started_at = datetime(2026, 5, 19, 1, 0, 0, 500000, tzinfo=timezone.utc)
+    operation_id = "backup-current"
 
     assert (
         admin_backups._timestamp_from_backup_stdout(
-            "[backup 2026-05-19T00:00:00Z] done\n"
-            '{"timestamp":"20260519-010203","pg_size":1,"redis_size":2}\n',
+            '{"operation_id":"backup-old","timestamp":"20260519-030405"}\n'
+            '{"operation_id":"backup-current","timestamp":"20260519-010203"}\n',
             started_at,
+            operation_id,
         )
         == "20260519-010203"
     )
     assert (
         admin_backups._timestamp_from_backup_stdout(
-            "[backup 2026-05-19T00:00:00Z] backup 20260519-020304 complete\n",
+            '{"operation_id":"backup-current","timestamp":"20260519-005959"}\n',
             started_at,
+            operation_id,
+        )
+        is None
+    )
+    assert (
+        admin_backups._timestamp_from_backup_stdout(
+            '{"timestamp":"20260519-010203"}\n'
+            "[backup 2026-05-19T01:02:03Z] backup 20260519-010203 complete\n",
+            started_at,
+            operation_id,
+        )
+        is None
+    )
+
+
+def test_timestamp_from_backup_stdout_legacy_requires_explicit_unbound_mode() -> None:
+    started_at = datetime(2026, 5, 19, 1, 0, tzinfo=timezone.utc)
+    output = "[backup now] backup 20260519-020304 complete\n"
+
+    assert (
+        admin_backups._timestamp_from_backup_stdout(
+            output,
+            started_at,
+            None,
+            allow_legacy=True,
         )
         == "20260519-020304"
     )
     assert (
         admin_backups._timestamp_from_backup_stdout(
-            "backup complete: timestamp=20260519-030405\n",
+            output,
             started_at,
+            "backup-current",
+            allow_legacy=True,
         )
-        == "20260519-030405"
+        is None
     )
 
 
@@ -302,7 +363,7 @@ def test_backup_script_was_skipped_detects_maintenance_skip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_find_latest_paired_backup_after_uses_filesystem_fallback(
+async def test_find_paired_backup_for_operation_ignores_newer_decoy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -313,11 +374,48 @@ async def test_find_latest_paired_backup_after_uses_filesystem_fallback(
     redis_dir.mkdir()
     monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
 
-    started_at = datetime.now(timezone.utc)
-    ts = "20260519-010203"
-    _write_committed_pair(backup_root, ts)
+    started_at = datetime(2026, 5, 19, 1, 0, tzinfo=timezone.utc)
+    target_ts = "20260519-010203"
+    _write_committed_pair(
+        backup_root,
+        target_ts,
+        operation_id="backup-target",
+    )
+    _write_committed_pair(
+        backup_root,
+        "20260519-020304",
+        operation_id="backup-decoy",
+    )
+    (backup_root / ".backup.last-success.json").write_text(
+        json.dumps(
+            {
+                "completed_at": target_ts,
+                "operation_id": "backup-target",
+                "pair_marker": f".backup-pair.{target_ts}.json",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
-    assert await admin_backups._find_latest_paired_backup_after(started_at) == ts
+    assert (
+        await admin_backups._find_paired_backup_for_operation(
+            "backup-target",
+            started_at,
+        )
+        == target_ts
+    )
+    marker_path = backup_root / f".backup-pair.{target_ts}.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["operation_id"] = "backup-replaced"
+    marker_path.write_text(json.dumps(marker) + "\n", encoding="utf-8")
+    assert (
+        await admin_backups._find_paired_backup_for_operation(
+            "backup-target",
+            started_at,
+        )
+        is None
+    )
 
 
 def test_backup_pair_for_timestamp_rejects_symlinked_backup_leaf(
@@ -363,6 +461,57 @@ async def test_list_backups_skips_symlinked_backup_files(
 
 
 @pytest.mark.asyncio
+async def test_list_is_metadata_only_but_full_validation_rejects_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
+    ts = "20260519-010203"
+    _write_committed_pair(backup_root, ts)
+    (backup_root / "pg" / f"{ts}.pg.dump.gz").write_bytes(b"xx")
+
+    out = await admin_backups.list_backups(SimpleNamespace())  # type: ignore[arg-type]
+
+    assert [item.timestamp for item in out.items] == [ts]
+    with pytest.raises(ValueError, match="hash does not match"):
+        await admin_backups._backup_pair_for_timestamp_async(
+            backup_root.resolve(),
+            ts,
+        )
+
+
+@pytest.mark.asyncio
+async def test_full_backup_hash_validation_runs_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    ts = "20260519-010203"
+    _write_committed_pair(backup_root, ts)
+    calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def run_in_thread(function: object, *args: object) -> object:
+        calls.append((function, args))
+        return function(*args)  # type: ignore[operator]
+
+    monkeypatch.setattr(backup_integrity.asyncio, "to_thread", run_in_thread)
+
+    binding = await backup_integrity.validate_backup_pair_async(
+        backup_root.resolve(),
+        ts,
+    )
+
+    assert binding.timestamp == ts
+    assert calls == [
+        (
+            backup_integrity.validate_backup_pair,
+            (backup_root.resolve(), ts),
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -391,8 +540,23 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     async def fake_wait_for_log_append(*_args, **_kwargs) -> bool:
         return True
 
-    async def fake_wait_for_latest(*_args, **_kwargs) -> str:
-        return "20260519-010203"
+    waited_operation_ids: list[str] = []
+    waited_timestamps: list[str] = []
+
+    async def fake_wait_for_operation(
+        operation_id: str,
+        started_at: datetime,
+        **_kwargs,
+    ) -> str:
+        waited_operation_ids.append(operation_id)
+        timestamp = started_at.strftime("%Y%m%d-%H%M%S")
+        waited_timestamps.append(timestamp)
+        _write_committed_pair(
+            backup_root,
+            timestamp,
+            operation_id=operation_id,
+        )
+        return timestamp
 
     async def fake_audit(*_args, **_kwargs) -> None:
         return None
@@ -401,8 +565,8 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     monkeypatch.setattr(admin_backups, "_marker_is_adopted", _simulate_host_adoption)
     monkeypatch.setattr(
         admin_backups,
-        "_wait_for_latest_paired_backup_after",
-        fake_wait_for_latest,
+        "_wait_for_paired_backup_operation",
+        fake_wait_for_operation,
     )
     monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
 
@@ -412,11 +576,13 @@ async def test_backup_now_trigger_mode_writes_trigger_and_waits_for_pair(
     )
 
     assert out.ok is True
-    assert out.timestamp == "20260519-010203"
+    assert out.timestamp == waited_timestamps[0]
     assert (backup_root / ".backup.trigger").is_file()
     marker = (backup_root / ".backup.running").read_text(encoding="utf-8")
     assert "owner=host\n" in marker
     assert "generation=1\n" in marker
+    assert len(waited_operation_ids) == 1
+    assert waited_operation_ids[0].startswith("backup-")
     assert release_calls[-1] == {"succeeded": True, "reason": "backup_complete"}
 
 
@@ -579,9 +745,7 @@ async def test_backup_now_nonzero_exit_returns_http_502(
         "returncode": 7,
         "stderr_tail": "disk full",
     }
-    assert release_calls == [
-        {"succeeded": False, "reason": "backup_script_failed"}
-    ]
+    assert release_calls == [{"succeeded": False, "reason": "backup_script_failed"}]
     assert audit_calls == [
         (
             "admin.backup.create.fail",
@@ -714,6 +878,11 @@ async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
 
     monkeypatch.setattr(admin_backups, "SystemOperationLockService", FakeLockService)
     monkeypatch.setattr(admin_backups, "_marker_is_adopted", _simulate_host_adoption)
+    monkeypatch.setattr(
+        admin_backups,
+        "_restore_adoption_receipt_matches",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(admin_backups, "write_admin_audit_isolated", fake_audit)
 
     out = await admin_backups.restore_backup(
@@ -723,12 +892,61 @@ async def test_restore_trigger_mode_keeps_unit_marker_until_host_finishes(
     )
 
     assert out.accepted is True
-    assert (backup_root / ".restore.trigger").read_text(encoding="utf-8") == f"{ts}\n"
+    trigger = json.loads((backup_root / ".restore.trigger").read_text(encoding="utf-8"))
+    assert trigger["schema"] == 2
+    assert trigger["timestamp"] == ts
+    assert trigger["operation_id"].startswith("restore-")
+    assert trigger["request_sha256"] == (
+        admin_backups._backup_runtime.restore_request_sha256(
+            trigger["operation_id"],
+            ts,
+        )
+    )
     marker = (backup_root / ".restore.running").read_text(encoding="utf-8")
     assert f"unit={admin_backups._RESTORE_RUNNER_UNIT}" in marker
     assert "owner=host\n" in marker
     assert "generation=1\n" in marker
     assert release_calls == [{"succeeded": True, "reason": "restore_launched"}]
+
+
+def test_restore_adoption_receipt_requires_matching_identity(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / ".restore.adoption.json"
+    operation_id = "restore-0123456789abcdef"
+    timestamp = "20260519-010203"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": operation_id,
+                "owner": "host",
+                "generation": 1,
+                "request_sha256": (
+                    admin_backups._backup_runtime.restore_request_sha256(
+                        operation_id,
+                        timestamp,
+                    )
+                ),
+                "pid": 1234,
+                "accepted_at": datetime.now(timezone.utc).isoformat(),
+                "status": "accepted",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert admin_backups._restore_adoption_receipt_matches(
+        receipt,
+        operation_id=operation_id,
+        timestamp=timestamp,
+    )
+    assert not admin_backups._restore_adoption_receipt_matches(
+        receipt,
+        operation_id="restore-other",
+        timestamp=timestamp,
+    )
 
 
 @pytest.mark.asyncio

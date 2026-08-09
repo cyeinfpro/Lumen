@@ -114,7 +114,10 @@ async def test_paused_lifecycle_waits_for_admin_restart_and_logs_once(
     control_started = asyncio.Event()
     send_restart = asyncio.Event()
 
-    async def fake_control_listener(stop_event: asyncio.Event) -> None:
+    async def fake_control_listener(
+        stop_event: asyncio.Event,
+        **_kwargs: object,
+    ) -> None:
         control_started.set()
         await send_restart.wait()
         stop_event.set()
@@ -158,7 +161,10 @@ async def test_paused_lifecycle_rechecks_config_until_it_recovers(
     control_stopped = asyncio.Event()
     checks = 0
 
-    async def fake_control_listener(stop_event: asyncio.Event) -> None:
+    async def fake_control_listener(
+        stop_event: asyncio.Event,
+        **_kwargs: object,
+    ) -> None:
         control_started.set()
         try:
             await stop_event.wait()
@@ -305,6 +311,53 @@ async def test_polling_supervisor_does_not_assume_pending_task_is_ready() -> Non
 
 
 @pytest.mark.asyncio
+async def test_restart_readiness_requires_identity_polling_and_health() -> None:
+    events: list[str] = []
+    polling_started = asyncio.Event()
+    polling_release = asyncio.Event()
+    restart_ready = asyncio.Event()
+    health = _HealthRecorder()
+
+    class Bot:
+        async def me(self) -> None:
+            events.append("identity")
+
+    class Dispatcher:
+        @staticmethod
+        def resolve_used_update_types() -> list[str]:
+            return ["message"]
+
+        async def start_polling(self, *_args: object, **_kwargs: object) -> None:
+            events.append("polling")
+            polling_started.set()
+            await polling_release.wait()
+
+    task = asyncio.create_task(
+        main._run_ready_polling(
+            bot=Bot(),  # type: ignore[arg-type]
+            dispatcher=Dispatcher(),  # type: ignore[arg-type]
+            runtime_health=health,  # type: ignore[arg-type]
+            restart_ready=restart_ready,
+        )
+    )
+    await polling_started.wait()
+    await asyncio.sleep(0)
+
+    assert events == ["identity", "polling"]
+    assert restart_ready.is_set()
+    assert health.transitions == [
+        (
+            main.TgbotRuntimeStatus.POLLING,
+            "telegram_identity_verified",
+        )
+    ]
+
+    polling_release.set()
+    await task
+    assert not restart_ready.is_set()
+
+
+@pytest.mark.asyncio
 async def test_polling_supervisor_retries_recoverable_network_failure() -> None:
     stop_event = asyncio.Event()
     attempts = 0
@@ -444,6 +497,7 @@ async def test_main_pauses_before_api_client_without_shared_secret(
         level: int,
         recovery_check=None,
         refresh_interval_sec: float = main._PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+        **_kwargs: object,
     ) -> None:
         del refresh_interval_sec
         pauses.append((diagnostic, level, recovery_check))
@@ -501,6 +555,7 @@ async def test_main_treats_rejected_shared_secret_as_unhealthy_configuration(
         level: int,
         recovery_check=None,
         refresh_interval_sec: float = main._PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+        **_kwargs: object,
     ) -> None:
         del recovery_check, refresh_interval_sec
         pauses.append((diagnostic, level))
@@ -740,6 +795,7 @@ async def test_main_pauses_for_non_runnable_runtime_configuration(
         level: int,
         recovery_check=None,
         refresh_interval_sec: float = main._PAUSED_CONFIG_REFRESH_INTERVAL_SEC,
+        **_kwargs: object,
     ) -> None:
         del refresh_interval_sec
         assert recovery_check is not None

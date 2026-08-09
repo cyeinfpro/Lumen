@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from PIL import Image as PILImage
+from sqlalchemy.exc import SQLAlchemyError
 from lumen_core.upstream_billing import (
     mark_upstream_dispatch_proven_no_cost,
     mark_upstream_dispatch_proven_undelivered,
@@ -80,6 +81,40 @@ def test_tool_image_dedupe_key_prefers_item_id() -> None:
     )
 
     assert key == "id:img-call-1"
+
+
+def test_completion_request_serialization_failure_is_rejected_before_dispatch() -> None:
+    usage = tool_images._CompletionUsageAccumulator()
+    estimate = tool_images._estimate_completion_request_input_tokens(
+        [{"role": "user", "content": object()}],
+    )
+
+    with pytest.raises(completion.billing_core.BillingError) as exc_info:
+        usage.start_round(input_fallback_tokens=estimate)
+
+    assert exc_info.value.code == "USAGE_SERIALIZATION_INVALID"
+    assert usage.values() == (0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def test_tokenizer_failure_after_dispatch_marks_usage_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_tokenizer(_text: str) -> int:
+        raise RuntimeError("tokenizer unavailable")
+
+    monkeypatch.setattr(tool_images, "count_tokens", fail_tokenizer)
+    usage = tool_images._CompletionUsageAccumulator()
+    usage.start_round(input_fallback_tokens=7)
+    usage.mark_round_dispatched()
+    usage.finish_round(output_text="provider output")
+    row = SimpleNamespace(upstream_request={})
+
+    usage.apply_to(row)
+
+    assert row.tokens_in == 7
+    assert row.tokens_out == 0
+    assert row.upstream_request["completion_usage_state"] == "unknown"
+    assert row.upstream_request["completion_billing_state"] == "pending_reconciliation"
 
 
 @pytest.mark.asyncio
@@ -188,13 +223,13 @@ async def test_tool_image_budget_storage_commit_publish_order_is_preserved(
             write_files=write_files,
             cleanup_on_error=cleanup,
             delete_files=delete_files,
-            ),
-            events=CompletionToolImageEvents(
-                stage=stage,
-                deliver=deliver,
-                outbox_model=object(),
-                image_event="completion.image",
-            ),
+        ),
+        events=CompletionToolImageEvents(
+            stage=stage,
+            deliver=deliver,
+            outbox_model=object(),
+            image_event="completion.image",
+        ),
     )
     monkeypatch.setattr(CompletionToolImageService, "store_tool_image", store)
 
@@ -693,12 +728,141 @@ async def test_cancelled_tool_image_fallback_counts_top_level_instructions(
                 "instructions": instructions,
             },
             ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
     )
     assert charged == [completion_row]
     assert completion_row.tokens_in == expected_input_tokens
     assert completion_row.tokens_out == 23
     assert completion_row.image_output_tokens == 23
+
+
+@pytest.mark.asyncio
+async def test_cancelled_completion_tokenizer_failure_keeps_reservation_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_tokenizer(_text: str) -> int:
+        raise RuntimeError("tokenizer unavailable")
+
+    async def fail_terminal_billing(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("unknown usage must preserve the reservation")
+
+    completion_row = SimpleNamespace(
+        upstream_request={"tool_image_reserved_micro": 250},
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+    )
+    monkeypatch.setattr(tool_images, "count_tokens", fail_tokenizer)
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "charge_completion",
+        fail_terminal_billing,
+    )
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "release_completion",
+        fail_terminal_billing,
+    )
+    monkeypatch.setattr(
+        completion.worker_billing,
+        "settle_completion_unknown_upstream",
+        fail_terminal_billing,
+    )
+
+    await completion._settle_cancelled_completion_billing(
+        object(),
+        completion_row,
+        has_partial=True,
+        input_list=[{"role": "user", "content": "hello"}],
+        accumulated_text="provider output",
+        tokens_in=0,
+        tokens_out=0,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+        cache_creation_5m_tokens=0,
+        cache_creation_1h_tokens=0,
+        reasoning_tokens=0,
+        image_output_tokens=0,
+        tool_images=[],
+        reserved_tool_image_budget_micro=250,
+        reason="cancelled",
+    )
+
+    assert completion_row.upstream_request["tool_image_reserved_micro"] == 250
+    assert completion_row.upstream_request["completion_usage_state"] == "unknown"
+    assert (
+        completion_row.upstream_request["completion_billing_state"]
+        == "pending_reconciliation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_image_pricing_db_failure_propagates_without_fake_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_pricing(*_args: Any, **_kwargs: Any) -> Any:
+        raise SQLAlchemyError("pricing db unavailable")
+
+    row = SimpleNamespace(
+        id="comp-pricing-db",
+        model="gpt-4o",
+        upstream_request={"tool_image_reserved_micro": 1_000},
+    )
+    monkeypatch.setattr(
+        completion.completion_billing.PricingResolver,
+        "resolve",
+        fail_pricing,
+    )
+
+    with pytest.raises(SQLAlchemyError, match="pricing db unavailable"):
+        await completion._fallback_completion_tool_image_tokens(
+            object(),
+            row,
+            budget_micro=1_000,
+        )
+
+    assert row.upstream_request["tool_image_reserved_micro"] == 1_000
+    assert "completion_billing_state" not in row.upstream_request
+
+
+@pytest.mark.asyncio
+async def test_tool_image_invalid_multiplier_marks_pending_without_one_token() -> None:
+    row = SimpleNamespace(
+        id="comp-invalid-multiplier",
+        model="gpt-4o",
+        user_id="user-1",
+        upstream_request={
+            "tool_image_reserved_micro": 1_000,
+            "billing_rate_multiplier_x10000": "invalid",
+            "billing_pricing_snapshot": {
+                "input_per_1k_micro": 100,
+                "output_per_1k_micro": 200,
+                "image_output_per_1k_micro": 500,
+            },
+        },
+    )
+
+    tokens = await completion._fallback_completion_tool_image_tokens(
+        object(),
+        row,
+        budget_micro=1_000,
+    )
+
+    assert tokens == 0
+    assert row.upstream_request["tool_image_reserved_micro"] == 1_000
+    assert row.upstream_request["completion_billing_state"] == "pending_reconciliation"
+    assert (
+        "RATE_MULTIPLIER_INVALID"
+        in row.upstream_request["completion_billing_pending_reason"]
+    )
 
 
 @pytest.mark.asyncio

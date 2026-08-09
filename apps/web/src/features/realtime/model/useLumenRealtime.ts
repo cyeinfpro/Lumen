@@ -47,6 +47,7 @@ import type {
   SnapshotAdapter,
   SnapshotExecutionContext,
 } from "./replayCoordinator";
+import { INITIAL_SNAPSHOT_RECOVERY_REASON } from "./contracts";
 import type { SnapshotScope } from "./snapshotScopes";
 
 const EVENT_NAMES = [
@@ -77,22 +78,6 @@ const EVENT_NAMES = [
 ] as const;
 
 const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
-const FULL_SNAPSHOT_SCOPES = [
-  "identity",
-  "conversations",
-  "activeTasks",
-  "wallet",
-  "runtimeDefaults",
-] as const satisfies readonly SnapshotScope[];
-
-type InitialSnapshotFlight = {
-  controller: AbortController;
-  connectionGeneration: number;
-  userScope: string;
-  userId: string | null;
-  identityEpoch: number;
-};
-
 type SnapshotIdentity = {
   userScope: string;
   userId: string | null;
@@ -333,7 +318,6 @@ export function useLumenRealtime(): void {
     identityEpoch: -1,
     syncedAt: 0,
   });
-  const initialSnapshotFlight = useRef<InitialSnapshotFlight | null>(null);
 
   const channels = useMemo(() => channelsFor(userId), [userId]);
   const userScope = channels.join(",");
@@ -423,7 +407,7 @@ export function useLumenRealtime(): void {
   );
 
   const recoverSnapshot = useCallback<SnapshotAdapter>(
-    async (scopes, _reason, signal, context) => {
+    async (scopes, reason, signal, context) => {
       assertSnapshotCurrent(
         signal,
         context,
@@ -431,6 +415,20 @@ export function useLumenRealtime(): void {
         userId,
         identityEpoch,
       );
+      const initialSnapshot =
+        reason.kind === "initial_snapshot" ||
+        (reason.kind === "recovery_required" &&
+          reason.reason === INITIAL_SNAPSHOT_RECOVERY_REASON);
+      if (
+        initialSnapshot &&
+        shouldSkipRecentSnapshot(lastSnapshot.current, {
+          userScope: context.userScope,
+          userId,
+          identityEpoch,
+        })
+      ) {
+        return { syncedAt: lastSnapshot.current.syncedAt };
+      }
       const store = useChatStore.getState();
       const hydration = await store.hydrateActiveTasks({ signal });
       requireCompleteTaskRecovery(hydration, "active task hydration", signal);
@@ -500,65 +498,7 @@ export function useLumenRealtime(): void {
       notifyAuthSessionChanged();
       requestSessionInvalidation("realtime_auth_invalidated");
     },
-    onOpen: (_event, connectionContext) => {
-      initialSnapshotFlight.current?.controller.abort();
-      initialSnapshotFlight.current = null;
-      const recent = lastSnapshot.current;
-      if (
-        shouldSkipRecentSnapshot(recent, {
-          userScope: connectionContext.userScope,
-          userId,
-          identityEpoch,
-        })
-      ) {
-        return;
-      }
-      const controller = new AbortController();
-      const flight: InitialSnapshotFlight = {
-        controller,
-        connectionGeneration: connectionContext.connectionGeneration,
-        userScope: connectionContext.userScope,
-        userId,
-        identityEpoch,
-      };
-      initialSnapshotFlight.current = flight;
-      void recoverSnapshot(
-        FULL_SNAPSHOT_SCOPES,
-        { kind: "replay_gap", reason: "connection_open" },
-        controller.signal,
-        {
-          ...connectionContext,
-          isCurrent: () =>
-            !controller.signal.aborted &&
-            initialSnapshotFlight.current === flight &&
-            flight.connectionGeneration ===
-              connectionContext.connectionGeneration &&
-            flight.userScope === connectionContext.userScope &&
-            flight.userId === userId &&
-            flight.identityEpoch === identityEpoch &&
-            isRealtimeScopeCurrent(connectionContext.userScope) &&
-            connectionContext.isCurrent(),
-        },
-      )
-        .catch((error) => {
-          if (error instanceof Error && error.name === "AbortError") return;
-          logError(error, { scope: "sse-open-snapshot" });
-        })
-        .finally(() => {
-          if (initialSnapshotFlight.current === flight) {
-            initialSnapshotFlight.current = null;
-          }
-        });
-    },
   });
-
-  useEffect(
-    () => () => {
-      initialSnapshotFlight.current?.controller.abort();
-      initialSnapshotFlight.current = null;
-    },
-    [identityEpoch, userScope],
-  );
 
   useEffect(() => {
     setRealtimeRuntimeStatus(channels.length > 0 ? status : "idle");

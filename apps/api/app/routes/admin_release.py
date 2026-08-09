@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import signal
 import subprocess
 from contextlib import asynccontextmanager
@@ -48,6 +47,7 @@ from ._admin_common import (
     write_admin_audit_isolated,
 )
 from .admin_backups import maintenance_marker_busy
+from .admin_release_rollback_script import build_rollback_script
 from .admin_update import (
     ReleaseInfo,
     list_releases as update_list_releases,
@@ -277,199 +277,11 @@ async def list_releases(_admin: AdminUser) -> list[ReleaseInfo]:
 
 
 def _build_rollback_script(*, target_id: str, lumen_root: Path) -> str:
-    if not re.fullmatch(r"[0-9]{8}-[0-9]{6}", target_id):
-        raise ValueError("invalid release id")
-    root_q = shlex.quote(str(lumen_root))
-    target_q = shlex.quote(target_id)
-    return rf"""
-set -euo pipefail
-ROOT={root_q}
-TARGET={target_q}
-ts() {{ date -u +%FT%TZ; }}
-
-ROLLBACK_START="$(ts)"
-echo "::lumen-step:: phase=rollback status=start ts=$ROLLBACK_START"
-echo "::lumen-info:: phase=rollback key=target value=$TARGET"
-
-CURRENT_ID=""
-if [ -L "$ROOT/current" ]; then
-  CURRENT_TARGET="$(readlink "$ROOT/current")"
-  CURRENT_ID="$(basename "$CURRENT_TARGET")"
-fi
-echo "::lumen-info:: phase=rollback key=previous_current value=$CURRENT_ID"
-SHARED_ENV="$ROOT/shared/.env"
-ENV_BACKUP="$ROOT/.rollback-env.$$"
-if [ -f "$SHARED_ENV" ]; then
-  cp -p "$SHARED_ENV" "$ENV_BACKUP"
-fi
-
-restore_original_link() {{
-  if [ -n "$CURRENT_ID" ] && [ -d "$ROOT/releases/$CURRENT_ID" ]; then
-    TMP_RESTORE="$ROOT/.current.restore.$$"
-    ln -s "releases/$CURRENT_ID" "$TMP_RESTORE"
-    mv -T "$TMP_RESTORE" "$ROOT/current"
-    echo "::lumen-info:: phase=recovery key=current value=$CURRENT_ID"
-    return 0
-  fi
-  return 1
-}}
-
-SWITCH_START="$(ts)"
-SWITCH_T0=$(date +%s%3N)
-echo "::lumen-step:: phase=switch status=start ts=$SWITCH_START"
-if [ ! -d "$ROOT/releases/$TARGET" ]; then
-  echo "release directory missing: $ROOT/releases/$TARGET" >&2
-  echo "::lumen-step:: phase=switch status=done rc=1 dur_ms=0 ts=$(ts)"
-  echo "::lumen-step:: phase=rollback status=done rc=1 dur_ms=0 ts=$(ts)"
-  exit 1
-fi
-TMP_LINK="$ROOT/.current.tmp.$$"
-ln -s "releases/$TARGET" "$TMP_LINK"
-mv -T "$TMP_LINK" "$ROOT/current"
-# Flip previous to whatever current pointed at before the swap.
-if [ -n "$CURRENT_ID" ] && [ -d "$ROOT/releases/$CURRENT_ID" ]; then
-  TMP_PREV="$ROOT/.previous.tmp.$$"
-  ln -s "releases/$CURRENT_ID" "$TMP_PREV"
-  mv -T "$TMP_PREV" "$ROOT/previous"
-fi
-SWITCH_T1=$(date +%s%3N)
-echo "::lumen-step:: phase=switch status=done rc=0 dur_ms=$((SWITCH_T1-SWITCH_T0)) ts=$(ts)"
-
-COMPOSE_START="$(ts)"
-COMPOSE_T0=$(date +%s%3N)
-echo "::lumen-step:: phase=containers status=start ts=$COMPOSE_START"
-compose_rc=0
-if [ -f "$ROOT/current/docker-compose.yml" ] && command -v docker >/dev/null 2>&1; then
-  if [ -f "$ROOT/current/scripts/lib.sh" ]; then
-    # shellcheck source=/dev/null
-    . "$ROOT/current/scripts/lib.sh"
-  fi
-  TARGET_IMAGE_TAG=""
-  TARGET_VERSION=""
-  if [ -f "$ROOT/current/.image-tag" ]; then
-    TARGET_IMAGE_TAG="$(head -n1 "$ROOT/current/.image-tag" | tr -d '[:space:]')"
-  fi
-  if [ -f "$ROOT/current/VERSION" ]; then
-    TARGET_VERSION="$(head -n1 "$ROOT/current/VERSION" | tr -d '[:space:]')"
-  fi
-  if [ -n "$TARGET_IMAGE_TAG" ] && declare -F lumen_set_image_tag_in_env >/dev/null 2>&1; then
-    if ! lumen_set_image_tag_in_env "$SHARED_ENV" "$TARGET_IMAGE_TAG"; then
-      compose_rc=1
-      echo "failed to restore shared LUMEN_IMAGE_TAG=$TARGET_IMAGE_TAG" >&2
-    else
-      echo "::lumen-info:: phase=containers key=image_tag value=$TARGET_IMAGE_TAG"
-    fi
-  fi
-  if [ -n "$TARGET_VERSION" ] && declare -F lumen_set_env_value_in_file >/dev/null 2>&1; then
-    if ! lumen_set_env_value_in_file "$SHARED_ENV" LUMEN_VERSION "$TARGET_VERSION"; then
-      compose_rc=1
-      echo "failed to restore shared LUMEN_VERSION=$TARGET_VERSION" >&2
-    else
-      echo "::lumen-info:: phase=containers key=version value=$TARGET_VERSION"
-    fi
-  fi
-  if declare -F lumen_ensure_compose_db_env_vars >/dev/null 2>&1 \
-    && ! lumen_ensure_compose_db_env_vars "$ROOT/current/.env"; then
-    compose_rc=1
-    echo "compose env validation failed; rollback continues but containers may be stale" >&2
-  elif ! (cd "$ROOT/current" && docker compose up -d --wait); then
-    compose_rc=1
-    echo "docker compose up failed; rollback continues but containers may be stale" >&2
-  fi
-else
-  compose_rc=1
-  echo "docker compose is unavailable; rollback cannot prove runtime alignment" >&2
-fi
-COMPOSE_T1=$(date +%s%3N)
-echo "::lumen-step:: phase=containers status=done rc=$compose_rc dur_ms=$((COMPOSE_T1-COMPOSE_T0)) ts=$(ts)"
-
-RESTART_START="$(ts)"
-RESTART_T0=$(date +%s%3N)
-echo "::lumen-step:: phase=restart status=start ts=$RESTART_START"
-restart_rc=0
-for unit in lumen-worker.service lumen-web.service lumen-tgbot.service; do
-  if ! systemctl restart "$unit"; then
-    restart_rc=1
-    echo "restart $unit failed" >&2
-  fi
-done
-if ! systemctl --no-block restart lumen-api.service; then
-  restart_rc=1
-  echo "restart lumen-api failed" >&2
-fi
-RESTART_T1=$(date +%s%3N)
-echo "::lumen-step:: phase=restart status=done rc=$restart_rc dur_ms=$((RESTART_T1-RESTART_T0)) ts=$(ts)"
-
-HEALTH_START="$(ts)"
-HEALTH_T0=$(date +%s%3N)
-echo "::lumen-step:: phase=health_post status=start ts=$HEALTH_START"
-health_rc=0
-if command -v curl >/dev/null 2>&1; then
-  for _ in $(seq 1 30); do
-    health_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
-    ready_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
-    if printf '%s' "$health_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
-      && printf '%s' "$ready_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
-      break
-    fi
-    sleep 1
-  done
-  health_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
-  ready_body="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
-  if ! printf '%s' "$health_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
-    || ! printf '%s' "$ready_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
-    health_rc=1
-  fi
-else
-  health_rc=1
-  echo "curl is unavailable; rollback readiness cannot be proven" >&2
-fi
-HEALTH_T1=$(date +%s%3N)
-echo "::lumen-step:: phase=health_post status=done rc=$health_rc dur_ms=$((HEALTH_T1-HEALTH_T0)) ts=$(ts)"
-
-rollback_rc=0
-rollback_status=done
-if [ "$compose_rc" -ne 0 ] || [ "$restart_rc" -ne 0 ] || [ "$health_rc" -ne 0 ]; then
-  rollback_rc=1
-  rollback_status=manual_required
-  echo "::lumen-step:: phase=rollback_recovery status=start ts=$(ts)"
-  if restore_original_link \
-    && {{ [ ! -f "$ENV_BACKUP" ] || cp -p "$ENV_BACKUP" "$SHARED_ENV"; }} \
-    && {{ [ ! -f "$ROOT/current/docker-compose.yml" ] \
-      || ! command -v docker >/dev/null 2>&1 \
-      || (cd "$ROOT/current" && docker compose up -d --wait); }} \
-    && systemctl restart lumen-worker.service \
-    && systemctl restart lumen-web.service \
-    && systemctl restart lumen-tgbot.service \
-    && systemctl --no-block restart lumen-api.service; then
-    recovery_health="$(curl -fsS --max-time 2 http://127.0.0.1:8000/healthz 2>/dev/null || true)"
-    recovery_ready="$(curl -fsS --max-time 2 http://127.0.0.1:8000/readyz 2>/dev/null || true)"
-    if printf '%s' "$recovery_health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' \
-      && printf '%s' "$recovery_ready" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'; then
-      rollback_rc=0
-      rollback_status=rolled_back
-      echo "::lumen-info:: phase=rollback_recovery key=status value=ready"
-    else
-      echo "original release was restored but readiness is still unproven" >&2
-    fi
-  else
-    echo "rollback recovery could not restore the original runtime" >&2
-  fi
-  echo "::lumen-step:: phase=rollback_recovery status=done rc=$rollback_rc ts=$(ts)"
-fi
-
-ROLLBACK_T1=$(date +%s%3N)
-ROLLBACK_T0_S=$(date -d "$ROLLBACK_START" +%s 2>/dev/null || echo 0)
-ROLLBACK_T1_S=$(date +%s)
-ROLLBACK_DUR=$(((ROLLBACK_T1_S - ROLLBACK_T0_S) * 1000))
-echo "::lumen-step:: phase=rollback status=$rollback_status rc=$rollback_rc dur_ms=$ROLLBACK_DUR ts=$(ts)"
-
-if [ "$rollback_status" != "manual_required" ]; then
-  rm -f "{shlex.quote(str(update_update_marker_path()))}"
-fi
-rm -f "$ENV_BACKUP"
-exit "$rollback_rc"
-"""
+    return build_rollback_script(
+        target_id=target_id,
+        lumen_root=lumen_root,
+        marker_path=update_update_marker_path(),
+    )
 
 
 def _rollback_unit_name(started_at: datetime) -> str:

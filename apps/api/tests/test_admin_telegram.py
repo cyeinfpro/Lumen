@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
 from app.routes import admin_telegram
+from app.services import telegram_control_dispatch
 
 
 def _request() -> Request:
@@ -57,9 +58,7 @@ async def test_restart_is_committed_and_queued_before_publisher_wakeup(
     audit_events: list[tuple[str, bool]] = []
 
     async def fake_audit(*_args: object, **kwargs: object) -> None:
-        audit_events.append(
-            (str(kwargs["event_type"]), bool(kwargs["autocommit"]))
-        )
+        audit_events.append((str(kwargs["event_type"]), bool(kwargs["autocommit"])))
 
     def fake_wakeup(_request: Request) -> bool:
         assert db.events == ["commit"]
@@ -166,3 +165,59 @@ async def test_restart_status_reads_durable_command() -> None:
 
     assert out.command_id == row.id
     assert out.status == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_control_dedup_history_gets_finite_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = "lumen:tgbot:control:v1:command:"
+
+    class Redis:
+        def __init__(self) -> None:
+            self.expired: list[tuple[str, int]] = []
+
+        async def scan(
+            self,
+            *,
+            cursor: int,
+            match: str,
+            count: int,
+        ) -> tuple[int, list[str]]:
+            assert cursor == 0
+            assert match == f"{prefix}*"
+            assert count == 100
+            return (
+                17,
+                [
+                    f"{prefix}terminal",
+                    f"{prefix}active",
+                    f"{prefix}orphan",
+                ],
+            )
+
+        async def ttl(self, _key: str) -> int:
+            return -1
+
+        async def expire(self, key: str, ttl_seconds: int) -> bool:
+            self.expired.append((key, ttl_seconds))
+            return True
+
+    async def fake_statuses(command_ids: list[str]) -> dict[str, str]:
+        assert command_ids == ["terminal", "active", "orphan"]
+        return {"terminal": "accepted", "active": "published"}
+
+    monkeypatch.setattr(
+        telegram_control_dispatch,
+        "_control_command_statuses",
+        fake_statuses,
+    )
+    redis = Redis()
+
+    cursor = await telegram_control_dispatch.maintain_control_dedup_keys(redis)
+
+    assert cursor == 17
+    assert redis.expired == [
+        (f"{prefix}terminal", 90 * 24 * 60 * 60),
+        (f"{prefix}orphan", 7 * 24 * 60 * 60),
+    ]

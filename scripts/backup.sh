@@ -86,6 +86,8 @@ PG_ERR=""
 PAIR_MARKER=""
 PG_SHA256=""
 REDIS_SHA256=""
+PAIR_COMMITTED=0
+SUCCESS_RECEIPT_COMMITTED=0
 BACKUP_LOCK_OWNER_TOKEN=""
 WRITERS_STOPPED=0
 ACTIVE_WRITER_SERVICES=()
@@ -282,11 +284,15 @@ cleanup() {
         [ -n "${PG_TMP:-}" ] && rm -f "$PG_TMP" 2>/dev/null || true
         [ -n "${REDIS_TMP:-}" ] && rm -f "$REDIS_TMP" 2>/dev/null || true
         [ -n "${PG_ERR:-}" ] && rm -f "$PG_ERR" 2>/dev/null || true
-        [ -n "${PG_OUT:-}" ] && rm -f "$PG_OUT" 2>/dev/null || true
-        [ -n "${REDIS_OUT:-}" ] && rm -f "$REDIS_OUT" 2>/dev/null || true
-        if [ -n "${PAIR_MARKER:-}" ]; then
-            rm -f "$PAIR_MARKER" 2>/dev/null || true
-            backup_fsync_directory "$BACKUP_ROOT" 2>/dev/null || true
+        if [ "$PAIR_COMMITTED" -ne 1 ]; then
+            [ -n "${PG_OUT:-}" ] && rm -f "$PG_OUT" 2>/dev/null || true
+            [ -n "${REDIS_OUT:-}" ] && rm -f "$REDIS_OUT" 2>/dev/null || true
+            if [ -n "${PAIR_MARKER:-}" ]; then
+                rm -f "$PAIR_MARKER" 2>/dev/null || true
+                backup_fsync_directory "$BACKUP_ROOT" 2>/dev/null || true
+            fi
+        elif [ "$SUCCESS_RECEIPT_COMMITTED" -ne 1 ]; then
+            log "retaining committed backup pair after terminal receipt failure"
         fi
     fi
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
@@ -575,7 +581,8 @@ PY
 
 record_backup_success() {
     local marker="${BACKUP_ROOT}/.backup.last-success.json"
-    python3 - "${marker}" "${TS}" "${PAIR_MARKER}" <<'PY'
+    python3 - \
+            "${marker}" "${TS}" "${BACKUP_OPERATION_ID}" "${PAIR_MARKER}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -584,14 +591,20 @@ import sys
 path = Path(sys.argv[1])
 payload = {
     "completed_at": sys.argv[2],
-    "pair_marker": Path(sys.argv[3]).name,
+    "operation_id": sys.argv[3],
+    "pair_marker": Path(sys.argv[4]).name,
 }
 tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
 data = (json.dumps(payload, sort_keys=True) + "\n").encode()
 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
 try:
     os.fchmod(fd, 0o640)
-    os.write(fd, data)
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write while persisting backup success receipt")
+        view = view[written:]
     os.fsync(fd)
 finally:
     os.close(fd)
@@ -1028,6 +1041,7 @@ if ! pair_hashes="$(
     log "ERROR: failed to durably commit postgres/redis backup pair"
     exit 5
 fi
+PAIR_COMMITTED=1
 IFS=$'\t' read -r PG_SHA256 REDIS_SHA256 <<< "$pair_hashes"
 if [ -z "$PG_SHA256" ] || [ -z "$REDIS_SHA256" ]; then
     log "ERROR: backup pair marker did not return payload hashes"
@@ -1052,6 +1066,24 @@ _extract_ts() {
         | sort -u
 }
 
+prune_timestamp() {
+    local pg_dir="$1"
+    local redis_dir="$2"
+    local ts="$3"
+    local marker="$BACKUP_ROOT/.backup-pair.$ts.json"
+
+    if [ -e "$marker" ]; then
+        rm -f "$marker"
+        backup_fsync_directory "$BACKUP_ROOT"
+        backup_failpoint after_prune_marker
+    fi
+    rm -f \
+        "$pg_dir/$ts.pg.dump.gz" \
+        "$redis_dir/$ts.redis.tgz"
+    backup_fsync_directory "$pg_dir"
+    backup_fsync_directory "$redis_dir"
+}
+
 # 配对 prune：之前 PG / Redis 各自独立删，可能淘汰掉"PG 有但 Redis 没有"
 # 的 timestamp，反过来 restore 拿到孤儿对直接 exit 2。
 # 修复：先取 PG ∩ Redis 的成对 timestamp，按字典序保留最新 keep 份；其余
@@ -1061,6 +1093,7 @@ prune_paired() {
     local pg_dir="$1"
     local redis_dir="$2"
     local keep="$3"
+    local protected_ts="$4"
 
     local pg_ts redis_ts
     pg_ts="$(_extract_ts "$pg_dir" "pg.dump.gz")"
@@ -1075,12 +1108,12 @@ prune_paired() {
     while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune orphan PG (no redis pair): $ts"
-        rm -f "$pg_dir/$ts.pg.dump.gz" "$BACKUP_ROOT/.backup-pair.$ts.json"
+        prune_timestamp "$pg_dir" "$redis_dir" "$ts"
     done <<< "$orphan_pg"
     while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune orphan Redis (no pg pair): $ts"
-        rm -f "$redis_dir/$ts.redis.tgz" "$BACKUP_ROOT/.backup-pair.$ts.json"
+        prune_timestamp "$pg_dir" "$redis_dir" "$ts"
     done <<< "$orphan_redis"
 
     local committed=""
@@ -1097,26 +1130,32 @@ prune_paired() {
     done <<< "$paired"
 
     local total excess
-    total="$(printf '%s\n' "$committed" | grep -c . || true)"
+    total="$(printf '%s' "$committed" | grep -c . || true)"
     if [ "$total" -le "$keep" ]; then
         return 0
     fi
     excess=$((total - keep))
-    printf '%s\n' "$committed" | sort | sed -n "1,${excess}p" | while IFS= read -r ts; do
+    printf '%s' "$committed" \
+        | sort \
+        | awk -v protected="$protected_ts" '$0 != protected' \
+        | sed -n "1,${excess}p" \
+        | while IFS= read -r ts; do
         [ -z "$ts" ] && continue
         log "prune old paired: $ts"
-        rm -f \
-            "$pg_dir/$ts.pg.dump.gz" \
-            "$redis_dir/$ts.redis.tgz" \
-            "$BACKUP_ROOT/.backup-pair.$ts.json"
+        prune_timestamp "$pg_dir" "$redis_dir" "$ts"
     done
 }
-backup_failpoint before_retention
-prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP"
 
-emit_backup_result
 if ! record_backup_success; then
     log "ERROR: backup pair exists but last-success marker was not durably recorded"
     exit 70
 fi
+SUCCESS_RECEIPT_COMMITTED=1
+backup_failpoint after_success_receipt
+backup_failpoint before_retention
+if ! prune_paired "$PG_DIR" "$REDIS_DIR" "$MAX_KEEP" "$TS"; then
+    log "WARN: backup pair committed but retention is pending"
+fi
+
+emit_backup_result
 log "backup $TS complete"

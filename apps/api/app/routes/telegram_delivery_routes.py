@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumen_core.model_entities.control_operations import (
+    TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION,
+)
 from lumen_core.model_entities.tasks import Generation
 
 from ..db import get_db
@@ -26,10 +29,14 @@ from ..services.telegram_quarantine import (
     QuarantineConflict,
     QuarantineNotFound,
     claim_control_effect,
+    commit_restart_intent,
     finish_control_command,
     finish_control_effect,
     mark_quarantine_mirrored,
     persist_quarantine,
+    prepare_redrive_control_effect,
+    reconcile_redrive_control_effect,
+    renew_control_effect,
 )
 
 
@@ -130,15 +137,77 @@ class ControlEffectClaimOut(BaseModel):
     acquired: bool
     owner: str | None = None
     fence: int
+    lease_seconds: int
     payload: dict[str, object]
+
+
+class ControlCapabilitiesOut(BaseModel):
+    effect_protocol_version: int
+
+
+class ControlEffectRenewIn(BaseModel):
+    command: str = Field(min_length=1, max_length=32)
+    owner: str = Field(min_length=1, max_length=96)
+    fence: int = Field(ge=1)
+
+
+class ControlEffectRenewOut(BaseModel):
+    renewed: bool
+    fence: int
+    lease_seconds: int
+
+
+class ControlEffectPrepareIn(BaseModel):
+    command: Literal["redrive_quarantine"]
+    owner: str = Field(min_length=1, max_length=96)
+    fence: int = Field(ge=1)
+
+
+class ControlEffectPrepareOut(BaseModel):
+    action: Literal["execute", "already_succeeded", "outcome_unknown"]
+    fence: int
+    idempotency_key: str
+
+
+class ControlRestartIntentIn(BaseModel):
+    command: Literal["restart"]
+    owner: str = Field(min_length=1, max_length=96)
+    fence: int = Field(ge=1)
+    generation: str = Field(min_length=1, max_length=96)
+
+
+class ControlRestartIntentOut(BaseModel):
+    action: Literal["stop_current_generation"]
+    fence: int
+    requested_generation: str
 
 
 class ControlEffectFinishIn(BaseModel):
     command: str = Field(min_length=1, max_length=32)
     owner: str = Field(min_length=1, max_length=96)
     fence: int = Field(ge=1)
-    status: Literal["succeeded", "failed"]
+    status: Literal["succeeded", "failed", "outcome_unknown"]
     error: str | None = Field(default=None, max_length=2000)
+    generation: str | None = Field(default=None, min_length=1, max_length=96)
+
+
+class ControlEffectFinishOut(BaseModel):
+    command: str
+    status: str
+    fence: int
+
+
+class ControlEffectReconcileIn(BaseModel):
+    command: Literal["redrive_quarantine"]
+    resolution: Literal["succeeded", "retry"]
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class ControlEffectReconcileOut(BaseModel):
+    command: Literal["redrive_quarantine"]
+    command_status: str
+    effect_status: str
+    resolution: Literal["succeeded", "retry"]
 
 
 async def _require_generation_owner(
@@ -360,6 +429,17 @@ async def ack_control_command(
     )
 
 
+@router.get(
+    "/telegram/control/capabilities",
+    response_model=ControlCapabilitiesOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def control_capabilities() -> ControlCapabilitiesOut:
+    return ControlCapabilitiesOut(
+        effect_protocol_version=TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION,
+    )
+
+
 @router.post(
     "/telegram/control/{command_id}/effect/claim",
     response_model=ControlEffectClaimOut,
@@ -388,20 +468,140 @@ async def claim_control_effect_route(
         acquired=result.acquired,
         owner=result.owner,
         fence=result.fence,
+        lease_seconds=result.lease_seconds,
         payload=result.payload,
     )
 
 
 @router.post(
+    "/telegram/control/{command_id}/effect/renew",
+    response_model=ControlEffectRenewOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def renew_control_effect_route(
+    command_id: str,
+    body: ControlEffectRenewIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlEffectRenewOut:
+    try:
+        result = await renew_control_effect(
+            db,
+            command_id=command_id,
+            expected_command=body.command,
+            owner=body.owner,
+            fence=body.fence,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except QuarantineConflict as exc:
+        raise _http("effect_fence_lost", str(exc), 409) from exc
+    return ControlEffectRenewOut(
+        renewed=result.renewed,
+        fence=result.fence,
+        lease_seconds=result.lease_seconds,
+    )
+
+
+@router.post(
+    "/telegram/control/{command_id}/effect/redrive/prepare",
+    response_model=ControlEffectPrepareOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def prepare_redrive_control_effect_route(
+    command_id: str,
+    body: ControlEffectPrepareIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlEffectPrepareOut:
+    try:
+        result = await prepare_redrive_control_effect(
+            db,
+            command_id=command_id,
+            owner=body.owner,
+            fence=body.fence,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except QuarantineConflict as exc:
+        raise _http("effect_fence_lost", str(exc), 409) from exc
+    return ControlEffectPrepareOut(
+        action=result.action,
+        fence=result.fence,
+        idempotency_key=result.idempotency_key,
+    )
+
+
+@router.post(
+    "/telegram/control/{command_id}/effect/redrive/reconcile",
+    response_model=ControlEffectReconcileOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def reconcile_redrive_control_effect_route(
+    command_id: str,
+    body: ControlEffectReconcileIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlEffectReconcileOut:
+    try:
+        result = await reconcile_redrive_control_effect(
+            db,
+            command_id=command_id,
+            resolution=body.resolution,
+            note=body.note,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except (QuarantineConflict, QuarantineNotFound) as exc:
+        raise _http("effect_not_reconcilable", str(exc), 409) from exc
+    return ControlEffectReconcileOut(
+        command="redrive_quarantine",
+        command_status=result.command_status,
+        effect_status=result.effect_status,
+        resolution=result.resolution,
+    )
+
+
+@router.post(
+    "/telegram/control/{command_id}/effect/restart-intent",
+    response_model=ControlRestartIntentOut,
+    dependencies=[Depends(require_bot_token)],
+)
+async def commit_restart_intent_route(
+    command_id: str,
+    body: ControlRestartIntentIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ControlRestartIntentOut:
+    try:
+        result = await commit_restart_intent(
+            db,
+            command_id=command_id,
+            owner=body.owner,
+            fence=body.fence,
+            generation=body.generation,
+        )
+        await db.commit()
+    except LookupError as exc:
+        raise _http("not_found", "control command not found", 404) from exc
+    except QuarantineConflict as exc:
+        raise _http("effect_fence_lost", str(exc), 409) from exc
+    return ControlRestartIntentOut(
+        action=result.action,
+        fence=result.fence,
+        requested_generation=result.requested_generation,
+    )
+
+
+@router.post(
     "/telegram/control/{command_id}/effect/finish",
-    response_model=ControlEffectClaimOut,
+    response_model=ControlEffectFinishOut,
     dependencies=[Depends(require_bot_token)],
 )
 async def finish_control_effect_route(
     command_id: str,
     body: ControlEffectFinishIn,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> ControlEffectClaimOut:
+) -> ControlEffectFinishOut:
     try:
         status = await finish_control_effect(
             db,
@@ -411,19 +611,17 @@ async def finish_control_effect_route(
             fence=body.fence,
             status=body.status,
             error=body.error,
+            generation=body.generation,
         )
         await db.commit()
     except LookupError as exc:
         raise _http("not_found", "control command not found", 404) from exc
     except QuarantineConflict as exc:
         raise _http("effect_fence_lost", str(exc), 409) from exc
-    return ControlEffectClaimOut(
+    return ControlEffectFinishOut(
         command=body.command,
         status=status,
-        acquired=False,
-        owner=None,
         fence=body.fence,
-        payload={},
     )
 
 

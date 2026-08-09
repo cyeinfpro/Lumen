@@ -17,6 +17,9 @@ from app.outbox.contracts import FAILURE_MATRIX as OUTBOX_FAILURE_MATRIX
 from app.reconciliation.contracts import (
     FAILURE_MATRIX as RECONCILIATION_FAILURE_MATRIX,
 )
+from app.reconciliation.completion_billing import (
+    COMPLETION_BILLING_RECONCILER,
+)
 from app.reconciliation.contracts import DomainReconciler
 from app.reconciliation.memory import (
     MEMORY_RECONCILER,
@@ -113,6 +116,7 @@ def test_outbox_claim_model_contract_is_expand_contract_safe() -> None:
 def test_domain_reconcilers_implement_shared_protocol() -> None:
     assert isinstance(GENERATION_RECONCILER, DomainReconciler)
     assert isinstance(COMPLETION_RECONCILER, DomainReconciler)
+    assert isinstance(COMPLETION_BILLING_RECONCILER, DomainReconciler)
     assert isinstance(MEMORY_RECONCILER, DomainReconciler)
 
 

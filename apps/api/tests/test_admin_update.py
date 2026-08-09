@@ -115,10 +115,12 @@ def test_update_runner_request_contains_only_constrained_fields() -> None:
     payload = admin_update._runner_request_payload(
         env,
         datetime(2026, 5, 2, tzinfo=timezone.utc),
+        "update-0123456789abcdef0123456789abcdef",
     )
 
     assert payload == {
-        "schema": 1,
+        "schema": 2,
+        "operation_id": "update-0123456789abcdef0123456789abcdef",
         "target_tag": "v1.2.4",
         "channel": "stable",
         "force_redeploy": True,
@@ -374,8 +376,11 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
 
-    # Pretend the runner unit goes active immediately.
-    monkeypatch.setattr(admin_update, "_unit_is_running", lambda unit: True)
+    monkeypatch.setattr(
+        admin_update._update_launcher,
+        "adoption_receipt_matches",
+        lambda *_args, **_kwargs: True,
+    )
 
     log_path = backup_root / ".update.log"
     log_path.parent.mkdir(parents=True)
@@ -408,6 +413,8 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
         (backup_root / ".update.request.json").read_text(encoding="utf-8")
     )
     assert request_payload["target_tag"] == "v1.2.3"
+    assert request_payload["schema"] == 2
+    assert request_payload["operation_id"].startswith("update-")
     assert request_payload["channel"] == "pinned"
     assert request_payload["force_redeploy"] is True
     assert request_payload["idempotency_key"] == "idem-123"
@@ -415,8 +422,11 @@ def test_start_update_via_path_unit_writes_trigger_and_waits(
     assert "LUMEN_REPO_DIR" not in request_payload
     assert "PATH" not in request_payload
 
-    trigger_text = (backup_root / ".update.trigger").read_text(encoding="utf-8")
-    assert trigger_text.startswith("2026-05-02T00:00:00")
+    trigger_payload = json.loads(
+        (backup_root / ".update.trigger").read_text(encoding="utf-8")
+    )
+    assert trigger_payload["operation_id"] == request_payload["operation_id"]
+    assert trigger_payload["request_sha256"] in marker
 
 
 def test_write_marker_tolerates_chmod_eperm_on_squashed_mount(
@@ -473,6 +483,65 @@ def test_write_marker_claims_exclusively_while_live(
     )
     text = (backup_root / ".update.running").read_text(encoding="utf-8")
     assert "pid=111" in text  # original claim preserved, not overwritten
+
+
+def test_write_marker_retries_short_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    real_write = admin_update._update_marker.os.write
+
+    def short_write(descriptor: int, payload: bytes | memoryview) -> int:
+        return real_write(descriptor, bytes(payload[:3]))
+
+    monkeypatch.setattr(admin_update._update_marker.os, "write", short_write)
+
+    assert admin_update._write_marker(
+        111,
+        datetime.now(timezone.utc).isoformat(),
+        unit="lumen-update-runner.service",
+        operation_id="update-short-write",
+        request_sha256="a" * 64,
+    )
+    marker = (backup_root / ".update.running").read_text(encoding="utf-8")
+    assert "operation_id=update-short-write" in marker
+    assert f"request_sha256={'a' * 64}" in marker
+    assert "generation=0" in marker
+
+
+def test_update_adoption_receipt_requires_exact_request_identity(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / ".update.adoption.json"
+    payload = {
+        "schema": 1,
+        "operation_id": "update-receipt",
+        "owner": "host",
+        "generation": 1,
+        "request_sha256": "b" * 64,
+        "pid": 1234,
+        "accepted_at": "2026-08-09T00:00:00+00:00",
+        "status": "accepted",
+    }
+    receipt.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    assert admin_update._update_launcher.adoption_receipt_matches(
+        receipt,
+        operation_id="update-receipt",
+        request_sha256="b" * 64,
+    )
+    assert not admin_update._update_launcher.adoption_receipt_matches(
+        receipt,
+        operation_id="update-other",
+        request_sha256="b" * 64,
+    )
+    assert not admin_update._update_launcher.adoption_receipt_matches(
+        receipt,
+        operation_id="update-receipt",
+        request_sha256="c" * 64,
+    )
 
 
 def test_write_marker_replaces_stale_marker(
@@ -553,6 +622,37 @@ def test_start_update_via_path_unit_raises_busy_when_marker_claim_fails(
     assert not (backup_root / ".update.request.json").exists()
 
 
+def test_start_update_via_path_unit_cleans_marker_when_staging_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
+    monkeypatch.setattr(
+        admin_update._update_launcher,
+        "_atomic_write_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    log_path = backup_root / ".update.log"
+    log_path.parent.mkdir(parents=True)
+
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        with pytest.raises(OSError, match="disk full"):
+            admin_update._start_update_via_path_unit(
+                env={
+                    "LUMEN_UPDATE_RESOLVED_TAG": "v1.2.4",
+                    "LUMEN_UPDATE_CHANNEL": "stable",
+                    "LUMEN_UPDATE_IDEMPOTENCY_KEY": "idem-staging-failure",
+                },
+                log_fh=log_fh,
+                started_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+            )
+
+    assert not (backup_root / ".update.running").exists()
+    assert not (backup_root / ".update.trigger").exists()
+    assert not (backup_root / ".update.request.json").exists()
+
+
 def test_read_marker_drops_stale_pid_only_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -617,8 +717,8 @@ def test_start_update_via_path_unit_tolerates_chmod_eperm_for_env_and_trigger(
 
     monkeypatch.setattr(admin_update.os, "chmod", fake_chmod_eperm)
     monkeypatch.setattr(
-        admin_update,
-        "_wait_for_log_append",
+        admin_update._update_launcher,
+        "adoption_receipt_matches",
         lambda *args, **kwargs: True,
     )
 
@@ -663,33 +763,32 @@ def test_runner_unit_available_short_circuits_in_trigger_only_mode(
     assert admin_update._runner_unit_available() is True
 
 
-def test_start_update_via_path_unit_uses_log_confirmation_in_trigger_only_mode(
+def test_start_update_via_path_unit_rejects_unrelated_log_growth(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Containerised lumen-api can't poll _unit_is_running.
-
-    With LUMEN_UPDATE_VIA_TRIGGER=1 set, the function confirms the host path
-    watcher started by waiting for update.sh output to appear in the shared log.
-    It must not call systemctl or rely on _unit_is_running.
-    """
+    """Shared log growth is diagnostic only and cannot acknowledge this request."""
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
     monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
 
+    counter = {"n": 0}
+
+    def fake_monotonic() -> float:
+        counter["n"] += 1
+        return float(counter["n"])
+
+    monkeypatch.setattr(admin_update._update_launcher.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(admin_update._update_launcher.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        admin_update,
-        "_wait_for_log_append",
-        lambda *args, **kwargs: True,
-    )
-    monkeypatch.setattr(
-        admin_update,
-        "_unit_is_running",
-        lambda _unit: pytest.fail("must not poll host systemd in trigger-only mode"),
+        admin_update._update_launcher,
+        "adoption_receipt_matches",
+        lambda *_args, **_kwargs: False,
     )
 
     log_path = backup_root / ".update.log"
     log_path.parent.mkdir(parents=True)
+    log_path.write_text("unrelated prior operation output\n", encoding="utf-8")
     with log_path.open("a", encoding="utf-8") as log_fh:
         outcome = admin_update._start_update_via_path_unit(
             env={
@@ -701,10 +800,10 @@ def test_start_update_via_path_unit_uses_log_confirmation_in_trigger_only_mode(
             started_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
         )
 
-    assert outcome == (0, admin_update._UPDATE_RUNNER_UNIT)
-    assert (backup_root / ".update.trigger").is_file()
-    assert (backup_root / ".update.request.json").is_file()
-    assert (backup_root / ".update.running").is_file()
+    assert outcome is None
+    assert not (backup_root / ".update.trigger").exists()
+    assert not (backup_root / ".update.request.json").exists()
+    assert not (backup_root / ".update.running").exists()
 
 
 def test_start_update_via_path_unit_cleans_up_when_trigger_only_runner_is_missing(
@@ -720,10 +819,18 @@ def test_start_update_via_path_unit_cleans_up_when_trigger_only_runner_is_missin
     backup_root = tmp_path / "backup"
     monkeypatch.setattr(admin_update.settings, "backup_root", str(backup_root))
     monkeypatch.setenv("LUMEN_UPDATE_VIA_TRIGGER", "1")
+    counter = {"n": 0}
+
+    def fake_monotonic() -> float:
+        counter["n"] += 1
+        return float(counter["n"])
+
+    monkeypatch.setattr(admin_update._update_launcher.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(admin_update._update_launcher.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
-        admin_update,
-        "_wait_for_log_append",
-        lambda *args, **kwargs: False,
+        admin_update._update_launcher,
+        "adoption_receipt_matches",
+        lambda *_args, **_kwargs: False,
     )
 
     log_path = backup_root / ".update.log"
@@ -743,7 +850,7 @@ def test_start_update_via_path_unit_cleans_up_when_trigger_only_runner_is_missin
     assert not (backup_root / ".update.trigger").exists()
     assert not (backup_root / ".update.request.json").exists()
     assert not (backup_root / ".update.running").exists()
-    assert "host runner did not append output" in log_path.read_text(encoding="utf-8")
+    assert "matching adoption receipt" in log_path.read_text(encoding="utf-8")
 
 
 def test_start_update_via_path_unit_cleans_up_when_runner_does_not_activate(

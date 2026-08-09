@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core.model_entities.storage_operations import StorageApplyOperation
@@ -38,8 +38,9 @@ _DISPATCH_HEARTBEAT_SECONDS = 10
 _DISPATCH_BACKOFF_CAP_SECONDS = 15 * 60
 
 LoadConfText = Callable[[AsyncSession], Awaitable[str]]
-StageOperation = Callable[[str, str], None]
-ReadHostResult = Callable[[], dict[str, Any] | None]
+StageOperation = Callable[[str, int, str, str], None]
+ReadHostResult = Callable[[str, int], dict[str, Any] | None]
+ReadHostFence = Callable[[], int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,10 @@ def _now() -> datetime:
 
 def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:_ERROR_LIMIT]
+
+
+def _zero_host_fence() -> int:
+    return 0
 
 
 def _host_timestamp(value: Any) -> int | None:
@@ -95,6 +100,8 @@ def _operation_apply_record(operation: StorageApplyOperation) -> dict[str, Any]:
         message = operation.result_message or operation.last_error or ""
     return {
         "call_id": operation.id,
+        "operation_id": operation.id,
+        "fence": operation.dispatch_fence,
         "status": status,
         "message": message,
         "started_at": operation.host_started_at
@@ -132,12 +139,18 @@ async def latest_storage_apply_record(
 
 
 async def _ingest_host_result(result: dict[str, Any]) -> bool:
-    operation_id = str(result.get("call_id") or "").strip()
+    operation_id = str(
+        result.get("operation_id") or result.get("call_id") or ""
+    ).strip()
+    fence = result.get("fence")
     host_status = str(result.get("status") or "").strip()
-    if not _OPERATION_ID_RE.fullmatch(operation_id) or host_status not in {
-        "ok",
-        "fail",
-    }:
+    if (
+        not _OPERATION_ID_RE.fullmatch(operation_id)
+        or isinstance(fence, bool)
+        or not isinstance(fence, int)
+        or fence <= 0
+        or host_status not in {"ok", "fail"}
+    ):
         logger.error("storage apply host result is invalid: %r", result)
         return False
 
@@ -145,14 +158,19 @@ async def _ingest_host_result(result: dict[str, Any]) -> bool:
         operation = (
             await session.execute(
                 select(StorageApplyOperation)
-                .where(StorageApplyOperation.id == operation_id)
+                .where(
+                    StorageApplyOperation.id == operation_id,
+                    StorageApplyOperation.dispatch_fence == fence,
+                )
                 .with_for_update()
             )
         ).scalar_one_or_none()
         if operation is None:
             logger.error(
-                "storage apply host result references unknown operation_id=%s",
+                "storage apply host result references unknown or stale identity "
+                "operation_id=%s fence=%s",
                 operation_id,
+                fence,
             )
             return False
         terminal_status = "succeeded" if host_status == "ok" else "failed"
@@ -160,8 +178,9 @@ async def _ingest_host_result(result: dict[str, Any]) -> bool:
             if operation.status != terminal_status:
                 logger.error(
                     "storage apply terminal result conflicts operation_id=%s "
-                    "db_status=%s host_status=%s",
+                    "fence=%s db_status=%s host_status=%s",
                     operation_id,
+                    fence,
                     operation.status,
                     host_status,
                 )
@@ -185,6 +204,7 @@ async def _ingest_host_result(result: dict[str, Any]) -> bool:
             user_id=operation.requested_by,
             details={
                 "operation_id": operation.id,
+                "fence": fence,
                 "host_status": host_status,
                 "message": message,
             },
@@ -236,11 +256,41 @@ async def _execute_select(statement: Any) -> Any:
         return await session.execute(statement)
 
 
-async def _claim_operation(operation_id: str) -> StorageDispatchClaim | None:
+async def _active_operation_identity() -> tuple[str, int] | None:
+    row = (
+        await _execute_select(
+            select(
+                StorageApplyOperation.id,
+                StorageApplyOperation.dispatch_fence,
+            )
+            .where(StorageApplyOperation.active_slot == 1)
+            .limit(1)
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    return str(row[0]), int(row[1])
+
+
+async def _claim_operation(
+    operation_id: str,
+    *,
+    host_fence_floor: int,
+) -> StorageDispatchClaim | None:
+    if (
+        isinstance(host_fence_floor, bool)
+        or not isinstance(host_fence_floor, int)
+        or host_fence_floor < 0
+    ):
+        raise RuntimeError("storage host fence floor is invalid")
     owner = f"api:{os.getpid()}:{uuid.uuid4().hex}"
     now = _now()
     retry_before = now - timedelta(seconds=_REDISPATCH_AFTER_SECONDS)
     async with SessionLocal() as session:
+        database_fence = await session.scalar(
+            select(func.coalesce(func.max(StorageApplyOperation.dispatch_fence), 0))
+        )
+        next_fence = max(int(database_fence or 0), host_fence_floor) + 1
         row = (
             await session.execute(
                 update(StorageApplyOperation)
@@ -270,7 +320,7 @@ async def _claim_operation(operation_id: str) -> StorageDispatchClaim | None:
                     dispatch_owner=owner,
                     dispatch_lease_until=now
                     + timedelta(seconds=_DISPATCH_LEASE_SECONDS),
-                    dispatch_fence=StorageApplyOperation.dispatch_fence + 1,
+                    dispatch_fence=next_fence,
                     dispatch_attempts=StorageApplyOperation.dispatch_attempts + 1,
                     last_error=None,
                 )
@@ -300,9 +350,13 @@ async def _record_dispatch_failure(
     permanent: bool,
 ) -> None:
     terminal = permanent or claim.attempts >= _MAX_DISPATCH_ATTEMPTS
-    retry_seconds = 0 if claim.attempts <= 1 else min(
-        _DISPATCH_BACKOFF_CAP_SECONDS,
-        2 ** max(0, min(claim.attempts - 1, 10)),
+    retry_seconds = (
+        0
+        if claim.attempts <= 1
+        else min(
+            _DISPATCH_BACKOFF_CAP_SECONDS,
+            2 ** max(0, min(claim.attempts - 1, 10)),
+        )
     )
     async with SessionLocal() as session:
         values: dict[str, Any] = {
@@ -363,7 +417,9 @@ async def _record_dispatch_failure(
 
 
 def _is_permanent_dispatch_error(exc: BaseException) -> bool:
-    if isinstance(exc, (PermissionError, FileNotFoundError, IsADirectoryError, ValueError)):
+    if isinstance(
+        exc, (PermissionError, FileNotFoundError, IsADirectoryError, ValueError)
+    ):
         return True
     if isinstance(exc, OSError):
         return exc.errno in {
@@ -404,32 +460,60 @@ async def _stage_with_heartbeat(
     conf_text: str,
 ) -> None:
     stage_task = asyncio.create_task(
-        asyncio.to_thread(stage_operation, claim.operation_id, conf_text)
+        asyncio.to_thread(
+            stage_operation,
+            claim.operation_id,
+            claim.fence,
+            claim.desired_config_sha256,
+            conf_text,
+        )
     )
     heartbeat_task = asyncio.create_task(
         _dispatch_heartbeat(claim),
         name=f"storage-dispatch-heartbeat-{claim.operation_id}",
     )
+    pending_error: BaseException | None = None
     try:
         done, _pending = await asyncio.wait(
             {stage_task, heartbeat_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         if heartbeat_task in done:
-            heartbeat_task.result()
+            pending_error = _completed_task_error(heartbeat_task)
         if stage_task in done:
-            stage_task.result()
-        else:
-            await stage_task
+            pending_error = pending_error or _completed_task_error(stage_task)
+    except BaseException as exc:
+        pending_error = exc
     finally:
+        stage_error = await _wait_for_uncancellable_stage(stage_task)
+        pending_error = pending_error or stage_error
         heartbeat_task.cancel()
-        if not stage_task.done():
-            stage_task.cancel()
-        await asyncio.gather(
-            heartbeat_task,
-            stage_task,
-            return_exceptions=True,
-        )
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+    if pending_error is not None:
+        raise pending_error
+
+
+def _completed_task_error(task: asyncio.Task[Any]) -> BaseException | None:
+    try:
+        task.result()
+    except BaseException as exc:
+        return exc
+    return None
+
+
+async def _wait_for_uncancellable_stage(
+    stage_task: asyncio.Task[None],
+) -> BaseException | None:
+    while not stage_task.done():
+        try:
+            await asyncio.shield(stage_task)
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                current_task.uncancel()
+        except BaseException as exc:
+            return exc
+    return _completed_task_error(stage_task)
 
 
 async def _dispatch_heartbeat(claim: StorageDispatchClaim) -> None:
@@ -507,8 +591,13 @@ async def dispatch_storage_apply_operation(
     *,
     load_conf_text: LoadConfText,
     stage_operation: StageOperation,
+    read_host_fence: ReadHostFence = _zero_host_fence,
 ) -> bool:
-    claim = await _claim_operation(operation_id)
+    host_fence_floor = await asyncio.to_thread(read_host_fence)
+    claim = await _claim_operation(
+        operation_id,
+        host_fence_floor=host_fence_floor,
+    )
     if claim is None:
         return False
 
@@ -537,8 +626,7 @@ async def dispatch_storage_apply_operation(
             )
         except Exception:
             logger.exception(
-                "storage dispatch failure state could not be persisted "
-                "operation_id=%s",
+                "storage dispatch failure state could not be persisted operation_id=%s",
                 operation_id,
             )
         raise
@@ -549,17 +637,21 @@ async def run_storage_apply_reconciler_once(
     load_conf_text: LoadConfText,
     stage_operation: StageOperation,
     read_host_result: ReadHostResult,
+    read_host_fence: ReadHostFence = _zero_host_fence,
 ) -> int:
     reconciled = 0
-    result = read_host_result()
-    if result is not None and await _ingest_host_result(result):
-        reconciled += 1
+    identity = await _active_operation_identity()
+    if identity is not None and identity[1] > 0:
+        result = read_host_result(*identity)
+        if result is not None and await _ingest_host_result(result):
+            reconciled += 1
     for operation_id in await _due_operation_ids():
         try:
             dispatched = await dispatch_storage_apply_operation(
                 operation_id,
                 load_conf_text=load_conf_text,
                 stage_operation=stage_operation,
+                read_host_fence=read_host_fence,
             )
         except asyncio.CancelledError:
             raise
@@ -579,6 +671,7 @@ async def storage_apply_reconciler_loop(
     load_conf_text: LoadConfText,
     stage_operation: StageOperation,
     read_host_result: ReadHostResult,
+    read_host_fence: ReadHostFence = _zero_host_fence,
     interval_seconds: float = _RECONCILE_INTERVAL_SECONDS,
 ) -> None:
     while not runtime.stop.is_set():
@@ -588,6 +681,7 @@ async def storage_apply_reconciler_loop(
                 load_conf_text=load_conf_text,
                 stage_operation=stage_operation,
                 read_host_result=read_host_result,
+                read_host_fence=read_host_fence,
             )
         except asyncio.CancelledError:
             raise
@@ -606,6 +700,7 @@ def create_storage_apply_lifespan(
     load_conf_text: LoadConfText,
     stage_operation: StageOperation,
     read_host_result: ReadHostResult,
+    read_host_fence: ReadHostFence = _zero_host_fence,
 ) -> Callable[[FastAPI], AsyncIterator[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -621,6 +716,7 @@ def create_storage_apply_lifespan(
                 load_conf_text=load_conf_text,
                 stage_operation=stage_operation,
                 read_host_result=read_host_result,
+                read_host_fence=read_host_fence,
             ),
             name="storage-apply-reconciler",
         )

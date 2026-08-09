@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-from maintenance_marker_lock import marker_lock
+from maintenance_marker_lock import atomic_replace_bytes, marker_lock
 
 _DEFAULT_REQUEST = Path("/opt/lumendata/backup/.update.request.json")
 _DEFAULT_SCRIPT = Path("/opt/lumen/current/scripts/update.sh")
@@ -26,11 +26,13 @@ _DEFAULT_RECOVERY_MARKER = Path("/opt/lumen/shared/.update-resume")
 _DEFAULT_TRIGGER = Path("/opt/lumendata/backup/.update.trigger")
 _DEFAULT_RUNNING = Path("/opt/lumendata/backup/.update.running")
 _DEFAULT_CLAIM = Path("/opt/lumen/shared/.update-claim.json")
+_DEFAULT_ADOPTION_RECEIPT = Path("/opt/lumendata/backup/.update.adoption.json")
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_JOURNAL_BYTES = 2 * 1024 * 1024
 _MAX_RUNTIME_BYTES = 64 * 1024
 _ALLOWED_FIELDS = {
     "schema",
+    "operation_id",
     "target_tag",
     "channel",
     "force_redeploy",
@@ -42,11 +44,18 @@ _TAG_RE = re.compile(
     r"^(?:v[0-9]+(?:\.[0-9]+){0,2}(?:-[0-9A-Za-z.-]+)?|main)$"
 )
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,240}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CHANNELS = {"stable", "main", "pinned", "minor", "major"}
 _PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 _MAX_REQUEST_AGE = timedelta(minutes=5)
 _ACTIVE_STATUSES = {"running", "failed"}
-_TERMINAL_STATUSES = {"complete", "manual_required", "rolled_back"}
+_TERMINAL_STATUSES = {
+    "complete",
+    "failed_recovered_original",
+    "manual_required",
+    "rolled_back",
+}
 _CONSUMABLE_STATUSES = {"complete", "rolled_back"}
 
 
@@ -107,14 +116,20 @@ def load_request(
     missing = _ALLOWED_FIELDS - set(payload)
     if extra or missing:
         raise UpdateRequestError("request fields do not match schema")
-    if payload.get("schema") != 1:
+    if payload.get("schema") != 2:
         raise UpdateRequestError("unsupported request schema")
 
+    operation_id = payload.get("operation_id")
     target_tag = payload.get("target_tag")
     channel = payload.get("channel")
     idempotency_key = payload.get("idempotency_key")
     issued_at = payload.get("issued_at")
     force_redeploy = payload.get("force_redeploy")
+    if (
+        not isinstance(operation_id, str)
+        or not _OPERATION_ID_RE.fullmatch(operation_id)
+    ):
+        raise UpdateRequestError("operation_id is invalid")
     if not isinstance(target_tag, str) or not _TAG_RE.fullmatch(target_tag):
         raise UpdateRequestError("target_tag is invalid")
     if not isinstance(channel, str) or channel not in _CHANNELS:
@@ -141,6 +156,7 @@ def load_request(
         raise UpdateRequestError("request is stale")
 
     return {
+        "operation_id": operation_id,
         "target_tag": target_tag,
         "channel": channel,
         "force_redeploy": force_redeploy,
@@ -148,6 +164,65 @@ def load_request(
         "proxy_url": _validated_proxy_url(payload.get("proxy_url")),
         "issued_at": issued_at,
     }
+
+
+def _request_document(request: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema": 2,
+        "operation_id": request["operation_id"],
+        "target_tag": request["target_tag"],
+        "channel": request["channel"],
+        "force_redeploy": request["force_redeploy"],
+        "idempotency_key": request["idempotency_key"],
+        "proxy_url": request.get("proxy_url"),
+        "issued_at": request["issued_at"],
+    }
+
+
+def request_sha256(request: dict[str, object]) -> str:
+    encoded = (
+        json.dumps(
+            _request_document(request),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_trigger(
+    path: Path,
+    *,
+    operation_id: str,
+    expected_request_sha256: str,
+) -> dict[str, object]:
+    try:
+        raw = _read_regular_file_with_limit(path, _MAX_REQUEST_BYTES)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise UpdateRequestError("cannot read update trigger") from exc
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateRequestError("update trigger is invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "issued_at",
+        "operation_id",
+        "request_sha256",
+        "schema",
+    }:
+        raise UpdateRequestError("update trigger fields do not match schema")
+    if (
+        payload.get("schema") != 1
+        or payload.get("operation_id") != operation_id
+        or payload.get("request_sha256") != expected_request_sha256
+        or not isinstance(payload.get("issued_at"), str)
+    ):
+        raise UpdateRequestError("update trigger identity mismatch")
+    return payload
 
 
 def load_journal(path: Path) -> dict[str, object] | None:
@@ -203,8 +278,10 @@ def journal_request_matches(
     request: dict[str, object],
 ) -> bool:
     journal_request = payload.get("request")
-    return isinstance(journal_request, dict) and journal_request == _request_contract(
-        request
+    return (
+        payload.get("operation_id") == request["operation_id"]
+        and isinstance(journal_request, dict)
+        and journal_request == _request_contract(request)
     )
 
 
@@ -305,16 +382,31 @@ def write_runtime_claim(
     request_path: Path,
     trigger_path: Path,
     running_path: Path,
+    receipt_path: Path,
+    adoption: dict[str, object],
 ) -> None:
+    generation = adoption.get("generation")
+    if (
+        adoption.get("operation_id") != request["operation_id"]
+        or adoption.get("request_sha256") != request_sha256(request)
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise UpdateRequestError("update adoption identity is invalid")
     _atomic_write_private_json(
         claim_path,
         {
-            "schema": 1,
+            "schema": 2,
+            "operation_id": request["operation_id"],
+            "request_sha256": request_sha256(request),
+            "generation": generation,
             "request": _request_contract(request),
             "artifacts": {
                 "request": _runtime_artifact_claim(request_path),
                 "trigger": _runtime_artifact_claim(trigger_path),
                 "running": _runtime_artifact_claim(running_path),
+                "receipt": _runtime_artifact_claim(receipt_path),
             },
         },
     )
@@ -322,13 +414,60 @@ def write_runtime_claim(
 
 def load_runtime_claim(path: Path) -> dict[str, object]:
     payload = _private_json(path, _MAX_RUNTIME_BYTES)
-    if payload.get("schema") != 1:
+    if payload.get("schema") != 2:
         raise UpdateRequestError("runtime claim schema is invalid")
     request = payload.get("request")
     artifacts = payload.get("artifacts")
-    if not isinstance(request, dict) or not isinstance(artifacts, dict):
+    operation_id = payload.get("operation_id")
+    request_digest = payload.get("request_sha256")
+    generation = payload.get("generation")
+    if (
+        not isinstance(request, dict)
+        or not isinstance(artifacts, dict)
+        or not isinstance(operation_id, str)
+        or not _OPERATION_ID_RE.fullmatch(operation_id)
+        or not isinstance(request_digest, str)
+        or not _SHA256_RE.fullmatch(request_digest)
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
         raise UpdateRequestError("runtime claim contract is invalid")
     return payload
+
+
+def verify_runtime_claim(
+    claim: dict[str, object],
+    request: dict[str, object],
+    *,
+    request_path: Path,
+    receipt_path: Path,
+) -> None:
+    expected_digest = request_sha256(request)
+    if (
+        claim.get("operation_id") != request["operation_id"]
+        or claim.get("request_sha256") != expected_digest
+        or claim.get("request") != _request_contract(request)
+    ):
+        raise UpdateRequestError("active journal runtime claim identity mismatch")
+    artifacts = claim.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise UpdateRequestError("active journal runtime claim artifacts are invalid")
+    for name, path in (("request", request_path), ("receipt", receipt_path)):
+        record = artifacts.get(name)
+        if not isinstance(record, dict) or record.get("path") != str(path):
+            raise UpdateRequestError(
+                f"active journal runtime claim {name} identity is invalid"
+            )
+        digest = record.get("sha256")
+        if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+            raise UpdateRequestError(
+                f"active journal runtime claim {name} digest is invalid"
+            )
+        if _file_sha256(path) != digest:
+            raise UpdateRequestError(
+                f"active journal runtime claim {name} changed or is missing"
+            )
 
 
 def archive_terminal_journal(
@@ -401,6 +540,8 @@ def build_environment(request: dict[str, object]) -> dict[str, str]:
         "LUMEN_UPDATE_CHANNEL": str(request["channel"]),
         "LUMEN_UPDATE_RESOLVED_TAG": target_tag,
         "LUMEN_UPDATE_IDEMPOTENCY_KEY": str(request["idempotency_key"]),
+        "LUMEN_UPDATE_API_OPERATION_ID": str(request["operation_id"]),
+        "LUMEN_UPDATE_REQUEST_SHA256": request_sha256(request),
         "LUMEN_IMAGE_TAG": target_tag,
         "NO_PROXY": "127.0.0.1,localhost,::1",
         "no_proxy": "127.0.0.1,localhost,::1",
@@ -429,7 +570,7 @@ def build_environment(request: dict[str, object]) -> dict[str, str]:
     return env
 
 
-def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path]:
+def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     return (
         Path(os.environ.get("LUMEN_UPDATE_REQUEST", _DEFAULT_REQUEST)),
         Path(os.environ.get("LUMEN_UPDATE_JOURNAL", _DEFAULT_JOURNAL)),
@@ -442,6 +583,12 @@ def _runtime_paths() -> tuple[Path, Path, Path, Path, Path, Path]:
         Path(os.environ.get("LUMEN_UPDATE_TRIGGER", _DEFAULT_TRIGGER)),
         Path(os.environ.get("LUMEN_UPDATE_RUNNING", _DEFAULT_RUNNING)),
         Path(os.environ.get("LUMEN_UPDATE_CLAIM", _DEFAULT_CLAIM)),
+        Path(
+            os.environ.get(
+                "LUMEN_UPDATE_ADOPTION_RECEIPT",
+                _DEFAULT_ADOPTION_RECEIPT,
+            )
+        ),
     )
 
 
@@ -500,6 +647,7 @@ def cleanup_runtime_files() -> int:
         trigger_path,
         running_path,
         claim_path,
+        receipt_path,
     ) = _runtime_paths()
     try:
         journal = load_journal(journal_path)
@@ -535,6 +683,7 @@ def cleanup_runtime_files() -> int:
         _unlink_claimed_artifact(claim, "request", request_path)
         _unlink_claimed_artifact(claim, "trigger", trigger_path)
         _unlink_claimed_artifact(claim, "running", running_path)
+        _unlink_claimed_artifact(claim, "receipt", receipt_path)
     except (OSError, UpdateRequestError) as exc:
         print(f"update runner cleanup could not consume claimed state: {exc}", file=sys.stderr)
         return 0
@@ -580,8 +729,89 @@ def _load_current_request(
         return None
 
 
-def _adopt_running_marker_unlocked(path: Path) -> str | None:
-    """Adopt the API marker before reading or mutating slow update state."""
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _load_adoption_receipt(path: Path) -> dict[str, object] | None:
+    try:
+        raw = _read_regular_file_with_limit(path, _MAX_RUNTIME_BYTES)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise UpdateRequestError("cannot read update adoption receipt") from exc
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateRequestError("update adoption receipt is invalid") from exc
+    if not isinstance(payload, dict):
+        raise UpdateRequestError("update adoption receipt is invalid")
+    generation = payload.get("generation")
+    pid = payload.get("pid")
+    if (
+        payload.get("schema") != 1
+        or not isinstance(payload.get("operation_id"), str)
+        or not isinstance(payload.get("request_sha256"), str)
+        or not _SHA256_RE.fullmatch(str(payload.get("request_sha256")))
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+        or payload.get("owner") != "host"
+        or payload.get("status") not in {"prepared", "accepted"}
+    ):
+        raise UpdateRequestError("update adoption receipt is invalid")
+    return payload
+
+
+def _write_adoption_receipt(path: Path, payload: dict[str, object]) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+    atomic_replace_bytes(path, encoded, mode=0o660)
+
+
+def verify_adoption_receipt(
+    path: Path,
+    *,
+    operation_id: str,
+    expected_request_sha256: str,
+    generation: int | None = None,
+) -> dict[str, object]:
+    receipt = _load_adoption_receipt(path)
+    if (
+        receipt is None
+        or receipt.get("operation_id") != operation_id
+        or receipt.get("request_sha256") != expected_request_sha256
+        or receipt.get("status") != "accepted"
+        or (
+            generation is not None
+            and receipt.get("generation") != generation
+        )
+    ):
+        raise UpdateRequestError("update adoption receipt identity mismatch")
+    return receipt
+
+
+def _adopt_running_marker_unlocked(
+    path: Path,
+    receipt_path: Path,
+    *,
+    expected_operation_id: str,
+    expected_request_sha256: str,
+) -> dict[str, object] | None:
+    """Adopt or recover a matching API-to-host ownership handoff."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -594,50 +824,79 @@ def _adopt_running_marker_unlocked(path: Path) -> str | None:
         if sep:
             values[key] = value.strip()
     operation_id = values.get("operation_id")
+    marker_request_sha256 = values.get("request_sha256")
     try:
         generation = int(values.get("generation", "0"))
     except ValueError as exc:
         raise UpdateRequestError("update ownership generation is invalid") from exc
-    if values.get("owner") != "api" or generation != 0 or not operation_id:
+    if (
+        operation_id != expected_operation_id
+        or marker_request_sha256 != expected_request_sha256
+    ):
         return None
+    owner = values.get("owner")
+    if owner == "api" and generation == 0:
+        next_generation = 1
+    elif owner == "host" and generation >= 1:
+        try:
+            previous_pid = int(values.get("pid", "0"))
+        except ValueError as exc:
+            raise UpdateRequestError("update ownership pid is invalid") from exc
+        if _pid_is_running(previous_pid):
+            return None
+        previous_receipt = _load_adoption_receipt(receipt_path)
+        if previous_receipt is not None and (
+            previous_receipt.get("operation_id") != expected_operation_id
+            or previous_receipt.get("request_sha256") != expected_request_sha256
+            or previous_receipt.get("generation") != generation
+        ):
+            raise UpdateRequestError("update ownership receipt conflicts with marker")
+        next_generation = generation + 1
+    else:
+        return None
+
+    accepted_at = datetime.now(timezone.utc).isoformat()
+    receipt: dict[str, object] = {
+        "schema": 1,
+        "operation_id": operation_id,
+        "owner": "host",
+        "generation": next_generation,
+        "request_sha256": expected_request_sha256,
+        "pid": os.getpid(),
+        "accepted_at": accepted_at,
+        "status": "prepared",
+    }
+    _write_adoption_receipt(receipt_path, receipt)
     values["owner"] = "host"
-    values["generation"] = str(generation + 1)
+    values["generation"] = str(next_generation)
+    values["request_sha256"] = expected_request_sha256
     values["pid"] = str(os.getpid())
-    values["adopted_at"] = datetime.now(timezone.utc).isoformat()
+    values["adopted_at"] = accepted_at
     payload = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_raw = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-    )
-    temporary = Path(temporary_raw)
-    try:
-        os.fchmod(descriptor, 0o660)
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-    return operation_id
+    atomic_replace_bytes(path, payload, mode=0o660)
+    receipt["status"] = "accepted"
+    _write_adoption_receipt(receipt_path, receipt)
+    return receipt
 
 
-def adopt_running_marker(path: Path) -> str | None:
+def adopt_running_marker(
+    path: Path,
+    receipt_path: Path,
+    *,
+    expected_operation_id: str,
+    expected_request_sha256: str,
+) -> dict[str, object] | None:
     try:
         path.lstat()
     except FileNotFoundError:
         return None
     with marker_lock(path.parent):
-        return _adopt_running_marker_unlocked(path)
+        return _adopt_running_marker_unlocked(
+            path,
+            receipt_path,
+            expected_operation_id=expected_operation_id,
+            expected_request_sha256=expected_request_sha256,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -654,10 +913,10 @@ def main(argv: list[str] | None = None) -> int:
         trigger_path,
         running_path,
         claim_path,
+        receipt_path,
     ) = _runtime_paths()
     update_script = Path(os.environ.get("LUMEN_UPDATE_SCRIPT", _DEFAULT_SCRIPT))
     try:
-        adopt_running_marker(running_path)
         journal = load_journal(journal_path)
         active = journal_is_active(journal)
         request = _load_current_request(request_path, allow_stale=active)
@@ -666,6 +925,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise UpdateRequestError(
                     "active journal requires the preserved update request"
                 )
+            claim = load_runtime_claim(claim_path)
+            verify_runtime_claim(
+                claim,
+                request,
+                request_path=request_path,
+                receipt_path=receipt_path,
+            )
+            generation = claim.get("generation")
+            if not isinstance(generation, int) or isinstance(generation, bool):
+                raise UpdateRequestError("active journal claim generation is invalid")
+            verify_adoption_receipt(
+                receipt_path,
+                operation_id=str(request["operation_id"]),
+                expected_request_sha256=request_sha256(request),
+                generation=generation,
+            )
             if (
                 isinstance(journal, dict)
                 and journal.get("request") is not None
@@ -674,40 +949,67 @@ def main(argv: list[str] | None = None) -> int:
                 raise UpdateRequestError(
                     "active journal belongs to a different update request"
                 )
-        elif journal is not None:
+        else:
             if request is None:
-                if _path_exists(trigger_path) or _path_exists(running_path):
+                if journal is not None and (
+                    _path_exists(trigger_path) or _path_exists(running_path)
+                ):
                     raise UpdateRequestError(
                         "terminal journal has incomplete pending request state"
                     )
-                print("update runner found only a terminal journal; no request pending")
-                return 0
-            if journal_request_matches(journal, request):
+                if journal is not None:
+                    print("update runner found only a terminal journal; no request pending")
+                    return 0
+                raise UpdateRequestError("cannot read update request")
+            request_digest = request_sha256(request)
+            load_trigger(
+                trigger_path,
+                operation_id=str(request["operation_id"]),
+                expected_request_sha256=request_digest,
+            )
+            adoption = adopt_running_marker(
+                running_path,
+                receipt_path,
+                expected_operation_id=str(request["operation_id"]),
+                expected_request_sha256=request_digest,
+            )
+            if adoption is None:
+                raise UpdateRequestError(
+                    "new update requires a successful API-to-host ownership handoff"
+                )
+            if journal is not None and journal_request_matches(journal, request):
+                if journal.get("status") not in _CONSUMABLE_STATUSES:
+                    raise UpdateRequestError(
+                        "previous update failed after restoring the original runtime"
+                    )
                 write_runtime_claim(
                     claim_path,
                     request,
                     request_path,
                     trigger_path,
                     running_path,
+                    receipt_path,
+                    adoption,
                 )
                 print("update runner found an already-consumed request")
                 return 0
-            archived = archive_terminal_journal(journal_path, journal)
-            print(f"update runner archived terminal journal at {archived}", flush=True)
-            journal = None
-            active = False
-        if request is None:
-            raise UpdateRequestError("cannot read update request")
+            if journal is not None:
+                archived = archive_terminal_journal(journal_path, journal)
+                print(f"update runner archived terminal journal at {archived}", flush=True)
+                journal = None
         script_info = update_script.stat()
         if not stat.S_ISREG(script_info.st_mode):
             raise UpdateRequestError("update script is not a regular file")
-        write_runtime_claim(
-            claim_path,
-            request,
-            request_path,
-            trigger_path,
-            running_path,
-        )
+        if not active:
+            write_runtime_claim(
+                claim_path,
+                request,
+                request_path,
+                trigger_path,
+                running_path,
+                receipt_path,
+                adoption,
+            )
     except (OSError, UpdateRequestError) as exc:
         print(f"update runner rejected request: {exc}", file=sys.stderr)
         return 2

@@ -83,6 +83,7 @@ class StorageApplyOperation(Base, TimestampMixin):
         nullable=False,
         default=0,
         server_default="0",
+        comment="Globally monotonic host adoption fence assigned at dispatch claim.",
     )
     dispatched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),

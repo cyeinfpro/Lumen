@@ -14,6 +14,7 @@ from lumen_core.pricing import (
 )
 
 from .contracts import CompletionPricingDependencies
+from .helpers import mark_completion_billing_pending
 
 
 async def completion_cost_breakdown(
@@ -139,7 +140,6 @@ async def resolve_completion_breakdown(
     service_tier: str,
     deps: CompletionPricingDependencies,
 ) -> CostBreakdown | None:
-    pricing_error: Any | None = None
     try:
         breakdown = await deps.completion_cost_breakdown(
             session,
@@ -151,99 +151,61 @@ async def resolve_completion_breakdown(
     except deps.billing_core.BillingError as exc:
         if exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}:
             raise
-        pricing_error = exc
-        breakdown = None
-    if breakdown is not None and (
-        breakdown.actual_cost_micro > 0 or rate_multiplier == 0
-    ):
-        if breakdown.pricing_source == "fallback":
-            session.add(
-                deps.audit(
-                    event_type="billing.pricing.fallback_used",
-                    user_id=completion.user_id,
-                    details={
-                        "model": completion.model,
-                        "completion_id": completion.id,
-                        "usage": usage.model_dump(),
-                    },
-                )
-            )
-        return breakdown
-
-    held = await deps.held_amount_for_ref(
-        session,
-        completion.user_id,
-        "completion",
-        billing_ref_id,
-    )
-    if held <= 0:
-        # 与 generation 侧同一语义:被先前 release 消费的 hold 不是真实结算,
-        # 定价缺失时按被退回的金额补记,不能吞掉已发生的上游成本;从未建 hold
-        # 或已有真实 settle 则保留对账记录。
-        consumed = await deps.existing_ref_consumption_tx(
-            session,
-            completion.user_id,
-            "completion",
-            billing_ref_id,
-        )
-        released = (
-            max(0, int(getattr(consumed, "amount_micro", 0) or 0))
-            if consumed is not None and consumed.kind == "release"
-            else 0
-        )
-        if released <= 0:
-            if pricing_error is not None:
-                session.add(
-                    deps.audit(
-                        event_type="billing.unresolved_after_upstream",
-                        user_id=completion.user_id,
-                        details={
-                            "scope": "chat_model",
-                            "model": completion.model,
-                            "completion_id": completion.id,
-                            "usage": usage.model_dump(),
-                            "error": pricing_error.message,
-                        },
-                    )
-                )
-            return None
-        held = released
+        reason = exc.code.lower()
+        mark_completion_billing_pending(completion, reason=reason)
         session.add(
             deps.audit(
-                event_type="billing.pricing.released_hold_fallback_after_upstream",
+                event_type="billing.reconciliation.pending",
                 user_id=completion.user_id,
                 details={
                     "scope": "chat_model",
                     "model": completion.model,
                     "completion_id": completion.id,
                     "usage": usage.model_dump(),
-                    "actual_micro": held,
-                    "error": (
-                        pricing_error.message if pricing_error is not None else None
-                    ),
+                    "reason": reason,
+                    "error": exc.message,
                 },
             )
         )
-        return held_amount_breakdown(
-            held,
-            rate_multiplier=rate_multiplier,
-            pricing_source="released_hold_fallback",
-        )
+        return None
+    if breakdown is not None and (
+        breakdown.actual_cost_micro > 0 or rate_multiplier == 0
+    ):
+        if breakdown.pricing_source == "fallback":
+            reason = "pricing_fallback_rejected"
+            mark_completion_billing_pending(completion, reason=reason)
+            session.add(
+                deps.audit(
+                    event_type="billing.reconciliation.pending",
+                    user_id=completion.user_id,
+                    details={
+                        "scope": "chat_model",
+                        "model": completion.model,
+                        "completion_id": completion.id,
+                        "usage": usage.model_dump(),
+                        "reason": reason,
+                    },
+                )
+            )
+            return None
+        return breakdown
+
+    reason = "pricing_zero_cost_after_upstream"
+    mark_completion_billing_pending(completion, reason=reason)
     session.add(
         deps.audit(
-            event_type="billing.pricing.hold_fallback_after_upstream",
+            event_type="billing.reconciliation.pending",
             user_id=completion.user_id,
             details={
                 "scope": "chat_model",
                 "model": completion.model,
                 "completion_id": completion.id,
                 "usage": usage.model_dump(),
-                "actual_micro": held,
-                "error": pricing_error.message if pricing_error is not None else None,
+                "reason": reason,
             },
         )
     )
-    return held_amount_breakdown(held, rate_multiplier=rate_multiplier)
+    return None
 
 
 async def completion_request_fingerprint(

@@ -28,6 +28,7 @@ export class LeaderElection {
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
   private unsubscribe: (() => void) | null = null;
   private listeners = new Set<(leader: boolean) => void>();
+  private peerHelloListeners = new Set<(peerId: string) => void>();
   private readonly tabId: string;
   private readonly bus: CrossTabBus;
   private readonly clock: LeaderClock;
@@ -72,6 +73,11 @@ export class LeaderElection {
     return () => this.listeners.delete(listener);
   }
 
+  subscribePeerHello(listener: (peerId: string) => void): () => void {
+    this.peerHelloListeners.add(listener);
+    return () => this.peerHelloListeners.delete(listener);
+  }
+
   isLeader(): boolean {
     return this.leader;
   }
@@ -98,6 +104,9 @@ export class LeaderElection {
       this.peers.set(message.sender, now);
       if (this.leader) {
         this.bus.post({ type: "leader_heartbeat" }, now);
+        for (const listener of this.peerHelloListeners) {
+          listener(message.sender);
+        }
       }
       return;
     }

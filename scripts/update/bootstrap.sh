@@ -80,7 +80,21 @@ LUMEN_APP_GID="${_LUMEN_UPDATE_INPUT_APP_GID:-${shared_app_gid:-10001}}"
 LUMEN_APP_STORAGE_GID="${_LUMEN_UPDATE_INPUT_APP_STORAGE_GID:-${shared_app_storage_gid:-${LUMEN_APP_GID}}}"
 export LUMEN_DATA_ROOT LUMEN_DB_ROOT LUMEN_BACKUP_ROOT LUMEN_POSTGRES_UID LUMEN_POSTGRES_GID LUMEN_REDIS_UID LUMEN_REDIS_GID LUMEN_APP_UID LUMEN_APP_GID LUMEN_APP_STORAGE_GID
 UPDATE_LOG_DIR="${LUMEN_BACKUP_ROOT}"
-OPERATION_ID="update-$(date -u +%Y%m%d-%H%M%S)-$$"
+if [ -n "${LUMEN_UPDATE_API_OPERATION_ID:-}" ]; then
+    OPERATION_ID="${LUMEN_UPDATE_API_OPERATION_ID}"
+    case "${OPERATION_ID}" in
+        *[!A-Za-z0-9._:-]*)
+            log_error "LUMEN_UPDATE_API_OPERATION_ID 格式无效。"
+            exit 78
+            ;;
+    esac
+    if [ "${#OPERATION_ID}" -gt 240 ]; then
+        log_error "LUMEN_UPDATE_API_OPERATION_ID 超过 240 字符。"
+        exit 78
+    fi
+else
+    OPERATION_ID="update-$(date -u +%Y%m%d-%H%M%S)-$$"
+fi
 
 NEW_ID=""
 NEW_RELEASE=""

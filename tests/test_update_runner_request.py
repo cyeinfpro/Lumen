@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -24,7 +25,8 @@ def _load_runner() -> ModuleType:
 
 def _request(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema": 1,
+        "schema": 2,
+        "operation_id": "update-0123456789abcdef0123456789abcdef",
         "target_tag": "v1.2.3",
         "channel": "stable",
         "force_redeploy": False,
@@ -34,6 +36,86 @@ def _request(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def _adoption(
+    runner: ModuleType,
+    payload: dict[str, object],
+    *,
+    generation: int = 1,
+) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "operation_id": payload["operation_id"],
+        "owner": "host",
+        "generation": generation,
+        "request_sha256": runner.request_sha256(payload),
+        "pid": 12345,
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "status": "accepted",
+    }
+
+
+def _write_receipt(
+    runner: ModuleType,
+    path: Path,
+    payload: dict[str, object],
+    *,
+    generation: int = 1,
+) -> dict[str, object]:
+    adoption = _adoption(runner, payload, generation=generation)
+    path.write_text(
+        json.dumps(adoption, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return adoption
+
+
+def _write_trigger(
+    runner: ModuleType,
+    path: Path,
+    payload: dict[str, object],
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "issued_at": payload["issued_at"],
+                "operation_id": payload["operation_id"],
+                "request_sha256": runner.request_sha256(payload),
+                "schema": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_marker(
+    runner: ModuleType,
+    path: Path,
+    payload: dict[str, object],
+    *,
+    owner: str = "api",
+    generation: int = 0,
+    pid: int = 0,
+) -> None:
+    path.write_text(
+        "\n".join(
+            (
+                f"pid={pid}",
+                f"started_at={payload['issued_at']}",
+                "unit=lumen-update-runner.service",
+                f"operation_id={payload['operation_id']}",
+                f"request_sha256={runner.request_sha256(payload)}",
+                f"owner={owner}",
+                f"generation={generation}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
 
 
 def _journal_request(payload: dict[str, object]) -> dict[str, object]:
@@ -129,6 +211,21 @@ def test_active_journal_auto_resumes_with_preserved_stale_request(
     )
     update_script = tmp_path / "update.sh"
     update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    trigger = tmp_path / "trigger"
+    running = tmp_path / "running"
+    claim = tmp_path / "claim.json"
+    receipt = tmp_path / "receipt.json"
+    request_payload = runner.load_request(request_path, allow_stale=True)
+    adoption = _write_receipt(runner, receipt, request_payload)
+    runner.write_runtime_claim(
+        claim,
+        request_payload,
+        request_path,
+        trigger,
+        running,
+        receipt,
+        adoption,
+    )
     captured: dict[str, object] = {}
     monkeypatch.setenv("LUMEN_UPDATE_REQUEST", str(request_path))
     monkeypatch.setenv("LUMEN_UPDATE_JOURNAL", str(journal))
@@ -137,7 +234,10 @@ def test_active_journal_auto_resumes_with_preserved_stale_request(
         "LUMEN_UPDATE_RECOVERY_MARKER",
         str(tmp_path / "resume.marker"),
     )
-    monkeypatch.setenv("LUMEN_UPDATE_CLAIM", str(tmp_path / "claim.json"))
+    monkeypatch.setenv("LUMEN_UPDATE_TRIGGER", str(trigger))
+    monkeypatch.setenv("LUMEN_UPDATE_RUNNING", str(running))
+    monkeypatch.setenv("LUMEN_UPDATE_CLAIM", str(claim))
+    monkeypatch.setenv("LUMEN_UPDATE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setattr(
         runner.os,
         "execve",
@@ -209,6 +309,7 @@ def test_runner_cleanup_preserves_request_until_journal_is_terminal(
     trigger = tmp_path / "trigger"
     running = tmp_path / "running"
     claim = tmp_path / "claim.json"
+    receipt = tmp_path / "receipt.json"
     request_payload = _request()
     request.write_text(json.dumps(request_payload), encoding="utf-8")
     marker.write_text("update-cleanup\n", encoding="utf-8")
@@ -225,14 +326,18 @@ def test_runner_cleanup_preserves_request_until_journal_is_terminal(
         ("LUMEN_UPDATE_TRIGGER", trigger),
         ("LUMEN_UPDATE_RUNNING", running),
         ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
     ):
         monkeypatch.setenv(key, str(path))
+    adoption = _write_receipt(runner, receipt, request_payload)
     runner.write_runtime_claim(
         claim,
         runner.load_request(request),
         request,
         trigger,
         running,
+        receipt,
+        adoption,
     )
 
     assert runner.cleanup_runtime_files() == 0
@@ -241,6 +346,7 @@ def test_runner_cleanup_preserves_request_until_journal_is_terminal(
     assert trigger.exists()
     assert running.exists()
     assert claim.exists()
+    assert receipt.exists()
 
     journal.write_text(
         json.dumps(
@@ -259,6 +365,7 @@ def test_runner_cleanup_preserves_request_until_journal_is_terminal(
     assert not trigger.exists()
     assert not running.exists()
     assert not claim.exists()
+    assert not receipt.exists()
 
 
 def test_manual_required_journal_preserves_request_trigger_and_claim(
@@ -272,6 +379,7 @@ def test_manual_required_journal_preserves_request_trigger_and_claim(
     trigger = tmp_path / "trigger"
     running = tmp_path / "running"
     claim = tmp_path / "claim.json"
+    receipt = tmp_path / "receipt.json"
     request_payload = _request()
     request.write_text(json.dumps(request_payload), encoding="utf-8")
     marker.write_text("manual-required\n", encoding="utf-8")
@@ -295,14 +403,18 @@ def test_manual_required_journal_preserves_request_trigger_and_claim(
         ("LUMEN_UPDATE_TRIGGER", trigger),
         ("LUMEN_UPDATE_RUNNING", running),
         ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
     ):
         monkeypatch.setenv(key, str(path))
+    adoption = _write_receipt(runner, receipt, request_payload)
     runner.write_runtime_claim(
         claim,
         runner.load_request(request),
         request,
         trigger,
         running,
+        receipt,
+        adoption,
     )
 
     assert runner.cleanup_runtime_files() == 0
@@ -312,6 +424,7 @@ def test_manual_required_journal_preserves_request_trigger_and_claim(
     assert trigger.exists()
     assert running.exists()
     assert claim.exists()
+    assert receipt.exists()
 
 
 def test_terminal_journal_is_archived_before_a_different_request_runs(
@@ -327,9 +440,9 @@ def test_terminal_journal_is_archived_before_a_different_request_runs(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(new_request), encoding="utf-8")
     trigger = tmp_path / "trigger"
-    trigger.write_text("new-trigger\n", encoding="utf-8")
+    _write_trigger(runner, trigger, new_request)
     running = tmp_path / "running"
-    running.write_text("new-running\n", encoding="utf-8")
+    _write_marker(runner, running, new_request)
     journal = tmp_path / "journal.json"
     journal.write_text(
         json.dumps(
@@ -346,6 +459,7 @@ def test_terminal_journal_is_archived_before_a_different_request_runs(
     update_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     archive = tmp_path / "journal-archive"
     claim = tmp_path / "claim.json"
+    receipt = tmp_path / "receipt.json"
     captured: dict[str, object] = {}
     for key, path in (
         ("LUMEN_UPDATE_REQUEST", request_path),
@@ -353,6 +467,7 @@ def test_terminal_journal_is_archived_before_a_different_request_runs(
         ("LUMEN_UPDATE_TRIGGER", trigger),
         ("LUMEN_UPDATE_RUNNING", running),
         ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
         ("LUMEN_UPDATE_JOURNAL_ARCHIVE", archive),
         ("LUMEN_UPDATE_SCRIPT", update_script),
     ):
@@ -378,6 +493,7 @@ def test_terminal_journal_is_archived_before_a_different_request_runs(
     assert trigger.exists()
     assert running.exists()
     assert claim.exists()
+    assert receipt.exists()
     child_env = captured["env"]
     assert isinstance(child_env, dict)
     assert child_env["LUMEN_UPDATE_IDEMPOTENCY_KEY"] == "new-request"
@@ -393,16 +509,27 @@ def test_terminal_cleanup_preserves_replacement_request_and_trigger(
     trigger = tmp_path / "trigger"
     running = tmp_path / "running"
     claim = tmp_path / "claim.json"
+    receipt = tmp_path / "receipt.json"
     journal = tmp_path / "journal.json"
     request.write_text(json.dumps(consumed_payload), encoding="utf-8")
     trigger.write_text("consumed-trigger\n", encoding="utf-8")
-    running.write_text("consumed-running\n", encoding="utf-8")
+    _write_marker(
+        runner,
+        running,
+        consumed_payload,
+        owner="host",
+        generation=1,
+        pid=12345,
+    )
+    adoption = _write_receipt(runner, receipt, consumed_payload)
     runner.write_runtime_claim(
         claim,
         runner.load_request(request),
         request,
         trigger,
         running,
+        receipt,
+        adoption,
     )
     journal.write_text(
         json.dumps(
@@ -428,6 +555,7 @@ def test_terminal_cleanup_preserves_replacement_request_and_trigger(
         ("LUMEN_UPDATE_TRIGGER", trigger),
         ("LUMEN_UPDATE_RUNNING", running),
         ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
         ("LUMEN_UPDATE_RECOVERY_MARKER", tmp_path / "resume.marker"),
     ):
         monkeypatch.setenv(key, str(path))
@@ -439,6 +567,168 @@ def test_terminal_cleanup_preserves_replacement_request_and_trigger(
     assert trigger.read_text(encoding="utf-8") == "replacement-trigger\n"
     assert running.read_text(encoding="utf-8") == "replacement-running\n"
     assert not claim.exists()
+    assert not receipt.exists()
+
+
+def test_new_update_requires_matching_marker_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload = _request()
+    request = tmp_path / "request.json"
+    trigger = tmp_path / "trigger"
+    script = tmp_path / "update.sh"
+    request.write_text(json.dumps(payload), encoding="utf-8")
+    _write_trigger(runner, trigger, payload)
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    for key, path in (
+        ("LUMEN_UPDATE_REQUEST", request),
+        ("LUMEN_UPDATE_JOURNAL", tmp_path / "journal.json"),
+        ("LUMEN_UPDATE_TRIGGER", trigger),
+        ("LUMEN_UPDATE_RUNNING", tmp_path / "missing.running"),
+        ("LUMEN_UPDATE_CLAIM", tmp_path / "claim.json"),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", tmp_path / "receipt.json"),
+        ("LUMEN_UPDATE_SCRIPT", script),
+    ):
+        monkeypatch.setenv(key, str(path))
+    monkeypatch.setattr(
+        runner.os,
+        "execve",
+        lambda *_args: pytest.fail("must not execute without ownership"),
+    )
+
+    assert runner.main([]) == 2
+
+
+def test_second_update_runner_cannot_take_live_host_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload = _request()
+    request = tmp_path / "request.json"
+    trigger = tmp_path / "trigger"
+    running = tmp_path / "running"
+    script = tmp_path / "update.sh"
+    request.write_text(json.dumps(payload), encoding="utf-8")
+    _write_trigger(runner, trigger, payload)
+    _write_marker(
+        runner,
+        running,
+        payload,
+        owner="host",
+        generation=1,
+        pid=os.getpid(),
+    )
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    for key, path in (
+        ("LUMEN_UPDATE_REQUEST", request),
+        ("LUMEN_UPDATE_JOURNAL", tmp_path / "journal.json"),
+        ("LUMEN_UPDATE_TRIGGER", trigger),
+        ("LUMEN_UPDATE_RUNNING", running),
+        ("LUMEN_UPDATE_CLAIM", tmp_path / "claim.json"),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", tmp_path / "receipt.json"),
+        ("LUMEN_UPDATE_SCRIPT", script),
+    ):
+        monkeypatch.setenv(key, str(path))
+
+    assert runner.main([]) == 2
+
+
+def test_update_runner_recovers_crash_after_marker_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload = _request()
+    request = tmp_path / "request.json"
+    trigger = tmp_path / "trigger"
+    running = tmp_path / "running"
+    receipt = tmp_path / "receipt.json"
+    claim = tmp_path / "claim.json"
+    script = tmp_path / "update.sh"
+    request.write_text(json.dumps(payload), encoding="utf-8")
+    _write_trigger(runner, trigger, payload)
+    _write_marker(
+        runner,
+        running,
+        payload,
+        owner="host",
+        generation=1,
+        pid=77777,
+    )
+    prepared = _adoption(runner, payload)
+    prepared["pid"] = 77777
+    prepared["status"] = "prepared"
+    receipt.write_text(json.dumps(prepared) + "\n", encoding="utf-8")
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+    for key, path in (
+        ("LUMEN_UPDATE_REQUEST", request),
+        ("LUMEN_UPDATE_JOURNAL", tmp_path / "journal.json"),
+        ("LUMEN_UPDATE_TRIGGER", trigger),
+        ("LUMEN_UPDATE_RUNNING", running),
+        ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
+        ("LUMEN_UPDATE_SCRIPT", script),
+    ):
+        monkeypatch.setenv(key, str(path))
+    monkeypatch.setattr(runner, "_pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(
+        runner.os,
+        "execve",
+        lambda executable, argv, env: captured.update(env=env),
+    )
+
+    assert runner.main([]) == 127
+    assert json.loads(receipt.read_text(encoding="utf-8"))["generation"] == 2
+    assert json.loads(claim.read_text(encoding="utf-8"))["generation"] == 2
+    assert isinstance(captured["env"], dict)
+
+
+def test_failed_recovered_original_is_not_consumed_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    payload = _request()
+    request = tmp_path / "request.json"
+    trigger = tmp_path / "trigger"
+    running = tmp_path / "running"
+    receipt = tmp_path / "receipt.json"
+    claim = tmp_path / "claim.json"
+    journal = tmp_path / "journal.json"
+    request.write_text(json.dumps(payload), encoding="utf-8")
+    _write_trigger(runner, trigger, payload)
+    _write_marker(runner, running, payload)
+    journal.write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "status": "failed_recovered_original",
+                "operation_id": "update-failed-target",
+                "request": _journal_request(payload),
+            }
+        ),
+        encoding="utf-8",
+    )
+    script = tmp_path / "update.sh"
+    script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    for key, path in (
+        ("LUMEN_UPDATE_REQUEST", request),
+        ("LUMEN_UPDATE_JOURNAL", journal),
+        ("LUMEN_UPDATE_TRIGGER", trigger),
+        ("LUMEN_UPDATE_RUNNING", running),
+        ("LUMEN_UPDATE_CLAIM", claim),
+        ("LUMEN_UPDATE_ADOPTION_RECEIPT", receipt),
+        ("LUMEN_UPDATE_SCRIPT", script),
+    ):
+        monkeypatch.setenv(key, str(path))
+
+    assert runner.main([]) == 2
+    assert journal.exists()
+    assert request.exists()
 
 
 def test_update_systemd_consumer_watches_resume_marker_and_restarts() -> None:

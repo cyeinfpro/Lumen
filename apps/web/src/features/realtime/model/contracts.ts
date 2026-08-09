@@ -1,4 +1,5 @@
 export const REALTIME_SCHEMA_VERSION = 1 as const;
+export const INITIAL_SNAPSHOT_RECOVERY_REASON = "initial_snapshot" as const;
 
 export const CONTROL_EVENT_NAMES = [
   "replay_truncated",
@@ -74,6 +75,7 @@ export type ParsedRealtimeEvent =
   | { kind: "unknown"; type: string };
 
 export type RecoveryReason =
+  | { kind: "initial_snapshot"; cursor?: string }
   | { kind: "replay_gap"; reason: string; cursor?: string }
   | { kind: "recovery_required"; reason: string; cursor?: string }
   | { kind: "server_epoch_changed"; epoch: string; cursor?: string };

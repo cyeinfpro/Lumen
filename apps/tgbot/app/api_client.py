@@ -550,6 +550,28 @@ class LumenApi:
             )
         return body
 
+    async def control_capabilities(self) -> dict[str, Any]:
+        try:
+            resp = await self._client.get("/telegram/control/capabilities")
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_capabilities_connection_lost",
+                "control effect protocol capability check failed",
+                outcome_unknown=False,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if not isinstance(body, dict) or not isinstance(
+            body.get("effect_protocol_version"),
+            int,
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "control capability response is malformed",
+                resp.status_code,
+            )
+        return body
+
     async def claim_control_effect(
         self,
         command_id: str,
@@ -570,10 +592,172 @@ class LumenApi:
             ) from exc
         self._raise_for(resp)
         body = resp.json()
-        if not isinstance(body, dict) or not isinstance(body.get("acquired"), bool):
+        if (
+            not isinstance(body, dict)
+            or not isinstance(body.get("acquired"), bool)
+            or not isinstance(body.get("fence"), int)
+            or not isinstance(body.get("lease_seconds"), int)
+        ):
             raise ApiError(
                 "ambiguous_response",
                 "control effect claim response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def renew_control_effect(
+        self,
+        command_id: str,
+        *,
+        command: str,
+        owner: str,
+        fence: int,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/renew",
+                json={
+                    "command": command,
+                    "owner": owner,
+                    "fence": fence,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_effect_renew_connection_lost",
+                "control effect lease renewal result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if (
+            not isinstance(body, dict)
+            or body.get("renewed") is not True
+            or body.get("fence") != fence
+            or not isinstance(body.get("lease_seconds"), int)
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "control effect renewal response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def prepare_control_redrive_effect(
+        self,
+        command_id: str,
+        *,
+        owner: str,
+        fence: int,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/redrive/prepare",
+                json={
+                    "command": "redrive_quarantine",
+                    "owner": owner,
+                    "fence": fence,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_effect_prepare_connection_lost",
+                "redrive receipt commit result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if (
+            not isinstance(body, dict)
+            or body.get("action")
+            not in {"execute", "already_succeeded", "outcome_unknown"}
+            or body.get("fence") != fence
+            or not isinstance(body.get("idempotency_key"), str)
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "redrive receipt response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def commit_control_restart_intent(
+        self,
+        command_id: str,
+        *,
+        owner: str,
+        fence: int,
+        generation: str,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/restart-intent",
+                json={
+                    "command": "restart",
+                    "owner": owner,
+                    "fence": fence,
+                    "generation": generation,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_restart_intent_connection_lost",
+                "restart intent commit result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if (
+            not isinstance(body, dict)
+            or body.get("action") != "stop_current_generation"
+            or body.get("fence") != fence
+            or body.get("requested_generation") != generation
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "restart intent response is malformed",
+                resp.status_code,
+                outcome_unknown=True,
+            )
+        return body
+
+    async def reconcile_control_redrive_effect(
+        self,
+        command_id: str,
+        *,
+        resolution: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            resp = await self._client.post(
+                f"/telegram/control/{command_id}/effect/redrive/reconcile",
+                json={
+                    "command": "redrive_quarantine",
+                    "resolution": resolution,
+                    "note": note,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise ApiError(
+                "control_effect_reconcile_connection_lost",
+                "redrive reconciliation result is unknown",
+                outcome_unknown=True,
+            ) from exc
+        self._raise_for(resp)
+        body = resp.json()
+        if (
+            not isinstance(body, dict)
+            or body.get("command") != "redrive_quarantine"
+            or body.get("resolution") != resolution
+            or body.get("command_status") not in {"pending", "published", "accepted"}
+            or body.get("effect_status") not in {"pending", "succeeded"}
+        ):
+            raise ApiError(
+                "ambiguous_response",
+                "redrive reconciliation response is malformed",
                 resp.status_code,
                 outcome_unknown=True,
             )
@@ -588,6 +772,7 @@ class LumenApi:
         fence: int,
         status: str,
         error: str | None = None,
+        generation: str | None = None,
     ) -> dict[str, Any]:
         try:
             resp = await self._client.post(
@@ -598,6 +783,7 @@ class LumenApi:
                     "fence": fence,
                     "status": status,
                     "error": error,
+                    "generation": generation,
                 },
             )
         except httpx.HTTPError as exc:

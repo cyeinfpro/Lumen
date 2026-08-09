@@ -146,6 +146,29 @@ test("two tabs elect one leader and follower takes over after leader exits", () 
   secondBus.close();
 });
 
+test("an elected leader reports a late peer hello", () => {
+  const clock = new FakeClock();
+  const hub = new FakeBroadcastHub();
+  const leaderBus = new CrossTabBus("user:u1", "tab-a", hub.create);
+  const followerBus = new CrossTabBus("user:u1", "tab-b", hub.create);
+  const leader = new LeaderElection("tab-a", leaderBus, clock);
+  const follower = new LeaderElection("tab-b", followerBus, clock);
+  const peers: string[] = [];
+  leader.subscribePeerHello((peerId) => peers.push(peerId));
+
+  leader.start();
+  clock.tick(50);
+  equal(leader.isLeader(), true);
+
+  follower.start();
+  deepEqual(peers, ["tab-b"]);
+
+  follower.stop();
+  leader.stop();
+  followerBus.close();
+  leaderBus.close();
+});
+
 test("default browser clock preserves the global timer receiver", () => {
   const originalTimerDescriptors = {
     setTimeout: Object.getOwnPropertyDescriptor(globalThis, "setTimeout")!,

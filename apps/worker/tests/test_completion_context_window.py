@@ -308,13 +308,22 @@ def test_fallback_usage_estimate_counts_top_level_instructions_once(
         tokens_out=0,
     )
 
-    legacy_payload = json.dumps(input_list, ensure_ascii=False)
+    legacy_payload = json.dumps(
+        input_list,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     request_payload = json.dumps(
         {
             "input": input_list,
             "instructions": instructions,
         },
         ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     assert input_only_tokens == len(legacy_payload)
     assert request_tokens == len(request_payload)

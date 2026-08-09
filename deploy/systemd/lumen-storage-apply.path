@@ -1,11 +1,11 @@
 [Unit]
-Description=Lumen storage apply trigger watcher
+Description=Lumen storage apply request watcher
 After=multi-user.target
 
 [Path]
-# lumen-api (containerised) writes this file via PUT /admin/storage; PID 1 starts
-# lumen-storage-apply.service so we sidestep the container's sandbox/sudo chain.
-PathChanged=/var/lib/lumen-storage/apply.trigger
+# lumen-api writes immutable operation_id.fence requests. DirectoryNotEmpty
+# retriggers after service exit until every request has a terminal result.
+DirectoryNotEmpty=/var/lib/lumen-storage/requests
 Unit=lumen-storage-apply.service
 
 [Install]

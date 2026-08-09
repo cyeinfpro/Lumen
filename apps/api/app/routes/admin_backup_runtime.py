@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import errno
+import hashlib
 import json
+import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any
 
 from . import admin_backup_catalog as _backup_catalog
@@ -20,6 +25,9 @@ class BackupTriggerNotStarted(RuntimeError):
 
 class BackupAttemptTimeout(TimeoutError):
     """Raised when a trigger is adopted but no committed pair appears."""
+
+
+_MAX_ADOPTION_RECEIPT_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -61,31 +69,79 @@ async def wait_for_log_append(
 def timestamp_from_backup_stdout(
     stdout: str,
     started_at: datetime,
+    operation_id: str | None,
+    *,
+    allow_legacy: bool = False,
 ) -> str | None:
-    del started_at
-    for line in reversed((stdout or "").splitlines()):
+    started_second = started_at.astimezone(timezone.utc).replace(microsecond=0)
+    lines = (stdout or "").splitlines()
+    timestamp = _structured_timestamp(lines, started_second, operation_id)
+    if timestamp is not None:
+        return timestamp
+
+    # Legacy text has no operation identity and is therefore available only to
+    # explicitly opted-in callers that have no operation_id to bind.
+    if not allow_legacy or operation_id is not None:
+        return None
+    return _legacy_timestamp(lines, started_second)
+
+
+def _structured_timestamp(
+    lines: list[str],
+    started_second: datetime,
+    operation_id: str | None,
+) -> str | None:
+    for line in reversed(lines):
         stripped = line.strip()
-        if stripped.startswith("{"):
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict):
-                ts = payload.get("timestamp")
-                if isinstance(ts, str) and _backup_catalog.TIMESTAMP_RE.fullmatch(ts):
-                    return ts
-        if "complete" in line and "backup " in line:
-            parts = line.split()
-            for i, token in enumerate(parts):
-                if token == "backup" and i + 1 < len(parts):
-                    ts = parts[i + 1].rstrip(":")
-                    if _backup_catalog.TIMESTAMP_RE.fullmatch(ts):
-                        return ts
-        if "complete" in line.lower():
-            match = re.search(r"\b([0-9]{8}-[0-9]{6})\b", line)
-            if match:
-                return match.group(1)
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if (
+            operation_id is None
+            or not isinstance(payload, dict)
+            or payload.get("operation_id") != operation_id
+        ):
+            continue
+        ts = payload.get("timestamp")
+        if not isinstance(ts, str) or not _backup_catalog.TIMESTAMP_RE.fullmatch(ts):
+            continue
+        completed_at = datetime.strptime(ts, "%Y%m%d-%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+        if completed_at >= started_second:
+            return ts
     return None
+
+
+def _legacy_timestamp(lines: list[str], started_second: datetime) -> str | None:
+    for line in reversed(lines):
+        timestamp = _legacy_timestamp_from_line(line)
+        if timestamp is not None and _timestamp_not_before(timestamp, started_second):
+            return timestamp
+    return None
+
+
+def _legacy_timestamp_from_line(line: str) -> str | None:
+    if "complete" not in line.lower():
+        return None
+    if "backup " in line:
+        parts = line.split()
+        for index, token in enumerate(parts[:-1]):
+            timestamp = parts[index + 1].rstrip(":")
+            if token == "backup" and _backup_catalog.TIMESTAMP_RE.fullmatch(timestamp):
+                return timestamp
+    match = re.search(r"\b([0-9]{8}-[0-9]{6})\b", line)
+    return match.group(1) if match else None
+
+
+def _timestamp_not_before(timestamp: str, started_second: datetime) -> bool:
+    completed_at = datetime.strptime(timestamp, "%Y%m%d-%H%M%S").replace(
+        tzinfo=timezone.utc
+    )
+    return completed_at >= started_second
 
 
 def backup_script_was_skipped(output: str) -> bool:
@@ -119,12 +175,215 @@ def write_backup_trigger(
     tmp.replace(path)
 
 
-def write_restore_trigger(path: Path, timestamp: str) -> None:
+def restore_request_sha256(operation_id: str, timestamp: str) -> str:
+    encoded = (
+        json.dumps(
+            {
+                "operation_id": operation_id,
+                "schema": 2,
+                "timestamp": timestamp,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while persisting backup runtime state")
+        view = view[written:]
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(path, flags)
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", -1)}:
+                raise
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, payload: bytes, *, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f"{path.suffix}.tmp")
-    tmp.write_text(timestamp + "\n", encoding="utf-8")
-    _chmod_tolerate_eperm(tmp, 0o600)
-    tmp.replace(path)
+    descriptor, temporary_raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_raw)
+    try:
+        try:
+            os.fchmod(descriptor, mode)
+        except PermissionError:
+            pass
+        _write_all(descriptor, payload)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        _chmod_tolerate_eperm(temporary, mode)
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def try_write_pid_marker(
+    path: Path,
+    pid: int,
+    started_at: datetime,
+    *,
+    unit: str | None,
+    operation_id: str | None,
+    owner: str,
+    generation: int,
+    marker_names: tuple[str, ...],
+    marker_is_live: Any,
+    marker_lock: Any,
+) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"pid={pid}", f"started_at={started_at.isoformat()}"]
+    if unit:
+        lines.append(f"unit={unit}")
+    if operation_id:
+        lines.extend(
+            (
+                f"operation_id={operation_id}",
+                f"owner={owner}",
+                f"generation={generation}",
+            )
+        )
+    payload = ("\n".join(lines) + "\n").encode()
+    with marker_lock(path.parent):
+        if any(marker_is_live(path.parent / name) for name in marker_names):
+            return False
+        descriptor, temporary_raw = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary = Path(temporary_raw)
+        try:
+            try:
+                os.fchmod(descriptor, 0o660)
+            except PermissionError:
+                pass
+            _write_all(descriptor, payload)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            _chmod_tolerate_eperm(temporary, 0o660)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return False
+            _fsync_directory(path.parent)
+            return True
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
+
+def write_restore_trigger(
+    path: Path,
+    timestamp: str,
+    operation_id: str,
+    issued_at: datetime,
+) -> None:
+    payload = {
+        "schema": 2,
+        "operation_id": operation_id,
+        "timestamp": timestamp,
+        "issued_at": issued_at.astimezone(timezone.utc).isoformat(),
+        "request_sha256": restore_request_sha256(operation_id, timestamp),
+    }
+    _atomic_write_bytes(
+        path,
+        (
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+        mode=0o600,
+    )
+
+
+def restore_adoption_receipt_matches(
+    path: Path,
+    *,
+    operation_id: str,
+    timestamp: str,
+) -> bool:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_size <= 0
+            or info.st_size > _MAX_ADOPTION_RECEIPT_BYTES
+        ):
+            return False
+        raw = os.read(descriptor, _MAX_ADOPTION_RECEIPT_BYTES + 1)
+        if len(raw) != info.st_size:
+            return False
+    finally:
+        os.close(descriptor)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    generation = payload.get("generation") if isinstance(payload, dict) else None
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("schema") == 1
+        and payload.get("operation_id") == operation_id
+        and payload.get("request_sha256")
+        == restore_request_sha256(operation_id, timestamp)
+        and payload.get("owner") == "host"
+        and isinstance(generation, int)
+        and not isinstance(generation, bool)
+        and generation >= 1
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and isinstance(payload.get("accepted_at"), str)
+        and payload.get("status") == "accepted"
+    )
+
+
+def restore_adoption_failure(marker_adopted: bool) -> tuple[str, str]:
+    if marker_adopted:
+        return (
+            "restore_adoption_unconfirmed",
+            "host restore marker was adopted, but the matching durable "
+            "receipt was not confirmed",
+        )
+    return (
+        "restore_trigger_not_started",
+        "restore trigger was written, but host restore service did not adopt it",
+    )
 
 
 async def run_backup_attempt(
@@ -139,10 +398,7 @@ async def run_backup_attempt(
             runtime.started_at,
             runtime.operation_id,
         )
-        deadline = (
-            asyncio.get_running_loop().time()
-            + runtime.trigger_timeout_seconds
-        )
+        deadline = asyncio.get_running_loop().time() + runtime.trigger_timeout_seconds
         adopted = False
         while asyncio.get_running_loop().time() < deadline:
             if runtime.marker_is_adopted(runtime.marker, runtime.operation_id):
@@ -154,6 +410,7 @@ async def run_backup_attempt(
             runtime.unlink_owned_marker(runtime.marker, runtime.operation_id)
             raise BackupTriggerNotStarted
         timestamp = await runtime.wait_for_pair(
+            runtime.operation_id,
             runtime.started_at,
             timeout_sec=max(
                 1,

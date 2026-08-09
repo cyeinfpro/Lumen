@@ -15,6 +15,11 @@ from aiogram import Bot
 from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
 
+from lumen_core.model_entities.control_operations import (
+    TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION,
+    TELEGRAM_CONTROL_RESTART_INTENT_KEY,
+)
+
 from .api_client import LumenApi
 from .config import settings
 from .listener import redrive_quarantined_event
@@ -30,6 +35,15 @@ _BATCH_SIZE = 10
 _BACKOFF_MAX_SECONDS = 60.0
 _ALERT_THRESHOLD = 50
 _CONTROL_STREAM_MAXLEN = 10_000
+_TERMINAL_DEDUP_TTL_SECONDS = 90 * 24 * 60 * 60
+
+
+class ControlEffectLeaseLost(RuntimeError):
+    pass
+
+
+class ControlRuntimeNotReady(RuntimeError):
+    pass
 
 
 def _decode(value: Any) -> str:
@@ -112,34 +126,148 @@ async def _ack_and_xack(
         status=status,
         error=error,
     )
+    await redis.expire(
+        f"{CONTROL_STREAM}:command:{command_id}",
+        _TERMINAL_DEDUP_TTL_SECONDS,
+    )
     await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
-    xdel = getattr(redis, "xdel", None)
-    if callable(xdel):
-        await xdel(CONTROL_STREAM, stream_id)
+    await redis.xdel(CONTROL_STREAM, stream_id)
     await _trim_control_stream(redis)
     return acknowledgement
 
 
 async def _xack_and_xdel(redis: Any, stream_id: str) -> None:
     await redis.xack(CONTROL_STREAM, CONTROL_GROUP, stream_id)
-    xdel = getattr(redis, "xdel", None)
-    if callable(xdel):
-        await xdel(CONTROL_STREAM, stream_id)
+    await redis.xdel(CONTROL_STREAM, stream_id)
     await _trim_control_stream(redis)
 
 
 async def _trim_control_stream(redis: Any) -> None:
-    xtrim = getattr(redis, "xtrim", None)
-    if not callable(xtrim):
-        return
     try:
-        await xtrim(
+        await redis.xtrim(
             CONTROL_STREAM,
             maxlen=_CONTROL_STREAM_MAXLEN,
             approximate=True,
         )
     except Exception:  # noqa: BLE001
         logger.warning("control stream trim failed", exc_info=True)
+
+
+async def _effect_heartbeat(
+    api: LumenApi,
+    *,
+    command_id: str,
+    command: str,
+    owner: str,
+    fence: int,
+    lease_seconds: int,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    interval = max(1.0, lease_seconds / 3)
+    while True:
+        await sleep(interval)
+        renewal = await api.renew_control_effect(
+            command_id,
+            command=command,
+            owner=owner,
+            fence=fence,
+        )
+        if (
+            renewal.get("renewed") is not True
+            or int(renewal.get("fence") or 0) != fence
+        ):
+            raise ControlEffectLeaseLost(
+                f"control effect lease was lost command_id={command_id}"
+            )
+        lease_seconds = int(renewal.get("lease_seconds") or lease_seconds)
+        interval = max(1.0, lease_seconds / 3)
+
+
+async def _run_with_effect_heartbeat(
+    api: LumenApi,
+    operation: Awaitable[None],
+    *,
+    command_id: str,
+    command: str,
+    owner: str,
+    fence: int,
+    lease_seconds: int,
+) -> None:
+    effect_task = asyncio.create_task(
+        operation,
+        name=f"telegram-control-effect:{command_id}",
+    )
+    heartbeat_task = asyncio.create_task(
+        _effect_heartbeat(
+            api,
+            command_id=command_id,
+            command=command,
+            owner=owner,
+            fence=fence,
+            lease_seconds=lease_seconds,
+        ),
+        name=f"telegram-control-heartbeat:{command_id}",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {effect_task, heartbeat_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat_task in done:
+            heartbeat_error = heartbeat_task.exception()
+            effect_task.cancel()
+            await asyncio.gather(effect_task, return_exceptions=True)
+            if heartbeat_error is not None:
+                raise heartbeat_error
+            raise ControlEffectLeaseLost(
+                f"control effect heartbeat stopped command_id={command_id}"
+            )
+        await effect_task
+    finally:
+        heartbeat_task.cancel()
+        if not effect_task.done():
+            effect_task.cancel()
+        await asyncio.gather(
+            heartbeat_task,
+            effect_task,
+            return_exceptions=True,
+        )
+
+
+async def _wait_for_restart_readiness(
+    ready_event: asyncio.Event,
+    stop_event: asyncio.Event,
+) -> None:
+    if ready_event.is_set():
+        return
+    ready_wait = asyncio.create_task(
+        ready_event.wait(),
+        name="telegram-control-restart-ready",
+    )
+    stop_wait = asyncio.create_task(
+        stop_event.wait(),
+        name="telegram-control-restart-stop",
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {ready_wait, stop_wait},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_wait in done:
+            raise ControlRuntimeNotReady(
+                "process stopped before Telegram polling became ready"
+            )
+        await ready_wait
+    finally:
+        for task in (ready_wait, stop_wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(ready_wait, stop_wait, return_exceptions=True)
+
+
+def new_control_generation() -> str:
+    host = socket.gethostname().strip()[:32] or "unknown-host"
+    return f"{host}:{os.getpid()}:{uuid.uuid4().hex[:16]}"
 
 
 async def process_control_entry(
@@ -150,10 +278,13 @@ async def process_control_entry(
     stream_id_raw: Any,
     fields_raw: Any,
     bot: Bot | None,
+    generation: str | None = None,
+    restart_ready: asyncio.Event | None = None,
 ) -> bool:
-    """Process one entry, returning True when a restart was newly accepted."""
+    """Process one entry, returning True when this generation must stop."""
 
     stream_id = _decode(stream_id_raw)
+    process_generation = generation or new_control_generation()
     fields = _decoded_fields(fields_raw)
     command_id = fields.get("command_id", "").strip()
     command = fields.get("command", "").strip()
@@ -173,71 +304,22 @@ async def process_control_entry(
         await _xack_and_xdel(redis, stream_id)
         return False
 
-    claim_effect = getattr(api, "claim_control_effect", None)
-    finish_effect = getattr(api, "finish_control_effect", None)
-    if callable(claim_effect) and callable(finish_effect):
-        owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
-        claim = await claim_effect(
-            command_id,
-            command=command,
-            owner=owner,
-        )
-        effect_status = str(claim.get("status") or "pending")
-        acquired = bool(claim.get("acquired"))
-        if not acquired and effect_status == "running":
+    owner = f"{process_generation}:{uuid.uuid4().hex[:12]}"
+    claim = await api.claim_control_effect(
+        command_id,
+        command=command,
+        owner=owner,
+    )
+    effect_status = str(claim.get("status") or "pending")
+    acquired = bool(claim.get("acquired"))
+    effect_fence = int(claim.get("fence") or 0)
+    lease_seconds = int(claim.get("lease_seconds") or 0)
+    effect_payload = claim.get("payload")
+    if not isinstance(effect_payload, dict):
+        raise RuntimeError("control effect payload is invalid")
+    if not acquired:
+        if effect_status == "running":
             raise RuntimeError("control effect is owned by another live consumer")
-        if not acquired and effect_status not in {"succeeded", "failed"}:
-            raise RuntimeError("control effect claim response is invalid")
-        effect_fence = int(claim.get("fence") or 0)
-        if acquired:
-            try:
-                if command == "redrive_quarantine":
-                    if bot is None:
-                        raise RuntimeError(
-                            "Telegram bot is unavailable for quarantine redrive"
-                        )
-                    effect_payload = claim.get("payload")
-                    if not isinstance(effect_payload, dict):
-                        raise RuntimeError("control effect payload is invalid")
-                    await redrive_quarantined_event(
-                        bot,
-                        api,
-                        payload_raw=str(effect_payload.get("payload_raw") or ""),
-                        stream_user_id=str(
-                            effect_payload.get("stream_user_id") or ""
-                        ),
-                    )
-                elif command != "restart":
-                    raise RuntimeError(f"unsupported control command: {command}")
-            except Exception as exc:  # noqa: BLE001
-                error = f"{type(exc).__name__}: {exc}"
-                await finish_effect(
-                    command_id,
-                    command=command,
-                    owner=owner,
-                    fence=effect_fence,
-                    status="failed",
-                    error=error,
-                )
-                await _ack_and_xack(
-                    api,
-                    redis,
-                    stream_id=stream_id,
-                    command_id=command_id,
-                    command=command,
-                    status="failed",
-                    error=error,
-                )
-                return False
-            await finish_effect(
-                command_id,
-                command=command,
-                owner=owner,
-                fence=effect_fence,
-                status="succeeded",
-            )
-            effect_status = "succeeded"
-
         if effect_status == "succeeded":
             await _ack_and_xack(
                 api,
@@ -247,53 +329,91 @@ async def process_control_entry(
                 command=command,
                 status="accepted",
             )
-            if command == "restart":
-                logger.info("control: restart effect committed command_id=%s", command_id)
-                stop_event.set()
-                return True
-            logger.info(
-                "control: quarantine redrive effect committed command_id=%s",
-                command_id,
+            return False
+        if effect_status == "failed":
+            await _ack_and_xack(
+                api,
+                redis,
+                stream_id=stream_id,
+                command_id=command_id,
+                command=command,
+                status="failed",
+                error="control effect previously failed",
             )
             return False
-        await _ack_and_xack(
-            api,
-            redis,
-            stream_id=stream_id,
-            command_id=command_id,
-            command=command,
-            status="failed",
-            error="control effect previously failed",
-        )
-        return False
+        raise RuntimeError("control effect claim response is invalid")
+    if effect_fence < 1 or lease_seconds < 3:
+        raise RuntimeError("control effect claim is missing its fence or lease")
 
     if command == "restart":
-        acknowledgement = await _ack_and_xack(
-            api,
-            redis,
-            stream_id=stream_id,
-            command_id=command_id,
-            command=command,
-            status="accepted",
+        raw_intent = effect_payload.get(TELEGRAM_CONTROL_RESTART_INTENT_KEY)
+        requested_generation = (
+            str(raw_intent.get("requested_generation") or "")
+            if isinstance(raw_intent, dict)
+            else ""
         )
-        if bool(acknowledgement.get("newly_accepted")):
-            logger.info("control: restart accepted command_id=%s", command_id)
-            stop_event.set()
-            return True
-        return False
+        if requested_generation and requested_generation != process_generation:
+            if restart_ready is None:
+                raise ControlRuntimeNotReady(
+                    "restart completion requires an explicit runtime readiness gate"
+                )
+            await _run_with_effect_heartbeat(
+                api,
+                _wait_for_restart_readiness(restart_ready, stop_event),
+                command_id=command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                lease_seconds=lease_seconds,
+            )
+            await api.finish_control_effect(
+                command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                status="succeeded",
+                generation=process_generation,
+            )
+            await _ack_and_xack(
+                api,
+                redis,
+                stream_id=stream_id,
+                command_id=command_id,
+                command=command,
+                status="accepted",
+            )
+            logger.info(
+                "control: restart completed by new generation command_id=%s "
+                "generation=%s",
+                command_id,
+                process_generation,
+            )
+            return False
+        await api.commit_control_restart_intent(
+            command_id,
+            owner=owner,
+            fence=effect_fence,
+            generation=process_generation,
+        )
+        logger.info(
+            "control: restart stop intent committed command_id=%s generation=%s",
+            command_id,
+            process_generation,
+        )
+        stop_event.set()
+        return True
 
     if command == "redrive_quarantine":
-        try:
-            if bot is None:
-                raise RuntimeError("Telegram bot is unavailable for quarantine redrive")
-            await redrive_quarantined_event(
-                bot,
-                api,
-                payload_raw=str(payload.get("payload_raw") or ""),
-                stream_user_id=str(payload.get("stream_user_id") or ""),
+        if bot is None:
+            error = "RuntimeError: Telegram bot is unavailable for quarantine redrive"
+            await api.finish_control_effect(
+                command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                status="failed",
+                error=error,
             )
-        except Exception as exc:  # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
             await _ack_and_xack(
                 api,
                 redis,
@@ -303,8 +423,62 @@ async def process_control_entry(
                 status="failed",
                 error=error,
             )
-            logger.error(
-                "control: quarantine redrive failed command_id=%s error=%s",
+            return False
+        try:
+            payload_raw_value = str(effect_payload.get("payload_raw") or "")
+            stream_user_id = str(effect_payload.get("stream_user_id") or "")
+            preparation = await api.prepare_control_redrive_effect(
+                command_id,
+                owner=owner,
+                fence=effect_fence,
+            )
+            action = str(preparation.get("action") or "")
+            if action == "outcome_unknown":
+                logger.warning(
+                    "control: quarantine redrive remains pending reconciliation "
+                    "command_id=%s",
+                    command_id,
+                )
+                return False
+            if action == "execute":
+                await _run_with_effect_heartbeat(
+                    api,
+                    redrive_quarantined_event(
+                        bot,
+                        api,
+                        payload_raw=payload_raw_value,
+                        stream_user_id=stream_user_id,
+                    ),
+                    command_id=command_id,
+                    command=command,
+                    owner=owner,
+                    fence=effect_fence,
+                    lease_seconds=lease_seconds,
+                )
+            elif action != "already_succeeded":
+                raise RuntimeError("control effect preparation response is invalid")
+            await api.finish_control_effect(
+                command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                status="succeeded",
+            )
+        except ControlEffectLeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            error = f"{type(exc).__name__}: {exc}"
+            await api.finish_control_effect(
+                command_id,
+                command=command,
+                owner=owner,
+                fence=effect_fence,
+                status="outcome_unknown",
+                error=error,
+            )
+            logger.warning(
+                "control: quarantine redrive outcome unknown; transport retained "
+                "command_id=%s error=%s",
                 command_id,
                 error,
             )
@@ -317,27 +491,30 @@ async def process_control_entry(
             command=command,
             status="accepted",
         )
-        logger.info("control: quarantine redrive accepted command_id=%s", command_id)
+        logger.info(
+            "control: quarantine redrive effect committed command_id=%s",
+            command_id,
+        )
         return False
 
-    try:
-        await _ack_and_xack(
-            api,
-            redis,
-            stream_id=stream_id,
-            command_id=command_id,
-            command=command,
-            status="failed",
-            error=f"unsupported control command: {command}",
-        )
-    except Exception:
-        await _quarantine_invalid_entry(
-            api,
-            stream_id=stream_id,
-            fields=fields,
-            reason=f"unsupported Telegram control command: {command}",
-        )
-        await _xack_and_xdel(redis, stream_id)
+    error = f"unsupported control command: {command}"
+    await api.finish_control_effect(
+        command_id,
+        command=command,
+        owner=owner,
+        fence=effect_fence,
+        status="failed",
+        error=error,
+    )
+    await _ack_and_xack(
+        api,
+        redis,
+        stream_id=stream_id,
+        command_id=command_id,
+        command=command,
+        status="failed",
+        error=error,
+    )
     return False
 
 
@@ -372,6 +549,8 @@ async def run_control_listener(
     *,
     api: LumenApi | None = None,
     bot: Bot | None = None,
+    generation: str | None = None,
+    restart_ready: asyncio.Event | None = None,
     sleep_or_stop: Callable[[asyncio.Event, float], Awaitable[bool]],
     redis_factory: Callable[..., Any] = aioredis.from_url,
 ) -> None:
@@ -379,10 +558,19 @@ async def run_control_listener(
 
     owned_api = api is None
     api_client = api or LumenApi()
-    consumer = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    process_generation = generation or new_control_generation()
+    consumer = f"{process_generation}:stream"
     backoff = 1.0
     consecutive_failures = 0
     try:
+        capabilities = await api_client.control_capabilities()
+        protocol_version = int(capabilities.get("effect_protocol_version") or 0)
+        if protocol_version != TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION:
+            raise RuntimeError(
+                "incompatible Telegram control effect protocol: "
+                f"expected={TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION} "
+                f"actual={protocol_version}"
+            )
         while not stop_event.is_set():
             client = None
             try:
@@ -409,6 +597,8 @@ async def run_control_listener(
                             stream_id_raw=stream_id,
                             fields_raw=fields,
                             bot=bot,
+                            generation=process_generation,
+                            restart_ready=restart_ready,
                         ):
                             return
             except asyncio.CancelledError:
@@ -444,7 +634,9 @@ async def run_control_listener(
 __all__ = [
     "CONTROL_GROUP",
     "CONTROL_STREAM",
+    "ControlRuntimeNotReady",
     "ensure_control_group",
+    "new_control_generation",
     "process_control_entry",
     "run_control_listener",
 ]

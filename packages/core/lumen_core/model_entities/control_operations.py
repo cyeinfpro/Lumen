@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Final, Literal, TypedDict
 
 from sqlalchemy import (
     BigInteger,
@@ -20,6 +20,42 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..model_base import Base, TimestampMixin, new_uuid7
 from ..sqltypes import JsonType
+
+
+TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION: Final = 1
+TELEGRAM_CONTROL_EFFECT_RECEIPT_KEY: Final = "effect_receipt_v1"
+TELEGRAM_CONTROL_RESTART_INTENT_KEY: Final = "restart_intent_v1"
+
+
+class TelegramControlEffectReceipt(TypedDict, total=False):
+    """Durable external-effect receipt stored in the command payload."""
+
+    idempotency_key: str
+    state: Literal[
+        "dispatching",
+        "succeeded",
+        "outcome_unknown",
+        "retryable",
+    ]
+    owner: str
+    fence: int
+    attempt: int
+    started_at: str
+    completed_at: str
+    error: str
+    reconciled_at: str
+    reconciliation: Literal["succeeded", "retry"]
+    reconciliation_note: str
+
+
+class TelegramControlRestartIntent(TypedDict, total=False):
+    """Cross-process restart intent stored without requiring a schema change."""
+
+    state: Literal["stop_intent_committed", "new_generation_ready"]
+    requested_generation: str
+    committed_at: str
+    completed_by_generation: str
+    ready_at: str
 
 
 class TelegramDeliveryAttempt(Base, TimestampMixin):
@@ -101,6 +137,11 @@ class TelegramControlCommand(Base, TimestampMixin):
         CheckConstraint(
             "effect_status IN ('pending','running','succeeded','failed')",
             name="ck_tg_control_effect_status",
+        ),
+        CheckConstraint(
+            "status IN ('pending','published') "
+            "OR effect_status IN ('succeeded','failed')",
+            name="ck_tg_control_effect_active_command",
         ),
         Index(
             "ix_tg_control_effect_due",
@@ -256,7 +297,12 @@ class TelegramDeliveryQuarantine(Base, TimestampMixin):
 
 
 __all__ = [
+    "TELEGRAM_CONTROL_EFFECT_PROTOCOL_VERSION",
+    "TELEGRAM_CONTROL_EFFECT_RECEIPT_KEY",
+    "TELEGRAM_CONTROL_RESTART_INTENT_KEY",
     "TelegramControlCommand",
+    "TelegramControlEffectReceipt",
+    "TelegramControlRestartIntent",
     "TelegramDeliveryAttempt",
     "TelegramDeliveryQuarantine",
 ]

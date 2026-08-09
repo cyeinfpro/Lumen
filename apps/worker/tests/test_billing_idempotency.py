@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app import billing as worker_billing
+from app.billing_parts import helpers as billing_helpers
 from lumen_core import billing_estimates
 from lumen_core.pricing import CostBreakdown
 
@@ -56,7 +57,7 @@ async def test_settle_generation_replay_writes_audit_without_reestimating(
     async def cache_aware_enabled() -> bool:
         return True
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def existing_tx(*_args: Any) -> SimpleNamespace:
@@ -546,7 +547,7 @@ async def test_charge_completion_replay_writes_audit_without_estimating(
 
 
 @pytest.mark.asyncio
-async def test_charge_completion_settles_hold_when_pricing_disappears(
+async def test_charge_completion_keeps_hold_pending_when_pricing_disappears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _Session()
@@ -575,7 +576,7 @@ async def test_charge_completion_settles_hold_when_pricing_disappears(
     async def cache_aware_enabled() -> bool:
         return True
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def no_existing(*_args: Any) -> None:
@@ -588,22 +589,11 @@ async def test_charge_completion_settles_hold_when_pricing_disappears(
             503,
         )
 
-    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
-        return 10_000
-
     async def allow_negative_balance() -> bool:
         return False
 
-    async def settle(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-        assert kwargs["actual_micro"] == 10_000
-        return SimpleNamespace(
-            id="settle-1",
-            kind="settle",
-            amount_micro=0,
-            balance_after=0,
-            hold_after=0,
-            meta=kwargs["meta"],
-        )
+    async def fail_settle(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("missing strict pricing must preserve the hold")
 
     monkeypatch.setattr(worker_billing, "_account_mode", account_mode)
     monkeypatch.setattr(worker_billing, "_billing_enabled", billing_enabled)
@@ -614,21 +604,188 @@ async def test_charge_completion_settles_hold_when_pricing_disappears(
     )
     monkeypatch.setattr(worker_billing, "_existing_wallet_tx", no_existing)
     monkeypatch.setattr(worker_billing, "_existing_fingerprint_tx", no_existing)
-    monkeypatch.setattr(worker_billing, "held_amount_for_ref", held_amount)
     monkeypatch.setattr(
         worker_billing.billing_core,
         "estimate_completion_cost",
         missing_price,
     )
-    monkeypatch.setattr(worker_billing.billing_core, "settle", settle)
+    monkeypatch.setattr(worker_billing.billing_core, "settle", fail_settle)
     monkeypatch.setattr(worker_billing, "get_billing_cache", lambda: None)
 
     await worker_billing.charge_completion(session, completion)  # type: ignore[arg-type]
 
+    assert completion.upstream_request["completion_billing_state"] == (
+        "pending_reconciliation"
+    )
     assert [row.event_type for row in session.added] == [
-        "billing.pricing.hold_fallback_after_upstream",
-        "wallet.charge.completion",
+        "billing.reconciliation.pending",
     ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_completion_retries_strict_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-pending",
+        user_id="user-1",
+        model="gpt-5.5",
+        upstream_request={
+            "completion_billing_state": "pending_reconciliation",
+            "completion_billing_pending_reason": "pricing_missing",
+            "completion_billing_pending_at": "2026-08-08T00:00:00+00:00",
+        },
+    )
+    charged: list[str] = []
+
+    async def charge(_session: Any, row: Any) -> None:
+        charged.append(row.id)
+
+    monkeypatch.setattr(worker_billing, "charge_completion", charge)
+
+    resolved = await worker_billing.reconcile_completion_billing(  # type: ignore[arg-type]
+        session,
+        completion,
+    )
+
+    assert resolved is True
+    assert charged == ["completion-pending"]
+    assert completion.upstream_request["completion_billing_reconcile_attempts"] == 1
+    assert completion.upstream_request["completion_billing_reconciled_source"] == (
+        "strict_pricing"
+    )
+    assert "completion_billing_state" not in completion.upstream_request
+    assert [row.event_type for row in session.added] == [
+        "billing.reconciliation.resolved",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_usage_unknown_consumes_reserved_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-usage-unknown",
+        user_id="user-1",
+        model="gpt-5.5",
+        upstream_request={
+            "completion_billing_state": "pending_reconciliation",
+            "completion_billing_pending_reason": "tokenizer_unavailable",
+            "completion_usage_state": "unknown",
+        },
+    )
+    settlements: list[tuple[str, str]] = []
+
+    async def settle(
+        _session: Any,
+        row: Any,
+        *,
+        reason: str,
+        knowledge: str,
+    ) -> None:
+        settlements.append((reason, knowledge))
+        assert row.id == "completion-usage-unknown"
+
+    monkeypatch.setattr(worker_billing, "settle_completion_unknown_upstream", settle)
+
+    resolved = await worker_billing.reconcile_completion_billing(  # type: ignore[arg-type]
+        session,
+        completion,
+    )
+
+    assert resolved is True
+    assert settlements == [
+        ("billing_reconciliation_usage_unknown", "tokenizer_unavailable")
+    ]
+    assert completion.upstream_request["completion_billing_reconciled_source"] == (
+        "reserved_hold"
+    )
+    assert "completion_usage_state" not in completion.upstream_request
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_completion_stays_pending_until_pricing_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-still-pending",
+        user_id="user-1",
+        model="gpt-5.5",
+        upstream_request={
+            "completion_billing_state": "pending_reconciliation",
+            "completion_billing_pending_reason": "pricing_missing",
+        },
+    )
+
+    async def charge(_session: Any, row: Any) -> None:
+        billing_helpers.mark_completion_billing_pending(
+            row,
+            reason="pricing_missing",
+        )
+
+    monkeypatch.setattr(worker_billing, "charge_completion", charge)
+
+    resolved = await worker_billing.reconcile_completion_billing(  # type: ignore[arg-type]
+        session,
+        completion,
+    )
+
+    assert resolved is False
+    assert completion.upstream_request["completion_billing_state"] == (
+        "pending_reconciliation"
+    )
+    assert completion.upstream_request["completion_billing_reconcile_attempts"] == 1
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tool_image_pricing_restores_image_usage_before_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import completion_billing
+
+    session = _Session()
+    completion = SimpleNamespace(
+        id="completion-tool-image-pending",
+        user_id="user-1",
+        model="gpt-5.5",
+        tokens_out=5,
+        image_output_tokens=0,
+        upstream_request={
+            "completion_billing_state": "pending_reconciliation",
+            "completion_billing_pending_reason": "tool_image_pricing:PRICING_MISSING",
+            "tool_image_reserved_micro": 2_000,
+        },
+    )
+    charged: list[tuple[int, int]] = []
+
+    async def recover_tokens(*_args: Any, **kwargs: Any) -> int:
+        assert kwargs["budget_micro"] == 2_000
+        return 23
+
+    async def charge(_session: Any, row: Any) -> None:
+        charged.append((row.tokens_out, row.image_output_tokens))
+
+    monkeypatch.setattr(
+        completion_billing,
+        "fallback_completion_tool_image_tokens",
+        recover_tokens,
+    )
+    monkeypatch.setattr(worker_billing, "charge_completion", charge)
+
+    resolved = await worker_billing.reconcile_completion_billing(  # type: ignore[arg-type]
+        session,
+        completion,
+    )
+
+    assert resolved is True
+    assert charged == [(23, 23)]
+    assert completion.upstream_request["completion_billing_reconciled_source"] == (
+        "strict_pricing"
+    )
 
 
 @pytest.mark.asyncio
@@ -743,7 +900,7 @@ async def test_charge_completion_uses_retry_billing_ref(
     async def cache_aware_enabled() -> bool:
         return True
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def allow_negative_balance() -> bool:
@@ -857,7 +1014,7 @@ async def test_charge_completion_settles_image_cost_in_full_when_balance_insuffi
     async def cache_aware_enabled() -> bool:
         return True
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def allow_negative_balance() -> bool:
@@ -922,8 +1079,7 @@ async def test_charge_completion_settles_image_cost_in_full_when_balance_insuffi
     assert calls["settle"]["allow_negative"] is False
     assert calls["settle"]["meta"]["image_output_tokens"] == 200
     assert any(
-        getattr(row, "event_type", None) == "wallet.overdrawn"
-        for row in session.added
+        getattr(row, "event_type", None) == "wallet.overdrawn" for row in session.added
     )
 
 
@@ -1063,7 +1219,7 @@ async def test_charge_completion_legacy_mode_folds_cache_tokens_into_input(
     async def allow_negative_balance() -> bool:
         return False
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def estimate_breakdown(*_args: Any, **kwargs: Any) -> CostBreakdown:
@@ -1301,7 +1457,7 @@ async def test_charge_completion_defers_window_increment_until_post_commit_flush
     async def cache_aware_enabled() -> bool:
         return True
 
-    async def rate_multiplier(*_args: Any) -> int:
+    async def rate_multiplier(*_args: Any, **_kwargs: Any) -> int:
         return 10_000
 
     async def window_rate_limit_enabled() -> bool:
@@ -2299,9 +2455,7 @@ async def test_unknown_upstream_without_hold_only_records_audit(
     session = _Session()
     generation = SimpleNamespace(id="gen-2", user_id="user-1", model="gpt-image-2")
     settled: list[dict[str, Any]] = []
-    _patch_unknown_upstream_settle(
-        monkeypatch, held=0, settled=settled, consumed=None
-    )
+    _patch_unknown_upstream_settle(monkeypatch, held=0, settled=settled, consumed=None)
 
     await worker_billing.settle_generation_unknown_upstream(  # type: ignore[arg-type]
         session,
@@ -2405,11 +2559,9 @@ async def test_unknown_upstream_replay_is_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_completion_breakdown_uses_released_hold_when_pricing_missing(
+async def test_completion_breakdown_marks_pending_when_pricing_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # completion 侧同款漏扣:定价缺失且 hold 已被先前 release 消费时,按退回
-    # 金额补记,不能吞掉已发生的上游成本。
     from app.billing_parts import completion_pricing
 
     session = _Session()
@@ -2435,21 +2587,9 @@ async def test_completion_breakdown_uses_released_hold_when_pricing_missing(
             503,
         )
 
-    async def held_amount(*_args: Any, **_kwargs: Any) -> int:
-        return 0
-
-    async def existing_consumption(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        return SimpleNamespace(
-            kind="release",
-            amount_micro=6000,
-            idempotency_key="release:comp-1",
-        )
-
     deps = SimpleNamespace(
         billing_core=worker_billing.billing_core,
         completion_cost_breakdown=missing_price,
-        held_amount_for_ref=held_amount,
-        existing_ref_consumption_tx=existing_consumption,
         audit=worker_billing._audit,
     )
 
@@ -2466,8 +2606,9 @@ async def test_completion_breakdown_uses_released_hold_when_pricing_missing(
         deps=deps,  # type: ignore[arg-type]
     )
 
-    assert breakdown is not None
-    assert breakdown.actual_cost_micro == 6000
-    assert breakdown.pricing_source == "released_hold_fallback"
+    assert breakdown is None
+    assert completion.upstream_request["completion_billing_state"] == (
+        "pending_reconciliation"
+    )
     event_types = [row.event_type for row in session.added]
-    assert event_types == ["billing.pricing.released_hold_fallback_after_upstream"]
+    assert event_types == ["billing.reconciliation.pending"]

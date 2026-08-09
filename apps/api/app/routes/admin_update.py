@@ -51,6 +51,7 @@ from .admin_backups import (
 from . import admin_update_environment as _update_environment
 from . import admin_update_launcher as _update_launcher
 from . import admin_update_marker as _update_marker
+from . import admin_update_path_runtime as _update_path_runtime
 from . import admin_update_preferences as _update_preferences
 from . import admin_update_runtime as _update_runtime
 from . import admin_update_schemas as _update_schemas
@@ -60,6 +61,7 @@ from . import admin_update_systemd as _update_systemd
 
 _MARKER_CLEANUP_RUNTIME_STATE_KEY = _update_runtime.MARKER_CLEANUP_RUNTIME_STATE_KEY
 _MarkerCleanupRuntime = _update_runtime.MarkerCleanupRuntime
+
 
 def _marker_cleanup_runtime(request: Request) -> _MarkerCleanupRuntime:
     return _update_runtime.marker_cleanup_runtime(request)
@@ -74,15 +76,10 @@ router = APIRouter(
 )
 router_public = APIRouter(tags=["system"])
 
-_UPDATE_LOG_NAME = ".update.log"
-_UPDATE_RUNNING_MARKER = ".update.running"
-_UPDATE_TRIGGER_NAME = ".update.trigger"
-_UPDATE_RUNNER_REQUEST_NAME = ".update.request.json"
 _UPDATE_RUNNER_UNIT = "lumen-update-runner.service"
 _LOG_TAIL_CHARS = 6000
 _PID_MARKER_STALE_AFTER_SECONDS = 24 * 60 * 60
 
-_LUMEN_ROOT = os.environ.get("LUMEN_ROOT", "/opt/lumen")
 _RELEASE_LIST_LIMIT = 10
 _TRIGGER_DELIMITER_RE = re.compile(
     r"^=== update (?:trigger|unit started) ", re.MULTILINE
@@ -99,6 +96,12 @@ _SEMVER_UPDATE_TAG_RE = re.compile(
 
 
 UpdateMarker = _update_marker.UpdateMarker
+_lumen_root = _update_path_runtime.lumen_root
+_update_adoption_receipt_path = _update_path_runtime.update_adoption_receipt_path
+_update_log_path = _update_path_runtime.update_log_path
+_update_marker_path = _update_path_runtime.update_marker_path
+_update_runner_request_path = _update_path_runtime.update_runner_request_path
+_update_trigger_path = _update_path_runtime.update_trigger_path
 
 
 def _ensure_update_not_running(marker: UpdateMarker | None) -> None:
@@ -124,30 +127,6 @@ def _update_script() -> Path:
 def _version_from_update_tag(tag: str) -> str | None:
     match = _SEMVER_UPDATE_TAG_RE.fullmatch((tag or "").strip())
     return match.group("version") if match else None
-
-
-def _update_log_path() -> Path:
-    return Path(settings.backup_root).expanduser() / _UPDATE_LOG_NAME
-
-
-def _update_marker_path() -> Path:
-    return Path(settings.backup_root).expanduser() / _UPDATE_RUNNING_MARKER
-
-
-def _update_trigger_path() -> Path:
-    return Path(settings.backup_root).expanduser() / _UPDATE_TRIGGER_NAME
-
-
-def _update_runner_request_path() -> Path:
-    return Path(settings.backup_root).expanduser() / _UPDATE_RUNNER_REQUEST_NAME
-
-
-def _lumen_root() -> Path:
-    """Return the Lumen install root (releases/, current, previous live here).
-
-    Resolved per-call so tests can override LUMEN_ROOT mid-process.
-    """
-    return Path(os.environ.get("LUMEN_ROOT", _LUMEN_ROOT)).expanduser()
 
 
 def _read_dotenv_value(path: Path, key: str) -> str | None:
@@ -201,23 +180,7 @@ def _runner_unit_available() -> bool:
     return _UPDATE_RUNNER_UNIT in result.stdout
 
 
-def _runner_request_payload(
-    env: dict[str, str], started_at: datetime
-) -> dict[str, object]:
-    """Build the narrow request consumed by the privileged host runner.
-
-    The backup directory is writable by lumen-api. It must therefore never be
-    used as a systemd EnvironmentFile or as a source of executable paths.
-    """
-    return {
-        "schema": 1,
-        "target_tag": env["LUMEN_UPDATE_RESOLVED_TAG"],
-        "channel": env["LUMEN_UPDATE_CHANNEL"],
-        "force_redeploy": env.get("LUMEN_UPDATE_FORCE_REDEPLOY") == "1",
-        "idempotency_key": env["LUMEN_UPDATE_IDEMPOTENCY_KEY"],
-        "proxy_url": env.get("LUMEN_UPDATE_PROXY_URL"),
-        "issued_at": started_at.isoformat(),
-    }
+_runner_request_payload = _update_launcher.request_payload
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -257,13 +220,22 @@ def _read_marker() -> UpdateMarker | None:
     )
 
 
-def _write_marker(pid: int, started_at: str, unit: str | None = None) -> bool:
+def _write_marker(
+    pid: int,
+    started_at: str,
+    unit: str | None = None,
+    *,
+    operation_id: str | None = None,
+    request_sha256: str | None = None,
+) -> bool:
     """Atomically claim the update marker; False means another op is running."""
     return _update_marker.write_marker(
         _update_marker_path(),
         pid=pid,
         started_at=started_at,
         unit=unit,
+        operation_id=operation_id,
+        request_sha256=request_sha256,
     )
 
 
@@ -436,18 +408,16 @@ def _start_update_via_path_unit(
     return _update_launcher.start_update_via_path_unit(
         runtime=_update_launcher.PathUnitLaunchRuntime(
             backup_root=Path(settings.backup_root).expanduser(),
-            log_path=_update_log_path(),
             request_path=_update_runner_request_path(),
             trigger_path=_update_trigger_path(),
             marker_path=_update_marker_path(),
+            receipt_path=_update_adoption_receipt_path(),
             unit=_UPDATE_RUNNER_UNIT,
             write_marker=_write_marker,
             request_payload=_runner_request_payload,
             chmod=chmod_tolerate_eperm,
-            trigger_only_mode=_runner_trigger_only_mode,
-            wait_for_log_append=_wait_for_log_append,
+            adoption_receipt_matches=_update_launcher.adoption_receipt_matches,
             trigger_timeout_sec=_TRIGGER_ONLY_RUNNER_START_TIMEOUT_SEC,
-            unit_is_running=_unit_is_running,
         ),
         env=env,
         log_fh=log_fh,

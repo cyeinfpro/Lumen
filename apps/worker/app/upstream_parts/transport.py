@@ -347,9 +347,7 @@ def _raise_curl_multipart_process_error(
         return
     stderr = stderr_b.decode("utf-8", "replace")[:500]
     if returncode == 28:
-        raise httpx.TimeoutException(
-            f"curl multipart timeout rc=28 stderr={stderr}"
-        )
+        raise httpx.TimeoutException(f"curl multipart timeout rc=28 stderr={stderr}")
     if returncode in {6, 7}:
         raise httpx.ConnectError(
             f"curl failed before request delivery rc={returncode} stderr={stderr}"
@@ -531,6 +529,7 @@ class _CurlSSEReader:
         self._stream_eof = False
         self._byte_count = 0
         self._line_count = 0
+        self.response_status_code = 0
 
     async def next_line(self) -> bytes | None:
         while True:
@@ -696,6 +695,7 @@ async def _read_curl_response_head(
     status_text = status_line.decode("utf-8", "replace").strip()
     match = re.match(r"HTTP/[\d.]+\s+(\d+)", status_text)
     status_code = int(match.group(1)) if match else 0
+    reader.response_status_code = status_code
     response_headers: dict[str, str] = {}
     while True:
         line = await reader.next_line()
@@ -735,9 +735,8 @@ def _raise_curl_sse_upstream_error(
     services: UpstreamServices,
 ) -> None:
     status_code = getattr(exc, "status_code", None)
-    if (
-        200 <= final_status < 300
-        and not (isinstance(status_code, int) and 200 <= status_code < 300)
+    if 200 <= final_status < 300 and not (
+        isinstance(status_code, int) and 200 <= status_code < 300
     ):
         raw_payload = getattr(exc, "payload", None)
         payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
@@ -786,6 +785,7 @@ async def _iter_sse_curl(
     started = time.monotonic()
     response_headers: dict[str, str] = {}
     final_status = 0
+    reader: _CurlSSEReader | None = None
 
     try:
         try:
@@ -930,7 +930,10 @@ async def _iter_sse_curl(
     except services.infrastructure.UpstreamError as exc:
         _raise_curl_sse_upstream_error(
             exc,
-            final_status=final_status,
+            final_status=(
+                final_status
+                or (reader.response_status_code if reader is not None else 0)
+            ),
             services=services,
         )
     finally:
@@ -948,6 +951,8 @@ async def _iter_sse_curl(
             services.infrastructure.logger.debug(
                 "failed to log upstream call meta", exc_info=True
             )
+
+
 __all__ = [
     "_curl_post_multipart",
     "_curl_post_multipart_using_paths",

@@ -36,6 +36,7 @@ export class ReplayCoordinator {
     signal: AbortSignal,
     context: SnapshotExecutionContext,
   ): Promise<SnapshotResult> {
+    signal.throwIfAborted();
     if (this.flight) return this.flight;
     const flight = this.snapshot(
       scopesForRecovery(reason),

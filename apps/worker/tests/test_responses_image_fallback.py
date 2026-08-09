@@ -889,11 +889,15 @@ async def test_iter_sse_curl_idle_timeout_raises(
     fake_curl.write_text(
         textwrap.dedent(
             """
-            #!/bin/sh
-            printf 'HTTP/1.1 200 OK\\r\\n'
-            printf 'content-type: text/event-stream\\r\\n'
-            printf '\\r\\n'
-            sleep 2
+            #!/usr/bin/env python3
+            import sys
+            import time
+
+            sys.stdout.write("HTTP/1.1 200 OK\\r\\n")
+            sys.stdout.write("content-type: text/event-stream\\r\\n")
+            sys.stdout.write("\\r\\n")
+            sys.stdout.flush()
+            time.sleep(2)
             """
         ).lstrip(),
         encoding="utf-8",
@@ -908,7 +912,7 @@ async def test_iter_sse_curl_idle_timeout_raises(
                 url="https://upstream.example/v1/responses",
                 json_body={"stream": True},
                 headers={"authorization": "Bearer test-key"},
-                timeout_s=0.5,
+                timeout_s=1.0,
             )
         ]
 
@@ -916,6 +920,45 @@ async def test_iter_sse_curl_idle_timeout_raises(
     assert exc_info.value.status_code == 200
     assert exc_info.value.payload["response_received"] is True
     assert "idle timeout" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_curl_header_timeout_preserves_received_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    fake_curl = tmp_path / "fake-curl"
+    fake_curl.write_text(
+        textwrap.dedent(
+            """
+            #!/usr/bin/env python3
+            import sys
+            import time
+
+            sys.stdout.write("HTTP/1.1 200 OK\\r\\n")
+            sys.stdout.flush()
+            time.sleep(2)
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "CURL_BIN", str(fake_curl))
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        _ = [
+            event
+            async for event in TEST_UPSTREAM_SERVICES.transport.iter_sse_curl(
+                url="https://upstream.example/v1/responses",
+                json_body={"stream": True},
+                headers={"authorization": "Bearer test-key"},
+                timeout_s=1.0,
+            )
+        ]
+
+    assert exc_info.value.error_code == "sse_curl_failed"
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.payload["response_received"] is True
 
 
 @pytest.mark.asyncio
@@ -1680,11 +1723,12 @@ async def test_confirmed_missing_image_route_uses_documented_default(
     monkeypatch.delenv("IMAGE_CHANNEL", raising=False)
     monkeypatch.delenv("IMAGE_ENGINE", raising=False)
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", missing_db)
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", missing_legacy)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure, "resolve", missing_legacy
+    )
 
     assert (
-        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()
-        == "responses"
+        await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route() == "responses"
     )
 
 
@@ -1730,7 +1774,9 @@ async def test_invalid_legacy_primary_route_fails_closed(
     monkeypatch.delenv("IMAGE_CHANNEL", raising=False)
     monkeypatch.delenv("IMAGE_ENGINE", raising=False)
     monkeypatch.setattr(TEST_UPSTREAM_SERVICES.core, "resolve_db", missing_db)
-    monkeypatch.setattr(TEST_UPSTREAM_SERVICES.infrastructure, "resolve", invalid_legacy)
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure, "resolve", invalid_legacy
+    )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await TEST_UPSTREAM_SERVICES.core.resolve_image_primary_route()

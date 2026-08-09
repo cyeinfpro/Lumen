@@ -8,6 +8,7 @@ from typing import Any
 from ..outbox.delivery import EventPublisher, deliver_staged_outbox_events
 from .bonus_billing import BONUS_BILLING_RECONCILER
 from .cleanup import cleanup_terminal_sentinels
+from .completion_billing import COMPLETION_BILLING_RECONCILER
 from .coordinator import run_reconciliation
 from .memory import MEMORY_RECONCILER
 from .task_domains import COMPLETION_RECONCILER, GENERATION_RECONCILER
@@ -57,6 +58,7 @@ async def reconcile_tasks(
         reconcilers=(
             GENERATION_RECONCILER,
             COMPLETION_RECONCILER,
+            COMPLETION_BILLING_RECONCILER,
             BONUS_BILLING_RECONCILER,
         ),
         deliver_pending=deliver_pending,

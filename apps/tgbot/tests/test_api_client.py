@@ -80,6 +80,44 @@ async def test_control_ack_sends_expected_command_and_requires_typed_receipt() -
 
 
 @pytest.mark.asyncio
+async def test_redrive_reconciliation_sends_typed_resolution() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "command": "redrive_quarantine",
+                "command_status": "published",
+                "effect_status": "pending",
+                "resolution": "retry",
+            },
+        )
+
+    api = _api_with_transport(httpx.MockTransport(handler))
+    try:
+        result = await api.reconcile_control_redrive_effect(
+            "command-1",
+            resolution="retry",
+            note="operator confirmed no Telegram message",
+        )
+    finally:
+        await api.aclose()
+
+    assert captured == {
+        "path": "/telegram/control/command-1/effect/redrive/reconcile",
+        "json": {
+            "command": "redrive_quarantine",
+            "resolution": "retry",
+            "note": "operator confirmed no Telegram message",
+        },
+    }
+    assert result["effect_status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_bind_sends_tg_user_id_in_header_and_body() -> None:
     captured: dict[str, Any] = {}
 

@@ -200,7 +200,7 @@ def test_update_journal_records_phase_failure_and_explicit_resume(
         . {shlex.quote(str(JOURNAL))}
         SHARED_DIR={shlex.quote(str(shared))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=update-new
+        OPERATION_ID=update-original
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         printf 'operation=%s resumed=%s target=%s\\n' \
@@ -212,6 +212,42 @@ def test_update_journal_records_phase_failure_and_explicit_resume(
     resumed_payload = json.loads(journal.read_text(encoding="utf-8"))
     assert resumed_payload["status"] == "running"
     assert resumed_payload["resume_count"] == 1
+
+
+def test_update_journal_resume_rejects_different_api_operation(
+    tmp_path: Path,
+) -> None:
+    journal = tmp_path / "journal.json"
+    first = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(JOURNAL))}
+        SHARED_DIR={shlex.quote(str(tmp_path))}
+        LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
+        OPERATION_ID=update-original
+        LUMEN_UPDATE_RESUME=0
+        lumen_update_journal_init
+        """
+    )
+    assert first.returncode == 0, first.stderr + first.stdout
+
+    resumed = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(JOURNAL))}
+        SHARED_DIR={shlex.quote(str(tmp_path))}
+        LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
+        OPERATION_ID=update-other
+        LUMEN_UPDATE_RESUME=1
+        lumen_update_journal_init
+        """
+    )
+
+    assert resumed.returncode != 0
+    assert "operation_id does not match" in resumed.stderr
+    assert json.loads(journal.read_text(encoding="utf-8"))["operation_id"] == (
+        "update-original"
+    )
 
 
 def test_update_journal_records_rollback_terminal_state(tmp_path: Path) -> None:

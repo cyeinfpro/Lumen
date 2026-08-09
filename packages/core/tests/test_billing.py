@@ -72,16 +72,12 @@ def test_rate_multiplier_conversion_avoids_float_truncation() -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (None, 10_000),
         (1, 10_000),
         ("1.0000", 10_000),
         (Decimal("0"), 0),  # 显式 0 = 运营配置的免费账号，保留
         (Decimal("2.5"), 25_000),
         (Decimal("0.0001"), 1),
         (Decimal("9999.9999"), 99_999_999),  # Numeric(8,4) 的上界，合法
-        ("nonsense", 10_000),  # 解析失败退回 1.0，不静默变成 0 折
-        ("NaN", 10_000),
-        ("Infinity", 10_000),
     ],
 )
 def test_rate_multiplier_conversion_edge_values(raw: Any, expected: int) -> None:
@@ -91,6 +87,10 @@ def test_rate_multiplier_conversion_edge_values(raw: Any, expected: int) -> None
 @pytest.mark.parametrize(
     "raw",
     [
+        None,
+        "nonsense",
+        "NaN",
+        "Infinity",
         Decimal("-1"),
         Decimal("-0.0001"),
         "-2.5",
@@ -99,20 +99,19 @@ def test_rate_multiplier_conversion_edge_values(raw: Any, expected: int) -> None
         Decimal("1E+9"),
     ],
 )
-def test_rate_multiplier_out_of_domain_falls_back_to_full_price(
-    raw: Any,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """越界倍率必须退回 1.0（原价），绝不能夹到 0 变成永久免费。
+def test_rate_multiplier_unknown_is_rejected_by_strict_billing(raw: Any) -> None:
+    with pytest.raises(billing.BillingError) as exc_info:
+        billing.parse_rate_multiplier_x10000(raw)
 
-    F-11：旧实现用 ``max(0, ...)`` 把负倍率夹成 0。一条脏数据（迁移遗留、
-    直连改库）就能让该账号所有生成都算成 0 元 —— 上游照扣，平台全额吸收，
-    正是「纯转嫁」明令禁止的方向。非法输入的正确落点是「按原价收」，
-    与解析失败 / NaN / Infinity 的处理保持一致，并且必须留下告警。
-    """
-    with caplog.at_level("WARNING", logger="lumen_core.billing"):
-        assert billing.parse_rate_multiplier_x10000(raw) == 10_000
-    assert any("rate multiplier out of range" in r.message for r in caplog.records)
+    assert exc_info.value.code == "RATE_MULTIPLIER_INVALID"
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.parametrize("raw", [None, "nonsense", "NaN", Decimal("-1")])
+def test_rate_multiplier_best_effort_fallback_requires_explicit_opt_in(
+    raw: Any,
+) -> None:
+    assert billing.parse_rate_multiplier_x10000(raw, strict=False) == 10_000
 
 
 def test_rate_multiplier_conversion_never_undercharges_over_column_domain() -> None:
@@ -245,6 +244,31 @@ async def test_estimate_completion_breakdown_fails_closed_for_missing_rates() ->
 
     assert exc.value.code == "PRICING_MISSING"
     assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_estimate_completion_breakdown_rejects_source_fallback() -> None:
+    calls: list[str] = []
+
+    class Resolver:
+        async def resolve(self, *_args: Any, **kwargs: Any) -> ModelPricing:
+            calls.append(kwargs["mode"])
+            return ModelPricing(
+                input_per_1k_micro=1_000,
+                output_per_1k_micro=2_000,
+                pricing_source="fallback",
+            )
+
+    with pytest.raises(billing.BillingError) as exc:
+        await billing.estimate_completion_breakdown(
+            object(),  # type: ignore[arg-type]
+            model="gpt-4o",
+            tokens=UsageTokens(input_tokens=10, output_tokens=5),
+            resolver=Resolver(),  # type: ignore[arg-type]
+        )
+
+    assert calls == ["strict_billing"]
+    assert exc.value.code == "PRICING_MISSING"
 
 
 def test_parse_thresholds_logs_invalid_json(caplog: pytest.LogCaptureFixture):

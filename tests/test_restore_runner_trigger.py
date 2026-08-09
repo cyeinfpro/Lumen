@@ -83,6 +83,62 @@ def _write_backup_pair(
     return binding
 
 
+def _write_running_marker(
+    path: Path,
+    *,
+    operation_id: str,
+    owner: str = "api",
+    generation: int = 0,
+    pid: int = 0,
+) -> None:
+    path.write_text(
+        "\n".join(
+            (
+                f"pid={pid}",
+                f"started_at={datetime.now(timezone.utc).isoformat()}",
+                "unit=lumen-restore-runner.service",
+                f"operation_id={operation_id}",
+                f"owner={owner}",
+                f"generation={generation}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_adoption_receipt(
+    runner: ModuleType,
+    path: Path,
+    *,
+    operation_id: str,
+    timestamp: str = TS,
+    generation: int = 1,
+    status: str = "accepted",
+    pid: int = 12345,
+) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "operation_id": operation_id,
+                "owner": "host",
+                "generation": generation,
+                "request_sha256": runner.restore_request_sha256(
+                    operation_id,
+                    timestamp,
+                ),
+                "pid": pid,
+                "accepted_at": datetime.now(timezone.utc).isoformat(),
+                "status": status,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_restore_runner_accepts_only_fresh_timestamp_regular_file(
     tmp_path: Path,
 ) -> None:
@@ -122,6 +178,10 @@ def test_restore_runner_ignores_env_script_injection_and_uses_trusted_sibling(
     trigger = tmp_path / "restore.trigger"
     trigger.write_text(f"{TS}\n", encoding="ascii")
     journal = tmp_path / "restore-state" / "active.json"
+    running = tmp_path / "restore.running"
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    operation_id = "restore-api-operation-1"
+    _write_running_marker(running, operation_id=operation_id)
     backup_root = tmp_path / "backup"
     binding = _write_backup_pair(backup_root)
     attacker = tmp_path / "attacker.sh"
@@ -132,6 +192,8 @@ def test_restore_runner_ignores_env_script_injection_and_uses_trusted_sibling(
     monkeypatch.setenv("BASH_ENV", str(attacker))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path / "python-inject"))
     monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_RUNNING", str(running))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
     captured: dict[str, object] = {}
 
@@ -160,6 +222,7 @@ def test_restore_runner_ignores_env_script_injection_and_uses_trusted_sibling(
     assert child_env["BACKUP_ROOT"] == str(backup_root)
     persisted = json.loads(journal.read_text(encoding="utf-8"))
     assert persisted["phase"] == "request_pending"
+    assert persisted["operation_id"] == operation_id
     assert persisted["timestamp"] == TS
     for field, value in binding.items():
         assert persisted[field] == value
@@ -185,10 +248,18 @@ def test_restore_runner_consumes_journal_without_api_trigger(
         + "\n",
         encoding="utf-8",
     )
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    _write_adoption_receipt(
+        runner,
+        receipt,
+        operation_id="restore-recovery",
+        timestamp="20260519-010203",
+    )
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(runner, "__file__", str(trusted_runner))
     monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setattr(
         runner.os,
         "execve",
@@ -230,9 +301,16 @@ def test_restore_runner_retries_durable_pending_request_without_trigger(
         + "\n",
         encoding="utf-8",
     )
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    _write_adoption_receipt(
+        runner,
+        receipt,
+        operation_id="restore-pending",
+    )
     captured: dict[str, object] = {}
     monkeypatch.setattr(runner, "__file__", str(trusted_runner))
     monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
     monkeypatch.setattr(
         runner.os,
@@ -265,9 +343,14 @@ def test_restore_runner_rejects_missing_pair_marker_before_pending_journal(
     trigger = tmp_path / "restore.trigger"
     trigger.write_text(f"{TS}\n", encoding="ascii")
     journal = tmp_path / "restore-state" / "active.json"
+    running = tmp_path / "restore.running"
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    _write_running_marker(running, operation_id="restore-missing-pair")
     monkeypatch.setattr(runner, "__file__", str(trusted_runner))
     monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
     monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_RUNNING", str(running))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setattr(
         runner.os,
         "execve",
@@ -304,6 +387,12 @@ def test_restore_runner_rejects_pending_pair_operation_identity_change(
         + "\n",
         encoding="utf-8",
     )
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    _write_adoption_receipt(
+        runner,
+        receipt,
+        operation_id="restore-pending",
+    )
     marker_path = Path(str(binding["backup_pair_marker"]))
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     marker["operation_id"] = "backup-op-replaced"
@@ -311,6 +400,7 @@ def test_restore_runner_rejects_pending_pair_operation_identity_change(
     monkeypatch.setattr(runner, "__file__", str(trusted_runner))
     monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
     monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
     monkeypatch.setattr(
         runner.os,
         "execve",
@@ -321,6 +411,145 @@ def test_restore_runner_rejects_pending_pair_operation_identity_change(
 
     assert "no longer matches durable request" in capsys.readouterr().err
     assert journal.exists()
+
+
+def test_new_restore_requires_matching_marker_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    trusted_runner, _trusted_script, _trusted_helper = _stage_trusted_runner(tmp_path)
+    trigger = tmp_path / "restore.trigger"
+    trigger.write_text(f"{TS}\n", encoding="ascii")
+    backup_root = tmp_path / "backup"
+    _write_backup_pair(backup_root)
+    monkeypatch.setattr(runner, "__file__", str(trusted_runner))
+    monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
+    monkeypatch.setenv(
+        "LUMEN_RESTORE_JOURNAL_FILE",
+        str(tmp_path / "restore-state" / "active.json"),
+    )
+    monkeypatch.setenv("LUMEN_RESTORE_RUNNING", str(tmp_path / "missing.running"))
+    monkeypatch.setenv(
+        "LUMEN_RESTORE_ADOPTION_RECEIPT",
+        str(tmp_path / "restore-state" / "adoption.json"),
+    )
+
+    assert runner.main([str(trigger)]) == 2
+
+
+def test_second_restore_runner_cannot_take_live_host_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    trusted_runner, _trusted_script, _trusted_helper = _stage_trusted_runner(tmp_path)
+    trigger = tmp_path / "restore.trigger"
+    trigger.write_text(f"{TS}\n", encoding="ascii")
+    running = tmp_path / "restore.running"
+    _write_running_marker(
+        running,
+        operation_id="restore-live-owner",
+        owner="host",
+        generation=1,
+        pid=os.getpid(),
+    )
+    backup_root = tmp_path / "backup"
+    _write_backup_pair(backup_root)
+    monkeypatch.setattr(runner, "__file__", str(trusted_runner))
+    monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
+    monkeypatch.setenv(
+        "LUMEN_RESTORE_JOURNAL_FILE",
+        str(tmp_path / "restore-state" / "active.json"),
+    )
+    monkeypatch.setenv("LUMEN_RESTORE_RUNNING", str(running))
+    monkeypatch.setenv(
+        "LUMEN_RESTORE_ADOPTION_RECEIPT",
+        str(tmp_path / "restore-state" / "adoption.json"),
+    )
+
+    assert runner.main([str(trigger)]) == 2
+
+
+def test_restore_runner_recovers_adopted_marker_before_journal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    trusted_runner, trusted_script, _trusted_helper = _stage_trusted_runner(tmp_path)
+    trigger = tmp_path / "restore.trigger"
+    trigger.write_text(f"{TS}\n", encoding="ascii")
+    running = tmp_path / "restore.running"
+    receipt = tmp_path / "restore-state" / "adoption.json"
+    operation_id = "restore-crash-window"
+    _write_running_marker(
+        running,
+        operation_id=operation_id,
+        owner="host",
+        generation=1,
+        pid=77777,
+    )
+    _write_adoption_receipt(
+        runner,
+        receipt,
+        operation_id=operation_id,
+        generation=1,
+        status="prepared",
+        pid=77777,
+    )
+    backup_root = tmp_path / "backup"
+    _write_backup_pair(backup_root)
+    journal = tmp_path / "restore-state" / "active.json"
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(runner, "__file__", str(trusted_runner))
+    monkeypatch.setattr(runner, "_pid_is_running", lambda _pid: False)
+    monkeypatch.setenv("BACKUP_ROOT", str(backup_root))
+    monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("LUMEN_RESTORE_RUNNING", str(running))
+    monkeypatch.setenv("LUMEN_RESTORE_ADOPTION_RECEIPT", str(receipt))
+    monkeypatch.setattr(
+        runner.os,
+        "execve",
+        lambda executable, argv, env: captured.update(argv=argv, env=env),
+    )
+
+    assert runner.main([str(trigger)]) == 127
+    assert json.loads(journal.read_text(encoding="utf-8"))["operation_id"] == operation_id
+    assert json.loads(receipt.read_text(encoding="utf-8"))["generation"] == 2
+    assert captured["argv"] == ["/bin/bash", str(trusted_script.resolve()), TS]
+
+
+def test_terminal_restore_journal_is_not_replayed_by_old_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner()
+    trusted_runner, _trusted_script, _trusted_helper = _stage_trusted_runner(tmp_path)
+    trigger = tmp_path / "restore.trigger"
+    trigger.write_text(f"{TS}\n", encoding="ascii")
+    journal = tmp_path / "restore-state" / "active.json"
+    journal.parent.mkdir()
+    journal.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "operation_id": "restore-terminal",
+                "timestamp": TS,
+                "phase": "committed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner, "__file__", str(trusted_runner))
+    monkeypatch.setenv("LUMEN_RESTORE_JOURNAL_FILE", str(journal))
+    monkeypatch.setattr(
+        runner.os,
+        "execve",
+        lambda *_args: pytest.fail("terminal restore must not execute"),
+    )
+
+    assert runner.main([str(trigger)]) == 0
 
 
 def test_restore_runner_unit_uses_fixed_interpreters_and_trigger_path() -> None:

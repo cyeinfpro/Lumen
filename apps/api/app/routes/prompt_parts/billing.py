@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
@@ -222,49 +223,38 @@ def _usage_is_empty(usage: UsageTokens) -> bool:
     )
 
 
-def _held_amount_breakdown(
-    billing: EnhanceBillingContext,
-    *,
-    cost: int | None = None,
-) -> billing_core.CostBreakdown:
-    actual_cost = billing.hold_amount_micro if cost is None else cost
-    return billing_core.CostBreakdown(
-        input_cost_micro=actual_cost,
-        output_cost_micro=0,
-        cache_read_cost_micro=0,
-        cache_creation_cost_micro=0,
-        image_output_cost_micro=0,
-        reasoning_cost_micro=0,
-        long_context_applied=False,
-        priority_tier_applied=False,
-        rate_multiplier_x10000=billing.rate_multiplier_x10000,
-        total_cost_micro=actual_cost,
-        actual_cost_micro=actual_cost,
-        pricing_source="held_amount_fallback",
-    )
-
-
-async def _audit_held_amount_fallback(
+async def _persist_prompt_enhance_pending(
     billing: EnhanceBillingContext,
     *,
     model: str,
     usage: UsageTokens,
-    error: str,
+    reason: str,
+    error: str | None,
     runtime: BillingRuntime,
 ) -> None:
-    await _write_required_audit(
-        billing,
-        runtime=runtime,
-        event_type="billing.pricing.hold_fallback_after_upstream",
-        details={
-            "scope": "chat_model",
-            "model": model,
-            "prompt_enhance_id": billing.request_id,
-            "usage": usage.model_dump(),
-            "actual_micro": billing.hold_amount_micro,
-            "error": error,
-        },
-    )
+    billing.settle_outcome.attempted = True
+    try:
+        await _write_required_audit(
+            billing,
+            runtime=runtime,
+            event_type="billing.reconciliation.pending",
+            details={
+                "scope": "prompt_enhance",
+                "model": model,
+                "prompt_enhance_id": billing.request_id,
+                "ref_type": "prompt_enhance",
+                "ref_id": billing.request_id,
+                "usage": usage.model_dump(),
+                "hold_micro": billing.hold_amount_micro,
+                "reason": reason,
+                "error": error,
+            },
+        )
+        await billing.db.commit()
+    except AuditPersistenceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise AuditPersistenceError("billing.reconciliation.pending") from exc
 
 
 async def _resolve_breakdown(
@@ -274,75 +264,81 @@ async def _resolve_breakdown(
     model: str,
     usage: UsageTokens,
     runtime: BillingRuntime,
-) -> billing_core.CostBreakdown:
+) -> billing_core.CostBreakdown | None:
     try:
         snapshot = billing.pricing_snapshots.get(
             capture.pricing_snapshot_key
             or runtime.pricing_snapshot_key(model, capture.service_tier)
         )
         if snapshot is not None:
-            return billing_core.completion_breakdown_from_snapshot(
+            breakdown = billing_core.completion_breakdown_from_snapshot(
                 snapshot,
                 model=model,
                 tokens=usage,
                 rate_multiplier_x10000=billing.rate_multiplier_x10000,
                 service_tier=capture.service_tier,
             )
-        return await billing_core.estimate_completion_breakdown(
-            billing.db,
-            model=model,
-            tokens=usage,
-            rate_multiplier_x10000=billing.rate_multiplier_x10000,
-            service_tier=capture.service_tier,
-        )
+        else:
+            breakdown = await billing_core.estimate_completion_breakdown(
+                billing.db,
+                model=model,
+                tokens=usage,
+                rate_multiplier_x10000=billing.rate_multiplier_x10000,
+                service_tier=capture.service_tier,
+            )
     except billing_core.BillingError as exc:
         if (
             exc.code not in {"PRICING_MISSING", "PRICING_SNAPSHOT_INVALID"}
             or billing.hold_amount_micro <= 0
         ):
             raise
-        await _audit_held_amount_fallback(
+        await _persist_prompt_enhance_pending(
             billing,
             model=model,
             usage=usage,
+            reason=exc.code.lower(),
             error=exc.message,
             runtime=runtime,
         )
-        return _held_amount_breakdown(billing)
-
-
-def _effective_cost(
-    billing: EnhanceBillingContext,
-    breakdown: billing_core.CostBreakdown,
-) -> tuple[int, billing_core.CostBreakdown]:
-    cost = breakdown.actual_cost_micro
-    if cost > 0 or billing.hold_amount_micro <= 0:
-        return cost, breakdown
-    cost = billing.hold_amount_micro
-    return cost, _held_amount_breakdown(billing, cost=cost)
-
-
-async def _audit_fallback_pricing(
-    billing: EnhanceBillingContext,
-    *,
-    breakdown: billing_core.CostBreakdown,
-    model: str,
-    ref_id: str,
-    usage: UsageTokens,
-    runtime: BillingRuntime,
-) -> None:
-    if breakdown.pricing_source != "fallback":
-        return
-    await _write_required_audit(
-        billing,
-        runtime=runtime,
-        event_type="billing.pricing.fallback_used",
-        details={
-            "model": model,
-            "prompt_enhance_id": ref_id,
-            "usage": usage.model_dump(),
-        },
-    )
+        return None
+    except SQLAlchemyError as exc:
+        rollback = getattr(billing.db, "rollback", None)
+        if callable(rollback):
+            await rollback()
+        await _persist_prompt_enhance_pending(
+            billing,
+            model=model,
+            usage=usage,
+            reason="pricing_db_unavailable",
+            error=type(exc).__name__,
+            runtime=runtime,
+        )
+        return None
+    if breakdown.pricing_source == "fallback":
+        await _persist_prompt_enhance_pending(
+            billing,
+            model=model,
+            usage=usage,
+            reason="pricing_fallback_rejected",
+            error=None,
+            runtime=runtime,
+        )
+        return None
+    if (
+        breakdown.actual_cost_micro <= 0
+        and billing.rate_multiplier_x10000 > 0
+        and billing.hold_amount_micro > 0
+    ):
+        await _persist_prompt_enhance_pending(
+            billing,
+            model=model,
+            usage=usage,
+            reason="pricing_zero_cost_after_upstream",
+            error=None,
+            runtime=runtime,
+        )
+        return None
+    return breakdown
 
 
 def _transaction_meta(
@@ -544,17 +540,11 @@ async def charge_prompt_enhance(
         usage=usage,
         runtime=runtime,
     )
+    if breakdown is None:
+        return True
     response_id = capture.response_id or billing.request_id
     ref_id = billing.request_id
-    cost, breakdown = _effective_cost(billing, breakdown)
-    await _audit_fallback_pricing(
-        billing,
-        breakdown=breakdown,
-        model=model,
-        ref_id=ref_id,
-        usage=usage,
-        runtime=runtime,
-    )
+    cost = breakdown.actual_cost_micro
     transaction_meta = _transaction_meta(
         billing,
         capture,
