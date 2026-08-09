@@ -138,7 +138,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: lumen_test
           POSTGRES_PASSWORD: lumen_test

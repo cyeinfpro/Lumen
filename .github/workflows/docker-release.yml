@@ -258,7 +258,7 @@ jobs:
     needs: [resolve-ref, version-check, resolve-runtime-images]
     services:
       postgres:
-        image: postgres:16
+        image: ${{ needs.resolve-runtime-images.outputs.postgres_ref }}
         env:
           POSTGRES_USER: lumen_test
           POSTGRES_PASSWORD: lumen_test
