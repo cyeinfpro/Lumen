@@ -82,6 +82,10 @@ const requestLifecycleCoreSource = readFileSync(
   new URL("../../lib/video/requestLifecycle.ts", import.meta.url),
   "utf8",
 );
+const videoGenerationApiSource = readFileSync(
+  new URL("../../lib/api/videoGenerations.ts", import.meta.url),
+  "utf8",
+);
 const volcanoAssetManagerSource = readFileSync(
   new URL("./volcano-asset-manager.tsx", import.meta.url),
   "utf8",
@@ -539,6 +543,38 @@ test("video reference aliases serialize to anchors and display round trips", () 
         },
       ],
     },
+  );
+});
+
+test("video reference batch upload preserves file selection order and bounds", () => {
+  const files = [
+    { name: "01.png", type: "image/png" },
+    { name: "02.mov", type: "video/quicktime" },
+    { name: "03.jpg", type: "" },
+    { name: "04.txt", type: "text/plain" },
+    { name: "05.mp4", type: "video/mp4" },
+  ];
+  const plan = referenceDomain.planReferenceUploadBatch(
+    files,
+    [{ kind: "image" }],
+    { image: 3, video: 1, audio: 0 },
+    4,
+  );
+
+  deepEqual(
+    plan.accepted.map((item) => [item.file.name, item.kind]),
+    [
+      ["01.png", "image"],
+      ["02.mov", "video"],
+      ["03.jpg", "image"],
+    ],
+  );
+  deepEqual(
+    plan.rejected.map((item) => [item.file.name, item.reason]),
+    [
+      ["04.txt", "只支持图片或视频文件"],
+      ["05.mp4", "参考素材最多 4 个"],
+    ],
   );
 });
 
@@ -1226,12 +1262,15 @@ test("video uploads are fenced to the current draft and upload epoch", () => {
   );
   match(
     source,
-    /uploadVideoReferenceImage\(\s*request\.file,\s*request\.controller\.signal/,
+    /uploadVideoReferenceImage\(\s*item\.file,\s*request\.controller\.signal/,
   );
   match(
     source,
-    /uploadReferenceVideo\(\s*request\.file,\s*request\.controller\.signal/,
+    /uploadReferenceVideo\(\s*item\.file,\s*request\.controller\.signal/,
   );
+  match(videoPageViewSource, /type="file"\s*multiple/);
+  match(videoPageViewSource, /model\.onFiles\(files\)/);
+  match(draftMediaControllerSource, /for \(const item of request\.items\)/);
   match(source, /switchDraftContext\(item\.id, item\.action\)/);
   match(source, /cancelFirstFrameUpload\(\)/);
   match(source, /cancelReferenceUpload\(\)/);
@@ -1239,6 +1278,12 @@ test("video uploads are fenced to the current draft and upload epoch", () => {
     source,
     /if \(isAbortError\(error\) \|\| !isCurrentReferenceUpload\(request\)\) return/,
   );
+});
+
+test("video creation stays origin-relative and does not require a callback domain", () => {
+  match(videoGenerationApiSource, /"\/videos\/generations"/);
+  doesNotMatch(videoGenerationApiSource, /https?:\/\//);
+  doesNotMatch(taskMutationsSource, /callback_url/);
 });
 
 test("video reference object URLs are revoked on replacement and unmount", () => {

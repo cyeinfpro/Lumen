@@ -28,10 +28,11 @@ export type DraftUploadRequest = {
   imageConstraints?: NormalizedVideoImageConstraints | null;
 };
 
-export type ReferenceUploadRequest = DraftUploadRequest & {
-  kind: "image" | "video";
-  limit: number;
-  totalLimit?: number | null;
+export type ReferenceUploadRequest = Omit<DraftUploadRequest, "file"> & {
+  items: Array<{
+    file: File;
+    kind: "image" | "video";
+  }>;
 };
 
 export type ReferenceUploadResult =
@@ -47,6 +48,14 @@ export type ReferenceUploadResult =
       display: string;
       previewUrl: string | null;
     };
+
+export type ReferenceUploadBatchResult = {
+  uploaded: ReferenceUploadResult[];
+  failed: Array<{
+    filename: string;
+    message: string;
+  }>;
+};
 
 export function fetchVideoOptions(signal: AbortSignal): Promise<VideoOptionsOut> {
   return apiFetch<VideoOptionsOut>("/videos/options", { signal });

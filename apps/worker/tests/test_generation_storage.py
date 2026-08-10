@@ -66,6 +66,7 @@ from app.upstream_parts import StagedImageFile
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
 from app.tasks.generation_parts.composition_ports import (
     DefaultGenerationArtifacts,
+    DefaultGenerationQueue,
 )
 from app.tasks.generation_parts.errors import (
     LeaseLost,
@@ -342,11 +343,6 @@ class FakeRedis:
                 return -1
             await self.zremrangebyscore(provider_key, "-inf", now)
             return await self.zcard(provider_key)
-        if script == generation_queue.ADVANCE_IMAGE_QUEUE_CURSOR_LUA:
-            cursor_key, lock_key, token, steps = args[2:6]
-            if self.store.get(lock_key) != token:
-                return -1
-            return await self.incrby(cursor_key, int(steps))
         if script == generation_queue.DELETE_IMAGE_QUEUE_KEY_IF_OWNER_LUA:
             key, lock_key, token = args[2:5]
             if self.store.get(lock_key) != token:
@@ -384,20 +380,18 @@ class FakeRedis:
             task_provider_key,
             not_before_key,
             lock_key,
-            cursor_key,
             reservation_key,
-        ) = args[2:9]
-        now = float(args[9])
-        expiry = float(args[10])
-        task_id = str(args[11])
-        provider_name = str(args[12])
-        provider_cap = int(args[13])
-        global_cap = int(args[14])
-        task_provider_ttl = int(args[15])
-        provider_zset_ttl = int(args[16])
-        lock_token = str(args[17])
-        cursor_steps = int(args[18])
-        reservation_ttl = int(args[19])
+        ) = args[2:8]
+        now = float(args[8])
+        expiry = float(args[9])
+        task_id = str(args[10])
+        provider_name = str(args[11])
+        provider_cap = int(args[12])
+        global_cap = int(args[13])
+        task_provider_ttl = int(args[14])
+        provider_zset_ttl = int(args[15])
+        lock_token = str(args[16])
+        reservation_ttl = int(args[17])
 
         if self.store.get(lock_key) != lock_token:
             return -1
@@ -414,8 +408,6 @@ class FakeRedis:
         await self.set(reservation_key, lock_token, ex=reservation_ttl)
         await self.zadd(global_zset, {task_id: expiry})
         await self.delete(not_before_key)
-        if cursor_steps > 0:
-            await self.incrby(cursor_key, cursor_steps)
         return 1
 
     async def enqueue_job(self, name: str, *args, **kwargs):
@@ -1368,7 +1360,6 @@ async def test_image_queue_reservation_survives_lock_release_failure(
     assert redis.store[generation_queue.image_task_provider_key("gen-1")] == "acc1"
     assert "gen-1" in redis.zsets[generation_queue.image_provider_active_key("acc1")]
     assert "gen-1" in redis.zsets[generation_queue.IMAGE_QUEUE_ACTIVE_KEY]
-    assert redis.store[generation_queue.IMAGE_QUEUE_LANE_CURSOR_KEY] == "1"
     assert "preserving critical-section result" in caplog.text
 
 
@@ -1546,13 +1537,64 @@ async def test_image_queue_capacity_uses_runtime_setting(
         return "12"
 
     monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    services = replace(
+        generation_services,
+        queue=DefaultGenerationQueue(settings),
+    )
 
     assert (
         await generation_queue.resolve_image_queue_capacity(
-            services=generation_services,
+            services=services,
         )
         == 12
     )
+
+
+@pytest.mark.asyncio
+async def test_image_queue_capacity_keeps_last_success_during_long_db_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "image_generation_concurrency", 2)
+    calls = 0
+
+    async def fake_resolve(key: str) -> str:
+        nonlocal calls
+        assert key == "image.generation_concurrency"
+        calls += 1
+        if calls == 1:
+            return "16"
+        raise runtime_settings.SettingUnavailable("database unavailable")
+
+    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    services = replace(
+        generation_services,
+        queue=DefaultGenerationQueue(settings),
+    )
+
+    assert await generation_queue.resolve_image_queue_capacity(services=services) == 16
+    for _ in range(3):
+        assert (
+            await generation_queue.resolve_image_queue_capacity(services=services)
+            == 16
+        )
+
+
+@pytest.mark.asyncio
+async def test_image_queue_capacity_uses_startup_fallback_before_first_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "image_generation_concurrency", 2)
+
+    async def fake_resolve(_key: str) -> str:
+        raise runtime_settings.SettingUnavailable("database unavailable")
+
+    monkeypatch.setattr(runtime_settings, "resolve", fake_resolve)
+    services = replace(
+        generation_services,
+        queue=DefaultGenerationQueue(settings),
+    )
+
+    assert await generation_queue.resolve_image_queue_capacity(services=services) == 2
 
 
 @pytest.mark.asyncio

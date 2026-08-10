@@ -24,6 +24,22 @@ const runtimeSource = readFileSync(
   new URL("./runtime.ts", import.meta.url),
   "utf8",
 );
+const videoFeedSource = readFileSync(
+  new URL("../../../app/video/use-video-generation-feed.ts", import.meta.url),
+  "utf8",
+);
+const taskIslandSource = readFileSync(
+  new URL("../../../components/ui/tray/TaskIsland.tsx", import.meta.url),
+  "utf8",
+);
+const taskCenterSource = readFileSync(
+  new URL("../../../components/ui/tray/TaskCenter.tsx", import.meta.url),
+  "utf8",
+);
+const compactionSource = readFileSync(
+  new URL("../../../hooks/useContextCompactionEvents.ts", import.meta.url),
+  "utf8",
+);
 
 type SSESubscriptionModule = typeof import("./sseSubscription");
 type SSECallbackInvocation = Parameters<
@@ -145,10 +161,11 @@ test("SSE scope fence drops user A events across the B commit and cleanup window
     true,
   );
   deepEqual(delivered, ["user-b"]);
-  match(source, /const subscribedScope = scopeIdentity;/);
-  match(source, /emitScopedCallback/);
-  match(source, /createSSESubscriber\(\{/);
-  match(lumenSource, /scopeIdentity: userScope,/);
+  doesNotMatch(source, /acquireRealtimeRuntime|releaseRealtimeRuntime/);
+  match(subscriptionSource, /export function isSSEScopeCurrent/);
+  match(subscriptionSource, /export function dispatchSSEEventForScope/);
+  match(lumenSource, /connectionGeneration: identityEpoch,/);
+  match(lumenSource, /userScope,/);
   match(
     lumenSource,
     /useChatStore\.getState\(\)\.currentUserId === userId/,
@@ -166,7 +183,9 @@ test("SSE callback dispatch keeps every callback behind the same scope fence", (
     onError: () => calls.push("error"),
     onControl: () => calls.push("control"),
     onAuthInvalidated: () => calls.push("auth"),
-    setStatus: (status: "connecting" | "open" | "closed" | "error") =>
+    setStatus: (
+      status: "idle" | "connecting" | "open" | "closed" | "error",
+    ) =>
       calls.push(`status:${status}`),
   };
   const context = {
@@ -315,13 +334,14 @@ test("same-user recovery after a fail-closed reset bypasses the recent snapshot 
   );
 });
 
-test("SSE defaults to infinite retry and exposes immediate reconnect", () => {
-  match(
-    subscriptionSource,
-    /DEFAULT_MAX_RETRY_COUNT = Number\.POSITIVE_INFINITY/,
+test("public realtime hook is permanently polling-only and cannot open /events", () => {
+  match(source, /REALTIME_TRANSPORT_MODE = "polling-only"/);
+  match(source, /return \{ status: "idle", reconnect: NOOP_RECONNECT \};/);
+  doesNotMatch(
+    source,
+    /acquireRealtimeRuntime|releaseRealtimeRuntime|EventSource|runtimeRef|\.reconnect\(/,
   );
-  match(source, /runtimeRef\.current\?\.reconnect\(\)/);
-  match(source, /return \{ status, reconnect \};/);
+  doesNotMatch(source, /setTimeout|setInterval|scheduleRetry/);
 });
 
 test("SSE subscriber adapter binds scope and registers only real recovery", async () => {
@@ -357,28 +377,31 @@ test("SSE subscriber adapter binds scope and registers only real recovery", asyn
   );
   deepEqual(result, { cursor: "user:user-b" });
 
-  match(
-    source,
-    /const hasRecoveryAdapter = typeof options\.recoverSnapshot === "function";/,
-  );
-  match(
-    source,
-    /recoverSnapshot: hasRecoveryAdapter[\s\S]*?emitRecoverSnapshot[\s\S]*?: undefined,/,
-  );
-  match(
-    source,
-    /\[\s*channelKey,\s*eventKey,\s*hasRecoveryAdapter,/,
-  );
+  doesNotMatch(source, /createSSESubscriber\(\{/);
 });
 
-test("initial snapshots are runtime-owned and fenced by connection, scope, and identity", () => {
+test("polling snapshots stay fenced by scope and identity", () => {
   doesNotMatch(lumenSource, /onOpen:\s*\(/);
-  match(runtimeSource, /snapshotRequired: this\.hasSnapshotAdapters\(\)/);
-  match(runtimeSource, /const controller = new AbortController\(\)/);
-  match(runtimeSource, /this\.recoveryAbort\?\.abort\(\)/);
+  match(lumenSource, /const POLLING_INTERVAL_MS = 8_000;/);
+  match(lumenSource, /store\.hydrateActiveTasks\(\{ signal \}\)/);
+  match(lumenSource, /store\.pollInflightTasks\(\{/);
+  match(lumenSource, /window\.setTimeout\(requestPoll, POLLING_INTERVAL_MS\)/);
+  match(lumenSource, /window\.addEventListener\("focus", requestPoll\)/);
   match(
     lumenSource,
     /assertSnapshotCurrent\(\s*signal,\s*context,\s*userScope,\s*userId,\s*identityEpoch,\s*\)/,
   );
   match(lumenSource, /!context\.isCurrent\(\)/);
+  doesNotMatch(lumenSource, /setRealtimeRuntimeStatus\([^)]*(?:closed|error)/);
+  match(runtimeSource, /snapshotRequired: this\.hasSnapshotAdapters\(\)/);
+});
+
+test("polling-only keeps existing video, task, chat, and compaction recovery", () => {
+  match(videoFeedSource, /startVideoActivePolling\(/);
+  match(videoFeedSource, /window\.addEventListener\("focus", refreshVisibleTasks\)/);
+  match(taskIslandSource, /refetchInterval: 8_000/);
+  match(taskCenterSource, /onRefresh=\{\(\) => void query\.refetch\(\)\}/);
+  match(lumenSource, /store\.hydrateActiveTasks\(\{ signal \}\)/);
+  match(lumenSource, /store\.pollInflightTasks\(\{/);
+  match(compactionSource, /const poll = async \(\) => \{/);
 });

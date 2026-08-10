@@ -21,13 +21,21 @@ from ..provider_runtime.upstream_services import (
     resolve_image_upstream_services,
 )
 from .delivery_evidence import transport_error_proves_undelivered
+from .direct_generation_responses import (
+    DirectGenerationStreamCall,
+    complete_direct_generation_response as _complete_direct_generation_response,
+    direct_image_response_result_unknown_error as _direct_image_response_result_unknown_error,
+    stream_direct_generation_response,
+)
 from .image_execution import (
     ImageExecutionRequest,
     ImageRequestContext,
     ensure_image_request_context,
 )
-from .generated_payload import GeneratedPayload, StagedImageFile
-from .response_evidence import direct_image_response_metadata
+from .generated_payload import (
+    GeneratedPayload,
+    StagedImageFile,
+)
 
 
 def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
@@ -432,41 +440,6 @@ def _raise_direct_request_failure(
     ) from exc
 
 
-def _direct_image_response_result_unknown_error(
-    exc: BaseException,
-    *,
-    path: str,
-    method: str,
-    url: str,
-    trace_id: str,
-    status_code: int,
-    response_metadata: dict[str, Any] | None = None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> BaseException:
-    services = _runtime_services(runtime)
-    payload: dict[str, Any] = {
-        "path": path,
-        "method": method,
-        "url": url,
-        "x_trace_id": trace_id,
-        "upstream_result_unknown": True,
-        "response_received": True,
-        "wrapped_error_code": services.infrastructure.EC.BAD_RESPONSE.value,
-        "exception": type(exc).__name__,
-    }
-    if response_metadata:
-        payload.update(response_metadata)
-    return services.infrastructure.UpstreamError(
-        (
-            f"{path} returned HTTP {status_code}, but the response could not be "
-            "decoded; upstream result is unknown and was not retried automatically"
-        ),
-        status_code=status_code,
-        error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
-        payload=payload,
-    )
-
-
 def _is_direct_image_result_unknown(
     exc: BaseException,
     *,
@@ -488,108 +461,6 @@ def _is_direct_image_result_unknown(
     )
 
 
-async def _complete_direct_generation_response(
-    *,
-    services: UpstreamServices,
-    request: ImageExecutionRequest,
-    response: Any,
-    started: float,
-    trace_id: str,
-    url: str,
-    context: ImageRequestContext,
-    proxy_url: str | None,
-    http_attempts: int,
-) -> list[tuple[str, str | None]]:
-    duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-    services.core.log_upstream_call(
-        endpoint="images_generations",
-        status=response.status_code,
-        duration_ms=duration_ms,
-        trace_id=trace_id,
-        response_headers=getattr(response, "headers", None),
-    )
-    response_metadata = direct_image_response_metadata(
-        response,
-        http_attempts=http_attempts,
-    )
-    await services.transport.emit_image_progress(
-        request.progress_callback,
-        (
-            "response_ready"
-            if 200 <= response.status_code < 300
-            else "response_received"
-        ),
-        **response_metadata,
-    )
-    if 500 <= response.status_code < 600:
-        raise services.infrastructure.UpstreamError(
-            "direct image POST returned an ambiguous server failure; "
-            "upstream result is unknown after bounded same-key delivery",
-            status_code=response.status_code,
-            error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
-            payload={
-                "path": "images/generations",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-                "upstream_result_unknown": True,
-                "response_received": True,
-                **response_metadata,
-            },
-        )
-
-    try:
-        payload = response.json()
-    except Exception as exc:  # noqa: BLE001
-        if 200 <= response.status_code < 300:
-            raise _direct_image_response_result_unknown_error(
-                exc,
-                path="images/generations",
-                method="POST",
-                url=url,
-                trace_id=trace_id,
-                status_code=response.status_code,
-                response_metadata=response_metadata,
-                runtime=request.upstream_runtime,
-            ) from exc
-        raise services.infrastructure.UpstreamError(
-            "upstream returned invalid JSON",
-            status_code=response.status_code,
-            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-            payload={
-                "path": "images/generations",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-                "response_received": True,
-                **response_metadata,
-            },
-        ) from exc
-
-    if response.status_code >= 400:
-        error = services.core.with_error_context(
-            services.core.parse_error(
-                payload if isinstance(payload, dict) else {},
-                response.status_code,
-            ),
-            path="images/generations",
-            method="POST",
-            url=url,
-        )
-        error.payload.setdefault("x_trace_id", trace_id)
-        error.payload["response_received"] = True
-        error.payload.update(response_metadata)
-        raise error
-    if isinstance(payload, dict):
-        services.core.record_usage(payload.get("usage"))
-    return await services.core.extract_image_results(
-        payload,
-        response.status_code,
-        proxy_url=proxy_url,
-        request_context=context,
-    )
-
-
 async def _direct_generate_image_once(
     request: ImageExecutionRequest,
     *,
@@ -598,6 +469,7 @@ async def _direct_generate_image_once(
     proxy_override: ProviderProxyDefinition | None = None,
     pinned_target_override: Any | None = None,
     before_attempt: Callable[[int], Awaitable[None]] | None = None,
+    streaming_override: bool = False,
 ) -> list[tuple[str, str | None]]:
     """Text-to-image via direct `/v1/images/generations` using gpt-image-2."""
     runtime = request.upstream_runtime
@@ -665,6 +537,10 @@ async def _direct_generate_image_once(
         background=background_for_upstream,
         moderation=moderation,
     )
+    if streaming_override:
+        body["stream"] = True
+        body["partial_images"] = 0
+        body["response_format"] = "b64_json"
     trace_id = context.trace_id
     headers = services.core.auth_headers(api_key_override, trace_id=trace_id)
     services.core.attach_image_idempotency_key(
@@ -673,13 +549,29 @@ async def _direct_generate_image_once(
         endpoint="images/generations",
         body=body,
     )
-    (
-        request_timeout,
-        read_timeout_s,
-    ) = await _image_request_timeout(size, runtime=runtime)
+    request_timeout, read_timeout_s = await _image_request_timeout(
+        size,
+        runtime=runtime,
+    )
     started = services.infrastructure.time.monotonic()
     try:
         async with asyncio.timeout(read_timeout_s):
+            if streaming_override:
+                return await stream_direct_generation_response(
+                    DirectGenerationStreamCall(
+                        services=services,
+                        request=request,
+                        body=body,
+                        headers=headers,
+                        url=url,
+                        trace_id=trace_id,
+                        context=context,
+                        read_timeout_s=read_timeout_s,
+                        proxy_url=proxy_url,
+                        pinned_target=pinned_target,
+                        prepare_attempt=prepare_attempt,
+                    )
+                )
             resp = await services.core.post_with_retry(
                 client=client,
                 url=url,
@@ -691,7 +583,19 @@ async def _direct_generate_image_once(
                 max_attempts=2,
                 before_attempt=prepare_attempt,
             )
-    except (TimeoutError, services.infrastructure.httpx.TimeoutException) as exc:
+    except services.infrastructure.httpx.TimeoutException as exc:
+        _raise_direct_request_failure(
+            exc,
+            path="images/generations",
+            log_endpoint="images_generations",
+            description="direct image request",
+            url=url,
+            trace_id=trace_id,
+            started=started,
+            timeout_s=read_timeout_s,
+            runtime=runtime,
+        )
+    except TimeoutError as exc:
         _raise_direct_request_failure(
             exc,
             path="images/generations",
@@ -715,7 +619,6 @@ async def _direct_generate_image_once(
             timeout_s=None,
             runtime=runtime,
         )
-
     return await _complete_direct_generation_response(
         services=services,
         request=request,

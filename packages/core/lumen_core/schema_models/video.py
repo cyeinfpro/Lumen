@@ -129,7 +129,10 @@ class VideoCreateIn(BaseModel):
     model: str = Field(min_length=1, max_length=64)
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     input_image_id: str | None = Field(default=None, max_length=36)
-    reference_media: list[VideoReferenceMediaIn] = Field(default_factory=list)
+    reference_media: list[VideoReferenceMediaIn] = Field(
+        default_factory=list,
+        max_length=50,
+    )
     duration_s: int = Field(ge=-1, le=30)
     resolution: VideoResolution
     aspect_ratio: VideoAspectRatio

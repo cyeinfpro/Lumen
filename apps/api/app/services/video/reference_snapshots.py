@@ -327,6 +327,7 @@ async def _image_snapshot(
         "label": label,
         "ref_id": ref_id,
         "storage_key": image.storage_key,
+        "size_bytes": max(0, int(getattr(image, "size_bytes", 0) or 0)),
         "sha256": image.sha256,
         "mime": image.mime,
         "url": url,

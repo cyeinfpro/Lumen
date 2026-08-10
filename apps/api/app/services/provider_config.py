@@ -44,6 +44,7 @@ def legacy_env_providers_raw() -> str | None:
                 "enabled": legacy.enabled,
                 "purposes": list(DEFAULT_PROVIDER_PURPOSES),
                 "image_jobs_enabled": False,
+                "image_streaming_enabled": False,
                 "image_jobs_endpoint": "auto",
                 "image_jobs_endpoint_lock": False,
                 "image_jobs_base_url": "",

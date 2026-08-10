@@ -363,12 +363,10 @@ DEFAULT_IMAGE_RESPONSES_MODEL_FAST = "gpt-5.4-mini"
 # 最长的调用方目前会进行 5 次 attempt（4 次 retry），因此 4 个间隔都可能用上。
 RETRY_BACKOFF_SECONDS = (10, 30, 60, 120)
 
-# 多张图任务（n>=2）入队 stagger（秒）：第 N 张图延迟 N*STAGGER 秒入队。
-# 实测：同 prompt 同账号同时打 ChatGPT codex 端会触发 OpenAI 内部 race，稳定一败一成。
-# 错开 5s 让第二条流到达 OpenAI 时第一条已经分配好 image_generation slot，避免内部碰撞。
-# Cap 30s 防止 N 张时最后一张等太久；i=0 不延迟保留 lowest-latency 首张。
-IMAGE_MULTI_GEN_STAGGER_S = 5
-IMAGE_MULTI_GEN_STAGGER_CAP_S = 30
+# Compatibility exports for older API facades. Batch image tasks now enqueue
+# immediately; global and per-provider admission own all concurrency control.
+IMAGE_MULTI_GEN_STAGGER_S = 0
+IMAGE_MULTI_GEN_STAGGER_CAP_S = 0
 
 # 上游 /v1/responses 必填 `instructions` 字段（system 指令）。
 # 无 system_prompt 时回退到这两条默认文案。对应 completion / generation 两条路径。

@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
-from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy import select
@@ -38,7 +36,6 @@ IMAGE_QUEUE_PROVIDER_LOCK_PREFIX = "generation:image_queue:provider:"
 IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
 IMAGE_QUEUE_NOT_BEFORE_PREFIX = "generation:image_queue:not_before:"
 IMAGE_QUEUE_AVOID_PREFIX = "generation:image_queue:avoid:"
-IMAGE_QUEUE_LANE_CURSOR_KEY = "generation:image_queue:lane_cursor"
 IMAGE_QUEUE_WAKEUP_KEY = "generation:image_queue:wakeup"
 IMAGE_INFLIGHT_PREFIX = "generation:image_inflight:"
 IMAGE_QUEUE_LOCK_TTL_S = 10
@@ -55,26 +52,6 @@ logger = logging.getLogger(__name__)
 
 IMAGE_QUEUE_AVOID_TTL_S = 120
 IMAGE_QUEUE_DEFAULT_LANE = "image:interactive:unknown"
-IMAGE_QUEUE_LANE_WEIGHTS = MappingProxyType(
-    {
-        "image:interactive:small": 8,
-        "image:interactive:medium": 5,
-        "image:interactive:large": 3,
-        "image:interactive:edit": 4,
-        "image:interactive:mask_edit": 5,
-        "image:interactive:unknown": 3,
-        "image:workflow:small": 3,
-        "image:workflow:medium": 2,
-        "image:workflow:large": 1,
-        "image:workflow:edit": 1,
-        "image:workflow:mask_edit": 1,
-        "image:workflow:unknown": 1,
-    }
-)
-IMAGE_QUEUE_LANE_ORDER: tuple[str, ...] = tuple(IMAGE_QUEUE_LANE_WEIGHTS)
-IMAGE_QUEUE_LANE_RANK = MappingProxyType(
-    {lane: idx for idx, lane in enumerate(IMAGE_QUEUE_LANE_ORDER)}
-)
 IMAGE_GENERATION_CONCURRENCY_SETTING = "image.generation_concurrency"
 
 CLEANUP_IMAGE_QUEUE_ACTIVE_LUA = """
@@ -90,15 +67,6 @@ if redis.call('GET', KEYS[2]) ~= ARGV[1] then
 end
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[2])
 return redis.call('ZCARD', KEYS[1])
-"""
-
-ADVANCE_IMAGE_QUEUE_CURSOR_LUA = """
-if redis.call('GET', KEYS[2]) ~= ARGV[1] then
-  return -1
-end
-local value = redis.call('INCRBY', KEYS[1], tonumber(ARGV[2]))
-redis.call('EXPIRE', KEYS[1], 3600)
-return value
 """
 
 CLEAR_STALE_IMAGE_QUEUE_RESERVATION_LUA = """
@@ -373,43 +341,6 @@ async def queued_generation_ids(
     return [str(row) for row in rows]
 
 
-def queue_lane_weight(lane: str | None, *, services: RunGenerationDeps) -> int:
-    if not lane:
-        return 1
-    return max(1, int(IMAGE_QUEUE_LANE_WEIGHTS.get(lane, 1)))
-
-
-def queue_lane_sort_key(
-    lane: str, *, services: RunGenerationDeps
-) -> tuple[int, int, str]:
-    return (
-        IMAGE_QUEUE_LANE_RANK.get(
-            lane,
-            len(IMAGE_QUEUE_LANE_RANK),
-        ),
-        -queue_lane_weight(lane, services=services),
-        lane,
-    )
-
-
-def weighted_queue_lane_slots(
-    lanes: list[str], *, services: RunGenerationDeps
-) -> list[str]:
-    ordered = sorted(
-        lanes,
-        key=lambda lane: queue_lane_sort_key(lane, services=services),
-    )
-    if not ordered:
-        return []
-    max_weight = max(queue_lane_weight(lane, services=services) for lane in ordered)
-    slots: list[str] = []
-    for level in range(max_weight):
-        for lane in ordered:
-            if queue_lane_weight(lane, services=services) > level:
-                slots.append(lane)
-    return slots
-
-
 def queued_candidate_from_mapping(
     row: Any,
     *,
@@ -493,86 +424,16 @@ async def queued_generation_candidates(
     ]
 
 
-async def select_ready_generation_ids_by_lane(
-    redis: Any,
-    ready_by_lane: dict[str, list[QueuedGenerationCandidate]],
-    limit: int,
-    *,
-    advance_cursor: bool = False,
-    services: RunGenerationDeps,
-) -> list[str]:
-    slots = weighted_queue_lane_slots(list(ready_by_lane), services=services)
-    if not slots:
-        return []
-    raw_cursor: str | None = None
-    with suppress(Exception):
-        raw_cursor = redis_text(await redis.get(IMAGE_QUEUE_LANE_CURSOR_KEY))
-    try:
-        cursor = int(raw_cursor) if raw_cursor else 0
-    except ValueError:
-        cursor = 0
-
-    lane_queues = {
-        lane: deque(candidates) for lane, candidates in ready_by_lane.items()
-    }
-    selected: list[str] = []
-    remaining = sum(len(candidates) for candidates in lane_queues.values())
-    while remaining > 0 and len(selected) < limit:
-        lane = slots[cursor % len(slots)]
-        cursor += 1
-        lane_candidates = lane_queues.get(lane)
-        if not lane_candidates:
-            continue
-        selected.append(lane_candidates.popleft().id)
-        remaining -= 1
-
-    if advance_cursor:
-        with suppress(Exception):
-            await redis.set(
-                IMAGE_QUEUE_LANE_CURSOR_KEY,
-                str(cursor),
-                ex=3600,
-            )
-    return selected
-
-
-async def advance_image_queue_lane_cursor(
-    redis: Any,
-    steps: int = 1,
-    *,
-    lock: ImageQueueLockLease | None = None,
-    services: RunGenerationDeps,
-) -> None:
-    if steps <= 0:
-        return
-    if lock is not None:
-        await lock.eval_fenced(
-            ADVANCE_IMAGE_QUEUE_CURSOR_LUA,
-            2,
-            IMAGE_QUEUE_LANE_CURSOR_KEY,
-            IMAGE_QUEUE_LOCK_KEY,
-            lock.token,
-            int(steps),
-            lost_result=-1,
-        )
-        return
-    with suppress(Exception):
-        await redis.incrby(IMAGE_QUEUE_LANE_CURSOR_KEY, int(steps))
-        await redis.expire(IMAGE_QUEUE_LANE_CURSOR_KEY, 3600)
-
-
 async def ready_queued_generation_ids(
     redis: Any,
     limit: int,
     *,
-    advance_cursor: bool = False,
     lock: ImageQueueLockLease | None = None,
     services: RunGenerationDeps,
 ) -> list[str]:
     candidates = await ready_queued_generation_candidates(
         redis,
         limit,
-        advance_cursor=advance_cursor,
         lock=lock,
         services=services,
     )
@@ -596,7 +457,6 @@ async def ready_queued_generation_candidates(
     redis: Any,
     limit: int,
     *,
-    advance_cursor: bool = False,
     lock: ImageQueueLockLease | None = None,
     services: RunGenerationDeps,
 ) -> list[QueuedGenerationCandidate]:
@@ -611,7 +471,6 @@ async def ready_queued_generation_candidates(
     if not candidates:
         return []
     ready_fifo: list[QueuedGenerationCandidate] = []
-    ready_by_lane: dict[str, list[QueuedGenerationCandidate]] = {}
     now = time.time()
     now_mono = time.monotonic()
     active_members: set[str] = set()
@@ -652,27 +511,6 @@ async def ready_queued_generation_candidates(
                     with suppress(Exception):
                         await redis.delete(not_before_key)
         ready_fifo.append(candidate)
-        ready_by_lane.setdefault(
-            candidate.queue_lane or IMAGE_QUEUE_DEFAULT_LANE,
-            [],
-        ).append(candidate)
-    if not ready_by_lane:
-        return []
-    if len(ready_by_lane) == 1:
-        return ready_fifo[:limit]
-    try:
-        selected = await select_ready_generation_ids_by_lane(
-            redis,
-            {lane: list(values) for lane, values in ready_by_lane.items()},
-            limit,
-            advance_cursor=advance_cursor,
-            services=services,
-        )
-        if selected:
-            by_id = {candidate.id: candidate for candidate in ready_fifo}
-            return [by_id[task_id] for task_id in selected]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("image queue weighted lane selection failed err=%s", exc)
     return ready_fifo[:limit]
 
 

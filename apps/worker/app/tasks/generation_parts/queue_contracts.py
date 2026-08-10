@@ -6,7 +6,6 @@ IMAGE_QUEUE_PROVIDER_LOCK_PREFIX = "generation:image_queue:provider:"
 IMAGE_QUEUE_TASK_PROVIDER_PREFIX = "generation:image_queue:task_provider:"
 IMAGE_QUEUE_NOT_BEFORE_PREFIX = "generation:image_queue:not_before:"
 IMAGE_QUEUE_AVOID_PREFIX = "generation:image_queue:avoid:"
-IMAGE_QUEUE_LANE_CURSOR_KEY = "generation:image_queue:lane_cursor"
 IMAGE_QUEUE_WAKEUP_KEY = "generation:image_queue:wakeup"
 IMAGE_INFLIGHT_PREFIX = "generation:image_inflight:"
 IMAGE_QUEUE_LOCK_TTL_S = 10

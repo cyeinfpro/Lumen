@@ -14,15 +14,8 @@ const hook = readFileSync(
   new URL("../features/realtime/model/useSSE.ts", import.meta.url),
   "utf8",
 );
-const subscription = readFileSync(
-  new URL(
-    "../features/realtime/model/sseSubscription.ts",
-    import.meta.url,
-  ),
-  "utf8",
-);
-const registry = readFileSync(
-  new URL("../shared/realtime/runtimeRegistry.ts", import.meta.url),
+const lumenHook = readFileSync(
+  new URL("../features/realtime/model/useLumenRealtime.ts", import.meta.url),
   "utf8",
 );
 
@@ -32,18 +25,20 @@ test("provider is a thin runtime boundary without business routing", () => {
   doesNotMatch(provider, /switch\s*\(|invalidateQueries|BroadcastChannel|EventSource/);
 });
 
-test("feature hook delegates runtime ownership and exposes control recovery", () => {
+test("feature hook is polling-only and never acquires an event runtime", () => {
   ok(hook.trimEnd().split("\n").length < 200);
-  match(hook, /acquireRealtimeRuntime/);
-  match(hook, /releaseRealtimeRuntime/);
-  match(hook, /recoverSnapshot/);
-  match(hook, /onControl/);
+  match(hook, /REALTIME_TRANSPORT_MODE = "polling-only"/);
+  match(hook, /status: "idle"/);
+  doesNotMatch(
+    hook,
+    /acquireRealtimeRuntime|releaseRealtimeRuntime|EventSource|runtimeRef/,
+  );
+  match(lumenHook, /const POLLING_INTERVAL_MS = 8_000/);
+  match(lumenHook, /hydrateActiveTasks/);
+  match(lumenHook, /pollInflightTasks/);
+  match(lumenHook, /setRealtimeRuntimeStatus\("idle"\)/);
   doesNotMatch(hook, /new Map/);
   doesNotMatch(hook, /function isSSEScopeCurrent/);
   doesNotMatch(hook, /Object\.fromEntries/);
-  match(subscription, /export function isSSEScopeCurrent/);
-  match(subscription, /export function dispatchSSECallbackForScope/);
-  match(subscription, /export function createSSESubscriber/);
-  match(registry, /const runtimes = new Map<string, RealtimeRuntime>\(\)/);
   doesNotMatch(hook, /class SharedSSEConnection/);
 });

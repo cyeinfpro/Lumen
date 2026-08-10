@@ -11,6 +11,7 @@ import pytest
 from app import video_upstream_service as video_upstream_module
 from app import video_upstream_content as video_upstream_content_module
 from app.tasks.video_generation_parts import default_runtime as video_generation_tasks
+from app.tasks.video_generation_parts import providers as video_provider_tasks
 from app.tasks.video_generation_parts.default_runtime import (
     _reference_media_bytes,
     _try_provider_cancel,
@@ -324,6 +325,78 @@ async def test_reference_media_bytes_ignores_variant_without_url_or_upstream_key
 
 
 @pytest.mark.asyncio
+async def test_reference_media_bytes_rejects_declared_inline_batch_before_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "storage_key": f"u/user-1/ref-{index}.png",
+                    "size_bytes": 12 * 1024 * 1024,
+                    "mime": "image/png",
+                }
+                for index in range(4)
+            ]
+        },
+    )
+    reads: list[str] = []
+
+    async def unexpected_get_bytes(key: str) -> bytes:
+        reads.append(key)
+        return _PNG_BYTES
+
+    monkeypatch.setattr(
+        video_generation_tasks.storage, "aget_bytes", unexpected_get_bytes
+    )
+
+    with pytest.raises(VideoUpstreamError, match="safe inline") as exc_info:
+        await _reference_media_bytes(generation)
+
+    assert exc_info.value.status_code == 413
+    assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_reference_media_bytes_bounds_legacy_snapshots_without_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = SimpleNamespace(
+        action="reference",
+        upstream_request={
+            "reference_media": [
+                {
+                    "kind": "image",
+                    "storage_key": f"u/user-1/ref-{index}.png",
+                    "mime": "image/png",
+                }
+                for index in range(4)
+            ]
+        },
+    )
+    reads: list[str] = []
+
+    async def get_bytes(key: str) -> bytes:
+        reads.append(key)
+        return b"12345678"
+
+    monkeypatch.setattr(video_generation_tasks.storage, "aget_bytes", get_bytes)
+    monkeypatch.setattr(
+        video_provider_tasks,
+        "SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES",
+        16,
+    )
+
+    with pytest.raises(VideoUpstreamError, match="safe inline") as exc_info:
+        await _reference_media_bytes(generation)
+
+    assert exc_info.value.status_code == 413
+    assert len(reads) == 3
+
+
+@pytest.mark.asyncio
 async def test_reference_media_bytes_rejects_local_video_snapshots() -> None:
     generation = SimpleNamespace(
         action="reference",
@@ -494,6 +567,7 @@ async def test_seedance_submit_uses_official_reference_payload_without_fps() -> 
     assert client.body["watermark"] is False
     assert len(client.body["safety_identifier"]) == 64
     assert "fps" not in client.body
+    assert "callback_url" not in client.body
     prompt_text = client.body["content"][0]["text"]
     assert "Reference asset contract" not in prompt_text
     assert "[ref:image:1]" not in prompt_text
@@ -2489,6 +2563,7 @@ async def test_seedance_25_submit_accepts_official_reference_media_limits() -> N
     assert roles.count("reference_image") == 30
     assert roles.count("reference_video") == 10
     assert roles.count("reference_audio") == 10
+    assert all("weight" not in item for item in client.body["content"])
     assert [
         item["image_url"]["url"]
         for item in reference_content

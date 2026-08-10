@@ -416,6 +416,7 @@ def _provider_rows(
             "enabled": provider_input.enabled,
             "purposes": _normalize_purposes(provider_input.purposes),
             "image_jobs_enabled": provider_input.image_jobs_enabled,
+            "image_streaming_enabled": provider_input.image_streaming_enabled,
             "image_jobs_endpoint": endpoint,
             "image_jobs_endpoint_lock": _normalize_image_jobs_endpoint_lock(
                 provider_input.image_jobs_endpoint_lock,

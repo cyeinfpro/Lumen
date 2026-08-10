@@ -235,6 +235,11 @@ class DefaultGenerationQueue:
     provider_cooldowns: dict[str, float] = field(default_factory=dict)
     _provider_selector: object | None = field(default=None, init=False)
     _provider_pool_identity: int | None = field(default=None, init=False)
+    _last_resolved_capacity: int | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     @property
     def expose_provider_diagnostics(self) -> bool:
@@ -251,10 +256,19 @@ class DefaultGenerationQueue:
             coerce_image_queue_capacity,
         )
 
-        raw = await runtime_settings.resolve(IMAGE_GENERATION_CONCURRENCY_SETTING)
+        try:
+            raw = await runtime_settings.resolve(
+                IMAGE_GENERATION_CONCURRENCY_SETTING
+            )
+        except runtime_settings.SettingUnavailable:
+            if self._last_resolved_capacity is not None:
+                return self._last_resolved_capacity
+            return self.configured_capacity()
         if raw is None:
             return self.configured_capacity()
-        return coerce_image_queue_capacity(raw)
+        capacity = coerce_image_queue_capacity(raw)
+        self._last_resolved_capacity = capacity
+        return capacity
 
     async def select_providers(
         self,

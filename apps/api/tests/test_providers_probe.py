@@ -100,6 +100,7 @@ def test_provider_admin_output_parses_string_booleans_without_truthy_coercion() 
             "api_key": "sk-test",
             "enabled": "false",
             "image_jobs_enabled": "0",
+            "image_streaming_enabled": "true",
             "image_jobs_endpoint": "generations",
             "image_jobs_endpoint_lock": "false",
         },
@@ -117,6 +118,7 @@ def test_provider_admin_output_parses_string_booleans_without_truthy_coercion() 
 
     assert item.enabled is False
     assert item.image_jobs_enabled is False
+    assert item.image_streaming_enabled is True
     assert item.image_jobs_endpoint_lock is False
     assert proxy.enabled is False
 
@@ -325,6 +327,7 @@ async def test_update_providers_preserves_existing_ssh_proxy_password(
                     "enabled": True,
                     "proxy": "ssh-cn",
                     "image_jobs_enabled": True,
+                    "image_streaming_enabled": True,
                 }
             ],
         ),
@@ -338,7 +341,9 @@ async def test_update_providers_preserves_existing_ssh_proxy_password(
     assert saved["proxies"][0]["password"] == "old-secret"
     assert saved["providers"][0]["api_key"] == "sk-old"
     assert saved["providers"][0]["image_jobs_enabled"] is True
+    assert saved["providers"][0]["image_streaming_enabled"] is True
     assert out.items[0].image_jobs_enabled is True
+    assert out.items[0].image_streaming_enabled is True
     assert out.proxies[0].password_hint == "****cret"
 
 

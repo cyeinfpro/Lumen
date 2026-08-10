@@ -2585,14 +2585,7 @@ async def test_post_message_persists_image_render_options(
     assert [outbox.payload["task_id"] for outbox in outboxes] == [
         gen.id for gen in gens
     ]
-    assert "defer_s" not in outboxes[0].payload
-    assert [outbox.payload.get("defer_s") for outbox in outboxes[1:]] == [
-        min(
-            messages.IMAGE_MULTI_GEN_STAGGER_CAP_S,
-            i * messages.IMAGE_MULTI_GEN_STAGGER_S,
-        )
-        for i in range(1, 10)
-    ]
+    assert all("defer_s" not in outbox.payload for outbox in outboxes)
 
 
 @pytest.mark.asyncio

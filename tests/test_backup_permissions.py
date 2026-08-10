@@ -178,6 +178,7 @@ def _run_permissions(
     *,
     service_user: str,
     service_group: str,
+    shared_group_id: int | None = None,
     legacy_owner_user: str = "root",
     legacy_owner_uids: tuple[int, ...] = (),
     with_lock: bool = True,
@@ -198,6 +199,8 @@ def _run_permissions(
         "--maintenance-lock-root",
         str(maintenance_root),
     ]
+    if shared_group_id is not None:
+        command.extend(("--shared-group-id", str(shared_group_id)))
     for legacy_owner_uid in legacy_owner_uids:
         command.extend(("--legacy-owner-uid", str(legacy_owner_uid)))
     if not with_lock:
@@ -294,10 +297,43 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def _metadata_with_uid(metadata: os.stat_result, user_id: int) -> os.stat_result:
+def _metadata_with(
+    metadata: os.stat_result,
+    *,
+    mode: int | None = None,
+    user_id: int | None = None,
+    group_id: int | None = None,
+) -> os.stat_result:
     values = list(metadata)
-    values[4] = user_id
+    if mode is not None:
+        values[0] = stat.S_IFMT(metadata.st_mode) | mode
+    if user_id is not None:
+        values[4] = user_id
+    if group_id is not None:
+        values[5] = group_id
     return os.stat_result(values)
+
+
+def _metadata_with_uid(metadata: os.stat_result, user_id: int) -> os.stat_result:
+    return _metadata_with(metadata, user_id=user_id)
+
+
+def _identity_has_mode_access(
+    path: Path,
+    *,
+    user_id: int,
+    group_ids: set[int],
+    required: int,
+) -> bool:
+    metadata = path.stat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if user_id == metadata.st_uid:
+        granted = mode >> 6
+    elif metadata.st_gid in group_ids:
+        granted = mode >> 3
+    else:
+        granted = mode
+    return granted & required == required
 
 
 @contextmanager
@@ -690,9 +726,9 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert _mode(backup_root) == 0o770
-    assert _mode(backup_root / "pg") == 0o770
-    assert _mode(backup_root / "redis") == 0o770
+    assert _mode(backup_root) == 0o2770
+    assert _mode(backup_root / "pg") == 0o2770
+    assert _mode(backup_root / "redis") == 0o2770
     assert _mode(shared_archive) == 0o660
     assert _mode(journal.parent) == 0o700
     assert _mode(journal) == 0o600
@@ -1048,10 +1084,225 @@ def test_deep_shared_target_owned_nodes_are_accepted_and_normalized(
     ):
         assert directory.stat().st_uid == os.geteuid()
         assert directory.stat().st_gid == os.getegid()
-        assert _mode(directory) == 0o770
+        assert _mode(directory) == 0o2770
     assert archive.stat().st_uid == os.geteuid()
     assert archive.stat().st_gid == os.getegid()
     assert _mode(archive) == 0o660
+
+
+def test_shared_tree_can_use_runtime_gid_while_recovery_stays_private(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() == 0:
+        target = _nonroot_identity()
+        if target is None:
+            pytest.skip("no non-root service identity is available")
+        service_user, service_group = target
+        service_gid = grp.getgrnam(service_group).gr_gid
+        shared_gid = next(
+            candidate
+            for candidate in range(10000, 11000)
+            if candidate != service_gid
+        )
+    else:
+        service_user, service_group = _current_identity()
+        service_gid = grp.getgrnam(service_group).gr_gid
+        shared_gid = next(
+            (
+                candidate
+                for candidate in os.getgroups()
+                if candidate != service_gid
+                and any(group.gr_gid == candidate for group in grp.getgrall())
+            ),
+            None,
+        )
+        if shared_gid is None:
+            pytest.skip("current user has no distinct supplementary group")
+    backup_root = tmp_path / "backup"
+    archive = backup_root / "pg" / "snapshot.dump"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"payload")
+    recovery = backup_root / ".recovery"
+    recovery.mkdir()
+    journal = recovery / "backup.json"
+    journal.write_text("{}\n", encoding="utf-8")
+
+    result = _run_permissions(
+        backup_root,
+        service_user=service_user,
+        service_group=service_group,
+        shared_group_id=shared_gid,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for path in (backup_root, backup_root / "pg", archive):
+        assert path.stat().st_gid == shared_gid
+    for path in (recovery, journal):
+        assert path.stat().st_gid == service_gid
+    assert _mode(backup_root) == 0o2770
+    assert _mode(archive) == 0o660
+    assert _mode(recovery) == 0o700
+    assert _mode(journal) == 0o600
+    inherited = backup_root / ".update.log"
+    previous_umask = os.umask(0o007)
+    try:
+        inherited.write_text("new\n", encoding="utf-8")
+    finally:
+        os.umask(previous_umask)
+    assert inherited.stat().st_gid == shared_gid
+    assert _mode(inherited) == 0o660
+
+
+def test_nonroot_permission_contract_keeps_shared_writable_and_recovery_private(
+    tmp_path: Path,
+) -> None:
+    service_user, service_group = _current_identity()
+    service_gid = grp.getgrnam(service_group).gr_gid
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir()
+    update_log = backup_root / ".update.log"
+    update_log.write_text("existing\n", encoding="utf-8")
+    trigger = backup_root / ".backup.trigger"
+    trigger.write_text("request\n", encoding="utf-8")
+    pair_marker = backup_root / ".backup-pair.20260810-010203.json"
+    pair_marker.write_text("{}\n", encoding="utf-8")
+    recovery = backup_root / ".recovery"
+    recovery.mkdir()
+    journal = recovery / "backup.json"
+    journal.write_text("{}\n", encoding="utf-8")
+
+    result = _run_permissions(
+        backup_root,
+        service_user=service_user,
+        service_group=service_group,
+        shared_group_id=service_gid,
+        legacy_owner_user=service_user,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _mode(backup_root) == 0o2770
+    assert _mode(update_log) == 0o660
+    assert _mode(trigger) == 0o660
+    assert _mode(pair_marker) & 0o640 == 0o640
+    assert _mode(recovery) == 0o700
+    assert _mode(journal) == 0o600
+
+    synthetic_api_uid = os.geteuid() + 1
+    shared_groups = {service_gid}
+    assert _identity_has_mode_access(
+        backup_root,
+        user_id=synthetic_api_uid,
+        group_ids=shared_groups,
+        required=0o3,
+    )
+    for path in (update_log, trigger):
+        assert _identity_has_mode_access(
+            path,
+            user_id=synthetic_api_uid,
+            group_ids=shared_groups,
+            required=0o2,
+        )
+    assert _identity_has_mode_access(
+        pair_marker,
+        user_id=synthetic_api_uid,
+        group_ids=shared_groups,
+        required=0o4,
+    )
+    assert not _identity_has_mode_access(
+        recovery,
+        user_id=synthetic_api_uid,
+        group_ids=shared_groups,
+        required=0o1,
+    )
+    assert not _identity_has_mode_access(
+        journal,
+        user_id=synthetic_api_uid,
+        group_ids=shared_groups,
+        required=0o4,
+    )
+
+
+def test_cifs_shared_policy_validates_effective_gid_without_forcing_sgid(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o770)
+    descriptor = os.open(shared, BACKUP_PERMISSIONS._DIRECTORY_FLAGS)
+    policy = BACKUP_PERMISSIONS._SharedFilesystemPolicy(
+        filesystem_type="cifs",
+        mount_manages_permissions=True,
+    )
+    try:
+        BACKUP_PERMISSIONS._set_shared_directory_permissions(
+            descriptor,
+            target_user_id=os.geteuid(),
+            target_group_id=os.getegid(),
+            legacy_owner_ids=frozenset({os.geteuid()}),
+            policy=policy,
+            label="root",
+        )
+    finally:
+        os.close(descriptor)
+
+    assert _mode(shared) == 0o770
+    assert _mode(shared) & stat.S_ISGID == 0
+
+    synthetic = _metadata_with(
+        shared.stat(),
+        mode=0o775,
+        user_id=os.geteuid() + 1,
+        group_id=os.getegid(),
+    )
+    BACKUP_PERMISSIONS._validate_final_shared_node(
+        BACKUP_PERMISSIONS._node_snapshot(synthetic),
+        target_user_id=os.geteuid(),
+        target_group_id=os.getegid(),
+        legacy_owner_ids=frozenset({os.geteuid() + 1}),
+        policy=policy,
+        directory=True,
+        label="shared backup root",
+    )
+
+    wrong_gid = _metadata_with(
+        synthetic,
+        group_id=os.getegid() + 1,
+    )
+    with pytest.raises(
+        BACKUP_PERMISSIONS.BackupPermissionError,
+        match="final permissions are unsafe",
+    ):
+        BACKUP_PERMISSIONS._validate_final_shared_node(
+            BACKUP_PERMISSIONS._node_snapshot(wrong_gid),
+            target_user_id=os.geteuid(),
+            target_group_id=os.getegid(),
+            legacy_owner_ids=frozenset({os.geteuid() + 1}),
+            policy=policy,
+            directory=True,
+            label="shared backup root",
+        )
+
+
+def test_mountinfo_parser_prefers_cifs_for_effective_device() -> None:
+    mountinfo = "\n".join(
+        (
+            "20 1 0:42 / /opt/lumendata rw - cifs //nas/lumen rw",
+            "21 1 0:43 / /opt/lumen rw - ext4 /dev/vda1 rw",
+        )
+    )
+
+    assert (
+        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:42", mountinfo)
+        == "cifs"
+    )
+    assert (
+        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:43", mountinfo)
+        == "ext4"
+    )
+    assert (
+        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:44", mountinfo)
+        is None
+    )
 
 
 def test_shared_legacy_owner_nodes_migrate_to_target_uid(tmp_path: Path) -> None:
@@ -1154,6 +1405,22 @@ def test_cli_collects_repeated_legacy_owner_uids(
 
     assert BACKUP_PERMISSIONS.main() == 0
     assert observed == [10001, 10002]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("-1", "decimal integer"),
+        ("gid-10001", "decimal integer"),
+        (str(BACKUP_PERMISSIONS._MAX_MIGRATABLE_UID + 1), "must be between"),
+    ],
+)
+def test_shared_group_id_validation_rejects_unsafe_values(
+    value: str,
+    message: str,
+) -> None:
+    with pytest.raises(argparse.ArgumentTypeError, match=message):
+        BACKUP_PERMISSIONS._parse_shared_group_id(value)
 
 
 @pytest.mark.parametrize(
@@ -1907,3 +2174,33 @@ def test_runtime_never_recursively_relaxes_private_recovery_directory() -> None:
     assert "backup_permissions.py" in runtime
     assert "--legacy-owner-user root" in runtime
     assert '--legacy-owner-uid "${LUMEN_APP_UID:-10001}"' in runtime
+    assert '--shared-group-id "${shared_group_id}"' in runtime
+    assert (
+        'shared_group_id="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"'
+        in runtime
+    )
+
+
+def test_host_writer_units_use_group_writable_umask() -> None:
+    units = (
+        "lumen-update-runner.service",
+        "lumen-update-warm.service",
+        "lumen-backup.service",
+        "lumen-restore-runner.service",
+    )
+    for unit_name in units:
+        unit = (
+            ROOT / "deploy" / "systemd" / unit_name
+        ).read_text(encoding="utf-8")
+        assert unit.count("UMask=0007") == 1
+
+    backup_unit = (
+        ROOT / "deploy" / "systemd" / "lumen-backup.service"
+    ).read_text(encoding="utf-8")
+    assert "Restart=on-failure" in backup_unit
+    assert "RestartPreventExitStatus=4" in backup_unit
+    assert "RestartSec=300s" in backup_unit
+    assert "StartLimitIntervalSec=0" not in backup_unit
+    assert "StartLimitIntervalSec=1800" in backup_unit
+    assert "StartLimitBurst=3" in backup_unit
+    assert "harden-pair-markers" not in backup_unit

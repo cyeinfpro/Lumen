@@ -382,6 +382,52 @@ async def test_direct_generate_provider_override_blocks_unsupported_generations(
 
 
 @pytest.mark.asyncio
+async def test_direct_failover_forwards_provider_streaming_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = provider_pool.ResolvedProvider(
+        name="streaming",
+        base_url="https://streaming.example",
+        api_key="sk-streaming",
+        image_generations_supported=True,
+        image_streaming_enabled=True,
+    )
+    seen: dict[str, Any] = {}
+
+    class FakePool:
+        def get_redis(self) -> None:
+            return None
+
+    async def fake_get_pool() -> FakePool:
+        return FakePool()
+
+    async def fake_direct_once(
+        _request: ImageExecutionRequest,
+        **kwargs: Any,
+    ) -> list[tuple[str, str | None]]:
+        seen.update(kwargs)
+        return [("BBBB", None)]
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.provider_pool,
+        "get_pool",
+        fake_get_pool,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.direct,
+        "direct_generate_image_once",
+        fake_direct_once,
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_with_failover(
+        _image_request(provider_override=provider)
+    )
+
+    assert result == [("BBBB", None)]
+    assert seen["streaming_override"] is True
+
+
+@pytest.mark.asyncio
 async def test_image2_dispatch_skips_responses_fallback_when_capability_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -13,10 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumen_core import billing as billing_core
-from lumen_core.constants import (
-    IMAGE_MULTI_GEN_STAGGER_CAP_S,
-    IMAGE_MULTI_GEN_STAGGER_S,
-)
 from lumen_core.model_entities import SystemSetting
 from lumen_core.runtime_settings import get_spec
 from lumen_core.schema_models import ChatParamsIn
@@ -79,9 +75,8 @@ def generation_child_idempotency_key(base_key: str, index: int) -> str:
 
 
 def image_multi_generation_defer_s(index: int) -> int:
-    if index <= 1:
-        return 0
-    return min(IMAGE_MULTI_GEN_STAGGER_CAP_S, (index - 1) * IMAGE_MULTI_GEN_STAGGER_S)
+    _ = index
+    return 0
 
 
 def idempotency_lookup_keys(

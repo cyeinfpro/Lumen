@@ -26,7 +26,6 @@ from .queue_provider import (
 )
 from .queue import (
     IMAGE_QUEUE_ACTIVE_KEY,
-    IMAGE_QUEUE_LANE_CURSOR_KEY,
     IMAGE_QUEUE_LOCK_KEY,
     ImageQueueLockLost,
     active_image_provider_names,
@@ -56,8 +55,7 @@ local global_zset = KEYS[2]
 local task_provider_key = KEYS[3]
 local not_before_key = KEYS[4]
 local lock_key = KEYS[5]
-local cursor_key = KEYS[6]
-local reservation_key = KEYS[7]
+local reservation_key = KEYS[6]
 
 local now = tonumber(ARGV[1])
 local expiry = tonumber(ARGV[2])
@@ -68,8 +66,7 @@ local global_cap = tonumber(ARGV[6])
 local task_provider_ttl = tonumber(ARGV[7])
 local provider_zset_ttl = tonumber(ARGV[8])
 local lock_token = ARGV[9]
-local cursor_steps = tonumber(ARGV[10])
-local reservation_ttl = tonumber(ARGV[11])
+local reservation_ttl = tonumber(ARGV[10])
 
 if redis.call('GET', lock_key) ~= lock_token then
   return -1
@@ -91,10 +88,6 @@ redis.call('SET', task_provider_key, provider_name, 'EX', task_provider_ttl)
 redis.call('SET', reservation_key, lock_token, 'EX', reservation_ttl)
 redis.call('ZADD', global_zset, expiry, task_id)
 redis.call('DEL', not_before_key)
-if cursor_steps > 0 then
-  redis.call('INCRBY', cursor_key, cursor_steps)
-  redis.call('EXPIRE', cursor_key, 3600)
-end
 return 1
 """
 
@@ -176,19 +169,17 @@ async def _reserve_provider_slot(
     capacity: int,
     now: float,
     expiry: float,
-    fair_rank: int,
     services: RunGenerationDeps,
 ) -> bool:
     try:
         ok = await lock.eval_fenced(
             RESERVE_IMAGE_SLOT_LUA,
-            7,
+            6,
             image_provider_active_key(provider_name),
             IMAGE_QUEUE_ACTIVE_KEY,
             image_task_provider_key(task_id),
             image_queue_not_before_key(task_id),
             IMAGE_QUEUE_LOCK_KEY,
-            IMAGE_QUEUE_LANE_CURSOR_KEY,
             _image_queue_reservation_token_key(task_id),
             str(now),
             str(expiry),
@@ -199,7 +190,6 @@ async def _reserve_provider_slot(
             str(LEASE_TTL_S),
             str(LEASE_TTL_S * 4),
             lock.token,
-            str(fair_rank + 1),
             str(_image_queue_reservation_token_ttl(services=services)),
             lost_result=-1,
         )
@@ -223,7 +213,7 @@ async def reserve_image_queue_slot(
     cost_class: str | None = None,
     services: RunGenerationDeps,
 ) -> Any | None:
-    """Reserve one global image slot for a task admitted by fair scheduling.
+    """Reserve one global image slot for a task admitted by strict FIFO.
 
     The provider branch delegates its atomic ``_RESERVE_IMAGE_SLOT_LUA`` call
     to ``_reserve_provider_slot``, which uses ``lock.eval_fenced(`` with
@@ -249,16 +239,18 @@ async def reserve_image_queue_slot(
             return None
         if len(active_members) >= capacity:
             return None
-        fair_window = max(1, capacity - len(active_members))
-        fair_rank = await ready_queue_rank(
-            redis,
-            lock,
-            task_id=task_id,
-            fair_window=fair_window,
-            services=services,
-            read_ready_candidates=ready_queued_generation_ids,
-        )
-        if fair_rank is None:
+        fifo_window = max(1, capacity - len(active_members))
+        if (
+            await ready_queue_rank(
+                redis,
+                lock,
+                task_id=task_id,
+                fifo_window=fifo_window,
+                services=services,
+                read_ready_candidates=ready_queued_generation_ids,
+            )
+            is None
+        ):
             return None
 
         now = time.time()
@@ -268,7 +260,6 @@ async def reserve_image_queue_slot(
                 lock,
                 task_id=task_id,
                 expiry=expiry,
-                fair_rank=fair_rank,
                 active_count=len(active_members),
                 capacity=capacity,
                 services=services,
@@ -306,7 +297,6 @@ async def reserve_image_queue_slot(
                     providers=providers,
                     now=now,
                     expiry=expiry,
-                    fair_rank=fair_rank,
                     active_count=len(active_members),
                     capacity=capacity,
                     services=services,

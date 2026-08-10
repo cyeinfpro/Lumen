@@ -13,7 +13,7 @@ export type SSEHandler = (data: unknown, id: string) => void;
 export interface SSEHandlers {
   [eventName: string]: SSEHandler;
 }
-export type SSEStatus = RealtimeStatus;
+export type SSEStatus = RealtimeStatus | "idle";
 
 export interface UseSSEOptions {
   scopeIdentity?: string;

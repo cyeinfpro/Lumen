@@ -100,7 +100,7 @@ export type VideoPageViewModel = {
       kindOptions: ReferenceKind[];
       selectedKind: ReferenceKind;
       assetUrlInput: string;
-      onFile: (file: File) => void;
+      onFiles: (files: File[]) => void;
       onOpenAssetManager: () => void;
       onInsert: (item: ReferenceDraft) => void;
       onPreview: (item: ReferenceDraft) => void;
@@ -365,11 +365,12 @@ function ReferenceSection({
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept={`${imageAcceptValue(model.imageConstraints)},video/mp4,video/quicktime`}
         className="hidden"
         onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) model.onFile(file);
+          const files = Array.from(event.target.files ?? []);
+          if (files.length > 0) model.onFiles(files);
           event.target.value = "";
         }}
       />

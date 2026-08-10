@@ -512,8 +512,9 @@ descriptor, temporary_raw = tempfile.mkstemp(
     dir=root,
 )
 temporary = Path(temporary_raw)
+final_descriptor = -1
 try:
-    os.fchmod(descriptor, 0o600)
+    os.fchmod(descriptor, 0o640)
     view = memoryview(payload)
     while view:
         written = os.write(descriptor, view)
@@ -521,9 +522,33 @@ try:
             raise OSError("short write while persisting backup pair marker")
         view = view[written:]
     os.fsync(descriptor)
+    temporary_metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(temporary_metadata.st_mode)
+        or stat.S_IMODE(temporary_metadata.st_mode) != 0o640
+        or temporary_metadata.st_size != len(payload)
+    ):
+        raise OSError("backup pair marker temporary file validation failed")
     os.close(descriptor)
     descriptor = -1
     os.replace(temporary, marker)
+    final_descriptor = os.open(
+        marker,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    final_metadata = os.fstat(final_descriptor)
+    if (
+        not stat.S_ISREG(final_metadata.st_mode)
+        or stat.S_IMODE(final_metadata.st_mode) != 0o640
+        or final_metadata.st_size != len(payload)
+        or (final_metadata.st_dev, final_metadata.st_ino)
+        != (temporary_metadata.st_dev, temporary_metadata.st_ino)
+    ):
+        raise OSError("backup pair marker final file validation failed")
+    os.close(final_descriptor)
+    final_descriptor = -1
     directory_fd = os.open(
         root,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
@@ -539,6 +564,8 @@ try:
 finally:
     if descriptor >= 0:
         os.close(descriptor)
+    if final_descriptor >= 0:
+        os.close(final_descriptor)
     temporary.unlink(missing_ok=True)
 print(f"{pg_hash}\t{redis_hash}")
 PY
@@ -689,6 +716,66 @@ docker_cp_redis() {
             ;;
     esac
     return 1
+}
+
+log_redis_validation_excerpt() {
+    local phase="$1"
+    local output_file="$2"
+    local line=""
+    local count=0
+
+    [ -s "$output_file" ] || return 0
+    while IFS= read -r line && [ "$count" -lt 12 ]; do
+        [ -n "$line" ] && log "ERROR: redis RDB ${phase}: ${line}"
+        count=$((count + 1))
+    done < "$output_file"
+}
+
+validate_archived_redis_rdb() {
+    local source="$1"
+    local remote="/tmp/lumen-rdb-check-$$-${RANDOM:-0}.rdb"
+    local stage_log="$TMP_DIR/redis-rdb-stage.err"
+    local check_log="$TMP_DIR/redis-rdb-check.err"
+    local cleanup_log="$TMP_DIR/redis-rdb-cleanup.err"
+    local staged=0
+    local rc=0
+
+    if [ ! -f "$source" ] || [ -L "$source" ] || [ ! -s "$source" ]; then
+        log "ERROR: archived redis dump.rdb is missing, unsafe, or empty"
+        return 1
+    fi
+
+    # docker cp preserves the host source UID. A backup run as lumen-backup
+    # therefore creates a 0600 uid999 file in the Redis container. The hardened
+    # container drops every capability, so even `docker exec -u 0` cannot bypass
+    # DAC to read that file. Stream through a uid0 process instead: it creates
+    # its own root-owned 0600 file without broadening the RDB permissions.
+    if docker exec -i -u 0 "$REDIS_CONTAINER" \
+            sh -c 'set -C; umask 077; exec cat > "$1"' sh "$remote" \
+            < "$source" 2>"$stage_log"; then
+        staged=1
+    else
+        log "ERROR: failed to stage archived redis dump.rdb inside the container"
+        log_redis_validation_excerpt "stage" "$stage_log"
+        rc=1
+    fi
+
+    if [ "$staged" -eq 1 ] \
+            && ! docker exec -u 0 "$REDIS_CONTAINER" \
+                redis-check-rdb "$remote" >"$check_log" 2>&1; then
+        log "ERROR: redis-check-rdb rejected the archived dump.rdb"
+        log_redis_validation_excerpt "check" "$check_log"
+        rc=1
+    fi
+
+    if ! docker exec -u 0 "$REDIS_CONTAINER" rm -f "$remote" \
+            >"$cleanup_log" 2>&1; then
+        log "ERROR: failed to remove staged redis RDB validation file"
+        log_redis_validation_excerpt "cleanup" "$cleanup_log"
+        rc=1
+    fi
+    rm -f "$stage_log" "$check_log" "$cleanup_log"
+    return "$rc"
 }
 
 redis_info_value() {
@@ -1005,9 +1092,7 @@ if ! python3 "${SCRIPT_DIR}/redis_backup_archive.py" \
     rm -rf "$REDIS_VALIDATION_DIR"
     exit 4
 fi
-if ! lumen_validate_redis_rdb_file \
-        "$REDIS_CONTAINER" "$REDIS_VALIDATION_DIR/dump.rdb"; then
-    log "ERROR: redis-check-rdb rejected the archived dump.rdb"
+if ! validate_archived_redis_rdb "$REDIS_VALIDATION_DIR/dump.rdb"; then
     rm -rf "$REDIS_VALIDATION_DIR"
     exit 4
 fi

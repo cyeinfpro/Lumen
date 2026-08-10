@@ -357,8 +357,10 @@ lumen_install_optional_systemd_unit() {
 lumen_ensure_backup_service_user() {
     local backup_root="${1:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
     local default_user="lumen-backup" default_group="lumen-backup"
+    local host_service_mode=1
     if [ "$(uname -s 2>/dev/null || true)" != "Linux" ] \
             || ! lumen_systemd_runtime_available; then
+        host_service_mode=0
         default_user="$(id -un)"
         default_group="$(id -gn)"
     fi
@@ -371,6 +373,7 @@ lumen_ensure_backup_service_user() {
     local shared_env="${deploy_root}/shared/.env"
     local permissions_helper=""
     local binding_token=""
+    local shared_group_id=""
     local -a maintenance_lock_env=()
     local shell_path="/usr/sbin/nologin"
     [ -x "${shell_path}" ] || shell_path="/sbin/nologin"
@@ -409,6 +412,11 @@ lumen_ensure_backup_service_user() {
         return 1
     fi
     service_login="$(id -un "${user}" 2>/dev/null || printf '%s' "${user}")"
+    if [ "${host_service_mode}" -eq 1 ]; then
+        shared_group_id="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
+    else
+        shared_group_id="$(id -g "${service_login}")"
+    fi
     if command -v getent >/dev/null 2>&1 && getent group docker >/dev/null 2>&1; then
         lumen_run_as_root usermod -aG docker "${service_login}" 2>/dev/null \
             || log_warn "把 ${service_login} 加入 docker 组失败；备份服务可能无法访问 docker socket。"
@@ -468,6 +476,7 @@ lumen_ensure_backup_service_user() {
                 ensure-backup-layout "${backup_root}" \
                 --service-user "${user}" \
                 --service-group "${service_group}" \
+                --shared-group-id "${shared_group_id}" \
                 --legacy-owner-user root \
                 --legacy-owner-uid "${LUMEN_APP_UID:-10001}" \
                 --maintenance-lock-root "${deploy_root}" \
@@ -482,6 +491,7 @@ lumen_ensure_backup_service_user() {
             ensure-backup-layout "${backup_root}" \
             --service-user "${user}" \
             --service-group "${service_group}" \
+            --shared-group-id "${shared_group_id}" \
             --legacy-owner-user root \
             --legacy-owner-uid "${LUMEN_APP_UID:-10001}" \
             --maintenance-lock-root "${deploy_root}" \

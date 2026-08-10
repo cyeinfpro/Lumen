@@ -1,4 +1,4 @@
-"""Fair-order and stale-reservation decisions for generation admission."""
+"""FIFO rank and stale-reservation decisions for generation admission."""
 
 from __future__ import annotations
 
@@ -27,14 +27,14 @@ async def ready_queue_rank(
     lock: Any,
     *,
     task_id: str,
-    fair_window: int,
+    fifo_window: int,
     services: RunGenerationDeps,
     read_ready_candidates: ReadyCandidates,
 ) -> int | None:
     try:
         queued_ids = await read_ready_candidates(
             redis,
-            fair_window,
+            fifo_window,
             lock=lock,
             services=services,
         )
@@ -43,7 +43,7 @@ async def ready_queue_rank(
             raise
         queued_ids = await read_ready_candidates(
             redis,
-            fair_window,
+            fifo_window,
             services=services,
         )
     return queued_ids.index(task_id) if task_id in queued_ids else None

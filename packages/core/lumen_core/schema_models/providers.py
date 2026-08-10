@@ -29,6 +29,7 @@ class ProviderItemOut(BaseModel):
     purposes: list[ProviderPurpose] = Field(default_factory=_default_provider_purposes)
     proxy: str | None = None
     image_jobs_enabled: bool = False
+    image_streaming_enabled: bool = False
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
@@ -86,6 +87,7 @@ class ProviderItemIn(BaseModel):
     )
     proxy: str | None = None
     image_jobs_enabled: bool = False
+    image_streaming_enabled: bool = False
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""

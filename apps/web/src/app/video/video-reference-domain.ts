@@ -7,6 +7,14 @@ import { referenceCapabilityForModelOption } from "../../lib/video/optionsModel.
 
 export type ReferenceKind = VideoReferenceMediaIn["kind"];
 export type ReferenceLimits = Record<ReferenceKind, number>;
+export type ReferenceUploadCandidate<T> = {
+  file: T;
+  kind: "image" | "video";
+};
+export type ReferenceUploadRejection<T> = {
+  file: T;
+  reason: string;
+};
 
 type ReferenceIdentity = Pick<VideoReferenceMediaIn, "kind" | "ref_id">;
 type LabeledReference = ReferenceIdentity & { label: string };
@@ -172,6 +180,59 @@ export function referenceLimitMessage(
 ): string {
   const unit = kind === "image" ? "张" : "个";
   return `参考${referenceKindNoun(kind)}最多 ${limit} ${unit}`;
+}
+
+export function referenceUploadFileKind(
+  file: Pick<File, "name" | "type">,
+): "image" | "video" | null {
+  const mime = file.type.trim().toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  const name = file.name.trim().toLowerCase();
+  if (/\.(?:png|jpe?g|webp|bmp|tiff?|gif|heic|heif|mpo)$/.test(name)) {
+    return "image";
+  }
+  if (/\.(?:mp4|mov)$/.test(name)) return "video";
+  return null;
+}
+
+export function planReferenceUploadBatch<
+  T extends Pick<File, "name" | "type">,
+>(
+  files: readonly T[],
+  refs: ReadonlyArray<Pick<VideoReferenceMediaIn, "kind">>,
+  limits: ReferenceLimits,
+  totalLimit: number | null,
+): {
+  accepted: ReferenceUploadCandidate<T>[];
+  rejected: ReferenceUploadRejection<T>[];
+} {
+  const counts = referenceCountsFor(refs);
+  let total = counts.image + counts.video + counts.audio;
+  const accepted: ReferenceUploadCandidate<T>[] = [];
+  const rejected: ReferenceUploadRejection<T>[] = [];
+  for (const file of files) {
+    const kind = referenceUploadFileKind(file);
+    if (!kind) {
+      rejected.push({ file, reason: "只支持图片或视频文件" });
+      continue;
+    }
+    if (totalLimit !== null && total >= totalLimit) {
+      rejected.push({ file, reason: `参考素材最多 ${totalLimit} 个` });
+      continue;
+    }
+    if (counts[kind] >= limits[kind]) {
+      rejected.push({
+        file,
+        reason: referenceLimitMessage(kind, limits[kind]),
+      });
+      continue;
+    }
+    accepted.push({ file, kind });
+    counts[kind] += 1;
+    total += 1;
+  }
+  return { accepted, rejected };
 }
 
 export function referenceCountsFor(

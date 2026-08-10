@@ -400,7 +400,7 @@ function DraftExecutionFields({
   onUpdate: (patch: Partial<Draft>) => void;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
       <Field label="优先级" hint="越大越优先">
           <Input
           type="number"
@@ -460,6 +460,17 @@ function DraftExecutionFields({
         enabledLabel="支持"
         disabledLabel="不支持"
         hint="勾选后，图片任务路由才会使用这个供应商。"
+        infoTone
+      />
+      <DraftToggleField
+        label="流式生图"
+        enabled={Boolean(draft.image_streaming_enabled)}
+        onCheckedChange={(enabled) =>
+          onUpdate({ image_streaming_enabled: enabled })
+        }
+        enabledLabel="已开启"
+        disabledLabel="已关闭"
+        hint="支持 Images API stream，最终图片事件到达后立即结束等待。"
         infoTone
       />
     </div>

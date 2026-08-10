@@ -195,6 +195,7 @@ def resolved_image_provider(provider: ProviderConfig) -> ResolvedProvider:
         api_key=provider.api_key,
         proxy=provider.proxy,
         image_jobs_enabled=provider.image_jobs_enabled,
+        image_streaming_enabled=provider.image_streaming_enabled,
         image_jobs_endpoint=provider.image_jobs_endpoint,
         image_jobs_endpoint_lock=provider.image_jobs_endpoint_lock,
         image_jobs_base_url=provider.image_jobs_base_url,

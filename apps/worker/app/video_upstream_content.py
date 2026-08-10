@@ -23,6 +23,7 @@ _REFERENCE_ANCHOR_CANDIDATE_RE = re.compile(
 _SEEDANCE_CONTENT_MAX_ESTIMATED_BYTES = 60 * 1024 * 1024
 _SEEDANCE_CONTENT_BASE_OVERHEAD_BYTES = 512
 _SEEDANCE_REFERENCE_ITEM_OVERHEAD_BYTES = 192
+SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES = 44 * 1024 * 1024
 
 
 def _clean_reference_label(raw: str | None) -> str | None:
@@ -508,6 +509,7 @@ def build_seedance_content(
 
 
 __all__ = [
+    "SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES",
     "_clean_reference_label",
     "_prompt_with_official_reference_names",
     "_prompt_with_reference_order",

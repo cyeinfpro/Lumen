@@ -227,12 +227,15 @@ test("runtime recovery login uses the shared safe replace navigation", () => {
   match(source, /replaceWithLogin\(\)/);
   match(source, /top-\[calc\(var\(--mobile-topbar-h\)/);
   match(source, /md:bottom-4 md:left-auto md:right-4 md:top-auto/);
-  match(source, /aria-label=\{unauthorized \? "登录" : "立即恢复实时连接"\}/);
+  match(source, /aria-label=\{unauthorized \? "登录" : "重新验证会话"\}/);
   match(source, /className="pointer-events-none fixed/);
   match(
     source,
-    /if \(!unauthorized && !sessionDegraded && !realtimeDegraded\) return null;/,
+    /if \(!unauthorized && !sessionDegraded\) return null;/,
   );
-  doesNotMatch(source, /"连接中"|"会话确认中"|animate-spin/);
+  doesNotMatch(
+    source,
+    /实时连接中断|立即恢复实时连接|realtimeDegraded|WifiOff|"连接中"|"会话确认中"|animate-spin/,
+  );
   doesNotMatch(source, /location\.assign/);
 });

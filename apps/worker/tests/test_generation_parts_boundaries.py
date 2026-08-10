@@ -257,23 +257,15 @@ async def test_lease_service_reads_concrete_module_ttl_at_call_time(
     ]
 
 
-def test_queue_and_request_parts_resolve_monkeypatches_at_call_time(
+def test_request_parts_resolve_monkeypatches_at_call_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(queue, "IMAGE_QUEUE_LANE_WEIGHTS", {"lane-a": 7})
     monkeypatch.setattr(
         request_options,
         "aspect_ratio_prompt_constraint",
         lambda _ratio: "\ncustom-constraint",
     )
 
-    assert (
-        queue.queue_lane_weight(
-            "lane-a",
-            services=_generation_deps(),
-        )
-        == 7
-    )
     assert (
         request_options.prompt_with_aspect_ratio_constraint("prompt", "1:1")
         == "prompt\ncustom-constraint"

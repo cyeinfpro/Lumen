@@ -262,7 +262,7 @@ def provider_prefers_public_media_url(provider: Any) -> bool:
         provider,
         "kind",
         None,
-    ) in {"volcano_third_party", "volcano_newapi", "omni_flash"}
+    ) in {"volcano", "volcano_third_party", "volcano_newapi", "omni_flash"}
 
 
 def reference_snapshot_ref_id(
