@@ -354,13 +354,13 @@ def _validate_legacy_video_inputs(
     reference_images = images_by_handle.get("reference_images", [])
     reference_videos = videos_by_handle.get("reference_videos", [])
     reference_count = len(reference_images) + len(reference_videos)
-    if len(reference_images) > 9 or len(reference_videos) > 3:
+    if len(reference_images) > 30 or len(reference_videos) > 10:
         raise canvas_http(
             "canvas_input_cardinality_invalid",
             "reference video exceeds the supported media limits",
             422,
-            maximum_images=9,
-            maximum_videos=3,
+            maximum_images=30,
+            maximum_videos=10,
             actual_images=len(reference_images),
             actual_videos=len(reference_videos),
         )
@@ -462,9 +462,7 @@ async def _prepare_resolution_inputs(
             str(edge.get("id") or ""),
         )
     )
-    graph_edges = [
-        edge for edge in graph.get("edges") or [] if isinstance(edge, dict)
-    ]
+    graph_edges = [edge for edge in graph.get("edges") or [] if isinstance(edge, dict)]
     static_image_ids: set[str] = set()
     static_video_ids: set[str] = set()
     node_type = str(node.get("type") or "")

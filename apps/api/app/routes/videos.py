@@ -387,6 +387,7 @@ _is_seedance_20_fast_model = video_options_service.is_seedance_20_fast_model
 _is_seedance_20_mini_model = video_options_service.is_seedance_20_mini_model
 _is_seedance_20_standard_model = video_options_service.is_seedance_20_standard_model
 _is_seedance_20_model = video_options_service.is_seedance_20_model
+_is_seedance_25_model = video_options_service.is_seedance_25_model
 _is_happyhorse_model = video_options_service.is_happyhorse_model
 _is_omni_flash_model = video_options_service.is_omni_flash_model
 _video_resolution_options_for_model = (

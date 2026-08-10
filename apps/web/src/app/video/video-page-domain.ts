@@ -32,8 +32,8 @@ import {
   cleanReferencePreviewUrl,
 } from "./video-page-utils";
 import {
-  preferredDuration,
   preferredResolution,
+  preferredDuration,
   videoUnavailableReasonMessage,
 } from "./video-options-model";
 import { videoEstimateIssue } from "./video-page-derived-state";
@@ -274,12 +274,14 @@ function videoInputIssue({
   inputImageId,
   referenceCounts,
   referenceLimitError,
+  allowAudioOnlyReference,
 }: {
   prompt: string;
   action: VideoAction;
   inputImageId: string;
   referenceCounts: ReferenceLimits;
   referenceLimitError: string | null;
+  allowAudioOnlyReference: boolean;
 }): string | null {
   const referenceCount =
     referenceCounts.image + referenceCounts.video + referenceCounts.audio;
@@ -292,7 +294,8 @@ function videoInputIssue({
   }
   if (
     action === "reference" &&
-    referenceCounts.image + referenceCounts.video === 0
+    referenceCounts.image + referenceCounts.video === 0 &&
+    !allowAudioOnlyReference
   ) {
     return "参考生成至少需要一张图片或一个视频，不能仅使用音频";
   }
@@ -317,6 +320,7 @@ export function videoSubmitDisabledReason({
   inputImageId,
   referenceCounts,
   referenceLimitError,
+  allowAudioOnlyReference,
   seedIsValid,
   estimate,
 }: {
@@ -334,6 +338,7 @@ export function videoSubmitDisabledReason({
   inputImageId: string;
   referenceCounts: ReferenceLimits;
   referenceLimitError: string | null;
+  allowAudioOnlyReference: boolean;
   seedIsValid: boolean;
   estimate: { tokens: number; micro: number } | null;
 }): string {
@@ -355,6 +360,7 @@ export function videoSubmitDisabledReason({
       inputImageId,
       referenceCounts,
       referenceLimitError,
+      allowAudioOnlyReference,
     }) ??
     videoEstimateIssue(seedIsValid, estimate) ??
     "可以提交"
@@ -383,19 +389,31 @@ export function selectedReferenceKind(
 export function effectiveVideoResolution(
   availableResolutions: string[],
   requested: string,
+  declaredDefault?: string | null,
 ): string {
   return availableResolutions.includes(requested)
     ? requested
-    : preferredResolution(availableResolutions);
+    : preferredResolution(availableResolutions, declaredDefault);
 }
 
 export function effectiveVideoDuration(
   availableDurations: number[],
-  requested: number,
+  requested: number | null,
+  declaredDefault?: number | null,
 ): number {
-  return availableDurations.includes(requested)
+  return requested != null && availableDurations.includes(requested)
     ? requested
-    : preferredDuration(availableDurations);
+    : preferredDuration(availableDurations, declaredDefault);
+}
+
+export function effectiveVideoAspectRatio(
+  availableAspectRatios: string[],
+  requested: string,
+  declaredDefault?: string | null,
+): string {
+  return availableAspectRatios.includes(requested)
+    ? requested
+    : preferredResolution(availableAspectRatios, declaredDefault);
 }
 
 export function canEnhanceVideoPrompt({

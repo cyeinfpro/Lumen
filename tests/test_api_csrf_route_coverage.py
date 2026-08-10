@@ -63,6 +63,18 @@ CSRF_EXEMPT_WRITE_ROUTES = {
     ("POST", "/telegram/control/{command_id}/effect/claim"): (
         "bot service: X-Bot-Token claims a fenced control effect"
     ),
+    ("POST", "/telegram/control/{command_id}/effect/renew"): (
+        "bot service: X-Bot-Token renews a fenced control effect lease"
+    ),
+    ("POST", "/telegram/control/{command_id}/effect/redrive/prepare"): (
+        "bot service: X-Bot-Token prepares a fenced redrive effect"
+    ),
+    ("POST", "/telegram/control/{command_id}/effect/redrive/reconcile"): (
+        "bot service: X-Bot-Token reconciles a fenced redrive effect"
+    ),
+    ("POST", "/telegram/control/{command_id}/effect/restart-intent"): (
+        "bot service: X-Bot-Token commits a fenced restart intent"
+    ),
     ("POST", "/telegram/control/{command_id}/effect/finish"): (
         "bot service: X-Bot-Token finalizes a fenced control effect"
     ),

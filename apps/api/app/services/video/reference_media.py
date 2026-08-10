@@ -20,6 +20,11 @@ from lumen_core.schemas import (
     normalize_asset_reference_url,
 )
 from lumen_core.url_security import is_private_host, resolve_public_http_target
+from lumen_core.video_providers import (
+    seedance_allows_audio_only_reference,
+    seedance_model_version,
+    seedance_reference_media_limits,
+)
 from lumen_core.volcano_asset_media import (
     VOLCANO_ASSET_IMAGE_KIND,
     VOLCANO_ASSET_VIDEO_KIND,
@@ -226,21 +231,25 @@ async def reference_video_upstream_public_url(
             "video reference variant failed",
             503,
         ) from exc
+    metadata = {
+        "upstream_reference_variant": VIDEO_REFERENCE_VIDEO_KIND,
+        "upstream_reference_storage_key": variant["storage_key"],
+        "upstream_reference_mime": VIDEO_REFERENCE_VIDEO_MIME,
+        "upstream_reference_width": variant["width"],
+        "upstream_reference_height": variant["height"],
+        "upstream_reference_size_bytes": variant["size_bytes"],
+        "upstream_reference_sha256": variant["sha256"],
+    }
+    duration_ms = variant.get("duration_ms")
+    if isinstance(duration_ms, int):
+        metadata["upstream_reference_duration_ms"] = duration_ms
     return (
         reference_video_public_url(
             video,
             public_base_url,
             variant=VIDEO_REFERENCE_VIDEO_KIND,
         ),
-        {
-            "upstream_reference_variant": VIDEO_REFERENCE_VIDEO_KIND,
-            "upstream_reference_storage_key": variant["storage_key"],
-            "upstream_reference_mime": VIDEO_REFERENCE_VIDEO_MIME,
-            "upstream_reference_width": variant["width"],
-            "upstream_reference_height": variant["height"],
-            "upstream_reference_size_bytes": variant["size_bytes"],
-            "upstream_reference_sha256": variant["sha256"],
-        },
+        metadata,
     )
 
 
@@ -516,6 +525,9 @@ async def reference_media_snapshots(
 def validate_provider_reference_media(
     provider_kind: str,
     reference_snapshots: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    upstream_model: str | None = None,
 ) -> None:
     if provider_kind == "dashscope" and any(
         item.get("kind") == "video"
@@ -561,8 +573,22 @@ def validate_provider_reference_media(
     if provider_kind not in {"volcano", "volcano_newapi"}:
         return
 
-    image_limit = 9 if provider_kind == "volcano" else 4
-    audio_limit = 3 if provider_kind == "volcano" else 1
+    if provider_kind == "volcano":
+        limits = seedance_reference_media_limits(model, upstream_model) or {
+            "image": 9,
+            "video": 3,
+            "audio": 3,
+        }
+        allow_audio_only = seedance_allows_audio_only_reference(
+            model,
+            upstream_model,
+        )
+    else:
+        limits = {"image": 4, "video": 3, "audio": 1}
+        allow_audio_only = False
+    image_limit = limits["image"]
+    video_limit = limits["video"]
+    audio_limit = limits["audio"]
     provider_label = (
         "Volcano Seedance" if provider_kind == "volcano" else "Volcano New API"
     )
@@ -572,10 +598,10 @@ def validate_provider_reference_media(
             f"{provider_label} supports at most {image_limit} reference images",
             422,
         )
-    if video_count > 3:
+    if video_count > video_limit:
         raise video_http_error(
             "too_many_reference_videos",
-            f"{provider_label} supports at most 3 reference videos",
+            f"{provider_label} supports at most {video_limit} reference videos",
             422,
         )
     if audio_count > audio_limit:
@@ -585,9 +611,40 @@ def validate_provider_reference_media(
             + (" references" if audio_limit != 1 else ""),
             422,
         )
-    if audio_count and not (image_count or video_count):
+    if audio_count and not (image_count or video_count) and not allow_audio_only:
         raise video_http_error(
             "reference_audio_requires_visual",
             "reference audio must be combined with an image or video",
+            422,
+        )
+    version = (
+        seedance_model_version(model, upstream_model)
+        if provider_kind == "volcano"
+        else None
+    )
+    max_video_duration_ms = 30_000 if version == "2.5" else 15_000
+    known_video_durations = [
+        int(item["upstream_reference_duration_ms"])
+        for item in reference_snapshots
+        if isinstance(item, dict)
+        and item.get("kind") == "video"
+        and isinstance(item.get("upstream_reference_duration_ms"), int)
+    ]
+    if any(duration > max_video_duration_ms for duration in known_video_durations):
+        raise video_http_error(
+            "invalid_reference_video_duration",
+            (
+                "reference video duration exceeds the model limit of "
+                f"{max_video_duration_ms // 1000} seconds"
+            ),
+            422,
+        )
+    if sum(known_video_durations) > max_video_duration_ms:
+        raise video_http_error(
+            "reference_video_duration_total_exceeded",
+            (
+                "reference videos exceed the model total-duration limit of "
+                f"{max_video_duration_ms // 1000} seconds"
+            ),
             422,
         )

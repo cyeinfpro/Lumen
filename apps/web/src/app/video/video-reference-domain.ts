@@ -3,6 +3,7 @@ import type {
   VideoModelOptionOut,
   VideoReferenceMediaIn,
 } from "../../lib/types";
+import { referenceCapabilityForModelOption } from "../../lib/video/optionsModel.ts";
 
 export type ReferenceKind = VideoReferenceMediaIn["kind"];
 export type ReferenceLimits = Record<ReferenceKind, number>;
@@ -28,16 +29,6 @@ type DraftReference = ReferencePayloadSource & {
 
 const REFERENCE_REF_ID_RE = /^ref:(image|video|audio):([1-9][0-9]{0,2})$/;
 export const REFERENCE_KINDS: ReferenceKind[] = ["image", "video", "audio"];
-export const DEFAULT_REFERENCE_LIMITS: ReferenceLimits = {
-  image: 9,
-  video: 3,
-  audio: 1,
-};
-const NEWAPI_REFERENCE_LIMITS: ReferenceLimits = {
-  image: 4,
-  video: 3,
-  audio: 1,
-};
 const CHINESE_DIGITS: Record<number, string> = {
   1: "一",
   2: "二",
@@ -90,6 +81,7 @@ export function appendVolcanoAssetReferences(
   assets: readonly VolcanoAssetReferenceCandidate[],
   limits: ReferenceLimits,
   keyFactory: () => string,
+  totalLimit: number | null = null,
 ): { references: DraftReference[]; added: number } {
   let references = [...refs];
   let added = 0;
@@ -104,6 +96,7 @@ export function appendVolcanoAssetReferences(
       references.some(
         (item) => assetIdFromReferenceUrl(item.url) === assetId,
       ) ||
+      (totalLimit !== null && references.length >= totalLimit) ||
       references.filter((item) => item.kind === kind).length >= limits[kind]
     ) {
       continue;
@@ -126,46 +119,22 @@ export function appendVolcanoAssetReferences(
   return { references, added };
 }
 
-export function isNewApiVideoModel(model: string): boolean {
-  const value = model.trim().toLowerCase().replace(/[_.]/g, "-");
-  return value === "video-ds-2-0" || value.startsWith("video-ds-2-0-");
-}
-
-export function referenceLimitsForModel(model: string): ReferenceLimits {
-  return isNewApiVideoModel(model)
-    ? NEWAPI_REFERENCE_LIMITS
-    : DEFAULT_REFERENCE_LIMITS;
-}
-
 export function referenceLimitsForModelOption(
   option: VideoModelOptionOut | null | undefined,
-  model: string,
 ): ReferenceLimits {
-  const fallback = referenceLimitsForModel(model);
-  const limits = option?.reference_media_limits;
-  const undeclaredKindLimit = limits ? 0 : undefined;
-  return {
-    image: normalizeReferenceLimit(
-      limits?.image,
-      undeclaredKindLimit ?? fallback.image,
-    ),
-    video: normalizeReferenceLimit(
-      limits?.video,
-      undeclaredKindLimit ?? fallback.video,
-    ),
-    audio: normalizeReferenceLimit(
-      limits?.audio,
-      undeclaredKindLimit ?? fallback.audio,
-    ),
-  };
+  return referenceCapabilityForModelOption(option).limits;
 }
 
-function normalizeReferenceLimit(
-  value: number | null | undefined,
-  fallback: number,
-): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+export function referenceTotalLimitForModelOption(
+  option: VideoModelOptionOut | null | undefined,
+): number | null {
+  return referenceCapabilityForModelOption(option).totalLimit;
+}
+
+export function referenceAllowsAudioOnlyForModelOption(
+  option: VideoModelOptionOut | null | undefined,
+): boolean {
+  return referenceCapabilityForModelOption(option).allowAudioOnly;
 }
 
 export function referenceRefId(kind: ReferenceKind, index: number): string {
@@ -218,12 +187,17 @@ export function referenceCountsFor(
 export function referenceLimitViolation(
   refs: ReadonlyArray<Pick<VideoReferenceMediaIn, "kind">>,
   limits: ReferenceLimits,
+  totalLimit?: number | null,
 ): string | null {
   const counts = referenceCountsFor(refs);
   for (const kind of REFERENCE_KINDS) {
     if (counts[kind] > limits[kind]) {
       return referenceLimitMessage(kind, limits[kind]);
     }
+  }
+  const total = counts.image + counts.video + counts.audio;
+  if (totalLimit != null && total > totalLimit) {
+    return `参考素材最多 ${totalLimit} 个`;
   }
   return null;
 }
@@ -263,6 +237,11 @@ export function referenceDisplayToken(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function referenceAliasPattern(alias: string, flags = ""): RegExp {
+  const numericBoundary = /\d$/.test(alias) ? "(?!\\d)" : "";
+  return new RegExp(`${escapeRegExp(alias)}${numericBoundary}`, flags);
 }
 
 export function referenceDisplayAliases(item: LabeledReference): string[] {
@@ -384,7 +363,7 @@ function replaceReferenceDisplayMentionsWithAnchors(
   for (const item of refs) {
     const token = referencePromptToken(item);
     for (const alias of referenceDisplayAliases(item)) {
-      next = next.replace(new RegExp(escapeRegExp(alias), "g"), token);
+      next = next.replace(referenceAliasPattern(alias, "g"), token);
     }
   }
   return next;
@@ -400,7 +379,7 @@ export function normalizePromptReferenceMentions(
     const token = referencePromptToken(item);
     if (next.includes(token)) continue;
     for (const alias of referenceMentionAliases(item)) {
-      const pattern = new RegExp(escapeRegExp(alias), "i");
+      const pattern = referenceAliasPattern(alias, "i");
       if (!pattern.test(next)) continue;
       next = next.replace(pattern, (match) => `${match} ${token}`);
       break;
@@ -488,7 +467,9 @@ export function promptContainsReferenceMention(
 ): boolean {
   return (
     text.includes(referencePromptToken(item)) ||
-    referenceDisplayAliases(item).some((alias) => text.includes(alias))
+    referenceDisplayAliases(item).some((alias) =>
+      referenceAliasPattern(alias).test(text),
+    )
   );
 }
 
@@ -516,7 +497,7 @@ export function removeReferencesAndReindexPrompt<T extends LabeledReference>(
       (left, right) => right.length - left.length,
     )) {
       nextPrompt = nextPrompt.replace(
-        new RegExp(escapeRegExp(alias), "g"),
+        referenceAliasPattern(alias, "g"),
         placeholder,
       );
     }

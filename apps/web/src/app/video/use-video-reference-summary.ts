@@ -18,6 +18,7 @@ import type { ReferenceDraft } from "./video-workbench-ui";
 export function useVideoReferenceSummary(
   referenceMedia: ReferenceDraft[],
   referenceLimits: ReferenceLimits,
+  referenceTotalLimit: number | null,
   assetReferenceKind: ReferenceKind,
 ) {
   const assetReferenceKindOptions = useMemo<ReferenceKind[]>(
@@ -32,6 +33,12 @@ export function useVideoReferenceSummary(
     () => referenceCountsFor(referenceMedia),
     [referenceMedia],
   );
+  const referenceTotal =
+    referenceCounts.image + referenceCounts.video + referenceCounts.audio;
+  const remainingTotal =
+    referenceTotalLimit === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, referenceTotalLimit - referenceTotal);
   const existingVolcanoAssetIds = useMemo(
     () =>
       new Set(
@@ -43,14 +50,21 @@ export function useVideoReferenceSummary(
   );
   const remainingVolcanoAssetLimits = useMemo(
     () => ({
-      image: Math.max(0, referenceLimits.image - referenceCounts.image),
-      video: Math.max(0, referenceLimits.video - referenceCounts.video),
+      image: Math.min(
+        remainingTotal,
+        Math.max(0, referenceLimits.image - referenceCounts.image),
+      ),
+      video: Math.min(
+        remainingTotal,
+        Math.max(0, referenceLimits.video - referenceCounts.video),
+      ),
     }),
     [
       referenceCounts.image,
       referenceCounts.video,
       referenceLimits.image,
       referenceLimits.video,
+      remainingTotal,
     ],
   );
 
@@ -61,7 +75,9 @@ export function useVideoReferenceSummary(
     referenceLimitError: referenceLimitViolation(
       referenceMedia,
       referenceLimits,
+      referenceTotalLimit,
     ),
+    referenceTotal,
     remainingVolcanoAssetLimits,
     selectedAssetReferenceKind,
   };

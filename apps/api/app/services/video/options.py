@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumen_core import billing as billing_core
 from lumen_core.models import PricingRule
 from lumen_core.runtime_settings import get_spec
+from lumen_core.schema_models import VideoImageConstraintsOut
 from lumen_core.schemas import (
     VideoAction,
     VideoCreateIn,
@@ -37,13 +38,16 @@ from lumen_core.video_billing import (
 from lumen_core.video_providers import (
     VIDEO_ACTIONS,
     parse_video_provider_config_json,
-    seedance_20_allowed_resolutions,
+    is_seedance_25_identifier,
+    seedance_allowed_resolutions,
+    seedance_duration_is_valid,
+    seedance_model_version,
     seedance_20_variant,
     select_video_provider,
 )
 
 from ...runtime_settings import get_setting
-from ...video_options import reference_media_limits_for_model
+from ...video_options import reference_media_capabilities_for_model
 from .errors import video_http_error
 from .presentation import money
 
@@ -216,8 +220,16 @@ def duration_options_for_model(
         return list(OMNI_FLASH_DURATIONS)
     available = set(available_durations or DEFAULT_VIDEO_DURATIONS)
     positive_durations = sorted(item for item in available if item > 0)
-    if is_seedance_20_model(model, upstream_model):
-        positive_durations = [item for item in positive_durations if item >= 4]
+    version = seedance_model_version(model, upstream_model)
+    if version is not None:
+        positive_durations = [
+            item
+            for item in positive_durations
+            if seedance_duration_is_valid(item, model, upstream_model)
+        ]
+    else:
+        supported = set(SUPPORTED_VIDEO_DURATIONS_S)
+        positive_durations = [item for item in positive_durations if item in supported]
     return [SMART_VIDEO_DURATION_S, *positive_durations]
 
 
@@ -351,6 +363,10 @@ def is_seedance_20_model(*identifiers: str | None) -> bool:
     return seedance_20_variant(*identifiers) is not None
 
 
+def is_seedance_25_model(*identifiers: str | None) -> bool:
+    return is_seedance_25_identifier(*identifiers)
+
+
 def is_happyhorse_model(*identifiers: str | None) -> bool:
     for identifier in identifiers:
         if not isinstance(identifier, str):
@@ -388,7 +404,7 @@ def video_resolution_options_for_model(
     if is_omni_flash_model(model, upstream_model):
         allowed = set(OMNI_FLASH_RESOLUTIONS)
         return [resolution for resolution in available if resolution in allowed]
-    seedance_resolutions = seedance_20_allowed_resolutions(model, upstream_model)
+    seedance_resolutions = seedance_allowed_resolutions(model, upstream_model)
     if seedance_resolutions is not None:
         allowed = set(seedance_resolutions)
         return [resolution for resolution in available if resolution in allowed]
@@ -611,6 +627,21 @@ def _model_option(
         for action in sorted_actions
     }
     unique_billing_models = set(billing_models.values())
+    (
+        reference_media_limits,
+        reference_media_total_limit,
+        allow_audio_only_reference,
+        image_constraints,
+    ) = reference_media_capabilities_for_model(
+        providers,
+        model,
+        actions,
+    )
+    constraints_out = (
+        VideoImageConstraintsOut.model_validate(image_constraints)
+        if image_constraints is not None
+        else None
+    )
     return VideoModelOptionOut(
         model=model,
         billing_model=(
@@ -642,11 +673,11 @@ def _model_option(
             list[VideoResolution],
             ordered_video_resolutions(catalog.model_resolutions.get(model, set())),
         ),
-        reference_media_limits=reference_media_limits_for_model(
-            providers,
-            model,
-            actions,
-        ),
+        reference_media_limits=reference_media_limits,
+        reference_media_total_limit=reference_media_total_limit,
+        allow_audio_only_reference=allow_audio_only_reference,
+        input_image_constraints=constraints_out,
+        reference_image_constraints=constraints_out,
     )
 
 

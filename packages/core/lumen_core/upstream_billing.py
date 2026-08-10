@@ -28,6 +28,10 @@ UPSTREAM_DISPATCH_ATTEMPT = "upstream_dispatch_attempt"
 UPSTREAM_RESPONSE_ATTEMPT = "upstream_response_attempt"
 UPSTREAM_DISPATCH_EXECUTION_EPOCH = "upstream_dispatch_execution_epoch"
 UPSTREAM_RESPONSE_EXECUTION_EPOCH = "upstream_response_execution_epoch"
+UPSTREAM_RESPONSE_STATUS_CODE = "upstream_response_status_code"
+UPSTREAM_RESPONSE_REQUEST_ID = "upstream_response_request_id"
+UPSTREAM_RESPONSE_TRACE_ID = "upstream_response_trace_id"
+UPSTREAM_RESPONSE_HTTP_ATTEMPTS = "upstream_response_http_attempts"
 UPSTREAM_DISPATCH_DELIVERY = "upstream_dispatch_delivery"
 UPSTREAM_DISPATCH_PROVEN_UNDELIVERED = "proven_undelivered"
 UPSTREAM_DISPATCH_PROVEN_NO_COST = "proven_no_cost"
@@ -44,6 +48,10 @@ _UPSTREAM_EXECUTION_RECEIPT_KEYS = frozenset(
         UPSTREAM_RESPONSE_ATTEMPT,
         UPSTREAM_DISPATCH_EXECUTION_EPOCH,
         UPSTREAM_RESPONSE_EXECUTION_EPOCH,
+        UPSTREAM_RESPONSE_STATUS_CODE,
+        UPSTREAM_RESPONSE_REQUEST_ID,
+        UPSTREAM_RESPONSE_TRACE_ID,
+        UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
         UPSTREAM_DISPATCH_DELIVERY,
     }
 )
@@ -181,6 +189,31 @@ def _normalized_nonnegative_int(value: object) -> int | None:
         return None
 
 
+def _normalized_response_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = "".join(
+        character for character in value.strip() if 32 <= ord(character) <= 126
+    )
+    return normalized[:256] or None
+
+
+def _clear_upstream_response_receipt(
+    request: dict[str, object],
+) -> dict[str, object]:
+    for key in (
+        UPSTREAM_RESPONSE_RECEIVED_AT,
+        UPSTREAM_RESPONSE_ATTEMPT,
+        UPSTREAM_RESPONSE_EXECUTION_EPOCH,
+        UPSTREAM_RESPONSE_STATUS_CODE,
+        UPSTREAM_RESPONSE_REQUEST_ID,
+        UPSTREAM_RESPONSE_TRACE_ID,
+        UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+    ):
+        request.pop(key, None)
+    return request
+
+
 def _receipt_matches_execution(
     task_or_request: object,
     *,
@@ -280,10 +313,7 @@ def mark_upstream_dispatch_proven_undelivered(
         execution_epoch=execution_epoch,
     )
     request[UPSTREAM_DISPATCH_DELIVERY] = UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
-    request.pop(UPSTREAM_RESPONSE_RECEIVED_AT, None)
-    request.pop(UPSTREAM_RESPONSE_ATTEMPT, None)
-    request.pop(UPSTREAM_RESPONSE_EXECUTION_EPOCH, None)
-    return request
+    return _clear_upstream_response_receipt(request)
 
 
 def mark_upstream_dispatch_proven_no_cost(
@@ -300,10 +330,7 @@ def mark_upstream_dispatch_proven_no_cost(
         execution_epoch=execution_epoch,
     )
     request[UPSTREAM_DISPATCH_DELIVERY] = UPSTREAM_DISPATCH_PROVEN_NO_COST
-    request.pop(UPSTREAM_RESPONSE_RECEIVED_AT, None)
-    request.pop(UPSTREAM_RESPONSE_ATTEMPT, None)
-    request.pop(UPSTREAM_RESPONSE_EXECUTION_EPOCH, None)
-    return request
+    return _clear_upstream_response_receipt(request)
 
 
 def mark_upstream_response_received(
@@ -312,6 +339,10 @@ def mark_upstream_response_received(
     at: str,
     attempt: int,
     execution_epoch: int | None = None,
+    status_code: int | None = None,
+    request_id: str | None = None,
+    response_trace_id: str | None = None,
+    http_attempts: int | None = None,
 ) -> dict[str, object]:
     request = mark_upstream_dispatch_started(
         task_or_request,
@@ -328,6 +359,18 @@ def mark_upstream_response_received(
     )
     if epoch is not None:
         request[UPSTREAM_RESPONSE_EXECUTION_EPOCH] = epoch
+    normalized_status = _normalized_nonnegative_int(status_code)
+    if normalized_status is not None and 100 <= normalized_status <= 599:
+        request[UPSTREAM_RESPONSE_STATUS_CODE] = normalized_status
+    normalized_request_id = _normalized_response_identifier(request_id)
+    if normalized_request_id is not None:
+        request[UPSTREAM_RESPONSE_REQUEST_ID] = normalized_request_id
+    normalized_trace_id = _normalized_response_identifier(response_trace_id)
+    if normalized_trace_id is not None:
+        request[UPSTREAM_RESPONSE_TRACE_ID] = normalized_trace_id
+    normalized_http_attempts = _normalized_nonnegative_int(http_attempts)
+    if normalized_http_attempts is not None and normalized_http_attempts > 0:
+        request[UPSTREAM_RESPONSE_HTTP_ATTEMPTS] = normalized_http_attempts
     return request
 
 
@@ -643,7 +686,11 @@ __all__ = [
     "UPSTREAM_DISPATCH_STARTED_AT",
     "UPSTREAM_RESPONSE_ATTEMPT",
     "UPSTREAM_RESPONSE_EXECUTION_EPOCH",
+    "UPSTREAM_RESPONSE_HTTP_ATTEMPTS",
+    "UPSTREAM_RESPONSE_REQUEST_ID",
     "UPSTREAM_RESPONSE_RECEIVED_AT",
+    "UPSTREAM_RESPONSE_STATUS_CODE",
+    "UPSTREAM_RESPONSE_TRACE_ID",
     "UPSTREAM_SIDECAR_EXECUTION",
     "UPSTREAM_TRACE_ID",
     "LocalBillingAction",

@@ -11,6 +11,8 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Literal
 
+from pillow_heif import register_heif_opener
+
 from ..ports.image_processing import (
     ImageProcessingRequest,
     ImageVariantProcessingRequest,
@@ -34,6 +36,8 @@ _PROCESS_JOIN_TIMEOUT_SECONDS = 2.0
 # leases forever: bound the result read so the child is killed and the
 # upload/variant capacity slot is released.
 _PROCESS_RESULT_TIMEOUT_SECONDS = 60.0
+
+register_heif_opener()
 
 
 @dataclass(frozen=True)

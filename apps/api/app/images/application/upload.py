@@ -25,6 +25,7 @@ from lumen_core.storage_capacity import (
     StorageCapacityPort,
     StorageCapacityUnavailable,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 from ...services.active_user import (
     ActiveSessionExpired,
@@ -38,7 +39,11 @@ from ..adapters.local_capacity import (
     CapacityLimits,
     CapacityUnavailable,
 )
-from ..adapters.sqlalchemy_repository import SQLAlchemyImageRepository
+from ..adapters.sqlalchemy_repository import (
+    ArtifactCommitError,
+    ArtifactTransitionConflict,
+    SQLAlchemyImageRepository,
+)
 from ..domain.artifact import (
     ArtifactIdentity,
     ArtifactKey,
@@ -90,6 +95,35 @@ class UploadPolicy:
     max_long_side: int
     mask_requested: bool
     reference_size: tuple[int, int] | None
+    purpose: str | None = None
+    min_side: int | None = None
+    min_aspect_ratio: float | None = None
+    max_aspect_ratio: float | None = None
+
+    def validate_dimensions(self, width: int, height: int) -> None:
+        if self.min_side is not None and min(width, height) < self.min_side:
+            raise UploadCommandError(
+                "video_reference_dimensions_unsupported",
+                (
+                    "video reference image sides must be between "
+                    f"{self.min_side}px and {self.max_long_side}px"
+                ),
+                400,
+            )
+        aspect_ratio = width / height
+        if (
+            self.min_aspect_ratio is not None and aspect_ratio < self.min_aspect_ratio
+        ) or (
+            self.max_aspect_ratio is not None and aspect_ratio > self.max_aspect_ratio
+        ):
+            raise UploadCommandError(
+                "video_reference_aspect_ratio_unsupported",
+                (
+                    "video reference image aspect ratio must be between "
+                    f"{self.min_aspect_ratio:g} and {self.max_aspect_ratio:g}"
+                ),
+                400,
+            )
 
 
 @dataclass(frozen=True)
@@ -171,6 +205,30 @@ def _map_upload_error(error: Exception) -> UploadCommandError | None:
             "storage_conflict",
             "image storage key already exists",
             409,
+        )
+    if isinstance(error, ArtifactCommitError):
+        return UploadCommandError(
+            "upload_commit_unknown",
+            "image upload commit outcome is unknown",
+            503,
+        )
+    if isinstance(error, ArtifactTransitionConflict):
+        return UploadCommandError(
+            "upload_state_conflict",
+            "image upload state changed unexpectedly; retry the upload",
+            503,
+        )
+    if isinstance(error, SQLAlchemyError):
+        return UploadCommandError(
+            "upload_database_unavailable",
+            "image upload database is temporarily unavailable",
+            503,
+        )
+    if isinstance(error, OSError):
+        return UploadCommandError(
+            "upload_storage_error",
+            "image storage is temporarily unavailable",
+            503,
         )
     return None
 
@@ -304,7 +362,7 @@ class UploadCommandService:
             )
             if storage_guard is not None:
                 storage_guard(state.staged.identity.size_bytes)
-            return await race_with_capacity_leases(
+            inspection = await race_with_capacity_leases(
                 self.processing_executor.inspect(
                     Path(state.staged.path),
                     upload_bytes=state.staged.identity.size_bytes,
@@ -315,6 +373,8 @@ class UploadCommandService:
                 ),
                 guards,
             )
+            policy.validate_dimensions(inspection.width, inspection.height)
+            return inspection
 
     async def _process_and_persist(
         self,

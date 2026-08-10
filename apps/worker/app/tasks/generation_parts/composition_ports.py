@@ -245,13 +245,6 @@ class DefaultGenerationQueue:
 
         return coerce_image_queue_capacity(self.settings.image_generation_concurrency)
 
-    def resource_budgets(self) -> tuple[int, int, int]:
-        return (
-            max(1, int(self.settings.image_generation_resource_units)),
-            max(1, int(self.settings.image_generation_external_lane_units)),
-            max(1, int(self.settings.image_generation_user_resource_units)),
-        )
-
     async def resolve_capacity(self) -> int:
         from .queue import (
             IMAGE_GENERATION_CONCURRENCY_SETTING,

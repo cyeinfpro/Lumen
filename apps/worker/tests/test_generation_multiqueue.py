@@ -10,7 +10,6 @@ import time
 import pytest
 
 from app.tasks.generation_parts import (
-    admission as generation_admission,
     queue as generation_queue,
     queue_claim,
 )
@@ -124,13 +123,6 @@ class _QueueRedis:
         return len(stale)
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
-        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
-            return 1
-        if script in {
-            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
-            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
-        }:
-            return 1
         if numkeys == 1:
             key, token = keys_and_args[:2]
             if self.strings.get(str(key)) == str(token):

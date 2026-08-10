@@ -14,11 +14,6 @@ from .queue_fairness import (
     existing_reservation_blocks_admission,
     ready_queue_rank,
 )
-from .queue_permit import (
-    default_weighted_permit,
-    release_generation_permit,
-    reserve_generation_permit,
-)
 from .queue_provider import (
     defer_after_active_count_failure,
     reserve_dual_race_slot,
@@ -35,17 +30,14 @@ __all__ = [
     "ClaimGenerationServices",
     "DispatchGenerationServices",
     "GenerationResourceLease",
-    "default_weighted_permit",
     "defer_after_active_count_failure",
     "existing_reservation_blocks_admission",
     "filter_avoided_providers",
     "ready_queue_rank",
-    "release_generation_permit",
     "release_generation_runtime_resources",
     "release_image_queue_slot",
     "reserve_dual_race_slot",
     "reserve_from_provider_candidates",
-    "reserve_generation_permit",
     "reserve_image_queue_slot",
     "run_generation",
     "select_provider_candidates",

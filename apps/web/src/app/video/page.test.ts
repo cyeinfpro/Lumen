@@ -5,6 +5,7 @@ import ts from "typescript";
 
 import type {
   VideoGenerationOut,
+  VideoModelOptionOut,
   VideoReferenceMediaIn,
 } from "../../lib/types";
 
@@ -199,6 +200,18 @@ const testReferences: TestReference[] = [
   },
 ];
 
+function imageReferenceFixtures(count: number): TestReference[] {
+  return Array.from({ length: count }, (_, offset) => {
+    const index = offset + 1;
+    return {
+      kind: "image",
+      image_id: `image-${index}`,
+      label: `图片 ${index}`,
+      ref_id: `ref:image:${index}`,
+    };
+  });
+}
+
 function taskFixture(
   overrides: Partial<VideoGenerationOut> = {},
 ): VideoGenerationOut {
@@ -232,18 +245,9 @@ test("video route orchestration stays split into focused hooks", () => {
     draftMediaControllerSource,
     /export function useVideoDraftMediaController\(/,
   );
-  match(
-    parameterHandlersSource,
-    /export function useVideoParameterHandlers\(/,
-  );
-  match(
-    pageViewActionsSource,
-    /export function useVideoPageViewActions\(/,
-  );
-  match(
-    referenceSummarySource,
-    /export function useVideoReferenceSummary\(/,
-  );
+  match(parameterHandlersSource, /export function useVideoParameterHandlers\(/);
+  match(pageViewActionsSource, /export function useVideoPageViewActions\(/);
+  match(referenceSummarySource, /export function useVideoReferenceSummary\(/);
 });
 
 test("video option and pricing domain stays extracted from the route page", () => {
@@ -312,43 +316,35 @@ test("video reference identity, labels, limits, and asset ids are stable", () =>
     ),
     "参考音频最多 1 个",
   );
-  deepEqual(referenceDomain.referenceLimitsForModel("video_ds_2.0-pro"), {
-    image: 4,
-    video: 3,
-    audio: 1,
+  const seedance25Option: VideoModelOptionOut = {
+    model: "seedance-2.5",
+    actions: ["reference"],
+    reference_media_limits: { image: 30, video: 10, audio: 10 },
+    reference_media_total_limit: 50,
+    allow_audio_only_reference: true,
+  };
+  deepEqual(referenceDomain.referenceLimitsForModelOption(seedance25Option), {
+    image: 30,
+    video: 10,
+    audio: 10,
   });
-  deepEqual(referenceDomain.referenceLimitsForModel("wan-video"), {
-    image: 9,
-    video: 3,
-    audio: 1,
-  });
-  deepEqual(
-    referenceDomain.referenceLimitsForModelOption(
-      {
-        model: "seedance-2.0",
-        actions: ["reference"],
-        reference_media_limits: { image: 6, video: 2 },
-      },
-      "seedance-2.0",
-    ),
-    {
-      image: 6,
-      video: 2,
-      audio: 0,
-    },
+  equal(
+    referenceDomain.referenceTotalLimitForModelOption(seedance25Option),
+    50,
+  );
+  equal(
+    referenceDomain.referenceAllowsAudioOnlyForModelOption(seedance25Option),
+    true,
   );
   deepEqual(
-    referenceDomain.referenceLimitsForModelOption(
-      {
-        model: "seedance-2.0",
-        actions: ["reference"],
-      },
-      "seedance-2.0",
-    ),
+    referenceDomain.referenceLimitsForModelOption({
+      model: "legacy-video-model",
+      actions: ["reference"],
+    }),
     {
-      image: 9,
-      video: 3,
-      audio: 1,
+      image: 0,
+      video: 0,
+      audio: 0,
     },
   );
   equal(
@@ -361,6 +357,28 @@ test("video reference identity, labels, limits, and asset ids are stable", () =>
   );
   equal(referenceDomain.assetIdFromReferenceUrl("https://example.com"), null);
   equal(referenceDomain.normalizeAssetUrl("https://example.com/asset-1"), "");
+});
+
+test("video image uploads use the video reference purpose", () => {
+  match(
+    draftMediaControllerSource,
+    /uploadImage\(file,\s*\{\s*signal,\s*purpose:\s*"video_reference"/s,
+  );
+  equal(
+    (draftMediaControllerSource.match(/uploadVideoReferenceImage\(/g) ?? [])
+      .length,
+    3,
+  );
+});
+
+test("video image constraints are driven by backend options", () => {
+  match(optionsModelSource, /value\.min_side_px/);
+  match(optionsModelSource, /value\.max_side_px/);
+  match(optionsModelSource, /value\.min_aspect_ratio/);
+  match(optionsModelSource, /value\.max_aspect_ratio/);
+  match(optionsModelSource, /value\.max_bytes/);
+  match(requestLifecycleCoreSource, /constraints\.minAspectRatio/);
+  match(requestLifecycleCoreSource, /constraints\.maxAspectRatio/);
 });
 
 test("volcano asset references keep the safe preview URL", () => {
@@ -524,6 +542,76 @@ test("video reference aliases serialize to anchors and display round trips", () 
   );
 });
 
+test("video 30-image references preserve exact prompt and payload ordinals", () => {
+  const references = imageReferenceFixtures(30);
+  const displayPrompt = references
+    .map((item) => referenceDomain.referenceDisplayToken(item))
+    .join(" ");
+  const anchoredPrompt = references
+    .map((item) => referenceDomain.referencePromptToken(item))
+    .join(" ");
+
+  equal(
+    referenceDomain.serializePromptReferenceMentions(displayPrompt, references),
+    anchoredPrompt,
+  );
+  equal(
+    referenceDomain.displayPromptReferenceMentions(anchoredPrompt, references),
+    displayPrompt,
+  );
+  deepEqual(
+    referenceDomain
+      .referencePayloadForVideoAction("reference", references)
+      .map((item) => [item.ref_id, item.image_id]),
+    references.map((item) => [item.ref_id, item.image_id]),
+  );
+
+  equal(
+    referenceDomain.promptContainsReferenceMention("@图片10", references[0]),
+    false,
+  );
+  equal(
+    referenceDomain.promptContainsReferenceMention("@图片10", references[9]),
+    true,
+  );
+  equal(
+    referenceDomain.promptContainsReferenceMention("@图片20", references[1]),
+    false,
+  );
+  equal(
+    referenceDomain.promptContainsReferenceMention("@图片30", references[2]),
+    false,
+  );
+
+  const removedFirst = referenceDomain.removeReferenceAndReindexPrompt(
+    "@图片1 @图片10 @图片20 @图片30",
+    references,
+    references[0],
+  );
+  equal(removedFirst.prompt, "@图片9 @图片19 @图片29");
+  deepEqual(
+    removedFirst.references.map((item) => item.ref_id),
+    Array.from({ length: 29 }, (_, offset) => `ref:image:${offset + 1}`),
+  );
+
+  const removedTenth = referenceDomain.removeReferenceAndReindexPrompt(
+    "@图片1 @图片10 @图片11 @图片30",
+    references,
+    references[9],
+  );
+  equal(removedTenth.prompt, "@图片1 @图片10 @图片29");
+
+  const pressurePrompt = Array.from({ length: 20 }, () => displayPrompt).join(
+    "\n",
+  );
+  const pressureSerialized = referenceDomain.serializePromptReferenceMentions(
+    pressurePrompt,
+    references,
+  );
+  equal(pressureSerialized.match(/\[ref:image:[1-9][0-9]?\]/g)?.length, 600);
+  ok(pressureSerialized.length < 10_000);
+});
+
 test("video prompt enhancement and request serialization preserve anchors", () => {
   const references = testReferences.slice(0, 2);
   const candidates = [
@@ -651,10 +739,7 @@ test("video task model preserves status, elapsed, and error semantics", () => {
     ),
     false,
   );
-  deepEqual(
-    taskModel.ensureVideoSettlingCheckpoint(expired, 99_000),
-    expired,
-  );
+  deepEqual(taskModel.ensureVideoSettlingCheckpoint(expired, 99_000), expired);
   equal(taskModel.isTerminalVideo(taskFixture({ status: "succeeded" })), true);
   equal(
     taskModel.isFailedHistoryVideo(taskFixture({ status: "canceled" })),
@@ -699,11 +784,17 @@ test("video materialization settling is bounded and wired into active polling", 
   match(settlingControllerSource, /return useMemo\(/);
   match(generationFeedSource, /startVideoActivePolling\(/);
   doesNotMatch(generationFeedSource, /\[effectiveItems, videoSettling\]/);
-  doesNotMatch(generationFeedSource, /\[refreshGenerationSafe, videoSettling\]/);
+  doesNotMatch(
+    generationFeedSource,
+    /\[refreshGenerationSafe, videoSettling\]/,
+  );
 });
 
 test("settling expiry wires a recovery refresh so pending tasks cannot stay stuck", () => {
-  match(settlingControllerSource, /VIDEO_SETTLING_RECOVERY_INTERVAL_MS = 30_000/);
+  match(
+    settlingControllerSource,
+    /VIDEO_SETTLING_RECOVERY_INTERVAL_MS = 30_000/,
+  );
   match(settlingControllerSource, /onExpired\(id\)/);
   match(
     settlingControllerSource,
@@ -758,10 +849,7 @@ test("active video polling keeps the 800ms start and 2.5s cadence", (t) => {
 test("video workspace keeps history reachable through a responsive task drawer", () => {
   doesNotMatch(source, /xl:overflow-hidden/);
   match(source, /page-scroll page-frame lumen-studio-bg/);
-  match(
-    source,
-    /min-\[1120px\]:grid-cols-\[minmax\(0,1fr\)_340px\]/,
-  );
+  match(source, /min-\[1120px\]:grid-cols-\[minmax\(0,1fr\)_340px\]/);
   match(source, /2xl:grid-cols-\[minmax\(0,1fr\)_360px\]/);
   match(source, /function VideoTaskDrawer\(/);
   match(source, /useBodyScrollLock\(isTaskPanelOpen/);
@@ -824,10 +912,7 @@ test("video prompt enhancement candidates do not trap editor scrolling", () => {
   match(source, /function PromptEnhanceCandidatePreview\(/);
   match(source, /function PromptEnhanceLoadingState\(/);
   match(pageSource, /onReturnToEditor: scrollPromptEditorIntoView/);
-  match(
-    videoPageViewSource,
-    /onReturnToEditor=\{model\.onReturnToEditor\}/,
-  );
+  match(videoPageViewSource, /onReturnToEditor=\{model\.onReturnToEditor\}/);
   match(source, /function motionSafeScrollBehavior\(\): ScrollBehavior/);
   match(
     source,
@@ -900,10 +985,7 @@ test("video reference chips render material thumbnails", () => {
   match(source, /<img\s+src=\{previewUrl \?\? ""\}/);
   match(source, /function ReferenceMediaPreviewDialog\(/);
   match(pageSource, /onPreview: setReferencePreviewItem/);
-  match(
-    videoPageViewSource,
-    /onPreview=\{\(\) => model\.onPreview\(item\)\}/,
-  );
+  match(videoPageViewSource, /onPreview=\{\(\) => model\.onPreview\(item\)\}/);
   match(source, /查看 \$\{displayToken\} 预览/);
   match(
     videoPageViewSource,
@@ -944,20 +1026,17 @@ test("official asset references keep the selected media kind", () => {
   );
   match(source, /aria-pressed=\{active\}/);
   match(pageSource, /onKindChange: setAssetReferenceKind/);
-  match(
-    videoPageViewSource,
-    /onClick=\{\(\) => model\.onKindChange\(kind\)\}/,
-  );
+  match(videoPageViewSource, /onClick=\{\(\) => model\.onKindChange\(kind\)\}/);
   match(
     referenceSummarySource,
     /const selectedAssetReferenceKind = selectedReferenceKind\(/,
   );
-  match(videoPageDomainSource, /if \(options\.includes\(requested\)\) return requested/);
-  match(videoPageDomainSource, /return options\[0\] \?\? "image"/);
   match(
-    pageSource,
-    /addAssetReference\(selectedAssetReferenceKind\)/,
+    videoPageDomainSource,
+    /if \(options\.includes\(requested\)\) return requested/,
   );
+  match(videoPageDomainSource, /return options\[0\] \?\? "image"/);
+  match(pageSource, /addAssetReference\(selectedAssetReferenceKind\)/);
   match(
     draftMediaControllerSource,
     /const identity = nextReferenceIdentity\(selectedKind, references\)/,
@@ -978,17 +1057,11 @@ test("volcano virtual asset manager is integrated with reference drafts", () => 
   match(draftMediaControllerSource, /appendVolcanoAssetReferences\(/);
   match(pageSource, /onUse: useVolcanoAssets/);
   match(pageSource, /onDeleted: removeDeletedVolcanoAssets/);
-  match(
-    videoPageViewSource,
-    /onUse=\{model\.assetManager\.onUse\}/,
-  );
+  match(videoPageViewSource, /onUse=\{model\.assetManager\.onUse\}/);
   match(draftMediaControllerSource, /removeReferencesAndReindexPrompt\(/);
   match(draftMediaControllerSource, /removeReferenceAndReindexPrompt\(/);
   match(pageSource, /onRemove: removeReferenceDraft/);
-  match(
-    videoPageViewSource,
-    /onRemove=\{\(\) => model\.onRemove\(item\)\}/,
-  );
+  match(videoPageViewSource, /onRemove=\{\(\) => model\.onRemove\(item\)\}/);
 });
 
 test("reference submit rejects audio-only media before calling the API", () => {
@@ -1032,7 +1105,7 @@ test("video duration selector follows selected model action and resolution", () 
   match(source, /setResolution\(nextResolution\)/);
   match(
     source,
-    /setDurationS\(\((\w+)\) =>\s*durationOrPreferred\(\1, nextDurations\),\s*\)/,
+    /setDurationS\(\((\w+)\) =>\s*durationOrPreferred\(\s*\1,\s*nextDurations,\s*defaultDurationForModel\(/,
   );
 });
 
@@ -1101,12 +1174,17 @@ test("video feed scopes private state and runtime ownership by user id", () => {
     feedRuntimeResetSource,
     /setScopedSelection\(\{ userId, value: "" \}\)/,
   );
-  match(generationFeedSource, /videoFeedChannels\(runtime, userId, activeItems\)/);
+  match(
+    generationFeedSource,
+    /videoFeedChannels\(runtime, userId, activeItems\)/,
+  );
   match(generationFeedSource, /isVideoFeedScopeTokenCurrent\(/);
 });
 
 test("video retry fences the original request while accepting a new task id", () => {
-  const retryStart = taskMutationsSource.indexOf("const retryMut = useMutation");
+  const retryStart = taskMutationsSource.indexOf(
+    "const retryMut = useMutation",
+  );
   const retryEnd = taskMutationsSource.indexOf("const deleteMut = useMutation");
   ok(retryStart >= 0 && retryEnd > retryStart);
   const retrySource = taskMutationsSource.slice(retryStart, retryEnd);
@@ -1129,10 +1207,7 @@ test("video retry fences the original request while accepting a new task id", ()
     /scheduleGenerationRefresh\(generation\.id, \{ delayMs: 800 \}\)/,
   );
   match(retrySource, /已创建新的重试任务/);
-  match(
-    retrySource,
-    /新任务 \$\{generation\.id\.slice\(0, 8\)\} 跟踪中/,
-  );
+  match(retrySource, /新任务 \$\{generation\.id\.slice\(0, 8\)\} 跟踪中/);
   match(
     retrySource,
     /nextVideoRequestFence\(\s*retryRequestFenceRef\.current,\s*generationId/,
@@ -1151,7 +1226,7 @@ test("video uploads are fenced to the current draft and upload epoch", () => {
   );
   match(
     source,
-    /uploadImage\(request\.file, \{ signal: request\.controller\.signal \}\)/,
+    /uploadVideoReferenceImage\(\s*request\.file,\s*request\.controller\.signal/,
   );
   match(
     source,
@@ -1212,10 +1287,7 @@ test("video upload state blocks submit and Enter shortcuts", () => {
   match(pageSource, /pending: referenceUploadPending/);
   match(videoPageViewSource, /!model\.pending/);
   match(pageSource, /onSubmit: submitVideo/);
-  match(
-    videoPageViewSource,
-    /onSubmit=\{model\.parameters\.onSubmit\}/,
-  );
+  match(videoPageViewSource, /onSubmit=\{model\.parameters\.onSubmit\}/);
 });
 
 test("video task rows and preview show elapsed runtime", () => {

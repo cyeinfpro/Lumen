@@ -15,7 +15,6 @@ from lumen_core.constants import GenerationErrorCode as EC
 
 from app.provider_runtime.errors import UpstreamError
 from app.tasks.generation_parts import (
-    admission as generation_admission,
     lease,
     queue,
     queue_claim,
@@ -198,13 +197,6 @@ class _TimingRedis:
         return set()
 
     async def eval(self, script: str, _numkeys: int, *args: Any) -> Any:
-        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
-            return 1
-        if script in {
-            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
-            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
-        }:
-            return 1
         if script == queue.RENEW_IMAGE_QUEUE_LOCK_LUA:
             lock_key, token, ttl_ms = str(args[0]), str(args[1]), int(args[2])
             if self.block_first_renewals and token == self.first_lock_token:

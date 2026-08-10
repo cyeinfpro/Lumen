@@ -8,7 +8,8 @@ from urllib.parse import urljoin, urlsplit
 
 from lumen_core.video_providers import (
     VideoProviderDefinition,
-    seedance_20_duration_is_valid,
+    seedance_duration_is_valid,
+    seedance_model_version,
 )
 
 from ..video_artifacts import DownloadedVideo, downloaded_video_from_bytes
@@ -81,13 +82,17 @@ class VolcanoSeedanceAdapter:
         return self.runtime.httpx.AsyncClient(**kwargs)
 
     async def submit(self, req: VideoSubmitRequest) -> SubmitResult:
-        if not seedance_20_duration_is_valid(
+        if not seedance_duration_is_valid(
             req.duration_s,
             req.model,
             req.upstream_model,
         ):
+            version = seedance_model_version(req.model, req.upstream_model)
+            max_duration_s = 30 if version == "2.5" else 15
+            model_label = f"Seedance {version}" if version else "Seedance"
             raise VideoUpstreamError(
-                "Seedance 2.0 duration must be -1 or between 4 and 15 seconds",
+                f"{model_label} duration must be -1 or between "
+                f"4 and {max_duration_s} seconds",
                 error_code="invalid_input",
                 status_code=422,
             )

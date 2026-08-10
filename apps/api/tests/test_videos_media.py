@@ -943,6 +943,108 @@ async def test_video_options_exposes_seedance_20_mini(
 
 
 @pytest.mark.asyncio
+async def test_video_options_exposes_seedance_25_official_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = VideoProviderDefinition(
+        name="volcano-main",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={
+            "seedance-2.5:t2v": "doubao-seedance-2-5-260628",
+            "seedance-2.5:i2v": "doubao-seedance-2-5-260628",
+            "seedance-2.5:reference": "doubao-seedance-2-5-260628",
+        },
+    )
+    estimate_keys = {
+        f"{resolution}:{duration_s}": 100_000 + duration_s
+        for resolution in ("480p", "720p")
+        for duration_s in range(4, 31)
+    }
+
+    async def enabled(_db) -> bool:
+        return True
+
+    async def estimates(_db):
+        return {
+            "seedance-2.5": {
+                "t2v": dict(estimate_keys),
+                "i2v": dict(estimate_keys),
+                "reference_image": dict(estimate_keys),
+                "reference_video": dict(estimate_keys),
+            }
+        }
+
+    async def provider_state(_db):
+        return [provider], []
+
+    async def price_options(_db):
+        return [
+            VideoPriceOptionOut(
+                model="seedance-2.5",
+                action=action,  # type: ignore[arg-type]
+                resolution=resolution,
+                variant=f"{action}_{resolution}",
+                price=videos._money(
+                    42_000_000 if action == "reference_video" else 70_000_000
+                ),  # noqa: SLF001
+                enabled=True,
+            )
+            for action in (
+                "t2v",
+                "i2v",
+                "reference",
+                "reference_image",
+                "reference_video",
+            )
+            for resolution in ("480p", "720p")
+        ]
+
+    monkeypatch.setattr(videos, "_video_enabled", enabled)
+    monkeypatch.setattr(videos, "_video_hold_estimates", estimates)
+    monkeypatch.setattr(videos, "_video_provider_state", provider_state)
+    monkeypatch.setattr(videos, "_video_price_options", price_options)
+
+    options = await videos.video_options(  # type: ignore[arg-type]
+        SimpleNamespace(id="user-1"),
+        object(),
+    )
+
+    assert options.enabled is True
+    assert len(options.models) == 1
+    model = options.models[0]
+    assert model.model == "seedance-2.5"
+    assert set(model.actions) == {"t2v", "i2v", "reference"}
+    assert model.durations_s == [-1, *range(4, 31)]
+    assert model.resolutions == ["480p", "720p"]
+    assert model.reference_media_limits == {
+        "image": 30,
+        "video": 10,
+        "audio": 10,
+    }
+    assert model.reference_media_total_limit == 50
+    assert model.allow_audio_only_reference is True
+    assert model.input_image_constraints is not None
+    assert model.input_image_constraints.min_side_px == 300
+    assert model.input_image_constraints.max_side_px == 6000
+    assert model.input_image_constraints.min_aspect_ratio == 0.4
+    assert model.input_image_constraints.max_aspect_ratio == 2.5
+    assert model.input_image_constraints.max_bytes == 30 * 1024 * 1024 - 1
+    assert set(model.input_image_constraints.mime_types) == {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/bmp",
+        "image/tiff",
+        "image/gif",
+        "image/heic",
+        "image/heif",
+    }
+    assert model.reference_image_constraints == model.input_image_constraints
+
+
+@pytest.mark.asyncio
 async def test_video_options_exposes_happyhorse_reference_with_image_pricing_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1667,6 +1769,55 @@ def test_volcano_reference_audio_requires_visual_and_allows_three() -> None:
     assert excinfo.value.detail["error"]["code"] == "too_many_reference_audios"
 
 
+def test_volcano_seedance_25_reference_media_matches_official_contract() -> None:
+    identifiers = {
+        "model": "seedance-2.5",
+        "upstream_model": "doubao-seedance-2-5-260628",
+    }
+    videos._validate_provider_reference_media(  # noqa: SLF001
+        "volcano",
+        [{"kind": "audio"} for _idx in range(10)],
+        **identifiers,
+    )
+    videos._validate_provider_reference_media(  # noqa: SLF001
+        "volcano",
+        [
+            *({"kind": "image"} for _idx in range(30)),
+            *(
+                {"kind": "video", "upstream_reference_duration_ms": 3_000}
+                for _idx in range(10)
+            ),
+            *({"kind": "audio"} for _idx in range(10)),
+        ],
+        **identifiers,
+    )
+
+    for snapshots, code in (
+        ([{"kind": "image"} for _idx in range(31)], "too_many_reference_images"),
+        ([{"kind": "video"} for _idx in range(11)], "too_many_reference_videos"),
+        ([{"kind": "audio"} for _idx in range(11)], "too_many_reference_audios"),
+        (
+            [{"kind": "video", "upstream_reference_duration_ms": 30_001}],
+            "invalid_reference_video_duration",
+        ),
+        (
+            [
+                {"kind": "video", "upstream_reference_duration_ms": 15_001},
+                {"kind": "video", "upstream_reference_duration_ms": 15_000},
+            ],
+            "reference_video_duration_total_exceeded",
+        ),
+    ):
+        with pytest.raises(HTTPException) as excinfo:
+            videos._validate_provider_reference_media(  # noqa: SLF001
+                "volcano",
+                snapshots,
+                **identifiers,
+            )
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail["error"]["code"] == code
+
+
 @pytest.mark.asyncio
 async def test_reference_public_base_url_falls_back_for_preferred_media(
     monkeypatch: pytest.MonkeyPatch,
@@ -2303,7 +2454,7 @@ def test_reference_video_fit_dimensions_stays_under_seedance_r2v_limit() -> None
             {
                 "width": 1280,
                 "height": 720,
-                "duration_ms": 15_001,
+                "duration_ms": 30_001,
                 "fps": 30.0,
             },
             "invalid_video_duration",

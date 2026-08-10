@@ -515,7 +515,7 @@ class VideoGeneration(Base, TimestampMixin):
             sqlite_where=text("provider_task_id IS NOT NULL"),
         ),
         CheckConstraint(
-            "duration_s = -1 OR (duration_s >= 3 AND duration_s <= 15)",
+            "duration_s = -1 OR (duration_s >= 3 AND duration_s <= 30)",
             name="ck_video_gen_duration_positive",
         ),
         CheckConstraint(

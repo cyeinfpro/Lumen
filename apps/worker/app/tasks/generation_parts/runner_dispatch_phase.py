@@ -23,6 +23,10 @@ from lumen_core.upstream_billing import (
     IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES,
     UPSTREAM_DISPATCH_PROVEN_NO_COST,
     UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+    UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+    UPSTREAM_RESPONSE_REQUEST_ID,
+    UPSTREAM_RESPONSE_STATUS_CODE,
+    UPSTREAM_RESPONSE_TRACE_ID,
     has_stable_provider_idempotency_key,
     mark_upstream_dispatch_started,
     mark_upstream_dispatch_proven_no_cost,
@@ -82,10 +86,14 @@ class _EpochGuardedProgressPublisher:
         if event.get("type") == "dispatch_ready":
             await _record_generation_dispatch_ready(self._state)
             return
-        if event.get("type") == "response_ready":
+        if event.get("type") in {"response_ready", "response_received"}:
             await record_generation_upstream_marker(
                 self._state,
                 response_received=True,
+                response_status_code=event.get(UPSTREAM_RESPONSE_STATUS_CODE),
+                response_request_id=event.get(UPSTREAM_RESPONSE_REQUEST_ID),
+                response_trace_id=event.get(UPSTREAM_RESPONSE_TRACE_ID),
+                response_http_attempts=event.get(UPSTREAM_RESPONSE_HTTP_ATTEMPTS),
             )
             return
         if event.get("type") == "dual_race_bonus_ready":
@@ -418,6 +426,10 @@ async def record_generation_upstream_marker(
     proven_undelivered: bool = False,
     proven_no_cost: bool = False,
     fence_active_user: bool = False,
+    response_status_code: int | None = None,
+    response_request_id: str | None = None,
+    response_trace_id: str | None = None,
+    response_http_attempts: int | None = None,
 ) -> None:
     """Persist an upstream receipt in a short, ownership-fenced transaction."""
 
@@ -427,6 +439,16 @@ async def record_generation_upstream_marker(
         raise ValueError("active-user fence is only valid for dispatch-start markers")
     if sum((response_received, proven_undelivered, proven_no_cost)) > 1:
         raise ValueError("upstream marker outcomes are mutually exclusive")
+    if not response_received and any(
+        value is not None
+        for value in (
+            response_status_code,
+            response_request_id,
+            response_trace_id,
+            response_http_attempts,
+        )
+    ):
+        raise ValueError("response diagnostics require a response receipt")
     services = DispatchGenerationServices.from_deps(state.services)
     recorded_at = datetime.now(timezone.utc).isoformat()
     async with services.store.session() as session:
@@ -454,21 +476,31 @@ async def record_generation_upstream_marker(
             raise StaleGenerationAttempt(
                 f"generation marker stale task={state.task_id} attempt={state.attempt}"
             )
-        marker = (
-            mark_upstream_response_received
-            if response_received
-            else mark_upstream_dispatch_proven_no_cost
-            if proven_no_cost
-            else mark_upstream_dispatch_proven_undelivered
-            if proven_undelivered
-            else mark_upstream_dispatch_started
-        )
-        request = marker(
-            current,
-            at=recorded_at,
-            attempt=state.attempt,
-            execution_epoch=generation_execution_epoch(state),
-        )
+        if response_received:
+            request = mark_upstream_response_received(
+                current,
+                at=recorded_at,
+                attempt=state.attempt,
+                execution_epoch=generation_execution_epoch(state),
+                status_code=response_status_code,
+                request_id=response_request_id,
+                response_trace_id=response_trace_id,
+                http_attempts=response_http_attempts,
+            )
+        else:
+            marker = (
+                mark_upstream_dispatch_proven_no_cost
+                if proven_no_cost
+                else mark_upstream_dispatch_proven_undelivered
+                if proven_undelivered
+                else mark_upstream_dispatch_started
+            )
+            request = marker(
+                current,
+                at=recorded_at,
+                attempt=state.attempt,
+                execution_epoch=generation_execution_epoch(state),
+            )
         current.upstream_request = request
         await session.commit()
         state.gen_upstream_request_snapshot = dict(request)

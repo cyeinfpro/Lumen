@@ -48,6 +48,7 @@ VIDEO_JSONB_TYPES_REVISION = "0061_video_jsonb_types"
 TELEGRAM_EFFECT_REVISION = "0062_tg_control_effect_fence"
 STORAGE_RETRY_REVISION = "0063_storage_apply_retry_fence"
 TELEGRAM_TERMINAL_GUARD_REVISION = "0064_tg_effect_terminal_guard"
+SEEDANCE_25_REVISION = "0065_seedance_25_defaults"
 
 
 @dataclass(frozen=True)
@@ -562,6 +563,7 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     telegram_effect = scripts.get_revision(TELEGRAM_EFFECT_REVISION)
     storage_retry = scripts.get_revision(STORAGE_RETRY_REVISION)
     telegram_terminal_guard = scripts.get_revision(TELEGRAM_TERMINAL_GUARD_REVISION)
+    seedance_25 = scripts.get_revision(SEEDANCE_25_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -579,7 +581,9 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert storage_retry.down_revision == TELEGRAM_EFFECT_REVISION
     assert telegram_terminal_guard is not None
     assert telegram_terminal_guard.down_revision == STORAGE_RETRY_REVISION
-    assert scripts.get_heads() == [TELEGRAM_TERMINAL_GUARD_REVISION]
+    assert seedance_25 is not None
+    assert seedance_25.down_revision == TELEGRAM_TERMINAL_GUARD_REVISION
+    assert scripts.get_heads() == [SEEDANCE_25_REVISION]
 
 
 @pytest.mark.parametrize(

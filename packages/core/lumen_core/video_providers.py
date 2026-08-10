@@ -35,11 +35,28 @@ VIDEO_PROVIDER_KINDS = (
 VIDEO_ACTIONS = ("t2v", "i2v", "reference")
 DEFAULT_VOLCANO_PROJECT_NAME = "default"
 DEFAULT_VOLCANO_REGION = "cn-beijing"
+SEEDANCE_20_ACTIONS = VIDEO_ACTIONS
 SEEDANCE_20_MIN_DURATION_S = 4
 SEEDANCE_20_MAX_DURATION_S = 15
 SEEDANCE_20_SMART_DURATION_S = -1
 SEEDANCE_20_STANDARD_RESOLUTIONS = ("480p", "720p", "1080p", "4k")
 SEEDANCE_20_FAST_RESOLUTIONS = ("480p", "720p")
+SEEDANCE_20_REFERENCE_MEDIA_LIMITS: Mapping[str, int] = immutable_mapping(
+    {"image": 9, "video": 3, "audio": 3}
+)
+SEEDANCE_25_ACTIONS = VIDEO_ACTIONS
+SEEDANCE_25_MIN_DURATION_S = 4
+SEEDANCE_25_MAX_DURATION_S = 30
+SEEDANCE_25_SMART_DURATION_S = -1
+SEEDANCE_25_RESOLUTIONS = ("480p", "720p")
+SEEDANCE_25_REFERENCE_MEDIA_LIMITS: Mapping[str, int] = immutable_mapping(
+    {"image": 30, "video": 10, "audio": 10}
+)
+SEEDANCE_25_REFERENCE_IMAGE_MIN_SIDE = 300
+SEEDANCE_25_REFERENCE_IMAGE_MAX_SIDE = 6000
+SEEDANCE_25_REFERENCE_IMAGE_MIN_ASPECT_RATIO = 0.4
+SEEDANCE_25_REFERENCE_IMAGE_MAX_ASPECT_RATIO = 2.5
+SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES = 30 * 1024 * 1024
 VIDEO_REFERENCE_MEDIA_LIMITS: Mapping[str, Mapping[str, int]] = (
     immutable_nested_mapping(
         {
@@ -54,11 +71,18 @@ VIDEO_REFERENCE_MEDIA_LIMITS: Mapping[str, Mapping[str, int]] = (
 )
 _VOLCANO_DOMESTIC_MODEL_ALIASES = immutable_mapping(
     {
+        "dreamina-seedance-2-5-260628": "doubao-seedance-2-5-260628",
         "dreamina-seedance-2-0-mini-260615": "doubao-seedance-2-0-mini-260615",
     }
 )
 Seedance20Variant = Literal["standard", "fast", "mini"]
+SeedanceModelVersion = Literal["2.0", "2.5"]
 _VOLCANO_REGION_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_SEEDANCE_25_PATTERN = re.compile(
+    r"(?<![a-z0-9-])"
+    r"(?:(?:(?:doubao|dreamina)-)?seedance-2-5|video-ds-2-5)"
+    r"(?=$|-[0-9]{6}(?:$|[^a-z0-9-])|[^a-z0-9-])"
+)
 _SEEDANCE_20_VARIANT_PATTERNS: tuple[
     tuple[Seedance20Variant, re.Pattern[str]],
     ...,
@@ -258,17 +282,40 @@ def _normalize_volcano_models(models: dict[str, str], *, kind: str) -> dict[str,
     }
 
 
-def seedance_20_variant(*identifiers: str | None) -> Seedance20Variant | None:
-    normalized = [
+def _normalized_seedance_identifiers(
+    identifiers: tuple[str | None, ...],
+) -> tuple[str, ...]:
+    return tuple(
         re.sub(
             r"-+", "-", identifier.strip().lower().replace("_", "-").replace(".", "-")
         )
         for identifier in identifiers
         if isinstance(identifier, str) and identifier.strip()
-    ]
+    )
+
+
+def seedance_20_variant(*identifiers: str | None) -> Seedance20Variant | None:
+    normalized = _normalized_seedance_identifiers(identifiers)
     for variant, pattern in _SEEDANCE_20_VARIANT_PATTERNS:
         if any(pattern.search(value) is not None for value in normalized):
             return variant
+    return None
+
+
+def is_seedance_25_identifier(*identifiers: str | None) -> bool:
+    return any(
+        _SEEDANCE_25_PATTERN.search(value) is not None
+        for value in _normalized_seedance_identifiers(identifiers)
+    )
+
+
+def seedance_model_version(
+    *identifiers: str | None,
+) -> SeedanceModelVersion | None:
+    if is_seedance_25_identifier(*identifiers):
+        return "2.5"
+    if seedance_20_variant(*identifiers) is not None:
+        return "2.0"
     return None
 
 
@@ -283,6 +330,23 @@ def seedance_20_allowed_resolutions(
     return SEEDANCE_20_STANDARD_RESOLUTIONS
 
 
+def seedance_25_allowed_resolutions(
+    *identifiers: str | None,
+) -> tuple[str, ...] | None:
+    if not is_seedance_25_identifier(*identifiers):
+        return None
+    return SEEDANCE_25_RESOLUTIONS
+
+
+def seedance_allowed_resolutions(
+    *identifiers: str | None,
+) -> tuple[str, ...] | None:
+    resolutions = seedance_25_allowed_resolutions(*identifiers)
+    if resolutions is not None:
+        return resolutions
+    return seedance_20_allowed_resolutions(*identifiers)
+
+
 def seedance_20_duration_is_valid(
     duration_s: int,
     *identifiers: str | None,
@@ -291,6 +355,84 @@ def seedance_20_duration_is_valid(
         return True
     return duration_s == SEEDANCE_20_SMART_DURATION_S or (
         SEEDANCE_20_MIN_DURATION_S <= duration_s <= SEEDANCE_20_MAX_DURATION_S
+    )
+
+
+def seedance_25_duration_is_valid(
+    duration_s: int,
+    *identifiers: str | None,
+) -> bool:
+    if not is_seedance_25_identifier(*identifiers):
+        return True
+    return duration_s == SEEDANCE_25_SMART_DURATION_S or (
+        SEEDANCE_25_MIN_DURATION_S <= duration_s <= SEEDANCE_25_MAX_DURATION_S
+    )
+
+
+def seedance_duration_is_valid(
+    duration_s: int,
+    *identifiers: str | None,
+) -> bool:
+    version = seedance_model_version(*identifiers)
+    if version == "2.5":
+        return seedance_25_duration_is_valid(duration_s, *identifiers)
+    if version == "2.0":
+        return seedance_20_duration_is_valid(duration_s, *identifiers)
+    return True
+
+
+def seedance_allowed_actions(
+    *identifiers: str | None,
+) -> tuple[str, ...] | None:
+    version = seedance_model_version(*identifiers)
+    if version == "2.5":
+        return SEEDANCE_25_ACTIONS
+    if version == "2.0":
+        return SEEDANCE_20_ACTIONS
+    return None
+
+
+def seedance_reference_media_limits(
+    *identifiers: str | None,
+) -> dict[str, int] | None:
+    version = seedance_model_version(*identifiers)
+    if version == "2.5":
+        return dict(SEEDANCE_25_REFERENCE_MEDIA_LIMITS)
+    if version == "2.0":
+        return dict(SEEDANCE_20_REFERENCE_MEDIA_LIMITS)
+    return None
+
+
+def seedance_allows_audio_only_reference(
+    *identifiers: str | None,
+) -> bool:
+    return seedance_model_version(*identifiers) == "2.5"
+
+
+def seedance_25_reference_image_is_valid(
+    *,
+    width: int,
+    height: int,
+    size_bytes: int,
+) -> bool:
+    if any(isinstance(value, bool) for value in (width, height, size_bytes)):
+        return False
+    if not (
+        SEEDANCE_25_REFERENCE_IMAGE_MIN_SIDE
+        <= width
+        <= SEEDANCE_25_REFERENCE_IMAGE_MAX_SIDE
+        and SEEDANCE_25_REFERENCE_IMAGE_MIN_SIDE
+        <= height
+        <= SEEDANCE_25_REFERENCE_IMAGE_MAX_SIDE
+    ):
+        return False
+    if not (0 < size_bytes < SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES):
+        return False
+    aspect_ratio = width / height
+    return (
+        SEEDANCE_25_REFERENCE_IMAGE_MIN_ASPECT_RATIO
+        <= aspect_ratio
+        <= SEEDANCE_25_REFERENCE_IMAGE_MAX_ASPECT_RATIO
     )
 
 
@@ -558,21 +700,44 @@ def video_reference_media_limits(provider_kind: str) -> dict[str, int]:
 __all__ = [
     "DEFAULT_VOLCANO_PROJECT_NAME",
     "DEFAULT_VOLCANO_REGION",
+    "SEEDANCE_20_ACTIONS",
     "SEEDANCE_20_FAST_RESOLUTIONS",
     "SEEDANCE_20_MAX_DURATION_S",
     "SEEDANCE_20_MIN_DURATION_S",
+    "SEEDANCE_20_REFERENCE_MEDIA_LIMITS",
     "SEEDANCE_20_SMART_DURATION_S",
     "SEEDANCE_20_STANDARD_RESOLUTIONS",
+    "SEEDANCE_25_ACTIONS",
+    "SEEDANCE_25_MAX_DURATION_S",
+    "SEEDANCE_25_MIN_DURATION_S",
+    "SEEDANCE_25_REFERENCE_IMAGE_MAX_ASPECT_RATIO",
+    "SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES",
+    "SEEDANCE_25_REFERENCE_IMAGE_MAX_SIDE",
+    "SEEDANCE_25_REFERENCE_IMAGE_MIN_ASPECT_RATIO",
+    "SEEDANCE_25_REFERENCE_IMAGE_MIN_SIDE",
+    "SEEDANCE_25_REFERENCE_MEDIA_LIMITS",
+    "SEEDANCE_25_RESOLUTIONS",
+    "SEEDANCE_25_SMART_DURATION_S",
     "VIDEO_ACTIONS",
     "VIDEO_PROVIDER_KINDS",
     "VIDEO_REFERENCE_MEDIA_LIMITS",
     "VideoProviderDefinition",
+    "is_seedance_25_identifier",
     "ordered_video_providers",
     "parse_video_provider_config_json",
     "parse_video_provider_item",
+    "seedance_25_allowed_resolutions",
+    "seedance_25_duration_is_valid",
+    "seedance_25_reference_image_is_valid",
     "seedance_20_allowed_resolutions",
     "seedance_20_duration_is_valid",
     "seedance_20_variant",
+    "seedance_allowed_actions",
+    "seedance_allowed_resolutions",
+    "seedance_allows_audio_only_reference",
+    "seedance_duration_is_valid",
+    "seedance_model_version",
+    "seedance_reference_media_limits",
     "select_video_provider",
     "validate_video_providers",
     "video_provider_binding_fingerprint",

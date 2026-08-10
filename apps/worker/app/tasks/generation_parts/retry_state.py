@@ -131,10 +131,16 @@ async def finalize_generation_result_unknown(
     state: Any,
     exc: BaseException,
 ) -> None:
+    error_code = getattr(exc, "error_code", None)
+    if not isinstance(error_code, str) or error_code not in {
+        EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+        EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+    }:
+        error_code = EC.IMAGE_JOB_RESULT_UNKNOWN.value
     await _finalize_generation_unknown(
         state,
         status=GenerationStatus.FAILED.value,
-        code=EC.IMAGE_JOB_RESULT_UNKNOWN.value,
+        code=error_code,
         error_message=str(exc)[:2000] or "upstream result is unknown",
         allow_cancel_requested=False,
     )

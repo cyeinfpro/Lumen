@@ -173,7 +173,7 @@ class ImageGenerateNodeConfig(_StrictModel):
 class VideoGenerateNodeConfig(_StrictModel):
     mode: Literal["t2v", "i2v", "reference"] = "t2v"
     model: str | None = Field(default=None, max_length=64)
-    duration_s: int = Field(default=5, ge=-1, le=15)
+    duration_s: int = Field(default=5, ge=-1, le=30)
     resolution: str = Field(default="720p", min_length=1, max_length=16)
     aspect_ratio: str = Field(default="16:9", min_length=1, max_length=16)
     generate_audio: bool = True
@@ -184,7 +184,7 @@ class VideoGenerateNodeConfig(_StrictModel):
     @classmethod
     def validate_duration(cls, value: int) -> int:
         if value != -1 and value < 3:
-            raise ValueError("duration_s must be -1 or between 3 and 15")
+            raise ValueError("duration_s must be -1 or between 3 and 30")
         return value
 
 
@@ -506,8 +506,8 @@ NODE_INPUT_PORTS: Mapping[str, Mapping[str, CanvasPortSpec]] = immutable_nested_
         },
         "video_reference_generate": {
             "prompt": CanvasPortSpec("text", 1, True),
-            "reference_images": CanvasPortSpec("image", 9),
-            "reference_videos": CanvasPortSpec("video", 3),
+            "reference_images": CanvasPortSpec("image", 30),
+            "reference_videos": CanvasPortSpec("video", 10),
         },
         "note": {},
         "frame": {},

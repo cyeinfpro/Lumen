@@ -20,7 +20,9 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from PIL import Image as PILImage
+from pillow_heif import register_heif_opener
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.images.adapters import filesystem_store as filesystem_store_module
 from app.images.adapters.filesystem_store import ArtifactStoreError
@@ -43,8 +45,12 @@ from app.images.adapters.local_capacity import (
     ScaledLocalCapacity,
 )
 from app.images.adapters.redis_capacity import RedisCapacity
-from app.images.adapters.sqlalchemy_repository import SQLAlchemyImageRepository
+from app.images.adapters.sqlalchemy_repository import (
+    ArtifactCommitError,
+    SQLAlchemyImageRepository,
+)
 from app.images.application.reconcile_policy import ImageArtifactReconciler
+from app.images.application.http_route_parts.upload import build_upload_policy
 from app.images.application.upload import (
     UploadCommandError,
     UploadCommandService,
@@ -74,6 +80,8 @@ from lumen_core.models import Image
 
 ROOT = Path(__file__).resolve().parents[4]
 MIGRATION = ROOT / "apps/api/alembic/versions/0046_image_artifact_status.py"
+
+register_heif_opener()
 
 
 class _Upload:
@@ -348,6 +356,12 @@ class _FakeRedis:
 def _png_bytes(size: tuple[int, int] = (32, 32)) -> bytes:
     output = io.BytesIO()
     PILImage.new("RGBA", size, (10, 20, 30, 128)).save(output, format="PNG")
+    return output.getvalue()
+
+
+def _image_bytes(image_format: str, size: tuple[int, int]) -> bytes:
+    output = io.BytesIO()
+    PILImage.new("RGB", size, (10, 20, 30)).save(output, format=image_format)
     return output.getvalue()
 
 
@@ -1221,13 +1235,16 @@ async def test_partial_publish_converges_to_ready_via_reconciler(
         repository=repository,  # type: ignore[arg-type]
         processing_executor=IsolatedImageProcessingExecutor(),
     )
-    with pytest.raises(OSError, match="crash after original publish"):
+    with pytest.raises(UploadCommandError) as exc_info:
         await service.execute(
             user_id="user-1",
             upload_file=_Upload(_png_bytes()),
             filename="upload.png",
             policy=_policy(),
         )
+    assert exc_info.value.code == "upload_storage_error"
+    assert exc_info.value.status_code == 503
+    assert isinstance(exc_info.value.__cause__, OSError)
     row = next(iter(repository.rows.values()))
     assert row.artifact_status == ArtifactStatus.PUBLISHING.value
     original = Path(tmp_path, row.storage_key)
@@ -1245,6 +1262,54 @@ async def test_partial_publish_converges_to_ready_via_reconciler(
     assert stats.marked_ready == 1
     assert row.artifact_status == ArtifactStatus.READY.value
     assert normalized.is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (
+            ArtifactCommitError("staging commit outcome unresolved"),
+            "upload_commit_unknown",
+        ),
+        (
+            SQLAlchemyError("database temporarily unavailable"),
+            "upload_database_unavailable",
+        ),
+    ],
+)
+async def test_upload_database_failure_maps_to_retryable_service_error(
+    tmp_path: Path,
+    failure: Exception,
+    expected_code: str,
+) -> None:
+    class _CommitFailureRepository(_Repository):
+        async def create_staging(self, image: Image) -> Image:
+            del image
+            raise failure
+
+    repository = _CommitFailureRepository()
+    service = UploadCommandService(
+        artifacts=FileSystemArtifactStore(tmp_path),
+        capacity=_Capacity(),
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
+    )
+
+    with pytest.raises(UploadCommandError) as exc_info:
+        await service.execute(
+            user_id="user-1",
+            upload_file=_Upload(_png_bytes()),
+            filename="upload.png",
+            policy=_policy(),
+        )
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.__cause__ is failure
+    assert list((tmp_path / ".upload-tmp").rglob("*")) == []
+    assert not (tmp_path / "u").exists()
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1357,7 @@ async def test_upload_durability_failure_keeps_intent_and_unique_sources(
 
     with monkeypatch.context() as failure:
         _fail_directory_sync_open(failure, uploads_directory)
-        with pytest.raises(OSError, match="directory sync open failure"):
+        with pytest.raises(UploadCommandError) as exc_info:
             await service.execute(
                 user_id="user-1",
                 upload_file=_Upload(payload),
@@ -1300,6 +1365,10 @@ async def test_upload_durability_failure_keeps_intent_and_unique_sources(
                 policy=_policy(),
             )
 
+    assert exc_info.value.code == "upload_storage_error"
+    assert exc_info.value.status_code == 503
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert "directory sync open failure" in str(exc_info.value.__cause__)
     row = next(iter(repository.rows.values()))
     manifest = row.artifact_manifest_jsonb
     ticket = manifest["ticket"]
@@ -1317,6 +1386,53 @@ async def test_upload_durability_failure_keeps_intent_and_unique_sources(
     assert Path(tmp_path, row.storage_key).read_bytes() == payload
     normalized_key = row.metadata_jsonb["normalized_ref"]["storage_key"]
     assert not Path(tmp_path, normalized_key).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image_format", "filename", "source_mime"),
+    [
+        ("BMP", "reference.bmp", "image/bmp"),
+        ("TIFF", "reference.tiff", "image/tiff"),
+        ("GIF", "reference.gif", "image/gif"),
+        ("HEIF", "reference.heic", "image/heic"),
+    ],
+)
+async def test_video_reference_upload_normalizes_official_legacy_formats(
+    tmp_path: Path,
+    image_format: str,
+    filename: str,
+    source_mime: str,
+) -> None:
+    repository = _Repository()
+    service = UploadCommandService(
+        artifacts=FileSystemArtifactStore(tmp_path),
+        capacity=_Capacity(),
+        storage_capacity=_Capacity(),  # type: ignore[arg-type]
+        repository=repository,  # type: ignore[arg-type]
+        processing_executor=IsolatedImageProcessingExecutor(),
+    )
+
+    row = await service.execute(
+        user_id="user-1",
+        upload_file=_Upload(_image_bytes(image_format, (300, 300))),
+        filename=filename,
+        policy=build_upload_policy(
+            purpose="video_reference",
+            filename=filename,
+            reference_size=None,
+        ),
+    )
+
+    assert row.artifact_status == ArtifactStatus.READY.value
+    assert row.mime == "image/jpeg"
+    assert row.metadata_jsonb["upload_normalized"] == {
+        "source_mime": source_mime,
+        "target_mime": "image/jpeg",
+        "reason": "unsupported_upload_mime",
+    }
+    with PILImage.open(tmp_path / row.storage_key) as normalized:
+        assert normalized.get_format_mimetype() == "image/jpeg"
 
 
 @pytest.mark.asyncio

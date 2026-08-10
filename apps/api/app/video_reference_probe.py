@@ -19,7 +19,7 @@ VIDEO_REFERENCE_VIDEO_TARGET_FPS = 30
 VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXELS = 16_777_216
 VIDEO_REFERENCE_VIDEO_SOURCE_MAX_SIDE = 4096
 VIDEO_REFERENCE_VIDEO_SOURCE_MIN_DURATION_MS = 2_000
-VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS = 15_000
+VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DURATION_MS = 30_000
 VIDEO_REFERENCE_VIDEO_SOURCE_MAX_FPS = 60.0
 VIDEO_REFERENCE_VIDEO_SOURCE_MAX_PIXEL_RATE = 300_000_000.0
 VIDEO_REFERENCE_VIDEO_SOURCE_MAX_DECODE_PIXELS = 4_000_000_000.0
@@ -226,7 +226,7 @@ def _validate_source_video(metadata: dict[str, Any]) -> None:
     ):
         raise VideoReferenceVideoError(
             "invalid_video_duration",
-            "reference video duration must be between 2 and 15 seconds",
+            "reference video duration must be between 2 and 30 seconds",
             422,
         )
     fps = _float_or_none(metadata.get("fps"))

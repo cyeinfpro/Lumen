@@ -10,10 +10,6 @@ from typing import Any
 
 from redis.exceptions import WatchError
 
-from .admission import (
-    WeightedPermit,
-    release_weighted_permit,
-)
 from .queue_candidate import (
     filter_avoided_providers,
     select_provider_candidates,
@@ -21,11 +17,6 @@ from .queue_candidate import (
 from .queue_fairness import (
     existing_reservation_blocks_admission,
     ready_queue_rank,
-)
-from .queue_permit import (
-    default_weighted_permit,
-    release_generation_permit,
-    reserve_generation_permit,
 )
 from .queue_provider import (
     RESERVE_DUAL_RACE_SLOT_LUA,
@@ -230,7 +221,6 @@ async def reserve_image_queue_slot(
     queue_lane: str | None = None,
     size_bucket: str | None = None,
     cost_class: str | None = None,
-    weighted_permit: WeightedPermit | None = None,
     services: RunGenerationDeps,
 ) -> Any | None:
     """Reserve one global image slot for a task admitted by fair scheduling.
@@ -273,84 +263,63 @@ async def reserve_image_queue_slot(
 
         now = time.time()
         expiry = now + LEASE_TTL_S
-        permit = weighted_permit or default_weighted_permit(
-            task_id=task_id,
-            dual_race=dual_race,
-        )
-        permit_reserved = await reserve_generation_permit(
-            redis,
-            permit=permit,
-            owner=lock.token,
-            now=now,
-            expiry=expiry,
-            capacity=capacity,
-            lock_key=IMAGE_QUEUE_LOCK_KEY,
-            services=services,
-        )
-        if not permit_reserved:
-            return None
-        try:
-            if dual_race:
-                provider = await reserve_dual_race_slot(
+        if dual_race:
+            provider = await reserve_dual_race_slot(
+                lock,
+                task_id=task_id,
+                expiry=expiry,
+                fair_rank=fair_rank,
+                active_count=len(active_members),
+                capacity=capacity,
+                services=services,
+                reservation_key=_image_queue_reservation_token_key,
+                reservation_ttl=_image_queue_reservation_token_ttl,
+            )
+            if provider is not None:
+                return provider
+        else:
+            providers = await select_provider_candidates(
+                task_id=task_id,
+                endpoint_kind=endpoint_kind,
+                requires_mask=requires_mask,
+                provider_override=provider_override,
+                queue_lane=queue_lane,
+                size_bucket=size_bucket,
+                cost_class=cost_class,
+                services=services,
+            )
+            providers = await filter_avoided_providers(
+                redis,
+                lock,
+                task_id=task_id,
+                providers=providers,
+                services=services,
+            )
+            if providers:
+                (
+                    provider,
+                    active_count_failed,
+                ) = await reserve_from_provider_candidates(
+                    redis,
                     lock,
                     task_id=task_id,
+                    providers=providers,
+                    now=now,
                     expiry=expiry,
                     fair_rank=fair_rank,
                     active_count=len(active_members),
                     capacity=capacity,
                     services=services,
-                    reservation_key=_image_queue_reservation_token_key,
-                    reservation_ttl=_image_queue_reservation_token_ttl,
+                    reserve_provider_slot=_reserve_provider_slot,
                 )
                 if provider is not None:
                     return provider
-            else:
-                providers = await select_provider_candidates(
-                    task_id=task_id,
-                    endpoint_kind=endpoint_kind,
-                    requires_mask=requires_mask,
-                    provider_override=provider_override,
-                    queue_lane=queue_lane,
-                    size_bucket=size_bucket,
-                    cost_class=cost_class,
-                    services=services,
-                )
-                providers = await filter_avoided_providers(
-                    redis,
-                    lock,
-                    task_id=task_id,
-                    providers=providers,
-                    services=services,
-                )
-                if providers:
-                    (
-                        provider,
-                        active_count_failed,
-                    ) = await reserve_from_provider_candidates(
-                        redis,
+                if active_count_failed:
+                    await defer_after_active_count_failure(
                         lock,
                         task_id=task_id,
-                        providers=providers,
-                        now=now,
-                        expiry=expiry,
-                        fair_rank=fair_rank,
-                        active_count=len(active_members),
-                        capacity=capacity,
                         services=services,
-                        reserve_provider_slot=_reserve_provider_slot,
                     )
-                    if provider is not None:
-                        return provider
-                    if active_count_failed:
-                        await defer_after_active_count_failure(
-                            lock,
-                            task_id=task_id,
-                            services=services,
-                        )
-        except BaseException:
-            await release_generation_permit(redis, permit=permit)
-            raise
-        await release_generation_permit(redis, permit=permit)
     return None
 
 
@@ -588,7 +557,6 @@ async def release_generation_runtime_resources(
     lease_token: str,
     provider_name: str | None,
     reservation_token: str | None = None,
-    weighted_permit: WeightedPermit | None = None,
     clear_avoided_providers: bool,
     services: RunGenerationDeps,
 ) -> None:
@@ -614,15 +582,6 @@ async def release_generation_runtime_resources(
             provider_name,
             exc_info=True,
         )
-    if weighted_permit is not None:
-        try:
-            await release_weighted_permit(redis, permit=weighted_permit)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "generation weighted permit release failed task=%s",
-                task_id,
-                exc_info=True,
-            )
     try:
         await inflight_clear(redis, task_id, services=services)
     except Exception:  # noqa: BLE001
@@ -663,7 +622,6 @@ class GenerationResourceLease:
     provider_name: str | None
     clear_avoided_providers: bool
     reservation_token: str | None = None
-    weighted_permit: WeightedPermit | None = None
     release_resources: Any | None = None
     _closed: bool = False
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -680,7 +638,6 @@ class GenerationResourceLease:
             lease_token=self.lease_token,
             provider_name=self.provider_name,
             reservation_token=self.reservation_token,
-            weighted_permit=self.weighted_permit,
             clear_avoided_providers=self.clear_avoided_providers,
             services=self.services,
         )

@@ -134,6 +134,11 @@ export interface PricingRulesOut {
 }
 
 export type VideoAction = "t2v" | "i2v" | "reference";
+export type VideoPricingAction =
+  | VideoAction
+  | "reference_image"
+  | "reference_video"
+  | "reference_audio";
 export type VideoStatus =
   | "queued"
   | "submitting"
@@ -205,7 +210,7 @@ export interface VideoCreateIn {
   input_image_id?: string | null;
   reference_media?: VideoReferenceMediaIn[];
   duration_s: number;
-  resolution: "480p" | "720p" | "1080p" | "4k";
+  resolution: string;
   aspect_ratio: string;
   generate_audio?: boolean;
   seed?: number | null;
@@ -228,7 +233,7 @@ export interface VideoPromptEnhanceIn {
 
 export interface VideoPriceOptionOut {
   model: string;
-  action: VideoAction | "reference_image" | "reference_video";
+  action: VideoPricingAction;
   resolution?: string | null;
   variant?: string | null;
   unit: "per_mtoken";
@@ -237,8 +242,52 @@ export interface VideoPriceOptionOut {
   note?: string | null;
 }
 
+export interface VideoImageConstraintsOut {
+  min_side_px?: number | null;
+  max_side_px?: number | null;
+  min_aspect_ratio?: number | null;
+  max_aspect_ratio?: number | null;
+  min_width_px?: number | null;
+  max_width_px?: number | null;
+  min_height_px?: number | null;
+  max_height_px?: number | null;
+  max_bytes?: number | null;
+  mime_types?: string[];
+}
+
+export interface VideoReferenceMediaCapabilitiesOut {
+  limits?: Partial<Record<VideoReferenceMediaIn["kind"], number>>;
+  total_limit?: number | null;
+  allow_audio_only?: boolean;
+  image_constraints?: VideoImageConstraintsOut | null;
+}
+
+export interface VideoParameterDefaultsOut {
+  resolution?: string | null;
+  aspect_ratio?: string | null;
+  duration_s?: number | null;
+  generate_audio?: boolean | null;
+}
+
+export interface VideoActionCapabilityOut {
+  enabled?: boolean;
+  resolutions?: string[];
+  aspect_ratios?: string[];
+  durations_s?: number[];
+  durations_by_resolution?: Partial<Record<string, number[]>>;
+  generate_audio?: boolean;
+  defaults?: VideoParameterDefaultsOut;
+  billing_model?: string | null;
+  pricing_action?: VideoPricingAction | null;
+  reference_media?: VideoReferenceMediaCapabilitiesOut | null;
+  input_image_constraints?: VideoImageConstraintsOut | null;
+  reference_image_constraints?: VideoImageConstraintsOut | null;
+}
+
 export interface VideoModelOptionOut {
   model: string;
+  label?: string | null;
+  display_name?: string | null;
   billing_model?: string | null;
   billing_models?: Partial<Record<VideoAction, string>>;
   actions: VideoAction[];
@@ -250,19 +299,38 @@ export interface VideoModelOptionOut {
       Partial<Record<VideoCreateIn["resolution"] | string, number[]>>
     >
   >;
-  resolutions?: Array<VideoCreateIn["resolution"]>;
+  resolutions?: string[];
+  resolutions_by_action?: Partial<Record<VideoAction, string[]>>;
+  aspect_ratios?: string[];
+  aspect_ratios_by_action?: Partial<Record<VideoAction, string[]>>;
+  generate_audio?: boolean;
+  generate_audio_by_action?: Partial<Record<VideoAction, boolean>>;
+  defaults?: VideoParameterDefaultsOut;
+  defaults_by_action?: Partial<Record<VideoAction, VideoParameterDefaultsOut>>;
   reference_media_limits?: Partial<
     Record<VideoReferenceMediaIn["kind"], number>
   >;
+  reference_media_total_limit?: number | null;
+  allow_audio_only_reference?: boolean;
+  input_image_constraints?: VideoImageConstraintsOut | null;
+  reference_image_constraints?: VideoImageConstraintsOut | null;
+  capabilities?: Partial<Record<VideoAction, VideoActionCapabilityOut>>;
+  action_capabilities?: Partial<Record<VideoAction, VideoActionCapabilityOut>>;
 }
 
 export interface VideoOptionsOut {
   enabled: boolean;
   models: VideoModelOptionOut[];
+  actions?: VideoAction[];
+  default_action?: VideoAction | null;
+  default_model?: string | null;
   durations_s: number[];
   resolutions: string[];
   aspect_ratios: string[];
   generate_audio: boolean;
+  defaults?: VideoParameterDefaultsOut;
+  input_image_constraints?: VideoImageConstraintsOut | null;
+  reference_image_constraints?: VideoImageConstraintsOut | null;
   pricing: VideoPriceOptionOut[];
   hold_estimates: Record<string, unknown>;
   unavailable_reason?: string | null;

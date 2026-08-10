@@ -1188,9 +1188,17 @@ async def test_canvas_video_submission_defers_commit_and_publishes_after_commit(
         assert required_public_media is False
         return []
 
-    def reference_validator(provider_kind, reference_snapshots):
+    def reference_validator(
+        provider_kind,
+        reference_snapshots,
+        *,
+        model,
+        upstream_model,
+    ):
         assert provider_kind == "test"
         assert reference_snapshots == []
+        assert model == "seedance-2.0-fast"
+        assert upstream_model == "upstream-video-model"
 
     async def allow_negative_loader(_db):
         return False

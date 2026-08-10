@@ -194,8 +194,6 @@ class GenerationQueueService(Protocol):
 
     async def resolve_capacity(self) -> int: ...
 
-    def resource_budgets(self) -> tuple[int, int, int]: ...
-
     async def select_providers(
         self,
         *,

@@ -164,10 +164,26 @@ def test_new_node_constants_configs_and_duration_contracts() -> None:
     )
     assert graph.nodes[0].config.separator == " | "
     assert graph.nodes[1].config.duration_s == -1
+    thirty_seconds = CanvasGraph.model_validate(
+        {
+            "nodes": [
+                _node(
+                    "video",
+                    "video_text_generate",
+                    {"duration_s": 30},
+                )
+            ]
+        }
+    )
+    assert thirty_seconds.nodes[0].config.duration_s == 30
 
-    with pytest.raises(ValidationError, match="between 3 and 15"):
+    with pytest.raises(ValidationError, match="between 3 and 30"):
         CanvasGraph.model_validate(
             {"nodes": [_node("video", "video_text_generate", {"duration_s": 2})]}
+        )
+    with pytest.raises(ValidationError):
+        CanvasGraph.model_validate(
+            {"nodes": [_node("video", "video_text_generate", {"duration_s": 31})]}
         )
     with pytest.raises(ValidationError, match="Input should be 'i2v'"):
         CanvasGraph.model_validate(
@@ -410,8 +426,8 @@ def test_mask_asset_exposes_only_mask_output_and_image_assets_can_feed_masks() -
 @pytest.mark.parametrize(
     ("source_type", "source_handle", "target_handle", "data_type", "count"),
     [
-        ("image_asset", "image", "reference_images", "image", 10),
-        ("video_asset", "video", "reference_videos", "video", 4),
+        ("image_asset", "image", "reference_images", "image", 31),
+        ("video_asset", "video", "reference_videos", "video", 11),
     ],
 )
 def test_reference_video_ports_enforce_downstream_media_limits(

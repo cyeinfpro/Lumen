@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 from urllib.parse import urlsplit
+
+_DEFAULT_VIDEO_MIN_DURATION_S = 3
+_DEFAULT_VIDEO_MAX_DURATION_S = 15
+_DEFAULT_REFERENCE_MEDIA_LIMITS = (
+    ("image", 9),
+    ("video", 3),
+    ("audio", 3),
+)
 
 
 def _normalize_reference_fields(media: Any) -> None:
@@ -114,15 +123,19 @@ def _validate_video_duration(
     allowed_resolutions: Callable[[str], tuple[str, ...] | None],
     duration_is_valid: Callable[[int, str], bool],
 ) -> None:
-    if request.duration_s != -1 and request.duration_s < 3:
-        raise ValueError("duration_s must be -1 or between 3 and 15")
     resolutions = allowed_resolutions(request.model)
     if resolutions is None:
+        if request.duration_s != -1 and not (
+            _DEFAULT_VIDEO_MIN_DURATION_S
+            <= request.duration_s
+            <= _DEFAULT_VIDEO_MAX_DURATION_S
+        ):
+            raise ValueError("duration_s must be -1 or between 3 and 15")
         return
     if not duration_is_valid(request.duration_s, request.model):
-        raise ValueError("Seedance 2.0 duration_s must be -1 or between 4 and 15")
+        raise ValueError("duration_s is not supported by this Seedance model")
     if request.resolution not in resolutions:
-        raise ValueError("resolution is not supported by this Seedance 2.0 model")
+        raise ValueError("resolution is not supported by this Seedance model")
 
 
 def _normalize_prompt_anchors(
@@ -144,7 +157,17 @@ def _normalize_prompt_anchors(
     return prompt_ref_ids
 
 
-def _validate_video_action_inputs(request: Any, prompt_ref_ids: set[str]) -> None:
+def _validate_video_action_inputs(
+    request: Any,
+    prompt_ref_ids: set[str],
+    *,
+    allowed_actions: Callable[[str], tuple[str, ...] | None] | None,
+) -> None:
+    model_actions = (
+        allowed_actions(request.model) if allowed_actions is not None else None
+    )
+    if model_actions is not None and request.action not in model_actions:
+        raise ValueError("action is not supported by this Seedance model")
     if request.action != "reference" and prompt_ref_ids:
         raise ValueError("reference anchors require action=reference")
     if request.action == "t2v":
@@ -166,27 +189,57 @@ def _resolved_reference_ids(reference_media: list[Any]) -> set[str]:
     resolved: set[str] = set()
     for item in reference_media:
         indexes[item.kind] += 1
-        ref_id = item.ref_id or f"ref:{item.kind}:{indexes[item.kind]}"
+        expected_ref_id = f"ref:{item.kind}:{indexes[item.kind]}"
+        ref_id = item.ref_id or expected_ref_id
         if ref_id in resolved:
             raise ValueError("reference media ref_id values must be unique")
-        item.ref_id = ref_id
-        resolved.add(ref_id)
+        if ref_id != expected_ref_id:
+            raise ValueError(
+                "reference media ref_id must match its same-kind array position"
+            )
+        item.ref_id = expected_ref_id
+        resolved.add(expected_ref_id)
     return resolved
 
 
-def _validate_reference_request(request: Any, prompt_ref_ids: set[str]) -> None:
+def _validate_reference_request(
+    request: Any,
+    prompt_ref_ids: set[str],
+    *,
+    reference_media_limits: Callable[[str], Mapping[str, int] | None] | None,
+    allows_audio_only_reference: Callable[[str], bool] | None,
+) -> None:
     if not request.reference_media:
         raise ValueError("reference requires at least one reference media")
     counts = Counter(item.kind for item in request.reference_media)
-    limits = (
-        ("image", 9, "reference supports at most 9 images"),
-        ("video", 3, "reference supports at most 3 videos"),
-        ("audio", 3, "reference supports at most 3 audio references"),
+    model_limits = (
+        reference_media_limits(request.model)
+        if reference_media_limits is not None
+        else None
     )
-    for kind, limit, message in limits:
+    limit_items = (
+        model_limits.items() if model_limits else _DEFAULT_REFERENCE_MEDIA_LIMITS
+    )
+    labels = {
+        "image": "images",
+        "video": "videos",
+        "audio": "audio references",
+    }
+    for kind, limit in limit_items:
         if counts[kind] > limit:
-            raise ValueError(message)
-    if counts["audio"] and not (counts["image"] or counts["video"]):
+            raise ValueError(
+                f"reference supports at most {limit} {labels.get(kind, kind)}"
+            )
+    audio_only_allowed = (
+        allows_audio_only_reference(request.model)
+        if allows_audio_only_reference is not None
+        else False
+    )
+    if (
+        counts["audio"]
+        and not (counts["image"] or counts["video"])
+        and not audio_only_allowed
+    ):
         raise ValueError("reference audio must be combined with an image or video")
     unknown_ref_ids = sorted(
         prompt_ref_ids - _resolved_reference_ids(request.reference_media)
@@ -204,6 +257,9 @@ def validate_video_create(
     anchor_candidate_re: re.Pattern[str],
     allowed_resolutions: Callable[[str], tuple[str, ...] | None],
     duration_is_valid: Callable[[int, str], bool],
+    allowed_actions: Callable[[str], tuple[str, ...] | None] | None = None,
+    reference_media_limits: Callable[[str], Mapping[str, int] | None] | None = None,
+    allows_audio_only_reference: Callable[[str], bool] | None = None,
 ) -> Any:
     _normalize_video_create_fields(request)
     _validate_video_duration(
@@ -216,9 +272,18 @@ def validate_video_create(
         reference_id_re=reference_id_re,
         anchor_candidate_re=anchor_candidate_re,
     )
-    _validate_video_action_inputs(request, prompt_ref_ids)
+    _validate_video_action_inputs(
+        request,
+        prompt_ref_ids,
+        allowed_actions=allowed_actions,
+    )
     if request.action == "reference":
-        _validate_reference_request(request, prompt_ref_ids)
+        _validate_reference_request(
+            request,
+            prompt_ref_ids,
+            reference_media_limits=reference_media_limits,
+            allows_audio_only_reference=allows_audio_only_reference,
+        )
     return request
 
 

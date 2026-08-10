@@ -27,6 +27,7 @@ from .image_execution import (
     ensure_image_request_context,
 )
 from .generated_payload import GeneratedPayload, StagedImageFile
+from .response_evidence import direct_image_response_metadata
 
 
 def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
@@ -439,9 +440,22 @@ def _direct_image_response_result_unknown_error(
     url: str,
     trace_id: str,
     status_code: int,
+    response_metadata: dict[str, Any] | None = None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> BaseException:
     services = _runtime_services(runtime)
+    payload: dict[str, Any] = {
+        "path": path,
+        "method": method,
+        "url": url,
+        "x_trace_id": trace_id,
+        "upstream_result_unknown": True,
+        "response_received": True,
+        "wrapped_error_code": services.infrastructure.EC.BAD_RESPONSE.value,
+        "exception": type(exc).__name__,
+    }
+    if response_metadata:
+        payload.update(response_metadata)
     return services.infrastructure.UpstreamError(
         (
             f"{path} returned HTTP {status_code}, but the response could not be "
@@ -449,16 +463,7 @@ def _direct_image_response_result_unknown_error(
         ),
         status_code=status_code,
         error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
-        payload={
-            "path": path,
-            "method": method,
-            "url": url,
-            "x_trace_id": trace_id,
-            "upstream_result_unknown": True,
-            "response_received": True,
-            "wrapped_error_code": services.infrastructure.EC.BAD_RESPONSE.value,
-            "exception": type(exc).__name__,
-        },
+        payload=payload,
     )
 
 
@@ -480,6 +485,108 @@ def _is_direct_image_result_unknown(
     return (
         isinstance(exc, services.infrastructure.UpstreamError)
         and (exc.error_code or "") in IMAGE_UPSTREAM_RESULT_UNKNOWN_CODES
+    )
+
+
+async def _complete_direct_generation_response(
+    *,
+    services: UpstreamServices,
+    request: ImageExecutionRequest,
+    response: Any,
+    started: float,
+    trace_id: str,
+    url: str,
+    context: ImageRequestContext,
+    proxy_url: str | None,
+    http_attempts: int,
+) -> list[tuple[str, str | None]]:
+    duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
+    services.core.log_upstream_call(
+        endpoint="images_generations",
+        status=response.status_code,
+        duration_ms=duration_ms,
+        trace_id=trace_id,
+        response_headers=getattr(response, "headers", None),
+    )
+    response_metadata = direct_image_response_metadata(
+        response,
+        http_attempts=http_attempts,
+    )
+    await services.transport.emit_image_progress(
+        request.progress_callback,
+        (
+            "response_ready"
+            if 200 <= response.status_code < 300
+            else "response_received"
+        ),
+        **response_metadata,
+    )
+    if 500 <= response.status_code < 600:
+        raise services.infrastructure.UpstreamError(
+            "direct image POST returned an ambiguous server failure; "
+            "upstream result is unknown after bounded same-key delivery",
+            status_code=response.status_code,
+            error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
+            payload={
+                "path": "images/generations",
+                "method": "POST",
+                "url": url,
+                "x_trace_id": trace_id,
+                "upstream_result_unknown": True,
+                "response_received": True,
+                **response_metadata,
+            },
+        )
+
+    try:
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001
+        if 200 <= response.status_code < 300:
+            raise _direct_image_response_result_unknown_error(
+                exc,
+                path="images/generations",
+                method="POST",
+                url=url,
+                trace_id=trace_id,
+                status_code=response.status_code,
+                response_metadata=response_metadata,
+                runtime=request.upstream_runtime,
+            ) from exc
+        raise services.infrastructure.UpstreamError(
+            "upstream returned invalid JSON",
+            status_code=response.status_code,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
+            payload={
+                "path": "images/generations",
+                "method": "POST",
+                "url": url,
+                "x_trace_id": trace_id,
+                "response_received": True,
+                **response_metadata,
+            },
+        ) from exc
+
+    if response.status_code >= 400:
+        error = services.core.with_error_context(
+            services.core.parse_error(
+                payload if isinstance(payload, dict) else {},
+                response.status_code,
+            ),
+            path="images/generations",
+            method="POST",
+            url=url,
+        )
+        error.payload.setdefault("x_trace_id", trace_id)
+        error.payload["response_received"] = True
+        error.payload.update(response_metadata)
+        raise error
+    if isinstance(payload, dict):
+        services.core.record_usage(payload.get("usage"))
+    return await services.core.extract_image_results(
+        payload,
+        response.status_code,
+        proxy_url=proxy_url,
+        request_context=context,
     )
 
 
@@ -520,11 +627,13 @@ async def _direct_generate_image_once(
     else:
         client = await services.lifecycle.get_images_client()
     dispatch_ready_emitted = False
+    http_attempts = 0
 
     async def prepare_attempt(attempt: int) -> None:
-        nonlocal dispatch_ready_emitted
+        nonlocal dispatch_ready_emitted, http_attempts
         if before_attempt is not None:
             await before_attempt(attempt)
+        http_attempts = max(http_attempts, attempt)
         if not dispatch_ready_emitted:
             await services.transport.emit_image_progress(
                 request.progress_callback,
@@ -578,7 +687,8 @@ async def _direct_generate_image_once(
                 json_body=body,
                 timeout=request_timeout,
                 retry_httpx_exceptions=False,
-                retry_status_codes=False,
+                retry_status_codes=True,
+                max_attempts=2,
                 before_attempt=prepare_attempt,
             )
     except (TimeoutError, services.infrastructure.httpx.TimeoutException) as exc:
@@ -606,77 +716,16 @@ async def _direct_generate_image_once(
             runtime=runtime,
         )
 
-    duration_ms = (services.infrastructure.time.monotonic() - started) * 1000.0
-    services.core.log_upstream_call(
-        endpoint="images_generations",
-        status=resp.status_code,
-        duration_ms=duration_ms,
+    return await _complete_direct_generation_response(
+        services=services,
+        request=request,
+        response=resp,
+        started=started,
         trace_id=trace_id,
-        response_headers=getattr(resp, "headers", None),
-    )
-    if 500 <= resp.status_code < 600:
-        raise services.infrastructure.UpstreamError(
-            "direct image POST returned an ambiguous server failure; "
-            "upstream result is unknown and was not replayed",
-            status_code=resp.status_code,
-            error_code=services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value,
-            payload={
-                "path": "images/generations",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-                "upstream_result_unknown": True,
-                "response_received": True,
-            },
-        )
-    if 200 <= resp.status_code < 300:
-        await services.transport.emit_image_progress(
-            request.progress_callback,
-            "response_ready",
-        )
-
-    try:
-        payload = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        if 200 <= resp.status_code < 300:
-            raise _direct_image_response_result_unknown_error(
-                exc,
-                path="images/generations",
-                method="POST",
-                url=url,
-                trace_id=trace_id,
-                status_code=resp.status_code,
-                runtime=runtime,
-            ) from exc
-        raise services.infrastructure.UpstreamError(
-            "upstream returned invalid JSON",
-            status_code=resp.status_code,
-            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-            payload={
-                "path": "images/generations",
-                "method": "POST",
-                "url": url,
-                "x_trace_id": trace_id,
-            },
-        ) from exc
-
-    if resp.status_code >= 400:
-        raise services.core.with_error_context(
-            services.core.parse_error(
-                payload if isinstance(payload, dict) else {}, resp.status_code
-            ),
-            path="images/generations",
-            method="POST",
-            url=url,
-        )
-    # JSON 响应里的 usage（如有）也走标准埋点。
-    if isinstance(payload, dict):
-        services.core.record_usage(payload.get("usage"))
-    return await services.core.extract_image_results(
-        payload,
-        resp.status_code,
+        url=url,
+        context=context,
         proxy_url=proxy_url,
-        request_context=context,
+        http_attempts=http_attempts,
     )
 
 
