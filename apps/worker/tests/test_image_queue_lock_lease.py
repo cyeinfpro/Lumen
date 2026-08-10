@@ -307,14 +307,12 @@ class _TimingRedis:
                 task_provider_key,
                 global_key,
                 not_before_key,
-                cursor_key,
                 lock_key,
                 reservation_key,
                 lock_token,
                 sentinel,
                 expiry,
                 task_provider_ttl,
-                cursor_steps,
                 reservation_ttl,
             ) = args
             async with self._mutex:
@@ -336,8 +334,6 @@ class _TimingRedis:
                     expiry
                 )
                 self._delete(str(not_before_key))
-                cursor = int(self._get_string(str(cursor_key)) or "0")
-                self._set_string(str(cursor_key), cursor + int(cursor_steps))
                 token = str(lock_token)
                 self.reservation_writes.append((token, str(sentinel), str(sentinel)))
                 self.fenced_mutations.append(("reserve", token))
@@ -350,7 +346,6 @@ class _TimingRedis:
                 task_provider_key,
                 not_before_key,
                 lock_key,
-                cursor_key,
                 reservation_key,
                 now,
                 expiry,
@@ -361,7 +356,6 @@ class _TimingRedis:
                 task_provider_ttl,
                 _provider_zset_ttl,
                 lock_token,
-                cursor_steps,
                 reservation_ttl,
             ) = args
             async with self._mutex:
@@ -388,8 +382,6 @@ class _TimingRedis:
                     ex=float(reservation_ttl),
                 )
                 self._delete(str(not_before_key))
-                cursor = int(self._get_string(str(cursor_key)) or "0")
-                self._set_string(str(cursor_key), cursor + int(cursor_steps))
                 token = str(lock_token)
                 self.reservation_writes.append(
                     (token, str(task_id), str(provider_name))

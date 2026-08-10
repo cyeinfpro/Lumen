@@ -14,7 +14,12 @@ from lumen_core.video_providers import (
     select_video_provider,
 )
 
-from ...video_upstream_service import VideoReferenceMedia, VideoUpstreamError
+from ...video_upstream_content import SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES
+from ...video_upstream_service import (
+    SEEDANCE_INLINE_IMAGE_MAX_BYTES,
+    VideoReferenceMedia,
+    VideoUpstreamError,
+)
 
 
 async def provider_config():
@@ -356,6 +361,44 @@ async def _reference_media_from_item(
     )
 
 
+def _declared_inline_reference_image_bytes(item: dict[str, Any]) -> int:
+    if item.get("kind") != "image" or _clean_optional_text(item.get("url")):
+        return 0
+    raw = item.get("size_bytes")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return 0
+    return raw
+
+
+def _validate_declared_inline_reference_sizes(
+    items: list[dict[str, Any]],
+) -> None:
+    declared_total = 0
+    for item in items:
+        declared = _declared_inline_reference_image_bytes(item)
+        if declared > SEEDANCE_INLINE_IMAGE_MAX_BYTES:
+            raise VideoUpstreamError(
+                "reference image is too large for inline video submission",
+                error_code="invalid_input",
+                status_code=413,
+                raw={
+                    "actual_bytes": declared,
+                    "max_bytes": SEEDANCE_INLINE_IMAGE_MAX_BYTES,
+                },
+            )
+        declared_total += declared
+    if declared_total > SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES:
+        raise VideoUpstreamError(
+            "reference images are too large for safe inline video submission",
+            error_code="invalid_input",
+            status_code=413,
+            raw={
+                "actual_bytes": declared_total,
+                "max_bytes": SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES,
+            },
+        )
+
+
 async def reference_media_bytes(
     generation: VideoGeneration,
 ) -> list[VideoReferenceMedia]:
@@ -364,12 +407,25 @@ async def reference_media_bytes(
         return []
     if not isinstance(raw, list) or not raw:
         raise RuntimeError("reference media snapshot missing")
+    items = [item for item in raw if isinstance(item, dict)]
+    _validate_declared_inline_reference_sizes(items)
     result: list[VideoReferenceMedia] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
+    inline_bytes = 0
+    for item in items:
         reference = await _reference_media_from_item(item)
         if reference is not None:
+            if reference.kind == "image" and reference.data:
+                inline_bytes += len(reference.data)
+                if inline_bytes > SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES:
+                    raise VideoUpstreamError(
+                        "reference images are too large for safe inline video submission",
+                        error_code="invalid_input",
+                        status_code=413,
+                        raw={
+                            "actual_bytes": inline_bytes,
+                            "max_bytes": SEEDANCE_INLINE_REFERENCE_RAW_MAX_BYTES,
+                        },
+                    )
             result.append(reference)
     if not result:
         raise RuntimeError("reference media snapshot has no usable entries")

@@ -141,7 +141,7 @@ class _QueueRedis:
             await self.zremrangebyscore(data_key, "-inf", now)
             return await self.zcard(data_key)
 
-        if numkeys != 7:
+        if numkeys != 6:
             raise AssertionError(f"unexpected eval numkeys={numkeys}")
 
         (
@@ -150,9 +150,8 @@ class _QueueRedis:
             task_provider_key,
             not_before_key,
             lock_key,
-            cursor_key,
             reservation_key,
-        ) = (str(item) for item in keys_and_args[:7])
+        ) = (str(item) for item in keys_and_args[:6])
         (
             now_raw,
             expiry_raw,
@@ -163,9 +162,8 @@ class _QueueRedis:
             task_provider_ttl_raw,
             provider_zset_ttl_raw,
             lock_token,
-            cursor_steps,
             reservation_ttl,
-        ) = keys_and_args[7:]
+        ) = keys_and_args[6:]
         if self.strings.get(lock_key) != str(lock_token):
             return -1
         now = float(now_raw)
@@ -194,7 +192,6 @@ class _QueueRedis:
         )
         await self.zadd(global_zset, {str(task_id): expiry})
         await self.delete(not_before_key)
-        await self.incrby(cursor_key, int(cursor_steps))
         return 1
 
 
@@ -202,59 +199,40 @@ def _candidate(task_id: str, lane: str, ordinal: int) -> SimpleNamespace:
     return SimpleNamespace(id=task_id, queue_lane=lane, created_at=ordinal)
 
 
-def _candidate_id(item: Any) -> str:
-    return str(getattr(item, "id", item))
-
-
 @pytest.mark.asyncio
-async def test_weighted_fair_lane_ordering_inside_scan_window(
+async def test_ready_scan_preserves_fifo_across_mixed_lanes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        generation_queue,
-        "IMAGE_QUEUE_LANE_WEIGHTS",
-        {
-            "image:interactive": 2,
-            "image:workflow:large": 1,
-        },
-    )
-    monkeypatch.setattr(
-        generation_queue,
-        "IMAGE_QUEUE_LANE_RANK",
-        {
-            "image:interactive": 0,
-            "image:workflow:large": 1,
-        },
-    )
-    ready_by_lane = {
-        "image:workflow:large": [
-            _candidate("wf-1", "image:workflow:large", 1),
-            _candidate("wf-2", "image:workflow:large", 2),
-            _candidate("wf-3", "image:workflow:large", 3),
-            _candidate("wf-4", "image:workflow:large", 4),
-        ],
-        "image:interactive": [
-            _candidate("int-1", "image:interactive", 5),
-            _candidate("int-2", "image:interactive", 6),
-            _candidate("int-3", "image:interactive", 7),
-            _candidate("int-4", "image:interactive", 8),
-        ],
-    }
+    candidates = [
+        _candidate("wf-1", "image:workflow:large", 1),
+        _candidate("int-1", "image:interactive", 2),
+        _candidate("wf-2", "image:workflow:large", 3),
+        _candidate("int-2", "image:interactive", 4),
+    ]
 
-    selected = await generation_queue.select_ready_generation_ids_by_lane(
+    async def fake_queued_generation_candidates(
+        limit: int,
+        _services: Any,
+    ) -> list[SimpleNamespace]:
+        return candidates[:limit]
+
+    monkeypatch.setattr(
+        generation_queue,
+        "queued_generation_candidates",
+        fake_queued_generation_candidates,
+    )
+
+    selected = await generation_queue.ready_queued_generation_ids(
         _QueueRedis(),
-        ready_by_lane,
-        limit=6,
+        4,
         services=generation_services,
     )
 
-    assert [_candidate_id(item) for item in selected] == [
-        "int-1",
+    assert selected == [
         "wf-1",
-        "int-2",
-        "int-3",
+        "int-1",
         "wf-2",
-        "int-4",
+        "int-2",
     ]
 
 

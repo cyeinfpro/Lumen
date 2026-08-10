@@ -479,6 +479,7 @@ class ProviderPool(
                         base_url=p.base_url,
                         api_key=p.api_key,
                         proxy=p.proxy,
+                        image_streaming_enabled=p.image_streaming_enabled,
                         image_jobs_endpoint=p.image_jobs_endpoint,
                         image_jobs_endpoint_lock=p.image_jobs_endpoint_lock,
                         image_jobs_base_url=p.image_jobs_base_url,

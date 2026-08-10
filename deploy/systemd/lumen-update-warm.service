@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+UMask=0007
 WorkingDirectory=/opt/lumen/current
 Environment=LUMEN_UPDATE_NONINTERACTIVE=1
 StandardOutput=append:/opt/lumendata/backup/.update.log

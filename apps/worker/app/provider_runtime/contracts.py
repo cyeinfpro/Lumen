@@ -151,6 +151,7 @@ class ProviderConfig:
     image_rate_limit: str | None = None
     image_daily_quota: int | None = None
     image_jobs_enabled: bool = False
+    image_streaming_enabled: bool = False
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""
@@ -208,6 +209,7 @@ class ResolvedProvider:
         default=None, repr=False, compare=False
     )
     image_jobs_enabled: bool = False
+    image_streaming_enabled: bool = False
     image_jobs_endpoint: str = "auto"
     image_jobs_endpoint_lock: bool = False
     image_jobs_base_url: str = ""

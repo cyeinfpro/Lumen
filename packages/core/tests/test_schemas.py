@@ -645,6 +645,33 @@ def test_video_create_schema_applies_seedance_25_capabilities() -> None:
         f"ref:image:{index}" for index in range(1, 31)
     ]
 
+    maximum_mixed_reference = VideoCreateIn(
+        **{
+            **base,
+            "action": "reference",
+            "reference_media": [
+                *image_media,
+                *[
+                    {
+                        "kind": "video",
+                        "video_id": f"vid-{index}",
+                        "ref_id": f"ref:video:{index}",
+                    }
+                    for index in range(1, 11)
+                ],
+                *[
+                    {
+                        "kind": "audio",
+                        "url": f"https://cdn.example.com/ref-{index}.mp3",
+                        "ref_id": f"ref:audio:{index}",
+                    }
+                    for index in range(1, 11)
+                ],
+            ],
+        }
+    )
+    assert len(maximum_mixed_reference.reference_media) == 50
+
     pressure_prompt = " ".join(image_anchors * 20)
     pressure_reference = VideoCreateIn(
         **{
@@ -703,6 +730,36 @@ def test_video_create_schema_applies_seedance_25_capabilities() -> None:
     for overrides in invalid_overrides:
         with pytest.raises(ValidationError):
             VideoCreateIn(**{**base, **overrides})
+
+    with pytest.raises(ValidationError, match="at most 50 items"):
+        VideoCreateIn(
+            **{
+                **base,
+                "action": "reference",
+                "reference_media": [
+                    *maximum_mixed_reference.reference_media,
+                    {
+                        "kind": "audio",
+                        "url": "https://cdn.example.com/ref-overflow.mp3",
+                    },
+                ],
+            }
+        )
+
+
+def test_video_reference_media_forbids_weight_fields() -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoReferenceMediaIn
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        VideoReferenceMediaIn.model_validate(
+            {
+                "kind": "image",
+                "image_id": "img-1",
+                "weight": 1,
+            }
+        )
 
 
 @pytest.mark.parametrize(

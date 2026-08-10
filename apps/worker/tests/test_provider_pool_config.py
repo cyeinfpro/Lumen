@@ -355,6 +355,7 @@ async def test_provider_pool_reload_preserves_image_job_fields(
                     "api_key": "sk-flux",
                     "enabled": True,
                     "image_jobs_enabled": True,
+                    "image_streaming_enabled": True,
                     "image_jobs_endpoint": "responses",
                     "image_jobs_base_url": "https://jobs.example",
                     "image_edit_input_transport": "file",
@@ -388,13 +389,14 @@ async def test_provider_pool_reload_preserves_image_job_fields(
         (
             provider.name,
             provider.image_concurrency,
+            provider.image_streaming_enabled,
             provider.image_jobs_endpoint,
             provider.image_jobs_base_url,
             provider.image_edit_input_transport,
         )
         for provider in providers
     ] == [
-        ("Flux", 20, "responses", "https://jobs.example", "file"),
+        ("Flux", 20, True, "responses", "https://jobs.example", "file"),
     ]
 
 

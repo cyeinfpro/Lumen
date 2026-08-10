@@ -1709,7 +1709,7 @@ def test_volcano_third_party_prefers_reference_public_urls() -> None:
     assert videos._provider_requires_public_media(third_party) is False  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(newapi) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(newapi) is True  # noqa: SLF001
-    assert videos._provider_prefers_public_media_url(official) is False  # noqa: SLF001
+    assert videos._provider_prefers_public_media_url(official) is True  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(dashscope) is True  # noqa: SLF001
     assert videos._provider_requires_public_media(dashscope) is True  # noqa: SLF001
     assert videos._provider_prefers_public_media_url(omni_flash) is True  # noqa: SLF001
@@ -2344,6 +2344,41 @@ async def test_reference_media_snapshots_default_labels_are_per_kind(
         ("video", "ref:video:1"),
         ("image", "ref:image:1"),
         ("audio", "ref:audio:1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reference_media_snapshots_preserve_thirty_image_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Db:
+        async def execute(self, _statement):
+            raise AssertionError("url reference should not query db")
+
+    async def resolve(url: str, **_kwargs: Any) -> Any:
+        return SimpleNamespace(url=url)
+
+    monkeypatch.setattr(videos, "resolve_public_http_target", resolve)
+    items = [
+        VideoReferenceMediaIn(
+            kind="image",
+            url=f"https://example.com/ref-{index:02d}.png",
+            ref_id=f"ref:image:{index}",
+        )
+        for index in range(1, 31)
+    ]
+
+    snapshots = await videos._reference_media_snapshots(  # noqa: SLF001
+        Db(),  # type: ignore[arg-type]
+        user_id="user-1",
+        items=items,
+    )
+
+    assert [item["url"] for item in snapshots] == [
+        f"https://example.com/ref-{index:02d}.png" for index in range(1, 31)
+    ]
+    assert [item["ref_id"] for item in snapshots] == [
+        f"ref:image:{index}" for index in range(1, 31)
     ]
 
 

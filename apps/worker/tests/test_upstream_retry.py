@@ -126,6 +126,7 @@ def test_direct_responses_interfaces_use_typed_request_carrier() -> None:
             "proxy_override",
             "pinned_target_override",
             "before_attempt",
+            "streaming_override",
         ),
         TEST_UPSTREAM_SERVICES.direct.direct_edit_image_once: (
             "request",
@@ -784,6 +785,235 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     assert seen["retry_httpx_exceptions"] is False
     assert seen["retry_status_codes"] is True
     assert seen["max_attempts"] == 2
+    assert "stream" not in seen["json_body"]
+    assert "partial_images" not in seen["json_body"]
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_stream_returns_on_final_image_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+    progress_events: list[dict[str, Any]] = []
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_iter_sse_curl(**kwargs: Any) -> Any:
+        seen["json_body"] = dict(kwargs["json_body"])
+        seen["headers"] = dict(kwargs["headers"])
+        await kwargs["on_dispatch_ready"]()
+        await kwargs["on_response_head"](
+            200,
+            {
+                "content-type": "text/event-stream",
+                "x-request-id": "req-stream-final",
+            },
+        )
+        yield {
+            "type": "image_generation.partial_image",
+            "partial_image_index": 7,
+            "b64_json": "cGFydGlhbA==",
+        }
+        yield {
+            "type": "image_generation.completed",
+            "b64_json": "ZmluYWw=",
+            "revised_prompt": "final prompt",
+        }
+        raise AssertionError("stream must close after the final image event")
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.transport,
+        "iter_sse_curl",
+        fake_iter_sse_curl,
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+        _image_request(
+            progress_callback=progress_events.append,
+            request_context=ImageRequestContext.create(trace_id="gen-stream"),
+        ),
+        base_url_override="https://example.invalid/v1",
+        api_key_override="sk-test",
+        streaming_override=True,
+    )
+
+    assert result == [(InlineImageBytes(b"final"), "final prompt")]
+    assert seen["json_body"]["stream"] is True
+    assert seen["json_body"]["partial_images"] == 0
+    assert seen["json_body"]["response_format"] == "b64_json"
+    assert seen["headers"]["x-trace-id"] == "gen-stream"
+    assert [event["type"] for event in progress_events] == [
+        "dispatch_ready",
+        "response_ready",
+        "partial_image",
+    ]
+    assert progress_events[1][UPSTREAM_RESPONSE_REQUEST_ID] == "req-stream-final"
+    assert progress_events[2]["index"] == 0
+    assert progress_events[2]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_stream_replays_503_once_with_same_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[dict[str, Any]] = []
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_iter_sse_curl(**kwargs: Any) -> Any:
+        attempts.append(
+            {
+                "body": dict(kwargs["json_body"]),
+                "headers": dict(kwargs["headers"]),
+            }
+        )
+        await kwargs["on_dispatch_ready"]()
+        if len(attempts) == 1:
+            await kwargs["on_response_head"](503, {"x-request-id": "req-first"})
+            raise upstream.UpstreamError(
+                "gateway failed",
+                status_code=503,
+                error_code="server_error",
+                payload={"response_received": True},
+            )
+        await kwargs["on_response_head"](200, {"x-request-id": "req-final"})
+        yield {
+            "type": "image_generation.completed",
+            "b64_json": "ZmluYWw=",
+        }
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.transport,
+        "iter_sse_curl",
+        fake_iter_sse_curl,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
+        "sleep",
+        lambda _delay: _done(),
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+        _image_request(request_context=ImageRequestContext.create(trace_id="retry")),
+        base_url_override="https://example.invalid/v1",
+        api_key_override="sk-test",
+        streaming_override=True,
+    )
+
+    assert result == [(InlineImageBytes(b"final"), None)]
+    assert len(attempts) == 2
+    assert attempts[0]["body"] == attempts[1]["body"]
+    assert (
+        attempts[0]["headers"]["Idempotency-Key"]
+        == attempts[1]["headers"]["Idempotency-Key"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_stream_preserves_explicit_error_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_iter_sse_curl(**kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        await kwargs["on_dispatch_ready"]()
+        await kwargs["on_response_head"](200, {})
+        yield {
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": "server_error",
+                "message": "image service failed",
+            },
+        }
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.transport,
+        "iter_sse_curl",
+        fake_iter_sse_curl,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+            _image_request(),
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+            streaming_override=True,
+        )
+
+    assert calls == 1
+    assert exc_info.value.error_code == "server_error"
+    assert exc_info.value.payload["upstream_error"]["message"] == (
+        "image service failed"
+    )
+    assert exc_info.value.payload.get("upstream_result_unknown") is not True
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_stream_interruption_is_result_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
+        return object()
+
+    async def fake_iter_sse_curl(**kwargs: Any) -> Any:
+        await kwargs["on_dispatch_ready"]()
+        await kwargs["on_response_head"](200, {"x-request-id": "req-cut"})
+        if False:
+            yield {}
+        raise upstream.UpstreamError(
+            "stream disconnected",
+            status_code=200,
+            error_code="sse_curl_failed",
+            payload={"response_received": True},
+        )
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.transport,
+        "iter_sse_curl",
+        fake_iter_sse_curl,
+    )
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+            _image_request(),
+            base_url_override="https://example.invalid/v1",
+            api_key_override="sk-test",
+            streaming_override=True,
+        )
+
+    error = exc_info.value
+    assert error.error_code == "direct_image_result_unknown"
+    assert error.payload["upstream_result_unknown"] is True
+    assert error.payload[UPSTREAM_RESPONSE_REQUEST_ID] == "req-cut"
+    assert error.payload[UPSTREAM_RESPONSE_HTTP_ATTEMPTS] == 1
 
 
 @pytest.mark.asyncio

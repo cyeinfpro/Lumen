@@ -28,6 +28,7 @@ import {
   assetIdFromReferenceUrl,
   nextReferenceIdentity,
   normalizeAssetUrl,
+  planReferenceUploadBatch,
   referenceKindNoun,
   referenceLimitMessage,
   removeReferenceAndReindexPrompt,
@@ -47,6 +48,7 @@ import {
 } from "./video-request-lifecycle";
 import type {
   DraftUploadRequest,
+  ReferenceUploadBatchResult,
   ReferenceUploadRequest,
   ReferenceUploadResult,
 } from "./video-request-lifecycle";
@@ -215,96 +217,102 @@ export function useVideoDraftMediaController({
   const referenceUploadMut = useMutation({
     mutationFn: async (
       request: ReferenceUploadRequest,
-    ): Promise<ReferenceUploadResult> => {
-      if (
-        referenceMediaRef.current.filter((item) => item.kind === request.kind)
-          .length >= request.limit
-      ) {
-        throw new Error(referenceLimitMessage(request.kind, request.limit));
+    ): Promise<ReferenceUploadBatchResult> => {
+      const uploaded: ReferenceUploadResult[] = [];
+      const failed: ReferenceUploadBatchResult["failed"] = [];
+      for (const item of request.items) {
+        try {
+          if (item.kind === "image") {
+            await validateVideoImageFile(item.file, request.imageConstraints);
+            const image = await uploadVideoReferenceImage(
+              item.file,
+              request.controller.signal,
+            );
+            uploaded.push({
+              kind: "image",
+              image_id: image.id,
+              display: `${image.width}x${image.height}`,
+              previewUrl: imageReferencePreviewUrl(image),
+            });
+            continue;
+          }
+          const video = await uploadReferenceVideo(
+            item.file,
+            request.controller.signal,
+          );
+          uploaded.push({
+            kind: "video",
+            video_id: video.id,
+            display: video.size_bytes
+              ? `${Math.round(video.size_bytes / 1024 / 1024)}MB`
+              : "视频",
+            previewUrl:
+              cleanReferencePreviewUrl(video.poster_url) ??
+              videoPosterUrl(video.id),
+          });
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          failed.push({
+            filename: item.file.name,
+            message: error instanceof Error ? error.message : "上传失败",
+          });
+        }
       }
-      if (
-        request.totalLimit != null &&
-        referenceMediaRef.current.length >= request.totalLimit
-      ) {
-        throw new Error(`参考素材最多 ${request.totalLimit} 个`);
-      }
-      if (request.kind === "image") {
-        await validateVideoImageFile(
-          request.file,
-          request.imageConstraints,
-        );
-        const image = await uploadVideoReferenceImage(
-          request.file,
-          request.controller.signal,
-        );
-        return {
-          kind: "image" as const,
-          image_id: image.id,
-          display: `${image.width}x${image.height}`,
-          previewUrl: imageReferencePreviewUrl(image),
-        };
-      }
-      const video = await uploadReferenceVideo(
-        request.file,
-        request.controller.signal,
-      );
-      return {
-        kind: "video" as const,
-        video_id: video.id,
-        display: video.size_bytes
-          ? `${Math.round(video.size_bytes / 1024 / 1024)}MB`
-          : "视频",
-        previewUrl:
-          cleanReferencePreviewUrl(video.poster_url) ??
-          videoPosterUrl(video.id),
-      };
+      return { uploaded, failed };
     },
-    onSuccess: (reference, request) => {
+    onSuccess: (result, request) => {
       if (!isCurrentReferenceUpload(request)) {
-        revokeReferenceObjectUrl(reference.previewUrl);
+        for (const reference of result.uploaded) {
+          revokeReferenceObjectUrl(reference.previewUrl);
+        }
         return;
       }
       beforeMediaChange();
-      const limit = referenceLimitsRef.current[reference.kind];
       const totalLimit = referenceTotalLimitRef.current;
-      const accepted = commitReferenceMedia((current) => {
-        const currentCount = current.filter(
-          (item) => item.kind === reference.kind,
-        ).length;
-        if (
-          currentCount >= limit ||
-          (totalLimit !== null && current.length >= totalLimit)
-        ) {
-          return current;
+      let acceptedCount = 0;
+      commitReferenceMedia((current) => {
+        let next = current;
+        for (const reference of result.uploaded) {
+          const limit = referenceLimitsRef.current[reference.kind];
+          const currentCount = next.filter(
+            (item) => item.kind === reference.kind,
+          ).length;
+          if (
+            currentCount >= limit ||
+            (totalLimit !== null && next.length >= totalLimit)
+          ) {
+            revokeReferenceObjectUrl(reference.previewUrl);
+            continue;
+          }
+          const identity = nextReferenceIdentity(reference.kind, next);
+          next = [
+            ...next,
+            {
+              _key: uuid(),
+              kind: reference.kind,
+              image_id:
+                reference.kind === "image" ? reference.image_id : null,
+              video_id:
+                reference.kind === "video" ? reference.video_id : null,
+              label: identity.label,
+              ref_id: identity.refId,
+              display: reference.display,
+              previewUrl: reference.previewUrl,
+            },
+          ];
+          acceptedCount += 1;
         }
-        const identity = nextReferenceIdentity(reference.kind, current);
-        return [
-          ...current,
-          {
-            _key: uuid(),
-            kind: reference.kind,
-            image_id:
-              reference.kind === "image" ? reference.image_id : null,
-            video_id:
-              reference.kind === "video" ? reference.video_id : null,
-            label: identity.label,
-            ref_id: identity.refId,
-            display: reference.display,
-            previewUrl: reference.previewUrl,
-          },
-        ];
+        return next;
       });
-      if (!accepted) {
-        revokeReferenceObjectUrl(reference.previewUrl);
-        toast.error(
-          totalLimit !== null &&
-            referenceMediaRef.current.length >= totalLimit
-            ? `参考素材最多 ${totalLimit} 个`
-            : referenceLimitMessage(reference.kind, limit),
-        );
-        return;
+      if (acceptedCount > 0) {
+        toast.success(`已上传 ${acceptedCount} 个参考素材`);
       }
-      toast.success("参考素材已上传");
+      if (result.failed.length > 0) {
+        const first = result.failed[0];
+        toast.error(`${result.failed.length} 个素材上传失败`, {
+          description: `${first.filename}: ${first.message}`,
+        });
+      }
     },
     onError: (error, request) => {
       if (isAbortError(error) || !isCurrentReferenceUpload(request)) return;
@@ -348,33 +356,22 @@ export function useVideoDraftMediaController({
   );
 
   const startReferenceUpload = useCallback(
-    (file: File) => {
+    (files: File[]) => {
       if (actionRef.current !== "reference") return;
-      const kind = file.type.startsWith("image/")
-        ? "image"
-        : file.type.startsWith("video/")
-          ? "video"
-          : null;
-      if (!kind) {
-        toast.error("上传失败", { description: "只支持图片或视频" });
-        return;
-      }
-      const limit = referenceLimitsRef.current[kind];
       const totalLimit = referenceTotalLimitRef.current;
-      if (
-        totalLimit !== null &&
-        referenceMediaRef.current.length >= totalLimit
-      ) {
-        toast.error(`参考素材最多 ${totalLimit} 个`);
-        return;
+      const planned = planReferenceUploadBatch(
+        files,
+        referenceMediaRef.current,
+        referenceLimitsRef.current,
+        totalLimit,
+      );
+      if (planned.rejected.length > 0) {
+        const first = planned.rejected[0];
+        toast.error(`${planned.rejected.length} 个素材未加入上传`, {
+          description: `${first.file.name}: ${first.reason}`,
+        });
       }
-      if (
-        referenceMediaRef.current.filter((item) => item.kind === kind).length >=
-        limit
-      ) {
-        toast.error(referenceLimitMessage(kind, limit));
-        return;
-      }
+      if (planned.accepted.length === 0) return;
       beforeMediaChange();
       cancelReferenceUpload();
       const controller = new AbortController();
@@ -383,12 +380,8 @@ export function useVideoDraftMediaController({
         draftFence: { ...draftFenceRef.current },
         epoch: referenceUploadEpochRef.current + 1,
         expectedAction: "reference",
-        file,
-        kind,
-        limit,
-        totalLimit,
-        imageConstraints:
-          kind === "image" ? referenceImageConstraints : null,
+        items: planned.accepted,
+        imageConstraints: referenceImageConstraints,
       };
       referenceUploadEpochRef.current = request.epoch;
       referenceUploadAbortRef.current = controller;

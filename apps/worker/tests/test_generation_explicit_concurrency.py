@@ -14,6 +14,8 @@ from app.tasks.generation_parts import (
     lease,
     queue as generation_queue,
     queue_claim,
+    queue_contracts,
+    queue_provider,
     runner,
 )
 from app.tasks.generation_parts.default_runtime import build_generation_runtime
@@ -21,6 +23,15 @@ from app.tasks.generation_parts.diagnostics import StageTimer
 
 
 REMOVED_RESOURCE_KEY_PREFIX = "generation:image_resources:"
+REMOVED_WEIGHTED_ADMISSION_MARKERS = (
+    "IMAGE_QUEUE_LANE_CURSOR_KEY",
+    "IMAGE_QUEUE_LANE_WEIGHTS",
+    "generation:image_queue:lane_cursor",
+    "generation:image_resources:",
+    "queue_lane_weight",
+    "resource_weight",
+    "weighted_queue_lane_slots",
+)
 PARTS_ROOT = Path(__file__).resolve().parents[1] / "app" / "tasks" / "generation_parts"
 CORE_ROOT = Path(__file__).resolve().parents[3] / "packages" / "core" / "lumen_core"
 
@@ -177,7 +188,7 @@ class _QueueRedis:
                 return -1
             await self.zremrangebyscore(data_key, "-inf", now)
             return await self.zcard(data_key)
-        if script != queue_claim.RESERVE_IMAGE_SLOT_LUA or numkeys != 7:
+        if script != queue_claim.RESERVE_IMAGE_SLOT_LUA or numkeys != 6:
             raise AssertionError("unexpected Redis script")
 
         (
@@ -186,9 +197,8 @@ class _QueueRedis:
             task_provider_key,
             not_before_key,
             lock_key,
-            cursor_key,
             reservation_key,
-        ) = (str(value) for value in args[:7])
+        ) = (str(value) for value in args[:6])
         (
             now_raw,
             expiry_raw,
@@ -199,9 +209,8 @@ class _QueueRedis:
             task_provider_ttl_raw,
             provider_zset_ttl_raw,
             lock_token,
-            cursor_steps_raw,
             reservation_ttl_raw,
-        ) = args[7:]
+        ) = args[6:]
         if self.strings.get(lock_key) != str(lock_token):
             return -1
 
@@ -228,11 +237,10 @@ class _QueueRedis:
         )
         await self.zadd(global_zset, {str(task_id): expiry})
         await self.delete(not_before_key)
-        await self.incrby(cursor_key, int(cursor_steps_raw))
         return 1
 
 
-def test_removed_resource_admission_surface_stays_deleted() -> None:
+def test_removed_weighted_admission_surfaces_stay_deleted() -> None:
     assert not (PARTS_ROOT / "admission.py").exists()
     assert not (PARTS_ROOT / "queue_permit.py").exists()
     assert not (CORE_ROOT / "generation_resources.py").exists()
@@ -249,6 +257,15 @@ def test_removed_resource_admission_surface_stays_deleted() -> None:
         "reserve_generation_permit",
         "release_generation_permit",
     }.isdisjoint(generation_parts.__all__)
+    for module in (
+        generation_queue,
+        queue_claim,
+        queue_contracts,
+        queue_provider,
+    ):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for marker in REMOVED_WEIGHTED_ADMISSION_MARKERS:
+            assert marker not in source
 
 
 @pytest.mark.asyncio

@@ -10,8 +10,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import { getTask, type BackendCompletion } from "@/lib/apiClient";
-import { logError, logWarn } from "@/lib/logger";
+import { logWarn } from "@/lib/logger";
 import {
   AUTH_USER_QUERY_KEY,
   userBillingQueryKeys,
@@ -22,21 +21,15 @@ import {
 import { qk } from "@/lib/queries/queryKeys";
 import {
   registerRuntimeRecovery,
-  requestSessionInvalidation,
   setRealtimeRuntimeStatus,
 } from "@/lib/runtimeResilience";
 import { getPrivateIdentitySnapshot } from "@/lib/auth/privateIdentityEpoch";
-import { notifyAuthSessionChanged } from "@/lib/auth/sessionChangeBus";
 import { useSSE, type SSEHandlers } from "./useSSE";
 import {
   disposeChatStoreRuntime,
   useChatStore,
 } from "@/store/useChatStore";
 import type { TaskRecoveryOutcome } from "@/store/chat/types";
-import type {
-  AssistantMessage,
-  Message,
-} from "@/lib/types";
 import {
   createLumenEffectRegistry,
   type LumenRealtimeEffectContext,
@@ -78,6 +71,7 @@ const EVENT_NAMES = [
 ] as const;
 
 const RECENT_SNAPSHOT_WINDOW_MS = 2_000;
+const POLLING_INTERVAL_MS = 8_000;
 type SnapshotIdentity = {
   userScope: string;
   userId: string | null;
@@ -141,135 +135,6 @@ function requireCompleteTaskRecovery(
   throw new Error(`${label} failed`);
 }
 
-function sortedTaskIds(ids: Iterable<string>): string[] {
-  // 修复非法频道名：空串 id 会拼出 `task:` 这种订阅不到任何东西的频道，并挤占
-  // MAX_CHANNELS 名额。completion_id 各处已有真值判断，但 generation_ids 数组元素
-  // 只判了前缀（`"".startsWith("opt-")` 为 false 会漏过），故在汇聚点统一过滤。
-  return [...new Set(ids)].filter((id) => id.length > 0).sort();
-}
-
-function completionIds(messages: Message[]): string[] {
-  return sortedTaskIds(
-    messages.flatMap((message) => {
-      if (message.role !== "assistant") return [];
-      const assistant = message as AssistantMessage;
-      return (assistant.status === "pending" ||
-        assistant.status === "streaming") &&
-        assistant.completion_id &&
-        !assistant.completion_id.startsWith("opt-")
-        ? [assistant.completion_id]
-        : [];
-    }),
-  );
-}
-
-function completionStatus(
-  status: BackendCompletion["status"],
-): AssistantMessage["status"] | null {
-  if (status === "queued") return "pending";
-  if (status === "streaming") return "streaming";
-  if (status === "succeeded") return "succeeded";
-  if (status === "failed") return "failed";
-  if (status === "canceled") return "canceled";
-  return null;
-}
-
-function applyCompletionSnapshot(fresh: BackendCompletion): void {
-  const now = Date.now();
-  useChatStore.setState((state) => {
-    let changed = false;
-    const messages = state.messages.map((message) => {
-      const update = updateCompletionMessage(message, fresh, now);
-      changed ||= update.changed;
-      return update.message;
-    });
-    return changed ? { messages } : state;
-  });
-}
-
-function updateCompletionMessage(
-  message: Message,
-  fresh: BackendCompletion,
-  now: number,
-): { message: Message; changed: boolean } {
-  if (
-    message.role !== "assistant" ||
-    (message as AssistantMessage).completion_id !== fresh.id
-  ) {
-    return { message, changed: false };
-  }
-  const previous = message as AssistantMessage;
-  const next = { ...previous };
-  applyCompletionStatus(next, fresh, now);
-  applyCompletionText(next, fresh, now);
-  const changed =
-    next.status !== previous.status ||
-    next.text !== previous.text ||
-    next.last_delta_at !== previous.last_delta_at ||
-    next.stream_started_at !== previous.stream_started_at;
-  return { message: changed ? next : message, changed };
-}
-
-function applyCompletionStatus(
-  message: AssistantMessage,
-  fresh: BackendCompletion,
-  now: number,
-): void {
-  const status = completionStatus(fresh.status);
-  if (status && status !== message.status) message.status = status;
-  if (status === "streaming" && !message.stream_started_at) {
-    message.stream_started_at = now;
-  }
-}
-
-function applyCompletionText(
-  message: AssistantMessage,
-  fresh: BackendCompletion,
-  now: number,
-): void {
-  const serverText = typeof fresh.text === "string" ? fresh.text : "";
-  if (
-    serverText &&
-    (fresh.status === "succeeded" ||
-      serverText.length >= (message.text ?? "").length)
-  ) {
-    message.text = serverText;
-    message.last_delta_at = now;
-  }
-}
-
-async function refreshCompletions(
-  signal: AbortSignal,
-  context: SnapshotExecutionContext,
-  userScope: string,
-  userId: string | null,
-  identityEpoch: number,
-): Promise<void> {
-  const ids = completionIds(useChatStore.getState().messages).slice(0, 16);
-  await Promise.all(
-    ids.map(async (id) => {
-      try {
-        const completion = await getTask("completions", id);
-        assertSnapshotCurrent(
-          signal,
-          context,
-          userScope,
-          userId,
-          identityEpoch,
-        );
-        applyCompletionSnapshot(completion);
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") throw error;
-        logError(error, {
-          scope: "sse-snapshot",
-          extra: { task: "completion", id },
-        });
-        throw error;
-      }
-    }),
-  );
-}
-
 function channelsFor(userId: string | null): string[] {
   return userId ? [`user:${userId}`] : [];
 }
@@ -318,6 +183,7 @@ export function useLumenRealtime(): void {
     identityEpoch: -1,
     syncedAt: 0,
   });
+  const pollNowRef = useRef<() => void>(() => {});
 
   const channels = useMemo(() => channelsFor(userId), [userId]);
   const userScope = channels.join(",");
@@ -444,16 +310,7 @@ export function useLumenRealtime(): void {
         signal,
       });
       requireCompleteTaskRecovery(polling, "active task polling", signal);
-      const results = await Promise.allSettled([
-        refreshCompletions(
-          signal,
-          context,
-          userScope,
-          userId,
-          identityEpoch,
-        ),
-        invalidateSnapshotQueries(queryClient, userId, scopes),
-      ]);
+      await invalidateSnapshotQueries(queryClient, userId, scopes);
       assertSnapshotCurrent(
         signal,
         context,
@@ -461,16 +318,6 @@ export function useLumenRealtime(): void {
         userId,
         identityEpoch,
       );
-      const failures = results.filter(
-        (result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-      );
-      if (failures.length > 0) {
-        throw new AggregateError(
-          failures.map((failure) => failure.reason),
-          "realtime snapshot recovery failed",
-        );
-      }
       const syncedAt = Date.now();
       lastSnapshot.current = {
         userScope,
@@ -483,39 +330,114 @@ export function useLumenRealtime(): void {
     [identityEpoch, queryClient, userId, userScope],
   );
 
-  const { status, reconnect } = useSSE(channels, handlers, {
-    scopeIdentity: userScope,
-    isScopeCurrent: isRealtimeScopeCurrent,
-    recoverSnapshot,
-    onProtocolIssue: (issue) => {
-      logWarn("realtime protocol validation failed", {
-        scope: "sse-protocol",
-        code: issue.reason,
-        extra: issue,
-      });
-    },
-    onAuthInvalidated: () => {
-      notifyAuthSessionChanged();
-      requestSessionInvalidation("realtime_auth_invalidated");
-    },
-  });
+  useSSE(channels, handlers);
 
   useEffect(() => {
-    setRealtimeRuntimeStatus(channels.length > 0 ? status : "idle");
-  }, [channels.length, status]);
+    setRealtimeRuntimeStatus("idle");
+    if (!userId || !userScope) {
+      pollNowRef.current = () => {};
+      return;
+    }
+
+    let disposed = false;
+    let running = false;
+    let timer: number | null = null;
+    let controller: AbortController | null = null;
+
+    const clearTimer = () => {
+      if (timer === null) return;
+      window.clearTimeout(timer);
+      timer = null;
+    };
+    const scheduleNext = () => {
+      clearTimer();
+      if (disposed || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(requestPoll, POLLING_INTERVAL_MS);
+    };
+    const runPoll = async () => {
+      if (
+        disposed ||
+        running ||
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+      running = true;
+      controller = new AbortController();
+      const context: SnapshotExecutionContext = {
+        connectionGeneration: identityEpoch,
+        userScope,
+        isCurrent: () => isRealtimeScopeCurrent(userScope),
+      };
+      try {
+        await recoverSnapshot(
+          ["activeTasks"],
+          { kind: "initial_snapshot" },
+          controller.signal,
+          context,
+        );
+      } catch (error) {
+        if (!(error instanceof Error && error.name === "AbortError")) {
+          logWarn("polling task recovery failed", {
+            scope: "realtime-poll",
+            extra: { err: String(error) },
+          });
+        }
+      } finally {
+        controller = null;
+        running = false;
+        scheduleNext();
+      }
+    };
+    function requestPoll() {
+      if (
+        disposed ||
+        running ||
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+      clearTimer();
+      void runPoll();
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        requestPoll();
+        return;
+      }
+      clearTimer();
+      controller?.abort();
+    };
+
+    pollNowRef.current = requestPoll;
+    window.addEventListener("focus", requestPoll);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    requestPoll();
+
+    return () => {
+      disposed = true;
+      pollNowRef.current = () => {};
+      clearTimer();
+      controller?.abort();
+      window.removeEventListener("focus", requestPoll);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      setRealtimeRuntimeStatus("idle");
+    };
+  }, [
+    identityEpoch,
+    isRealtimeScopeCurrent,
+    recoverSnapshot,
+    userId,
+    userScope,
+  ]);
 
   useEffect(
     () =>
       registerRuntimeRecovery("realtime", () => {
-        lastSnapshot.current = {
-          userScope,
-          userId,
-          identityEpoch,
-          syncedAt: 0,
-        };
-        reconnect();
+        lastSnapshot.current.syncedAt = 0;
+        pollNowRef.current();
       }),
-    [identityEpoch, reconnect, userId, userScope],
+    [],
   );
 
   useEffect(

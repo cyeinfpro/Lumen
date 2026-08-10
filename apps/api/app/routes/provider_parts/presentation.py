@@ -137,6 +137,10 @@ def provider_out(item: dict[str, Any], index: int) -> ProviderItemOut:
             item.get("image_jobs_enabled"),
             default=False,
         ),
+        image_streaming_enabled=normalize_bool(
+            item.get("image_streaming_enabled"),
+            default=False,
+        ),
         image_jobs_endpoint=endpoint,
         image_jobs_endpoint_lock=normalize_image_jobs_endpoint_lock(
             item.get("image_jobs_endpoint_lock"), endpoint

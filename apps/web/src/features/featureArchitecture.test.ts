@@ -97,11 +97,11 @@ test("features never deep-import another feature", () => {
   }
 });
 
-test("shared realtime is the only runtime registry owner", () => {
+test("public realtime hook stays polling-only and does not acquire the registry", () => {
   const hook = source("features/realtime/model/useSSE.ts");
   const registry = source("shared/realtime/runtimeRegistry.ts");
   doesNotMatch(hook, /new Map/);
   match(registry, /const runtimes = new Map<string, RealtimeRuntime>\(\)/);
-  match(hook, /acquireRealtimeRuntime/);
-  match(hook, /releaseRealtimeRuntime/);
+  match(hook, /REALTIME_TRANSPORT_MODE = "polling-only"/);
+  doesNotMatch(hook, /acquireRealtimeRuntime|releaseRealtimeRuntime/);
 });

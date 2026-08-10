@@ -146,6 +146,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
             "image_rate_limit": " 5/min ",
             "image_daily_quota": "10",
             "image_jobs_enabled": True,
+            "image_streaming_enabled": "true",
             "image_edit_input_transport": " file ",
         },
         index=0,
@@ -160,6 +161,7 @@ def test_parse_provider_item_defaults_and_normalizes_fields():
     assert provider.image_rate_limit == "5/min"
     assert provider.image_daily_quota == 10
     assert provider.image_jobs_enabled is True
+    assert provider.image_streaming_enabled is True
     assert provider.image_edit_input_transport == "file"
     assert provider.purposes == DEFAULT_PROVIDER_PURPOSES
 
@@ -177,6 +179,7 @@ def test_parse_provider_item_parses_string_booleans_without_truthy_coercion():
 
     assert provider.enabled is False
     assert provider.image_jobs_enabled is False
+    assert provider.image_streaming_enabled is False
 
     enabled_provider = parse_provider_item(
         {
@@ -1194,7 +1197,7 @@ def test_parse_provider_item_rejects_non_integral_priority():
 
 def test_parse_provider_item_rejects_invalid_boolean_strings():
     base = {"base_url": "https://upstream.example", "api_key": "sk-test"}
-    for field in ("enabled", "image_jobs_enabled"):
+    for field in ("enabled", "image_jobs_enabled", "image_streaming_enabled"):
         with pytest.raises(ValueError, match=f"{field} must be a boolean"):
             parse_provider_item({**base, field: "sometimes"}, index=0)
 

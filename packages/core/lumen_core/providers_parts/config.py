@@ -261,6 +261,11 @@ def parse_provider_item(item: dict[str, Any], *, index: int) -> ProviderDefiniti
             default=False,
             field="image_jobs_enabled",
         ),
+        image_streaming_enabled=_parse_bool(
+            item.get("image_streaming_enabled"),
+            default=False,
+            field="image_streaming_enabled",
+        ),
         image_jobs_endpoint=normalized_endpoint,
         image_jobs_endpoint_lock=image_jobs_endpoint_lock,
         image_jobs_base_url=image_jobs_base_url,

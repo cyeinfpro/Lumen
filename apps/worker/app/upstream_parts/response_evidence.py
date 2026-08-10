@@ -53,11 +53,23 @@ def direct_image_response_metadata(
     *,
     http_attempts: int,
 ) -> dict[str, Any]:
+    return direct_image_response_metadata_from_headers(
+        status_code=int(response.status_code),
+        response_headers=getattr(response, "headers", None),
+        http_attempts=http_attempts,
+    )
+
+
+def direct_image_response_metadata_from_headers(
+    *,
+    status_code: int,
+    response_headers: Any,
+    http_attempts: int,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {
-        UPSTREAM_RESPONSE_STATUS_CODE: int(response.status_code),
+        UPSTREAM_RESPONSE_STATUS_CODE: int(status_code),
         UPSTREAM_RESPONSE_HTTP_ATTEMPTS: max(1, int(http_attempts)),
     }
-    response_headers = getattr(response, "headers", None)
     request_id = _response_identifier(response_headers, _REQUEST_ID_HEADERS)
     if request_id is not None:
         metadata[UPSTREAM_RESPONSE_REQUEST_ID] = request_id
@@ -67,4 +79,7 @@ def direct_image_response_metadata(
     return metadata
 
 
-__all__ = ["direct_image_response_metadata"]
+__all__ = [
+    "direct_image_response_metadata",
+    "direct_image_response_metadata_from_headers",
+]

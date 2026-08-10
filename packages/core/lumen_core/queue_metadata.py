@@ -1,8 +1,8 @@
 """Queue observability metadata helpers.
 
 These helpers intentionally derive labels from existing task fields. Image
-workers now use the same stable labels for weighted-fair scheduling and for
-queue observability.
+workers preserve the labels for queue observability while admission itself is
+strict FIFO.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def parse_pixel_count(size: str | None) -> int | None:
 
 
 def size_bucket(pixel_count: int | None) -> str | None:
-    """Return the fair-scheduling size bucket label for image tasks."""
+    """Return the observability size bucket label for image tasks."""
 
     if pixel_count is None:
         return None
@@ -131,7 +131,7 @@ def queue_lane(
     size_bucket_value: str | None = None,
     has_mask: bool = False,
 ) -> str:
-    """Stable lane label for dashboards and image fair scheduling."""
+    """Stable lane label for dashboards and historical diagnostics."""
 
     if kind == "completion":
         return "completion:interactive"

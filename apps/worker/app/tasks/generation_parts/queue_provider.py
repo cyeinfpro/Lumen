@@ -9,7 +9,6 @@ from typing import Any, Awaitable, Callable
 from .lease import LEASE_TTL_S
 from .queue import (
     IMAGE_QUEUE_ACTIVE_KEY,
-    IMAGE_QUEUE_LANE_CURSOR_KEY,
     IMAGE_QUEUE_LOCK_KEY,
     IMAGE_QUEUE_NOT_BEFORE_GRACE_S,
     IMAGE_QUEUE_REDIS_ERROR_COOLDOWN_S,
@@ -32,16 +31,14 @@ RESERVE_DUAL_RACE_SLOT_LUA = """
 local task_provider_key = KEYS[1]
 local global_zset = KEYS[2]
 local not_before_key = KEYS[3]
-local cursor_key = KEYS[4]
-local lock_key = KEYS[5]
-local reservation_key = KEYS[6]
+local lock_key = KEYS[4]
+local reservation_key = KEYS[5]
 
 local lock_token = ARGV[1]
 local sentinel = ARGV[2]
 local expiry = tonumber(ARGV[3])
 local task_provider_ttl = tonumber(ARGV[4])
-local cursor_steps = tonumber(ARGV[5])
-local reservation_ttl = tonumber(ARGV[6])
+local reservation_ttl = tonumber(ARGV[5])
 
 if redis.call('GET', lock_key) ~= lock_token then
   return -1
@@ -54,10 +51,6 @@ redis.call('SET', task_provider_key, sentinel, 'EX', task_provider_ttl)
 redis.call('SET', reservation_key, lock_token, 'EX', reservation_ttl)
 redis.call('ZADD', global_zset, expiry, sentinel)
 redis.call('DEL', not_before_key)
-if cursor_steps > 0 then
-  redis.call('INCRBY', cursor_key, cursor_steps)
-  redis.call('EXPIRE', cursor_key, 3600)
-end
 return 1
 """
 
@@ -67,7 +60,6 @@ async def reserve_dual_race_slot(
     *,
     task_id: str,
     expiry: float,
-    fair_rank: int,
     active_count: int,
     capacity: int,
     services: RunGenerationDeps,
@@ -79,18 +71,16 @@ async def reserve_dual_race_slot(
     sentinel = dual_race_sentinel_name(task_id)
     ok = await lock.eval_fenced(
         RESERVE_DUAL_RACE_SLOT_LUA,
-        6,
+        5,
         image_task_provider_key(task_id),
         IMAGE_QUEUE_ACTIVE_KEY,
         image_queue_not_before_key(task_id),
-        IMAGE_QUEUE_LANE_CURSOR_KEY,
         IMAGE_QUEUE_LOCK_KEY,
         reservation_key(task_id),
         lock.token,
         sentinel,
         str(expiry),
         str(LEASE_TTL_S),
-        str(fair_rank + 1),
         str(reservation_ttl(services=services)),
         lost_result=-1,
     )
@@ -113,7 +103,6 @@ async def reserve_from_provider_candidates(
     providers: list[Any],
     now: float,
     expiry: float,
-    fair_rank: int,
     active_count: int,
     capacity: int,
     services: RunGenerationDeps,
@@ -147,7 +136,6 @@ async def reserve_from_provider_candidates(
             capacity=capacity,
             now=now,
             expiry=expiry,
-            fair_rank=fair_rank,
             services=services,
         )
         if not admitted:

@@ -116,6 +116,9 @@ async def _direct_generate_image_with_failover(
                 kwargs: dict[str, Any] = {
                     "base_url_override": provider.base_url,
                     "api_key_override": provider.api_key,
+                    "streaming_override": bool(
+                        getattr(provider, "image_streaming_enabled", False)
+                    ),
                 }
                 proxy = services.core.provider_proxy(provider)
                 if proxy is not None:

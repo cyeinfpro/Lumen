@@ -2,10 +2,12 @@
 Description=Lumen periodic backup
 After=docker.service
 Requires=docker.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=1800
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
+UMask=0007
 # This service needs Docker socket access to run pg_dump/redis backup inside
 # the compose containers. Run it as a non-root account that is only granted the
 # docker group; installer/update scripts create lumen-backup and make the backup
@@ -34,7 +36,8 @@ TimeoutStopSec=120
 KillSignal=SIGTERM
 KillMode=mixed
 Restart=on-failure
-RestartSec=60s
+RestartPreventExitStatus=4
+RestartSec=300s
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

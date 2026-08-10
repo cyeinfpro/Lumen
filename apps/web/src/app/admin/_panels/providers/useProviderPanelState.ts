@@ -153,6 +153,7 @@ function providerPayloadItem(
     enabled: draft.enabled,
     purposes: normalizePurposes(draft.purposes),
     image_jobs_enabled: draft.image_jobs_enabled,
+    image_streaming_enabled: draft.image_streaming_enabled,
     image_jobs_endpoint: endpoint,
     image_jobs_endpoint_lock:
       endpoint === "auto" ? false : Boolean(draft.image_jobs_endpoint_lock),

@@ -646,7 +646,7 @@ export default function VideoPage() {
         kindOptions: assetReferenceKindOptions,
         selectedKind: selectedAssetReferenceKind,
         assetUrlInput,
-        onFile: startReferenceUpload,
+        onFiles: startReferenceUpload,
         onOpenAssetManager: () => setIsVolcanoAssetManagerOpen(true),
         onInsert: insertReferenceTag,
         onPreview: setReferencePreviewItem,

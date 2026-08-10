@@ -119,6 +119,31 @@ def _write_fake_docker(path: Path) -> None:
                     encoding="utf-8",
                 )
 
+            def write_validation_state(
+                *,
+                owner: str,
+                mode: str,
+                payload: bytes,
+            ) -> None:
+                (state_path.parent / "redis-validation-owner").write_text(
+                    owner,
+                    encoding="utf-8",
+                )
+                (state_path.parent / "redis-validation-mode").write_text(
+                    mode,
+                    encoding="utf-8",
+                )
+                (state_path.parent / "redis-validation-payload").write_bytes(payload)
+                with Path(os.environ["TEST_RDB_VALIDATION_AUDIT"]).open(
+                    "a",
+                    encoding="utf-8",
+                ) as fh:
+                    fh.write(
+                        "source_uid="
+                        + os.environ.get("TEST_RDB_SOURCE_UID", str(os.getuid()))
+                        + f" owner={owner} mode={mode} size={len(payload)}\\n"
+                    )
+
             if args and args[0] == "compose":
                 if "exec" in args:
                     if os.environ.get("TEST_WORKER_READY", "1") != "1":
@@ -160,7 +185,10 @@ def _write_fake_docker(path: Path) -> None:
 
             if args and args[0] == "exec":
                 index = 1
+                exec_user = os.environ.get("TEST_REDIS_CONTAINER_UID", "999")
                 while index < len(args) and args[index] in {"-i", "-e", "-u"}:
+                    if args[index] == "-u":
+                        exec_user = args[index + 1].split(":", 1)[0]
                     index += 2 if args[index] in {"-e", "-u"} else 1
                 index += 1
                 command = args[index] if index < len(args) else ""
@@ -223,16 +251,60 @@ def _write_fake_docker(path: Path) -> None:
                             values["in_progress"] = "0"
                             save_redis_state(values)
                     raise SystemExit(0)
+                if command == "sh" and "umask 077" in " ".join(rest):
+                    payload = sys.stdin.buffer.read()
+                    write_validation_state(
+                        owner=exec_user,
+                        mode="600",
+                        payload=payload,
+                    )
+                    raise SystemExit(0)
                 if command == "redis-check-rdb":
+                    if os.environ.get("TEST_ENFORCE_RDB_DAC", "0") == "1":
+                        owner = (
+                            state_path.parent / "redis-validation-owner"
+                        ).read_text(encoding="utf-8")
+                        mode = (
+                            state_path.parent / "redis-validation-mode"
+                        ).read_text(encoding="utf-8")
+                        payload = (
+                            state_path.parent / "redis-validation-payload"
+                        ).read_bytes()
+                        if mode != "600":
+                            print("validation RDB mode was broadened", file=sys.stderr)
+                            raise SystemExit(1)
+                        if owner != exec_user:
+                            print(f"[offset 0] Checking RDB file {rest[-1]}")
+                            print("Permission denied", file=sys.stderr)
+                            raise SystemExit(1)
+                        if not payload:
+                            print("empty validation RDB", file=sys.stderr)
+                            raise SystemExit(1)
                     raise SystemExit(
                         0 if os.environ.get("TEST_RDB_VALID", "1") == "1" else 1
                     )
+                if command == "rm":
+                    for name in (
+                        "redis-validation-owner",
+                        "redis-validation-mode",
+                        "redis-validation-payload",
+                    ):
+                        (state_path.parent / name).unlink(missing_ok=True)
+                    raise SystemExit(0)
                 raise SystemExit(0)
 
             if args and args[0] == "cp":
                 source = args[1]
                 destination = Path(args[2])
                 if ":" in args[2] and not source.startswith("lumen-redis:"):
+                    write_validation_state(
+                        owner=os.environ.get(
+                            "TEST_RDB_SOURCE_UID",
+                            str(os.getuid()),
+                        ),
+                        mode=f"{Path(source).stat().st_mode & 0o777:o}",
+                        payload=Path(source).read_bytes(),
+                    )
                     raise SystemExit(0)
                 if source.endswith("/dump.rdb"):
                     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -412,6 +484,7 @@ def _start_backup(
     max_keep: int = 56,
     existing_timestamps: tuple[str, ...] = (),
     last_success_is_directory: bool = False,
+    process_umask: str = "",
     env_out: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen[str], Path, Path, Path, Path]:
     backup_root = tmp_path / "backup"
@@ -471,6 +544,10 @@ def _start_backup(
             "TEST_PHASE_MARKER": str(marker),
             "TEST_DOCKER_LOG": str(docker_log),
             "TEST_DOCKER_STATE": str(docker_state),
+            "TEST_RDB_VALIDATION_AUDIT": str(tmp_path / "redis-validation.audit"),
+            "TEST_RDB_SOURCE_UID": "999",
+            "TEST_REDIS_CONTAINER_UID": "999",
+            "TEST_ENFORCE_RDB_DAC": "1",
             "TEST_SYSTEMCTL_LOG": str(systemctl_log),
             "TEST_ACTIVE_SYSTEMD_UNITS": " ".join(active_systemd_units),
             "TEST_CURL_LOG": str(tmp_path / "curl.log"),
@@ -515,7 +592,8 @@ def _start_backup(
     if env_out is not None:
         env_out.update(env)
     (tmp_path / "tmp").mkdir()
-    shell = '. "$1"\n'
+    shell = f"umask {process_umask}\n" if process_umask else ""
+    shell += '. "$1"\n'
     process = subprocess.Popen(
         ["/bin/bash", "-c", shell, "backup-signal-test", str(BACKUP)],
         cwd=ROOT,
@@ -649,6 +727,7 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
     assert len(markers) == 1
     marker_payload = json.loads(markers[0].read_text(encoding="utf-8"))
     assert marker_payload["schema"] == 1
+    assert markers[0].stat().st_mode & 0o777 == 0o640
     assert marker_payload["pg"]["sha256"] == hashlib.sha256(
         next((backup_root / "pg").glob("*.pg.dump.gz")).read_bytes()
     ).hexdigest()
@@ -660,6 +739,102 @@ def test_successful_backup_freezes_all_writers_before_both_snapshots(
     assert success_payload["completed_at"] == marker_payload["timestamp"]
     assert success_payload["pair_marker"] == markers[0].name
     assert success_marker.stat().st_mode & 0o777 == 0o640
+
+
+def test_pair_marker_is_persisted_0640_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        process_umask="077",
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 0, output
+    pair_markers = list(backup_root.glob(".backup-pair.*.json"))
+    assert len(pair_markers) == 1
+    assert pair_markers[0].stat().st_mode & 0o777 == 0o640
+    assert not list(backup_root.glob("..backup-pair.*.json.*.tmp"))
+
+
+def test_pair_marker_writer_validates_temporary_and_final_0640_modes() -> None:
+    source = BACKUP.read_text(encoding="utf-8")
+
+    assert "os.fchmod(descriptor, 0o640)" in source
+    assert "stat.S_IMODE(temporary_metadata.st_mode) != 0o640" in source
+    assert "stat.S_IMODE(final_metadata.st_mode) != 0o640" in source
+    assert "(final_metadata.st_dev, final_metadata.st_ino)" in source
+    assert "(temporary_metadata.st_dev, temporary_metadata.st_ino)" in source
+
+
+def test_nonroot_backup_stages_rdb_as_root_owned_private_container_file(
+    tmp_path: Path,
+) -> None:
+    process, _marker, _backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 0, output
+    audit = (
+        (tmp_path / "redis-validation.audit").read_text(encoding="utf-8").splitlines()
+    )
+    assert audit == ["source_uid=999 owner=0 mode=600 size=22"]
+    calls = (tmp_path / "docker.log").read_text(encoding="utf-8").splitlines()
+    stage_index = next(
+        index
+        for index, call in enumerate(calls)
+        if call.startswith("exec -i -u 0 lumen-redis sh -c ")
+    )
+    check_index = next(
+        index
+        for index, call in enumerate(calls)
+        if "exec -u 0 lumen-redis redis-check-rdb " in call
+    )
+    cleanup_index = next(
+        index
+        for index, call in enumerate(calls)
+        if "exec -u 0 lumen-redis rm -f " in call
+    )
+    assert stage_index < check_index < cleanup_index
+    assert "set -C; umask 077; exec cat" in calls[stage_index]
+    assert "chmod" not in calls[stage_index]
+    assert not any(
+        call.startswith("cp ") and "lumen-redis:/tmp/lumen-rdb-check-" in call
+        for call in calls
+    )
+
+
+def test_invalid_staged_rdb_is_cleaned_up_and_writers_are_restarted(
+    tmp_path: Path,
+) -> None:
+    process, _marker, backup_root, _maint_root, _lock_file = _start_backup(
+        tmp_path,
+        block_phase="",
+        rdb_valid=False,
+    )
+
+    stdout, stderr = process.communicate(timeout=15)
+    output = stdout + stderr
+
+    assert process.returncode == 4, output
+    assert "redis-check-rdb rejected the archived dump.rdb" in output
+    assert not (tmp_path / "redis-validation-owner").exists()
+    assert not (tmp_path / "redis-validation-mode").exists()
+    assert not (tmp_path / "redis-validation-payload").exists()
+    assert not list(backup_root.glob(".backup-pair.*.json"))
+    assert not list((backup_root / "pg").glob("*"))
+    assert not list((backup_root / "redis").glob("*"))
+    for service in APPLICATION_SERVICES:
+        assert (tmp_path / f"service-{service}").read_text(encoding="utf-8") == (
+            "true"
+        )
 
 
 @pytest.mark.parametrize("unit", SYSTEMD_WRITER_UNITS)

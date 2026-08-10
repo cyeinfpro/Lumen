@@ -26,12 +26,14 @@ _DIRECTORY_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
 )
 _FILE_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-_SHARED_DIRECTORY_MODE = 0o770
+_SHARED_DIRECTORY_MODE = 0o2770
+_SHARED_DIRECTORY_REQUIRED_MODE = 0o770
 _SHARED_FILE_MODE = 0o660
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_RECOVERY_NAME = ".recovery"
 _SHARED_DATA_NAMES = ("pg", "redis")
+_MOUNT_MANAGED_PERMISSION_FILESYSTEMS = frozenset({"cifs", "smb3"})
 _LOCK_RECORD_LIMIT = 4096
 _OWNER_TOKEN_PATTERN = re.compile(r"\.owner\.[A-Za-z0-9]+")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -59,6 +61,12 @@ class _NodeSnapshot:
 class _DirectorySnapshot:
     directory: _NodeSnapshot
     entries: tuple[tuple[str, _NodeSnapshot], ...]
+
+
+@dataclass(frozen=True)
+class _SharedFilesystemPolicy:
+    filesystem_type: str | None
+    mount_manages_permissions: bool
 
 
 @dataclass
@@ -555,6 +563,73 @@ def _fsync(descriptor: int) -> None:
         unsupported = {errno.EINVAL}
         if hasattr(errno, "ENOTSUP"):
             unsupported.add(errno.ENOTSUP)
+        if exc.errno not in unsupported:
+            raise
+
+
+def _filesystem_type_from_mountinfo(
+    device_id: str,
+    mountinfo: str,
+) -> str | None:
+    matches: list[str] = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if len(fields) < 7 or fields[2] != device_id:
+            continue
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if separator + 1 < len(fields):
+            matches.append(fields[separator + 1].lower())
+    if not matches:
+        return None
+    for filesystem_type in matches:
+        if filesystem_type in _MOUNT_MANAGED_PERMISSION_FILESYSTEMS:
+            return filesystem_type
+    return matches[-1]
+
+
+def _filesystem_type_for_fd(directory_fd: int) -> str | None:
+    if sys.platform != "linux":
+        return None
+    metadata = os.fstat(directory_fd)
+    device_id = f"{os.major(metadata.st_dev)}:{os.minor(metadata.st_dev)}"
+    try:
+        with open(
+            "/proc/self/mountinfo",
+            encoding="utf-8",
+            errors="strict",
+        ) as mountinfo_file:
+            mountinfo = mountinfo_file.read()
+    except (OSError, UnicodeError):
+        return None
+    return _filesystem_type_from_mountinfo(device_id, mountinfo)
+
+
+def _shared_filesystem_policy(directory_fd: int) -> _SharedFilesystemPolicy:
+    filesystem_type = _filesystem_type_for_fd(directory_fd)
+    return _SharedFilesystemPolicy(
+        filesystem_type=filesystem_type,
+        mount_manages_permissions=(
+            filesystem_type in _MOUNT_MANAGED_PERMISSION_FILESYSTEMS
+        ),
+    )
+
+
+def _set_mount_managed_mode(descriptor: int, mode: int) -> None:
+    try:
+        os.fchmod(descriptor, mode)
+    except OSError as exc:
+        unsupported = {
+            errno.EACCES,
+            errno.EINVAL,
+            errno.EPERM,
+        }
+        if hasattr(errno, "ENOTSUP"):
+            unsupported.add(errno.ENOTSUP)
+        if hasattr(errno, "EOPNOTSUPP"):
+            unsupported.add(errno.EOPNOTSUPP)
         if exc.errno not in unsupported:
             raise
 
@@ -1323,6 +1398,7 @@ def _set_shared_directory_permissions(
     target_user_id: int,
     target_group_id: int,
     legacy_owner_ids: frozenset[int],
+    policy: _SharedFilesystemPolicy,
     label: str,
 ) -> None:
     _validate_shared_owner(
@@ -1331,11 +1407,31 @@ def _set_shared_directory_permissions(
         legacy_owner_ids=legacy_owner_ids,
         label=label,
     )
-    os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
-    os.fchown(directory_fd, target_user_id, target_group_id)
-    os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
+    if policy.mount_manages_permissions:
+        _set_mount_managed_mode(
+            directory_fd,
+            _SHARED_DIRECTORY_REQUIRED_MODE,
+        )
+    else:
+        os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
+        os.fchown(directory_fd, target_user_id, target_group_id)
+        os.fchmod(directory_fd, _SHARED_DIRECTORY_MODE)
     final = os.fstat(directory_fd)
-    if (
+    if policy.mount_manages_permissions:
+        owner_is_allowed = (
+            final.st_uid == target_user_id
+            or final.st_uid in legacy_owner_ids
+        )
+        if (
+            not owner_is_allowed
+            or final.st_gid != target_group_id
+            or stat.S_IMODE(final.st_mode) & _SHARED_DIRECTORY_REQUIRED_MODE
+            != _SHARED_DIRECTORY_REQUIRED_MODE
+        ):
+            raise BackupPermissionError(
+                f"shared backup directory effective permissions are unsafe: {label}"
+            )
+    elif (
         final.st_uid != target_user_id
         or final.st_gid != target_group_id
         or stat.S_IMODE(final.st_mode) != _SHARED_DIRECTORY_MODE
@@ -1352,6 +1448,7 @@ def _set_shared_file_permissions(
     target_user_id: int,
     target_group_id: int,
     legacy_owner_ids: frozenset[int],
+    policy: _SharedFilesystemPolicy,
     label: str,
 ) -> None:
     _validate_shared_owner(
@@ -1360,11 +1457,28 @@ def _set_shared_file_permissions(
         legacy_owner_ids=legacy_owner_ids,
         label=label,
     )
-    os.fchmod(file_fd, _SHARED_FILE_MODE)
-    os.fchown(file_fd, target_user_id, target_group_id)
-    os.fchmod(file_fd, _SHARED_FILE_MODE)
+    if policy.mount_manages_permissions:
+        _set_mount_managed_mode(file_fd, _SHARED_FILE_MODE)
+    else:
+        os.fchmod(file_fd, _SHARED_FILE_MODE)
+        os.fchown(file_fd, target_user_id, target_group_id)
+        os.fchmod(file_fd, _SHARED_FILE_MODE)
     final = os.fstat(file_fd)
-    if (
+    if policy.mount_manages_permissions:
+        owner_is_allowed = (
+            final.st_uid == target_user_id
+            or final.st_uid in legacy_owner_ids
+        )
+        if (
+            not owner_is_allowed
+            or final.st_gid != target_group_id
+            or stat.S_IMODE(final.st_mode) & _SHARED_FILE_MODE
+            != _SHARED_FILE_MODE
+        ):
+            raise BackupPermissionError(
+                f"shared backup file effective permissions are unsafe: {label}"
+            )
+    elif (
         final.st_uid != target_user_id
         or final.st_gid != target_group_id
         or stat.S_IMODE(final.st_mode) != _SHARED_FILE_MODE
@@ -1459,6 +1573,7 @@ def _harden_shared_tree(
     target_user_id: int,
     target_group_id: int,
     legacy_owner_ids: frozenset[int],
+    policy: _SharedFilesystemPolicy,
     guard: _TreeStabilityGuard,
     skip_recovery: bool = False,
     relative_path: str = "",
@@ -1497,6 +1612,7 @@ def _harden_shared_tree(
                     target_user_id=target_user_id,
                     target_group_id=target_group_id,
                     legacy_owner_ids=legacy_owner_ids,
+                    policy=policy,
                     guard=guard,
                     relative_path=label,
                 )
@@ -1505,6 +1621,7 @@ def _harden_shared_tree(
                     target_user_id=target_user_id,
                     target_group_id=target_group_id,
                     legacy_owner_ids=legacy_owner_ids,
+                    policy=policy,
                     label=label,
                 )
             finally:
@@ -1525,6 +1642,7 @@ def _harden_shared_tree(
                 target_user_id=target_user_id,
                 target_group_id=target_group_id,
                 legacy_owner_ids=legacy_owner_ids,
+                policy=policy,
                 label=label,
             )
         finally:
@@ -1746,11 +1864,46 @@ def _validate_final_node(
         raise BackupPermissionError(f"{label} final permissions are unsafe")
 
 
+def _validate_final_shared_node(
+    node: _NodeSnapshot,
+    *,
+    target_user_id: int,
+    target_group_id: int,
+    legacy_owner_ids: frozenset[int],
+    policy: _SharedFilesystemPolicy,
+    directory: bool,
+    label: str,
+) -> None:
+    type_matches = stat.S_ISDIR(node.mode) if directory else stat.S_ISREG(node.mode)
+    links_are_safe = directory or node.links == 1
+    if policy.mount_manages_permissions:
+        required_mode = (
+            _SHARED_DIRECTORY_REQUIRED_MODE if directory else _SHARED_FILE_MODE
+        )
+        permissions_match = (
+            node.user_id == target_user_id
+            or node.user_id in legacy_owner_ids
+        ) and node.group_id == target_group_id and (
+            stat.S_IMODE(node.mode) & required_mode
+        ) == required_mode
+    else:
+        expected_mode = _SHARED_DIRECTORY_MODE if directory else _SHARED_FILE_MODE
+        permissions_match = (
+            node.user_id == target_user_id
+            and node.group_id == target_group_id
+            and stat.S_IMODE(node.mode) == expected_mode
+        )
+    if not type_matches or not links_are_safe or not permissions_match:
+        raise BackupPermissionError(f"{label} final permissions are unsafe")
+
+
 def _record_final_shared_tree(
     directory_fd: int,
     *,
     target_user_id: int,
     target_group_id: int,
+    legacy_owner_ids: frozenset[int],
+    policy: _SharedFilesystemPolicy,
     guard: _TreeStabilityGuard,
     skip_recovery: bool = False,
     relative_path: str = "",
@@ -1760,11 +1913,12 @@ def _record_final_shared_tree(
         directory_fd,
         label=directory_label,
     )
-    _validate_final_node(
+    _validate_final_shared_node(
         snapshot.directory,
-        expected_mode=_SHARED_DIRECTORY_MODE,
         target_user_id=target_user_id,
         target_group_id=target_group_id,
+        legacy_owner_ids=legacy_owner_ids,
+        policy=policy,
         directory=True,
         label=directory_label,
     )
@@ -1780,11 +1934,12 @@ def _record_final_shared_tree(
             strict=True,
         )
         if stat.S_ISDIR(node.mode):
-            _validate_final_node(
+            _validate_final_shared_node(
                 node,
-                expected_mode=_SHARED_DIRECTORY_MODE,
                 target_user_id=target_user_id,
                 target_group_id=target_group_id,
+                legacy_owner_ids=legacy_owner_ids,
+                policy=policy,
                 directory=True,
                 label=f"shared backup {label}",
             )
@@ -1794,17 +1949,20 @@ def _record_final_shared_tree(
                     child_fd,
                     target_user_id=target_user_id,
                     target_group_id=target_group_id,
+                    legacy_owner_ids=legacy_owner_ids,
+                    policy=policy,
                     guard=guard,
                     relative_path=label,
                 )
             finally:
                 os.close(child_fd)
             continue
-        _validate_final_node(
+        _validate_final_shared_node(
             node,
-            expected_mode=_SHARED_FILE_MODE,
             target_user_id=target_user_id,
             target_group_id=target_group_id,
+            legacy_owner_ids=legacy_owner_ids,
+            policy=policy,
             directory=False,
             label=f"shared backup {label}",
         )
@@ -1900,9 +2058,28 @@ def _parse_legacy_owner_uid(value: str) -> int:
     return user_id
 
 
+def _parse_shared_group_id(value: str) -> int:
+    if re.fullmatch(r"[0-9]+", value) is None:
+        raise argparse.ArgumentTypeError(
+            "shared group GID must be a decimal integer"
+        )
+    group_id = int(value, 10)
+    if group_id > _MAX_MIGRATABLE_UID:
+        raise argparse.ArgumentTypeError(
+            "shared group GID must be between "
+            f"0 and {_MAX_MIGRATABLE_UID}"
+        )
+    return group_id
+
+
 def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
     target_user = _resolve_user(args.service_user)
     target_group = _resolve_group(args.service_group)
+    shared_group_id = (
+        target_group.gr_gid
+        if args.shared_group_id is None
+        else args.shared_group_id
+    )
     legacy_owner = _resolve_user(args.legacy_owner_user)
     legacy_owner_ids = frozenset(
         (legacy_owner.pw_uid, *args.legacy_owner_uid)
@@ -1912,6 +2089,7 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
         create_mode=_SHARED_DIRECTORY_MODE,
     )
     backup_root_fd = backup_root_binding.directory_fd
+    shared_policy = _shared_filesystem_policy(backup_root_fd)
     recovery_fd: int | None = None
     try:
         backup_root_binding.verify(label="backup root")
@@ -1968,23 +2146,27 @@ def _ensure_backup_layout_locked(args: argparse.Namespace) -> str:
             _harden_shared_tree(
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
-                target_group_id=target_group.gr_gid,
+                target_group_id=shared_group_id,
                 legacy_owner_ids=legacy_owner_ids,
+                policy=shared_policy,
                 guard=guard,
                 skip_recovery=True,
             )
             _set_shared_directory_permissions(
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
-                target_group_id=target_group.gr_gid,
+                target_group_id=shared_group_id,
                 legacy_owner_ids=legacy_owner_ids,
+                policy=shared_policy,
                 label="root",
             )
             guard.verify_baseline(strict=False)
             _record_final_shared_tree(
                 backup_root_fd,
                 target_user_id=target_user.pw_uid,
-                target_group_id=target_group.gr_gid,
+                target_group_id=shared_group_id,
+                legacy_owner_ids=legacy_owner_ids,
+                policy=shared_policy,
                 guard=guard,
                 skip_recovery=True,
             )
@@ -2024,6 +2206,14 @@ def main() -> int:
     ensure.add_argument("backup_root")
     ensure.add_argument("--service-user", required=True)
     ensure.add_argument("--service-group", required=True)
+    ensure.add_argument(
+        "--shared-group-id",
+        type=_parse_shared_group_id,
+        help=(
+            "numeric GID for the shared backup tree; private recovery journals "
+            "remain owned by --service-group"
+        ),
+    )
     ensure.add_argument("--legacy-owner-user", default="root")
     ensure.add_argument(
         "--legacy-owner-uid",

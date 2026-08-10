@@ -17,6 +17,7 @@ export interface ProviderItemOut {
   purposes: ProviderPurpose[];
   proxy: string | null;
   image_jobs_enabled: boolean;
+  image_streaming_enabled: boolean;
   image_jobs_endpoint: ImageJobsEndpoint;
   image_jobs_endpoint_lock: boolean;
   image_jobs_base_url: string;
@@ -53,6 +54,7 @@ export interface ProviderItemIn {
   purposes: ProviderPurpose[];
   proxy?: string | null;
   image_jobs_enabled?: boolean;
+  image_streaming_enabled?: boolean;
   image_jobs_endpoint?: ImageJobsEndpoint;
   image_jobs_endpoint_lock?: boolean;
   image_jobs_base_url?: string;

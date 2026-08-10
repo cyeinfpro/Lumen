@@ -8,12 +8,11 @@ import math
 import os
 import re
 import signal
-import tempfile
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,15 +27,27 @@ from .progress_events import (
     emit_image_progress as _emit_image_progress,
     maybe_record_usage_from_event as _maybe_record_usage_from_event,
 )
+from .curl_files import (
+    secure_mkstemp as _secure_mkstemp,
+    stage_curl_secret_config as _stage_curl_secret_config,
+    write_bytes_file as _write_bytes_file,
+    write_json_body_file as _write_json_body_file,
+)
 from .sse_transport import CurlSSEEventParser, CurlSSEProcess, decode_sse_event
 
 DispatchReadyHook = Callable[[], Awaitable[None]]
 ResponseReadyHook = Callable[[], Awaitable[None]]
+ResponseHeadHook = Callable[[int, dict[str, str]], Awaitable[None]]
 
-_CURL_TEMP_FILE_MODE = 0o600
 _CURL_STDERR_MAX_BYTES = 64 * 1024
 _DEFAULT_JSON_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
 _DEFAULT_ERROR_RESPONSE_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class CurlSSEResponseContext:
+    endpoint_label: str = "responses"
+    error_path: str = "responses"
 
 
 class _CurlOutputTooLarge(Exception):
@@ -54,104 +65,6 @@ def _runtime_services(runtime: ImageUpstreamRuntime | None) -> UpstreamServices:
 def _curl_timeout_arg(timeout_s: float) -> str:
     timeout = math.ceil(timeout_s) if math.isfinite(timeout_s) else 1
     return str(max(1, timeout))
-
-
-def _write_all(fd: int, raw: bytes) -> None:
-    view = memoryview(raw)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("failed to write temporary curl payload")
-        view = view[written:]
-
-
-def _write_json_body_file(fd: int, json_body: dict[str, Any]) -> None:
-    _write_all(fd, json.dumps(json_body).encode("utf-8"))
-
-
-def _write_bytes_file(fd: int, raw: bytes) -> None:
-    _write_all(fd, raw)
-
-
-def _secure_mkstemp(*, prefix: str, suffix: str) -> tuple[int, str]:
-    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
-    try:
-        os.fchmod(fd, _CURL_TEMP_FILE_MODE)
-    except BaseException:
-        os.close(fd)
-        with suppress(OSError):
-            os.unlink(path)
-        raise
-    return fd, path
-
-
-def _curl_config_quote(value: str) -> str:
-    if any(char in value for char in ("\x00", "\r", "\n")):
-        raise ValueError("curl config value contains a forbidden control character")
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _curl_secret_config_bytes(
-    *,
-    headers: dict[str, str],
-    proxy_url: str | None,
-    pinned_target: Any | None,
-) -> bytes:
-    lines = [
-        f"header = {_curl_config_quote(f'{key}: {value}')}\n"
-        for key, value in headers.items()
-    ]
-    if proxy_url:
-        lines.append(f"proxy = {_curl_config_quote(proxy_url)}\n")
-    elif pinned_target is not None:
-        parsed = urlsplit(str(pinned_target.url))
-        host = (parsed.hostname or "").strip("[]")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        resolved_ip = str(pinned_target.resolved_ips[0]).strip("[]")
-        if ":" in resolved_ip:
-            resolved_ip = f"[{resolved_ip}]"
-        lines.append(
-            f"resolve = {_curl_config_quote(f'{host}:{port}:{resolved_ip}')}\n"
-        )
-    return "".join(lines).encode("utf-8")
-
-
-async def _stage_curl_secret_config(
-    *,
-    url: str,
-    headers: dict[str, str],
-    proxy_url: str | None,
-    pinned_target: Any | None,
-    runtime: ImageUpstreamRuntime | None = None,
-) -> str:
-    services = _runtime_services(runtime)
-    effective_target = (
-        None
-        if proxy_url is not None
-        else services.requests.validated_byok_target_for_request(pinned_target, url)
-    )
-    fd, config_path = _secure_mkstemp(
-        prefix="lumen_curl_",
-        suffix=".conf",
-    )
-    try:
-        await asyncio.to_thread(
-            _write_bytes_file,
-            fd,
-            _curl_secret_config_bytes(
-                headers=headers,
-                proxy_url=proxy_url,
-                pinned_target=effective_target,
-            ),
-        )
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(config_path)
-        raise
-    finally:
-        os.close(fd)
-    return config_path
 
 
 def _configured_limit(
@@ -604,6 +517,7 @@ class _CurlSSEReader:
         status_code: int,
         url: str,
         trace_id: str,
+        path: str = "responses",
     ) -> bytes:
         body = bytearray()
         if self._buffer:
@@ -617,6 +531,7 @@ class _CurlSSEReader:
                 status_code=status_code,
                 url=url,
                 trace_id=trace_id,
+                path=path,
             )
         while True:
             line = await self.next_line()
@@ -630,6 +545,7 @@ class _CurlSSEReader:
                 status_code=status_code,
                 url=url,
                 trace_id=trace_id,
+                path=path,
             )
 
     def _raise_if_payload_too_large(
@@ -641,6 +557,7 @@ class _CurlSSEReader:
         status_code: int,
         url: str,
         trace_id: str,
+        path: str,
     ) -> None:
         if len(body) <= max_bytes:
             return
@@ -649,7 +566,7 @@ class _CurlSSEReader:
             status_code=status_code or None,
             error_code=self._services.infrastructure.EC.STREAM_TOO_LARGE.value,
             payload={
-                "path": "responses",
+                "path": path,
                 "method": "POST",
                 "url": url,
                 "x_trace_id": trace_id,
@@ -757,6 +674,124 @@ def _decode_curl_sse_event(
     return decode_sse_event(event_type, event_data)
 
 
+async def _raise_curl_sse_http_error(
+    reader: _CurlSSEReader,
+    *,
+    services: UpstreamServices,
+    status_code: int,
+    response_headers: dict[str, str],
+    url: str,
+    trace_id: str,
+    error_path: str,
+    runtime: ImageUpstreamRuntime | None,
+) -> None:
+    err_raw = await reader.drain(
+        max_bytes=_error_response_limit(runtime=runtime),
+        label="upstream error payload",
+        status_code=status_code,
+        url=url,
+        trace_id=trace_id,
+        path=error_path,
+    )
+    err_text = err_raw.decode("utf-8", "replace")
+    services.infrastructure.logger.warning(
+        "curl sse non-2xx status=%s url=%s body=%.1000s "
+        "trace_id=%s x_request_id=%s",
+        status_code,
+        url,
+        err_text,
+        trace_id,
+        response_headers.get("x-request-id"),
+    )
+    try:
+        payload = json.loads(err_text)
+    except Exception:  # noqa: BLE001
+        payload = {"raw": err_text[:2000]}
+    raise services.core.with_error_context(
+        services.core.parse_error(
+            payload if isinstance(payload, dict) else {},
+            status_code or 0,
+        ),
+        path=error_path,
+        method="POST",
+        url=url,
+    )
+
+
+async def _non_sse_json_event(
+    reader: _CurlSSEReader,
+    process: CurlSSEProcess,
+    *,
+    services: UpstreamServices,
+    allow_non_sse_payload: bool,
+    response_headers: dict[str, str],
+    status_code: int,
+    url: str,
+    trace_id: str,
+    error_path: str,
+    runtime: ImageUpstreamRuntime | None,
+) -> dict[str, Any] | None:
+    if not allow_non_sse_payload:
+        return None
+    content_type = response_headers.get("content-type", "")
+    if "text/event-stream" in content_type.lower():
+        return None
+    body_bytes = await reader.drain(
+        max_bytes=_json_response_limit(runtime=runtime),
+        label="non-sse json payload",
+        status_code=status_code,
+        url=url,
+        trace_id=trace_id,
+        path=error_path,
+    )
+    body_text = body_bytes.decode("utf-8", errors="replace")
+    try:
+        json_payload = json.loads(body_text)
+    except Exception as exc:  # noqa: BLE001
+        raise services.infrastructure.UpstreamError(
+            f"non-sse payload is not valid JSON: {exc}",
+            status_code=status_code,
+            error_code=services.infrastructure.EC.BAD_RESPONSE.value,
+            payload={
+                "path": error_path,
+                "method": "POST",
+                "url": url,
+                "x_trace_id": trace_id,
+                "content_type": content_type,
+                "body_summary": body_text[:200],
+            },
+        ) from exc
+    rc = await process.wait()
+    if rc != 0:
+        stderr_s = await _curl_stderr_text(process.stderr_task)
+        services.infrastructure.logger.debug(
+            "curl json fallback exited rc=%s stderr=%.500s",
+            rc,
+            stderr_s,
+        )
+    return {
+        "type": services.core.JSON_PAYLOAD_SENTINEL_TYPE,
+        "payload": json_payload,
+        "content_type": content_type,
+    }
+
+
+async def _raise_if_curl_sse_process_failed(
+    process: CurlSSEProcess,
+    *,
+    services: UpstreamServices,
+) -> None:
+    rc = await process.wait()
+    if rc == 0:
+        return
+    stderr_s = await _curl_stderr_text(process.stderr_task)
+    raise services.infrastructure.UpstreamError(
+        f"curl sse exited rc={rc} stderr={stderr_s[:500]}",
+        error_code=services.infrastructure.EC.SSE_CURL_FAILED.value,
+        status_code=200,
+    )
+
+
 async def _iter_sse_curl(
     *,
     url: str,
@@ -768,6 +803,8 @@ async def _iter_sse_curl(
     allow_non_sse_payload: bool = False,
     on_dispatch_ready: DispatchReadyHook | None = None,
     on_response_ready: ResponseReadyHook | None = None,
+    on_response_head: ResponseHeadHook | None = None,
+    response_context: CurlSSEResponseContext | None = None,
     runtime: ImageUpstreamRuntime | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream a curl POST and parse bounded SSE or an allowed JSON fallback.
@@ -776,6 +813,7 @@ async def _iter_sse_curl(
     context, curl binary selection, and process cleanup.
     """
     services = _runtime_services(runtime)
+    response_context = response_context or CurlSSEResponseContext()
     trace_id = headers.get("x-trace-id") or services.core.generate_trace_id()
     fd, body_path = _secure_mkstemp(
         prefix="lumen_sse_body_",
@@ -837,94 +875,43 @@ async def _iter_sse_curl(
             services=services,
         )
         final_status = status_code
+        if on_response_head is not None:
+            await on_response_head(status_code, response_headers)
 
         if not 200 <= status_code < 300:
-            err_raw = await reader.drain(
-                max_bytes=_error_response_limit(runtime=runtime),
-                label="upstream error payload",
+            await _raise_curl_sse_http_error(
+                reader,
+                services=services,
                 status_code=status_code,
+                response_headers=response_headers,
                 url=url,
                 trace_id=trace_id,
-            )
-            err_text = err_raw.decode("utf-8", "replace")
-            services.infrastructure.logger.warning(
-                "curl sse non-2xx status=%s url=%s body=%.1000s "
-                "trace_id=%s x_request_id=%s",
-                status_code,
-                url,
-                err_text,
-                trace_id,
-                response_headers.get("x-request-id"),
-            )
-            try:
-                payload = json.loads(err_text)
-            except Exception:  # noqa: BLE001
-                payload = {"raw": err_text[:2000]}
-            raise services.core.with_error_context(
-                services.core.parse_error(
-                    payload if isinstance(payload, dict) else {},
-                    status_code or 0,
-                ),
-                path="responses",
-                method="POST",
-                url=url,
+                error_path=response_context.error_path,
+                runtime=runtime,
             )
         if on_response_ready is not None:
             await on_response_ready()
 
-        if allow_non_sse_payload:
-            content_type = response_headers.get("content-type", "")
-            if "text/event-stream" not in content_type.lower():
-                body_bytes = await reader.drain(
-                    max_bytes=_json_response_limit(runtime=runtime),
-                    label="non-sse json payload",
-                    status_code=status_code,
-                    url=url,
-                    trace_id=trace_id,
-                )
-                body_text = body_bytes.decode("utf-8", errors="replace")
-                try:
-                    json_payload = json.loads(body_text)
-                except Exception as exc:  # noqa: BLE001
-                    raise services.infrastructure.UpstreamError(
-                        f"non-sse payload is not valid JSON: {exc}",
-                        status_code=status_code,
-                        error_code=services.infrastructure.EC.BAD_RESPONSE.value,
-                        payload={
-                            "path": "responses",
-                            "method": "POST",
-                            "url": url,
-                            "x_trace_id": trace_id,
-                            "content_type": content_type,
-                            "body_summary": body_text[:200],
-                        },
-                    ) from exc
-                yield {
-                    "type": services.core.JSON_PAYLOAD_SENTINEL_TYPE,
-                    "payload": json_payload,
-                    "content_type": content_type,
-                }
-                rc = await process.wait()
-                if rc != 0:
-                    stderr_s = await _curl_stderr_text(process.stderr_task)
-                    services.infrastructure.logger.debug(
-                        "curl json fallback exited rc=%s stderr=%.500s",
-                        rc,
-                        stderr_s,
-                    )
-                return
+        fallback_event = await _non_sse_json_event(
+            reader,
+            process,
+            services=services,
+            allow_non_sse_payload=allow_non_sse_payload,
+            response_headers=response_headers,
+            status_code=status_code,
+            url=url,
+            trace_id=trace_id,
+            error_path=response_context.error_path,
+            runtime=runtime,
+        )
+        if fallback_event is not None:
+            yield fallback_event
+            return
 
         async for event in _iter_curl_sse_events(reader, services=services):
             yield event
 
-        rc = await process.wait()
-        if rc != 0:
-            stderr_s = await _curl_stderr_text(process.stderr_task)
-            raise services.infrastructure.UpstreamError(
-                f"curl sse exited rc={rc} stderr={stderr_s[:500]}",
-                error_code=services.infrastructure.EC.SSE_CURL_FAILED.value,
-                status_code=200,
-            )
+        await _raise_if_curl_sse_process_failed(process, services=services)
     except asyncio.CancelledError:
         raise
     except services.infrastructure.UpstreamError as exc:
@@ -941,7 +928,7 @@ async def _iter_sse_curl(
         duration_ms = (time.monotonic() - started) * 1000.0
         try:
             services.core.log_upstream_call(
-                endpoint="responses",
+                endpoint=response_context.endpoint_label,
                 status=final_status,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
