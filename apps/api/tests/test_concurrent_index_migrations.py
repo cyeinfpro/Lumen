@@ -49,6 +49,7 @@ TELEGRAM_EFFECT_REVISION = "0062_tg_control_effect_fence"
 STORAGE_RETRY_REVISION = "0063_storage_apply_retry_fence"
 TELEGRAM_TERMINAL_GUARD_REVISION = "0064_tg_effect_terminal_guard"
 SEEDANCE_25_REVISION = "0065_seedance_25_defaults"
+SEEDANCE_DURATION_ONLINE_REVISION = "0066_seedance_duration_online"
 
 
 @dataclass(frozen=True)
@@ -564,6 +565,7 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     storage_retry = scripts.get_revision(STORAGE_RETRY_REVISION)
     telegram_terminal_guard = scripts.get_revision(TELEGRAM_TERMINAL_GUARD_REVISION)
     seedance_25 = scripts.get_revision(SEEDANCE_25_REVISION)
+    seedance_duration_online = scripts.get_revision(SEEDANCE_DURATION_ONLINE_REVISION)
 
     assert repair is not None
     assert repair.down_revision == "0056_outbox_due_index"
@@ -583,7 +585,9 @@ def test_repair_revision_remains_in_the_single_head_chain() -> None:
     assert telegram_terminal_guard.down_revision == STORAGE_RETRY_REVISION
     assert seedance_25 is not None
     assert seedance_25.down_revision == TELEGRAM_TERMINAL_GUARD_REVISION
-    assert scripts.get_heads() == [SEEDANCE_25_REVISION]
+    assert seedance_duration_online is not None
+    assert seedance_duration_online.down_revision == SEEDANCE_25_REVISION
+    assert scripts.get_heads() == [SEEDANCE_DURATION_ONLINE_REVISION]
 
 
 @pytest.mark.parametrize(
