@@ -16,6 +16,7 @@ from app.canvas_services import asset_ref_service
 from app.config import settings
 from app.images.application import http_routes as images
 from app.images.application.storage_maintenance import sweep_orphan_image_files
+from app.images.application.upload import UploadCommandError
 from app.images.domain.variants import VIDEO_REFERENCE_VARIANT
 from lumen_core.volcano_asset_media import VOLCANO_ASSET_IMAGE_KIND
 from lumen_core.models import AuditLog, Image
@@ -272,18 +273,23 @@ def test_upload_write_falls_back_when_hardlink_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_upload_route_delegates_commit_recovery_to_command_service() -> None:
+async def test_upload_route_maps_command_error_and_rolls_back_request_session() -> None:
     class _FailingService:
         async def execute(self, **_kwargs: Any) -> Any:
-            raise RuntimeError("commit outcome unresolved")
+            raise UploadCommandError(
+                "upload_commit_unknown",
+                "image upload commit outcome is unknown",
+                503,
+            )
 
     async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    with pytest.raises(RuntimeError, match="commit outcome unresolved"):
+    db = _Db(None)
+    with pytest.raises(HTTPException) as exc_info:
         await images.upload_image_impl(
             SimpleNamespace(id="user-1"),
-            object(),  # type: ignore[arg-type]
+            db,  # type: ignore[arg-type]
             file=_UploadFile(_png_bytes("RGB", (16, 16), (10, 20, 30))),  # type: ignore[arg-type]
             purpose=None,
             reference_width=None,
@@ -293,6 +299,15 @@ async def test_upload_route_delegates_commit_recovery_to_command_service() -> No
             upload_command_service=_FailingService(),  # type: ignore[arg-type]
             image_out=_unexpected_image_out,
         )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == {
+        "error": {
+            "code": "upload_commit_unknown",
+            "message": "image upload commit outcome is unknown",
+        }
+    }
+    assert db.rolled_back
 
 
 def test_binary_open_rejects_final_symlink(tmp_path: Path) -> None:
@@ -400,10 +415,109 @@ async def test_upload_image_passes_volcano_asset_dimension_policy() -> None:
     assert captured["policy"].max_long_side == images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
 
 
+@pytest.mark.asyncio
+async def test_upload_image_passes_seedance_video_reference_policy() -> None:
+    captured: dict[str, Any] = {}
+
+    async def no_rate_limit(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    class _CaptureService:
+        async def execute(self, **kwargs: Any) -> Image:
+            captured["policy"] = kwargs["policy"]
+            raise RuntimeError("stop after policy")
+
+    db = _Db(None)
+    with pytest.raises(RuntimeError, match="stop after policy"):
+        await images.upload_image_impl(
+            SimpleNamespace(id="user-1"),
+            db,  # type: ignore[arg-type]
+            file=SimpleNamespace(filename="mask.png"),  # type: ignore[arg-type]
+            purpose="video_reference",
+            reference_width=None,
+            reference_height=None,
+            check_upload_rate_limit=no_rate_limit,
+            ensure_storage_free_space=lambda _size: None,
+            upload_command_service=_CaptureService(),  # type: ignore[arg-type]
+            image_out=_unexpected_image_out,
+        )
+
+    policy = captured["policy"]
+    assert policy.purpose == images.VIDEO_REFERENCE_UPLOAD_PURPOSE
+    assert policy.max_bytes == 30 * 1024 * 1024 - 1
+    assert policy.max_bytes < images.MAX_BYTES
+    assert policy.min_side == 300
+    assert policy.max_long_side == 6000
+    assert policy.max_long_side != images.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+    assert policy.min_aspect_ratio == 0.4
+    assert policy.max_aspect_ratio == 2.5
+    assert policy.mask_requested is False
+    assert {
+        "image/bmp",
+        "image/tiff",
+        "image/gif",
+        "image/heic",
+        "image/heif",
+    } <= policy.normalizable_mime
+    assert db.rolled_back
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        (300, 300),
+        (300, 750),
+        (750, 300),
+        (2400, 6000),
+        (6000, 2400),
+    ],
+)
+def test_video_reference_policy_accepts_official_dimension_boundaries(
+    size: tuple[int, int],
+) -> None:
+    policy = images._build_upload_policy(
+        purpose="video_reference",
+        filename="reference.png",
+        reference_size=None,
+    )
+
+    policy.validate_dimensions(*size)
+
+
+@pytest.mark.parametrize(
+    ("size", "expected_code"),
+    [
+        ((299, 300), "video_reference_dimensions_unsupported"),
+        ((300, 299), "video_reference_dimensions_unsupported"),
+        ((300, 751), "video_reference_aspect_ratio_unsupported"),
+        ((751, 300), "video_reference_aspect_ratio_unsupported"),
+    ],
+)
+def test_video_reference_policy_rejects_official_dimension_violations(
+    size: tuple[int, int],
+    expected_code: str,
+) -> None:
+    policy = images._build_upload_policy(
+        purpose="video_reference",
+        filename="reference.png",
+        reference_size=None,
+    )
+
+    with pytest.raises(UploadCommandError) as exc_info:
+        policy.validate_dimensions(*size)
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.status_code == 400
+
+
 def test_mask_filename_requests_strict_preflight() -> None:
     assert images._upload_requests_mask_preflight(None, "mask.png")
     assert images._upload_requests_mask_preflight(None, "mask_123.png")
     assert images._upload_requests_mask_preflight("inpaint_mask", "photo.png")
+    assert not images._upload_requests_mask_preflight(
+        "video_reference",
+        "mask.png",
+    )
     assert not images._upload_requests_mask_preflight(None, "reference.png")
 
 
@@ -497,9 +611,7 @@ async def test_reference_image_binary_serves_video_reference_variant(
         id="image-1",
         metadata_jsonb={
             "video_reference_access_token": "x" * 16,
-            "video_reference_access_token_expires_at": (
-                "2099-01-01T00:00:00+00:00"
-            ),
+            "video_reference_access_token_expires_at": ("2099-01-01T00:00:00+00:00"),
         },
         storage_key="u/user-1/uploads/image-1.png",
         mime="image/png",
@@ -557,9 +669,7 @@ async def test_reference_image_binary_serves_volcano_asset_variant(
         id="image-1",
         metadata_jsonb={
             "video_reference_access_token": "x" * 16,
-            "video_reference_access_token_expires_at": (
-                "2099-01-01T00:00:00+00:00"
-            ),
+            "video_reference_access_token_expires_at": ("2099-01-01T00:00:00+00:00"),
         },
         storage_key="u/user-1/uploads/image-1.png",
         mime="image/png",

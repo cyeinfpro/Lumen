@@ -8,7 +8,6 @@ from dataclasses import replace
 from typing import Any
 
 from ...task_cancellation import scoped_cancellation_requested
-from .admission import WeightedPermit, renew_weighted_permit
 from .errors import LeaseLost
 from .queue import (
     IMAGE_QUEUE_ACTIVE_KEY,
@@ -234,7 +233,6 @@ async def _renew_generation_lease_once(
     ttl_s: float,
     extra_lease_keys: list[str] | None,
     image_provider_name: str | None,
-    weighted_permit: WeightedPermit | None,
 ) -> bool:
     renewed = await redis.eval(
         RENEW_LEASE_LUA,
@@ -256,15 +254,6 @@ async def _renew_generation_lease_once(
             image_provider_name=image_provider_name,
             ttl_s=ttl_s,
         )
-    if weighted_permit is not None:
-        seconds, microseconds = await redis.time()
-        redis_now = float(seconds) + (float(microseconds) / 1_000_000.0)
-        if not await renew_weighted_permit(
-            redis,
-            permit=weighted_permit,
-            expiry=redis_now + ttl_s,
-        ):
-            return False
     return True
 
 
@@ -276,7 +265,6 @@ async def lease_renewer(
     *,
     extra_lease_keys: list[str] | None = None,
     image_provider_name: str | None = None,
-    weighted_permit: WeightedPermit | None = None,
     monotonic: Callable[[], float] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
 ) -> None:
@@ -308,7 +296,6 @@ async def lease_renewer(
                         ttl_s=ttl_s,
                         extra_lease_keys=extra_lease_keys,
                         image_provider_name=image_provider_name,
-                        weighted_permit=weighted_permit,
                     ),
                     timeout=remaining_s,
                 )

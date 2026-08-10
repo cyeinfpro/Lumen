@@ -87,6 +87,14 @@ INSTALL = ROOT / "scripts" / "install.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
 RESTORE = ROOT / "scripts" / "restore.sh"
 ADMIN_RELEASE = ROOT / "apps" / "api" / "app" / "routes" / "admin_release.py"
+ADMIN_ROLLBACK_SCRIPT = (
+    ROOT
+    / "apps"
+    / "api"
+    / "app"
+    / "routes"
+    / "admin_release_rollback_script.py"
+)
 
 
 def lib_source_text() -> str:
@@ -2633,25 +2641,24 @@ def test_release_shared_env_fails_when_no_env_source(tmp_path: Path) -> None:
 
 
 def test_rollback_script_validates_compose_env_before_compose_up() -> None:
-    text = ADMIN_RELEASE.read_text(encoding="utf-8")
-    assert '. "$ROOT/current/scripts/lib.sh"' in text
-    assert 'SHARED_ENV="$ROOT/shared/.env"' in text
-    assert 'TARGET_IMAGE_TAG="$(head -n1 "$ROOT/current/.image-tag"' in text
-    assert 'lumen_set_image_tag_in_env "$SHARED_ENV" "$TARGET_IMAGE_TAG"' in text
+    route_text = ADMIN_RELEASE.read_text(encoding="utf-8")
+    script_text = ADMIN_ROLLBACK_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'SHARED_ENV="$ROOT/shared/.env"' in script_text
+    assert 'set_env_value "$SHARED_ENV" LUMEN_IMAGE_TAG "$tag"' in script_text
+    assert 'set_env_value "$SHARED_ENV" LUMEN_VERSION "$version"' in script_text
     assert (
-        'lumen_set_env_value_in_file "$SHARED_ENV" LUMEN_VERSION "$TARGET_VERSION"'
-        in text
+        'if ! apply_release_env "$TARGET" || ! apply_compose_release "$TARGET"; then'
+        in script_text
     )
-    assert 'lumen_ensure_compose_db_env_vars "$ROOT/current/.env"' in text
-    assert (
-        "compose env validation failed; rollback continues but containers may be stale"
-        in text
+    assert 'compose_command "$id" up -d --wait api worker web' in script_text
+    assert script_text.index('apply_release_env "$TARGET"') < script_text.index(
+        'apply_compose_release "$TARGET"'
     )
-    assert 'cd "$ROOT/current" && docker compose up -d --wait' in text
-    assert "SystemOperationLockService(" in text
-    assert "maintenance_marker_busy()" in text
-    assert "await asyncio.to_thread(_start_rollback_subprocess" not in text
-    assert "asyncio.to_thread(update_list_releases, limit=None)" in text
+    assert "SystemOperationLockService(" in route_text
+    assert "maintenance_marker_busy()" in route_text
+    assert "await asyncio.to_thread(_start_rollback_subprocess" not in route_text
+    assert "asyncio.to_thread(update_list_releases, limit=None)" in route_text
 
 
 def _prepare_lumenctl_rollback_layout(

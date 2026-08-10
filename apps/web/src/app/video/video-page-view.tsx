@@ -47,6 +47,10 @@ import {
 import {
   PROMPT_CHIPS,
 } from "./video-page-domain";
+import type {
+  NormalizedVideoImageConstraints,
+  VideoEstimate,
+} from "./video-options-model";
 import {
   promptContainsReferenceMention,
   referenceKindNoun,
@@ -57,8 +61,6 @@ import type {
   VolcanoAssetReferenceCandidate,
 } from "./video-reference-domain";
 import { VolcanoAssetManager } from "./volcano-asset-manager";
-
-type VideoEstimate = { tokens: number; micro: number } | null;
 
 export type VideoPageViewModel = {
   header: {
@@ -76,11 +78,13 @@ export type VideoPageViewModel = {
   };
   composer: {
     action: VideoAction;
+    actionOptions: VideoAction[];
     onActionChange: (action: VideoAction) => void;
     firstFrame: {
       pending: boolean;
       inputImageId: string;
       uploadedLabel: string;
+      imageConstraints: NormalizedVideoImageConstraints | null;
       onFile: (file: File) => void;
       onInputImageIdChange: (value: string) => void;
     };
@@ -88,6 +92,9 @@ export type VideoPageViewModel = {
       pending: boolean;
       counts: ReferenceLimits;
       limits: ReferenceLimits;
+      total: number;
+      totalLimit: number | null;
+      imageConstraints: NormalizedVideoImageConstraints | null;
       items: ReferenceDraft[];
       prompt: string;
       kindOptions: ReferenceKind[];
@@ -123,6 +130,7 @@ export type VideoPageViewModel = {
   parameters: {
     selectedModel: string;
     modelOptions: string[];
+    modelOptionLabels: Record<string, string>;
     durationS: number;
     durationOptions: string[];
     resolution: string;
@@ -131,7 +139,8 @@ export type VideoPageViewModel = {
     aspectRatioOptions: string[];
     seed: string;
     generateAudio: boolean;
-    estimate: VideoEstimate;
+    audioSupported: boolean;
+    estimate: VideoEstimate | null;
     canSubmit: boolean;
     reason: string;
     loading: boolean;
@@ -192,9 +201,11 @@ export type VideoPageViewModel = {
 
 function ModeSelector({
   action,
+  actionOptions,
   onActionChange,
 }: {
   action: VideoAction;
+  actionOptions: VideoAction[];
   onActionChange: (action: VideoAction) => void;
 }) {
   return (
@@ -210,8 +221,13 @@ function ModeSelector({
           {MODE_COPY[action].requirement}
         </span>
       </div>
-      <div className="grid min-w-0 grid-cols-[repeat(3,minmax(0,1fr))] gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/74 p-1">
-        {(Object.keys(MODE_COPY) as VideoAction[]).map((key) => (
+      <div
+        className="grid min-w-0 gap-1 rounded-[var(--radius-card)] border border-[var(--border-subtle)] bg-[var(--bg-0)]/74 p-1"
+        style={{
+          gridTemplateColumns: `repeat(${Math.max(actionOptions.length, 1)}, minmax(0, 1fr))`,
+        }}
+      >
+        {actionOptions.map((key) => (
           <ModeCard
             key={key}
             actionKey={key}
@@ -220,9 +236,51 @@ function ModeSelector({
             onSelect={() => onActionChange(key)}
           />
         ))}
+        {actionOptions.length === 0 && (
+          <span className="px-3 py-2 text-center type-caption text-[var(--fg-2)]">
+            暂无可用生成方式
+          </span>
+        )}
       </div>
     </div>
   );
+}
+
+function imageConstraintSummary(
+  constraints: NormalizedVideoImageConstraints | null,
+): string | null {
+  if (!constraints) return null;
+  const parts: string[] = [];
+  const minSide = Math.max(
+    constraints.minWidthPx ?? 0,
+    constraints.minHeightPx ?? 0,
+  );
+  const maxSide = Math.min(
+    constraints.maxWidthPx ?? Number.POSITIVE_INFINITY,
+    constraints.maxHeightPx ?? Number.POSITIVE_INFINITY,
+  );
+  if (minSide > 0 && Number.isFinite(maxSide)) {
+    parts.push(`${minSide}-${maxSide}px`);
+  } else if (minSide > 0) {
+    parts.push(`至少 ${minSide}px`);
+  } else if (Number.isFinite(maxSide)) {
+    parts.push(`不超过 ${maxSide}px`);
+  }
+  if (constraints.maxBytes) {
+    const megabytes = constraints.maxBytes / 1024 / 1024;
+    parts.push(
+      `< ${Number.isInteger(megabytes) ? megabytes : megabytes.toFixed(1)} MB`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function imageAcceptValue(
+  constraints: NormalizedVideoImageConstraints | null,
+): string {
+  return constraints?.mimeTypes.length
+    ? constraints.mimeTypes.join(",")
+    : "image/png,image/jpeg,image/webp,image/mpo";
 }
 
 function FirstFrameSection({
@@ -231,12 +289,13 @@ function FirstFrameSection({
   model: VideoPageViewModel["composer"]["firstFrame"];
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const constraintSummary = imageConstraintSummary(model.imageConstraints);
   return (
     <section className="surface-section overflow-hidden">
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/png,image/jpeg,image/webp,image/mpo"
+        accept={imageAcceptValue(model.imageConstraints)}
         className="hidden"
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -250,7 +309,7 @@ function FirstFrameSection({
           <p className="type-body-sm font-semibold text-[var(--fg-0)]">首帧素材</p>
         </div>
         <span className="type-caption text-[var(--fg-2)]">
-          用图片锁定构图与起始状态
+          {constraintSummary || "用图片锁定构图与起始状态"}
         </span>
       </div>
       <div className="grid gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,0.42fr)] lg:items-end">
@@ -274,7 +333,7 @@ function FirstFrameSection({
             <span className="mt-1 block truncate type-caption text-[var(--fg-2)]">
               {model.uploadedLabel || model.inputImageId
                 ? model.uploadedLabel || "已填写图片 ID"
-                : "PNG、JPEG、WEBP"}
+                : constraintSummary || "PNG、JPEG、WEBP"}
             </span>
           </span>
         </button>
@@ -300,12 +359,13 @@ function ReferenceSection({
   model: VideoPageViewModel["composer"]["references"];
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const constraintSummary = imageConstraintSummary(model.imageConstraints);
   return (
     <section className="surface-section overflow-hidden">
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/png,image/jpeg,image/webp,image/mpo,video/mp4,video/quicktime"
+        accept={`${imageAcceptValue(model.imageConstraints)},video/mp4,video/quicktime`}
         className="hidden"
         onChange={(event) => {
           const file = event.target.files?.[0];
@@ -328,6 +388,11 @@ function ReferenceSection({
           <span>
             音频 {model.counts.audio}/{model.limits.audio}
           </span>
+          {model.totalLimit !== null && (
+            <span>
+              总计 {model.total}/{model.totalLimit}
+            </span>
+          )}
         </div>
       </div>
       <div className="space-y-3 p-3">
@@ -352,7 +417,9 @@ function ReferenceSection({
             火山素材库
           </Button>
           <p className="min-w-0 flex-1 type-caption leading-5 text-[var(--fg-2)]">
-            点击素材可预览，点击文字可插入引用。
+            {constraintSummary
+              ? `参考图 ${constraintSummary}。点击素材可预览。`
+              : "点击素材可预览，点击文字可插入引用。"}
           </p>
         </div>
         <div className="flex min-w-0 gap-2 overflow-x-auto pb-1">
@@ -623,6 +690,7 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
             <div className="flex flex-col overflow-hidden border-y border-[var(--border)] bg-transparent">
               <ModeSelector
                 action={model.composer.action}
+                actionOptions={model.composer.actionOptions}
                 onActionChange={model.composer.onActionChange}
               />
               <div className="space-y-3 p-3 sm:p-4 md:pb-5 lg:pb-6">
@@ -639,6 +707,7 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
             className="scroll-mt-20 pb-[calc(var(--mobile-tabbar-height)+1rem)] min-[1120px]:sticky min-[1120px]:top-[76px] min-[1120px]:pb-0"
             selectedModel={model.parameters.selectedModel}
             modelOptions={model.parameters.modelOptions}
+            modelOptionLabels={model.parameters.modelOptionLabels}
             durationS={model.parameters.durationS}
             durationOptions={model.parameters.durationOptions}
             resolution={model.parameters.resolution}
@@ -647,6 +716,7 @@ export function VideoPageView({ model }: { model: VideoPageViewModel }) {
             aspectRatioOptions={model.parameters.aspectRatioOptions}
             seed={model.parameters.seed}
             generateAudio={model.parameters.generateAudio}
+            audioSupported={model.parameters.audioSupported}
             estimate={model.parameters.estimate}
             canSubmit={model.parameters.canSubmit}
             reason={model.parameters.reason}

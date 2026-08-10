@@ -7,10 +7,20 @@ import pytest
 
 from lumen_core.providers import ProviderProxyDefinition
 from lumen_core.video_providers import (
+    SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES,
+    VIDEO_ACTIONS,
     VideoProviderDefinition,
+    is_seedance_25_identifier,
     parse_video_provider_config_json,
     parse_video_provider_item,
+    seedance_25_reference_image_is_valid,
     seedance_20_variant,
+    seedance_allowed_actions,
+    seedance_allowed_resolutions,
+    seedance_allows_audio_only_reference,
+    seedance_duration_is_valid,
+    seedance_model_version,
+    seedance_reference_media_limits,
     select_video_provider,
     video_provider_binding_fingerprint,
     video_reference_media_limits,
@@ -127,6 +137,109 @@ def test_seedance_20_variant_rejects_substring_false_positives(
     identifier: str,
 ) -> None:
     assert seedance_20_variant(identifier) is None
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "seedance-2.5",
+        "doubao-seedance-2-5-260628",
+        "dreamina-seedance-2-5-260628",
+        "video-ds-2.5",
+        "namespace/doubao-seedance-2-5-260628",
+    ],
+)
+def test_seedance_25_identifier_matches_supported_tokens(identifier: str) -> None:
+    assert is_seedance_25_identifier(identifier) is True
+    assert seedance_model_version(identifier) == "2.5"
+    assert seedance_20_variant(identifier) is None
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "not-seedance-2.5",
+        "prefix-doubao-seedance-2-5-260628",
+        "seedance-2.50",
+        "seedance-2.5-preview",
+        "video-ds-2.5-fast",
+    ],
+)
+def test_seedance_25_identifier_rejects_substring_false_positives(
+    identifier: str,
+) -> None:
+    assert is_seedance_25_identifier(identifier) is False
+
+
+def test_seedance_capabilities_add_25_without_changing_20() -> None:
+    seedance_25 = "doubao-seedance-2-5-260628"
+    seedance_20 = "doubao-seedance-2-0-260128"
+
+    assert seedance_allowed_actions(seedance_25) == VIDEO_ACTIONS
+    assert seedance_allowed_resolutions(seedance_25) == ("480p", "720p")
+    assert seedance_duration_is_valid(-1, seedance_25)
+    assert seedance_duration_is_valid(4, seedance_25)
+    assert seedance_duration_is_valid(30, seedance_25)
+    assert not seedance_duration_is_valid(3, seedance_25)
+    assert not seedance_duration_is_valid(31, seedance_25)
+    assert seedance_reference_media_limits(seedance_25) == {
+        "image": 30,
+        "video": 10,
+        "audio": 10,
+    }
+    assert seedance_allows_audio_only_reference(seedance_25) is True
+
+    assert seedance_allowed_actions(seedance_20) == VIDEO_ACTIONS
+    assert seedance_allowed_resolutions(seedance_20) == (
+        "480p",
+        "720p",
+        "1080p",
+        "4k",
+    )
+    assert seedance_duration_is_valid(-1, seedance_20)
+    assert seedance_duration_is_valid(4, seedance_20)
+    assert seedance_duration_is_valid(15, seedance_20)
+    assert not seedance_duration_is_valid(3, seedance_20)
+    assert not seedance_duration_is_valid(16, seedance_20)
+    assert seedance_reference_media_limits(seedance_20) == {
+        "image": 9,
+        "video": 3,
+        "audio": 3,
+    }
+    assert seedance_allows_audio_only_reference(seedance_20) is False
+
+
+def test_seedance_25_reference_image_constraints_match_official_limits() -> None:
+    assert seedance_25_reference_image_is_valid(
+        width=300,
+        height=750,
+        size_bytes=1,
+    )
+    assert seedance_25_reference_image_is_valid(
+        width=6000,
+        height=2400,
+        size_bytes=SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES - 1,
+    )
+    assert not seedance_25_reference_image_is_valid(
+        width=299,
+        height=750,
+        size_bytes=1,
+    )
+    assert not seedance_25_reference_image_is_valid(
+        width=6001,
+        height=2400,
+        size_bytes=1,
+    )
+    assert not seedance_25_reference_image_is_valid(
+        width=300,
+        height=751,
+        size_bytes=1,
+    )
+    assert not seedance_25_reference_image_is_valid(
+        width=6000,
+        height=2400,
+        size_bytes=SEEDANCE_25_REFERENCE_IMAGE_MAX_BYTES,
+    )
 
 
 def test_video_provider_binding_fingerprint_is_stable_and_secret_safe() -> None:
@@ -257,6 +370,22 @@ def test_parse_volcano_provider_rewrites_byteplus_seedance_mini_alias() -> None:
     assert (
         provider.upstream_model_for("seedance-2.0-mini", "t2v")
         == "doubao-seedance-2-0-mini-260615"
+    )
+
+
+def test_parse_volcano_provider_rewrites_byteplus_seedance_25_alias() -> None:
+    provider = parse_video_provider_item(
+        _provider_raw(
+            models={
+                "seedance-2.5:reference": "dreamina-seedance-2-5-260628",
+            }
+        ),
+        index=0,
+    )
+
+    assert (
+        provider.upstream_model_for("seedance-2.5", "reference")
+        == "doubao-seedance-2-5-260628"
     )
 
 

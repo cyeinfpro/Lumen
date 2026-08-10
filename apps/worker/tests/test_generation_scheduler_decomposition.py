@@ -30,7 +30,6 @@ def test_queue_claim_delegates_each_scheduler_control() -> None:
     assert "ready_queue_rank(" in source
     assert "select_provider_candidates(" in source
     assert "filter_avoided_providers(" in source
-    assert "reserve_generation_permit(" in source
     assert "reserve_from_provider_candidates(" in source
     assert "reserve_dual_race_slot(" in source
 
@@ -85,7 +84,6 @@ def test_new_scheduler_modules_do_not_reach_composition_roots() -> None:
     for name in (
         "queue_candidate.py",
         "queue_fairness.py",
-        "queue_permit.py",
         "queue_provider.py",
         "runner_claim_phase.py",
         "runner_dispatch_phase.py",

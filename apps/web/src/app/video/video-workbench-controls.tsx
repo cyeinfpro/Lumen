@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/primitives";
 import { formatRmb } from "@/lib/money";
 import type { VideoAction } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import type { VideoEstimate } from "@/lib/video/optionsModel";
 
 const SMART_VIDEO_DURATION = -1;
 
@@ -29,6 +30,7 @@ export type VideoParameterPanelProps = {
   className?: string;
   selectedModel: string;
   modelOptions: string[];
+  modelOptionLabels: Record<string, string>;
   durationS: number;
   durationOptions: string[];
   resolution: string;
@@ -37,7 +39,8 @@ export type VideoParameterPanelProps = {
   aspectRatioOptions: string[];
   seed: string;
   generateAudio: boolean;
-  estimate: { tokens: number; micro: number } | null;
+  audioSupported: boolean;
+  estimate: VideoEstimate | null;
   canSubmit: boolean;
   reason: string;
   loading: boolean;
@@ -141,6 +144,7 @@ export function VideoParameterPanelView({
   className,
   selectedModel,
   modelOptions,
+  modelOptionLabels,
   durationS,
   durationOptions,
   resolution,
@@ -149,6 +153,7 @@ export function VideoParameterPanelView({
   aspectRatioOptions,
   seed,
   generateAudio,
+  audioSupported,
   estimate,
   canSubmit,
   reason,
@@ -210,6 +215,7 @@ export function VideoParameterPanelView({
             value={selectedModel}
             onChange={onModelChange}
             options={modelOptions}
+            renderOption={(value) => modelOptionLabels[value] || value}
           />
         </section>
 
@@ -238,18 +244,26 @@ export function VideoParameterPanelView({
           />
         </section>
 
-        <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/72 px-3">
+        <label
+          className={cn(
+            "flex min-h-12 min-w-0 items-center justify-between gap-4 rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--bg-0)]/72 px-3",
+            audioSupported ? "cursor-pointer" : "cursor-not-allowed opacity-65",
+          )}
+        >
           <span className="min-w-0">
             <span className="block type-body-sm font-medium text-[var(--fg-0)]">
               生成音频
             </span>
             <span className="mt-0.5 block type-caption text-[var(--fg-2)]">
-              同步生成环境声或对白
+              {audioSupported
+                ? "同步生成环境声或对白"
+                : "当前模型与生成方式不支持音频"}
             </span>
           </span>
           <input
             type="checkbox"
             checked={generateAudio}
+            disabled={!audioSupported}
             onChange={(event) => onGenerateAudioChange(event.target.checked)}
             className="peer sr-only"
           />
@@ -290,12 +304,22 @@ export function VideoParameterPanelView({
             </p>
           </div>
           <div className="min-w-0 border-l border-[var(--border-subtle)] pl-3">
-            <p className="type-caption text-[var(--fg-2)]">Token 上限</p>
+            <p className="type-caption text-[var(--fg-2)]">计费单价</p>
             <p className="mt-1 truncate type-body-sm font-semibold tabular-nums text-[var(--fg-0)]">
-              {estimate ? estimate.tokens.toLocaleString() : "-"}
+              {estimate
+                ? `${formatRmb(estimate.unitPriceMicro / 1_000_000)} / 百万 Token`
+                : "-"}
             </p>
           </div>
         </div>
+        <p
+          className="mb-3 truncate type-caption tabular-nums text-[var(--fg-2)]"
+          title={estimate?.note ?? undefined}
+        >
+          {estimate
+            ? `Token 上限 ${estimate.tokens.toLocaleString()}${estimate.note ? ` · ${estimate.note}` : ""}`
+            : "价格与预扣由服务端配置返回"}
+        </p>
         <SubmitPanel
           canSubmit={canSubmit}
           reason={reason}

@@ -106,7 +106,7 @@ test("reference video ports enforce image and video media limits", () => {
   );
   graph.nodes.push(target);
 
-  for (let index = 0; index < 10; index += 1) {
+  for (let index = 0; index < 31; index += 1) {
     const source = createCanvasNode("image_asset", { x: 0, y: index * 40 }, {
       id: `reference-image-${index}`,
     });
@@ -117,7 +117,7 @@ test("reference video ports enforce image and video media limits", () => {
       targetNodeId: target.id,
       targetHandle: "reference_images",
     });
-    if (index < 9) {
+    if (index < 30) {
       assert.equal(validation.valid, true);
       const edge = createCanvasEdge(graph, {
         sourceNodeId: source.id,
@@ -130,12 +130,12 @@ test("reference video ports enforce image and video media limits", () => {
     } else {
       assert.deepEqual(validation, {
         valid: false,
-        reason: "参考图 最多允许 9 个输入",
+        reason: "参考图 最多允许 30 个输入",
       });
     }
   }
 
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 11; index += 1) {
     const source = createCanvasNode("video_asset", { x: 240, y: index * 80 }, {
       id: `reference-clip-${index}`,
     });
@@ -146,7 +146,7 @@ test("reference video ports enforce image and video media limits", () => {
       targetNodeId: target.id,
       targetHandle: "reference_videos",
     });
-    if (index < 3) {
+    if (index < 10) {
       assert.equal(validation.valid, true);
       const edge = createCanvasEdge(graph, {
         sourceNodeId: source.id,
@@ -159,7 +159,7 @@ test("reference video ports enforce image and video media limits", () => {
     } else {
       assert.deepEqual(validation, {
         valid: false,
-        reason: "参考视频 最多允许 3 个输入",
+        reason: "参考视频 最多允许 10 个输入",
       });
     }
   }

@@ -9,10 +9,14 @@ import pytest
 from lumen_core.upstream_billing import (
     UPSTREAM_DISPATCH_PROVEN_NO_COST,
     UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+    UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+    UPSTREAM_RESPONSE_REQUEST_ID,
+    UPSTREAM_RESPONSE_STATUS_CODE,
+    UPSTREAM_RESPONSE_TRACE_ID,
 )
 
 from app.provider_runtime.errors import UpstreamError
-from app.tasks.generation_parts import runner_dispatch_phase
+from app.tasks.generation_parts import retry_state, runner_dispatch_phase
 from app.upstream_clients.image_job_client import ImageJobClientError
 from app.upstream_parts import direct_requests, image_job_failover, image_jobs
 from app.upstream_parts.image_execution import ImageExecutionRequest
@@ -448,3 +452,126 @@ async def test_runner_rejects_forged_payload_receipt_for_result_unknown(
     )
 
     assert markers == []
+
+
+class _ResponseMarkerResult:
+    def __init__(self, current: object) -> None:
+        self.current = current
+
+    def scalar_one_or_none(self) -> object:
+        return self.current
+
+
+class _ResponseMarkerSession:
+    def __init__(self, current: object) -> None:
+        self.current = current
+        self.commits = 0
+
+    async def __aenter__(self) -> _ResponseMarkerSession:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def execute(self, _statement: object) -> _ResponseMarkerResult:
+        return _ResponseMarkerResult(self.current)
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+class _NoopProgressPublisher:
+    async def __call__(self, _event: dict[str, Any]) -> None:
+        return None
+
+    def pop_provider_used_event(self) -> dict[str, str]:
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_response_received_event_persists_allowlisted_diagnostics() -> None:
+    current = SimpleNamespace(upstream_request={})
+    session = _ResponseMarkerSession(current)
+    state = SimpleNamespace(
+        services=SimpleNamespace(
+            store=SimpleNamespace(session=lambda: session),
+            events=object(),
+            provider=object(),
+        ),
+        generation=SimpleNamespace(execution_epoch=4),
+        task_id="gen-response-receipt",
+        user_id="user-1",
+        attempt=2,
+        gen_upstream_request_snapshot={},
+    )
+    publisher = runner_dispatch_phase._EpochGuardedProgressPublisher(  # noqa: SLF001
+        state,
+        _NoopProgressPublisher(),
+    )
+
+    await publisher(
+        {
+            "type": "response_received",
+            UPSTREAM_RESPONSE_STATUS_CODE: 503,
+            UPSTREAM_RESPONSE_REQUEST_ID: " req-final\r\n",
+            UPSTREAM_RESPONSE_TRACE_ID: "trace-final",
+            UPSTREAM_RESPONSE_HTTP_ATTEMPTS: 2,
+            "authorization": "Bearer must-not-persist",
+            "response_body": "must-not-persist",
+        }
+    )
+
+    request = current.upstream_request
+    assert session.commits == 1
+    assert request["upstream_response_received_at"]
+    assert request[UPSTREAM_RESPONSE_STATUS_CODE] == 503
+    assert request[UPSTREAM_RESPONSE_REQUEST_ID] == "req-final"
+    assert request[UPSTREAM_RESPONSE_TRACE_ID] == "trace-final"
+    assert request[UPSTREAM_RESPONSE_HTTP_ATTEMPTS] == 2
+    assert "authorization" not in request
+    assert "response_body" not in request
+    assert state.gen_upstream_request_snapshot == request
+
+
+@pytest.mark.asyncio
+async def test_direct_result_unknown_code_reaches_persistent_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def capture_finalizer(
+        _state: object,
+        *,
+        status: str,
+        code: str,
+        error_message: str,
+        allow_cancel_requested: bool,
+    ) -> None:
+        captured.update(
+            {
+                "status": status,
+                "code": code,
+                "error_message": error_message,
+                "allow_cancel_requested": allow_cancel_requested,
+            }
+        )
+
+    monkeypatch.setattr(
+        retry_state,
+        "_finalize_generation_unknown",
+        capture_finalizer,
+    )
+
+    await retry_state.finalize_generation_result_unknown(
+        object(),
+        UpstreamError(
+            "final direct result is unknown",
+            status_code=503,
+            error_code="direct_image_result_unknown",
+        ),
+    )
+
+    assert captured["status"] == "failed"
+    assert captured["code"] == "direct_image_result_unknown"
+    assert captured["error_message"] == "final direct result is unknown"
+    assert captured["allow_cancel_requested"] is False

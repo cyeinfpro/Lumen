@@ -48,7 +48,6 @@ from app import runtime_settings
 from app.storage import LocalStorage, StorageDiskFullError, StoragePutResult
 
 from app.tasks.generation_parts import (
-    admission as generation_admission,
     image_artifact_contracts,
     lease as generation_lease,
     lifecycle,
@@ -279,13 +278,6 @@ class FakeRedis:
 
     async def eval(self, *args: Any) -> int:
         script = args[0]
-        if script == generation_admission.RESERVE_WEIGHTED_PERMIT_LUA:
-            return 1
-        if script in {
-            generation_admission.RELEASE_WEIGHTED_PERMIT_LUA,
-            generation_admission.RENEW_WEIGHTED_PERMIT_LUA,
-        }:
-            return 1
         if script == generation_dispatch.BEGIN_DISPATCH_LUA:
             (
                 active_key,

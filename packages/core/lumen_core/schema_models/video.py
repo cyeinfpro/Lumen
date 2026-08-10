@@ -12,8 +12,11 @@ from ..billing_schemas import MoneyOut
 from ..constants import MAX_PROMPT_CHARS
 from ..url_security import is_private_host
 from ..video_providers import (
-    seedance_20_allowed_resolutions,
-    seedance_20_duration_is_valid,
+    seedance_allowed_actions,
+    seedance_allowed_resolutions,
+    seedance_allows_audio_only_reference,
+    seedance_duration_is_valid,
+    seedance_reference_media_limits,
 )
 from ..video_schema_validation import (
     validate_video_create,
@@ -127,7 +130,7 @@ class VideoCreateIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     input_image_id: str | None = Field(default=None, max_length=36)
     reference_media: list[VideoReferenceMediaIn] = Field(default_factory=list)
-    duration_s: int = Field(ge=-1, le=15)
+    duration_s: int = Field(ge=-1, le=30)
     resolution: VideoResolution
     aspect_ratio: VideoAspectRatio
     generate_audio: bool = True
@@ -141,8 +144,11 @@ class VideoCreateIn(BaseModel):
             self,
             reference_id_re=_VIDEO_REFERENCE_ID_RE,
             anchor_candidate_re=_VIDEO_REFERENCE_ANCHOR_CANDIDATE_RE,
-            allowed_resolutions=seedance_20_allowed_resolutions,
-            duration_is_valid=seedance_20_duration_is_valid,
+            allowed_resolutions=seedance_allowed_resolutions,
+            duration_is_valid=seedance_duration_is_valid,
+            allowed_actions=seedance_allowed_actions,
+            reference_media_limits=seedance_reference_media_limits,
+            allows_audio_only_reference=seedance_allows_audio_only_reference,
         )
 
 
@@ -155,6 +161,15 @@ class VideoPriceOptionOut(BaseModel):
     price: MoneyOut
     enabled: bool = True
     note: str | None = None
+
+
+class VideoImageConstraintsOut(BaseModel):
+    min_side_px: int | None = Field(default=None, ge=1)
+    max_side_px: int | None = Field(default=None, ge=1)
+    min_aspect_ratio: float | None = Field(default=None, gt=0)
+    max_aspect_ratio: float | None = Field(default=None, gt=0)
+    max_bytes: int | None = Field(default=None, ge=1)
+    mime_types: list[str] = Field(default_factory=list)
 
 
 class VideoModelOptionOut(BaseModel):
@@ -171,6 +186,10 @@ class VideoModelOptionOut(BaseModel):
     reference_media_limits: dict[Literal["image", "video", "audio"], int] = Field(
         default_factory=dict
     )
+    reference_media_total_limit: int | None = Field(default=None, ge=0)
+    allow_audio_only_reference: bool = False
+    input_image_constraints: VideoImageConstraintsOut | None = None
+    reference_image_constraints: VideoImageConstraintsOut | None = None
 
 
 class VideoOptionsOut(BaseModel):
@@ -240,6 +259,7 @@ __all__ = [
     "VideoReferenceMediaOut",
     "VideoCreateIn",
     "VideoPriceOptionOut",
+    "VideoImageConstraintsOut",
     "VideoModelOptionOut",
     "VideoOptionsOut",
     "VideoGenerationOut",

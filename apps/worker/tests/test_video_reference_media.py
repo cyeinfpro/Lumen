@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app import video_upstream_service as video_upstream_module
+from app import video_upstream_content as video_upstream_content_module
 from app.tasks.video_generation_parts import default_runtime as video_generation_tasks
 from app.tasks.video_generation_parts.default_runtime import (
     _reference_media_bytes,
@@ -640,7 +641,7 @@ async def test_seedance_submit_supports_three_reference_audios_with_visual_media
         )
     )
 
-    assert client.body["content"][0]["text"] == "让 图片1 配合 音频3"
+    assert client.body["content"][0]["text"] == "让 @图片1 配合 @音频3"
     assert [item["role"] for item in client.body["content"][1:]] == [
         "reference_image",
         "reference_audio",
@@ -2358,6 +2359,393 @@ async def test_seedance_submit_forwards_smart_duration() -> None:
     )
 
     assert client.body["duration"] == -1
+
+
+@pytest.mark.asyncio
+async def test_seedance_25_submit_accepts_thirty_second_duration() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.5:t2v": "doubao-seedance-2-5-260628"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-25",
+            user_id="user-1",
+            action="t2v",
+            model="seedance-2.5",
+            upstream_model="doubao-seedance-2-5-260628",
+            prompt="a continuous thirty second scene",
+            duration_s=30,
+            resolution="720p",
+            aspect_ratio="16:9",
+            generate_audio=True,
+        )
+    )
+
+    assert client.body["duration"] == 30
+
+
+@pytest.mark.asyncio
+async def test_seedance_25_submit_rejects_duration_above_thirty_seconds() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.5:t2v": "doubao-seedance-2-5-260628"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+
+    with pytest.raises(VideoUpstreamError, match="between 4 and 30"):
+        await adapter.submit(
+            VideoSubmitRequest(
+                task_id="video-gen-25",
+                user_id="user-1",
+                action="t2v",
+                model="seedance-2.5",
+                upstream_model="doubao-seedance-2-5-260628",
+                prompt="too long",
+                duration_s=31,
+                resolution="720p",
+                aspect_ratio="16:9",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_seedance_25_submit_accepts_official_reference_media_limits() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.5:reference": "doubao-seedance-2-5-260628"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+    references: list[VideoReferenceMedia] = []
+    for index in range(1, 31):
+        references.append(
+            VideoReferenceMedia(
+                kind="image",
+                url=f"asset://seedance-25-image-{index}",
+                ref_id=f"ref:image:{index}",
+            )
+        )
+        if index <= 10:
+            references.extend(
+                [
+                    VideoReferenceMedia(
+                        kind="video",
+                        url=f"asset://seedance-25-video-{index}",
+                        ref_id=f"ref:video:{index}",
+                    ),
+                    VideoReferenceMedia(
+                        kind="audio",
+                        url=f"asset://seedance-25-audio-{index}",
+                        ref_id=f"ref:audio:{index}",
+                    ),
+                ]
+            )
+    prompt = " ".join(f"[ref:image:{index}]" for index in range(1, 31))
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-25",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.5",
+            upstream_model="doubao-seedance-2-5-260628",
+            prompt=prompt,
+            duration_s=30,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            reference_media=references,
+        )
+    )
+
+    prompt_text = client.body["content"][0]["text"]
+    assert prompt_text == " ".join(f"@图片{index}" for index in range(1, 31))
+    assert len(prompt_text.encode("utf-8")) < 512
+
+    reference_content = client.body["content"][1:]
+    roles = [item.get("role") for item in reference_content]
+    assert roles == [
+        {
+            "image": "reference_image",
+            "video": "reference_video",
+            "audio": "reference_audio",
+        }[item.kind]
+        for item in references
+    ]
+    assert roles.count("reference_image") == 30
+    assert roles.count("reference_video") == 10
+    assert roles.count("reference_audio") == 10
+    assert [
+        item["image_url"]["url"]
+        for item in reference_content
+        if item["role"] == "reference_image"
+    ] == [f"asset://seedance-25-image-{index}" for index in range(1, 31)]
+
+
+@pytest.mark.parametrize(
+    ("reference_media", "prompt", "message"),
+    [
+        (
+            [
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-1",
+                    ref_id="ref:image:1",
+                ),
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-2",
+                    ref_id="ref:image:1",
+                ),
+            ],
+            "use [ref:image:1]",
+            "unique",
+        ),
+        (
+            [
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-1",
+                    ref_id="ref:image:31",
+                )
+            ],
+            "use [ref:image:31]",
+            "same-kind content order",
+        ),
+        (
+            [
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-1",
+                    ref_id="ref:image:2",
+                ),
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-2",
+                    ref_id="ref:image:1",
+                ),
+            ],
+            "use both images",
+            "same-kind content order",
+        ),
+        (
+            [
+                VideoReferenceMedia(
+                    kind="image",
+                    url="asset://seedance-25-image-1",
+                    ref_id="ref:image:1",
+                )
+            ],
+            "use [ref:image:2]",
+            "unknown media anchor",
+        ),
+    ],
+)
+def test_seedance_reference_media_rejects_duplicate_out_of_range_and_mismatch(
+    reference_media: list[VideoReferenceMedia],
+    prompt: str,
+    message: str,
+) -> None:
+    with pytest.raises(VideoUpstreamError, match=message):
+        video_upstream_module._seedance_content(  # noqa: SLF001
+            VideoSubmitRequest(
+                task_id="video-gen-25",
+                user_id="user-1",
+                action="reference",
+                model="seedance-2.5",
+                upstream_model="doubao-seedance-2-5-260628",
+                prompt=prompt,
+                duration_s=4,
+                resolution="720p",
+                aspect_ratio="adaptive",
+                reference_media=reference_media,
+            ),
+            use_official_reference_names=True,
+        )
+
+
+def test_seedance_thirty_inline_images_are_rejected_before_base64_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = 0
+
+    def unexpected_encoder(_data: bytes, _mime: str | None) -> str:
+        nonlocal encoded
+        encoded += 1
+        raise AssertionError("payload preflight must run before Base64 encoding")
+
+    monkeypatch.setattr(
+        video_upstream_content_module,
+        "_SEEDANCE_CONTENT_MAX_ESTIMATED_BYTES",
+        4_096,
+    )
+    monkeypatch.setattr(
+        video_upstream_module,
+        "_seedance_image_data_url",
+        unexpected_encoder,
+    )
+    references = [
+        VideoReferenceMedia(
+            kind="image",
+            data=_PNG_BYTES + (b"x" * 64),
+            mime="image/png",
+            ref_id=f"ref:image:{index}",
+        )
+        for index in range(1, 31)
+    ]
+
+    with pytest.raises(VideoUpstreamError, match="safe JSON") as exc_info:
+        video_upstream_module._seedance_content(  # noqa: SLF001
+            VideoSubmitRequest(
+                task_id="video-gen-25",
+                user_id="user-1",
+                action="reference",
+                model="seedance-2.5",
+                upstream_model="doubao-seedance-2-5-260628",
+                prompt=" ".join(f"[ref:image:{index}]" for index in range(1, 31)),
+                duration_s=4,
+                resolution="720p",
+                aspect_ratio="adaptive",
+                reference_media=references,
+            ),
+            use_official_reference_names=True,
+        )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.raw["estimated_bytes"] > 4_096
+    assert encoded == 0
+
+
+@pytest.mark.asyncio
+async def test_seedance_25_submit_allows_audio_only_reference() -> None:
+    provider = VideoProviderDefinition(
+        name="volcano",
+        kind="volcano",
+        base_url="https://ark.example/api/v3",
+        api_key="sk-test",
+        models={"seedance-2.5:reference": "doubao-seedance-2-5-260628"},
+    )
+    adapter = VolcanoSeedanceAdapter(provider)
+    client = CaptureClient()
+    adapter._client = lambda: client  # type: ignore[method-assign]
+
+    await adapter.submit(
+        VideoSubmitRequest(
+            task_id="video-gen-25",
+            user_id="user-1",
+            action="reference",
+            model="seedance-2.5",
+            upstream_model="doubao-seedance-2-5-260628",
+            prompt="edit to the reference audio",
+            duration_s=4,
+            resolution="480p",
+            aspect_ratio="adaptive",
+            reference_media=[
+                VideoReferenceMedia(
+                    kind="audio",
+                    url="asset://seedance-25-audio-1",
+                )
+            ],
+        )
+    )
+
+    assert client.body["content"][1] == {
+        "type": "audio_url",
+        "role": "reference_audio",
+        "audio_url": {"url": "asset://seedance-25-audio-1"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "count"),
+    [
+        ("image", 31),
+        ("video", 11),
+        ("audio", 11),
+    ],
+)
+def test_seedance_25_reference_media_rejects_each_limit_overflow(
+    kind: str,
+    count: int,
+) -> None:
+    references = [
+        VideoReferenceMedia(
+            kind=kind,  # type: ignore[arg-type]
+            url=f"asset://seedance-25-{kind}-{index}",
+        )
+        for index in range(count)
+    ]
+
+    with pytest.raises(VideoUpstreamError, match="too many"):
+        video_upstream_module._seedance_content(  # noqa: SLF001
+            VideoSubmitRequest(
+                task_id="video-gen-25",
+                user_id="user-1",
+                action="reference",
+                model="seedance-2.5",
+                upstream_model="doubao-seedance-2-5-260628",
+                prompt="too many references",
+                duration_s=4,
+                resolution="720p",
+                aspect_ratio="adaptive",
+                reference_media=references,
+            )
+        )
+
+
+def test_seedance_20_reference_limits_and_audio_only_rule_stay_unchanged() -> None:
+    base = dict(
+        task_id="video-gen-20",
+        user_id="user-1",
+        action="reference",
+        model="seedance-2.0",
+        upstream_model="doubao-seedance-2-0-260128",
+        prompt="legacy behavior",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="adaptive",
+    )
+
+    with pytest.raises(VideoUpstreamError, match="combined"):
+        video_upstream_module._seedance_content(  # noqa: SLF001
+            VideoSubmitRequest(
+                **base,
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="audio",
+                        url="asset://seedance-20-audio-1",
+                    )
+                ],
+            )
+        )
+
+    with pytest.raises(VideoUpstreamError, match="too many"):
+        video_upstream_module._seedance_content(  # noqa: SLF001
+            VideoSubmitRequest(
+                **base,
+                reference_media=[
+                    VideoReferenceMedia(
+                        kind="image",
+                        url=f"asset://seedance-20-image-{index}",
+                    )
+                    for index in range(10)
+                ],
+            )
+        )
 
 
 @pytest.mark.asyncio

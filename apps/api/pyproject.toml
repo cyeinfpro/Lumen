@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumen-api"
-version = "1.2.107"
+version = "1.2.108"
 description = "Lumen FastAPI — DESIGN.md §5 REST + SSE"
 requires-python = ">=3.12"
 dependencies = [
@@ -35,6 +35,7 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.46b0,<1.0",
     "opentelemetry-instrumentation-httpx>=0.46b0,<1.0",
     "opentelemetry-instrumentation-redis>=0.46b0,<1.0",
+    "pillow-heif>=1.0,<2.0",
 ]
 
 [tool.uv.sources]

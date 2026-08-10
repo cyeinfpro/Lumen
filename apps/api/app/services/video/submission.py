@@ -362,13 +362,18 @@ async def _prepare_video_billing_admission(
     services: VideoSubmissionServices,
 ) -> _VideoBillingAdmission:
     provider, estimates = await services.require_ready(db, body)
+    upstream_model = provider.upstream_model_for(body.model, body.action)
     reference_media = _reference_media_for_admission(
         body,
         reference_media_snapshot,
     )
-    services.reference_validator(provider.kind, reference_media)
+    services.reference_validator(
+        provider.kind,
+        reference_media,
+        model=body.model,
+        upstream_model=upstream_model,
+    )
     _validate_provider_aspect_ratio(provider.kind, body)
-    upstream_model = provider.upstream_model_for(body.model, body.action)
     billing_model = video_billing_model(body.model, upstream_model)
     pricing_variant = video_pricing_variant(
         body.action,
@@ -476,7 +481,12 @@ async def _prepare_video_submission(
         reference_public_base_url=reference_public_base,
         required_public_media=requires_public_media,
     )
-    services.reference_validator(admission.provider.kind, reference_snapshots)
+    services.reference_validator(
+        admission.provider.kind,
+        reference_snapshots,
+        model=body.model,
+        upstream_model=admission.upstream_model,
+    )
     return _VideoSubmissionPlan(
         provider=admission.provider,
         input_storage_key=input_storage_key,

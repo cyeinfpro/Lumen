@@ -12,24 +12,31 @@ import type {
 } from "@/lib/types";
 
 import {
+  aspectRatioOptionsForModel,
+  audioCapabilityForModel,
+  defaultAspectRatioForModel,
+  defaultDurationForModel,
+  defaultResolutionForModel,
   durationOptionsForModel,
   durationOrPreferred,
   firstModelForAction,
-  preferredResolution,
+  generateAudioOrDefault,
   resolutionOptionsForModel,
+  stringOrPreferred,
 } from "./video-options-model";
 
 type UseVideoParameterHandlersOptions = {
   action: VideoAction;
   options: VideoOptionsOut | undefined;
+  aspectRatio: string;
   resolution: string;
   selectedModel: string;
   beforeParameterChange: () => void;
   switchDraftContext: (taskId: string, action: VideoAction) => void;
   setAction: Dispatch<SetStateAction<VideoAction>>;
   setAspectRatio: Dispatch<SetStateAction<string>>;
-  setDurationS: Dispatch<SetStateAction<number>>;
-  setGenerateAudio: Dispatch<SetStateAction<boolean>>;
+  setDurationS: Dispatch<SetStateAction<number | null>>;
+  setGenerateAudio: Dispatch<SetStateAction<boolean | null>>;
   setModel: Dispatch<SetStateAction<string>>;
   setResolution: Dispatch<SetStateAction<string>>;
 };
@@ -37,6 +44,7 @@ type UseVideoParameterHandlersOptions = {
 export function useVideoParameterHandlers({
   action,
   options,
+  aspectRatio,
   resolution,
   selectedModel,
   beforeParameterChange,
@@ -52,28 +60,61 @@ export function useVideoParameterHandlers({
     (nextAction: VideoAction) => {
       switchDraftContext(`draft:${nextAction}`, nextAction);
       const nextModel = firstModelForAction(options, nextAction);
-      const nextResolutions = resolutionOptionsForModel(options, nextModel);
-      const nextResolution = nextResolutions.includes(resolution)
-        ? resolution
-        : preferredResolution(nextResolutions);
+      const nextResolutions = resolutionOptionsForModel(
+        options,
+        nextModel,
+        nextAction,
+      );
+      const nextResolution = stringOrPreferred(
+        resolution,
+        nextResolutions,
+        defaultResolutionForModel(options, nextModel, nextAction),
+      );
       const nextDurations = durationOptionsForModel(
         options,
         nextModel,
         nextAction,
         nextResolution,
       );
+      const nextAspectRatios = aspectRatioOptionsForModel(
+        options,
+        nextModel,
+        nextAction,
+      );
       setAction(nextAction);
       setModel(nextModel);
+      setResolution(nextResolution);
+      setAspectRatio(
+        stringOrPreferred(
+          aspectRatio,
+          nextAspectRatios,
+          defaultAspectRatioForModel(options, nextModel, nextAction),
+        ),
+      );
       setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
+        durationOrPreferred(
+          previous,
+          nextDurations,
+          defaultDurationForModel(options, nextModel, nextAction),
+        ),
+      );
+      setGenerateAudio((previous) =>
+        generateAudioOrDefault(
+          previous,
+          audioCapabilityForModel(options, nextModel, nextAction),
+        ),
       );
     },
     [
+      aspectRatio,
       options,
       resolution,
       setAction,
+      setAspectRatio,
       setDurationS,
+      setGenerateAudio,
       setModel,
+      setResolution,
       switchDraftContext,
     ],
   );
@@ -81,28 +122,59 @@ export function useVideoParameterHandlers({
   const handleModelChange = useCallback(
     (value: string) => {
       beforeParameterChange();
-      const nextResolutions = resolutionOptionsForModel(options, value);
-      const nextResolution = nextResolutions.includes(resolution)
-        ? resolution
-        : preferredResolution(nextResolutions);
+      const nextResolutions = resolutionOptionsForModel(
+        options,
+        value,
+        action,
+      );
+      const nextResolution = stringOrPreferred(
+        resolution,
+        nextResolutions,
+        defaultResolutionForModel(options, value, action),
+      );
       const nextDurations = durationOptionsForModel(
         options,
         value,
         action,
         nextResolution,
       );
+      const nextAspectRatios = aspectRatioOptionsForModel(
+        options,
+        value,
+        action,
+      );
       setModel(value);
       setResolution(nextResolution);
+      setAspectRatio(
+        stringOrPreferred(
+          aspectRatio,
+          nextAspectRatios,
+          defaultAspectRatioForModel(options, value, action),
+        ),
+      );
       setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
+        durationOrPreferred(
+          previous,
+          nextDurations,
+          defaultDurationForModel(options, value, action),
+        ),
+      );
+      setGenerateAudio((previous) =>
+        generateAudioOrDefault(
+          previous,
+          audioCapabilityForModel(options, value, action),
+        ),
       );
     },
     [
       action,
+      aspectRatio,
       beforeParameterChange,
       options,
       resolution,
+      setAspectRatio,
       setDurationS,
+      setGenerateAudio,
       setModel,
       setResolution,
     ],
@@ -127,7 +199,11 @@ export function useVideoParameterHandlers({
       );
       setResolution(value);
       setDurationS((previous) =>
-        durationOrPreferred(previous, nextDurations),
+        durationOrPreferred(
+          previous,
+          nextDurations,
+          defaultDurationForModel(options, selectedModel, action),
+        ),
       );
     },
     [

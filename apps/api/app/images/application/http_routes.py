@@ -102,10 +102,23 @@ logger = logging.getLogger(__name__)
 MAX_BYTES = route_upload.MAX_BYTES
 MAX_LONG_SIDE = route_upload.MAX_LONG_SIDE
 VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE = route_upload.VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+VIDEO_REFERENCE_UPLOAD_PURPOSE = route_upload.VIDEO_REFERENCE_UPLOAD_PURPOSE
+VIDEO_REFERENCE_UPLOAD_MAX_BYTES = route_upload.VIDEO_REFERENCE_UPLOAD_MAX_BYTES
+VIDEO_REFERENCE_UPLOAD_MIN_SIDE = route_upload.VIDEO_REFERENCE_UPLOAD_MIN_SIDE
+VIDEO_REFERENCE_UPLOAD_MAX_LONG_SIDE = route_upload.VIDEO_REFERENCE_UPLOAD_MAX_LONG_SIDE
+VIDEO_REFERENCE_UPLOAD_MIN_ASPECT_RATIO = (
+    route_upload.VIDEO_REFERENCE_UPLOAD_MIN_ASPECT_RATIO
+)
+VIDEO_REFERENCE_UPLOAD_MAX_ASPECT_RATIO = (
+    route_upload.VIDEO_REFERENCE_UPLOAD_MAX_ASPECT_RATIO
+)
 MAX_IMAGE_PIXELS = route_upload.MAX_IMAGE_PIXELS
 ALLOWED_MIME = route_upload.ALLOWED_MIME
 EXT_BY_MIME = route_upload.EXT_BY_MIME
 NORMALIZABLE_UPLOAD_MIME = route_upload.NORMALIZABLE_UPLOAD_MIME
+VIDEO_REFERENCE_NORMALIZABLE_UPLOAD_MIME = (
+    route_upload.VIDEO_REFERENCE_NORMALIZABLE_UPLOAD_MIME
+)
 MIN_STORAGE_FREE_BYTES = route_storage.MIN_STORAGE_FREE_BYTES
 PILImage = route_upload.PILImage
 _etag_matches_if_none_match = route_storage.etag_matches_if_none_match
@@ -185,6 +198,7 @@ _too_many_pixels = route_upload.too_many_pixels
 _enforce_pixel_limit = route_upload.enforce_pixel_limit
 _upload_requests_mask_preflight = route_upload.upload_requests_mask_preflight
 _upload_allows_large_dimensions = route_upload.upload_allows_large_dimensions
+_build_upload_policy = route_upload.build_upload_policy
 _key_for_upload = route_upload.key_for_upload
 _key_for_normalized_ref = route_upload.key_for_normalized_ref
 

@@ -43,6 +43,7 @@ import {
   revokeReferenceObjectUrl,
   revokeUnusedReferenceObjectUrls,
   uploadReferenceVideo,
+  validateVideoImageFile,
 } from "./video-request-lifecycle";
 import type {
   DraftUploadRequest,
@@ -54,21 +55,37 @@ import {
   imageReferencePreviewUrl,
 } from "./video-page-utils";
 import type { ReferenceDraft } from "./video-workbench-ui";
+import type {
+  NormalizedVideoImageConstraints,
+} from "./video-options-model";
 
 type UseVideoDraftMediaControllerOptions = {
   actionRef: MutableRefObject<VideoAction>;
   draftFenceRef: MutableRefObject<VideoRequestFence>;
   promptValueRef: MutableRefObject<string>;
   referenceLimits: ReferenceLimits;
+  referenceTotalLimit: number | null;
+  inputImageConstraints: NormalizedVideoImageConstraints | null;
+  referenceImageConstraints: NormalizedVideoImageConstraints | null;
   beforeMediaChange: () => void;
   setPrompt: Dispatch<SetStateAction<string>>;
 };
+
+function uploadVideoReferenceImage(file: File, signal: AbortSignal) {
+  return uploadImage(file, {
+    signal,
+    purpose: "video_reference",
+  });
+}
 
 export function useVideoDraftMediaController({
   actionRef,
   draftFenceRef,
   promptValueRef,
   referenceLimits,
+  referenceTotalLimit,
+  inputImageConstraints,
+  referenceImageConstraints,
   beforeMediaChange,
   setPrompt,
 }: UseVideoDraftMediaControllerOptions) {
@@ -77,6 +94,7 @@ export function useVideoDraftMediaController({
   const referenceUploadAbortRef = useRef<AbortController | null>(null);
   const referenceUploadEpochRef = useRef(0);
   const referenceLimitsRef = useRef(referenceLimits);
+  const referenceTotalLimitRef = useRef(referenceTotalLimit);
   const referenceMediaRef = useRef<ReferenceDraft[]>([]);
   const previousReferenceMediaRef = useRef<ReferenceDraft[]>([]);
 
@@ -94,6 +112,10 @@ export function useVideoDraftMediaController({
   useEffect(() => {
     referenceLimitsRef.current = referenceLimits;
   }, [referenceLimits]);
+
+  useEffect(() => {
+    referenceTotalLimitRef.current = referenceTotalLimit;
+  }, [referenceTotalLimit]);
 
   useEffect(() => {
     referenceMediaRef.current = referenceMedia;
@@ -160,8 +182,16 @@ export function useVideoDraftMediaController({
   );
 
   const uploadMut = useMutation({
-    mutationFn: (request: DraftUploadRequest) =>
-      uploadImage(request.file, { signal: request.controller.signal }),
+    mutationFn: async (request: DraftUploadRequest) => {
+      await validateVideoImageFile(
+        request.file,
+        request.imageConstraints,
+      );
+      return uploadVideoReferenceImage(
+        request.file,
+        request.controller.signal,
+      );
+    },
     onSuccess: (image, request) => {
       if (!isCurrentFirstFrameUpload(request)) return;
       beforeMediaChange();
@@ -192,10 +222,21 @@ export function useVideoDraftMediaController({
       ) {
         throw new Error(referenceLimitMessage(request.kind, request.limit));
       }
+      if (
+        request.totalLimit != null &&
+        referenceMediaRef.current.length >= request.totalLimit
+      ) {
+        throw new Error(`参考素材最多 ${request.totalLimit} 个`);
+      }
       if (request.kind === "image") {
-        const image = await uploadImage(request.file, {
-          signal: request.controller.signal,
-        });
+        await validateVideoImageFile(
+          request.file,
+          request.imageConstraints,
+        );
+        const image = await uploadVideoReferenceImage(
+          request.file,
+          request.controller.signal,
+        );
         return {
           kind: "image" as const,
           image_id: image.id,
@@ -225,11 +266,17 @@ export function useVideoDraftMediaController({
       }
       beforeMediaChange();
       const limit = referenceLimitsRef.current[reference.kind];
+      const totalLimit = referenceTotalLimitRef.current;
       const accepted = commitReferenceMedia((current) => {
         const currentCount = current.filter(
           (item) => item.kind === reference.kind,
         ).length;
-        if (currentCount >= limit) return current;
+        if (
+          currentCount >= limit ||
+          (totalLimit !== null && current.length >= totalLimit)
+        ) {
+          return current;
+        }
         const identity = nextReferenceIdentity(reference.kind, current);
         return [
           ...current,
@@ -249,7 +296,12 @@ export function useVideoDraftMediaController({
       });
       if (!accepted) {
         revokeReferenceObjectUrl(reference.previewUrl);
-        toast.error(referenceLimitMessage(reference.kind, limit));
+        toast.error(
+          totalLimit !== null &&
+            referenceMediaRef.current.length >= totalLimit
+            ? `参考素材最多 ${totalLimit} 个`
+            : referenceLimitMessage(reference.kind, limit),
+        );
         return;
       }
       toast.success("参考素材已上传");
@@ -279,6 +331,7 @@ export function useVideoDraftMediaController({
         epoch: firstFrameUploadEpochRef.current + 1,
         expectedAction: "i2v",
         file,
+        imageConstraints: inputImageConstraints,
       };
       firstFrameUploadEpochRef.current = request.epoch;
       firstFrameUploadAbortRef.current = controller;
@@ -289,6 +342,7 @@ export function useVideoDraftMediaController({
       beforeMediaChange,
       cancelFirstFrameUpload,
       draftFenceRef,
+      inputImageConstraints,
       uploadMut,
     ],
   );
@@ -306,6 +360,14 @@ export function useVideoDraftMediaController({
         return;
       }
       const limit = referenceLimitsRef.current[kind];
+      const totalLimit = referenceTotalLimitRef.current;
+      if (
+        totalLimit !== null &&
+        referenceMediaRef.current.length >= totalLimit
+      ) {
+        toast.error(`参考素材最多 ${totalLimit} 个`);
+        return;
+      }
       if (
         referenceMediaRef.current.filter((item) => item.kind === kind).length >=
         limit
@@ -324,6 +386,9 @@ export function useVideoDraftMediaController({
         file,
         kind,
         limit,
+        totalLimit,
+        imageConstraints:
+          kind === "image" ? referenceImageConstraints : null,
       };
       referenceUploadEpochRef.current = request.epoch;
       referenceUploadAbortRef.current = controller;
@@ -334,6 +399,7 @@ export function useVideoDraftMediaController({
       beforeMediaChange,
       cancelReferenceUpload,
       draftFenceRef,
+      referenceImageConstraints,
       referenceUploadMut,
     ],
   );
@@ -350,6 +416,11 @@ export function useVideoDraftMediaController({
       }
       const current = referenceMediaRef.current;
       const limit = referenceLimitsRef.current[selectedKind];
+      const totalLimit = referenceTotalLimitRef.current;
+      if (totalLimit !== null && current.length >= totalLimit) {
+        toast.error(`参考素材最多 ${totalLimit} 个`);
+        return;
+      }
       if (
         current.filter((item) => item.kind === selectedKind).length >= limit
       ) {
@@ -391,6 +462,7 @@ export function useVideoDraftMediaController({
         assets,
         referenceLimitsRef.current,
         uuid,
+        referenceTotalLimitRef.current,
       );
       commitReferenceMedia(() => references);
       setIsVolcanoAssetManagerOpen(false);

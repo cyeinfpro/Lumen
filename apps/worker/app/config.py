@@ -113,9 +113,6 @@ class Settings(BaseSettings):
     # 使用不同 provider（dual_race 模式不锁 provider，但每 task 内部 image2/responses
     # 两路自己 failover 全 N 个号）。
     image_generation_concurrency: int = 4
-    image_generation_resource_units: int = 14
-    image_generation_external_lane_units: int = 4
-    image_generation_user_resource_units: int = 10
     # 默认只向前端暴露脱敏诊断；排查自托管/内部问题时可显式打开 provider/proxy/endpoint 细节。
     expose_provider_diagnostics: bool = False
 

@@ -116,6 +116,19 @@ def test_video_billing_model_uses_mini_when_upstream_or_model_is_mini() -> None:
     )
 
 
+def test_video_billing_model_canonicalizes_seedance_25_identifiers() -> None:
+    for model, upstream_model in (
+        ("seedance-2.5", None),
+        ("seedance-2.0", "doubao-seedance-2-5-260628"),
+        ("seedance-2.5", "dreamina-seedance-2-5-260628"),
+        ("video-ds-2.5", "video-ds-2.5"),
+    ):
+        assert (
+            video_billing.video_billing_model(model, upstream_model)
+            == video_billing.SEEDANCE_25_MODEL
+        )
+
+
 def test_video_token_upper_bound_rejects_invalid_values() -> None:
     estimates = {
         "seedance-2.0": {
@@ -161,6 +174,16 @@ def test_video_token_upper_bound_rejects_invalid_values() -> None:
 
 def test_smart_duration_uses_max_duration_hold_estimate() -> None:
     assert video_billing.hold_estimate_duration_s(-1) == 15
+    assert video_billing.hold_estimate_duration_s(-1, model="seedance-2.0") == 15
+    assert video_billing.hold_estimate_duration_s(-1, model="seedance-2.5") == 30
+    assert (
+        video_billing.hold_estimate_duration_s(
+            -1,
+            model="seedance-2.0",
+            upstream_model="doubao-seedance-2-5-260628",
+        )
+        == 30
+    )
     assert (
         video_billing.token_upper_bound(
             {"seedance-2.0": {"t2v": {"720p:15": 180_000}}},
@@ -170,6 +193,16 @@ def test_smart_duration_uses_max_duration_hold_estimate() -> None:
             duration_s=-1,
         )
         == 180_000
+    )
+    assert (
+        video_billing.token_upper_bound(
+            {"seedance-2.5": {"t2v": {"720p:15": 180_000, "720p:30": 360_000}}},
+            model="seedance-2.5",
+            action="t2v",
+            resolution="720p",
+            duration_s=-1,
+        )
+        == 360_000
     )
 
 
@@ -181,6 +214,24 @@ def test_video_duration_estimates_include_official_three_second_bucket() -> None
     t2v = expanded["happyhorse-1.0"]["t2v"]
     assert t2v["720p:3"] == 3_000_000
     assert sorted(int(key.rsplit(":", 1)[1]) for key in t2v) == list(range(3, 16))
+
+
+def test_seedance_25_duration_estimates_expand_through_thirty_seconds() -> None:
+    expanded = video_billing.expand_video_duration_estimates(
+        {
+            "seedance-2.5": {
+                "t2v": {
+                    "720p:4": 80_000,
+                    "720p:30": 600_000,
+                }
+            }
+        }
+    )
+
+    t2v = expanded["seedance-2.5"]["t2v"]
+    assert t2v["720p:4"] == 80_000
+    assert t2v["720p:30"] == 600_000
+    assert sorted(int(key.rsplit(":", 1)[1]) for key in t2v) == list(range(4, 31))
 
 
 def test_happyhorse_seconds_map_to_internal_video_tokens() -> None:
@@ -311,6 +362,14 @@ def test_video_pricing_variant_splits_reference_media_kind() -> None:
             [{"kind": "image"}, {"kind": "video"}],
         )
         == "reference_video"
+    )
+    assert (
+        video_billing.video_pricing_variant(
+            "reference",
+            [{"kind": "audio"}],
+            resolution="720p",
+        )
+        == "reference_image_720p"
     )
 
 

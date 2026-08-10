@@ -16,16 +16,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .billing import pricing_price_micro
 from .pricing import MAX_BILLABLE_TOKENS, MAX_RATE_PER_1K_MICRO
+from .video_providers import is_seedance_25_identifier
 
 VIDEO_PRICING_SCOPE = "video"
 VIDEO_PRICING_UNIT = "per_mtoken"
 SMART_VIDEO_DURATION_S = -1
 SMART_VIDEO_HOLD_DURATION_S = 15
 SUPPORTED_VIDEO_DURATIONS_S = tuple(range(3, 16))
+SEEDANCE_25_SMART_VIDEO_HOLD_DURATION_S = 30
+SEEDANCE_25_SUPPORTED_VIDEO_DURATIONS_S = tuple(range(4, 31))
 VIDEO_BILLING_TOKENS_PER_SECOND = 1_000_000
 VIDEO_REFERENCE_IMAGE_PRICING_VARIANT = "reference_image"
 VIDEO_REFERENCE_VIDEO_PRICING_VARIANT = "reference_video"
 VIDEO_LEGACY_REFERENCE_PRICING_VARIANT = "reference"
+SEEDANCE_25_MODEL = "seedance-2.5"
 SEEDANCE_20_FAST_MODEL = "seedance-2.0-fast"
 SEEDANCE_20_MINI_MODEL = "seedance-2.0-mini"
 SEEDANCE_20_MODEL = "seedance-2.0"
@@ -117,8 +121,15 @@ def estimate_key(*, resolution: str, duration_s: int) -> str:
     return f"{resolution}:{int(duration_s)}"
 
 
-def hold_estimate_duration_s(duration_s: int) -> int:
+def hold_estimate_duration_s(
+    duration_s: int,
+    *,
+    model: str | None = None,
+    upstream_model: str | None = None,
+) -> int:
     if int(duration_s) == SMART_VIDEO_DURATION_S:
+        if is_seedance_25_identifier(model, upstream_model):
+            return SEEDANCE_25_SMART_VIDEO_HOLD_DURATION_S
         return SMART_VIDEO_HOLD_DURATION_S
     return int(duration_s)
 
@@ -199,6 +210,8 @@ def is_video_ds_20_standard_identifier(*identifiers: str | None) -> bool:
 
 
 def video_billing_model(model: str, upstream_model: str | None = None) -> str:
+    if is_seedance_25_identifier(model, upstream_model):
+        return SEEDANCE_25_MODEL
     if is_seedance_20_fast_identifier(model, upstream_model):
         return SEEDANCE_20_FAST_MODEL
     if is_seedance_20_mini_identifier(model, upstream_model):
@@ -305,7 +318,7 @@ def _duration_estimate(entries: dict[int, int], duration_s: int) -> int | None:
 def expand_video_duration_estimates(
     estimates: dict[str, Any],
     *,
-    durations_s: tuple[int, ...] = SUPPORTED_VIDEO_DURATIONS_S,
+    durations_s: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Fill missing 1-second duration buckets with conservative estimates."""
     expanded: dict[str, Any] = {}
@@ -324,8 +337,17 @@ def expand_video_duration_estimates(
                 resolution, duration_s, parsed_estimate = parsed
                 by_resolution.setdefault(resolution, {})[duration_s] = parsed_estimate
             expanded_action: dict[str, Any] = {}
+            model_durations_s = (
+                durations_s
+                if durations_s is not None
+                else (
+                    SEEDANCE_25_SUPPORTED_VIDEO_DURATIONS_S
+                    if is_seedance_25_identifier(model)
+                    else SUPPORTED_VIDEO_DURATIONS_S
+                )
+            )
             for resolution, duration_map in by_resolution.items():
-                for duration_s in durations_s:
+                for duration_s in model_durations_s:
                     duration_estimate = _duration_estimate(duration_map, duration_s)
                     if duration_estimate is not None:
                         expanded_action[
@@ -373,7 +395,7 @@ def token_upper_bound(
     value = None
     key = estimate_key(
         resolution=resolution,
-        duration_s=hold_estimate_duration_s(duration_s),
+        duration_s=hold_estimate_duration_s(duration_s, model=model),
     )
     for action_name in tuple(dict.fromkeys(action_names)):
         action_map = model_map.get(action_name)
@@ -502,6 +524,9 @@ __all__ = [
     "VIDEO_PRICING_UNIT",
     "SMART_VIDEO_DURATION_S",
     "SMART_VIDEO_HOLD_DURATION_S",
+    "SEEDANCE_25_MODEL",
+    "SEEDANCE_25_SMART_VIDEO_HOLD_DURATION_S",
+    "SEEDANCE_25_SUPPORTED_VIDEO_DURATIONS_S",
     "SEEDANCE_20_FAST_MODEL",
     "SEEDANCE_20_MODEL",
     "SEEDANCE_20_MINI_MODEL",

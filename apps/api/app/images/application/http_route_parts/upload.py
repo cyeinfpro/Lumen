@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -18,9 +19,17 @@ from ..create_variant import VariantError, make_display_variant
 from ..upload import UploadCommandError, UploadCommandService, UploadPolicy
 
 
+logger = logging.getLogger(__name__)
+
 MAX_BYTES = 50 * 1024 * 1024
 MAX_LONG_SIDE = 4096
 VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE = 8192
+VIDEO_REFERENCE_UPLOAD_PURPOSE = "video_reference"
+VIDEO_REFERENCE_UPLOAD_MAX_BYTES = 30 * 1024 * 1024 - 1
+VIDEO_REFERENCE_UPLOAD_MIN_SIDE = 300
+VIDEO_REFERENCE_UPLOAD_MAX_LONG_SIDE = 6000
+VIDEO_REFERENCE_UPLOAD_MIN_ASPECT_RATIO = 0.4
+VIDEO_REFERENCE_UPLOAD_MAX_ASPECT_RATIO = 2.5
 MAX_IMAGE_PIXELS = 64_000_000
 PILImage.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 ALLOWED_MIME = frozenset({"image/png", "image/jpeg", "image/webp"})
@@ -28,6 +37,16 @@ EXT_BY_MIME = MappingProxyType(
     {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 )
 NORMALIZABLE_UPLOAD_MIME = frozenset({"image/mpo", "image/x-mpo"})
+VIDEO_REFERENCE_NORMALIZABLE_UPLOAD_MIME = frozenset(
+    {
+        *NORMALIZABLE_UPLOAD_MIME,
+        "image/bmp",
+        "image/tiff",
+        "image/gif",
+        "image/heic",
+        "image/heif",
+    }
+)
 
 
 def http_error(code: str, message: str, status_code: int = 400) -> HTTPException:
@@ -68,6 +87,8 @@ def upload_requests_mask_preflight(
     filename: str | None,
 ) -> bool:
     purpose_norm = (purpose or "").strip().lower()
+    if purpose_norm == VIDEO_REFERENCE_UPLOAD_PURPOSE:
+        return False
     if purpose_norm in {"mask", "inpaint_mask", "inpaint-mask"}:
         return True
     name = Path(filename or "").name.lower()
@@ -77,6 +98,48 @@ def upload_requests_mask_preflight(
 
 def upload_allows_large_dimensions(purpose: str | None) -> bool:
     return (purpose or "").strip().lower() == "volcano_asset"
+
+
+def build_upload_policy(
+    *,
+    purpose: str | None,
+    filename: str | None,
+    reference_size: tuple[int, int] | None,
+) -> UploadPolicy:
+    purpose_norm = (purpose or "").strip().lower()
+    if purpose_norm == VIDEO_REFERENCE_UPLOAD_PURPOSE:
+        return UploadPolicy(
+            allowed_mime=ALLOWED_MIME,
+            normalizable_mime=VIDEO_REFERENCE_NORMALIZABLE_UPLOAD_MIME,
+            extensions=EXT_BY_MIME,
+            max_bytes=VIDEO_REFERENCE_UPLOAD_MAX_BYTES,
+            max_pixels=MAX_IMAGE_PIXELS,
+            max_long_side=VIDEO_REFERENCE_UPLOAD_MAX_LONG_SIDE,
+            mask_requested=False,
+            reference_size=None,
+            purpose=VIDEO_REFERENCE_UPLOAD_PURPOSE,
+            min_side=VIDEO_REFERENCE_UPLOAD_MIN_SIDE,
+            min_aspect_ratio=VIDEO_REFERENCE_UPLOAD_MIN_ASPECT_RATIO,
+            max_aspect_ratio=VIDEO_REFERENCE_UPLOAD_MAX_ASPECT_RATIO,
+        )
+    return UploadPolicy(
+        allowed_mime=ALLOWED_MIME,
+        normalizable_mime=NORMALIZABLE_UPLOAD_MIME,
+        extensions=EXT_BY_MIME,
+        max_bytes=MAX_BYTES,
+        max_pixels=MAX_IMAGE_PIXELS,
+        max_long_side=(
+            VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
+            if upload_allows_large_dimensions(purpose_norm)
+            else MAX_LONG_SIDE
+        ),
+        mask_requested=upload_requests_mask_preflight(
+            purpose_norm,
+            filename,
+        ),
+        reference_size=reference_size,
+        purpose=purpose_norm or None,
+    )
 
 
 def key_for_upload(user_id: str, image_id: str, ext: str) -> str:
@@ -127,6 +190,13 @@ def upload_metadata_finalizer(
     )
 
 
+async def _rollback_request_session(db: AsyncSession) -> None:
+    try:
+        await db.rollback()
+    except Exception:
+        logger.exception("failed to roll back image upload request session")
+
+
 async def upload_image_impl(
     user: Any,
     db: AsyncSession,
@@ -141,8 +211,8 @@ async def upload_image_impl(
     image_out: Any,
     session_id: str | None = None,
 ) -> ImageOut:
-    await check_upload_rate_limit(user.id)
     try:
+        await check_upload_rate_limit(user.id)
         ensure_storage_free_space(0)
         reference_size = (
             (reference_width, reference_height)
@@ -153,21 +223,9 @@ async def upload_image_impl(
             "user_id": user.id,
             "upload_file": file,
             "filename": file.filename,
-            "policy": UploadPolicy(
-                allowed_mime=ALLOWED_MIME,
-                normalizable_mime=NORMALIZABLE_UPLOAD_MIME,
-                extensions=EXT_BY_MIME,
-                max_bytes=MAX_BYTES,
-                max_pixels=MAX_IMAGE_PIXELS,
-                max_long_side=(
-                    VOLCANO_ASSET_UPLOAD_MAX_LONG_SIDE
-                    if upload_allows_large_dimensions(purpose)
-                    else MAX_LONG_SIDE
-                ),
-                mask_requested=upload_requests_mask_preflight(
-                    purpose,
-                    file.filename,
-                ),
+            "policy": build_upload_policy(
+                purpose=purpose,
+                filename=file.filename,
                 reference_size=reference_size,
             ),
             "metadata_profile": MODEL_LIBRARY_METADATA_PROFILE,
@@ -179,7 +237,10 @@ async def upload_image_impl(
         image = await upload_command_service.execute(
             **execute_kwargs,
         )
+        return await image_out(db, image)
     except UploadCommandError as exc:
+        await _rollback_request_session(db)
         raise http_error(exc.code, exc.message, exc.status_code) from exc
-
-    return await image_out(db, image)
+    except Exception:
+        await _rollback_request_session(db)
+        raise

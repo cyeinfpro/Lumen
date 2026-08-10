@@ -600,6 +600,231 @@ def test_video_create_schema_enforces_action_image_contract():
             raise AssertionError(f"expected validation error for {kwargs}")
 
 
+def test_video_create_schema_applies_seedance_25_capabilities() -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn
+
+    base = {
+        "action": "t2v",
+        "model": "doubao-seedance-2-5-260628",
+        "prompt": "make a clip",
+        "duration_s": 4,
+        "resolution": "720p",
+        "aspect_ratio": "16:9",
+        "idempotency_key": "idem-seedance-25",
+    }
+
+    for duration_s in (-1, 4, 30):
+        body = VideoCreateIn(**{**base, "duration_s": duration_s})
+        assert body.duration_s == duration_s
+    for resolution in ("480p", "720p"):
+        body = VideoCreateIn(**{**base, "resolution": resolution})
+        assert body.resolution == resolution
+
+    image_anchors = [f"[ref:image:{index}]" for index in range(1, 31)]
+    image_media = [
+        {
+            "kind": "image",
+            "image_id": f"img-{index}",
+            "ref_id": f"ref:image:{index}",
+        }
+        for index in range(1, 31)
+    ]
+    image_reference = VideoCreateIn(
+        **{
+            **base,
+            "action": "reference",
+            "prompt": " ".join(image_anchors),
+            "reference_media": image_media,
+        }
+    )
+    assert len(image_reference.reference_media) == 30
+    assert image_reference.prompt == " ".join(image_anchors)
+    assert [item.ref_id for item in image_reference.reference_media] == [
+        f"ref:image:{index}" for index in range(1, 31)
+    ]
+
+    pressure_prompt = " ".join(image_anchors * 20)
+    pressure_reference = VideoCreateIn(
+        **{
+            **base,
+            "action": "reference",
+            "prompt": pressure_prompt,
+            "reference_media": image_media,
+        }
+    )
+    assert pressure_reference.prompt == pressure_prompt
+    assert len(pressure_reference.prompt) < 10_000
+
+    audio_reference = VideoCreateIn(
+        **{
+            **base,
+            "action": "reference",
+            "reference_media": [
+                {
+                    "kind": "audio",
+                    "url": f"https://cdn.example.com/ref-{index}.mp3",
+                }
+                for index in range(10)
+            ],
+        }
+    )
+    assert len(audio_reference.reference_media) == 10
+
+    invalid_overrides = (
+        {"duration_s": 3},
+        {"duration_s": 31},
+        {"resolution": "1080p"},
+        {"resolution": "4k"},
+        {
+            "action": "reference",
+            "reference_media": [
+                {"kind": "image", "image_id": f"img-{index}"} for index in range(31)
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {"kind": "video", "video_id": f"vid-{index}"} for index in range(11)
+            ],
+        },
+        {
+            "action": "reference",
+            "reference_media": [
+                {
+                    "kind": "audio",
+                    "url": f"https://cdn.example.com/ref-{index}.mp3",
+                }
+                for index in range(11)
+            ],
+        },
+    )
+    for overrides in invalid_overrides:
+        with pytest.raises(ValidationError):
+            VideoCreateIn(**{**base, **overrides})
+
+
+@pytest.mark.parametrize(
+    "reference_media",
+    [
+        [
+            {
+                "kind": "image",
+                "image_id": "img-1",
+                "ref_id": "ref:image:1",
+            },
+            {
+                "kind": "image",
+                "image_id": "img-2",
+                "ref_id": "ref:image:1",
+            },
+        ],
+        [
+            {
+                "kind": "image",
+                "image_id": "img-1",
+                "ref_id": "ref:image:31",
+            }
+        ],
+        [
+            {
+                "kind": "image",
+                "image_id": "img-1",
+                "ref_id": "ref:image:2",
+            },
+            {
+                "kind": "image",
+                "image_id": "img-2",
+                "ref_id": "ref:image:1",
+            },
+        ],
+    ],
+)
+def test_video_create_schema_rejects_reference_id_order_mismatches(
+    reference_media: list[dict[str, str]],
+) -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn
+
+    with pytest.raises(
+        ValidationError,
+        match="unique|same-kind array position",
+    ):
+        VideoCreateIn(
+            action="reference",
+            model="doubao-seedance-2-5-260628",
+            prompt="use the supplied images",
+            reference_media=reference_media,
+            duration_s=4,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            idempotency_key="idem-reference-id-order",
+        )
+
+
+def test_video_create_schema_rejects_prompt_anchor_above_thirty_images() -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn
+
+    with pytest.raises(ValidationError, match="unknown media anchors"):
+        VideoCreateIn(
+            action="reference",
+            model="doubao-seedance-2-5-260628",
+            prompt="use [ref:image:31]",
+            reference_media=[
+                {
+                    "kind": "image",
+                    "image_id": f"img-{index}",
+                    "ref_id": f"ref:image:{index}",
+                }
+                for index in range(1, 31)
+            ],
+            duration_s=4,
+            resolution="720p",
+            aspect_ratio="adaptive",
+            idempotency_key="idem-reference-anchor-overflow",
+        )
+
+
+def test_video_create_schema_keeps_seedance_20_and_generic_duration_limits() -> None:
+    from pydantic import ValidationError
+
+    from lumen_core.schemas import VideoCreateIn
+
+    base = {
+        "action": "t2v",
+        "prompt": "make a clip",
+        "duration_s": 15,
+        "resolution": "720p",
+        "aspect_ratio": "16:9",
+        "idempotency_key": "idem-duration-compat",
+    }
+
+    VideoCreateIn(**{**base, "model": "seedance-2.0"})
+    with pytest.raises(ValidationError):
+        VideoCreateIn(**{**base, "model": "seedance-2.0", "duration_s": 16})
+    with pytest.raises(ValidationError):
+        VideoCreateIn(**{**base, "model": "happyhorse-1.0", "duration_s": 16})
+    with pytest.raises(ValidationError):
+        VideoCreateIn(
+            **{
+                **base,
+                "action": "reference",
+                "model": "seedance-2.0",
+                "duration_s": 5,
+                "reference_media": [
+                    {
+                        "kind": "audio",
+                        "url": "https://cdn.example.com/ref.mp3",
+                    }
+                ],
+            }
+        )
+
+
 def test_video_reference_audio_media_is_url_only():
     from pydantic import ValidationError
 

@@ -6,6 +6,13 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from lumen_core.upstream_billing import (
+    UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+    UPSTREAM_RESPONSE_REQUEST_ID,
+    UPSTREAM_RESPONSE_STATUS_CODE,
+    UPSTREAM_RESPONSE_TRACE_ID,
+)
+
 from ..provider_runtime.upstream_services import (
     ImageUpstreamRuntime,
     UpstreamServices,
@@ -14,6 +21,13 @@ from ..provider_runtime.upstream_services import (
 
 
 ImageProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+_RESPONSE_RECEIPT_EVENT_TYPES = frozenset({"response_ready", "response_received"})
+_RESPONSE_RECEIPT_METADATA_KEYS = (
+    UPSTREAM_RESPONSE_STATUS_CODE,
+    UPSTREAM_RESPONSE_REQUEST_ID,
+    UPSTREAM_RESPONSE_TRACE_ID,
+    UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+)
 
 
 def maybe_record_usage_from_event(
@@ -66,19 +80,34 @@ async def emit_image_progress(
         if inspect.isawaitable(result):
             await result
     except Exception as exc:  # noqa: BLE001
-        if event_type == "response_ready":
+        if event_type in _RESPONSE_RECEIPT_EVENT_TYPES:
+            receipt_payload: dict[str, Any] = {
+                "upstream_result_unknown": True,
+                "response_received": True,
+                "receipt_persist_failed": True,
+            }
+            for key in _RESPONSE_RECEIPT_METADATA_KEYS:
+                value = event.get(key)
+                if value is not None:
+                    receipt_payload[key] = value
+            raw_status = event.get(UPSTREAM_RESPONSE_STATUS_CODE)
+            status_code = (
+                raw_status
+                if isinstance(raw_status, int)
+                and not isinstance(raw_status, bool)
+                and raw_status > 0
+                else 200
+                if event_type == "response_ready"
+                else 0
+            )
             raise services.infrastructure.UpstreamError(
-                "failed to persist the successful upstream response receipt; "
-                "the request was not retried",
-                status_code=200,
+                "failed to persist the upstream response receipt; "
+                "no further replay or provider failover was attempted",
+                status_code=status_code,
                 error_code=(
                     services.infrastructure.EC.DIRECT_IMAGE_RESULT_UNKNOWN.value
                 ),
-                payload={
-                    "upstream_result_unknown": True,
-                    "response_received": True,
-                    "receipt_persist_failed": True,
-                },
+                payload=receipt_payload,
             ) from exc
         if event_type == "image_job_execution":
             execution = event.get("execution")

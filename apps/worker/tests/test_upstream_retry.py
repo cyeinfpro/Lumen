@@ -21,7 +21,13 @@ from app.upstream_parts.image_execution import (
 from app.upstream_parts.image_jobs import image_job_idempotency_key
 from app.upstream_parts.generated_payload import InlineImageBytes
 from app.upstream_parts.upstream_impl import build_image_upstream_runtime
-from lumen_core.upstream_billing import UPSTREAM_DISPATCH_PROVEN_UNDELIVERED
+from lumen_core.upstream_billing import (
+    UPSTREAM_DISPATCH_PROVEN_UNDELIVERED,
+    UPSTREAM_RESPONSE_HTTP_ATTEMPTS,
+    UPSTREAM_RESPONSE_REQUEST_ID,
+    UPSTREAM_RESPONSE_STATUS_CODE,
+    UPSTREAM_RESPONSE_TRACE_ID,
+)
 from lumen_core.url_security import PublicHttpTarget
 
 
@@ -285,15 +291,35 @@ async def test_post_with_retry_can_disable_ambiguous_status_replay() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_generate_5xx_is_sent_once_and_fails_result_unknown(
+async def test_direct_generate_replays_503_once_with_same_idempotency_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Client:
-        calls = 0
+    posts: list[dict[str, Any]] = []
+    progress_events: list[dict[str, Any]] = []
 
-        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
-            self.calls += 1
-            return httpx.Response(503, json={"error": {"message": "gateway failed"}})
+    class _Client:
+        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+            posts.append(
+                {
+                    "url": url,
+                    "headers": dict(kwargs["headers"]),
+                    "json": dict(kwargs["json"]),
+                }
+            )
+            if len(posts) == 1:
+                return httpx.Response(
+                    503,
+                    headers={"x-request-id": "req-first"},
+                    json={"error": {"message": "gateway failed"}},
+                )
+            return httpx.Response(
+                200,
+                headers={
+                    "x-request-id": "req-final",
+                    "traceparent": "00-final-trace-01",
+                },
+                json={"data": [{"b64_json": "ZmFrZQ==", "revised_prompt": "ok"}]},
+            )
 
     client = _Client()
 
@@ -305,18 +331,139 @@ async def test_direct_generate_5xx_is_sent_once_and_fails_result_unknown(
         "get_images_client",
         fake_get_images_client,
     )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
+        "sleep",
+        lambda _delay: _done(),
+    )
+
+    result = await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
+        _image_request(
+            progress_callback=progress_events.append,
+            request_context=ImageRequestContext.create(trace_id="gen-replay"),
+        ),
+        base_url_override="https://example.invalid/v1",
+        api_key_override="sk-test",
+    )
+
+    assert result == [(InlineImageBytes(b"fake"), "ok")]
+    assert len(posts) == 2
+    assert posts[0]["url"] == posts[1]["url"]
+    assert posts[0]["json"] == posts[1]["json"]
+    assert (
+        posts[0]["headers"]["Idempotency-Key"] == posts[1]["headers"]["Idempotency-Key"]
+    )
+    assert [event["type"] for event in progress_events] == [
+        "dispatch_ready",
+        "response_ready",
+    ]
+    response_event = progress_events[-1]
+    assert response_event[UPSTREAM_RESPONSE_STATUS_CODE] == 200
+    assert response_event[UPSTREAM_RESPONSE_REQUEST_ID] == "req-final"
+    assert response_event[UPSTREAM_RESPONSE_TRACE_ID] == "00-final-trace-01"
+    assert response_event[UPSTREAM_RESPONSE_HTTP_ATTEMPTS] == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_generate_repeated_503_is_terminal_with_response_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posts: list[dict[str, Any]] = []
+    progress_events: list[dict[str, Any]] = []
+
+    class _Client:
+        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+            posts.append(
+                {
+                    "url": url,
+                    "headers": dict(kwargs["headers"]),
+                    "json": dict(kwargs["json"]),
+                }
+            )
+            return httpx.Response(
+                503,
+                headers={
+                    "x-request-id": f"req-{len(posts)}",
+                    "x-trace-id": f"trace-{len(posts)}",
+                    "authorization": "Bearer must-not-persist",
+                    "set-cookie": "session=must-not-persist",
+                },
+                json={"error": {"message": "gateway failed"}},
+            )
+
+    client = _Client()
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> _Client:
+        return client
+
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.lifecycle,
+        "get_images_client",
+        fake_get_images_client,
+    )
+    monkeypatch.setattr(
+        TEST_UPSTREAM_SERVICES.infrastructure.asyncio,
+        "sleep",
+        lambda _delay: _done(),
+    )
 
     with pytest.raises(upstream.UpstreamError) as exc_info:
         await TEST_UPSTREAM_SERVICES.direct.direct_generate_image_once(
-            _image_request(),
+            _image_request(
+                progress_callback=progress_events.append,
+                request_context=ImageRequestContext.create(trace_id="gen-unknown"),
+            ),
             base_url_override="https://example.invalid/v1",
             api_key_override="sk-test",
         )
 
-    assert client.calls == 1
-    assert exc_info.value.error_code == "direct_image_result_unknown"
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.payload["upstream_result_unknown"] is True
+    error = exc_info.value
+    assert len(posts) == 2
+    assert posts[0]["json"] == posts[1]["json"]
+    assert (
+        posts[0]["headers"]["Idempotency-Key"] == posts[1]["headers"]["Idempotency-Key"]
+    )
+    assert error.error_code == "direct_image_result_unknown"
+    assert error.status_code == 503
+    assert error.payload["upstream_result_unknown"] is True
+    assert error.payload[UPSTREAM_RESPONSE_STATUS_CODE] == 503
+    assert error.payload[UPSTREAM_RESPONSE_REQUEST_ID] == "req-2"
+    assert error.payload[UPSTREAM_RESPONSE_TRACE_ID] == "trace-2"
+    assert error.payload[UPSTREAM_RESPONSE_HTTP_ATTEMPTS] == 2
+    assert "must-not-persist" not in repr(error.payload)
+    assert [event["type"] for event in progress_events] == [
+        "dispatch_ready",
+        "response_received",
+    ]
+    assert not TEST_UPSTREAM_SERVICES.retry.should_continue_image_provider_failover(
+        error,
+        retriable=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_received_receipt_failure_keeps_safe_metadata() -> None:
+    async def fail_receipt(_event: dict[str, Any]) -> None:
+        raise RuntimeError("database unavailable")
+
+    with pytest.raises(upstream.UpstreamError) as exc_info:
+        await TEST_UPSTREAM_SERVICES.transport.emit_image_progress(
+            fail_receipt,
+            "response_received",
+            **{
+                UPSTREAM_RESPONSE_STATUS_CODE: 503,
+                UPSTREAM_RESPONSE_REQUEST_ID: "req-final",
+                UPSTREAM_RESPONSE_TRACE_ID: "trace-final",
+                UPSTREAM_RESPONSE_HTTP_ATTEMPTS: 2,
+            },
+        )
+
+    error = exc_info.value
+    assert error.error_code == "direct_image_result_unknown"
+    assert error.status_code == 503
+    assert error.payload["receipt_persist_failed"] is True
+    assert error.payload[UPSTREAM_RESPONSE_REQUEST_ID] == "req-final"
+    assert error.payload[UPSTREAM_RESPONSE_TRACE_ID] == "trace-final"
 
 
 @pytest.mark.asyncio
@@ -591,6 +738,8 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
         seen["json_body"] = dict(kwargs["json_body"])
         seen["timeout"] = kwargs.get("timeout")
         seen["retry_httpx_exceptions"] = kwargs.get("retry_httpx_exceptions")
+        seen["retry_status_codes"] = kwargs.get("retry_status_codes")
+        seen["max_attempts"] = kwargs.get("max_attempts")
         return httpx.Response(
             200,
             json={"data": [{"b64_json": "ZmFrZQ==", "revised_prompt": "ok"}]},
@@ -633,6 +782,8 @@ async def test_direct_generate_image_once_sends_bound_trace_idempotency_key(
     assert headers["Idempotency-Key"] == expected_key
     assert seen["timeout"].read == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
     assert seen["retry_httpx_exceptions"] is False
+    assert seen["retry_status_codes"] is True
+    assert seen["max_attempts"] == 2
 
 
 @pytest.mark.asyncio
@@ -717,11 +868,19 @@ async def test_image_job_submit_does_not_fall_back_to_upstream_key(
 async def test_direct_generate_timeout_is_result_unknown_not_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> object:
-        return object()
+    progress_events: list[dict[str, Any]] = []
 
-    async def fake_post_with_retry(**_kwargs: Any) -> httpx.Response:
-        raise httpx.ReadTimeout("client gave up")
+    class _Client:
+        calls = 0
+
+        async def post(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
+            self.calls += 1
+            raise httpx.ReadTimeout("client gave up")
+
+    client = _Client()
+
+    async def fake_get_images_client(*_args: Any, **_kwargs: Any) -> _Client:
+        return client
 
     async def fake_timeout_config() -> TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig:
         return TEST_UPSTREAM_SERVICES.lifecycle.TimeoutConfig(
@@ -730,9 +889,6 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
 
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.lifecycle, "get_images_client", fake_get_images_client
-    )
-    monkeypatch.setattr(
-        TEST_UPSTREAM_SERVICES.core, "post_with_retry", fake_post_with_retry
     )
     monkeypatch.setattr(
         TEST_UPSTREAM_SERVICES.lifecycle, "resolve_timeout_config", fake_timeout_config
@@ -744,6 +900,7 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
                 output_format="png",
                 background="auto",
                 moderation="auto",
+                progress_callback=progress_events.append,
             ),
             base_url_override="https://example.invalid/v1",
             api_key_override="sk-test",
@@ -758,6 +915,8 @@ async def test_direct_generate_timeout_is_result_unknown_not_retryable(
         exc.payload["timeout_s"] == TEST_UPSTREAM_SERVICES.core.IMAGE_READ_TIMEOUT_MIN_S
     )
     assert exc.payload["upstream_result_unknown"] is True
+    assert client.calls == 1
+    assert [event["type"] for event in progress_events] == ["dispatch_ready"]
     from app.retry import is_retriable
 
     assert (

@@ -16,9 +16,7 @@ from lumen_core.constants import (
     GenerationStatus,
     MessageStatus,
 )
-from lumen_core.generation_resources import generation_resource_demand
 from lumen_core.models import Generation, Message
-from lumen_core.queue_metadata import generation_queue_metadata
 from lumen_core.upstream_billing import upstream_dispatch_result_unknown
 
 from ...observability import safe_outcome, task_duration_seconds
@@ -120,23 +118,6 @@ async def load_initial_generation(state: GenerationRunState) -> bool:
         if not may_run:
             await fail_max_attempts(state, session, services)
             return False
-        request = state.gen_upstream_request_snapshot or {}
-        metadata = generation_queue_metadata(
-            upstream_request=request,
-            action=state.action,
-            size_requested=state.size_requested,
-            mask_image_id=state.mask_image_id,
-            created_at=state.gen_created_at,
-        )
-        state.resource_demand = generation_resource_demand(
-            pixel_count=metadata.get("pixel_count"),
-            reference_count=len(state.input_image_ids),
-            action=str(state.action),
-            has_mask=bool(state.mask_image_id),
-            transparent=request.get("background") == "transparent",
-            output_count=int(request.get("n") or 1),
-            dual_race=request.get("image_route") == "dual_race",
-        )
     return True
 
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { toast } from "@/components/ui/primitives";
 import type {
@@ -15,7 +15,6 @@ import type { VideoRequestFence } from "@/lib/videoEventSnapshot";
 import {
   displayPromptReferenceMentions,
   referenceDisplayToken,
-  referenceLimitsForModelOption,
 } from "./video-reference-domain";
 import {
   canApplyPromptEnhanceCandidate,
@@ -26,21 +25,20 @@ import type {
   ReferenceDraft,
 } from "./video-workbench-ui";
 import {
-  billingModelForAction,
-  durationOptionsForModel,
   estimateHoldMicro,
   parseSeed,
-  resolutionOptionsForModel,
+  videoModelLabel,
 } from "./video-options-model";
+import {
+  deriveVideoOptionSelection,
+  deriveVideoParameterSelection,
+} from "./video-option-state";
 import {
   motionSafeScrollBehavior,
 } from "./video-page-utils";
 import { hasPromptEnhancementPanel } from "./video-page-derived-state";
 import {
-  effectiveVideoDuration,
-  effectiveVideoResolution,
   referenceDraftFromHistory,
-  selectedVideoModel,
   videoServiceSummary,
   videoSourceReady,
   videoSubmitDisabledReason,
@@ -92,10 +90,10 @@ export default function VideoPage() {
   const [action, setAction] = useState<VideoAction>("t2v");
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState("");
-  const [durationS, setDurationS] = useState(5);
-  const [resolution, setResolution] = useState("720p");
-  const [aspectRatio, setAspectRatio] = useState("adaptive");
-  const [generateAudio, setGenerateAudio] = useState(true);
+  const [durationS, setDurationS] = useState<number | null>(null);
+  const [resolution, setResolution] = useState("");
+  const [aspectRatio, setAspectRatio] = useState("");
+  const [generateAudio, setGenerateAudio] = useState<boolean | null>(null);
   const [seed, setSeed] = useState("");
   const [isEnhancingPrompt, setIsEnhancingPrompt] = useState(false);
   const [promptEnhancePreview, setPromptEnhancePreview] = useState("");
@@ -141,10 +139,6 @@ export default function VideoPage() {
   );
 
   useEffect(() => {
-    actionRef.current = action;
-  }, [action]);
-
-  useEffect(() => {
     promptValueRef.current = prompt;
   }, [prompt]);
 
@@ -159,29 +153,35 @@ export default function VideoPage() {
     [],
   );
 
-  const availableModels = useMemo(
-    () => options?.models.filter((item) => item.actions.includes(action)) ?? [],
-    [action, options?.models],
-  );
-  const selectedModel = selectedVideoModel(availableModels, model);
-  const selectedModelOption = availableModels.find(
-    (item) => item.model === selectedModel,
-  );
-  const referenceLimits = useMemo(
-    () => referenceLimitsForModelOption(selectedModelOption, selectedModel),
-    [selectedModel, selectedModelOption],
-  );
+  const {
+    availableActions,
+    effectiveAction,
+    availableModels,
+    selectedModel,
+    referenceLimits,
+    referenceTotalLimit,
+    allowAudioOnlyReference,
+    inputImageConstraints,
+    referenceImageConstraints,
+  } = deriveVideoOptionSelection(options, action, model);
+  useEffect(() => {
+    actionRef.current = effectiveAction;
+  }, [effectiveAction]);
 
   const clearPromptEnhanceChoices = useCallback(() => {
     setPromptEnhancePreview("");
     setPromptEnhanceCandidates([]);
     setSelectedPromptEnhanceCandidateId("");
-  }, []);
+  }, [
+    setPromptEnhanceCandidates,
+    setPromptEnhancePreview,
+    setSelectedPromptEnhanceCandidateId,
+  ]);
 
   const clearPromptEnhanceSelection = useCallback(() => {
     setPromptEnhancePreview("");
     setSelectedPromptEnhanceCandidateId("");
-  }, []);
+  }, [setPromptEnhancePreview, setSelectedPromptEnhanceCandidateId]);
 
   const abortPromptEnhancement = useCallback(() => {
     promptEnhanceEpochRef.current += 1;
@@ -189,7 +189,7 @@ export default function VideoPage() {
     promptEnhanceAbortRef.current = null;
     controller?.abort();
     setIsEnhancingPrompt(false);
-  }, []);
+  }, [setIsEnhancingPrompt]);
 
   const beforeMediaChange = useCallback(() => {
     abortPromptEnhancement();
@@ -226,6 +226,9 @@ export default function VideoPage() {
     draftFenceRef,
     promptValueRef,
     referenceLimits,
+    referenceTotalLimit,
+    inputImageConstraints,
+    referenceImageConstraints,
     beforeMediaChange,
     setPrompt,
   });
@@ -235,47 +238,43 @@ export default function VideoPage() {
     existingVolcanoAssetIds,
     referenceCounts,
     referenceLimitError,
+    referenceTotal,
     remainingVolcanoAssetLimits,
     selectedAssetReferenceKind,
   } = useVideoReferenceSummary(
     referenceMedia,
     referenceLimits,
+    referenceTotalLimit,
     assetReferenceKind,
   );
-  const selectedBillingModel = billingModelForAction(
+  const {
+    selectedBillingModel,
+    availableResolutions,
+    effectiveResolution,
+    availableAspectRatios,
+    effectiveAspectRatio,
+    availableDurations,
+    effectiveDurationS,
+    audioCapability,
+    effectiveGenerateAudio,
+  } = deriveVideoParameterSelection(
     options,
     selectedModel,
-    action,
-  );
-  const availableResolutions = useMemo(
-    () => resolutionOptionsForModel(options, selectedModel),
-    [options, selectedModel],
-  );
-  const effectiveResolution = effectiveVideoResolution(
-    availableResolutions,
-    resolution,
-  );
-  const availableDurations = useMemo(
-    () =>
-      durationOptionsForModel(
-        options,
-        selectedModel,
-        action,
-        effectiveResolution,
-      ),
-    [action, effectiveResolution, options, selectedModel],
-  );
-  const effectiveDurationS = effectiveVideoDuration(
-    availableDurations,
-    durationS,
+    effectiveAction,
+    {
+      resolution,
+      aspectRatio,
+      durationS,
+      generateAudio,
+    },
   );
   const estimate = estimateHoldMicro(options, {
     model: selectedModel,
     billingModel: selectedBillingModel,
-    action,
+    action: effectiveAction,
     resolution: effectiveResolution,
     durationS: effectiveDurationS,
-    referenceHasVideo: referenceMedia.some((item) => item.kind === "video"),
+    referenceCounts,
   });
   const seedIsValid = !seed.trim() || parseSeed(seed) !== null;
 
@@ -342,6 +341,7 @@ export default function VideoPage() {
       clearPromptEnhanceSelection,
       focusPromptTarget,
       prompt,
+      setPrompt,
     ],
   );
 
@@ -360,13 +360,13 @@ export default function VideoPage() {
     retryMut,
   } = useVideoTaskMutations({
     abortGenerationRefresh,
-    action,
-    aspectRatio,
+    action: effectiveAction,
+    aspectRatio: effectiveAspectRatio,
     disableVideoSettling,
     durationS: effectiveDurationS,
     effectiveItems,
     enableVideoSettling,
-    generateAudio,
+    generateAudio: effectiveGenerateAudio,
     inputImageId,
     invalidateHistory,
     model: selectedModel,
@@ -410,19 +410,31 @@ export default function VideoPage() {
       });
       toast.success("已套用参数");
     },
-    [focusPromptTarget, loadDraftMedia, switchDraftContext],
+    [
+      focusPromptTarget,
+      loadDraftMedia,
+      setAction,
+      setAspectRatio,
+      setDurationS,
+      setGenerateAudio,
+      setModel,
+      setPrompt,
+      setResolution,
+      setSeed,
+      switchDraftContext,
+    ],
   );
 
   const {
     canEnhancePrompt,
     enhancePromptAction,
   } = useVideoPromptEnhancement({
-    action,
-    aspectRatio,
+    action: effectiveAction,
+    aspectRatio: effectiveAspectRatio,
     clearPromptEnhanceChoices,
     draftFenceRef,
     durationS: effectiveDurationS,
-    generateAudio,
+    generateAudio: effectiveGenerateAudio,
     hasActiveUpload,
     inputImageId,
     isEnhancingPrompt,
@@ -461,26 +473,22 @@ export default function VideoPage() {
         if (target) focusPromptTarget(target, { preventScroll: true });
       });
     },
-    [focusPromptTarget],
-  );
-
-  const handlePromptChange = useCallback(
-    (value: string) => {
-      abortPromptEnhancement();
-      clearPromptEnhanceSelection();
-      setPrompt(
-        action === "reference"
-          ? displayPromptReferenceMentions(value, referenceMedia)
-          : value,
-      );
-    },
     [
-      abortPromptEnhancement,
-      action,
-      clearPromptEnhanceSelection,
-      referenceMedia,
+      focusPromptTarget,
+      setPrompt,
+      setSelectedPromptEnhanceCandidateId,
     ],
   );
+
+  const handlePromptChange = (value: string) => {
+    abortPromptEnhancement();
+    clearPromptEnhanceSelection();
+    setPrompt(
+      effectiveAction === "reference"
+        ? displayPromptReferenceMentions(value, referenceMedia)
+        : value,
+    );
+  };
 
   const resizePromptEditor = useCallback(() => {
     const target = promptRef.current;
@@ -506,45 +514,25 @@ export default function VideoPage() {
   }, []);
 
   const uploadsPending = firstFrameUploadPending || referenceUploadPending;
-  const submitDisabledReason = useMemo(
-    () =>
-      videoSubmitDisabledReason({
-        createPending: createMut.isPending,
-        uploadPending: uploadsPending,
-        optionsLoading: optionsQ.isLoading,
-        options,
-        selectedModel,
-        availableResolutions,
-        resolution: effectiveResolution,
-        availableDurations,
-        durationS: effectiveDurationS,
-        prompt,
-        action,
-        inputImageId,
-        referenceCounts,
-        referenceLimitError,
-        seedIsValid,
-        estimate,
-      }),
-    [
-      action,
-      availableDurations,
-      availableResolutions,
-      createMut.isPending,
-      effectiveDurationS,
-      effectiveResolution,
-      estimate,
-      inputImageId,
-      options,
-      optionsQ.isLoading,
-      prompt,
-      referenceCounts,
-      referenceLimitError,
-      seedIsValid,
-      selectedModel,
-      uploadsPending,
-    ],
-  );
+  const submitDisabledReason = videoSubmitDisabledReason({
+    createPending: createMut.isPending,
+    uploadPending: uploadsPending,
+    optionsLoading: optionsQ.isLoading,
+    options,
+    selectedModel,
+    availableResolutions,
+    resolution: effectiveResolution,
+    availableDurations,
+    durationS: effectiveDurationS,
+    prompt,
+    action: effectiveAction,
+    inputImageId,
+    referenceCounts,
+    referenceLimitError,
+    allowAudioOnlyReference,
+    seedIsValid,
+    estimate,
+  });
   const canSubmit = submitDisabledReason === "可以提交";
   const submitVideo = useCallback(() => {
     if (!canSubmit || hasActiveUpload()) return;
@@ -559,9 +547,10 @@ export default function VideoPage() {
     handleModelChange,
     handleResolutionChange,
   } = useVideoParameterHandlers({
-    action,
+    action: effectiveAction,
     options,
-    resolution,
+    aspectRatio: effectiveAspectRatio,
+    resolution: effectiveResolution,
     selectedModel,
     beforeParameterChange: beforeMediaChange,
     switchDraftContext,
@@ -604,26 +593,26 @@ export default function VideoPage() {
     modelCount: availableModels.length,
     unavailableReason: options?.unavailable_reason,
   });
-  const parameterProfile = `${effectiveResolution} · ${formatDurationLabel(effectiveDurationS)}`;
+  const parameterProfile =
+    effectiveResolution && availableDurations.length > 0
+      ? `${effectiveResolution} · ${formatDurationLabel(effectiveDurationS)}`
+      : "参数未配置";
   const sourceReady = videoSourceReady(
-    action,
+    effectiveAction,
     inputImageId,
     referenceMedia.length,
   );
   const modelOptionValues = availableModels.map((item) => item.model);
+  const modelOptionLabels = Object.fromEntries(
+    availableModels.map((item) => [item.model, videoModelLabel(item)]),
+  );
   const durationOptionValues = availableDurations.map(String);
-  const aspectRatioOptionValues = options?.aspect_ratios ?? [
-    "adaptive",
-    "16:9",
-    "9:16",
-    "1:1",
-  ];
 
   const viewModel: VideoPageViewModel = {
     header: {
-      action,
+      action: effectiveAction,
       parameterProfile,
-      generateAudio,
+      generateAudio: effectiveGenerateAudio,
       serviceEnabled,
       optionsLoading: optionsQ.isLoading,
       activeCount: activeItems.length,
@@ -634,12 +623,14 @@ export default function VideoPage() {
       onOpenTasks: () => setIsTaskPanelOpen(true),
     },
     composer: {
-      action,
+      action: effectiveAction,
+      actionOptions: availableActions,
       onActionChange: handleActionChange,
       firstFrame: {
         pending: firstFrameUploadPending,
         inputImageId,
         uploadedLabel,
+        imageConstraints: inputImageConstraints,
         onFile: startFirstFrameUpload,
         onInputImageIdChange: handleInputImageIdChange,
       },
@@ -647,6 +638,9 @@ export default function VideoPage() {
         pending: referenceUploadPending,
         counts: referenceCounts,
         limits: referenceLimits,
+        total: referenceTotal,
+        totalLimit: referenceTotalLimit,
+        imageConstraints: referenceImageConstraints,
         items: referenceMedia,
         prompt,
         kindOptions: assetReferenceKindOptions,
@@ -683,14 +677,16 @@ export default function VideoPage() {
     parameters: {
       selectedModel,
       modelOptions: modelOptionValues,
+      modelOptionLabels,
       durationS: effectiveDurationS,
       durationOptions: durationOptionValues,
       resolution: effectiveResolution,
       resolutionOptions: availableResolutions,
-      aspectRatio,
-      aspectRatioOptions: aspectRatioOptionValues,
+      aspectRatio: effectiveAspectRatio,
+      aspectRatioOptions: availableAspectRatios,
       seed,
-      generateAudio,
+      generateAudio: effectiveGenerateAudio,
+      audioSupported: audioCapability.supported,
       estimate,
       canSubmit,
       reason: submitDisabledReason,
