@@ -20,7 +20,7 @@ from lumen_core.model_base import new_uuid7
 from lumen_core.model_entities import Video
 from lumen_core.schema_models import VideoUploadOut
 
-from ..services.active_user import lock_db_authenticated_user_snapshot
+from ..services import active_user as active_user_service
 from ..services.video_storage_capacity import VideoStorageCapacityManager
 from ..services.video_storage_lifecycle import (
     VideoReferenceStorageLockTimeout,
@@ -46,8 +46,7 @@ from .video_upload_planning import (
 )
 
 _REFERENCE_INVENTORY_CLEANUP_PAGE_SIZE = 32
-_REFERENCE_UPLOAD_FILENAME_MAX_CHARS = 255
-_REFERENCE_UPLOAD_FILENAME_MAX_BYTES = 255
+_REFERENCE_UPLOAD_FILENAME_LIMIT = 255
 _REFERENCE_UPLOAD_CAS_ATTEMPTS = 3
 _STARTED_TASK_CONFIRMATION_TIMEOUT_SECONDS = 30.0
 
@@ -101,9 +100,9 @@ def normalize_reference_filename(raw: str | None) -> str:
         raise ValueError("filename contains control characters")
     if "/" in value or "\\" in value or value in {".", ".."}:
         raise ValueError("filename contains a path separator")
-    if len(value) > _REFERENCE_UPLOAD_FILENAME_MAX_CHARS:
+    if len(value) > _REFERENCE_UPLOAD_FILENAME_LIMIT:
         raise ValueError("filename is too long")
-    if len(value.encode("utf-8")) > _REFERENCE_UPLOAD_FILENAME_MAX_BYTES:
+    if len(value.encode("utf-8")) > _REFERENCE_UPLOAD_FILENAME_LIMIT:
         raise ValueError("filename is too large")
     return value
 
@@ -560,6 +559,7 @@ async def _discard_prepared_upload(
 async def _adopt_reference_upload(
     *,
     user_id: str,
+    identity: active_user_service.CapturedActiveUserIdentity,
     filename: str,
     mime: str,
     size: int,
@@ -567,13 +567,12 @@ async def _adopt_reference_upload(
     inventory: ReferenceInventorySnapshot,
     plan: _ReferenceUploadPlan,
     marker: VideoUploadAdoptionMarker | None,
-    user: Any,
     db: AsyncSession,
     deps: UploadDependencies,
 ) -> Any:
     commit_started = False
     try:
-        await lock_db_authenticated_user_snapshot(db, user)
+        await active_user_service.lock_captured_active_user_snapshot(db, identity)
         locked = await lock_reference_inventory_for_adoption(
             user_id=user_id,
             sha256=sha256,
@@ -693,7 +692,8 @@ async def upload_reference_video(
     file: UploadFile,
     deps: UploadDependencies,
 ) -> VideoUploadOut:
-    user_id = str(user.id)
+    identity = active_user_service.capture_db_authenticated_user_identity(db, user)
+    user_id = identity.user_id
     try:
         filename = deps.normalize_filename(file.filename)
     except ValueError as exc:
@@ -761,6 +761,7 @@ async def upload_reference_video(
                 try:
                     adopted = await _adopt_reference_upload(
                         user_id=user_id,
+                        identity=identity,
                         filename=filename,
                         mime=mime,
                         size=size,
@@ -768,7 +769,6 @@ async def upload_reference_video(
                         inventory=inventory,
                         plan=plan,
                         marker=marker,
-                        user=user,
                         db=db,
                         deps=deps,
                     )

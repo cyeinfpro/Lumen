@@ -354,6 +354,50 @@ lumen_install_optional_systemd_unit() {
         || log_warn "${warn_msg}"
 }
 
+lumen_publish_backup_service_gid() {
+    local deploy_root="$1"
+    local service_group="$2"
+    local service_login="$3"
+    local shared_env="${deploy_root%/}/shared/.env"
+    local service_group_id=""
+
+    if command -v getent >/dev/null 2>&1; then
+        service_group_id="$(
+            getent group "${service_group}" 2>/dev/null \
+                | awk -F: 'NR == 1 && $3 ~ /^[0-9]+$/ { print $3 }'
+        )"
+    fi
+    if [ -z "${service_group_id}" ]; then
+        service_group_id="$(id -g "${service_login}" 2>/dev/null || true)"
+    fi
+    case "${service_group_id}" in
+        ''|*[!0-9]*)
+            log_error "无法解析备份服务组 ${service_group} 的数字 GID。"
+            return 1
+            ;;
+    esac
+
+    LUMEN_BACKUP_SERVICE_GID="${service_group_id}"
+    export LUMEN_BACKUP_SERVICE_GID
+    [ -f "${shared_env}" ] || return 0
+    lumen_release_shared_env_path_safe "${deploy_root}" || return 1
+    if [ "$(lumen_read_dotenv_value LUMEN_BACKUP_SERVICE_GID "${shared_env}")" \
+            = "${service_group_id}" ]; then
+        return 0
+    fi
+    if ! command -v lumen_set_env_value_in_file >/dev/null 2>&1 \
+            || ! lumen_set_env_value_in_file \
+                "${shared_env}" LUMEN_BACKUP_SERVICE_GID "${service_group_id}"; then
+        log_error "无法把备份服务 GID 写入 ${shared_env}，拒绝以错误 Compose 组启动 API。"
+        return 1
+    fi
+    if [ "$(lumen_read_dotenv_value LUMEN_BACKUP_SERVICE_GID "${shared_env}")" \
+            != "${service_group_id}" ]; then
+        log_error "备份服务 GID 写入后校验失败：${shared_env}"
+        return 1
+    fi
+}
+
 lumen_ensure_backup_service_user() {
     local backup_root="${1:-${LUMEN_BACKUP_ROOT:-/opt/lumendata/backup}}"
     local default_user="lumen-backup" default_group="lumen-backup"
@@ -384,6 +428,11 @@ lumen_ensure_backup_service_user() {
     # the lock path after the switch.
     if [ "${LUMEN_BACKUP_LAYOUT_BINDING_ROOT:-}" = "${backup_root}" ] \
             && [ -n "${LUMEN_BACKUP_LAYOUT_BINDING_TOKEN:-}" ]; then
+        service_login="$(id -un "${user}" 2>/dev/null || printf '%s' "${user}")"
+        if ! lumen_publish_backup_service_gid \
+                "${deploy_root}" "${service_group}" "${service_login}"; then
+            return 1
+        fi
         if ! lumen_verify_backup_service_layout_binding; then
             log_error "backup/maintenance root binding 在复用前失效。"
             return 1
@@ -412,6 +461,10 @@ lumen_ensure_backup_service_user() {
         return 1
     fi
     service_login="$(id -un "${user}" 2>/dev/null || printf '%s' "${user}")"
+    if ! lumen_publish_backup_service_gid \
+            "${deploy_root}" "${service_group}" "${service_login}"; then
+        return 1
+    fi
     if [ "${host_service_mode}" -eq 1 ]; then
         shared_group_id="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"
     else

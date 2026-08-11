@@ -44,6 +44,7 @@ services:
     user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"
     group_add:
       - "${LUMEN_APP_STORAGE_GID:-10001}"
+      - "${LUMEN_BACKUP_SERVICE_GID:-10001}"
     env_file: ${LUMEN_COMPOSE_ENV_FILE:-.env}
     restart: unless-stopped
     stop_grace_period: 60s

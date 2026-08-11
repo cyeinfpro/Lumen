@@ -343,9 +343,7 @@ def _maintenance_lock_environment(
 ):
     maintenance_root.mkdir()
     parent = maintenance_root.parent
-    anchor_key = hashlib.sha256(
-        str(maintenance_root).encode("utf-8")
-    ).hexdigest()[:32]
+    anchor_key = hashlib.sha256(str(maintenance_root).encode("utf-8")).hexdigest()[:32]
     anchor_dir = parent / f".lumen-maintenance.{anchor_key}.lock.d"
     local_dir = maintenance_root / ".lumen-maintenance.lock.d"
     anchor_owner_token = f".owner.{secrets.token_hex(8)}"
@@ -396,22 +394,14 @@ def _maintenance_lock_environment(
         "LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT": str(maintenance_root),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH": str(parent),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_NAME": maintenance_root.name,
-        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV": str(
-            parent_metadata.st_dev
-        ),
-        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO": str(
-            parent_metadata.st_ino
-        ),
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV": str(parent_metadata.st_dev),
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO": str(parent_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_DEV": str(root_metadata.st_dev),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_INO": str(root_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY": anchor_key,
         "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH": str(anchor_dir),
-        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV": str(
-            anchor_metadata.st_dev
-        ),
-        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO": str(
-            anchor_metadata.st_ino
-        ),
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV": str(anchor_metadata.st_dev),
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO": str(anchor_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_PATH": str(anchor_dir),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_PATH": str(local_dir),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_LOCAL_OWNER_TOKEN": local_owner_token,
@@ -444,10 +434,14 @@ def _maintenance_lock_environment(
                 current = os.lstat(directory)
             except FileNotFoundError:
                 current = None
-            if current is not None and (
-                current.st_dev,
-                current.st_ino,
-            ) == identity:
+            if (
+                current is not None
+                and (
+                    current.st_dev,
+                    current.st_ino,
+                )
+                == identity
+            ):
                 owner_file.unlink(missing_ok=True)
                 try:
                     owner_dir.rmdir()
@@ -495,30 +489,20 @@ def _maintenance_flock_environment(
     metadata = os.fstat(descriptor)
     parent_metadata = os.fstat(parent_descriptor)
     root_metadata = maintenance_root.stat()
-    anchor_key = hashlib.sha256(
-        str(maintenance_root).encode("utf-8")
-    ).hexdigest()[:32]
+    anchor_key = hashlib.sha256(str(maintenance_root).encode("utf-8")).hexdigest()[:32]
     environment = {
         "LUMEN_BORROWED_MAINTENANCE_LOCK_KIND": "flock",
         "LUMEN_BORROWED_MAINTENANCE_LOCK_ROOT": str(maintenance_root),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_PATH": str(parent),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_NAME": maintenance_root.name,
-        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV": str(
-            parent_metadata.st_dev
-        ),
-        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO": str(
-            parent_metadata.st_ino
-        ),
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_DEV": str(parent_metadata.st_dev),
+        "LUMEN_BORROWED_MAINTENANCE_ROOT_PARENT_INO": str(parent_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_DEV": str(root_metadata.st_dev),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_INO": str(root_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_ROOT_ANCHOR_KEY": anchor_key,
         "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_PATH": str(parent),
-        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV": str(
-            parent_metadata.st_dev
-        ),
-        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO": str(
-            parent_metadata.st_ino
-        ),
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_DEV": str(parent_metadata.st_dev),
+        "LUMEN_BORROWED_MAINTENANCE_LOCK_ANCHOR_INO": str(parent_metadata.st_ino),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_PATH": str(lock_path),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_DEV": str(metadata.st_dev),
         "LUMEN_BORROWED_MAINTENANCE_LOCK_INO": str(metadata.st_ino),
@@ -755,6 +739,48 @@ def test_first_backup_journal_survives_install_ensure_and_remains_writable(
     cleared_restore = _run_journal("clear", str(restore_journal))
     assert cleared_restore.returncode == 0, cleared_restore.stderr
     assert not restore_journal.exists()
+
+
+def test_backup_service_gid_is_persisted_independently_from_storage_gid(
+    tmp_path: Path,
+) -> None:
+    user, group = _current_identity()
+    expected_gid = grp.getgrnam(group).gr_gid
+    deploy_root = tmp_path / "deploy"
+    shared_env = deploy_root / "shared" / ".env"
+    shared_env.parent.mkdir(parents=True)
+    shared_env.write_text(
+        "LUMEN_APP_STORAGE_GID=424242\nLUMEN_BACKUP_SERVICE_GID=777777\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            f"""
+            set -euo pipefail
+            . {shlex.quote(str(LIB))}
+            LUMEN_APP_STORAGE_GID=424242
+            lumen_publish_backup_service_gid \
+                {shlex.quote(str(deploy_root))} \
+                {shlex.quote(group)} \
+                {shlex.quote(user)}
+            printf '%s\\n' "$LUMEN_BACKUP_SERVICE_GID"
+            """,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.strip() == str(expected_gid)
+    assert shared_env.read_text(encoding="utf-8").splitlines() == [
+        "LUMEN_APP_STORAGE_GID=424242",
+        f"LUMEN_BACKUP_SERVICE_GID={expected_gid}",
+    ]
 
 
 @pytest.mark.parametrize("failure", ["touch", "chown", "chmod", "writable"])
@@ -1100,9 +1126,7 @@ def test_shared_tree_can_use_runtime_gid_while_recovery_stays_private(
         service_user, service_group = target
         service_gid = grp.getgrnam(service_group).gr_gid
         shared_gid = next(
-            candidate
-            for candidate in range(10000, 11000)
-            if candidate != service_gid
+            candidate for candidate in range(10000, 11000) if candidate != service_gid
         )
     else:
         service_user, service_group = _current_identity()
@@ -1292,17 +1316,12 @@ def test_mountinfo_parser_prefers_cifs_for_effective_device() -> None:
     )
 
     assert (
-        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:42", mountinfo)
-        == "cifs"
+        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:42", mountinfo) == "cifs"
     )
     assert (
-        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:43", mountinfo)
-        == "ext4"
+        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:43", mountinfo) == "ext4"
     )
-    assert (
-        BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:44", mountinfo)
-        is None
-    )
+    assert BACKUP_PERMISSIONS._filesystem_type_from_mountinfo("0:44", mountinfo) is None
 
 
 def test_shared_legacy_owner_nodes_migrate_to_target_uid(tmp_path: Path) -> None:
@@ -1340,7 +1359,7 @@ def test_shared_legacy_owner_nodes_migrate_to_target_uid(tmp_path: Path) -> None
 def test_explicit_unmapped_legacy_owner_uid_is_allowed_without_passwd_entry(
     tmp_path: Path,
 ) -> None:
-    metadata = (tmp_path / "node")
+    metadata = tmp_path / "node"
     metadata.write_text("payload", encoding="utf-8")
     unmapped_uid = next(
         (
@@ -1541,9 +1560,7 @@ def test_deep_shared_third_party_owner_is_rejected(
                 BACKUP_PERMISSIONS._validate_shared_tree(
                     root_fd,
                     target_user_id=target_uid,
-                    legacy_owner_ids=frozenset(
-                        {legacy_uid, explicit_legacy_uid}
-                    ),
+                    legacy_owner_ids=frozenset({legacy_uid, explicit_legacy_uid}),
                     guard=guard,
                     skip_recovery=True,
                 )
@@ -1948,9 +1965,7 @@ def test_maintenance_lock_spans_helper_return_through_activation(
 
     def verify_then_inject(self) -> None:
         original_verify_final(self)
-        attempts.append(
-            _run_supported_writer(tmp_path / "maintenance", injected)
-        )
+        attempts.append(_run_supported_writer(tmp_path / "maintenance", injected))
 
     monkeypatch.setattr(
         BACKUP_PERMISSIONS._TreeStabilityGuard,
@@ -1993,13 +2008,12 @@ def test_replaced_maintenance_lock_path_fails_closed_without_cleanup(
         monkeypatch,
         maintenance_root,
     ):
-        anchor_key = hashlib.sha256(
-            str(maintenance_root).encode("utf-8")
-        ).hexdigest()[:32]
+        anchor_key = hashlib.sha256(str(maintenance_root).encode("utf-8")).hexdigest()[
+            :32
+        ]
         if lock_location == "anchor":
             lock_path = (
-                maintenance_root.parent
-                / f".lumen-maintenance.{anchor_key}.lock.d"
+                maintenance_root.parent / f".lumen-maintenance.{anchor_key}.lock.d"
             )
         else:
             lock_path = maintenance_root / ".lumen-maintenance.lock.d"
@@ -2175,9 +2189,10 @@ def test_runtime_never_recursively_relaxes_private_recovery_directory() -> None:
     assert "--legacy-owner-user root" in runtime
     assert '--legacy-owner-uid "${LUMEN_APP_UID:-10001}"' in runtime
     assert '--shared-group-id "${shared_group_id}"' in runtime
+    assert "lumen_publish_backup_service_gid" in runtime
+    assert "LUMEN_BACKUP_SERVICE_GID" in runtime
     assert (
-        'shared_group_id="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"'
-        in runtime
+        'shared_group_id="${LUMEN_APP_STORAGE_GID:-${LUMEN_APP_GID:-10001}}"' in runtime
     )
 
 
@@ -2189,14 +2204,12 @@ def test_host_writer_units_use_group_writable_umask() -> None:
         "lumen-restore-runner.service",
     )
     for unit_name in units:
-        unit = (
-            ROOT / "deploy" / "systemd" / unit_name
-        ).read_text(encoding="utf-8")
+        unit = (ROOT / "deploy" / "systemd" / unit_name).read_text(encoding="utf-8")
         assert unit.count("UMask=0007") == 1
 
-    backup_unit = (
-        ROOT / "deploy" / "systemd" / "lumen-backup.service"
-    ).read_text(encoding="utf-8")
+    backup_unit = (ROOT / "deploy" / "systemd" / "lumen-backup.service").read_text(
+        encoding="utf-8"
+    )
     assert "Restart=on-failure" in backup_unit
     assert "RestartPreventExitStatus=4" in backup_unit
     assert "RestartSec=300s" in backup_unit

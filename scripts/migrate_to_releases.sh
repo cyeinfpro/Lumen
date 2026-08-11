@@ -361,6 +361,63 @@ action_recorded() {
     grep -Fxq "$1" "${ACTION_MANIFEST}" 2>/dev/null
 }
 
+snapshot_shared_env_before_runtime_mutation() {
+    local shared_env="${ROOT}/shared/.env"
+    local snapshot="${MIGRATION_STATE_DIR}/shared-env.before-runtime"
+    local snapshot_tmp="${snapshot}.tmp.$$"
+
+    [ -e "${shared_env}" ] || return 0
+    if [ -L "${shared_env}" ] || [ ! -f "${shared_env}" ]; then
+        log_error "迁移中的 shared/.env 不是可信普通文件：${shared_env}"
+        return 1
+    fi
+    if action_recorded "shared-env-runtime-snapshot"; then
+        [ -f "${snapshot}" ] && [ ! -L "${snapshot}" ] || {
+            log_error "迁移 journal 缺少 shared/.env 原始快照：${snapshot}"
+            return 1
+        }
+        return 0
+    fi
+
+    rm -f -- "${snapshot_tmp}" 2>/dev/null || true
+    if ! (umask 077; cp -p -- "${shared_env}" "${snapshot_tmp}") \
+            || ! migration_fsync_file_and_parent "${snapshot_tmp}" \
+            || ! mv -f -- "${snapshot_tmp}" "${snapshot}" \
+            || ! migration_fsync_file_and_parent "${snapshot}" \
+            || ! record_action "shared-env-runtime-snapshot"; then
+        rm -f -- "${snapshot_tmp}" 2>/dev/null || true
+        log_error "无法持久化 shared/.env 迁移前快照。"
+        return 1
+    fi
+}
+
+restore_runtime_mutated_shared_env() {
+    local shared_env="${ROOT}/shared/.env"
+    local snapshot="${MIGRATION_STATE_DIR}/shared-env.before-runtime"
+    local restore_tmp="${shared_env}.restore.$$"
+
+    action_recorded "shared-env-runtime-snapshot" || return 0
+    if [ ! -f "${snapshot}" ] || [ -L "${snapshot}" ]; then
+        log_error "shared/.env 回滚快照缺失或类型不安全：${snapshot}"
+        return 1
+    fi
+    if [ -L "${shared_env}" ] \
+            || { [ -e "${shared_env}" ] && [ ! -f "${shared_env}" ]; }; then
+        log_error "拒绝覆盖类型不安全的 shared/.env：${shared_env}"
+        return 1
+    fi
+
+    rm -f -- "${restore_tmp}" 2>/dev/null || true
+    if ! cp -p -- "${snapshot}" "${restore_tmp}" \
+            || ! migration_fsync_file_and_parent "${restore_tmp}" \
+            || ! mv -f -- "${restore_tmp}" "${shared_env}" \
+            || ! migration_fsync_file_and_parent "${shared_env}"; then
+        rm -f -- "${restore_tmp}" 2>/dev/null || true
+        log_error "无法从迁移 journal 恢复 shared/.env。"
+        return 1
+    fi
+}
+
 acquire_migration_lock() {
     if [ "${LUMEN_LOCK_KIND:-}" != "flock" ]; then
         log_error "release 布局迁移要求全局 flock 互斥；拒绝在不可安全恢复的平台上停止服务或移动目录。"
@@ -415,6 +472,7 @@ cleanup_migration_lock() {
         rm -f -- "${PHASE_FILE}" "${PHASE_FILE}.tmp.$$" \
             "${MOVE_INTENT_MANIFEST}" "${MOVED_MANIFEST}" \
             "${ACTION_MANIFEST}" "${ACTIVE_SERVICES_MANIFEST}" \
+            "${MIGRATION_STATE_DIR}/shared-env.before-runtime" \
             2>/dev/null || true
     fi
     if [ -n "${MIGRATION_LOCK_OWNER_TOKEN}" ]; then
@@ -871,6 +929,7 @@ rollback_after_repack() {
     local record="" kind="" name="" source=""
     local rollback_failed=0
     migration_verify_staging_accounted || return 1
+    restore_runtime_mutated_shared_env || return 1
     restore_shared_paths || rollback_failed=1
     remove_expected_current_link || rollback_failed=1
     mkdir -p "${stage}" || return 1
@@ -1661,6 +1720,10 @@ main() {
     create_current_symlink
     extract_to_shared
     write_initial_release_metadata
+    if ! snapshot_shared_env_before_runtime_mutation; then
+        log_error "无法保护 shared/.env 的迁移前状态，拒绝配置运行时服务。"
+        return 1
+    fi
     fix_ownership
     deploy_systemd_units
     if ! lumen_verify_backup_service_layout_binding; then

@@ -413,9 +413,7 @@ def _run_migration(
             "SYSTEMCTL_STARTED_MARKER_UNIT": inactive_after_start_unit,
             "SYSTEMCTL_STARTED_MARKER": str(tmp_path / "started.marker"),
             "SYSTEMCTL_ACTIVE_CHECK_COUNT": str(tmp_path / "active-check.count"),
-            "SYSTEMCTL_ACTIVE_AFTER_START_SUCCESSES": str(
-                active_after_start_successes
-            ),
+            "SYSTEMCTL_ACTIVE_AFTER_START_SUCCESSES": str(active_after_start_successes),
             "SYSTEMCTL_ACTIVE_UNITS": " ".join(active_units),
             "CURL_LOG": str(tmp_path / "curl.log"),
             "CURL_FAIL_URLS": ",".join(http_fail_urls),
@@ -588,9 +586,9 @@ def _assert_original_layout_restored(root: Path) -> None:
     assert (root / "payload.txt").read_text(encoding="utf-8") == "keep-me\n"
     assert (root / ".env").read_text(encoding="utf-8") == "ROOT_ENV=original\n"
     assert not (root / ".env").is_symlink()
-    assert (
-        root / "apps/web/.env.local"
-    ).read_text(encoding="utf-8") == "WEB_ENV=original\n"
+    assert (root / "apps/web/.env.local").read_text(
+        encoding="utf-8"
+    ) == "WEB_ENV=original\n"
     assert not (root / "apps/web/.env.local").is_symlink()
     assert (root / "apps/web/.next/cache/cache.bin").read_bytes() == b"cache"
     assert not (root / "apps/web/.next/cache").is_symlink()
@@ -865,7 +863,7 @@ def test_lumen_with_lock_preserves_nondefault_signal_disposition(
         trap_command = f"trap '' {signal_name}"
     else:
         trap_command = (
-            f"trap 'printf \"%s\\\\n\" {signal_name} >> "
+            f'trap \'printf "%s\\\\n" {signal_name} >> '
             f"{shlex.quote(str(handler_log))}' {signal_name}"
         )
     process = _start_bash(
@@ -1188,8 +1186,8 @@ def test_active_worker_without_worker_readiness_retains_migration_journal(
     assert "恢复证据与 owner 锁已保留" in result.stderr
     assert "start lumen-worker.service" in calls
     worker_calls = (
-        tmp_path / "worker-health.log"
-    ).read_text(encoding="utf-8").splitlines()
+        (tmp_path / "worker-health.log").read_text(encoding="utf-8").splitlines()
+    )
     assert worker_calls
     assert set(worker_calls) == {
         f"-m app.worker_health check --expected-owner-uid {os.getuid()}"
@@ -1208,8 +1206,10 @@ def test_worker_and_tgbot_require_sustained_active_polls(tmp_path: Path) -> None
     assert (root / "current").is_symlink()
     assert calls.count("is-active --quiet lumen-worker.service") == 3
     assert calls.count("is-active --quiet lumen-tgbot.service") == 3
-    assert not (tmp_path / "curl.log").exists() \
+    assert (
+        not (tmp_path / "curl.log").exists()
         or (tmp_path / "curl.log").read_text(encoding="utf-8") == ""
+    )
 
 
 @pytest.mark.parametrize(
@@ -1250,9 +1250,9 @@ def test_api_web_http_health_is_bounded_configurable_and_rolls_back(
         if failed_service == "api"
         else [api_url, web_url, web_url, api_url]
     )
-    assert (
-        tmp_path / "curl.log"
-    ).read_text(encoding="utf-8").splitlines() == expected_calls
+    assert (tmp_path / "curl.log").read_text(
+        encoding="utf-8"
+    ).splitlines() == expected_calls
 
 
 @pytest.mark.parametrize(
@@ -1288,8 +1288,7 @@ def test_signal_at_first_stop_recovers_before_any_directory_move(
     calls = (tmp_path / "systemctl.log").read_text(encoding="utf-8").splitlines()
     assert calls.count("start lumen-web.service") == 1
     assert not any(
-        call.startswith("start ")
-        and call != "start lumen-web.service"
+        call.startswith("start ") and call != "start lumen-web.service"
         for call in calls
     )
 
@@ -1308,6 +1307,9 @@ def test_signal_after_shared_extraction_restores_dirs_links_and_env(
         assert len(owner_dirs) == 1
         state_dir = owner_dirs[0]
         assert (state_dir / "phase").read_text(encoding="utf-8") == "starting\n"
+        assert (state_dir / "shared-env.before-runtime").read_text(
+            encoding="utf-8"
+        ) == "ROOT_ENV=original\n"
         moved = (state_dir / "moved.manifest").read_bytes()
         assert b"top\tpayload.txt\0" in moved
         assert b"env\t.env\0" in moved
@@ -1384,12 +1386,10 @@ def test_sigkill_after_durable_move_before_ack_recovers_and_reruns(
         assert len(owner_dirs) == 1
         state_dir = owner_dirs[0]
         assert (state_dir / "phase").read_text(encoding="utf-8") == "moving\n"
-        assert b"top\tpayload.txt\0" in (
-            state_dir / "move-intent.manifest"
-        ).read_bytes()
-        assert b"top\tpayload.txt\0" not in (
-            state_dir / "moved.manifest"
-        ).read_bytes()
+        assert (
+            b"top\tpayload.txt\0" in (state_dir / "move-intent.manifest").read_bytes()
+        )
+        assert b"top\tpayload.txt\0" not in (state_dir / "moved.manifest").read_bytes()
         assert tmp_payload.read_text(encoding="utf-8") == "keep-me\n"
         assert not (root / "payload.txt").exists()
         os.killpg(process.pid, signal.SIGKILL)
@@ -1405,9 +1405,9 @@ def test_sigkill_after_durable_move_before_ack_recovers_and_reruns(
     assert rerun.returncode == 0, rerun.stderr + rerun.stdout
     assert "上次强制中断的迁移已恢复" in rerun.stderr + rerun.stdout
     assert (root / "current").is_symlink()
-    assert (
-        root / "releases/initial/payload.txt"
-    ).read_text(encoding="utf-8") == "keep-me\n"
+    assert (root / "releases/initial/payload.txt").read_text(
+        encoding="utf-8"
+    ) == "keep-me\n"
     assert not Path(f"{root}.tmp").exists()
     assert not lock_dir.exists()
 
@@ -1506,9 +1506,7 @@ def test_sigkill_after_current_creation_is_recovered_and_rerun_to_completion(
         _wait_for_file(ready)
         owner_dirs = list(lock_dir.glob(".owner.*"))
         assert len(owner_dirs) == 1
-        assert (owner_dirs[0] / "phase").read_text(encoding="utf-8") == (
-            "starting\n"
-        )
+        assert (owner_dirs[0] / "phase").read_text(encoding="utf-8") == ("starting\n")
         assert (root / "current").is_symlink()
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate(timeout=5)

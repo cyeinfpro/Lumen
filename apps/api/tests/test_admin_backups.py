@@ -764,6 +764,14 @@ async def test_direct_api_backup_cannot_overlap_host_maintenance_lock(
     deploy_root = tmp_path / "deploy"
     deploy_root.mkdir()
     ready = tmp_path / "maintenance-ready"
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    fake_ps = fakebin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'Mon Jan  1 00:00:00 2024'\n",
+        encoding="utf-8",
+    )
+    fake_ps.chmod(0o755)
     monkeypatch.setattr(admin_backups.settings, "backup_root", str(backup_root))
     monkeypatch.setattr(
         admin_backups.settings,
@@ -773,6 +781,7 @@ async def test_direct_api_backup_cannot_overlap_host_maintenance_lock(
     monkeypatch.setattr(admin_backups, "_backup_trigger_only_mode", lambda: False)
     monkeypatch.setenv("LUMEN_DEPLOY_ROOT", str(deploy_root))
     monkeypatch.delenv("LUMEN_BACKUP_FORCE", raising=False)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
 
     class FakeLockService:
         def __init__(self, *, fallback_busy):
