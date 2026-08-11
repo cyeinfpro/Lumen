@@ -26,6 +26,15 @@ class ActiveUserSnapshot:
     account_mode: AccountMode
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedActiveUserIdentity:
+    """Immutable request identity that remains safe across rollback boundaries."""
+
+    user_id: str
+    account_mode: AccountMode
+    session_id: str | None
+
+
 class ActiveUserFenceError(RuntimeError):
     """The authenticated identity became invalid before a durable write."""
 
@@ -248,3 +257,33 @@ async def lock_db_authenticated_user_snapshot(
         user,
         session_id=durable_session_id_from_db(db),
     )
+
+
+def capture_db_authenticated_user_identity(
+    db: AsyncSession,
+    user: User,
+) -> CapturedActiveUserIdentity:
+    """Freeze authenticated identity fields before a transaction can expire ``user``."""
+    from ..deps import durable_session_id_from_db
+
+    return CapturedActiveUserIdentity(
+        user_id=str(user.id),
+        account_mode=account_mode_from_user(user),
+        session_id=durable_session_id_from_db(db),
+    )
+
+
+async def lock_captured_active_user_snapshot(
+    db: AsyncSession,
+    identity: CapturedActiveUserIdentity,
+) -> ActiveUserSnapshot:
+    """Lock a previously captured identity and translate fence failures to HTTP."""
+    try:
+        return await lock_active_user_snapshot(
+            db,
+            identity.user_id,
+            identity.account_mode,
+            session_id=identity.session_id,
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc

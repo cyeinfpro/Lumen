@@ -76,7 +76,7 @@ def test_invalid_update_mode_fails_before_side_effects(
 
 def test_unset_update_mode_keeps_documented_fast_default(tmp_path: Path) -> None:
     source = BOOTSTRAP.read_text(encoding="utf-8")
-    assert '${LUMEN_UPDATE_MODE+x}' in source
+    assert "${LUMEN_UPDATE_MODE+x}" in source
     assert 'raw_update_mode="fast"' in source
     assert "exit 64" in source
 
@@ -133,13 +133,14 @@ def test_invalid_resolved_tag_and_literal_channel_are_rejected(
     assert literal.stdout.strip() == ""
 
 
-def test_backup_service_retries_lock_deferrals_without_start_limit() -> None:
+def test_backup_service_skips_lock_deferral_restarts_and_bounds_failures() -> None:
     service = BACKUP_SERVICE.read_text(encoding="utf-8")
 
-    assert "StartLimitIntervalSec=0" in service
-    assert "StartLimitBurst=" not in service
+    assert "StartLimitIntervalSec=1800" in service
+    assert "StartLimitBurst=3" in service
     assert "Restart=on-failure" in service
-    assert "RestartSec=60s" in service
+    assert "RestartPreventExitStatus=4" in service
+    assert "RestartSec=300s" in service
 
 
 @pytest.mark.parametrize(
@@ -186,8 +187,7 @@ def test_production_compose_requires_complete_digest_references() -> None:
 
     for service, variable in expected.items():
         assert (
-            f"image: ${{{variable}:?Set {variable} to name@sha256 digest}}"
-            in compose
+            f"image: ${{{variable}:?Set {variable} to name@sha256 digest}}" in compose
         ), service
     assert "build:" not in compose
     assert (

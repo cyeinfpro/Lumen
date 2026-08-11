@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import event, func, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -679,6 +679,95 @@ async def test_reference_upload_storage_phases_run_between_short_transactions(
         "clear-marker",
     ]
     assert not deleted_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reference_upload_survives_auth_rollback_without_implicit_user_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-upload-expired-auth"
+    payload = _payload(512, b"e")
+    _configure_storage(
+        monkeypatch,
+        tmp_path,
+        free_bytes=10 * 1024 * 1024,
+        minimum_free_bytes=100,
+    )
+    rollback_expired_user = False
+    implicit_column_loads: list[str] = []
+
+    async with _database(tmp_path) as factory:
+        monkeypatch.setattr(videos, "SessionLocal", factory)
+        async with factory() as setup:
+            await _seed_user(setup, user_id=user_id)
+
+        async with factory() as primary:
+            user = (
+                await primary.execute(select(User).where(User.id == user_id))
+            ).scalar_one()
+            assert primary.in_transaction()
+
+            real_rollback = (
+                video_upload_routes._rollback_inherited_transaction  # noqa: SLF001
+            )
+
+            async def rollback_and_assert_user_expired(db: AsyncSession) -> None:
+                nonlocal rollback_expired_user
+                assert db is primary
+                await real_rollback(db)
+                state = sa_inspect(user)
+                rollback_expired_user = state.expired
+                assert "id" in state.expired_attributes
+
+            def track_implicit_column_load(orm_execute_state: Any) -> None:
+                mapper = orm_execute_state.bind_arguments.get("mapper")
+                if (
+                    orm_execute_state.is_column_load
+                    and getattr(mapper, "class_", None) is User
+                ):
+                    implicit_column_loads.append(str(orm_execute_state.statement))
+
+            monkeypatch.setattr(
+                video_upload_routes,
+                "_rollback_inherited_transaction",
+                rollback_and_assert_user_expired,
+            )
+            event.listen(
+                primary.sync_session,
+                "do_orm_execute",
+                track_implicit_column_load,
+            )
+            try:
+                result = await videos.upload_reference_video(
+                    user,
+                    primary,
+                    _upload(payload),
+                )
+            finally:
+                event.remove(
+                    primary.sync_session,
+                    "do_orm_execute",
+                    track_implicit_column_load,
+                )
+
+        async with factory() as observer:
+            stored = (
+                await observer.execute(
+                    select(Video).where(
+                        Video.user_id == user_id,
+                        Video.id == result.id,
+                    )
+                )
+            ).scalar_one()
+
+    assert rollback_expired_user is True
+    assert implicit_column_loads == []
+    assert result.created is True
+    assert stored.sha256 == hashlib.sha256(payload).hexdigest()
+    assert (
+        Path(videos.settings.storage_root) / stored.storage_key
+    ).read_bytes() == payload
 
 
 @pytest.mark.asyncio
