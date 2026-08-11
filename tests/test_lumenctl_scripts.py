@@ -1852,11 +1852,11 @@ def test_compose_supports_split_db_root_for_cifs_data_root() -> None:
     assert "LUMEN_DB_ROOT=/opt/lumendata" in env_example
     assert 'user: "${LUMEN_APP_UID:-10001}:${LUMEN_APP_GID:-10001}"' in compose
     assert '- "${LUMEN_APP_STORAGE_GID:-10001}"' in compose
-    assert '- "${LUMEN_BACKUP_SERVICE_GID:-10001}"' in compose
+    assert '- "${LUMEN_BACKUP_SERVICE_GID:-10002}"' in compose
     bluegreen = (ROOT / "docker-compose.bluegreen.yml").read_text(encoding="utf-8")
-    assert '- "${LUMEN_BACKUP_SERVICE_GID:-10001}"' in bluegreen
+    assert '- "${LUMEN_BACKUP_SERVICE_GID:-10002}"' in bluegreen
     assert "LUMEN_APP_STORAGE_GID=10001" in env_example
-    assert "LUMEN_BACKUP_SERVICE_GID=10001" in env_example
+    assert "LUMEN_BACKUP_SERVICE_GID=10002" in env_example
     assert (
         'env_file_set "${shared_env}" LUMEN_DB_ROOT        "${LUMEN_DB_ROOT}"'
         in install
