@@ -1682,9 +1682,36 @@ mount_configured() {
   return "$rc"
 }
 
+unmanaged_direct_marker_valid() {
+  python3 - "$UNMANAGED_DIRECT_FILE" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    info = os.lstat(path)
+except OSError:
+    raise SystemExit(1)
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_uid not in {0, os.geteuid()}
+    or info.st_mode & 0o022
+):
+    raise SystemExit(1)
+try:
+    with open(path, "rb") as handle:
+        payload = handle.read(129)
+except OSError:
+    raise SystemExit(1)
+if payload != b"schema=1\nmode=unmanaged-direct\n":
+    raise SystemExit(1)
+PY
+}
+
 unmanaged_direct_storage_valid() {
-  [[ -f "$UNMANAGED_DIRECT_FILE" && ! -L "$UNMANAGED_DIRECT_FILE" ]] \
-    || return 1
+  unmanaged_direct_marker_valid || return 1
   [[ -d "$TARGET" && ! -L "$TARGET" ]] || return 1
   ! mountpoint -q "$TARGET" 2>/dev/null
 }

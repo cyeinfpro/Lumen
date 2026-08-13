@@ -45,6 +45,7 @@ def _runtime(
     tmp_path: Path,
     lock: LockRecorder,
     *,
+    trigger_only_mode: bool = True,
     open_update_log: Any | None = None,
     clean_proxy_env: Any | None = None,
     runner_unit_available: Any | None = None,
@@ -102,7 +103,7 @@ def _runtime(
         version_from_update_tag=lambda _tag: "1.2.109",
         write_marker=write_marker or (lambda *_args, **_kwargs: True),
         runner_unit_available=runner_unit_available or (lambda: True),
-        runner_trigger_only_mode=lambda: True,
+        runner_trigger_only_mode=lambda: trigger_only_mode,
         start_update_via_path_unit=(
             start_update_via_path_unit
             or (lambda **_kwargs: (0, "lumen-update-runner.service"))
@@ -240,6 +241,7 @@ async def test_unhandled_journal_or_resume_state_fails_closed_before_launch(
     runtime, shared_root, backup_root = _runtime(
         tmp_path,
         lock,
+        trigger_only_mode=False,
         open_update_log=lambda: open_calls.append(object()),
         start_update_via_path_unit=lambda **kwargs: launcher_calls.append(kwargs),
     )
@@ -303,7 +305,11 @@ async def test_malformed_legacy_journal_fails_closed_as_unreadable(
     tmp_path: Path,
 ) -> None:
     lock = LockRecorder()
-    runtime, shared_root, backup_root = _runtime(tmp_path, lock)
+    runtime, shared_root, backup_root = _runtime(
+        tmp_path,
+        lock,
+        trigger_only_mode=False,
+    )
     (shared_root / ".update-journal.json").write_text(
         '{"schema":1,"status":"failed"}\n',
         encoding="utf-8",
@@ -320,6 +326,68 @@ async def test_malformed_legacy_journal_fails_closed_as_unreadable(
     assert not (backup_root / ".update.running").exists()
     assert not (backup_root / ".update.request.json").exists()
     assert not (backup_root / ".update.trigger").exists()
+
+
+@pytest.mark.asyncio
+async def test_trigger_only_launch_does_not_read_private_host_recovery_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = LockRecorder()
+    runtime, shared_root, _backup_root = _runtime(
+        tmp_path,
+        lock,
+        trigger_only_mode=True,
+    )
+    (shared_root / ".update-journal.json").write_text(
+        '{"schema":1,"status":"failed"}\n',
+        encoding="utf-8",
+    )
+    (shared_root / ".update-resume").write_text(
+        "host-owned-resume\n",
+        encoding="utf-8",
+    )
+
+    def private_state_must_not_be_read(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("container trigger path read host-private recovery state")
+
+    monkeypatch.setattr(
+        update_trigger,
+        "_read_update_journal",
+        private_state_must_not_be_read,
+    )
+    monkeypatch.setattr(
+        update_trigger,
+        "_read_recovery_operation_id",
+        private_state_must_not_be_read,
+    )
+
+    pid, unit, proc, _started_at = await _launch(runtime)
+
+    assert (pid, unit, proc) == (0, "lumen-update-runner.service", None)
+    assert lock.releases == [{"succeeded": True, "reason": "launched"}]
+
+
+@pytest.mark.asyncio
+async def test_trigger_only_launch_still_blocks_pending_request_handoff(
+    tmp_path: Path,
+) -> None:
+    lock = LockRecorder()
+    runtime, _shared_root, backup_root = _runtime(
+        tmp_path,
+        lock,
+        trigger_only_mode=True,
+    )
+    (backup_root / ".update.trigger").write_text("pending\n", encoding="utf-8")
+
+    with pytest.raises(TypedHttpError) as excinfo:
+        await _launch(runtime)
+
+    assert excinfo.value.code == "update_recovery_pending"
+    assert excinfo.value.status_code == 409
+    assert lock.releases == [
+        {"succeeded": False, "reason": "update_recovery_pending"}
+    ]
 
 
 @pytest.mark.asyncio
