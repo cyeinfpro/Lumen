@@ -160,6 +160,20 @@ detect_repo_source_dir() {
     return 1
 }
 
+resolve_local_release_commit() {
+    local repo_dir="$1"
+    local release_ref="$2"
+    local candidate=""
+    [ -d "${repo_dir}/.git" ] || return 1
+    command -v git >/dev/null 2>&1 || return 1
+    candidate="$(
+        cd "${repo_dir}" \
+            && git rev-parse --verify "${release_ref}^{commit}" 2>/dev/null
+    )" || return 1
+    release_commit_is_valid "${candidate}" || return 1
+    printf '%s\n' "${candidate}"
+}
+
 # 探测 GHCR 上 tag 是否存在。在没有 token 的情况下只能尽力 HEAD：
 # 失败时 warn 但不 abort（pull_images 阶段会真实暴露问题）。
 probe_ghcr_tag() {
