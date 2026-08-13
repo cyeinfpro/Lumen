@@ -13,6 +13,7 @@ from lumen_core.constants import Intent, Role
 from lumen_core.models import Conversation, Message, User
 from lumen_core.schemas import ChatParamsIn, ImageParamsIn, VideoCreateIn
 
+from ..deps import durable_session_id
 from ..redis_client import get_redis
 from .active_user import ActiveUserSnapshot
 from .message_submission import (
@@ -221,6 +222,7 @@ async def create_canvas_video_task(
             user,
             context=VideoSubmissionContext(
                 request=request,
+                session_id=durable_session_id(request),
                 active_user_snapshot=active_user_snapshot,
                 idempotency_serialized=True,
                 workflow_metadata=metadata,

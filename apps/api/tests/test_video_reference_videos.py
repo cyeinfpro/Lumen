@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from contextlib import asynccontextmanager
@@ -77,6 +78,32 @@ def _register_cleanup(
     assert payload == path.read_bytes()
 
 
+def _register_replaced_cleanup(
+    session: AsyncSession,
+    path: Path,
+    *,
+    storage_root: Path,
+) -> None:
+    video_reference_videos._discard_replaced_variant_after_commit(
+        session,
+        storage_root=str(storage_root),
+        replaced={
+            "storage_key": str(path.relative_to(storage_root)),
+            "size_bytes": path.stat().st_size,
+            "sha256": video_reference_videos._sha256_file(path),
+        },
+        replacement_key="replacement.mp4",
+    )
+
+
+async def _wait_until_missing(path: Path) -> None:
+    for _attempt in range(100):
+        if not path.exists():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"timed out waiting for cleanup: {path}")
+
+
 @pytest.mark.asyncio
 async def test_rollback_discards_installed_variant(tmp_path: Path) -> None:
     async with _variant_session() as session:
@@ -119,6 +146,40 @@ async def test_rollback_keeps_unrelated_file(tmp_path: Path) -> None:
             sha256="0" * 64,
         )
         await session.rollback()
+        assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_root_commit_discards_replaced_variant_after_savepoint(
+    tmp_path: Path,
+) -> None:
+    async with _variant_session() as session:
+        path = _write_variant(tmp_path)
+        async with session.begin_nested():
+            _register_replaced_cleanup(
+                session,
+                path,
+                storage_root=tmp_path,
+            )
+        assert path.exists()
+        await session.commit()
+        await _wait_until_missing(path)
+
+
+@pytest.mark.asyncio
+async def test_root_rollback_keeps_replaced_variant_after_savepoint(
+    tmp_path: Path,
+) -> None:
+    async with _variant_session() as session:
+        path = _write_variant(tmp_path)
+        async with session.begin_nested():
+            _register_replaced_cleanup(
+                session,
+                path,
+                storage_root=tmp_path,
+            )
+        await session.rollback()
+        await asyncio.sleep(0.05)
         assert path.exists()
 
 

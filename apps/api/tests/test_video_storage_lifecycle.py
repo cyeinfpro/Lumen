@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import event, func, inspect as sa_inspect, select
+from sqlalchemy import event, func, inspect as sa_inspect, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -29,6 +29,7 @@ from app.images.application.deleted_media_references import (
 )
 from app.routes import video_generation_routes, video_upload_routes, videos
 from app.services import video_storage_accounting as video_storage_accounting_module
+from app.services import video_storage_capacity as video_storage_capacity_module
 from app.services import video_storage_lifecycle as video_storage_lifecycle_module
 from app.services.video import submission as video_submission
 from app.services.video_storage_capacity import (
@@ -2285,6 +2286,190 @@ async def test_video_transcode_capacity_fails_fast_at_global_limit() -> None:
         await task
 
 
+def test_video_transcode_wait_can_cover_slow_arm_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis = object()
+    monkeypatch.setattr(video_storage_capacity_module, "get_redis", lambda: redis)
+    monkeypatch.setenv("LUMEN_VIDEO_REFERENCE_TRANSCODE_WAIT_SECONDS", "150")
+
+    manager = video_storage_capacity_module.build_video_transcode_capacity_manager()
+
+    assert manager.redis is redis
+    assert manager.wait_timeout_seconds == 150
+
+
+@pytest.mark.asyncio
+async def test_reference_variant_waiter_reuses_variant_created_by_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _video(
+        video_id="video-capacity-winner",
+        user_id="user-capacity-winner",
+        payload=_payload(128),
+    )
+    variant_payload = b"winner-variant"
+    variant_key = (
+        f"u/{source.user_id}/vref/{source.id}/"
+        f"{source.id}.{video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND}.mp4"
+    )
+    variant_path = tmp_path / variant_key
+    variant_path.parent.mkdir(parents=True)
+    variant_path.write_bytes(variant_payload)
+    variant = {
+        "kind": video_reference_videos.VIDEO_REFERENCE_VIDEO_KIND,
+        "storage_key": variant_key,
+        "size_bytes": len(variant_payload),
+        "sha256": hashlib.sha256(variant_payload).hexdigest(),
+    }
+    refreshed = _video(
+        video_id=source.id,
+        user_id=source.user_id,
+        payload=_payload(128),
+        metadata={"upstream_reference_video_variant": variant},
+    )
+
+    class Result:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def scalar_one_or_none(self) -> Any:
+            return self.value
+
+    class Db:
+        def __init__(self) -> None:
+            self.rows = [source, refreshed]
+            self.commits = 0
+
+        async def execute(self, _statement: Any) -> Result:
+            return Result(self.rows.pop(0))
+
+        async def commit(self) -> None:
+            self.commits += 1
+
+        async def rollback(self) -> None:
+            return None
+
+    class TranscodeCapacity:
+        @asynccontextmanager
+        async def hold(self, *, user_id: str) -> AsyncIterator[None]:
+            assert user_id == source.user_id
+            yield
+
+    class StorageCapacity:
+        @asynccontextmanager
+        async def reserve(self, _bytes_required: int) -> AsyncIterator[None]:
+            raise AssertionError("existing variant must skip storage reservation")
+            yield
+
+    async def fail_render(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("waiting request must reuse the winner variant")
+
+    monkeypatch.setattr(
+        video_reference_videos,
+        "_render_reference_variant",
+        fail_render,
+    )
+    db = Db()
+
+    result = await video_reference_videos.ensure_video_reference_video_variant(
+        db,  # type: ignore[arg-type]
+        source,
+        storage_root=str(tmp_path),
+        storage_capacity=StorageCapacity(),  # type: ignore[arg-type]
+        transcode_capacity=TranscodeCapacity(),  # type: ignore[arg-type]
+    )
+
+    assert result == variant
+    assert db.commits == 2
+    assert db.rows == []
+
+
+@pytest.mark.asyncio
+async def test_nested_reference_variant_keeps_parent_transaction_atomic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_id = "user-nested-reference"
+    source_payload = _payload(128)
+    source = _video(
+        video_id="video-nested-reference",
+        user_id=user_id,
+        payload=source_payload,
+    )
+    source_id = source.id
+    source_path = tmp_path / source.storage_key
+    source_path.parent.mkdir(parents=True)
+    source_path.write_bytes(source_payload)
+
+    class TranscodeCapacity:
+        @asynccontextmanager
+        async def hold(self, *, user_id: str) -> AsyncIterator[None]:
+            assert user_id == source.user_id
+            yield
+
+    class StorageCapacity:
+        @asynccontextmanager
+        async def reserve(self, _bytes_required: int) -> AsyncIterator[None]:
+            yield
+
+    async def render(_source: Path, staged: Path) -> Any:
+        payload = b"nested-variant"
+        staged.write_bytes(payload)
+        return video_reference_videos.VideoReferenceMp4(
+            width=1280,
+            height=720,
+            duration_ms=5_000,
+            fps=30.0,
+            has_audio=False,
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+
+    monkeypatch.setattr(
+        video_reference_videos,
+        "_render_reference_variant",
+        render,
+    )
+
+    async with _database(tmp_path) as factory:
+        async with factory() as session:
+            await _seed_user(session, user_id=user_id)
+            session.add(source)
+            await session.commit()
+
+            root_transaction = await session.begin()
+            try:
+                # SQLite defers the DBAPI BEGIN until a write; issue it here so
+                # releasing the savepoint cannot commit the would-be root.
+                await session.execute(text("BEGIN"))
+                async with session.begin_nested():
+                    variant = (
+                        await video_reference_videos.ensure_video_reference_video_variant(
+                            session,
+                            source,
+                            storage_root=str(tmp_path),
+                            storage_capacity=StorageCapacity(),  # type: ignore[arg-type]
+                            transcode_capacity=TranscodeCapacity(),  # type: ignore[arg-type]
+                        )
+                    )
+
+                assert session.in_transaction()
+                variant_path = tmp_path / variant["storage_key"]
+                assert variant_path.exists()
+                await root_transaction.rollback()
+                assert not variant_path.exists()
+            finally:
+                if root_transaction.is_active:
+                    await root_transaction.rollback()
+
+        async with factory() as observer:
+            persisted = await observer.get(Video, source_id)
+            assert persisted is not None
+            assert "upstream_reference_video_variant" not in persisted.metadata_jsonb
+
+
 @pytest.mark.asyncio
 async def test_reference_variant_reserves_max_output_before_render(
     tmp_path: Path,
@@ -2418,10 +2603,11 @@ async def test_reference_variant_reserves_max_output_before_render(
     assert order == [
         "db-commit-1",
         "transcode-capacity",
+        "db-commit-2",
         "storage-capacity",
         "render",
         "install",
-        "db-commit-2",
+        "db-commit-3",
     ]
     assert reserved == [2 * video_reference_videos.VIDEO_REFERENCE_VIDEO_MAX_BYTES]
     assert variant["size_bytes"] == 7
@@ -2520,6 +2706,7 @@ async def test_reference_variant_concurrent_winner_survives_loser_cleanup(
         destination=loser_path,
         observed_existing=None,
         storage_root=str(tmp_path),
+        manage_transaction=True,
     )
     await video_reference_videos._discard_installed_variant(  # noqa: SLF001
         loser_path,
