@@ -55,6 +55,7 @@ _LUMEN_UPDATE_DEPENDENCY_FILES=(
     lib/backup_restore_services.sh lib/backup_journal.sh lib/restore_journal.sh
     release_manifest_guard.py update_runner.py restore_runner.py
     redis_backup_archive.py backup_permissions.py restore_journal.py
+    update/backup/storage_direct.sh
     update/backup/storage_identity.sh update/backup/migration_helpers.sh
     update/backup/phases.sh
     update/backup/preflight.sh update/backup/restore_points.sh
