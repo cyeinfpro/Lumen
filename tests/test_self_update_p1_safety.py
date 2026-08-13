@@ -61,6 +61,20 @@ def write_remote_scripts(remote: Path) -> tuple[str, ...]:
     return tuple(files)
 
 
+def write_remote_update_dependency_scripts(remote: Path) -> None:
+    files = {
+        "update/runner.sh": "#!/usr/bin/env bash\nREMOTE_RUNNER=1\n",
+        "update/backup/storage_direct.sh": (
+            "#!/usr/bin/env bash\nREMOTE_STORAGE_DIRECT=1\n"
+        ),
+    }
+    for relative, content in files.items():
+        path = remote / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+
 def install_copying_curl(fakebin: Path, *, serialized: bool = False) -> None:
     fakebin.mkdir(parents=True, exist_ok=True)
     curl = fakebin / "curl"
@@ -140,6 +154,33 @@ def invoke_self_update(
         """,
         env=env,
     )
+
+
+def test_update_entry_self_update_includes_new_leaf_dependencies(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "scripts"
+    remote = tmp_path / "remote"
+    fakebin = tmp_path / "bin"
+    target.mkdir()
+    write_remote_update_dependency_scripts(remote)
+    install_copying_curl(fakebin)
+    env = self_update_env(fakebin, remote)
+
+    result = invoke_self_update(
+        target,
+        ("update/runner.sh",),
+        env=env,
+        ttl=0,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "update/backup/storage_direct.sh" in result.stdout
+    assert (target / "update/runner.sh").is_file()
+    assert (target / "update/backup/storage_direct.sh").is_file()
+    manifest = (target / ".lumen-self-update.files").read_text(encoding="utf-8")
+    assert "update/runner.sh\n" in manifest
+    assert "update/backup/storage_direct.sh\n" in manifest
 
 
 def test_integrity_manifest_drives_ttl_repair_and_rejects_symlink(
