@@ -301,7 +301,7 @@ def test_update_recovery_marker_survives_failure_and_clears_at_terminal_state(
         SHARED_DIR={shlex.quote(str(tmp_path))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
         LUMEN_UPDATE_RECOVERY_MARKER={shlex.quote(str(marker))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-consumer
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_status rolled_back
@@ -572,7 +572,7 @@ def test_target_contract_allows_only_monotonic_proof_completion(
         SHARED_DIR={shlex.quote(str(shared))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
         LUMEN_UPDATE_RESUME=1
-        OPERATION_ID=ignored
+        OPERATION_ID=update-target-completion
         lumen_update_journal_init
         TARGET_TAG=main
         TARGET_RELEASE_TAG=""
@@ -799,7 +799,7 @@ def test_incomplete_v2_journal_cannot_skip_snapshot_bearing_phase(
         SHARED_DIR={shlex.quote(str(tmp_path))}
         SHARED_ENV={shlex.quote(str(tmp_path / ".env"))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=malformed-v2
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_validate_resume
@@ -980,7 +980,7 @@ def test_resume_replays_bound_target_before_completing_fetch_phase(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-fetch-replay
         LUMEN_UPDATE_RESUME=1
         lumen_emit_step() {{ :; }}
         lumen_emit_info() {{ :; }}
@@ -1091,7 +1091,7 @@ def test_resume_rejects_target_proof_drift_without_moving_links(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-proof-drift
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_validate_resume
@@ -1169,7 +1169,7 @@ def test_killed_switch_resume_restores_snapshot_and_commit_state(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored-on-resume
+        OPERATION_ID=update-killed-switch
         LUMEN_UPDATE_RESUME=1
         UPDATE_RUNTIME_MIGRATION_HEAD=""
         lumen_update_journal_init
@@ -1202,7 +1202,7 @@ def test_killed_switch_resume_restores_snapshot_and_commit_state(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored-again
+        OPERATION_ID=update-killed-switch
         LUMEN_UPDATE_RESUME=1
         UPDATE_RUNTIME_MIGRATION_HEAD=""
         lumen_update_journal_init
@@ -1275,7 +1275,7 @@ def test_resume_rejects_unexpected_link_without_changing_it(tmp_path: Path) -> N
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-invariant
         LUMEN_UPDATE_RESUME=1
         UPDATE_RUNTIME_MIGRATION_HEAD=""
         lumen_update_journal_init
@@ -1303,7 +1303,7 @@ def test_resume_rejects_unexpected_link_without_changing_it(tmp_path: Path) -> N
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored-again
+        OPERATION_ID=update-invariant
         LUMEN_UPDATE_RESUME=1
         UPDATE_RUNTIME_MIGRATION_HEAD=""
         lumen_update_journal_init
@@ -1430,7 +1430,7 @@ def test_rolling_target_binds_image_ids_and_resume_ignores_tag_drift(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-rolling-digest
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_validate_resume
@@ -1784,7 +1784,7 @@ def test_resume_accepts_journaled_env_candidate_after_sigkill(
         SHARED_DIR={shlex.quote(str(shared))}
         SHARED_ENV={shlex.quote(str(shared_env))}
         LUMEN_UPDATE_JOURNAL={shlex.quote(str(journal))}
-        OPERATION_ID=ignored
+        OPERATION_ID=update-env-candidate
         LUMEN_UPDATE_RESUME=1
         lumen_update_journal_init
         lumen_update_journal_validate_resume

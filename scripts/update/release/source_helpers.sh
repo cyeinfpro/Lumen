@@ -43,6 +43,7 @@ _LUMEN_UPDATE_SCRIPT_UNIT_FILES=(
     update/release/image_proof_store.py
     update/release/activate.sh
     update/backup/restore_points.sh
+    update/backup/storage_direct.sh
     update/backup/storage_identity.sh
     update/backup/migration_helpers.sh
     update/backup/preflight.sh
