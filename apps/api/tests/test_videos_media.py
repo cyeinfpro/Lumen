@@ -2129,6 +2129,116 @@ async def test_video_wallet_preflight_runs_before_transcode_and_hold_after(
     assert order == ["wallet", "transcode", "hold"]
 
 
+@pytest.mark.asyncio
+async def test_video_reference_submission_rechecks_idempotency_after_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="reference",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        reference_media=[VideoReferenceMediaIn(kind="video", video_id="video-1")],
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="post-transcode-winner",
+    )
+    replay = SimpleNamespace(id="winner-output")
+    lookup_results = [None, replay]
+    calls: list[str] = []
+    provider = SimpleNamespace(kind="test", name="test-provider")
+    cost = VideoCostEstimate(
+        estimated_tokens=1,
+        hold_micro=1,
+        unit_price_micro=1,
+        source="test",
+    )
+
+    class Db:
+        def __init__(self) -> None:
+            self.transaction = object()
+
+        def get_transaction(self) -> object:
+            return self.transaction
+
+    db = Db()
+
+    async def serialize(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("idempotency")
+        return lookup_results.pop(0)
+
+    async def lock_user(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append("user")
+        return SimpleNamespace(
+            user=SimpleNamespace(id="user-1"),
+            account_mode="wallet",
+        )
+
+    async def prepare_admission(*_args: Any, **_kwargs: Any) -> Any:
+        return video_submission._VideoBillingAdmission(  # noqa: SLF001
+            provider=provider,
+            upstream_model="test-upstream",
+            billing_model="seedance-2.0-fast",
+            pricing_variant="reference_video_720p",
+            cost=cost,
+            allow_negative=False,
+        )
+
+    async def prepare_submission(preparation_db: Any, *_args: Any, **_kwargs: Any) -> Any:
+        calls.append("transcode")
+        preparation_db.transaction = object()
+        return video_submission._VideoSubmissionPlan(  # noqa: SLF001
+            provider=provider,
+            input_storage_key=None,
+            input_sha256=None,
+            input_image_url=None,
+            reference_snapshots=[{"kind": "video", "video_id": "video-1"}],
+            reference_public_base=None,
+            requires_public_media=False,
+            prefers_public_media_url=False,
+            upstream_model="test-upstream",
+            billing_model="seedance-2.0-fast",
+            pricing_variant="reference_video_720p",
+            cost=cost,
+            variant_diagnostics={},
+        )
+
+    async def fail_hold(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("idempotent winner must skip a second wallet hold")
+
+    monkeypatch.setattr(
+        video_submission,
+        "_find_or_serialize_video_submission",
+        serialize,
+    )
+    monkeypatch.setattr(video_submission, "_lock_video_submission_user", lock_user)
+    monkeypatch.setattr(
+        video_submission,
+        "_prepare_video_billing_admission",
+        prepare_admission,
+    )
+    monkeypatch.setattr(
+        video_submission,
+        "_ensure_video_wallet_admission",
+        lambda *_args, **_kwargs: _async_value(None),
+    )
+    monkeypatch.setattr(
+        video_submission,
+        "_prepare_video_submission",
+        prepare_submission,
+    )
+    monkeypatch.setattr(video_submission.billing_core, "hold", fail_hold)
+
+    result = await video_submission.create_video_generation_record(
+        db,  # type: ignore[arg-type]
+        body,
+        SimpleNamespace(id="user-1", account_mode="wallet"),
+    )
+
+    assert result is replay
+    assert calls == ["idempotency", "user", "transcode", "idempotency"]
+
+
 def test_create_video_generation_reuses_request_fingerprint() -> None:
     submission_source = inspect.getsource(
         video_submission.create_video_generation_record
@@ -2203,6 +2313,152 @@ async def test_video_idempotent_lock_recheck_skips_expensive_preparation() -> No
     assert result is rendered
     assert db.connection_calls == 1
     assert db.results == []
+
+
+@pytest.mark.asyncio
+async def test_video_idempotency_race_recovery_uses_captured_user_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = VideoCreateIn(
+        action="t2v",
+        model="seedance-2.0-fast",
+        prompt="make a video",
+        duration_s=5,
+        resolution="720p",
+        aspect_ratio="16:9",
+        idempotency_key="idempotency-race-user",
+    )
+    fingerprint = video_submission.request_fingerprint(body)
+
+    class ExpiringUser:
+        account_mode = "wallet"
+
+        def __init__(self) -> None:
+            self.expired = False
+
+        @property
+        def id(self) -> str:
+            if self.expired:
+                raise AssertionError("rolled-back ORM user must not be accessed")
+            return "user-1"
+
+    user = ExpiringUser()
+    winner = SimpleNamespace(request_fingerprint=fingerprint, diagnostics={})
+    rendered = SimpleNamespace(id="winner-output")
+
+    class Db:
+        def add(self, _value: Any) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            user.expired = True
+
+    provider = SimpleNamespace(kind="test", name="test-provider")
+    cost = VideoCostEstimate(
+        estimated_tokens=1,
+        hold_micro=1,
+        unit_price_micro=1,
+        source="test",
+    )
+    admission = video_submission._VideoBillingAdmission(  # noqa: SLF001
+        provider=provider,
+        upstream_model="test-upstream",
+        billing_model="seedance-2.0-fast",
+        pricing_variant="t2v_720p",
+        cost=cost,
+        allow_negative=False,
+    )
+    plan = video_submission._VideoSubmissionPlan(  # noqa: SLF001
+        provider=provider,
+        input_storage_key=None,
+        input_sha256=None,
+        input_image_url=None,
+        reference_snapshots=[],
+        reference_public_base=None,
+        requires_public_media=False,
+        prefers_public_media_url=False,
+        upstream_model="test-upstream",
+        billing_model="seedance-2.0-fast",
+        pricing_variant="t2v_720p",
+        cost=cost,
+        variant_diagnostics={},
+    )
+
+    async def no_replay(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def lock_user(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(user=user, account_mode="wallet")
+
+    async def prepare_admission(*_args: Any, **_kwargs: Any) -> Any:
+        return admission
+
+    async def allow_wallet(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def prepare_submission(*_args: Any, **_kwargs: Any) -> Any:
+        return plan
+
+    async def duplicate_hold(*_args: Any, **_kwargs: Any) -> None:
+        raise video_submission.IntegrityError(
+            "insert generation",
+            {},
+            RuntimeError("duplicate"),
+        )
+
+    async def find_winner(
+        _db: Any,
+        *,
+        user_id: str,
+        idempotency_key: str,
+    ) -> Any:
+        assert user_id == "user-1"
+        assert idempotency_key == body.idempotency_key
+        return winner
+
+    async def render(_db: Any, row: Any) -> Any:
+        assert row is winner
+        return rendered
+
+    monkeypatch.setattr(
+        video_submission,
+        "_find_or_serialize_video_submission",
+        no_replay,
+    )
+    monkeypatch.setattr(video_submission, "_lock_video_submission_user", lock_user)
+    monkeypatch.setattr(
+        video_submission,
+        "_prepare_video_billing_admission",
+        prepare_admission,
+    )
+    monkeypatch.setattr(
+        video_submission,
+        "_ensure_video_wallet_admission",
+        allow_wallet,
+    )
+    monkeypatch.setattr(
+        video_submission,
+        "_prepare_video_submission",
+        prepare_submission,
+    )
+    monkeypatch.setattr(video_submission.billing_core, "hold", duplicate_hold)
+    monkeypatch.setattr(
+        video_submission,
+        "_find_idempotent_generation",
+        find_winner,
+    )
+
+    result = await video_submission.create_video_generation_record(
+        Db(),  # type: ignore[arg-type]
+        body,
+        user,
+        services=video_submission.VideoSubmissionServices(
+            generation_renderer=render,
+        ),
+    )
+
+    assert result is rendered
+    assert user.expired is True
 
 
 @pytest.mark.asyncio

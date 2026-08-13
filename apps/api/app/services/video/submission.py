@@ -65,6 +65,7 @@ AsyncCallback = Callable[..., Awaitable[Any]]
 SyncCallback = Callable[..., Any]
 
 VIDEO_DEADLINE = timedelta(minutes=10)
+_TRANSACTION_IDENTITY_UNAVAILABLE = object()
 
 
 async def invalidate_video_balance_cache(user_id: str) -> None:
@@ -187,6 +188,64 @@ async def _lock_video_submission_user(
             403,
         )
     return snapshot
+
+
+def _has_local_reference_video(
+    body: VideoCreateIn,
+    fallback_snapshots: list[dict[str, Any]] | None,
+) -> bool:
+    if any(
+        item.kind == "video" and isinstance(item.video_id, str) and item.video_id
+        for item in body.reference_media
+    ):
+        return True
+    return any(
+        isinstance(item, dict)
+        and item.get("kind") == "video"
+        and isinstance(item.get("video_id"), str)
+        and bool(item["video_id"].strip())
+        for item in fallback_snapshots or []
+    )
+
+
+def _transaction_identity(db: AsyncSession) -> object:
+    getter = getattr(db, "get_transaction", None)
+    if not callable(getter):
+        return _TRANSACTION_IDENTITY_UNAVAILABLE
+    transaction = getter()
+    return getattr(transaction, "sync_transaction", transaction)
+
+
+async def _revalidate_video_submission(
+    db: AsyncSession,
+    body: VideoCreateIn,
+    *,
+    user_id: str,
+    expected_account_mode: AccountMode,
+    request_fingerprint_value: str,
+    context: VideoSubmissionContext,
+    services: VideoSubmissionServices,
+) -> VideoGenerationOut | None:
+    replay = await _find_or_serialize_video_submission(
+        db,
+        body,
+        user_id=user_id,
+        request_fingerprint_value=request_fingerprint_value,
+        context=context,
+        services=services,
+    )
+    if replay is not None:
+        return replay
+    try:
+        await lock_active_user_snapshot(
+            db,
+            user_id,
+            expected_account_mode,
+            session_id=context.session_id,
+        )
+    except ActiveUserFenceError as exc:
+        raise active_user_fence_http_error(exc) from exc
+    return None
 
 
 async def _find_or_serialize_video_submission(
@@ -582,12 +641,13 @@ async def create_video_generation_record(
 ) -> VideoGenerationOut:
     context = context or VideoSubmissionContext()
     services = services or VideoSubmissionServices()
+    user_id = str(user.id)
     expected_account_mode = account_mode_from_user(user)
     request_fingerprint_value = request_fingerprint(body)
     replay = await _find_or_serialize_video_submission(
         db,
         body,
-        user_id=user.id,
+        user_id=user_id,
         request_fingerprint_value=request_fingerprint_value,
         context=context,
         services=services,
@@ -595,13 +655,12 @@ async def create_video_generation_record(
     if replay is not None:
         return replay
 
-    snapshot = await _lock_video_submission_user(
+    await _lock_video_submission_user(
         db,
-        user_id=user.id,
+        user_id=user_id,
         expected_account_mode=expected_account_mode,
         context=context,
     )
-    user = snapshot.user
 
     admission = await _prepare_video_billing_admission(
         db,
@@ -611,25 +670,54 @@ async def create_video_generation_record(
     )
     await _ensure_video_wallet_admission(
         db,
-        user_id=user.id,
+        user_id=user_id,
         admission=admission,
         services=services,
+    )
+    revalidate_after_preparation = _has_local_reference_video(
+        body,
+        context.reference_media_snapshot,
+    )
+    transaction_before_preparation = (
+        _transaction_identity(db)
+        if revalidate_after_preparation
+        else _TRANSACTION_IDENTITY_UNAVAILABLE
     )
     plan = await _prepare_video_submission(
         db,
         body,
-        user_id=user.id,
+        user_id=user_id,
         request=context.request,
         input_image_snapshot=context.input_image_snapshot,
         reference_media_snapshot=context.reference_media_snapshot,
         admission=admission,
         services=services,
     )
+    transaction_after_preparation = (
+        _transaction_identity(db)
+        if revalidate_after_preparation
+        else _TRANSACTION_IDENTITY_UNAVAILABLE
+    )
+    if (
+        transaction_before_preparation is not _TRANSACTION_IDENTITY_UNAVAILABLE
+        and transaction_after_preparation is not transaction_before_preparation
+    ):
+        replay = await _revalidate_video_submission(
+            db,
+            body,
+            user_id=user_id,
+            expected_account_mode=expected_account_mode,
+            request_fingerprint_value=request_fingerprint_value,
+            context=context,
+            services=services,
+        )
+        if replay is not None:
+            return replay
     generation_id = new_uuid7()
     generation = _build_video_generation(
         body,
         generation_id=generation_id,
-        user_id=user.id,
+        user_id=user_id,
         request_fingerprint_value=request_fingerprint_value,
         workflow_metadata=context.workflow_metadata,
         plan=plan,
@@ -638,7 +726,7 @@ async def create_video_generation_record(
         db.add(generation)
         await billing_core.hold(
             db,
-            user.id,
+            user_id,
             admission.cost.hold_micro,
             ref_type="video_generation",
             ref_id=generation_id,
@@ -661,7 +749,7 @@ async def create_video_generation_record(
         )
         payload = {
             "task_id": generation.id,
-            "user_id": user.id,
+            "user_id": user_id,
             "kind": "video_generation",
         }
         outbox = OutboxEvent(
@@ -691,7 +779,7 @@ async def create_video_generation_record(
         await db.rollback()
         winner = await _find_idempotent_generation(
             db,
-            user_id=user.id,
+            user_id=user_id,
             idempotency_key=body.idempotency_key,
         )
         if winner is not None:
@@ -713,6 +801,6 @@ async def create_video_generation_record(
         raise
     if not context.defer_commit:
         await db.refresh(generation)
-        await services.balance_invalidator(user.id)
+        await services.balance_invalidator(user_id)
         await services.queued_publisher(payload)
     return await services.generation_renderer(db, generation)

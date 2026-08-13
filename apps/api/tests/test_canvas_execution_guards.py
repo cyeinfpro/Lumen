@@ -1064,6 +1064,7 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
     )
     user = SimpleNamespace(id="user-1")
     request = _request()
+    request.state.session_id = "session-1"
     metadata = {"workflow_type": "infinite_canvas"}
     create_record = create_autospec(video_submission.create_video_generation_record)
 
@@ -1078,6 +1079,7 @@ async def test_canvas_video_submission_preserves_outbox_publish_identity(
         assert isinstance(context, video_submission.VideoSubmissionContext)
         assert isinstance(services, video_submission.VideoSubmissionServices)
         assert context.request is request
+        assert context.session_id == "session-1"
         assert context.workflow_metadata == metadata
         assert context.defer_commit is True
         assert context.deferred_publish_payload is not None

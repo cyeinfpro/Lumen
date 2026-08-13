@@ -260,6 +260,104 @@ def _discard_orphaned_variant_on_rollback(
     event.listen(sync, "after_transaction_end", _on_transaction_end)
 
 
+def _discard_replaced_variant_sync(
+    *,
+    storage_root: str,
+    replaced: dict[str, Any],
+    replacement_key: str,
+) -> None:
+    storage_key = replaced.get("storage_key")
+    if (
+        not isinstance(storage_key, str)
+        or not storage_key
+        or storage_key == replacement_key
+    ):
+        return
+    try:
+        size_bytes = int(replaced.get("size_bytes") or 0)
+        sha256 = str(replaced["sha256"])
+        path = _storage_path(storage_root, storage_key)
+        if _file_matches(path, size_bytes=size_bytes, sha256=sha256):
+            path.unlink(missing_ok=True)
+    except Exception:
+        logger.warning(
+            "replaced reference video variant cleanup failed key=%s",
+            storage_key,
+            exc_info=True,
+        )
+
+
+def _discard_replaced_variant_after_commit(
+    db: AsyncSession,
+    *,
+    storage_root: str,
+    replaced: dict[str, Any] | None,
+    replacement_key: str,
+) -> None:
+    if not isinstance(replaced, dict):
+        return
+    sync = getattr(db, "sync_session", None)
+    if sync is None:
+        return
+    root_transaction = sync.get_transaction()
+    nested_transaction = sync.get_nested_transaction()
+    committed = False
+    nested_rolled_back = False
+    done = False
+
+    def _on_commit(session: Any) -> None:
+        nonlocal committed
+        if not session.in_nested_transaction():
+            committed = True
+
+    def _on_rollback(session: Any) -> None:
+        nonlocal nested_rolled_back
+        if (
+            nested_transaction is not None
+            and session.get_nested_transaction() is nested_transaction
+        ):
+            nested_rolled_back = True
+
+    def _on_transaction_end(_session: Any, transaction: Any) -> None:
+        nonlocal done
+        if root_transaction is not None:
+            if transaction is not root_transaction:
+                return
+        elif transaction.parent is not None:
+            return
+        if done:
+            return
+        done = True
+        if not committed or nested_rolled_back:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _discard_replaced_variant_sync(
+                storage_root=storage_root,
+                replaced=replaced,
+                replacement_key=replacement_key,
+            )
+            return
+        future = loop.run_in_executor(
+            None,
+            lambda: _discard_replaced_variant_sync(
+                storage_root=storage_root,
+                replaced=replaced,
+                replacement_key=replacement_key,
+            ),
+        )
+        future.add_done_callback(
+            lambda completed: completed.exception()
+            if not completed.cancelled()
+            else None
+        )
+
+    event.listen(sync, "after_commit", _on_commit)
+    event.listen(sync, "after_rollback", _on_rollback)
+    event.listen(sync, "after_transaction_end", _on_transaction_end)
+
+
 def make_video_reference_mp4(
     source_path: Path,
     destination: Path,
@@ -504,6 +602,7 @@ async def _snapshot_reference_source(
     db: AsyncSession,
     *,
     video_id: str,
+    manage_transaction: bool,
 ) -> _ReferenceSourceSnapshot:
     source = (
         await db.execute(
@@ -513,10 +612,12 @@ async def _snapshot_reference_source(
         )
     ).scalar_one_or_none()
     if source is None:
-        await db.rollback()
+        if manage_transaction:
+            await db.rollback()
         raise VideoReferenceVideoError("not_found", "video was deleted", 404)
     snapshot = _ReferenceSourceSnapshot.from_video(source)
-    await db.commit()
+    if manage_transaction:
+        await db.commit()
     return snapshot
 
 
@@ -609,6 +710,7 @@ async def _adopt_reference_variant(
     destination: Path,
     observed_existing: dict[str, Any] | None,
     storage_root: str,
+    manage_transaction: bool,
 ) -> tuple[dict[str, Any], bool]:
     observed = observed_existing
     for _attempt in range(3):
@@ -639,7 +741,8 @@ async def _adopt_reference_variant(
             existing = video_reference_variant_metadata(current)
             if existing is not None and existing != observed:
                 candidate = dict(existing)
-                await db.commit()
+                if manage_transaction:
+                    await db.commit()
                 if await _variant_file_matches(storage_root, candidate):
                     return candidate, False
                 observed = candidate
@@ -665,15 +768,25 @@ async def _adopt_reference_variant(
             metadata = dict(current.metadata_jsonb or {})
             metadata["upstream_reference_video_variant"] = variant
             current.metadata_jsonb = metadata
-            await db.commit()
-            await _discard_replaced_variant_best_effort(
-                storage_root=storage_root,
-                replaced=existing,
-                replacement_key=str(variant["storage_key"]),
-            )
+            if manage_transaction:
+                await db.commit()
+                await _discard_replaced_variant_best_effort(
+                    storage_root=storage_root,
+                    replaced=existing,
+                    replacement_key=str(variant["storage_key"]),
+                )
+            else:
+                await db.flush()
+                _discard_replaced_variant_after_commit(
+                    db,
+                    storage_root=storage_root,
+                    replaced=existing,
+                    replacement_key=str(variant["storage_key"]),
+                )
             return variant, True
         except BaseException:
-            await db.rollback()
+            if manage_transaction:
+                await db.rollback()
             raise
     raise VideoReferenceVideoError(
         "video_reference_changed",
@@ -690,7 +803,15 @@ async def ensure_video_reference_video_variant(
     storage_capacity: VideoStorageCapacityManager | None = None,
     transcode_capacity: VideoTranscodeCapacityManager | None = None,
 ) -> dict[str, Any]:
-    source = await _snapshot_reference_source(db, video_id=str(video.id))
+    nested_checker = getattr(db, "in_nested_transaction", None)
+    manage_transaction = not (
+        callable(nested_checker) and bool(nested_checker())
+    )
+    source = await _snapshot_reference_source(
+        db,
+        video_id=str(video.id),
+        manage_transaction=manage_transaction,
+    )
     existing_raw = source.metadata_jsonb.get("upstream_reference_video_variant")
     existing = dict(existing_raw) if isinstance(existing_raw, dict) else None
     if existing is not None and await _variant_file_matches(storage_root, existing):
@@ -707,6 +828,36 @@ async def ensure_video_reference_video_variant(
         async with (
             transcode_capacity or build_video_transcode_capacity_manager()
         ).hold(user_id=source.user_id):
+            refreshed = await _snapshot_reference_source(
+                db,
+                video_id=source.id,
+                manage_transaction=manage_transaction,
+            )
+            if (
+                refreshed.user_id != source.user_id
+                or refreshed.storage_key != source.storage_key
+                or refreshed.sha256 != source.sha256
+            ):
+                raise VideoReferenceVideoError(
+                    "video_reference_changed",
+                    "video changed or was deleted during reference preparation",
+                    409,
+                )
+            refreshed_existing_raw = refreshed.metadata_jsonb.get(
+                "upstream_reference_video_variant"
+            )
+            refreshed_existing = (
+                dict(refreshed_existing_raw)
+                if isinstance(refreshed_existing_raw, dict)
+                else None
+            )
+            if refreshed_existing is not None and await _variant_file_matches(
+                storage_root,
+                refreshed_existing,
+            ):
+                return refreshed_existing
+            source = refreshed
+            existing = refreshed_existing
             async with (
                 storage_capacity or build_video_storage_capacity_manager()
             ).reserve(2 * VIDEO_REFERENCE_VIDEO_MAX_BYTES):
@@ -746,6 +897,7 @@ async def ensure_video_reference_video_variant(
                     destination=destination,
                     observed_existing=existing,
                     storage_root=storage_root,
+                    manage_transaction=manage_transaction,
                 )
                 if not adopted:
                     await _discard_installed_variant(
