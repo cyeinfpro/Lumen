@@ -850,6 +850,25 @@ def test_fresh_install_unmanaged_marker_keeps_direct_data_unmounted(
     assert not (harness.state_dir / "last-good.conf").exists()
 
 
+def test_unmanaged_marker_with_wrong_payload_is_rejected(
+    tmp_path: Path,
+) -> None:
+    harness = StorageHarness(
+        tmp_path,
+        initial_mounted=False,
+        running_services=(),
+    )
+    (harness.state_dir / "unmanaged-direct").write_text(
+        "mode=unmanaged-direct\n",
+        encoding="utf-8",
+    )
+
+    result = harness.run("verify")
+
+    assert result.returncode == 1
+    assert "unmanaged direct storage verification failed" in result.stderr
+
+
 def test_first_apply_failure_restores_unmanaged_direct_baseline(
     tmp_path: Path,
 ) -> None:

@@ -70,6 +70,53 @@ lumen_update_capture_exact_data_mount() {
     return 0
 }
 
+lumen_update_unmanaged_direct_storage_valid() {
+    local data_root="$1"
+    local state_dir="$2"
+    local marker="${state_dir%/}/unmanaged-direct"
+
+    if ! python3 - "${marker}" "${data_root}" <<'PY'
+import os
+import stat
+import sys
+
+marker = sys.argv[1]
+data_root = sys.argv[2]
+
+try:
+    state_info = os.lstat(os.path.dirname(marker))
+    marker_info = os.lstat(marker)
+    target_info = os.lstat(data_root)
+except OSError:
+    raise SystemExit(1)
+
+if (
+    not stat.S_ISDIR(state_info.st_mode)
+    or stat.S_ISLNK(state_info.st_mode)
+    or not stat.S_ISREG(marker_info.st_mode)
+    or stat.S_ISLNK(marker_info.st_mode)
+    or marker_info.st_uid not in {0, os.geteuid()}
+    or marker_info.st_mode & 0o022
+    or not stat.S_ISDIR(target_info.st_mode)
+    or stat.S_ISLNK(target_info.st_mode)
+):
+    raise SystemExit(1)
+
+try:
+    with open(marker, "rb") as handle:
+        payload = handle.read(129)
+except OSError:
+    raise SystemExit(1)
+
+if payload != b"schema=1\nmode=unmanaged-direct\n":
+    raise SystemExit(1)
+PY
+    then
+        return 1
+    fi
+    ! mountpoint -q "${data_root}" 2>/dev/null
+}
+
 lumen_update_run_storage_controller() {
     local controller="$1"
     local action="$2"
@@ -298,6 +345,7 @@ lumen_update_require_storage_identity() {
     local state_dir="${LUMEN_STORAGE_STATE_DIR:-/var/lib/lumen-storage}"
     local last_good="${state_dir}/last-good.conf"
     local controller="" db_identity_file="" db_identity_status=""
+    local storage_mode="mounted"
 
     if ! lumen_require_no_active_systemd_fallback_writers; then
         log_error "[${context}] systemd 兜底 writer 仍在运行，拒绝维护数据或容器。"
@@ -317,34 +365,46 @@ lumen_update_require_storage_identity() {
             return 1
             ;;
     esac
-    if ! lumen_update_capture_exact_data_mount "${data_root}"; then
-        log_error "[${context}] LUMEN_DATA_ROOT 未通过精确 mountpoint 校验。"
-        return 1
-    fi
     controller="$(lumen_update_storage_controller_path)" || {
         log_error "[${context}] 找不到可验证 storage last-good identity 的 controller。"
         return 1
     }
+    if ! lumen_update_capture_exact_data_mount "${data_root}" >/dev/null 2>&1; then
+        storage_mode="unmanaged-direct"
+        if ! lumen_update_unmanaged_direct_storage_valid \
+                "${data_root}" "${state_dir}"; then
+            log_error "[${context}] LUMEN_DATA_ROOT 既不是精确 mountpoint，也不是已验证的 unmanaged-direct 数据根。"
+            return 1
+        fi
+        log_info "[${context}] 使用已登记的 unmanaged-direct 数据根；跳过精确 mountpoint 要求。"
+    fi
     if [ -L "${last_good}" ] \
             || { [ -e "${last_good}" ] && [ ! -f "${last_good}" ]; }; then
         log_error "[${context}] storage last-good identity 文件类型不安全：${last_good}"
         return 1
     fi
-    if [ ! -e "${last_good}" ] && [ ! -L "${last_good}" ]; then
-        log_warn "[${context}] 旧部署缺少 storage last-good；仅对已精确挂载目标执行一次安全绑定。"
-        if ! lumen_update_run_storage_controller "${controller}" up \
-                "${data_root}" "${db_root}" "${state_dir}"; then
-            log_error "[${context}] storage last-good identity 初始化失败。"
+    if [ "${storage_mode}" = "unmanaged-direct" ]; then
+        if [ -e "${last_good}" ] || [ -L "${last_good}" ]; then
+            log_error "[${context}] unmanaged-direct 数据根不能与 managed storage last-good 同时存在。"
             return 1
         fi
-    fi
-    if [ -f "${last_good}" ] \
-            && ! grep -Eq '^DATASET_IDENTITY=[0-9a-f]{64}$' "${last_good}"; then
-        log_warn "[${context}] legacy storage last-good 缺少 durable dataset identity，执行一次受锁升级。"
-        if ! lumen_update_run_storage_controller "${controller}" bind-identity \
-                "${data_root}" "${db_root}" "${state_dir}"; then
-            log_error "[${context}] legacy storage dataset identity 升级失败。"
-            return 1
+    else
+        if [ ! -e "${last_good}" ] && [ ! -L "${last_good}" ]; then
+            log_warn "[${context}] 旧部署缺少 storage last-good；仅对已精确挂载目标执行一次安全绑定。"
+            if ! lumen_update_run_storage_controller "${controller}" up \
+                    "${data_root}" "${db_root}" "${state_dir}"; then
+                log_error "[${context}] storage last-good identity 初始化失败。"
+                return 1
+            fi
+        fi
+        if [ -f "${last_good}" ] \
+                && ! grep -Eq '^DATASET_IDENTITY=[0-9a-f]{64}$' "${last_good}"; then
+            log_warn "[${context}] legacy storage last-good 缺少 durable dataset identity，执行一次受锁升级。"
+            if ! lumen_update_run_storage_controller "${controller}" bind-identity \
+                    "${data_root}" "${db_root}" "${state_dir}"; then
+                log_error "[${context}] legacy storage dataset identity 升级失败。"
+                return 1
+            fi
         fi
     fi
     if ! lumen_update_run_storage_controller "${controller}" verify \
@@ -352,7 +412,13 @@ lumen_update_require_storage_identity() {
         log_error "[${context}] storage controller verify/last-good identity 校验失败。"
         return 1
     fi
-    if ! lumen_update_capture_exact_data_mount "${data_root}"; then
+    if [ "${storage_mode}" = "unmanaged-direct" ]; then
+        if ! lumen_update_unmanaged_direct_storage_valid \
+                "${data_root}" "${state_dir}"; then
+            log_error "[${context}] controller verify 后 unmanaged-direct 数据根状态已漂移。"
+            return 1
+        fi
+    elif ! lumen_update_capture_exact_data_mount "${data_root}" >/dev/null 2>&1; then
         log_error "[${context}] controller verify 后数据根 mount identity 已漂移。"
         return 1
     fi

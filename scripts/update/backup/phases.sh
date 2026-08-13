@@ -91,9 +91,8 @@ if [ "${SKIP_STORAGE_CHECK:-0}" = "1" ]; then
 else
     _storage_target="${LUMEN_DATA_ROOT:-/opt/lumendata}"
     if ! lumen_update_require_storage_identity check_storage; then
-        log_error "[check_storage] ${_storage_target} 未通过 mountpoint/last-good identity 校验。"
-        log_error "  在管理后台「存储后端」页面配置 local 或 smb 后即可生效；"
-        log_error "  紧急绕过：SKIP_STORAGE_CHECK=1 ./update.sh"
+        log_error "[check_storage] ${_storage_target} 未通过已验证存储 identity 校验。"
+        log_error "  请在管理后台「存储后端」页面完成 local/smb 配置，或先完成旧部署存储迁移。"
         emit_fail check_storage 1
         exit 1
     fi

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -128,6 +129,7 @@ def _start_infra_storage_run(
     *,
     data_exact: bool,
     split_db_root: bool,
+    unmanaged_direct: bool = False,
     db_source_after_first: str = "",
     controller_verify_rc: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], Path, Path]:
@@ -150,6 +152,12 @@ def _start_infra_storage_run(
         f"DATASET_IDENTITY={'a' * 64}\n",
         encoding="utf-8",
     )
+    if unmanaged_direct:
+        (state / "last-good.conf").unlink()
+        (state / "unmanaged-direct").write_text(
+            "schema=1\nmode=unmanaged-direct\n",
+            encoding="utf-8",
+        )
     _, controller = _write_storage_mount_mocks(fakebin)
     events = tmp_path / "events.log"
     controller_log = tmp_path / "controller.log"
@@ -294,10 +302,118 @@ def test_root_filesystem_findmnt_false_positive_blocks_infra_recreate(
     )
 
     assert result.returncode != 0
-    assert "数据根不是独立 mountpoint" in result.stderr
+    assert "既不是精确 mountpoint，也不是已验证的 unmanaged-direct 数据根" in (
+        result.stderr
+    )
     assert not any(line.startswith("compose:") for line in events)
     assert not controller_log.exists()
     assert not identity_file.exists()
+
+
+def test_verified_unmanaged_direct_storage_allows_infra_recreate(
+    tmp_path: Path,
+) -> None:
+    result, events, controller_log, identity_file = _start_infra_storage_run(
+        tmp_path,
+        data_exact=False,
+        split_db_root=False,
+        unmanaged_direct=True,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert any(
+        "up --pull missing -d --wait --force-recreate postgres redis" in line
+        for line in events
+    )
+    assert controller_log.read_text(encoding="utf-8").count("|verify\n") == 2
+    assert not identity_file.exists()
+
+
+def test_unmanaged_direct_storage_requires_exact_marker(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "lumendata"
+    state = tmp_path / "storage-state"
+    data_root.mkdir()
+    state.mkdir()
+    (state / "unmanaged-direct").write_text(
+        "mode=unmanaged-direct\n",
+        encoding="utf-8",
+    )
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    _, controller = _write_storage_mount_mocks(fakebin)
+    result = _run(
+        f"""
+        set -u
+        export PATH={shlex.quote(str(fakebin))}:$PATH
+        export TEST_DATA_ROOT={shlex.quote(str(data_root))}
+        export TEST_DB_ROOT={shlex.quote(str(data_root))}
+        export TEST_DATA_EXACT=0
+        export TEST_CONTROLLER_LOG={shlex.quote(str(tmp_path / "controller.log"))}
+        export TEST_CONTROLLER_VERIFY_RC=0
+        . {shlex.quote(str(ROOT / "scripts/update/backup/storage_identity.sh"))}
+        log_error() {{ printf 'ERROR:%s\\n' "$*" >&2; }}
+        log_warn() {{ :; }}
+        lumen_require_no_active_systemd_fallback_writers() {{ return 0; }}
+        lumen_run_as_root() {{ "$@"; }}
+        LUMEN_DATA_ROOT={shlex.quote(str(data_root))}
+        LUMEN_DB_ROOT={shlex.quote(str(data_root))}
+        LUMEN_STORAGE_STATE_DIR={shlex.quote(str(state))}
+        LUMEN_UPDATE_STORAGE_CONTROLLER={shlex.quote(str(controller))}
+        lumen_update_require_storage_identity update_test
+        """
+    )
+
+    assert result.returncode != 0
+    assert "unmanaged-direct 数据根" in result.stderr
+
+
+def test_unmanaged_direct_storage_requires_root_owned_marker(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root test environment cannot model a non-root marker owner")
+    data_root = tmp_path / "lumendata"
+    state = tmp_path / "storage-state"
+    data_root.mkdir()
+    state.mkdir()
+    marker = state / "unmanaged-direct"
+    marker.write_text(
+        "schema=1\nmode=unmanaged-direct\n",
+        encoding="utf-8",
+    )
+    marker.chmod(0o640)
+    try:
+        os.chown(marker, 65534, -1)
+    except PermissionError:
+        pytest.skip("test environment cannot model a non-trusted marker owner")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    _, controller = _write_storage_mount_mocks(fakebin)
+    result = _run(
+        f"""
+        set -u
+        export PATH={shlex.quote(str(fakebin))}:$PATH
+        export TEST_DATA_ROOT={shlex.quote(str(data_root))}
+        export TEST_DB_ROOT={shlex.quote(str(data_root))}
+        export TEST_DATA_EXACT=0
+        export TEST_CONTROLLER_LOG={shlex.quote(str(tmp_path / "controller.log"))}
+        export TEST_CONTROLLER_VERIFY_RC=0
+        . {shlex.quote(str(ROOT / "scripts/update/backup/storage_identity.sh"))}
+        log_error() {{ :; }}
+        log_warn() {{ :; }}
+        lumen_require_no_active_systemd_fallback_writers() {{ return 0; }}
+        lumen_run_as_root() {{ "$@"; }}
+        LUMEN_DATA_ROOT={shlex.quote(str(data_root))}
+        LUMEN_DB_ROOT={shlex.quote(str(data_root))}
+        LUMEN_STORAGE_STATE_DIR={shlex.quote(str(state))}
+        LUMEN_UPDATE_STORAGE_CONTROLLER={shlex.quote(str(controller))}
+        lumen_update_require_storage_identity update_test
+        """
+    )
+
+    assert result.returncode != 0
 
 
 def test_verified_data_mount_allows_split_db_root_on_root_filesystem(

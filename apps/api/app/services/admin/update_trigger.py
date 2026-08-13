@@ -201,6 +201,36 @@ def _default_update_state_problem(runtime: TriggerRuntime) -> _UpdateStateProble
     backup_root = runtime.update_log_path().parent
     request_path = backup_root / ".update.request.json"
     trigger_path = backup_root / ".update.trigger"
+
+    # In the containerized deployment the journal and resume marker belong to
+    # the host-side root runner and intentionally remain private (0600). The
+    # API's coordination boundary is the marker/request/trigger handoff in the
+    # backup mount; asking the unprivileged API container to read host-private
+    # recovery files turns a healthy terminal journal into a false 503.
+    if runtime.runner_trigger_only_mode():
+        try:
+            request_exists = _path_exists(request_path, label="update request")
+            trigger_exists = _path_exists(trigger_path, label="update trigger")
+        except _UpdateStateReadError:
+            return _UpdateStateProblem(
+                code="update_recovery_state_unreadable",
+                message=(
+                    "cannot safely inspect the update request handoff; "
+                    "repair the mounted update backup directory"
+                ),
+                http_status=503,
+            )
+        if request_exists or trigger_exists:
+            return _UpdateStateProblem(
+                code="update_recovery_pending",
+                message=(
+                    "a pending update request or trigger already exists; "
+                    "let the host runner consume or recover it before starting another update"
+                ),
+                http_status=409,
+            )
+        return None
+
     try:
         resume_operation_id = _read_recovery_operation_id(resume_path)
         journal = _read_update_journal(journal_path)
