@@ -644,6 +644,10 @@ _lumen_self_update_scripts_locked() {
         backup_permissions.py
         restore_journal.py
     )
+    # Keep new updater leaf files reachable from legacy self-update callers.
+    local update_dependency_files=(
+        update/backup/storage_direct.sh
+    )
     if [ "${#files[@]}" -eq 0 ]; then
         files=(
             lib.sh
@@ -668,12 +672,14 @@ _lumen_self_update_scripts_locked() {
             backup.sh
             restore.sh
             update.sh
+            update/backup/storage_direct.sh
             update/recovery/consumer.sh
             lumenctl.sh
         )
     else
         # Facade/modules/runners are one version unit, including legacy callers.
-        local requested include_modules=0 include_python_helpers=0 module helper present
+        local requested include_modules=0 include_python_helpers=0
+        local include_update_dependencies=0 module helper dependency present
         for requested in "${files[@]}"; do
             if [ "${requested}" = "lib.sh" ]; then
                 include_modules=1
@@ -681,6 +687,11 @@ _lumen_self_update_scripts_locked() {
             case "${requested}" in
                 lib.sh|lib/self_update.sh|update.sh|lumenctl.sh)
                     include_python_helpers=1
+                    ;;
+            esac
+            case "${requested}" in
+                update.sh|update/*)
+                    include_update_dependencies=1
                     ;;
             esac
         done
@@ -709,6 +720,20 @@ _lumen_self_update_scripts_locked() {
                 done
                 if [ "${present}" -eq 0 ]; then
                     files+=("${helper}")
+                fi
+            done
+        fi
+        if [ "${include_update_dependencies}" -eq 1 ]; then
+            for dependency in "${update_dependency_files[@]}"; do
+                present=0
+                for requested in "${files[@]}"; do
+                    if [ "${requested}" = "${dependency}" ]; then
+                        present=1
+                        break
+                    fi
+                done
+                if [ "${present}" -eq 0 ]; then
+                    files+=("${dependency}")
                 fi
             done
         fi
@@ -762,6 +787,14 @@ _lumen_self_update_scripts_locked() {
             fi
         done
     done
+    for dependency in "${update_dependency_files[@]}"; do
+        for requested in "${files[@]}"; do
+            if [ "${requested}" = "${dependency}" ]; then
+                ordered_files+=("${requested}")
+                break
+            fi
+        done
+    done
     for requested in "${files[@]}"; do
         present=0
         for module in "${module_files[@]}"; do
@@ -773,6 +806,14 @@ _lumen_self_update_scripts_locked() {
         if [ "${present}" -eq 0 ]; then
             for helper in "${python_helper_files[@]}"; do
                 if [ "${requested}" = "${helper}" ]; then
+                    present=1
+                    break
+                fi
+            done
+        fi
+        if [ "${present}" -eq 0 ]; then
+            for dependency in "${update_dependency_files[@]}"; do
+                if [ "${requested}" = "${dependency}" ]; then
                     present=1
                     break
                 fi
