@@ -61,11 +61,25 @@ if [ -n "${TARGET_RELEASE_TAG}" ] \
     fi
 fi
 
-# Official releases on non-git hosts always refresh from the manifest's
-# immutable API image. This path is independent of LUMEN_UPDATE_GIT_PULL.
-if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ ! -d "${REPO_DIR}/.git" ]; then
+# Official releases only trust a local Git source when the target tag resolves
+# to the exact manifest commit. Missing or stale deployment Git metadata falls
+# back to the manifest-bound immutable API image.
+OFFICIAL_LOCAL_GIT_COMMIT=""
+if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ -d "${REPO_DIR}/.git" ]; then
+    OFFICIAL_LOCAL_GIT_COMMIT="$(
+        resolve_local_release_commit \
+            "${REPO_DIR}" "${TARGET_RELEASE_TAG}" 2>/dev/null || true
+    )"
+    if [ -z "${OFFICIAL_LOCAL_GIT_COMMIT}" ]; then
+        log_warn "[fetch_release] 本地 git 无法解析 ${TARGET_RELEASE_TAG}；改用官方 immutable image source。"
+    elif [ "${OFFICIAL_LOCAL_GIT_COMMIT}" != "${RELEASE_EXPECTED_COMMIT}" ]; then
+        log_warn "[fetch_release] 本地 git 的 ${TARGET_RELEASE_TAG} commit 与 manifest 不一致；改用官方 immutable image source。"
+    fi
+fi
+if [ -n "${RELEASE_EXPECTED_COMMIT}" ] \
+        && [ "${OFFICIAL_LOCAL_GIT_COMMIT}" != "${RELEASE_EXPECTED_COMMIT}" ]; then
     if [ "${LUMEN_UPDATE_DISABLE_IMAGE_EXTRACT:-0}" = "1" ]; then
-        log_error "[fetch_release] 正式 release 在无 .git 主机上不能禁用 immutable image source；拒绝使用当前快照。"
+        log_error "[fetch_release] 正式 release 缺少与 manifest 匹配的本地 git source，不能禁用 immutable image source。"
         emit_fail fetch_release 1
         exit 1
     fi
@@ -84,6 +98,7 @@ if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ ! -d "${REPO_DIR}/.git" ]; then
     emit_info fetch_release source "immutable_image_extract"
     log_info "[fetch_release] 已从 immutable image 提取代码到 ${REPO_DIR}"
 fi
+unset OFFICIAL_LOCAL_GIT_COMMIT
 
 if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then
     if [ ! -d "${REPO_DIR}/.git" ]; then

@@ -2438,7 +2438,7 @@ def test_update_script_requires_release_layout_and_prepares_new_release() -> Non
     )
     assert 'REPO_DIR="${CURRENT_RELEASE}"' in text
     assert "非正式/rolling 更新未取得 image source；按显式兼容语义使用当前快照" in text
-    assert "正式 release 在无 .git 主机上不能禁用 immutable image source" in text
+    assert "正式 release 缺少与 manifest 匹配的本地 git source" in text
     assert "--exclude='/releases/'" in text
     assert "--exclude='/shared/'" in text
     # release/.env 是 -> shared/.env 的 symlink，docker compose 自动识别

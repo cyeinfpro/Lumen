@@ -56,6 +56,27 @@ def _binding_harness(tmp_path: Path) -> Path:
     return harness
 
 
+def _local_git_commit_harness(tmp_path: Path) -> Path:
+    source = _update_source()
+    functions = "\n".join(
+        _bash_function(source, name)
+        for name in (
+            "release_commit_is_valid",
+            "resolve_local_release_commit",
+        )
+    )
+    harness = tmp_path / "local-git-commit-harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"{functions}\n"
+        'resolve_local_release_commit "$1" "$2"\n',
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    return harness
+
+
 def _manifest(path: Path, *, tag: str, commit: str) -> None:
     path.write_text(
         json.dumps(
@@ -138,7 +159,8 @@ def test_formal_release_collects_source_commit_from_allowed_proofs() -> None:
 def test_no_git_official_release_defaults_to_immutable_image_source() -> None:
     source = _update_source()
     mandatory = source.index(
-        'if [ -n "${RELEASE_EXPECTED_COMMIT}" ] && [ ! -d "${REPO_DIR}/.git" ]; then'
+        'if [ -n "${RELEASE_EXPECTED_COMMIT}" ] \\\n'
+        '        && [ "${OFFICIAL_LOCAL_GIT_COMMIT}" != "${RELEASE_EXPECTED_COMMIT}" ]; then'
     )
     wrapper_opt_in = source.index(
         'if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then',
@@ -148,11 +170,83 @@ def test_no_git_official_release_defaults_to_immutable_image_source() -> None:
     assert mandatory < wrapper_opt_in
     assert '"${RELEASE_SOURCE_API_IMAGE}"' in source[mandatory:wrapper_opt_in]
     assert "不能禁用 immutable image source" in source[mandatory:wrapper_opt_in]
-    assert "拒绝使用当前快照" in source[mandatory:wrapper_opt_in]
+    assert "与 manifest 匹配的本地 git source" in source[mandatory:wrapper_opt_in]
     assert (
         'RELEASE_SOURCE_REF="${RELEASE_SOURCE_COMMIT}"'
         in source[mandatory:wrapper_opt_in]
     )
+
+
+def test_stale_git_official_release_falls_back_to_immutable_image_source() -> None:
+    source = _update_source()
+    resolve = source.index(
+        'OFFICIAL_LOCAL_GIT_COMMIT="$(\n'
+        "        resolve_local_release_commit"
+    )
+    fallback = source.index(
+        '&& [ "${OFFICIAL_LOCAL_GIT_COMMIT}" != "${RELEASE_EXPECTED_COMMIT}" ]',
+        resolve,
+    )
+    image_extract = source.index("try_image_extract_release", fallback)
+    git_pull = source.index(
+        'if [ "${LUMEN_UPDATE_GIT_PULL:-0}" = "1" ]; then',
+        image_extract,
+    )
+
+    assert resolve < fallback < image_extract < git_pull
+    assert "本地 git 无法解析" in source[resolve:image_extract]
+    assert "commit 与 manifest 不一致" in source[resolve:image_extract]
+    assert 'RELEASE_SOURCE_IMAGE_EXTRACT=1' in source[fallback:git_pull]
+
+
+def test_local_release_commit_resolver_requires_an_existing_immutable_ref(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Lumen Test"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / "VERSION").write_text("1.2.118\n", encoding="utf-8")
+    subprocess.run(["git", "add", "VERSION"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "release"], cwd=repository, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "tag", "v1.2.118"], cwd=repository, check=True)
+    harness = _local_git_commit_harness(tmp_path)
+
+    matched = subprocess.run(
+        ["bash", str(harness), str(repository), "v1.2.118"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    missing = subprocess.run(
+        ["bash", str(harness), str(repository), "v1.2.119"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert matched.returncode == 0, matched.stderr
+    assert matched.stdout.strip() == commit
+    assert missing.returncode != 0
+    assert missing.stdout == ""
 
 
 def test_official_manifest_is_bound_after_fetch_without_changing_compat_paths() -> None:
