@@ -2157,6 +2157,63 @@ def test_phase_done_is_after_required_state_and_side_effects() -> None:
         "emit_done  lock 0"
     )
     assert "export LUMEN_UPDATE_RESUME=1" in self_update
+    assert 'export LUMEN_UPDATE_API_OPERATION_ID="${OPERATION_ID}"' in self_update
+
+
+def test_self_update_reexec_preserves_operation_id_for_resume(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "current"
+    (release / "scripts").mkdir(parents=True)
+    capture = tmp_path / "reexec"
+    operation_id = "update-reexec-operation"
+
+    result = _run(
+        f"""
+        set -euo pipefail
+        . {shlex.quote(str(SELF_UPDATE_PHASE))}
+        CURRENT_RELEASE={shlex.quote(str(release))}
+        ROOT={shlex.quote(str(tmp_path))}
+        OPERATION_ID={operation_id}
+        LUMEN_UPDATE_SELF_UPDATE_SCRIPTS=1
+        LUMEN_UPDATE_SCRIPTS_REF={SOURCE_COMMIT}
+        _LUMEN_UPDATE_SCRIPT_UNIT_FILES=(update.sh)
+        emit_start() {{ :; }}
+        emit_info() {{ :; }}
+        emit_done() {{ :; }}
+        emit_fail() {{ :; }}
+        log_info() {{ :; }}
+        log_error() {{ :; }}
+        lumen_self_update_scripts() {{
+            LUMEN_SELF_UPDATE_RESULT=ok
+            LUMEN_SELF_UPDATE_CHANGED='update/runner.sh '
+            LUMEN_SELF_UPDATE_SOURCE=https://example.invalid/scripts
+            LUMEN_SELF_UPDATE_SOURCE_COMMIT={SOURCE_COMMIT}
+            LUMEN_SELF_UPDATE_BACKUP_TS=20260814-000000
+            return 0
+        }}
+        lumen_update_bind_expected_scripts_commit() {{ return 0; }}
+        lumen_export_borrowed_maintenance_lock() {{ return 0; }}
+        exec() {{
+            printf 'api_operation=%s\\noperation=%s\\nresume=%s\\nargv=%s\\n' \
+                "${{LUMEN_UPDATE_API_OPERATION_ID-<unset>}}" \
+                "${{OPERATION_ID-<unset>}}" \
+                "${{LUMEN_UPDATE_RESUME-<unset>}}" \
+                "$*" > {shlex.quote(str(capture))}
+            return 0
+        }}
+        update_phase_self_update_scripts
+        """
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    values = dict(
+        line.split("=", 1) for line in capture.read_text(encoding="utf-8").splitlines()
+    )
+    assert values["api_operation"] == operation_id
+    assert values["operation"] == operation_id
+    assert values["resume"] == "1"
+    assert values["argv"] == f"bash {release}/scripts/update.sh"
 
 
 @pytest.mark.parametrize("failure", ("semantic_failure", "missing_immutable_ref"))

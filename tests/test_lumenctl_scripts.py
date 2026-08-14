@@ -363,6 +363,14 @@ cp "${TEST_REMOTE_ROOT:?}/${relative}" "${output:?}"
         recovery_consumer,
         encoding="utf-8",
     )
+    storage_direct = (
+        ROOT / "scripts" / "update" / "backup" / "storage_direct.sh"
+    ).read_text(encoding="utf-8")
+    (remote / "update" / "backup").mkdir(parents=True, exist_ok=True)
+    (remote / "update" / "backup" / "storage_direct.sh").write_text(
+        storage_direct,
+        encoding="utf-8",
+    )
 
     module_update = assert_bash_ok(
         f"""
@@ -3610,6 +3618,37 @@ def test_lumenctl_lifecycle_fallback_works_without_split_modules(
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "legacy-update:--probe" in result.stdout
+
+
+def test_lumenctl_uses_current_release_entry_lock_for_legacy_root(
+    tmp_path: Path,
+) -> None:
+    deploy_root = tmp_path / "lumen"
+    scripts_dir = deploy_root / "scripts"
+    release_scripts = deploy_root / "releases" / "release-old" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (release_scripts / "update").mkdir(parents=True)
+    shutil.copy2(LUMENCTL, scripts_dir / "lumenctl.sh")
+    shutil.copy2(LIB, scripts_dir / "lib.sh")
+    shutil.copytree(LIB_MODULE_DIR, scripts_dir / "lib")
+    shutil.copy2(
+        ROOT / "scripts" / "update" / "entry_lock.py",
+        release_scripts / "update" / "entry_lock.py",
+    )
+    (deploy_root / "current").symlink_to("releases/release-old")
+
+    result = subprocess.run(
+        ["bash", str(scripts_dir / "lumenctl.sh"), "help"],
+        cwd=deploy_root,
+        text=True,
+        capture_output=True,
+        env=script_env(),
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "Lumen" in result.stdout
+    assert Path(f"{scripts_dir.resolve()}.lumen-self-update.lock").is_file()
 
 
 def test_install_image_job_persists_required_sidecar_token() -> None:

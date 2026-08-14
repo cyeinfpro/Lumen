@@ -7,14 +7,16 @@ _LUMEN_STORAGE_IDENTITY_DIR="$(
 _LUMEN_BACKUP_RESTORE_SERVICES="$(
     cd "${_LUMEN_STORAGE_IDENTITY_DIR}/../.." && pwd -P
 )/lib/backup_restore_services.sh"
+_LUMEN_STORAGE_DIRECT="${_LUMEN_STORAGE_IDENTITY_DIR}/storage_direct.sh"
 if ! command -v lumen_require_no_active_systemd_fallback_writers \
         >/dev/null 2>&1; then
     # shellcheck source=/dev/null
     . "${_LUMEN_BACKUP_RESTORE_SERVICES}"
 fi
-unset _LUMEN_STORAGE_IDENTITY_DIR _LUMEN_BACKUP_RESTORE_SERVICES
 # shellcheck source=storage_direct.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/storage_direct.sh"
+. "${_LUMEN_STORAGE_DIRECT}"
+unset _LUMEN_STORAGE_IDENTITY_DIR _LUMEN_BACKUP_RESTORE_SERVICES \
+    _LUMEN_STORAGE_DIRECT
 
 lumen_update_storage_controller_path() {
     local candidate=""

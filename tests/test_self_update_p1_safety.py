@@ -63,6 +63,12 @@ def write_remote_scripts(remote: Path) -> tuple[str, ...]:
 
 def write_remote_update_dependency_scripts(remote: Path) -> None:
     files = {
+        "install/bootstrap_transaction.py": (
+            ROOT / "scripts" / "install" / "bootstrap_transaction.py"
+        ).read_text(encoding="utf-8"),
+        "update/entry_lock.py": (
+            ROOT / "scripts" / "update" / "entry_lock.py"
+        ).read_text(encoding="utf-8"),
         "update/runner.sh": "#!/usr/bin/env bash\nREMOTE_RUNNER=1\n",
         "update/backup/storage_direct.sh": (
             "#!/usr/bin/env bash\nREMOTE_STORAGE_DIRECT=1\n"
@@ -175,10 +181,16 @@ def test_update_entry_self_update_includes_new_leaf_dependencies(
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+    assert "install/bootstrap_transaction.py" in result.stdout
+    assert "update/entry_lock.py" in result.stdout
     assert "update/backup/storage_direct.sh" in result.stdout
+    assert (target / "install/bootstrap_transaction.py").is_file()
+    assert (target / "update/entry_lock.py").is_file()
     assert (target / "update/runner.sh").is_file()
     assert (target / "update/backup/storage_direct.sh").is_file()
     manifest = (target / ".lumen-self-update.files").read_text(encoding="utf-8")
+    assert "install/bootstrap_transaction.py\n" in manifest
+    assert "update/entry_lock.py\n" in manifest
     assert "update/runner.sh\n" in manifest
     assert "update/backup/storage_direct.sh\n" in manifest
 

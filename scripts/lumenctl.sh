@@ -12,14 +12,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-    _LUMEN_ENTRY_LOCK_HELPER="${SCRIPT_DIR}/update/entry_lock.py"
-    _LUMEN_ENTRY_LOCK_SCRIPTS_DIR="$(cd "${SCRIPT_DIR}" && pwd -P)"
-    _LUMEN_ENTRY_LOCK_PATH="${_LUMEN_ENTRY_LOCK_SCRIPTS_DIR}.lumen-self-update.lock"
-    if [ ! -f "${_LUMEN_ENTRY_LOCK_HELPER}" ] \
-            || [ -L "${_LUMEN_ENTRY_LOCK_HELPER}" ]; then
+    _lumenctl_entry_lock_helper() {
+        local scripts_dir="$1" helper="" deploy_root="" current_scripts=""
+        helper="${scripts_dir}/update/entry_lock.py"
+        if [ -f "${helper}" ] && [ ! -L "${helper}" ]; then
+            printf '%s\n' "${helper}"
+            return 0
+        fi
+        deploy_root="$(cd "${scripts_dir}/.." 2>/dev/null && pwd -P)" || return 1
+        [ -L "${deploy_root}/current" ] || return 1
+        current_scripts="$(cd "${deploy_root}/current/scripts" 2>/dev/null \
+            && pwd -P)" || return 1
+        case "${current_scripts}" in
+            "${deploy_root}"/releases/*/scripts) ;;
+            *) return 1 ;;
+        esac
+        helper="${current_scripts}/update/entry_lock.py"
+        [ -f "${helper}" ] && [ ! -L "${helper}" ] || return 1
+        printf '%s\n' "${helper}"
+    }
+    if ! _LUMEN_ENTRY_LOCK_HELPER="$(_lumenctl_entry_lock_helper "${SCRIPT_DIR}")"; then
         printf '[ERROR] lumenctl 脚本单元缺少安全入口锁 helper。\n' >&2
         exit 78
     fi
+    _LUMEN_ENTRY_LOCK_SCRIPTS_DIR="$(cd "${SCRIPT_DIR}" && pwd -P)"
+    _LUMEN_ENTRY_LOCK_PATH="${_LUMEN_ENTRY_LOCK_SCRIPTS_DIR}.lumen-self-update.lock"
     if ! python3 "${_LUMEN_ENTRY_LOCK_HELPER}" verify \
             "${LUMEN_SCRIPT_UNIT_LOCK_FD:-}" \
             "${_LUMEN_ENTRY_LOCK_PATH}" >/dev/null 2>&1; then
@@ -30,6 +47,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     fi
     unset _LUMEN_ENTRY_LOCK_HELPER _LUMEN_ENTRY_LOCK_SCRIPTS_DIR \
         _LUMEN_ENTRY_LOCK_PATH
+    unset -f _lumenctl_entry_lock_helper
 fi
 # shellcheck source=lib.sh
 . "${SCRIPT_DIR}/lib.sh"
