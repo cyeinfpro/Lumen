@@ -51,6 +51,7 @@ from .tasks import memory_extraction as memory_tasks
 from .tasks import outbox as outbox_tasks
 from .tasks import storyboard_assembly as storyboard_assembly_tasks
 from .tasks import volcano_asset_orchestrator as volcano_asset_tasks
+from .tasks import volcano_asset_recovery as volcano_asset_recovery_tasks
 from .tasks.completion_parts import entrypoints as completion_tasks
 from .tasks.completion_parts.default_runtime import build_completion_runtime
 from .tasks.generation_parts.default_runtime import build_generation_runtime
@@ -296,6 +297,7 @@ class WorkerSettings:
         outbox_tasks.cron_jobs
         + canvas_reconcile_tasks.cron_jobs
         + video_generation_tasks.cron_jobs
+        + volcano_asset_recovery_tasks.cron_jobs
         + [
             # provider probe 可能卡在 Redis、代理或上游 TCP；arq 的 cron timeout
             # 负责取消该 job，避免它占住 cron 槽位和 worker event loop。

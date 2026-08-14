@@ -251,14 +251,17 @@ async def test_same_intent_operations_do_not_share_reconcile_candidate(
     assert receipts == [("operation-1", "asset-operation-1")]
     assert redis.operation("operation-2")["progress_stage"] == "waiting_intent_lock"
 
-    second = await volcano_assets.process_volcano_asset_operation(
-        {"redis": redis},
-        "operation-2",
-        1,
-        0,
-    )
+    with pytest.raises(Retry):
+        await volcano_assets.process_volcano_asset_operation(
+            {"redis": redis},
+            "operation-2",
+            1,
+            0,
+        )
 
-    assert second["status"] == "failed"
+    second = redis.operation("operation-2")
+    assert second["status"] == "queued"
+    assert second["progress_stage"] == "reconciling_submit"
     assert second["error"]["code"] == "volcano_asset_create_reconcile_ambiguous"
     assert create_calls == 2
     assert receipts == [("operation-1", "asset-operation-1")]
@@ -268,6 +271,18 @@ async def test_same_intent_operations_do_not_share_reconcile_candidate(
         if key.startswith(_INTENT_LOCK_PREFIX)
     ]
     assert intent_owners == ["operation-2"]
+
+
+def test_create_intent_lock_is_bounded_below_operation_retention() -> None:
+    from lumen_core.volcano_assets import VOLCANO_ASSET_OPERATION_TTL_SECONDS
+
+    from app.tasks import volcano_asset_create as create_parts
+
+    assert create_parts._INTENT_LOCK_TTL_SECONDS == 30 * 60  # noqa: SLF001
+    assert (
+        create_parts._INTENT_LOCK_TTL_SECONDS  # noqa: SLF001
+        < VOLCANO_ASSET_OPERATION_TTL_SECONDS
+    )
 
 
 @pytest.mark.asyncio

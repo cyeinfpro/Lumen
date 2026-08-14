@@ -48,6 +48,7 @@ from .video_upstream_parts.contracts import (
     PollResult,
     SubmitResult,
     VIDEO_RESULT_READ_TIMEOUT_S,
+    VIDEO_RESULT_TOTAL_TIMEOUT_S,
     VideoProviderAdapter,
     VideoProviderStatus as VideoProviderStatus,
     VideoReferenceMedia,
@@ -344,7 +345,7 @@ async def _stream_video_response(
         raise
 
 
-async def _download_video_url(
+async def _download_video_url_with_redirects(
     video_url: str,
     *,
     max_redirects: int = 0,
@@ -409,6 +410,37 @@ async def _download_video_url(
         error_code="fetch_failed",
         status_code=508,
     )
+
+
+async def _download_video_url(
+    video_url: str,
+    *,
+    max_redirects: int = 0,
+    headers_for_url: Callable[[str], dict[str, str]] | None = None,
+    client_factory: Callable[[PublicHttpTarget], httpx.AsyncClient] | None = None,
+    ensure_active: Callable[[], None] | None = None,
+    total_timeout_s: float = VIDEO_RESULT_TOTAL_TIMEOUT_S,
+) -> DownloadedVideo:
+    timeout_s = max(0.001, float(total_timeout_s))
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await _download_video_url_with_redirects(
+                video_url,
+                max_redirects=max_redirects,
+                headers_for_url=headers_for_url,
+                client_factory=client_factory,
+                ensure_active=ensure_active,
+            )
+    except TimeoutError as exc:
+        raise VideoUpstreamError(
+            "video fetch exceeded total download time limit",
+            error_code="fetch_failed",
+            status_code=504,
+            raw={
+                "timeout_scope": "total",
+                "timeout_seconds": timeout_s,
+            },
+        ) from exc
 
 
 async def _downloaded_video_bytes(downloaded: DownloadedVideo) -> bytes:

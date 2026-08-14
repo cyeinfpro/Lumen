@@ -5,15 +5,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from arq import Retry
 
 from .volcano_asset_runtime import (
     VolcanoAssetRuntimeContext,
     VolcanoAssetRuntimeSlot,
     VolcanoAssetRuntimeView,
+)
+from .volcano_asset_retry_policy import (
+    VOLCANO_ASSET_PRE_SUBMIT_RETRY_LIMIT,
+    VOLCANO_ASSET_UNCERTAIN_SUBMIT_RETRY_LIMIT,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,16 +29,25 @@ logger = logging.getLogger(__name__)
 _AIGC_GROUP_TYPE = "AIGC"
 _INTENT_LOCK_PREFIX = "video-assets:create-intent:"
 _INTENT_LOCK_RETRY_SECONDS = 5
+_INTENT_LOCK_TTL_SECONDS = 30 * 60
 _SUBMIT_LOCK_PREFIX = "video-assets:create-submit:"
 _SUBMIT_LOCK_RETRY_SECONDS = 2
 _SUBMIT_LOCK_TTL_SECONDS = 120
 _SUBMIT_LOCK_RENEW_INTERVAL_SECONDS = 30
+_AUTOMATIC_RETRYABLE_CODES = frozenset(
+    {
+        "volcano_asset_connection_failed",
+        "volcano_asset_create_reconcile_ambiguous",
+        "volcano_asset_inventory_incomplete",
+        "volcano_asset_proxy_unavailable",
+        "volcano_asset_timeout",
+    }
+)
 _RUNTIME = VolcanoAssetRuntimeSlot(
     owner=__name__,
     dependencies=frozenset(
         {
             "VOLCANO_ASSET_MAX_ASSETS",
-            "VOLCANO_ASSET_OPERATION_TTL_SECONDS",
             "VolcanoAssetClient",
             "VolcanoAssetCreateRateLimited",
             "VolcanoAssetMediaError",
@@ -148,7 +165,7 @@ async def _acquire_intent_lock(state: _CreateAssetState) -> None:
     runtime = _runtime()
     key = _intent_lock_key(state)
     owner = state.operation_id
-    ttl = runtime.VOLCANO_ASSET_OPERATION_TTL_SECONDS
+    ttl = _INTENT_LOCK_TTL_SECONDS
     acquired = await runtime._retry_redis_call(
         lambda: state.redis.set(
             key,
@@ -188,7 +205,7 @@ async def _confirm_intent_lock(state: _CreateAssetState) -> None:
             1,
             state.intent_lock_key,
             state.operation_id,
-            runtime.VOLCANO_ASSET_OPERATION_TTL_SECONDS,
+            _INTENT_LOCK_TTL_SECONDS,
         )
     )
     if not renewed:
@@ -380,6 +397,87 @@ async def _release_reservation(state: _CreateAssetState) -> None:
     )
     if released:
         state.reservation_acquired = False
+
+
+def _automatic_retry_delay(
+    failure: Any,
+    *,
+    retry_count: int,
+    uncertain_submit: bool,
+) -> int:
+    if failure.retry_after_seconds is not None:
+        return max(1, int(failure.retry_after_seconds))
+    if uncertain_submit:
+        schedule = (10, 15, 20, 30, 45)
+        if retry_count <= len(schedule):
+            return schedule[retry_count - 1]
+        return 60
+    return min(30, 2 ** min(retry_count, 5))
+
+
+async def _schedule_automatic_retry(
+    state: _CreateAssetState,
+    failure: Any,
+) -> int | None:
+    if not failure.retryable or failure.code not in _AUTOMATIC_RETRYABLE_CODES:
+        return None
+    uncertain_submit = bool(
+        state.operation.get("submit_started_at")
+        and state.operation.get("submit_outcome_uncertain")
+    )
+    retry_count = (
+        max(
+            0,
+            int(state.operation.get("automatic_retry_count") or 0),
+        )
+        + 1
+    )
+    retry_limit = (
+        VOLCANO_ASSET_UNCERTAIN_SUBMIT_RETRY_LIMIT
+        if uncertain_submit
+        else VOLCANO_ASSET_PRE_SUBMIT_RETRY_LIMIT
+    )
+    if retry_count > retry_limit:
+        return None
+    delay_s = _automatic_retry_delay(
+        failure,
+        retry_count=retry_count,
+        uncertain_submit=uncertain_submit,
+    )
+    now = datetime.now(timezone.utc)
+    await _release_reservation(state)
+    await state.persistence.update(
+        state.operation,
+        status="queued",
+        progress_stage=(
+            "reconciling_submit" if uncertain_submit else "retrying_upstream"
+        ),
+        automatic_retry_count=retry_count,
+        retry_not_before=(now + timedelta(seconds=delay_s)).isoformat(),
+        retryable=True,
+        retry_after_seconds=delay_s,
+        completed_at=None,
+        result=None,
+        error={
+            "code": failure.code,
+            "message": failure.message,
+            "retryable": True,
+            "retry_after_seconds": delay_s,
+        },
+    )
+    state.deferred = True
+    state.release_intent_lock = not uncertain_submit
+    logger.info(
+        "video_asset.automatic_retry operation_id=%s code=%s count=%s "
+        "limit=%s delay_s=%s uncertain_submit=%s",
+        state.operation_id,
+        failure.code,
+        retry_count,
+        retry_limit,
+        delay_s,
+        uncertain_submit,
+    )
+    return delay_s
 
 
 async def _prepare_scope(state: _CreateAssetState) -> None:
@@ -754,6 +852,11 @@ async def _process_create_asset(
                 await _release_reservation(state)
                 raise
             mapped = _failure_from_exception(state, exc)
+            retry_delay = await _schedule_automatic_retry(state, mapped)
+            if retry_delay is not None:
+                raise Retry(
+                    defer=retry_delay + random.uniform(0, min(2.0, retry_delay / 4))
+                ) from exc
             result = await _record_create_failure(state, mapped)
             state.release_intent_lock = state.operation.get(
                 "submit_outcome_uncertain"

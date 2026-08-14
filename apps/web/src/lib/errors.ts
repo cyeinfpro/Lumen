@@ -252,6 +252,7 @@ export function recommendedActionsForError(
   } else if (
     [
       "moderation_blocked",
+      "content_policy",
       "content_policy_violation",
       "safety_violation",
     ].includes(normalized)

@@ -68,10 +68,18 @@ def _install_create_asset_runtime(
 async def test_later_page_existing_asset_is_in_submit_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.tasks import volcano_asset_create as create_parts
     from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
-    redis = _Redis(_operation())
+    redis = _Redis(
+        {
+            **_operation(),
+            "automatic_retry_count": (
+                create_parts.VOLCANO_ASSET_UNCERTAIN_SUBMIT_RETRY_LIMIT
+            ),
+        }
+    )
     create_calls = 0
     filtered_pages: list[int] = []
     existing = [_asset(f"asset-old-{index}") for index in range(101)]
@@ -148,6 +156,7 @@ async def test_later_page_existing_asset_is_in_submit_baseline(
 async def test_later_page_second_new_candidate_keeps_reconcile_ambiguous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.tasks import volcano_asset_create as create_parts
     from app.tasks import volcano_asset_orchestrator as volcano_assets
 
     provider = _provider()
@@ -158,6 +167,9 @@ async def test_later_page_second_new_candidate_keeps_reconcile_ambiguous(
         "submit_outcome_uncertain": True,
         "source_url": "https://lumen.example/safe.mp4",
         "baseline_asset_ids": [asset["Id"] for asset in old_assets],
+        "automatic_retry_count": (
+            create_parts.VOLCANO_ASSET_UNCERTAIN_SUBMIT_RETRY_LIMIT
+        ),
     }
     redis = _Redis(operation)
     create_calls = 0

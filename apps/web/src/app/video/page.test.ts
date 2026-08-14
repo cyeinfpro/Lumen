@@ -799,6 +799,12 @@ test("video task model preserves status, elapsed, and error semantics", () => {
     ),
     "参考素材不是有效图片，检查素材类型或重新上传后再试。",
   );
+  equal(
+    taskModel.taskErrorSummary(
+      "The request failed because the output video may contain sensitive information. Request id: req-2",
+    ),
+    "火山内容安全审核拦截了生成结果。上游未提供具体命中项，请调整提示词或逐步减少参考素材后重试。",
+  );
   deepEqual(taskModel.videoHistoryEmptyCopy("failed", 1, false), {
     title: "暂无失败记录",
     description: "当前任务完成后会进入历史。",

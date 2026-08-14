@@ -761,6 +761,92 @@ async def test_worker_never_resubmits_when_create_asset_reconcile_is_ambiguous(
     monkeypatch.setattr(volcano_assets, "release_volcano_asset_quota", noop)
     monkeypatch.setattr(volcano_assets, "_write_audit", noop)
 
+    with pytest.raises(Retry):
+        await volcano_assets.process_volcano_asset_operation(
+            {"redis": redis},
+            "operation-1",
+            1,
+            0,
+        )
+
+    stored = redis.operation()
+    assert stored["status"] == "queued"
+    assert stored["progress_stage"] == "reconciling_submit"
+    assert stored["automatic_retry_count"] == 1
+    assert stored["error"]["code"] == "volcano_asset_create_reconcile_ambiguous"
+    assert create_calls == 0
+    assert reserve_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_automatically_recovers_late_create_asset_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import volcano_asset_orchestrator as volcano_assets
+
+    provider = _provider()
+    redis = _Redis(_operation())
+    create_calls = 0
+    asset_visible = False
+
+    class Client:
+        async def request(self, action: str, _body: dict[str, Any]) -> Any:
+            nonlocal create_calls
+            if action == "GetAssetGroup":
+                return {
+                    "Id": "group-1",
+                    "GroupType": "AIGC",
+                    "ProjectName": "project-a",
+                }
+            if action == "ListAssets":
+                if not asset_visible:
+                    return {"Assets": [], "TotalCount": 0}
+                return {
+                    "Assets": [
+                        {
+                            "Id": "asset-late",
+                            "GroupId": "group-1",
+                            "Name": "User Display Name",
+                            "AssetType": "Video",
+                            "Status": "Active",
+                            "ProjectName": "project-a",
+                        }
+                    ],
+                    "TotalCount": 1,
+                }
+            create_calls += 1
+            raise VolcanoAssetServiceError(
+                "volcano_asset_timeout",
+                "Volcano asset service timed out",
+                504,
+            )
+
+    async def provider_for(_operation: dict[str, Any]) -> VideoProviderDefinition:
+        return provider
+
+    async def normalized(_operation: dict[str, Any]) -> tuple[str, str]:
+        return ("https://lumen.example/safe.mp4", "volcano_asset_video_v1")
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(volcano_assets, "_provider_for_operation", provider_for)
+    monkeypatch.setattr(volcano_assets, "VolcanoAssetClient", lambda _p: Client())
+    monkeypatch.setattr(volcano_assets, "_normalized_source_url", normalized)
+    monkeypatch.setattr(volcano_assets, "reserve_volcano_asset_quota", noop)
+    monkeypatch.setattr(volcano_assets, "release_volcano_asset_quota", noop)
+    monkeypatch.setattr(volcano_assets, "acquire_volcano_create_rate_limit", noop)
+    monkeypatch.setattr(volcano_assets, "_write_audit", noop)
+
+    with pytest.raises(Retry):
+        await volcano_assets.process_volcano_asset_operation(
+            {"redis": redis},
+            "operation-1",
+            1,
+            0,
+        )
+
+    asset_visible = True
     result = await volcano_assets.process_volcano_asset_operation(
         {"redis": redis},
         "operation-1",
@@ -768,10 +854,9 @@ async def test_worker_never_resubmits_when_create_asset_reconcile_is_ambiguous(
         0,
     )
 
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "volcano_asset_create_reconcile_ambiguous"
-    assert create_calls == 0
-    assert reserve_calls == 0
+    assert result["status"] == "succeeded"
+    assert result["result"]["id"] == "asset-late"
+    assert create_calls == 1
 
 
 @pytest.mark.asyncio
