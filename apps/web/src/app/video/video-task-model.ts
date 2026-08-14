@@ -286,6 +286,13 @@ export function taskErrorSummary(raw: string): string {
   if (/specified asset is not an image/i.test(extracted)) {
     return "参考素材不是有效图片，检查素材类型或重新上传后再试。";
   }
+  if (
+    /OutputVideoSensitiveContentDetected|output video may contain sensitive information/i.test(
+      extracted,
+    )
+  ) {
+    return "火山内容安全审核拦截了生成结果。上游未提供具体命中项，请调整提示词或逐步减少参考素材后重试。";
+  }
   const normalized = extracted
     .replace(/\\n/g, " ")
     .replace(/\s*Request id:\s*[A-Za-z0-9_-]+/gi, "")

@@ -79,6 +79,25 @@ function assetFixture(
   };
 }
 
+test("volcano operation stages explain automatic recovery", () => {
+  assert.equal(
+    domain.volcanoOperationStageMessage("reconciling_submit"),
+    "提交结果确认中，后台会自动继续",
+  );
+  assert.equal(
+    domain.volcanoOperationStageMessage("retrying_upstream"),
+    "火山服务波动，后台自动重试中",
+  );
+  assert.equal(
+    domain.volcanoOperationStageMessage("waiting_intent_lock"),
+    "同一素材正在确认提交结果",
+  );
+  assert.equal(
+    domain.volcanoOperationStageMessage("recovery_queued"),
+    "任务已由后台自愈接管",
+  );
+});
+
 function uploadFixture(
   patch: Partial<UploadItem> = {},
 ): UploadItem {
