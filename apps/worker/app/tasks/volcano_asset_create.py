@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from typing import Any
 
 from .volcano_asset_runtime import (
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 _AIGC_GROUP_TYPE = "AIGC"
 _INTENT_LOCK_PREFIX = "video-assets:create-intent:"
 _INTENT_LOCK_RETRY_SECONDS = 5
+_SUBMIT_LOCK_PREFIX = "video-assets:create-submit:"
+_SUBMIT_LOCK_RETRY_SECONDS = 2
+_SUBMIT_LOCK_TTL_SECONDS = 120
+_SUBMIT_LOCK_RENEW_INTERVAL_SECONDS = 30
 _RUNTIME = VolcanoAssetRuntimeSlot(
     owner=__name__,
     dependencies=frozenset(
@@ -40,6 +46,7 @@ _RUNTIME = VolcanoAssetRuntimeSlot(
             "_complete_operation",
             "_confirm_operation_lock",
             "_defer_for_rate_limit",
+            "_defer_for_submit_slot",
             "_media_failure",
             "_provider_for_operation",
             "_reconcile_ambiguous_submit",
@@ -58,6 +65,7 @@ _RUNTIME = VolcanoAssetRuntimeSlot(
             "reserve_volcano_asset_quota",
             "video_provider_binding_fingerprint",
             "volcano_asset_quota_key",
+            "volcano_asset_quota_scope",
         }
     ),
 )
@@ -91,6 +99,12 @@ class _CreateAssetState:
     intent_lock_key: str = ""
     intent_lock_owned: bool = False
     release_intent_lock: bool = False
+    submit_lock_key: str = ""
+    submit_lock_owner: str = ""
+    submit_lock_owned: bool = False
+    submit_lock_deadline: float = 0.0
+    submit_lock_lost: asyncio.Event = field(default_factory=asyncio.Event)
+    submit_lock_heartbeat: asyncio.Task[None] | None = None
 
 
 def _ensure_lease(state: _CreateAssetState) -> None:
@@ -207,6 +221,153 @@ async def _release_intent_lock(state: _CreateAssetState) -> None:
         )
     finally:
         state.intent_lock_owned = False
+
+
+async def _acquire_submit_lock(state: _CreateAssetState) -> bool:
+    runtime = _runtime()
+    key = f"{_SUBMIT_LOCK_PREFIX}{runtime.volcano_asset_quota_scope(state.quota_key)}"
+    owner = f"{state.operation_id}:{max(1, int(state.operation.get('attempt') or 1))}"
+    acquired = await runtime._retry_redis_call(
+        lambda: state.redis.set(
+            key,
+            owner,
+            nx=True,
+            ex=_SUBMIT_LOCK_TTL_SECONDS,
+        )
+    )
+    if not acquired:
+        current = await runtime._retry_redis_call(lambda: state.redis.get(key))
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", errors="replace")
+        if current == owner:
+            acquired = await runtime._retry_redis_call(
+                lambda: state.redis.eval(
+                    runtime._RENEW_OPERATION_LOCK_SCRIPT,
+                    1,
+                    key,
+                    owner,
+                    _SUBMIT_LOCK_TTL_SECONDS,
+                )
+            )
+    if not acquired:
+        await runtime._defer_for_submit_slot(
+            state.persistence,
+            state.operation,
+            retry_after_seconds=_SUBMIT_LOCK_RETRY_SECONDS,
+        )
+        state.deferred = True
+        return False
+    state.submit_lock_key = key
+    state.submit_lock_owner = owner
+    state.submit_lock_owned = True
+    state.submit_lock_deadline = time.monotonic() + _SUBMIT_LOCK_TTL_SECONDS
+    state.submit_lock_lost.clear()
+    state.submit_lock_heartbeat = asyncio.create_task(
+        _submit_lock_heartbeat(state),
+        name=f"volcano-submit-lock:{state.operation_id}",
+    )
+    return True
+
+
+def _mark_submit_lock_lost(state: _CreateAssetState) -> None:
+    state.submit_lock_owned = False
+    state.submit_lock_lost.set()
+
+
+def _ensure_submit_lock(state: _CreateAssetState) -> None:
+    if (
+        not state.submit_lock_owned
+        or state.submit_lock_lost.is_set()
+        or time.monotonic() >= state.submit_lock_deadline
+    ):
+        _mark_submit_lock_lost(state)
+        raise _runtime()._LeaseLostError("Volcano asset submit lease was lost")
+
+
+async def _renew_submit_lock(state: _CreateAssetState) -> bool:
+    return bool(
+        await _runtime()._retry_redis_call(
+            lambda: state.redis.eval(
+                _runtime()._RENEW_OPERATION_LOCK_SCRIPT,
+                1,
+                state.submit_lock_key,
+                state.submit_lock_owner,
+                _SUBMIT_LOCK_TTL_SECONDS,
+            )
+        )
+    )
+
+
+async def _confirm_submit_lock(state: _CreateAssetState) -> None:
+    _ensure_submit_lock(state)
+    renewed = await _renew_submit_lock(state)
+    if not renewed:
+        _mark_submit_lock_lost(state)
+        raise _runtime()._LeaseLostError("Volcano asset submit lease was lost")
+    state.submit_lock_deadline = time.monotonic() + _SUBMIT_LOCK_TTL_SECONDS
+
+
+async def _submit_lock_heartbeat(state: _CreateAssetState) -> None:
+    runtime = _runtime()
+    while state.submit_lock_owned:
+        remaining = state.submit_lock_deadline - time.monotonic()
+        if remaining <= 0:
+            _mark_submit_lock_lost(state)
+            return
+        await asyncio.sleep(min(_SUBMIT_LOCK_RENEW_INTERVAL_SECONDS, remaining))
+        if not state.submit_lock_owned:
+            return
+        try:
+            renewed = await _renew_submit_lock(state)
+        except runtime.VolcanoAssetRedisUnavailable:
+            logger.warning(
+                "video_asset.submit_lock_renew_unavailable operation_id=%s",
+                state.operation_id,
+                exc_info=True,
+            )
+            continue
+        if not renewed:
+            _mark_submit_lock_lost(state)
+            return
+        state.submit_lock_deadline = time.monotonic() + _SUBMIT_LOCK_TTL_SECONDS
+
+
+async def _stop_submit_lock_heartbeat(state: _CreateAssetState) -> None:
+    task = state.submit_lock_heartbeat
+    state.submit_lock_heartbeat = None
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _release_submit_lock(state: _CreateAssetState) -> None:
+    await _stop_submit_lock_heartbeat(state)
+    if (
+        not state.submit_lock_owned
+        or not state.submit_lock_key
+        or not state.submit_lock_owner
+    ):
+        return
+    runtime = _runtime()
+    try:
+        await runtime._retry_redis_call(
+            lambda: state.redis.eval(
+                runtime._RELEASE_OPERATION_LOCK_SCRIPT,
+                1,
+                state.submit_lock_key,
+                state.submit_lock_owner,
+            )
+        )
+    except runtime.VolcanoAssetRedisUnavailable:
+        logger.warning(
+            "video_asset.submit_lock_release_failed operation_id=%s",
+            state.operation_id,
+            exc_info=True,
+        )
+    finally:
+        state.submit_lock_owned = False
 
 
 async def _release_reservation(state: _CreateAssetState) -> None:
@@ -329,6 +490,12 @@ async def _wait_for_submit_slot(
         state.operation,
         progress_stage="waiting_submit_slot",
     )
+    if not await _acquire_submit_lock(state):
+        return {
+            "status": "deferred",
+            "operation_id": state.operation_id,
+            "retry_after_ms": _SUBMIT_LOCK_RETRY_SECONDS * 1000,
+        }
     try:
         await runtime.acquire_volcano_create_rate_limit(
             state.redis,
@@ -347,6 +514,7 @@ async def _wait_for_submit_slot(
             exc,
         )
         state.deferred = True
+        await _release_submit_lock(state)
         return {
             "status": "deferred",
             "operation_id": state.operation_id,
@@ -360,6 +528,7 @@ async def _request_asset(
     public_url: str,
 ) -> tuple[dict[str, Any], bool]:
     runtime = _runtime()
+    await _confirm_submit_lock(state)
     try:
         raw_asset = await state.client.request(
             "CreateAsset",
@@ -398,6 +567,7 @@ async def _request_asset(
             baseline_asset_ids=[],
         )
         raise mapped_failure from exc
+    await _confirm_submit_lock(state)
     return raw_asset, False
 
 
@@ -409,24 +579,28 @@ async def _normalize_submitted_asset(
 ) -> dict[str, Any]:
     runtime = _runtime()
     if already_normalized:
-        return raw_asset
-    asset = runtime.normalize_asset(
-        raw_asset,
-        project_name=state.provider.project_name,
-        fallback={
-            "group_id": state.group_id,
-            "name": str(state.operation.get("name") or ""),
-            "asset_type": str(state.operation.get("asset_type") or ""),
-            "status": "Processing",
-            "project_name": state.provider.project_name,
-        },
-    )
+        asset = dict(raw_asset)
+    else:
+        asset = runtime.normalize_asset(
+            raw_asset,
+            project_name=state.provider.project_name,
+            fallback={
+                "group_id": state.group_id,
+                "name": str(state.operation.get("name") or ""),
+                "asset_type": str(state.operation.get("asset_type") or ""),
+                "status": "Processing",
+                "project_name": state.provider.project_name,
+            },
+        )
     valid = (
         bool(asset.get("id"))
         and asset.get("group_id") == state.group_id
         and asset.get("project_name") == state.provider.project_name
     )
     if valid:
+        preview_url = str(state.operation.get("preview_url") or "")
+        if preview_url.startswith(("/api/images/", "/api/videos/")):
+            asset["preview_url"] = preview_url
         return asset
     await _confirm_intent_lock(state)
     recovered = await runtime._reconcile_ambiguous_submit(
@@ -436,6 +610,9 @@ async def _normalize_submitted_asset(
     )
     if recovered is None:
         raise runtime._ambiguous_create_asset_failure()
+    preview_url = str(state.operation.get("preview_url") or "")
+    if preview_url.startswith(("/api/images/", "/api/videos/")):
+        recovered = {**recovered, "preview_url": preview_url}
     return recovered
 
 
@@ -444,12 +621,14 @@ async def _submit_asset(
     public_url: str,
 ) -> dict[str, Any]:
     runtime = _runtime()
+    await _confirm_submit_lock(state)
     await _confirm_intent_lock(state)
     baseline_asset_ids = await runtime._snapshot_group_asset_ids(
         state.client,
         state.provider,
         state.operation,
     )
+    await _confirm_submit_lock(state)
     await state.persistence.update(
         state.operation,
         progress_stage="submitting",
@@ -583,6 +762,7 @@ async def _process_create_asset(
         state.release_intent_lock = True
         return result
     finally:
+        await _release_submit_lock(state)
         await _release_intent_lock(state)
 
 

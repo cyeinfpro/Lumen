@@ -48,6 +48,21 @@ class QueryRouteDependencies:
     member_list_page_size: int
 
 
+def _apply_receipt_previews(
+    items: list[dict[str, Any]],
+    receipts: Any,
+) -> None:
+    preview_urls = getattr(receipts, "preview_urls", None)
+    if not isinstance(preview_urls, dict):
+        return
+    for asset in items:
+        preview_url = preview_urls.get(str(asset.get("id") or ""))
+        if isinstance(preview_url, str) and preview_url.startswith(
+            ("/api/images/", "/api/videos/")
+        ):
+            asset["preview_url"] = preview_url
+
+
 async def get_capabilities(
     *,
     model: str,
@@ -208,6 +223,7 @@ async def list_assets(
             sort_by=sort_by,
             sort_order=sort_order,
         )
+        _apply_receipt_previews(normalized["items"], member_receipts)
         for asset in normalized["items"]:
             deps.require_asset_shape(asset, provider)
         return VideoAssetListOut(**normalized)
@@ -225,6 +241,13 @@ async def list_assets(
         sort_by=sort_by,
         sort_order=sort_order,
     )
+    admin_receipts = await deps.owned_resource_receipts(
+        db,
+        user=None,
+        provider=provider,
+        resource_type="asset",
+    )
+    _apply_receipt_previews(normalized["items"], admin_receipts)
     for asset in normalized["items"]:
         deps.require_asset_shape(asset, provider)
     return VideoAssetListOut(**normalized)

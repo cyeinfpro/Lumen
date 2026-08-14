@@ -20,8 +20,6 @@ export type VolcanoUploadQueueController = {
   uploadNamesRef: RefObject<Map<string, string>>;
   uploadControllersRef: RefObject<Map<string, AbortController>>;
   pollAbortRef: RefObject<AbortController | null>;
-  createAssetQueueRef: RefObject<Promise<void>>;
-  nextCreateAssetAtRef: RefObject<number>;
   commitUploadQueue: (
     queueModel: string,
     updater: (current: UploadItem[]) => UploadItem[],
@@ -33,7 +31,6 @@ export type VolcanoUploadQueueController = {
     queueModel?: string,
   ) => void;
   abortUploadRequests: () => void;
-  resetUploadScheduling: () => void;
   restoreUploadQueue: (queueModel: string) => UploadItem[];
   pauseActiveUploadQueue: (queueModel: string) => UploadItem[];
   showUploads: (items: UploadItem[]) => void;
@@ -47,8 +44,6 @@ export function useVolcanoUploadQueue(
   const uploadsRef = useRef<UploadItem[]>([]);
   const uploadQueuesRef = useRef(new Map<string, UploadItem[]>());
   const uploadNamesRef = useRef(new Map<string, string>());
-  const createAssetQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const nextCreateAssetAtRef = useRef(0);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
 
   const commitUploadQueue = useCallback(
@@ -116,11 +111,6 @@ export function useVolcanoUploadQueue(
     uploadControllersRef.current.clear();
   }, []);
 
-  const resetUploadScheduling = useCallback(() => {
-    createAssetQueueRef.current = Promise.resolve();
-    nextCreateAssetAtRef.current = 0;
-  }, []);
-
   const restoreUploadQueue = useCallback((queueModel: string) => {
     const restored = pauseUploadQueue(
       uploadQueuesRef.current.get(queueModel) ?? [],
@@ -153,12 +143,9 @@ export function useVolcanoUploadQueue(
     uploadNamesRef,
     uploadControllersRef,
     pollAbortRef,
-    createAssetQueueRef,
-    nextCreateAssetAtRef,
     commitUploadQueue,
     updateUpload,
     abortUploadRequests,
-    resetUploadScheduling,
     restoreUploadQueue,
     pauseActiveUploadQueue,
     showUploads,

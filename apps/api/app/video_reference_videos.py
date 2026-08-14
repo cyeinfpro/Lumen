@@ -348,9 +348,9 @@ def _discard_replaced_variant_after_commit(
             ),
         )
         future.add_done_callback(
-            lambda completed: completed.exception()
-            if not completed.cancelled()
-            else None
+            lambda completed: (
+                completed.exception() if not completed.cancelled() else None
+            )
         )
 
     event.listen(sync, "after_commit", _on_commit)
@@ -523,9 +523,7 @@ async def _render_reference_variant(
         try:
             await _wait_for_started_task(task)
         except BaseException:
-            task.add_done_callback(
-                lambda _done: destination.unlink(missing_ok=True)
-            )
+            task.add_done_callback(lambda _done: destination.unlink(missing_ok=True))
         await asyncio.to_thread(destination.unlink, missing_ok=True)
         raise cancellation
 
@@ -584,9 +582,15 @@ async def _reference_storage_usage(db: AsyncSession, *, user_id: str) -> int:
         Video.metadata_jsonb["volcano_asset_video_variant"]["size_bytes"].as_integer(),
         0,
     )
+    volcano_poster_bytes = func.coalesce(
+        Video.metadata_jsonb["volcano_asset_video_variant"][
+            "poster_size_bytes"
+        ].as_integer(),
+        0,
+    )
     contribution = case(
         (cleanup_complete, 0),
-        else_=primary_bytes + upstream_bytes + volcano_bytes,
+        else_=primary_bytes + upstream_bytes + volcano_bytes + volcano_poster_bytes,
     )
     raw = (
         await db.execute(
@@ -804,9 +808,7 @@ async def ensure_video_reference_video_variant(
     transcode_capacity: VideoTranscodeCapacityManager | None = None,
 ) -> dict[str, Any]:
     nested_checker = getattr(db, "in_nested_transaction", None)
-    manage_transaction = not (
-        callable(nested_checker) and bool(nested_checker())
-    )
+    manage_transaction = not (callable(nested_checker) and bool(nested_checker()))
     source = await _snapshot_reference_source(
         db,
         video_id=str(video.id),

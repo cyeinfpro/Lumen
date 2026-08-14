@@ -209,7 +209,8 @@ async def test_worker_create_asset_forces_scope_and_safe_url(
     async def provider_for(_operation: dict[str, Any]) -> VideoProviderDefinition:
         return provider
 
-    async def normalized(_operation: dict[str, Any]) -> tuple[str, str]:
+    async def normalized(operation: dict[str, Any]) -> tuple[str, str]:
+        operation["preview_url"] = "/api/videos/video-1/poster"
         return (
             "https://lumen.example/api/videos/reference/video-1/"
             "binary/lumen-asset-video-1.mp4"
@@ -286,6 +287,7 @@ async def test_worker_create_asset_forces_scope_and_safe_url(
     stored = redis.operation()
     assert stored["status"] == "succeeded"
     assert stored["result"]["status"] == "Processing"
+    assert stored["result"]["preview_url"] == "/api/videos/video-1/poster"
     assert stored["attempt"] == 1
     assert stored["fencing"] == 1
     assert stored["lock_token"]

@@ -40,6 +40,7 @@ from lumen_core.volcano_assets import (
     reserve_volcano_asset_quota,  # noqa: F401 - compatibility runtime export
     volcano_asset_operation_key,
     volcano_asset_quota_key,  # noqa: F401 - compatibility runtime export
+    volcano_asset_quota_scope,
 )
 from .. import runtime_settings
 from ..db import SessionLocal
@@ -131,6 +132,7 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "_complete_operation": lambda: _complete_operation,
         "_confirm_operation_lock": lambda: _confirm_operation_lock,
         "_defer_for_rate_limit": lambda: _defer_for_rate_limit,
+        "_defer_for_submit_slot": lambda: _defer_for_submit_slot,
         "_delete_asset_result": lambda: _delete_asset_result,
         "_delete_group_result": lambda: _delete_group_result,
         "_get_operation": lambda: _get_operation,
@@ -181,6 +183,7 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         ),
         "volcano_asset_operation_key": lambda: volcano_asset_operation_key,
         "volcano_asset_quota_key": lambda: volcano_asset_quota_key,
+        "volcano_asset_quota_scope": lambda: volcano_asset_quota_scope,
     }
 )
 
@@ -203,9 +206,7 @@ _OPERATION_LOCK_RENEW_INTERVAL_SECONDS = (
 )
 _RELEASE_OPERATION_LOCK_SCRIPT = _lease_parts._RELEASE_OPERATION_LOCK_SCRIPT
 _RENEW_OPERATION_LOCK_SCRIPT = _lease_parts._RENEW_OPERATION_LOCK_SCRIPT
-_ALLOCATE_OPERATION_FENCING_SCRIPT = (
-    _lease_parts._ALLOCATE_OPERATION_FENCING_SCRIPT
-)
+_ALLOCATE_OPERATION_FENCING_SCRIPT = _lease_parts._ALLOCATE_OPERATION_FENCING_SCRIPT
 _CONFIRM_OPERATION_FENCE_SCRIPT = _lease_parts._CONFIRM_OPERATION_FENCE_SCRIPT
 _SET_FENCED_OPERATION_SCRIPT = _lease_parts._SET_FENCED_OPERATION_SCRIPT
 _REDIS_RETRY_ATTEMPTS = 3
@@ -495,6 +496,7 @@ async def _source_url_for_submit(
         source_variant=variant_kind,
         source_url_created_at=_utc_iso(),
         submit_started_at=None,
+        preview_url=operation.get("preview_url"),
     )
     return public_url
 
@@ -593,13 +595,17 @@ _operation_lock_heartbeat = _lease_parts._operation_lock_heartbeat
 _confirm_operation_lock = _lease_parts._confirm_operation_lock
 
 
-async def _defer_for_rate_limit(
+async def _defer_create_delivery(
     persistence: _OperationPersistence,
     operation: dict[str, Any],
-    exc: VolcanoAssetCreateRateLimited,
+    *,
+    progress_stage: str,
+    error_code: str,
+    error_message: str,
+    retry_after_seconds: int,
 ) -> None:
     redis = persistence.redis
-    retry_after_seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
+    retry_after_seconds = max(1, int(retry_after_seconds))
     delivery_generation = max(0, int(operation.get("delivery_generation") or 0)) + 1
     retry_not_before = (
         datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)
@@ -607,15 +613,15 @@ async def _defer_for_rate_limit(
     await persistence.update(
         operation,
         status="queued",
-        progress_stage="waiting_rate_limit",
+        progress_stage=progress_stage,
         delivery_generation=delivery_generation,
         delivery_enqueued=False,
         retry_not_before=retry_not_before,
         retryable=True,
         retry_after_seconds=retry_after_seconds,
         error={
-            "code": "volcano_asset_create_rate_limited",
-            "message": "CreateAsset is waiting for the 3 per 60 seconds limit",
+            "code": error_code,
+            "message": error_message,
             "retryable": True,
             "retry_after_seconds": retry_after_seconds,
         },
@@ -639,6 +645,37 @@ async def _defer_for_rate_limit(
     )
 
 
+async def _defer_for_rate_limit(
+    persistence: _OperationPersistence,
+    operation: dict[str, Any],
+    exc: VolcanoAssetCreateRateLimited,
+) -> None:
+    await _defer_create_delivery(
+        persistence,
+        operation,
+        progress_stage="waiting_rate_limit",
+        error_code="volcano_asset_create_rate_limited",
+        error_message="CreateAsset is waiting for the 3 per 60 seconds limit",
+        retry_after_seconds=max(1, math.ceil(exc.retry_after_ms / 1000)),
+    )
+
+
+async def _defer_for_submit_slot(
+    persistence: _OperationPersistence,
+    operation: dict[str, Any],
+    *,
+    retry_after_seconds: int,
+) -> None:
+    await _defer_create_delivery(
+        persistence,
+        operation,
+        progress_stage="waiting_submit_slot",
+        error_code="volcano_asset_create_queued",
+        error_message="CreateAsset is queued behind another active submission",
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
 async def _recover_unconfirmed_delivery(
     persistence: _OperationPersistence,
     operation: dict[str, Any],
@@ -646,7 +683,8 @@ async def _recover_unconfirmed_delivery(
     redis = persistence.redis
     if (
         operation.get("status") != "queued"
-        or operation.get("progress_stage") != "waiting_rate_limit"
+        or operation.get("progress_stage")
+        not in {"waiting_rate_limit", "waiting_submit_slot"}
         or operation.get("delivery_enqueued") is not False
     ):
         return False

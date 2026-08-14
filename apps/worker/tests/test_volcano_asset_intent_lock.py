@@ -20,6 +20,7 @@ from apps.worker.tests.volcano_asset_test_support import (
 
 
 _INTENT_LOCK_PREFIX = "video-assets:create-intent:"
+_SUBMIT_LOCK_PREFIX = "video-assets:create-submit:"
 
 
 def _listed_asset(asset_id: str, name: str) -> dict[str, Any]:
@@ -270,11 +271,17 @@ async def test_same_intent_operations_do_not_share_reconcile_candidate(
 
 
 @pytest.mark.asyncio
-async def test_different_create_asset_intents_can_submit_concurrently(
+async def test_different_create_asset_intents_submit_serially(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.tasks import volcano_asset_create as create_parts
     from app.tasks import volcano_asset_orchestrator as volcano_assets
 
+    monkeypatch.setattr(
+        create_parts,
+        "_SUBMIT_LOCK_RENEW_INTERVAL_SECONDS",
+        0.01,
+    )
     provider = _provider()
     operation_one = {**_operation(), "name": "Alpha Upload"}
     operation_two = {
@@ -287,13 +294,16 @@ async def test_different_create_asset_intents_can_submit_concurrently(
     redis = _Redis([operation_one, operation_two])
     receipts: list[tuple[str, str]] = []
     upstream_assets: list[dict[str, Any]] = []
-    both_submitting = asyncio.Event()
+    first_submitting = asyncio.Event()
+    submit_lock_renewed = asyncio.Event()
+    allow_first_success = asyncio.Event()
     active_submits = 0
     max_active_submits = 0
+    create_calls = 0
 
     class Client:
         async def request(self, action: str, body: dict[str, Any]) -> Any:
-            nonlocal active_submits, max_active_submits
+            nonlocal active_submits, max_active_submits, create_calls
             if action == "GetAssetGroup":
                 return {
                     "Id": "group-1",
@@ -308,12 +318,13 @@ async def test_different_create_asset_intents_can_submit_concurrently(
                     if not name or asset["Name"] == name
                 ]
                 return {"Assets": assets, "TotalCount": len(assets)}
+            create_calls += 1
             active_submits += 1
             max_active_submits = max(max_active_submits, active_submits)
-            if active_submits == 2:
-                both_submitting.set()
             try:
-                await asyncio.wait_for(both_submitting.wait(), timeout=2)
+                if create_calls == 1:
+                    first_submitting.set()
+                    await asyncio.wait_for(allow_first_success.wait(), timeout=2)
                 name = str(body.get("Name") or "")
                 asset = _listed_asset(f"asset-{name.lower().replace(' ', '-')}", name)
                 upstream_assets.append(asset)
@@ -328,27 +339,61 @@ async def test_different_create_asset_intents_can_submit_concurrently(
         Client(),
         receipts,
     )
+    original_eval = redis.eval
 
-    first, second = await asyncio.gather(
+    async def tracking_eval(
+        script: str,
+        numkeys: int,
+        *parts: Any,
+    ) -> int:
+        if (
+            numkeys
+            and str(parts[0]).startswith(_SUBMIT_LOCK_PREFIX)
+            and "EXPIRE" in script
+        ):
+            submit_lock_renewed.set()
+        return await original_eval(script, numkeys, *parts)
+
+    redis.eval = tracking_eval  # type: ignore[method-assign]
+
+    first_task = asyncio.create_task(
         volcano_assets.process_volcano_asset_operation(
             {"redis": redis},
             "operation-1",
             1,
             0,
-        ),
-        volcano_assets.process_volcano_asset_operation(
-            {"redis": redis},
-            "operation-2",
-            1,
-            0,
-        ),
+        )
     )
+    await asyncio.wait_for(first_submitting.wait(), timeout=1)
+    await asyncio.wait_for(submit_lock_renewed.wait(), timeout=1)
+    second = await volcano_assets.process_volcano_asset_operation(
+        {"redis": redis},
+        "operation-2",
+        1,
+        0,
+    )
+    allow_first_success.set()
+    first = await first_task
 
     assert first["status"] == "succeeded"
-    assert second["status"] == "succeeded"
-    assert max_active_submits == 2
+    assert second["status"] == "deferred"
+    assert max_active_submits == 1
+    queued_second = redis.operation("operation-2")
+    assert queued_second["progress_stage"] == "waiting_submit_slot"
+    assert queued_second["delivery_generation"] == 1
+
+    retried_second = await volcano_assets.process_volcano_asset_operation(
+        {"redis": redis},
+        "operation-2",
+        1,
+        queued_second["delivery_generation"],
+    )
+
+    assert retried_second["status"] == "succeeded"
+    assert max_active_submits == 1
     assert sorted(receipts) == [
         ("operation-1", "asset-alpha-upload"),
         ("operation-2", "asset-beta-upload"),
     ]
     assert not any(key.startswith(_INTENT_LOCK_PREFIX) for key in redis.values)
+    assert not any(key.startswith(_SUBMIT_LOCK_PREFIX) for key in redis.values)

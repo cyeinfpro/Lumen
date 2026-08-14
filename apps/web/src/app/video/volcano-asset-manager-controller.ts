@@ -52,7 +52,6 @@ export function useVolcanoAssetManagerController({
   const {
     abortUploadRequests,
     pauseActiveUploadQueue,
-    resetUploadScheduling,
     restoreUploadQueue,
     showUploads,
   } = uploadQueue;
@@ -83,7 +82,6 @@ export function useVolcanoAssetManagerController({
     sessionCounterRef.current = sessionId;
     activeSessionRef.current = { id: sessionId, open, model };
     abortSessionRequests();
-    resetUploadScheduling();
     const restoredUploads = restoreUploadQueue(model);
     const restoredOperations = restoreOperationQueue(model, sessionId);
     if (!open) return;
@@ -119,7 +117,6 @@ export function useVolcanoAssetManagerController({
     pauseActiveUploadQueue,
     resetData,
     resetSessionUi,
-    resetUploadScheduling,
     restoreOperationQueue,
     restoreUploadQueue,
     resumePausedOperations,

@@ -40,7 +40,6 @@ import { useVolcanoUploadPolling } from "./use-volcano-upload-polling";
 import {
   startVolcanoUpload,
   verifyUntrackedVolcanoUpload,
-  waitForVolcanoCreateAssetSlot,
 } from "./volcano-upload-runner";
 
 export type VolcanoUploadController = {
@@ -86,8 +85,6 @@ export function useVolcanoUploadController({
     uploads,
     uploadNamesRef,
     uploadControllersRef,
-    createAssetQueueRef,
-    nextCreateAssetAtRef,
     commitUploadQueue,
     updateUpload,
   } = uploadQueue;
@@ -103,16 +100,6 @@ export function useVolcanoUploadController({
     refreshProjectAssetTotal,
   } = assetData;
   const pendingAssetCreates = volcanoReservedQuotaCount(uploads);
-
-  const waitForCreateAssetSlot = useCallback(
-    (signal: AbortSignal) =>
-      waitForVolcanoCreateAssetSlot(
-        createAssetQueueRef,
-        nextCreateAssetAtRef,
-        signal,
-      ),
-    [createAssetQueueRef, nextCreateAssetAtRef],
-  );
 
   const startUpload = useCallback(
     (initialItem: UploadItem) =>
@@ -135,7 +122,6 @@ export function useVolcanoUploadController({
           refreshGroups,
           refreshProjectAssetTotal,
         },
-        waitForCreateAssetSlot,
         setNotice,
       }),
     [
@@ -152,7 +138,6 @@ export function useVolcanoUploadController({
       updateUpload,
       uploadControllersRef,
       uploadQueue.uploadQueuesRef,
-      waitForCreateAssetSlot,
     ],
   );
 
@@ -269,7 +254,7 @@ export function useVolcanoUploadController({
         ]);
         setNotice({
           tone: "status",
-          text: `已加入 ${accepted.length} 个文件，上传后自动优化为火山规格`,
+          text: `已加入 ${accepted.length} 个文件，Lumen 将后台分批提交火山`,
         });
       }
       if (errors.length > 0) {
@@ -390,7 +375,6 @@ export function useVolcanoUploadController({
           refreshGroups,
           refreshProjectAssetTotal,
         },
-        waitForCreateAssetSlot,
         setNotice,
       }),
     [
@@ -407,7 +391,6 @@ export function useVolcanoUploadController({
       updateUpload,
       uploadControllersRef,
       uploadQueue.uploadQueuesRef,
-      waitForCreateAssetSlot,
     ],
   );
 

@@ -88,6 +88,7 @@ _video_target_dimensions = _transcode._video_target_dimensions
 _video_target_duration_seconds = _transcode._video_target_duration_seconds
 _validate_video_output = _transcode._validate_video_output
 _ffmpeg_command = _transcode._ffmpeg_command
+_make_video_poster_jpeg = _transcode._make_video_poster_jpeg
 
 
 class _VideoTranscodeRuntime:
@@ -532,6 +533,12 @@ def make_volcano_asset_video_mp4(
                     continue
                 raise
             data = destination.read_bytes()
+            poster_bytes = _make_video_poster_jpeg(
+                ffmpeg,
+                destination,
+                Path(tmp) / "poster.jpg",
+                timeout_seconds=remaining_timeout(),
+            )
             return VolcanoAssetVideoMp4(
                 data=data,
                 width=int(output_metadata["width"]),
@@ -541,6 +548,7 @@ def make_volcano_asset_video_mp4(
                 has_audio=bool(output_metadata["has_audio"]),
                 size_bytes=len(data),
                 sha256=hashlib.sha256(data).hexdigest(),
+                poster_bytes=poster_bytes,
             )
     raise last_error or VolcanoAssetMediaError(
         "volcano_asset_video_transcode_failed",
@@ -587,8 +595,15 @@ def _video_variant_quota_bytes(video: Any, metadata_key: str) -> int:
     raw = metadata.get(metadata_key)
     if not isinstance(raw, dict):
         return 0
+    return _video_variant_payload_bytes(raw)
+
+
+def _video_variant_payload_bytes(raw: dict[str, Any]) -> int:
     try:
-        return max(0, int(raw.get("size_bytes") or 0))
+        return max(0, int(raw.get("size_bytes") or 0)) + max(
+            0,
+            int(raw.get("poster_size_bytes") or 0),
+        )
     except (TypeError, ValueError, OverflowError):
         return 0
 

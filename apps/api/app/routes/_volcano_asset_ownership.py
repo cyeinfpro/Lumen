@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select
@@ -22,6 +22,7 @@ _RECEIPT_EVENT = "video_asset.operation.receipt"
 class OwnedResourceReceipts:
     resource_ids: frozenset[str]
     group_ids: frozenset[str]
+    preview_urls: dict[str, str] = field(default_factory=dict)
 
 
 def _receipt_action(resource_type: str) -> str:
@@ -65,21 +66,57 @@ async def resource_owner_user_id(
     ).scalar_one_or_none()
 
 
+async def resource_preview_url(
+    db: AsyncSession,
+    *,
+    provider: VideoProviderDefinition,
+    resource_id: str,
+    user_id: str | None,
+) -> str | None:
+    filters: list[Any] = [
+        *_receipt_scope_filters(provider, action="create_asset"),
+        AuditLog.details["result"]["id"].as_string() == resource_id,
+    ]
+    if user_id is not None:
+        filters.insert(0, AuditLog.user_id == str(user_id))
+    details = (
+        await db.execute(
+            select(AuditLog.details)
+            .where(*filters)
+            .order_by(AuditLog.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not isinstance(details, dict):
+        return None
+    result = details.get("result")
+    if not isinstance(result, dict):
+        return None
+    preview_url = str(result.get("preview_url") or "").strip()
+    return (
+        preview_url
+        if preview_url.startswith(("/api/images/", "/api/videos/"))
+        else None
+    )
+
+
 async def owned_resource_receipts(
     db: AsyncSession,
     *,
     provider: VideoProviderDefinition,
     resource_type: str,
-    user_id: str,
+    user_id: str | None,
 ) -> OwnedResourceReceipts:
     action = _receipt_action(resource_type)
+    filters: list[Any] = list(_receipt_scope_filters(provider, action=action))
+    if user_id is not None:
+        filters.insert(0, AuditLog.user_id == str(user_id))
     details_rows = (
         (
             await db.execute(
-                select(AuditLog.details).where(
-                    AuditLog.user_id == str(user_id),
-                    *_receipt_scope_filters(provider, action=action),
-                )
+                select(AuditLog.details)
+                .where(*filters)
+                .order_by(AuditLog.created_at.asc())
             )
         )
         .scalars()
@@ -87,6 +124,7 @@ async def owned_resource_receipts(
     )
     resource_ids: set[str] = set()
     group_ids: set[str] = set()
+    preview_urls: dict[str, str] = {}
     for details in details_rows:
         if not isinstance(details, dict):
             continue
@@ -96,12 +134,16 @@ async def owned_resource_receipts(
         resource_id = str(result.get("id") or "").strip()
         if resource_id:
             resource_ids.add(resource_id)
+            preview_url = str(result.get("preview_url") or "").strip()
+            if preview_url.startswith(("/api/images/", "/api/videos/")):
+                preview_urls[resource_id] = preview_url
         group_id = str(result.get("group_id") or "").strip()
         if group_id:
             group_ids.add(group_id)
     return OwnedResourceReceipts(
         resource_ids=frozenset(resource_ids),
         group_ids=frozenset(group_ids),
+        preview_urls=preview_urls,
     )
 
 

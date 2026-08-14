@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +21,6 @@ from lumen_core.volcano_asset_media import (
     VOLCANO_ASSET_IMAGE_KIND,
     VOLCANO_ASSET_VIDEO_KIND,
     VOLCANO_ASSET_VIDEO_METADATA_KEY,
-    VOLCANO_ASSET_VIDEO_MIME,
     VolcanoAssetInstallReceipt,
     VolcanoAssetMediaError,
     VolcanoAssetVideoMp4,
@@ -57,10 +54,31 @@ from .volcano_asset_video_accounting import (
     reference_storage_usage as _bounded_reference_storage_usage,
     variant_receipt as _variant_receipt,
 )
+from .volcano_assets_parts.source_common import ensure_reference_token
+from .volcano_assets_parts.source_common import source_not_found as _not_found
+from .volcano_assets_parts.source_video import (
+    PreparedVideoVariant as _PreparedVideoVariant,
+)
+from .volcano_assets_parts.source_video import (
+    StagedVideoVariant as _StagedVideoVariant,
+)
+from .volcano_assets_parts.source_video import (
+    VideoSourceSnapshot as _VideoSourceSnapshot,
+)
+from .volcano_assets_parts.source_video import (
+    video_poster_metadata as _video_poster_metadata,
+)
+from .volcano_assets_parts.source_video import (
+    video_poster_storage_key as _video_poster_storage_key,
+)
+from .volcano_assets_parts.source_video import video_stage_path as _video_stage_path
+from .volcano_assets_parts.source_video import video_variant as _video_variant
+from .volcano_assets_parts.source_video import (
+    video_variant_storage_key as _video_variant_storage_key,
+)
 
 
 logger = logging.getLogger(__name__)
-_REFERENCE_TOKEN_TTL = timedelta(hours=24)
 _IMAGE_COMMIT_TIMEOUT_SECONDS = 10.0
 _IMAGE_ADOPTION_PROBE_TIMEOUT_SECONDS = 5.0
 _VIDEO_TRANSCODE_TOTAL_TIMEOUT_SECONDS = 360.0
@@ -73,23 +91,6 @@ _VIDEO_DB_STATEMENT_TIMEOUT_MS = 12_000
 _VIDEO_REFERENCE_SCAN_LIMIT = 2_048
 _VIDEO_ADOPTION_CAS_ATTEMPTS = 3
 _VIDEO_SNAPSHOT_ATTEMPTS = 2
-
-@dataclass(frozen=True)
-class _VideoSourceSnapshot:
-    id: str
-    user_id: str
-    storage_key: str
-    sha256: str
-    etag: str
-    size_bytes: int
-    metadata_jsonb: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class _PreparedVideoVariant:
-    variant: dict[str, Any]
-    receipt: VolcanoAssetInstallReceipt | None
-    from_snapshot: bool
 
 
 @dataclass
@@ -117,31 +118,6 @@ class _RetryVideoSnapshot(RuntimeError):
 _CAS_RETRY = object()
 
 
-def ensure_reference_token(
-    metadata: dict[str, Any],
-    *,
-    token_key: str,
-    expires_key: str,
-) -> str:
-    existing_token = str(metadata.get(token_key) or "")
-    raw_expires_at = str(metadata.get(expires_key) or "")
-    try:
-        expires_at = datetime.fromisoformat(raw_expires_at)
-    except ValueError:
-        expires_at = None
-    if expires_at is not None:
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if existing_token and expires_at > datetime.now(timezone.utc):
-            return existing_token
-    token = secrets.token_urlsafe(32)
-    metadata[token_key] = token
-    metadata[expires_key] = (
-        datetime.now(timezone.utc) + _REFERENCE_TOKEN_TTL
-    ).isoformat()
-    return token
-
-
 async def _cleanup_install(receipt: VolcanoAssetInstallReceipt | None) -> None:
     if receipt is None:
         return
@@ -153,14 +129,6 @@ async def _cleanup_install(receipt: VolcanoAssetInstallReceipt | None) -> None:
             receipt.storage_key,
             exc_info=True,
         )
-
-
-def _not_found(asset_type: str) -> VolcanoAssetMediaError:
-    return VolcanoAssetMediaError(
-        f"video_asset_{asset_type.lower()}_not_found",
-        f"asset {asset_type.lower()} was not found",
-        404,
-    )
 
 
 async def _normalized_image_source_url(
@@ -254,6 +222,7 @@ async def _normalized_image_source_url(
                     503,
                 ) from commit_error
             raise commit_error
+        operation["preview_url"] = f"/api/images/{source_id}/binary"
         return (
             volcano_asset_reference_url(
                 public_base_url,
@@ -315,8 +284,7 @@ async def _image_adoption_is_durable(
         return False
     metadata = dict(image.metadata_jsonb or {}) if image is not None else {}
     return bool(
-        variant is not None
-        and metadata.get("video_reference_access_token") == token
+        variant is not None and metadata.get("video_reference_access_token") == token
     )
 
 
@@ -345,6 +313,11 @@ async def _video_source_snapshot(
             etag=str(video.etag),
             size_bytes=max(0, int(video.size_bytes or 0)),
             metadata_jsonb=dict(video.metadata_jsonb or {}),
+            poster_storage_key=(
+                str(getattr(video, "poster_storage_key", "") or "")
+                if getattr(video, "poster_storage_key", None)
+                else None
+            ),
         )
         await session.rollback()
         return snapshot
@@ -429,50 +402,6 @@ async def _install_video_stage(
     )
 
 
-def _video_stage_path(snapshot: _VideoSourceSnapshot) -> Path:
-    source = Path(snapshot.storage_key)
-    stage_key = str(
-        source.with_name(
-            f".{snapshot.id}.{VOLCANO_ASSET_VIDEO_KIND}."
-            f"{secrets.token_hex(8)}.stage"
-        )
-    )
-    return asset_media._storage_path(settings.storage_root, stage_key)
-
-
-def _video_variant_storage_key(
-    snapshot: _VideoSourceSnapshot,
-    *,
-    sha256: str,
-) -> str:
-    source = Path(snapshot.storage_key)
-    return str(
-        source.with_name(
-            f"{snapshot.id}.{VOLCANO_ASSET_VIDEO_KIND}.{sha256}."
-            f"{secrets.token_hex(8)}.mp4"
-        )
-    )
-
-
-def _video_variant(
-    rendered: VolcanoAssetVideoMp4,
-    *,
-    storage_key: str,
-) -> dict[str, Any]:
-    return {
-        "kind": VOLCANO_ASSET_VIDEO_KIND,
-        "storage_key": storage_key,
-        "mime": VOLCANO_ASSET_VIDEO_MIME,
-        "width": rendered.width,
-        "height": rendered.height,
-        "duration_ms": rendered.duration_ms,
-        "fps": rendered.fps,
-        "has_audio": rendered.has_audio,
-        "size_bytes": rendered.size_bytes,
-        "sha256": rendered.sha256,
-    }
-
-
 async def _render_video(
     snapshot: _VideoSourceSnapshot,
 ) -> VolcanoAssetVideoMp4:
@@ -493,7 +422,9 @@ async def _render_video(
 async def _transcode_video_to_stage(
     snapshot: _VideoSourceSnapshot,
     storage_writes: StorageWriteCoordinator | None = None,
-) -> tuple[Path, dict[str, Any]]:
+    *,
+    include_poster: bool = True,
+) -> _StagedVideoVariant:
     render_task = asyncio.create_task(_render_video(snapshot))
     staged_path: Path | None = None
     completed = False
@@ -534,8 +465,26 @@ async def _transcode_video_to_stage(
             snapshot,
             sha256=rendered.sha256,
         )
+        poster_storage_key = (
+            _video_poster_storage_key(
+                snapshot,
+                video_sha256=rendered.sha256,
+            )
+            if include_poster and rendered.poster_bytes
+            else None
+        )
         completed = True
-        return staged_path, _video_variant(rendered, storage_key=storage_key)
+        return _StagedVideoVariant(
+            path=staged_path,
+            variant=_video_variant(
+                rendered,
+                storage_key=storage_key,
+                poster_storage_key=poster_storage_key,
+            ),
+            poster_bytes=(
+                rendered.poster_bytes if poster_storage_key is not None else None
+            ),
+        )
     finally:
         if staged_path is not None and not completed:
             cleanup_task = asyncio.create_task(
@@ -550,7 +499,8 @@ async def _prepare_video_variant_with_deadline(
     storage_writes: StorageWriteCoordinator,
 ) -> _PreparedVideoVariant:
     existing = volcano_asset_video_variant_metadata(snapshot)
-    if existing is not None:
+    existing_poster = await _video_poster_metadata(snapshot.poster_storage_key)
+    if existing is not None and existing_poster is not None:
         existing_path = asset_media._storage_path(
             settings.storage_root,
             str(existing["storage_key"]),
@@ -560,22 +510,50 @@ async def _prepare_video_variant_with_deadline(
             existing_path,
             existing,
         ):
+            if all(
+                existing.get(key) == value for key, value in existing_poster.items()
+            ):
+                return _PreparedVideoVariant(
+                    variant=existing,
+                    receipt=None,
+                    from_snapshot=True,
+                )
             return _PreparedVideoVariant(
-                variant=existing,
+                variant={**existing, **existing_poster},
                 receipt=None,
-                from_snapshot=True,
+                from_snapshot=False,
             )
 
     staged_path: Path | None = None
     receipt: VolcanoAssetInstallReceipt | None = None
+    poster_receipt: VolcanoAssetInstallReceipt | None = None
     try:
-        staged_path, variant = await _transcode_video_to_stage(
-            snapshot,
-            storage_writes,
+        raw_staged = (
+            await _transcode_video_to_stage(snapshot, storage_writes)
+            if existing_poster is None
+            else await _transcode_video_to_stage(
+                snapshot,
+                storage_writes,
+                include_poster=False,
+            )
         )
+        if isinstance(raw_staged, tuple):
+            staged = _StagedVideoVariant(
+                path=raw_staged[0],
+                variant=raw_staged[1],
+                poster_bytes=None,
+            )
+        else:
+            staged = raw_staged
+        staged_path = staged.path
+        variant = staged.variant
+        if existing_poster is not None:
+            variant.update(existing_poster)
+        poster_bytes = staged.poster_bytes
+        total_size = int(variant["size_bytes"]) + len(poster_bytes or b"")
         storage_lease = await asset_media._reserve_media_capacity(
             storage_writes.capacity,
-            int(variant["size_bytes"]),
+            total_size,
         )
         async with maintained_capacity_lease(
             storage_lease,
@@ -589,14 +567,27 @@ async def _prepare_video_variant_with_deadline(
                 guard=guard,
                 storage_writes=storage_writes,
             )
+            poster_storage_key = str(variant.get("poster_storage_key") or "")
+            poster_sha256 = str(variant.get("poster_sha256") or "")
+            if poster_storage_key and poster_bytes and poster_sha256:
+                poster_receipt = await asset_media._install_rendered_media(
+                    storage_root=settings.storage_root,
+                    storage_key=poster_storage_key,
+                    data=poster_bytes,
+                    sha256=poster_sha256,
+                    guard=guard,
+                )
         return _PreparedVideoVariant(
             variant=variant,
             receipt=receipt,
             from_snapshot=False,
+            poster_receipt=poster_receipt,
         )
     except CapacityLeaseLost as exc:
         if receipt is not None:
             await _cleanup_install(receipt)
+        if poster_receipt is not None:
+            await _cleanup_install(poster_receipt)
         raise VolcanoAssetMediaError(
             "volcano_asset_media_storage_capacity",
             "normalized asset media storage capacity lease was lost",
@@ -605,6 +596,8 @@ async def _prepare_video_variant_with_deadline(
     except BaseException:
         if receipt is not None:
             await _cleanup_install(receipt)
+        if poster_receipt is not None:
+            await _cleanup_install(poster_receipt)
         raise
     finally:
         if staged_path is not None:
@@ -655,10 +648,7 @@ async def _configure_video_adoption_transaction(session: Any) -> None:
         text(f"SET LOCAL lock_timeout = '{_VIDEO_DB_LOCK_TIMEOUT_MS}ms'")
     )
     await session.execute(
-        text(
-            "SET LOCAL statement_timeout = "
-            f"'{_VIDEO_DB_STATEMENT_TIMEOUT_MS}ms'"
-        )
+        text(f"SET LOCAL statement_timeout = '{_VIDEO_DB_STATEMENT_TIMEOUT_MS}ms'")
     )
 
 
@@ -701,13 +691,21 @@ async def _video_adoption_is_durable(
     metadata = dict(current.metadata_jsonb or {})
     if metadata.get("reference_access_token") != token:
         return False
+    expected_poster_storage_key = (
+        snapshot.poster_storage_key
+        or str(prepared.variant.get("poster_storage_key") or "")
+        or None
+    )
+    if (
+        str(getattr(current, "poster_storage_key", "") or "") or None
+    ) != expected_poster_storage_key:
+        return False
     if prepared.from_snapshot:
         return True
     current_variant = volcano_asset_video_variant_metadata(current)
     return bool(
         current_variant is not None
-        and current_variant.get("storage_key")
-        == prepared.variant.get("storage_key")
+        and current_variant.get("storage_key") == prepared.variant.get("storage_key")
         and current_variant.get("sha256") == prepared.variant.get("sha256")
     )
 
@@ -769,6 +767,11 @@ async def _adopt_video_variant_transaction(
             )
 
         current_variant = volcano_asset_video_variant_metadata(current)
+        if (
+            str(getattr(current, "poster_storage_key", "") or "") or None
+        ) != snapshot.poster_storage_key:
+            await session.rollback()
+            raise _RetryVideoSnapshot
         if prepared.from_snapshot and current_variant != prepared.variant:
             await session.rollback()
             raise _RetryVideoSnapshot
@@ -788,7 +791,7 @@ async def _adopt_video_variant_transaction(
             )
             projected_bytes = (
                 current_bytes - min(current_bytes, replaced_bytes)
-            ) + int(prepared.variant["size_bytes"])
+            ) + asset_media._video_variant_payload_bytes(prepared.variant)
             if (
                 projected_bytes > VIDEO_REFERENCE_STORAGE_QUOTA_BYTES
                 and projected_bytes > current_bytes
@@ -800,6 +803,11 @@ async def _adopt_video_variant_transaction(
             )
             current_metadata[VOLCANO_ASSET_VIDEO_METADATA_KEY] = prepared.variant
 
+        poster_storage_key = (
+            snapshot.poster_storage_key
+            or str(prepared.variant.get("poster_storage_key") or "")
+            or None
+        )
         token = ensure_reference_token(
             current_metadata,
             token_key="reference_access_token",
@@ -814,10 +822,14 @@ async def _adopt_video_variant_transaction(
                 Video.sha256 == snapshot.sha256,
                 Video.etag == snapshot.etag,
                 Video.size_bytes == snapshot.size_bytes,
+                Video.poster_storage_key == snapshot.poster_storage_key,
                 Video.metadata_jsonb == dict(current.metadata_jsonb or {}),
                 Video.deleted_at.is_(None),
             )
-            .values(metadata_jsonb=current_metadata)
+            .values(
+                metadata_jsonb=current_metadata,
+                poster_storage_key=poster_storage_key,
+            )
         )
         if affected_rows(result) != 1:
             await session.rollback()
@@ -929,6 +941,13 @@ async def _normalized_video_source_url(
                     "video changed during asset preparation",
                     409,
                 ) from None
+            poster_storage_key = (
+                snapshot.poster_storage_key
+                or str(prepared.variant.get("poster_storage_key") or "")
+                or None
+            )
+            if poster_storage_key:
+                operation["preview_url"] = f"/api/videos/{snapshot.id}/poster"
             return (
                 volcano_asset_reference_url(
                     public_base_url,
@@ -943,6 +962,11 @@ async def _normalized_video_source_url(
                 _cleanup_receipt_in_background(
                     prepared.receipt,
                     task_name="volcano-discard-unadopted-video",
+                    storage_writes=storage_writes,
+                )
+                _cleanup_receipt_in_background(
+                    prepared.poster_receipt,
+                    task_name="volcano-discard-unadopted-video-poster",
                     storage_writes=storage_writes,
                 )
     raise VolcanoAssetMediaError(

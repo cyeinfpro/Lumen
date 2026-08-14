@@ -5,28 +5,16 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 import logging
-import time
 from typing import Any
 
 from fastapi import HTTPException
-from lumen_core.volcano_assets import (
-    VolcanoAssetCreateRateLimited,
-    VolcanoAssetOperationOwnershipError,
-    VolcanoAssetQuotaKey,
-)
+from lumen_core.volcano_assets import VolcanoAssetOperationOwnershipError
 
 
 @dataclass(frozen=True)
 class RetryDependencies:
     http_error: Callable[..., HTTPException]
-    rate_limit_error: Callable[[VolcanoAssetCreateRateLimited], HTTPException]
-    operation_quota_key: Callable[[dict[str, Any]], VolcanoAssetQuotaKey]
-    acquire_rate_limit: Callable[..., Awaitable[None]]
     compare_and_set: Callable[..., Awaitable[tuple[bool, dict[str, Any] | None]]]
-    release_admission_slot: Callable[
-        [Any, VolcanoAssetQuotaKey, str],
-        Awaitable[None],
-    ]
     same_operation_scope: Callable[[dict[str, Any], dict[str, Any]], bool]
     enqueue_operation: Callable[[dict[str, Any]], Awaitable[None]]
     mark_enqueue_failed: Callable[
@@ -42,7 +30,6 @@ class RetryPlan:
     action: str
     previous_attempt: int
     next_attempt: int
-    rate_member: str
     queued_operation: dict[str, Any]
 
 
@@ -88,7 +75,6 @@ def _prepare_retry(
         action=action,
         previous_attempt=previous_attempt,
         next_attempt=next_attempt,
-        rate_member=f"{operation_id}:retry:{next_attempt}",
         queued_operation={
             **operation,
             "status": "queued",
@@ -105,40 +91,11 @@ def _prepare_retry(
     )
 
 
-async def _reserve_create_slot(
-    redis: Any,
-    plan: RetryPlan,
-    *,
-    deps: RetryDependencies,
-) -> VolcanoAssetQuotaKey | None:
-    if plan.action != "create_asset":
-        return None
-    quota_key = deps.operation_quota_key(plan.queued_operation)
-    try:
-        await deps.acquire_rate_limit(
-            redis,
-            quota_key,
-            bucket="admission",
-            operation_id=plan.rate_member,
-            now_ms=int(time.time() * 1000),
-        )
-    except VolcanoAssetCreateRateLimited as exc:
-        raise deps.rate_limit_error(exc) from exc
-    except Exception as exc:
-        raise deps.http_error(
-            "video_asset_queue_unavailable",
-            "video asset operation queue is unavailable",
-            503,
-        ) from exc
-    return quota_key
-
-
 async def _claim_retry(
     redis: Any,
     plan: RetryPlan,
     *,
     user_id: str,
-    quota_key: VolcanoAssetQuotaKey | None,
     deps: RetryDependencies,
 ) -> tuple[bool, dict[str, Any] | None]:
     try:
@@ -157,12 +114,6 @@ async def _claim_retry(
             404,
         ) from exc
     except Exception as exc:
-        if quota_key is not None:
-            await deps.release_admission_slot(
-                redis,
-                quota_key,
-                plan.rate_member,
-            )
         raise deps.http_error(
             "video_asset_queue_unavailable",
             "video asset operation queue is unavailable",
@@ -187,9 +138,7 @@ def _is_recovered_claim(
 async def _reenqueue_recovered(
     redis: Any,
     current: dict[str, Any],
-    plan: RetryPlan,
     *,
-    quota_key: VolcanoAssetQuotaKey | None,
     deps: RetryDependencies,
 ) -> dict[str, Any]:
     if current.get("status") != "queued" or current.get("progress_stage") != "queued":
@@ -205,12 +154,6 @@ async def _reenqueue_recovered(
                 current.get("id"),
                 exc_info=True,
             )
-        if quota_key is not None:
-            await deps.release_admission_slot(
-                redis,
-                quota_key,
-                plan.rate_member,
-            )
     return current
 
 
@@ -219,22 +162,13 @@ async def _resolve_unclaimed(
     current: dict[str, Any] | None,
     plan: RetryPlan,
     *,
-    quota_key: VolcanoAssetQuotaKey | None,
     deps: RetryDependencies,
 ) -> dict[str, Any]:
     if _is_recovered_claim(current, plan, deps=deps):
         return await _reenqueue_recovered(
             redis,
             current,
-            plan,
-            quota_key=quota_key,
             deps=deps,
-        )
-    if quota_key is not None:
-        await deps.release_admission_slot(
-            redis,
-            quota_key,
-            plan.rate_member,
         )
     raise deps.http_error(
         "video_asset_operation_not_retryable",
@@ -247,7 +181,6 @@ async def _enqueue_claimed(
     redis: Any,
     plan: RetryPlan,
     *,
-    quota_key: VolcanoAssetQuotaKey | None,
     deps: RetryDependencies,
 ) -> dict[str, Any]:
     operation = plan.queued_operation
@@ -267,12 +200,6 @@ async def _enqueue_claimed(
                 operation.get("id"),
                 exc_info=True,
             )
-        if quota_key is not None:
-            await deps.release_admission_slot(
-                redis,
-                quota_key,
-                plan.rate_member,
-            )
     return operation
 
 
@@ -291,12 +218,10 @@ async def retry_failed_operation(
         allowed_actions=allowed_actions,
         deps=deps,
     )
-    quota_key = await _reserve_create_slot(redis, plan, deps=deps)
     claimed, current = await _claim_retry(
         redis,
         plan,
         user_id=user_id,
-        quota_key=quota_key,
         deps=deps,
     )
     if not claimed:
@@ -304,7 +229,6 @@ async def retry_failed_operation(
             redis,
             current,
             plan,
-            quota_key=quota_key,
             deps=deps,
         )
         return RetryResult(
@@ -315,7 +239,6 @@ async def retry_failed_operation(
     queued = await _enqueue_claimed(
         redis,
         plan,
-        quota_key=quota_key,
         deps=deps,
     )
     return RetryResult(

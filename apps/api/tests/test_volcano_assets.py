@@ -1003,8 +1003,14 @@ async def test_admin_asset_type_filter_scans_but_unfiltered_stays_single_page(
     async def require_provider(*_args: Any, **_kwargs: Any) -> VideoProviderDefinition:
         return provider
 
-    async def unexpected_receipts(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("admin asset list must not query ownership receipts")
+    async def empty_receipts(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            resource_ids=frozenset(),
+            group_ids=frozenset(),
+            preview_urls={
+                "asset-011": "/api/videos/video-11/poster",
+            },
+        )
 
     class Client:
         def __init__(self, _provider: VideoProviderDefinition) -> None:
@@ -1026,7 +1032,7 @@ async def test_admin_asset_type_filter_scans_but_unfiltered_stays_single_page(
     monkeypatch.setattr(
         volcano_assets,
         "_owned_resource_receipts",
-        unexpected_receipts,
+        empty_receipts,
     )
     monkeypatch.setattr(volcano_assets, "VolcanoAssetClient", Client)
     admin = SimpleNamespace(id="admin-1", role="admin")
@@ -1048,6 +1054,7 @@ async def test_admin_asset_type_filter_scans_but_unfiltered_stays_single_page(
         item["Id"] for item in remote_assets[10:20]
     ]
     assert unfiltered.total_count == len(remote_assets)
+    assert unfiltered.items[1].preview_url == "/api/videos/video-11/poster"
     assert len(calls) == 1
     assert calls[0]["PageNumber"] == 2
     assert calls[0]["PageSize"] == 10
@@ -1468,13 +1475,16 @@ async def test_create_asset_uses_local_source_and_processing_fallback(
 
 
 @pytest.mark.asyncio
-async def test_create_asset_returns_structured_429_before_enqueue(
+async def test_create_asset_admission_accepts_multiple_background_operations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.routes import volcano_assets
     from lumen_core.volcano_assets import VolcanoAssetCreateRateLimited
 
     provider = _provider()
+    redis = _Redis()
+    admission_calls = 0
+    enqueued: list[str] = []
 
     async def require_provider(*_args: Any, **_kwargs: Any) -> VideoProviderDefinition:
         return provider
@@ -1489,15 +1499,25 @@ async def test_create_asset_returns_structured_429_before_enqueue(
         return "https://lumen.example"
 
     async def reject(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal admission_calls
+        admission_calls += 1
         raise VolcanoAssetCreateRateLimited(retry_after_ms=12_500)
+
+    async def enqueue(operation: dict[str, Any]) -> None:
+        enqueued.append(str(operation["id"]))
+
+    async def audit(**_kwargs: Any) -> None:
+        return None
 
     monkeypatch.setattr(volcano_assets, "_require_provider", require_provider)
     monkeypatch.setattr(volcano_assets, "_resolve_local_asset_source", resolve_source)
     monkeypatch.setattr(volcano_assets, "_public_base_url", public_base)
-    monkeypatch.setattr(volcano_assets, "get_redis", lambda: object())
+    monkeypatch.setattr(volcano_assets, "get_redis", lambda: redis)
     monkeypatch.setattr(volcano_assets, "acquire_volcano_create_rate_limit", reject)
+    monkeypatch.setattr(volcano_assets, "_enqueue_operation", enqueue)
+    monkeypatch.setattr(volcano_assets, "_audit_write", audit)
 
-    with pytest.raises(HTTPException) as exc_info:
+    outputs = [
         await volcano_assets.create_asset(
             VideoAssetCreateIn(
                 group_id="group-1",
@@ -1508,13 +1528,13 @@ async def test_create_asset_returns_structured_429_before_enqueue(
             _Db(),  # type: ignore[arg-type]
             "seedance",
         )
+        for _index in range(4)
+    ]
 
-    assert exc_info.value.status_code == 429
-    assert exc_info.value.headers["Retry-After"] == "13"
-    error = exc_info.value.detail["error"]
-    assert error["code"] == "volcano_asset_create_rate_limited"
-    assert error["details"]["limit"] == 3
-    assert error["details"]["window_seconds"] == 60
+    assert all(output.status == "queued" for output in outputs)
+    assert len(enqueued) == 4
+    assert len(set(enqueued)) == 4
+    assert admission_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1711,12 +1731,16 @@ async def test_direct_asset_get_requires_owner_but_admin_keeps_global_access(
             "project_name": provider.project_name,
         }
 
+    async def preview_url(*_args: Any, **_kwargs: Any) -> str:
+        return "/api/images/image-1/binary"
+
     monkeypatch.setattr(volcano_assets, "_redis_get_operation", no_operation)
     monkeypatch.setattr(volcano_assets, "get_redis", lambda: object())
     monkeypatch.setattr(volcano_assets, "_require_provider", require_provider)
     monkeypatch.setattr(volcano_assets, "_resource_owner_user_id", owner)
     monkeypatch.setattr(volcano_assets, "VolcanoAssetClient", lambda _p: object())
     monkeypatch.setattr(volcano_assets, "_get_asset", get_current)
+    monkeypatch.setattr(volcano_assets, "_resource_preview_url", preview_url)
 
     with pytest.raises(HTTPException) as exc_info:
         await volcano_assets.get_asset(
@@ -1735,6 +1759,7 @@ async def test_direct_asset_get_requires_owner_but_admin_keeps_global_access(
         _Db(),  # type: ignore[arg-type]
     )
     assert output.id == "asset-1"
+    assert output.preview_url == "/api/images/image-1/binary"
     assert upstream_calls == 1
 
 
@@ -1886,7 +1911,7 @@ async def test_retry_supports_every_action_and_only_rates_create_asset(
     assert enqueued[0]["delivery_generation"] == 0
     assert enqueued[0]["model"] == "seedance"
     assert enqueued[0]["target_id"] == "target-1"
-    assert len(rate_calls) == (1 if action == "create_asset" else 0)
+    assert rate_calls == []
 
 
 @pytest.mark.asyncio
@@ -2125,7 +2150,7 @@ async def test_create_asset_enqueue_failure_is_pollable_and_retryable(
     assert output.retryable is True
     assert operation["status"] == "failed"
     assert operation["error"]["code"] == "video_asset_queue_unavailable"
-    assert released == [operation["id"]]
+    assert released == []
 
 
 @pytest.mark.asyncio

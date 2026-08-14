@@ -24,15 +24,12 @@ from lumen_core.schemas import (
 )
 from lumen_core.video_providers import VideoProviderDefinition
 from lumen_core.volcano_assets import (
-    VolcanoAssetCreateRateLimited,
-    VolcanoAssetQuotaKey,
-    acquire_volcano_create_rate_limit,
+    acquire_volcano_create_rate_limit,  # noqa: F401 - monkeypatch compatibility
     compare_and_set_volcano_asset_operation,
     normalize_asset_group_list,
     normalize_asset_list,
     normalize_volcano_asset_name,
-    release_volcano_create_rate_limit,
-    volcano_asset_quota_key,
+    release_volcano_create_rate_limit,  # noqa: F401 - monkeypatch compatibility
 )
 
 from ..arq_pool import get_arq_pool
@@ -59,6 +56,7 @@ from ._volcano_asset_ownership import (
     operation_matches_provider_snapshot,
     owned_resource_receipts,
     resource_owner_user_id,
+    resource_preview_url,
 )
 from .videos import video_provider_state
 from .volcano_assets_parts import mutations as _mutation_routes
@@ -79,13 +77,10 @@ _OPERATION_ACTIONS = _serialization.OPERATION_ACTIONS
 _REDIS_RETRY_ATTEMPTS = _operations.REDIS_RETRY_ATTEMPTS
 _REDIS_RETRY_BASE_DELAY_SECONDS = _operations.REDIS_RETRY_BASE_DELAY_SECONDS
 _MEMBER_LIST_PAGE_SIZE = 100
-VOLCANO_ASSET_CREATE_QPM = _operations.VOLCANO_ASSET_CREATE_QPM
-VOLCANO_ASSET_CREATE_WINDOW_SECONDS = _operations.VOLCANO_ASSET_CREATE_WINDOW_SECONDS
 _capability = _validation.capability
 _is_admin = _validation.is_admin
 _utc_iso = _serialization.utc_iso
 _retry_redis_call = _operations.retry_redis_call
-_operation_quota_key = _serialization.operation_quota_key
 _operation_asset_response = _serialization.operation_asset_response
 _same_operation_scope = _serialization.same_operation_scope
 _http_error_code = _validation.http_error_code
@@ -116,15 +111,12 @@ def _operation_route_dependencies() -> _operation_routes.OperationRouteDependenc
         get_asset=_get_asset,
         http_error_code=_http_error_code,
         require_resource_owner=_require_resource_owner,
+        resource_preview_url=_resource_preview_url,
         operation_asset_response=_operation_asset_response,
         owned_operation=_owned_operation,
         operation_out=_operation_out,
         allowed_actions=_OPERATION_ACTIONS,
-        rate_limit_http=_rate_limit_http,
-        operation_quota_key=_operation_quota_key,
-        acquire_rate_limit=acquire_volcano_create_rate_limit,
         compare_and_set=compare_and_set_volcano_asset_operation,
-        release_admission_slot=_release_admission_slot,
         same_operation_scope=_same_operation_scope,
         enqueue_operation=_enqueue_operation,
         mark_enqueue_failed=_mark_enqueue_failed,
@@ -214,10 +206,25 @@ async def _resource_owner_user_id(
     )
 
 
+async def _resource_preview_url(
+    db: AsyncSession,
+    *,
+    provider: VideoProviderDefinition,
+    resource_id: str,
+    user_id: str | None,
+) -> str | None:
+    return await resource_preview_url(
+        db,
+        provider=provider,
+        resource_id=resource_id,
+        user_id=user_id,
+    )
+
+
 async def _owned_resource_receipts(
     db: AsyncSession,
     *,
-    user: Any,
+    user: Any | None,
     provider: VideoProviderDefinition,
     resource_type: str,
 ) -> OwnedResourceReceipts:
@@ -225,7 +232,7 @@ async def _owned_resource_receipts(
         db,
         provider=provider,
         resource_type=resource_type,
-        user_id=str(user.id),
+        user_id=str(user.id) if user is not None else None,
     )
 
 
@@ -413,20 +420,6 @@ async def _enqueue_operation(operation: dict[str, Any]) -> None:
     )
 
 
-async def _release_admission_slot(
-    redis: Any,
-    quota_key: VolcanoAssetQuotaKey,
-    member: str,
-) -> None:
-    await _operations.release_admission_slot(
-        redis,
-        quota_key,
-        member,
-        release_rate_limit=release_volcano_create_rate_limit,
-        logger=logger,
-    )
-
-
 async def _mark_enqueue_failed(
     redis: Any,
     operation: dict[str, Any],
@@ -478,25 +471,17 @@ async def _queue_operation(
             get_redis=get_redis,
             hash_email=hash_email,
             request_ip_hash=request_ip_hash,
-            acquire_rate_limit=acquire_volcano_create_rate_limit,
-            quota_key=volcano_asset_quota_key,
             redis_set_operation=_redis_set_operation,
             redis_get_operation=_redis_get_operation,
             same_operation_intent=_same_operation_intent,
-            release_admission_slot=_release_admission_slot,
             enqueue_operation=_enqueue_operation,
             mark_enqueue_failed=_mark_enqueue_failed,
             audit_write_best_effort=_audit_write_best_effort,
             operation_out=_operation_out,
-            rate_limit_http=_rate_limit_http,
             http_error=_http,
             logger=logger,
         ),
     )
-
-
-def _rate_limit_http(exc: VolcanoAssetCreateRateLimited) -> HTTPException:
-    return _operations.rate_limit_http(exc, http_error=_http)
 
 
 @router.get("/capabilities", response_model=VideoAssetCapabilitiesOut)
