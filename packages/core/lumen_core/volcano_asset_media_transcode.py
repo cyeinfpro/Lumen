@@ -33,6 +33,8 @@ from .volcano_asset_media_types import (
     VOLCANO_ASSET_VIDEO_MIN_DURATION_MS,
     VOLCANO_ASSET_VIDEO_MIN_FPS,
     VOLCANO_ASSET_VIDEO_MIN_PIXELS,
+    VOLCANO_ASSET_VIDEO_POSTER_MAX_BYTES,
+    VOLCANO_ASSET_VIDEO_POSTER_MAX_SIDE,
     VOLCANO_ASSET_VIDEO_TARGET_LONG_SIDE,
     VOLCANO_ASSET_NEUTRAL_RGB,
     VolcanoAssetImageJpeg,
@@ -482,6 +484,88 @@ def _validate_video_output(metadata: dict[str, Any]) -> None:
             "normalized asset video exceeds the size limit",
             503,
         )
+
+
+def _make_video_poster_jpeg(
+    ffmpeg: str,
+    source_path: Path,
+    destination: Path,
+    *,
+    timeout_seconds: float,
+) -> bytes:
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                "0",
+                "-i",
+                str(source_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                (
+                    f"scale={VOLCANO_ASSET_VIDEO_POSTER_MAX_SIDE}:"
+                    f"{VOLCANO_ASSET_VIDEO_POSTER_MAX_SIDE}:"
+                    "force_original_aspect_ratio=decrease"
+                ),
+                "-q:v",
+                "3",
+                str(destination),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=min(60.0, max(1.0, timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_video_preview_failed",
+            "asset video preview generation timed out",
+            503,
+        ) from exc
+    except OSError as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_video_preview_failed",
+            "asset video preview generation could not start",
+            503,
+        ) from exc
+    if proc.returncode != 0 or not destination.is_file():
+        raise VolcanoAssetMediaError(
+            "volcano_asset_video_preview_failed",
+            "asset video preview generation failed",
+            503,
+        )
+    try:
+        data = destination.read_bytes()
+        if not data or len(data) > VOLCANO_ASSET_VIDEO_POSTER_MAX_BYTES:
+            raise ValueError("poster size is invalid")
+        with PILImage.open(destination) as poster:
+            if (
+                poster.format != "JPEG"
+                or poster.width <= 0
+                or poster.height <= 0
+                or max(poster.size) > VOLCANO_ASSET_VIDEO_POSTER_MAX_SIDE
+            ):
+                raise ValueError("poster dimensions are invalid")
+            poster.load()
+    except (
+        OSError,
+        ValueError,
+        UnidentifiedImageError,
+        PILImage.DecompressionBombError,
+    ) as exc:
+        raise VolcanoAssetMediaError(
+            "volcano_asset_video_preview_failed",
+            "asset video preview is invalid",
+            503,
+        ) from exc
+    return data
 
 
 def _ffmpeg_command(

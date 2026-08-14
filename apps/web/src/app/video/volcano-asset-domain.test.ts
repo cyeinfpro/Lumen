@@ -191,6 +191,18 @@ test("asset media prefers the safe preview URL and keeps it in selections", () =
     null,
   );
   assert.equal(
+    domain.volcanoAssetPreviewUrl({
+      preview_url: "/api/videos/video-1/poster",
+    }),
+    "/api/videos/video-1/poster",
+  );
+  assert.equal(
+    domain.volcanoAssetSourceUrl({
+      url: "https://cdn.example.com/original.mp4",
+    }),
+    "https://cdn.example.com/original.mp4",
+  );
+  assert.equal(
     domain.volcanoAssetMediaUrl({
       preview_url: "javascript:alert(1)",
       url: null,
@@ -881,7 +893,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /后台优化/);
   assert.match(managerSource, /火山处理中/);
   assert.match(managerSource, /组内全部云端素材/);
-  assert.match(managerSource, /上传后自动优化为火山规格/);
+  assert.match(managerSource, /Lumen 将后台分批提交火山/);
   assert.match(managerSource, /管理并选择 AIGC 图片与视频/);
   assert.match(managerSource, /const processingUploadKey = useMemo\(/);
   assert.match(
@@ -899,7 +911,7 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
   assert.match(managerSource, /上一页/);
   assert.match(managerSource, /下一页/);
   assert.doesNotMatch(managerSource, /sort_by: "UpdateTime"/);
-  assert.match(managerSource, /等待火山提交配额/);
+  assert.match(managerSource, /后台排队/);
   assert.match(managerSource, /上传素材/);
   assert.match(managerSource, /图片 ≤ 50 MiB · 视频 ≤ 64 MiB/);
   assert.doesNotMatch(managerSource, /CreateAsset 3 QPM/);
@@ -954,7 +966,14 @@ test("manager preserves mobile dialog, upload-purpose, and destructive copy cont
     managerSource,
     /仅用于\s+Lumen\/火山素材列表展示和搜索/,
   );
-  assert.match(managerSource, /const mediaUrl = volcanoAssetMediaUrl\(asset\)/);
+  assert.match(
+    managerSource,
+    /const mediaUrl = sourceUrl \?\? volcanoAssetMediaUrl\(asset\)/,
+  );
+  assert.match(managerSource, /src=\{previewUrl\}/);
+  assert.match(managerSource, /src=\{sourceUrl\}/);
+  assert.doesNotMatch(managerSource, /waitForVolcanoCreateAssetSlot/);
+  assert.doesNotMatch(managerSource, /CREATE_ASSET_MIN_INTERVAL_MS/);
   assert.match(managerSource, /预览加载失败/);
   assert.match(managerSource, /火山素材链接/);
   assert.match(managerSource, /安全预览链接/);

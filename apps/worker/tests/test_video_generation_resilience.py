@@ -1291,13 +1291,19 @@ async def test_cancel_commit_after_submitting_fences_adapter_and_receipt(
     monkeypatch.setattr(video_generation, "_reserve_video_submit_slot", reserve)
     monkeypatch.setattr(video_generation, "_input_image_bytes", input_image)
     monkeypatch.setattr(video_generation, "_reference_media_bytes", reference_media)
-    monkeypatch.setattr(video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None)
-    monkeypatch.setattr(video_generation, "adapter_for_provider", lambda _provider: Adapter())
+    monkeypatch.setattr(
+        video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        video_generation, "adapter_for_provider", lambda _provider: Adapter()
+    )
     monkeypatch.setattr(video_generation, "resolve_video_billing", billing)
     monkeypatch.setattr(video_generation, "_queue_video_event", lambda *_a, **_k: None)
     monkeypatch.setattr(video_generation, "worker_flush_balance_cache", _noop_async)
     monkeypatch.setattr(video_generation, "_release_provider_slot", release_slot)
-    monkeypatch.setattr(video_generation, "_persist_video_submit_receipt", receipt_must_not_run)
+    monkeypatch.setattr(
+        video_generation, "_persist_video_submit_receipt", receipt_must_not_run
+    )
 
     await video_generation._run_video_generation_with_lease(  # noqa: SLF001
         {"redis": object()},
@@ -1396,7 +1402,9 @@ async def test_submit_receipt_persists_cancel_requested_row(
     persisted = await video_generation._persist_video_submit_receipt(  # noqa: SLF001
         object(),
         generation.id,
-        SimpleNamespace(provider_task_id="provider-task-1", raw={"id": "provider-task-1"}),
+        SimpleNamespace(
+            provider_task_id="provider-task-1", raw={"id": "provider-task-1"}
+        ),
         submission_epoch=generation.submission_epoch,
         lease_lost=asyncio.Event(),
     )
@@ -1530,16 +1538,24 @@ async def test_submit_then_cancel_persists_receipt_and_enqueues_poll_without_rec
         polls.append((task_id, defer_s))
 
     async def unexpected_recovery(*_args: object, **_kwargs: object) -> bool:
-        raise AssertionError("confirmed receipt must route to poll, not submit recovery")
+        raise AssertionError(
+            "confirmed receipt must route to poll, not submit recovery"
+        )
 
     monkeypatch.setattr(video_generation, "SessionLocal", lambda: session)
     monkeypatch.setattr(video_submission, "_prepare_submit_row", prepared)
-    monkeypatch.setattr(video_generation, "_provider_for_generation", provider_for_generation)
+    monkeypatch.setattr(
+        video_generation, "_provider_for_generation", provider_for_generation
+    )
     monkeypatch.setattr(video_generation, "_reserve_video_submit_slot", reserve)
     monkeypatch.setattr(video_generation, "_input_image_bytes", input_image)
     monkeypatch.setattr(video_generation, "_reference_media_bytes", reference_media)
-    monkeypatch.setattr(video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None)
-    monkeypatch.setattr(video_generation, "adapter_for_provider", lambda _provider: Adapter())
+    monkeypatch.setattr(
+        video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        video_generation, "adapter_for_provider", lambda _provider: Adapter()
+    )
     monkeypatch.setattr(video_generation, "_store_submit_result", store_submit_result)
     monkeypatch.setattr(video_generation, "_enqueue_poll", enqueue_poll)
     monkeypatch.setattr(
@@ -1697,12 +1713,18 @@ async def test_deleted_user_fence_cancels_before_provider_submit_and_settles_hol
 
     monkeypatch.setattr(video_generation, "SessionLocal", lambda: session)
     monkeypatch.setattr(video_submission, "_prepare_submit_row", prepared)
-    monkeypatch.setattr(video_generation, "_provider_for_generation", provider_for_generation)
+    monkeypatch.setattr(
+        video_generation, "_provider_for_generation", provider_for_generation
+    )
     monkeypatch.setattr(video_generation, "_reserve_video_submit_slot", reserve)
     monkeypatch.setattr(video_generation, "_input_image_bytes", input_image)
     monkeypatch.setattr(video_generation, "_reference_media_bytes", reference_media)
-    monkeypatch.setattr(video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None)
-    monkeypatch.setattr(video_generation, "adapter_for_provider", lambda _provider: Adapter())
+    monkeypatch.setattr(
+        video_generation, "_persist_provider_snapshot", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        video_generation, "adapter_for_provider", lambda _provider: Adapter()
+    )
     monkeypatch.setattr(video_generation, "resolve_video_billing", billing)
     monkeypatch.setattr(
         video_generation,
@@ -1796,7 +1818,9 @@ async def test_submit_receipt_rejects_terminal_row(
     persisted = await video_generation._persist_video_submit_receipt(  # noqa: SLF001
         object(),
         generation.id,
-        SimpleNamespace(provider_task_id="provider-task-1", raw={"id": "provider-task-1"}),
+        SimpleNamespace(
+            provider_task_id="provider-task-1", raw={"id": "provider-task-1"}
+        ),
         submission_epoch=generation.submission_epoch,
         lease_lost=asyncio.Event(),
     )
@@ -2188,6 +2212,53 @@ async def _record_cleanup(
 ) -> bool:
     deleted_keys.extend(keys)
     return True
+
+
+@pytest.mark.asyncio
+async def test_finalization_releases_provider_slot_before_result_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = _finalization_generation()
+    events: list[str] = []
+
+    class Adapter:
+        async def download_result(
+            self,
+            _url: str,
+            *,
+            ensure_active: object,
+        ) -> bytes:
+            ensure_active()
+            events.append("download")
+            raise RuntimeError("stop after ordering check")
+
+    async def release_slot(
+        _redis: object,
+        _provider_name: str,
+        _task_id: str,
+    ) -> None:
+        events.append("release")
+
+    async def publish(*_args: object, **_kwargs: object) -> None:
+        events.append("publish")
+
+    monkeypatch.setattr(video_generation, "_release_provider_slot", release_slot)
+    monkeypatch.setattr(video_generation, "_publish", publish)
+
+    with pytest.raises(RuntimeError, match="ordering check"):
+        await video_generation._finish_success(  # noqa: SLF001
+            _FinalizationSession(),
+            object(),
+            generation,
+            PollResult(
+                status="succeeded",
+                video_url="https://cdn.example/output.mp4",
+            ),
+            adapter=Adapter(),
+            lease_lost=asyncio.Event(),
+        )
+
+    assert events == ["release", "publish", "download"]
 
 
 @pytest.mark.asyncio

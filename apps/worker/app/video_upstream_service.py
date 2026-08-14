@@ -47,6 +47,7 @@ from .video_upstream_parts.contracts import (
     CancelResult,
     PollResult,
     SubmitResult,
+    VIDEO_RESULT_READ_TIMEOUT_S,
     VideoProviderAdapter,
     VideoProviderStatus as VideoProviderStatus,
     VideoReferenceMedia,
@@ -236,7 +237,10 @@ def _video_download_client(target: PublicHttpTarget) -> httpx.AsyncClient:
     client_kwargs: dict[str, Any] = {
         "timeout": httpx.Timeout(
             connect=settings.upstream_connect_timeout_s,
-            read=settings.upstream_read_timeout_s,
+            read=min(
+                settings.upstream_read_timeout_s,
+                VIDEO_RESULT_READ_TIMEOUT_S,
+            ),
             write=settings.upstream_write_timeout_s,
             pool=30.0,
         ),
@@ -368,23 +372,38 @@ async def _download_video_url(
                 error_code="invalid_input",
                 status_code=422,
             ) from exc
-        async with make_client(target) as client:
-            async with client.stream(
-                "GET",
-                target.url,
-                headers=headers_for_url(target.url) if headers_for_url else None,
-            ) as response:
-                redirect_url = _video_redirect_url(response)
-                if redirect_url is not None:
-                    if urlsplit(target.url).scheme.lower() == "https":
-                        allow_http = False
-                    current_url = redirect_url
-                    continue
-                _validate_video_download_response(response)
-                return await _stream_video_response(
-                    response,
-                    ensure_active=ensure_active,
-                )
+        try:
+            async with make_client(target) as client:
+                async with client.stream(
+                    "GET",
+                    target.url,
+                    headers=headers_for_url(target.url) if headers_for_url else None,
+                ) as response:
+                    redirect_url = _video_redirect_url(response)
+                    if redirect_url is not None:
+                        if urlsplit(target.url).scheme.lower() == "https":
+                            allow_http = False
+                        current_url = redirect_url
+                        continue
+                    _validate_video_download_response(response)
+                    return await _stream_video_response(
+                        response,
+                        ensure_active=ensure_active,
+                    )
+        except httpx.TimeoutException as exc:
+            raise VideoUpstreamError(
+                "video fetch timed out while receiving result",
+                error_code="fetch_failed",
+                status_code=504,
+                raw={"transport_error": type(exc).__name__},
+            ) from exc
+        except httpx.TransportError as exc:
+            raise VideoUpstreamError(
+                "video fetch connection failed while receiving result",
+                error_code="fetch_failed",
+                status_code=502,
+                raw={"transport_error": type(exc).__name__},
+            ) from exc
     raise VideoUpstreamError(
         "video fetch exceeded redirect limit",
         error_code="fetch_failed",

@@ -13,7 +13,6 @@ from lumen_core.video_asset_schemas import (
     VideoAssetOperationOut,
     VideoAssetOut,
 )
-from lumen_core.volcano_assets import VolcanoAssetQuotaKey
 
 
 OPERATION_ACTIONS = frozenset(
@@ -30,14 +29,6 @@ OPERATION_ACTIONS = frozenset(
 
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def operation_quota_key(operation: dict[str, Any]) -> VolcanoAssetQuotaKey:
-    return VolcanoAssetQuotaKey(
-        provider_name=str(operation.get("provider_name") or ""),
-        project_name=str(operation.get("project_name") or ""),
-        region=str(operation.get("region") or ""),
-    )
 
 
 def operation_out(
@@ -90,6 +81,13 @@ def operation_asset_response(
             asset_type=str(operation.get("asset_type") or ""),
             status="Failed" if failed else "Processing",
             url=None,
+            preview_url=(
+                str(operation.get("preview_url"))
+                if str(operation.get("preview_url") or "").startswith(
+                    ("/api/images/", "/api/videos/")
+                )
+                else None
+            ),
             project_name=str(operation.get("project_name") or ""),
             error_code=str(error.get("code") or "") or None,
             error_message=str(error.get("message") or "") or None,

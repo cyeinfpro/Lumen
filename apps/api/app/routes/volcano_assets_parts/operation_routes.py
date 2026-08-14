@@ -12,7 +12,6 @@ from lumen_core.video_asset_schemas import (
     VideoAssetOperationOut,
     VideoAssetOut,
 )
-from lumen_core.volcano_assets import VolcanoAssetQuotaKey
 
 from .._volcano_asset_retry import RetryDependencies, retry_failed_operation
 
@@ -29,15 +28,12 @@ class OperationRouteDependencies:
     get_asset: Callable[..., Awaitable[dict[str, Any]]]
     http_error_code: Callable[[HTTPException], str | None]
     require_resource_owner: Callable[..., Awaitable[None]]
+    resource_preview_url: Callable[..., Awaitable[str | None]]
     operation_asset_response: Callable[[dict[str, Any]], Any]
     owned_operation: Callable[..., Awaitable[dict[str, Any]]]
     operation_out: Callable[[dict[str, Any]], VideoAssetOperationOut]
     allowed_actions: Any
-    rate_limit_http: Callable[..., HTTPException]
-    operation_quota_key: Callable[[dict[str, Any]], VolcanoAssetQuotaKey]
-    acquire_rate_limit: Callable[..., Awaitable[Any]]
     compare_and_set: Callable[..., Awaitable[Any]]
-    release_admission_slot: Callable[..., Awaitable[None]]
     same_operation_scope: Callable[[dict[str, Any], dict[str, Any]], bool]
     enqueue_operation: Callable[..., Awaitable[None]]
     mark_enqueue_failed: Callable[..., Awaitable[dict[str, Any]]]
@@ -88,6 +84,9 @@ async def get_asset(
                         if deps.http_error_code(exc) != "volcano_asset_not_found":
                             raise
                     else:
+                        preview_url = str(result.get("preview_url") or "")
+                        if preview_url.startswith(("/api/images/", "/api/videos/")):
+                            current["preview_url"] = preview_url
                         return VideoAssetOut(**current)
         return VideoAssetOut(
             **deps.operation_asset_response(operation).model_dump(
@@ -107,6 +106,14 @@ async def get_asset(
         provider,
         asset_id,
     )
+    preview_url = await deps.resource_preview_url(
+        db,
+        provider=provider,
+        resource_id=asset_id,
+        user_id=None if deps.is_admin(user) else str(user.id),
+    )
+    if preview_url is not None:
+        asset["preview_url"] = preview_url
     return VideoAssetOut(**asset)
 
 
@@ -132,11 +139,7 @@ async def retry_operation(
         allowed_actions=deps.allowed_actions,
         deps=RetryDependencies(
             http_error=deps.http_error,
-            rate_limit_error=deps.rate_limit_http,
-            operation_quota_key=deps.operation_quota_key,
-            acquire_rate_limit=deps.acquire_rate_limit,
             compare_and_set=deps.compare_and_set,
-            release_admission_slot=deps.release_admission_slot,
             same_operation_scope=deps.same_operation_scope,
             enqueue_operation=deps.enqueue_operation,
             mark_enqueue_failed=deps.mark_enqueue_failed,

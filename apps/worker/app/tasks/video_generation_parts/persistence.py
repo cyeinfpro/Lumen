@@ -38,9 +38,7 @@ _VideoArtifactFence = artifact_fence_helpers._VideoArtifactFence
 _generation_matches_video_artifact_fence = (
     artifact_fence_helpers._generation_matches_video_artifact_fence
 )
-_pending_video_artifact_fence = (
-    artifact_fence_helpers._pending_video_artifact_fence
-)
+_pending_video_artifact_fence = artifact_fence_helpers._pending_video_artifact_fence
 _claim_video_artifact_fence_impl = artifact_fence_helpers.claim_video_artifact_fence
 _cleanup_video_artifacts_if_owned_impl = (
     artifact_fence_helpers.cleanup_video_artifacts_if_owned
@@ -68,22 +66,14 @@ async def _claim_video_artifact_fence(
 
 async def _transition_to_fetching(
     session: Any,
-    redis: Any,
     generation: VideoGeneration,
     poll: PollResult,
-    *,
-    lease_lost: asyncio.Event | None,
 ) -> None:
     generation.status = VideoGenerationStatus.RUNNING.value
     generation.progress_stage = VideoGenerationStage.FETCHING.value
     generation.progress_pct = max(generation.progress_pct, 96)
     generation.upstream_response = poll.raw
     await session.commit()
-    video_ports()._raise_if_video_lease_lost(
-        lease_lost,
-        "video poll lease lost before fetching event",
-    )
-    await video_ports()._publish(redis, generation, EV_VIDEO_FETCHING)
 
 
 async def finish_success(
@@ -124,11 +114,21 @@ async def finish_success(
         release_provider_slot = True
         await _transition_to_fetching(
             session,
-            redis,
             generation,
             poll,
-            lease_lost=lease_lost,
         )
+        if release_provider_name:
+            await video_ports()._release_provider_slot(
+                redis,
+                release_provider_name,
+                generation.id,
+            )
+            release_provider_slot = False
+        video_ports()._raise_if_video_lease_lost(
+            lease_lost,
+            "video poll lease lost before fetching event",
+        )
+        await video_ports()._publish(redis, generation, EV_VIDEO_FETCHING)
 
         def ensure_active() -> None:
             video_ports()._raise_if_video_lease_lost(
@@ -383,9 +383,7 @@ async def delete_video_storage_keys(
         if isinstance(result, BaseException)
     ]
     if failures:
-        raise RuntimeError(
-            f"video artifact cleanup failed for {len(failures)} key(s)"
-        )
+        raise RuntimeError(f"video artifact cleanup failed for {len(failures)} key(s)")
 
 
 async def _cleanup_unadopted_video_storage_keys(
@@ -399,8 +397,7 @@ async def _cleanup_unadopted_video_storage_keys(
         return
     if fence is None:
         video_ports().logger.error(
-            "video artifact cleanup deferred without durable ownership "
-            "task=%s keys=%s",
+            "video artifact cleanup deferred without durable ownership task=%s keys=%s",
             generation_id,
             keys,
         )

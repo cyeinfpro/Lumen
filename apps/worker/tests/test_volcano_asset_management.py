@@ -652,6 +652,7 @@ def test_success_receipt_is_bound_to_exact_provider_route() -> None:
         "name": "User Display Name",
         "asset_type": "Video",
         "status": "Processing",
+        "preview_url": "/api/videos/video-1/poster",
         "project_name": "project-a",
     }
 
@@ -674,6 +675,7 @@ def test_success_receipt_is_bound_to_exact_provider_route() -> None:
     assert details["lock_token"] == "worker-1"
     assert details["attempt"] == 1
     assert details["fencing"] == 7
+    assert details["result"]["preview_url"] == "/api/videos/video-1/poster"
     assert volcano_assets._receipt_binding_matches(operation, details) is True
     for field in ("provider_name", "region", "provider_binding"):
         legacy_or_mismatched = dict(details)

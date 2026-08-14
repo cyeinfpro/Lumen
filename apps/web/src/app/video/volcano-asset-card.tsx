@@ -23,6 +23,8 @@ import type { VideoAssetOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   volcanoAssetMediaUrl,
+  volcanoAssetPreviewUrl,
+  volcanoAssetSourceUrl,
   volcanoAssetStatusKind,
 } from "./volcano-asset-domain";
 import {
@@ -43,24 +45,21 @@ type AssetCardProps = {
 };
 
 function AssetMedia({ asset }: { asset: VideoAssetOut }) {
-  const mediaUrl = volcanoAssetMediaUrl(asset);
+  const previewUrl = volcanoAssetPreviewUrl(asset);
+  const sourceUrl = volcanoAssetSourceUrl(asset);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const failed = Boolean(mediaUrl && failedUrl === mediaUrl);
-  if (!mediaUrl || failed) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
-        {asset.asset_type === "Image" ? (
-          <ImageIcon className="h-8 w-8" />
-        ) : (
-          <Video className="h-8 w-8" />
-        )}
-        <span className="type-caption">
-          {failed ? "预览加载失败" : "暂无预览"}
-        </span>
-      </div>
-    );
-  }
   if (asset.asset_type === "Image") {
+    const mediaUrl = previewUrl ?? sourceUrl;
+    if (!mediaUrl || failedUrl === mediaUrl) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+          <ImageIcon className="h-8 w-8" />
+          <span className="type-caption">
+            {failedUrl ? "预览加载失败" : "暂无预览"}
+          </span>
+        </div>
+      );
+    }
     return (
       <img
         src={mediaUrl}
@@ -71,16 +70,44 @@ function AssetMedia({ asset }: { asset: VideoAssetOut }) {
       />
     );
   }
+  if (previewUrl && failedUrl !== previewUrl) {
+    return (
+      <div className="relative h-full w-full">
+        <img
+          src={previewUrl}
+          alt={`${asset.name || "虚拟素材"}视频预览`}
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setFailedUrl(previewUrl)}
+        />
+        {sourceUrl ? (
+          <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-0)]/82 text-[var(--fg-0)] shadow-[var(--shadow-1)] backdrop-blur-sm">
+            <Play className="h-3.5 w-3.5 fill-current" />
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+  if (!sourceUrl || failedUrl === sourceUrl) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--fg-2)]">
+        <Video className="h-8 w-8" />
+        <span className="type-caption">
+          {failedUrl ? "预览加载失败" : "暂无预览"}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="relative h-full w-full">
       <video
-        src={mediaUrl}
+        src={sourceUrl}
         aria-label={`${asset.name || "虚拟素材"}视频预览`}
         className="h-full w-full object-cover"
         muted
         playsInline
         preload="metadata"
-        onError={() => setFailedUrl(mediaUrl)}
+        onError={() => setFailedUrl(sourceUrl)}
       />
       <span className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-0)]/82 text-[var(--fg-0)] shadow-[var(--shadow-1)] backdrop-blur-sm">
         <Play className="h-3.5 w-3.5 fill-current" />
@@ -218,7 +245,8 @@ function AssetCardDetails({
 }
 
 function AssetCardLink({ asset }: { asset: VideoAssetOut }) {
-  const mediaUrl = volcanoAssetMediaUrl(asset);
+  const sourceUrl = volcanoAssetSourceUrl(asset);
+  const mediaUrl = sourceUrl ?? volcanoAssetMediaUrl(asset);
   return (
     <div className="border-t border-[var(--border-subtle)] px-3 py-2">
       {mediaUrl ? (
@@ -231,7 +259,7 @@ function AssetCardLink({ asset }: { asset: VideoAssetOut }) {
         >
           <Link2 className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate">
-            {asset.url ? "火山素材链接" : "安全预览链接"}
+            {sourceUrl ? "火山素材链接" : "安全预览链接"}
           </span>
           <ExternalLink className="h-3 w-3 shrink-0" />
         </a>

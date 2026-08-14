@@ -15,8 +15,6 @@ import {
   volcanoOperationTimedOut,
 } from "./volcano-asset-domain";
 import {
-  abortableDelay,
-  CREATE_ASSET_MIN_INTERVAL_MS,
   scanVideoAssets,
 } from "./volcano-asset-manager-helpers";
 import {
@@ -52,29 +50,7 @@ interface VolcanoUploadRuntimeDependencies {
     VolcanoAssetDataController,
     "refreshAssets" | "refreshGroups" | "refreshProjectAssetTotal"
   >;
-  waitForCreateAssetSlot: (signal: AbortSignal) => Promise<void>;
   setNotice: (notice: Notice) => void;
-}
-
-export function waitForVolcanoCreateAssetSlot(
-  createAssetQueueRef: RefObject<Promise<void>>,
-  nextCreateAssetAtRef: RefObject<number>,
-  signal: AbortSignal,
-): Promise<void> {
-  const scheduled = createAssetQueueRef.current.then(async () => {
-    const waitMs = Math.max(0, nextCreateAssetAtRef.current - Date.now());
-    await abortableDelay(waitMs, signal);
-    if (signal.aborted) {
-      throw new DOMException("Aborted", "AbortError");
-    }
-    nextCreateAssetAtRef.current =
-      Date.now() + CREATE_ASSET_MIN_INTERVAL_MS;
-  });
-  createAssetQueueRef.current = scheduled.then(
-    () => undefined,
-    () => undefined,
-  );
-  return scheduled;
 }
 
 export async function startVolcanoUpload(
@@ -85,7 +61,6 @@ export async function startVolcanoUpload(
     uploadQueue,
     operationController,
     assetData,
-    waitForCreateAssetSlot,
     setNotice,
   }: VolcanoUploadRuntimeDependencies,
 ): Promise<void> {
@@ -255,7 +230,6 @@ export async function startVolcanoUpload(
         pendingLabel: "素材创建与优化中",
       },
       {
-        prepare: waitForCreateAssetSlot,
         submit: (signal) => {
           updateUpload(
             item.id,

@@ -231,13 +231,26 @@ export function volcanoQuotaUsage(
 export function volcanoAssetMediaUrl(
   asset: Pick<VolcanoAssetSelectionLike, "preview_url" | "url">,
 ): string | null {
-  for (const candidate of [asset.preview_url, asset.url]) {
-    const value = candidate?.trim();
-    if (value && (/^https?:\/\//i.test(value) || value.startsWith("/api/"))) {
-      return value;
-    }
-  }
-  return null;
+  return volcanoAssetPreviewUrl(asset) ?? volcanoAssetSourceUrl(asset);
+}
+
+function safeVolcanoAssetUrl(candidate?: string | null): string | null {
+  const value = candidate?.trim();
+  return value && (/^https?:\/\//i.test(value) || value.startsWith("/api/"))
+    ? value
+    : null;
+}
+
+export function volcanoAssetPreviewUrl(
+  asset: Pick<VolcanoAssetSelectionLike, "preview_url">,
+): string | null {
+  return safeVolcanoAssetUrl(asset.preview_url);
+}
+
+export function volcanoAssetSourceUrl(
+  asset: Pick<VolcanoAssetSelectionLike, "url">,
+): string | null {
+  return safeVolcanoAssetUrl(asset.url);
 }
 
 export function volcanoReservedQuotaCount(
@@ -347,7 +360,7 @@ export function volcanoOperationStageMessage(stage?: string | null): string {
     checking_quota: "素材配额确认中",
     normalizing_image: "图片尺寸与格式后台优化中",
     normalizing_video: "视频尺寸、帧率与编码后台转码中",
-    waiting_submit_slot: "等待火山提交配额",
+    waiting_submit_slot: "等待后台串行提交",
     waiting_rate_limit: "触发火山限流，后台稍后自动继续",
     submitting: "火山素材库提交中",
     completed: "已提交到火山素材库",

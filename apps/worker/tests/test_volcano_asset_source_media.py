@@ -499,6 +499,7 @@ async def test_video_pipeline_cas_persists_with_real_sqlite(
     source_path.parent.mkdir(parents=True)
     source_path.write_bytes(b"source")
     rendered_data = b"sqlite-normalized-video"
+    poster_data = b"sqlite-video-poster"
     rendered = VolcanoAssetVideoMp4(
         data=rendered_data,
         width=1280,
@@ -508,6 +509,7 @@ async def test_video_pipeline_cas_persists_with_real_sqlite(
         has_audio=False,
         size_bytes=len(rendered_data),
         sha256=hashlib.sha256(rendered_data).hexdigest(),
+        poster_bytes=poster_data,
     )
 
     class _Lease:
@@ -578,13 +580,14 @@ async def test_video_pipeline_cas_persists_with_real_sqlite(
             render,
         )
 
+        operation = {
+            "asset_type": "Video",
+            "local_source_id": "video-1",
+            "user_id": "user-1",
+            "public_base_url": "https://lumen.example",
+        }
         url, kind = await volcano_asset_source_media.normalized_source_url(
-            {
-                "asset_type": "Video",
-                "local_source_id": "video-1",
-                "user_id": "user-1",
-                "public_base_url": "https://lumen.example",
-            },
+            operation,
             storage_writes=SimpleNamespace(
                 capacity=_Capacity(),
                 lease_ttl_seconds=30,
@@ -601,6 +604,10 @@ async def test_video_pipeline_cas_persists_with_real_sqlite(
         assert stored.metadata_jsonb["reference_access_token"]
         assert variant["sha256"] == rendered.sha256
         assert (tmp_path / variant["storage_key"]).read_bytes() == rendered_data
+        assert stored.poster_storage_key == variant["poster_storage_key"]
+        assert (tmp_path / stored.poster_storage_key).read_bytes() == poster_data
+        assert variant["poster_size_bytes"] == len(poster_data)
+        assert operation["preview_url"] == "/api/videos/video-1/poster"
     finally:
         await engine.dispose()
 
@@ -643,9 +650,7 @@ async def test_video_adoption_retries_cas_and_reuses_winner_token(
             metadata_jsonb={
                 VOLCANO_ASSET_VIDEO_METADATA_KEY: variant,
                 "reference_access_token": "winner-token",
-                "reference_access_token_expires_at": (
-                    "2099-01-01T00:00:00+00:00"
-                ),
+                "reference_access_token_expires_at": ("2099-01-01T00:00:00+00:00"),
             },
         ),
     ]
@@ -939,8 +944,7 @@ async def test_video_prepare_deadline_covers_blocked_final_install(
     sha256 = hashlib.sha256(payload).hexdigest()
     staged = tmp_path / "u/user-1/vref/video-1/.video.stage"
     destination_key = (
-        f"u/user-1/vref/video-1/video-1.{VOLCANO_ASSET_VIDEO_KIND}."
-        f"{sha256}.attempt.mp4"
+        f"u/user-1/vref/video-1/video-1.{VOLCANO_ASSET_VIDEO_KIND}.{sha256}.attempt.mp4"
     )
     destination = tmp_path / destination_key
     staged.parent.mkdir(parents=True)
@@ -1230,9 +1234,7 @@ async def test_video_commit_error_probes_durable_adoption(
             current.metadata_jsonb = {
                 VOLCANO_ASSET_VIDEO_METADATA_KEY: variant,
                 "reference_access_token": state.reference_token,
-                "reference_access_token_expires_at": (
-                    "2099-01-01T00:00:00+00:00"
-                ),
+                "reference_access_token_expires_at": ("2099-01-01T00:00:00+00:00"),
             }
             raise RuntimeError("commit response lost")
 

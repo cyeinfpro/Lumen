@@ -15,6 +15,7 @@ VideoProviderStatus = Literal[
     "cancelled",
     "expired",
 ]
+VIDEO_RESULT_READ_TIMEOUT_S = 60.0
 
 
 @dataclass(frozen=True)

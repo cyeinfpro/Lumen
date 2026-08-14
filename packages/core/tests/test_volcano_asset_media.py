@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import shutil
 import subprocess
 import sys
 import threading
@@ -65,11 +66,7 @@ class _PauseAfterUserLock:
     async def execute(self, statement: Any) -> Any:
         result = await self.session.execute(statement)
         sql = str(statement)
-        if (
-            not self.paused
-            and "FROM users" in sql
-            and "FOR UPDATE" in sql
-        ):
+        if not self.paused and "FROM users" in sql and "FOR UPDATE" in sql:
             self.paused = True
             await self.release.wait()
         return result
@@ -246,6 +243,67 @@ def test_atomic_install_detects_a_competing_different_writer(
     assert exc_info.value.code == "volcano_asset_media_storage_conflict"
 
 
+def test_video_transcode_generates_bounded_jpeg_poster(tmp_path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is required for the video poster probe")
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24",
+            "-t",
+            "2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(source),
+        ],
+        check=True,
+    )
+
+    rendered = volcano_asset_media.make_volcano_asset_video_mp4(
+        source,
+        timeout_seconds=120,
+    )
+
+    assert rendered.poster_bytes is not None
+    with PILImage.open(io.BytesIO(rendered.poster_bytes)) as poster:
+        assert poster.format == "JPEG"
+        assert max(poster.size) <= 640
+
+
+def test_video_variant_quota_includes_poster_bytes() -> None:
+    video = _video(
+        "videos/source.mp4",
+        {
+            volcano_asset_media.VOLCANO_ASSET_VIDEO_METADATA_KEY: {
+                "size_bytes": 10,
+                "poster_size_bytes": 3,
+            }
+        },
+    )
+
+    assert (
+        volcano_asset_media._video_variant_quota_bytes(
+            video,
+            volcano_asset_media.VOLCANO_ASSET_VIDEO_METADATA_KEY,
+        )
+        == 13
+    )
+
+
 @pytest.mark.asyncio
 async def test_image_prepare_io_is_outside_transaction_and_commit_is_caller_owned(
     tmp_path: Path,
@@ -327,14 +385,15 @@ async def test_image_prepare_io_is_outside_transaction_and_commit_is_caller_owne
             )
             capacity = _StorageCapacity(on_reserve=lambda: outside("reserve"))
 
-            result, receipt = (
-                await volcano_asset_media.ensure_volcano_asset_image_variant(
-                    session,
-                    loaded,
-                    storage_root=str(tmp_path),
-                    storage_capacity=capacity,
-                    storage_lease_ttl_seconds=30,
-                )
+            (
+                result,
+                receipt,
+            ) = await volcano_asset_media.ensure_volcano_asset_image_variant(
+                session,
+                loaded,
+                storage_root=str(tmp_path),
+                storage_capacity=capacity,
+                storage_lease_ttl_seconds=30,
             )
 
             assert phases == [
@@ -463,14 +522,15 @@ async def test_video_prepare_io_is_outside_transaction_and_commit_is_caller_owne
             )
             capacity = _StorageCapacity(on_reserve=lambda: outside("reserve"))
 
-            result, receipt = (
-                await volcano_asset_media.ensure_volcano_asset_video_variant(
-                    session,
-                    loaded,
-                    storage_root=str(tmp_path),
-                    storage_capacity=capacity,
-                    storage_lease_ttl_seconds=30,
-                )
+            (
+                result,
+                receipt,
+            ) = await volcano_asset_media.ensure_volcano_asset_video_variant(
+                session,
+                loaded,
+                storage_root=str(tmp_path),
+                storage_capacity=capacity,
+                storage_lease_ttl_seconds=30,
             )
 
             assert phases == [
@@ -575,9 +635,7 @@ async def test_video_quota_failure_rolls_back_and_cleans_own_install(
             loaded = (
                 await session.execute(select(Video).where(Video.id == source.id))
             ).scalar_one()
-            with pytest.raises(
-                volcano_asset_media.VolcanoAssetMediaError
-            ) as exc_info:
+            with pytest.raises(volcano_asset_media.VolcanoAssetMediaError) as exc_info:
                 await volcano_asset_media.ensure_volcano_asset_video_variant(
                     session,
                     loaded,
@@ -641,14 +699,15 @@ async def test_image_concurrent_loser_keeps_winner_file_with_real_sqlite(
             loaded = (
                 await session.execute(select(Image).where(Image.id == image.id))
             ).scalar_one()
-            variant, receipt = (
-                await volcano_asset_media.ensure_volcano_asset_image_variant(
-                    session,
-                    loaded,
-                    storage_root=str(tmp_path),
-                    storage_capacity=_StorageCapacity(),
-                    storage_lease_ttl_seconds=30,
-                )
+            (
+                variant,
+                receipt,
+            ) = await volcano_asset_media.ensure_volcano_asset_image_variant(
+                session,
+                loaded,
+                storage_root=str(tmp_path),
+                storage_capacity=_StorageCapacity(),
+                storage_lease_ttl_seconds=30,
             )
             await session.commit()
             return str(variant.storage_key), receipt
@@ -718,14 +777,15 @@ async def test_video_concurrent_loser_keeps_winner_file_with_real_sqlite(
             loaded = (
                 await session.execute(select(Video).where(Video.id == video.id))
             ).scalar_one()
-            variant, receipt = (
-                await volcano_asset_media.ensure_volcano_asset_video_variant(
-                    session,
-                    loaded,
-                    storage_root=str(tmp_path),
-                    storage_capacity=_StorageCapacity(),
-                    storage_lease_ttl_seconds=30,
-                )
+            (
+                variant,
+                receipt,
+            ) = await volcano_asset_media.ensure_volcano_asset_video_variant(
+                session,
+                loaded,
+                storage_root=str(tmp_path),
+                storage_capacity=_StorageCapacity(),
+                storage_lease_ttl_seconds=30,
             )
             await session.commit()
             return str(variant["storage_key"]), receipt
@@ -905,9 +965,7 @@ async def test_prepare_total_deadline_does_not_wait_for_install_thread(
             loaded = (
                 await session.execute(select(Image).where(Image.id == image.id))
             ).scalar_one()
-            with pytest.raises(
-                volcano_asset_media.VolcanoAssetMediaError
-            ) as exc_info:
+            with pytest.raises(volcano_asset_media.VolcanoAssetMediaError) as exc_info:
                 await volcano_asset_media.ensure_volcano_asset_image_variant(
                     session,
                     loaded,
@@ -983,9 +1041,7 @@ async def test_final_transaction_timeout_rolls_back_before_cleanup(
                 await inner.execute(select(Image).where(Image.id == image.id))
             ).scalar_one()
             session = _PauseAfterUserLock(inner)
-            with pytest.raises(
-                volcano_asset_media.VolcanoAssetMediaError
-            ) as exc_info:
+            with pytest.raises(volcano_asset_media.VolcanoAssetMediaError) as exc_info:
                 await volcano_asset_media.ensure_volcano_asset_image_variant(
                     session,
                     loaded,

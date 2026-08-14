@@ -25,6 +25,7 @@ def receipt_asset(asset: dict[str, Any]) -> dict[str, Any]:
             "name",
             "asset_type",
             "status",
+            "preview_url",
             "project_name",
             "create_time",
             "update_time",

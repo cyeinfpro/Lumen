@@ -6,18 +6,13 @@ import type {
   VideoAssetType,
 } from "@/lib/types";
 
-import {
-  VOLCANO_CREATE_ASSET_QPM,
-  volcanoAssetStatusKind,
-} from "./volcano-asset-domain";
+import { volcanoAssetStatusKind } from "./volcano-asset-domain";
 import { mergeUniqueAssetPage } from "./volcano-asset-manager-state";
 import {
   DELETE_SCAN_PAGE_SIZE,
   type UploadPhase,
 } from "./volcano-asset-manager-types";
 
-export const CREATE_ASSET_MIN_INTERVAL_MS =
-  60_000 / VOLCANO_CREATE_ASSET_QPM;
 export const VOLCANO_ASSET_SCAN_LIMIT = 3_000;
 
 export function clientId(): string {
@@ -163,7 +158,7 @@ export function uploadPresentation(phase: UploadPhase): {
   }
   if (phase === "waiting_quota") {
     return {
-      label: "等待火山提交配额",
+      label: "后台排队",
       className: "border-warning-border bg-warning-soft text-warning",
     };
   }

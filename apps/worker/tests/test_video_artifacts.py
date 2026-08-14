@@ -287,6 +287,66 @@ async def test_download_video_url_streams_to_temp_file_with_real_media_type(
 
 
 @pytest.mark.asyncio
+async def test_video_download_uses_short_idle_timeout() -> None:
+    client = video_upstream._video_download_client(  # noqa: SLF001
+        SimpleNamespace(resolved_ips=())
+    )
+    try:
+        assert client.timeout.read == video_upstream.VIDEO_RESULT_READ_TIMEOUT_S
+        assert client.timeout.read == 60.0
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_download_video_url_maps_stalled_stream_to_fetch_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_paths: list[Path] = []
+    real_mkstemp = video_upstream.tempfile.mkstemp
+
+    class StalledStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield _mp4_bytes()
+            raise httpx.ReadTimeout("result CDN stopped sending data")
+
+    async def resolve_target(raw_url: str, *, allow_http: bool) -> SimpleNamespace:
+        assert allow_http is True
+        return SimpleNamespace(url=raw_url, resolved_ips=())
+
+    def capture_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        fd, raw_path = real_mkstemp(*args, **kwargs)
+        created_paths.append(Path(raw_path))
+        return fd, raw_path
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "video/mp4"},
+            stream=StalledStream(),
+            request=request,
+        )
+
+    def client_factory(_target: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(video_upstream, "resolve_public_http_target", resolve_target)
+    monkeypatch.setattr(video_upstream.tempfile, "mkstemp", capture_mkstemp)
+
+    with pytest.raises(video_upstream.VideoUpstreamError) as exc_info:
+        await _download_video_url(
+            "https://cdn.example.com/result.mp4",
+            client_factory=client_factory,
+        )
+
+    assert exc_info.value.error_code == "fetch_failed"
+    assert exc_info.value.status_code == 504
+    assert exc_info.value.raw == {"transport_error": "ReadTimeout"}
+    assert created_paths
+    assert all(not path.exists() for path in created_paths)
+
+
+@pytest.mark.asyncio
 async def test_download_video_url_cleans_partial_file_when_lease_check_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

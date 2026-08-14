@@ -1,13 +1,11 @@
-"""Redis persistence and queue admission services for Volcano asset operations."""
+"""Redis persistence and queue services for Volcano asset operations."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import math
 import random
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -24,11 +22,7 @@ from lumen_core.video_providers import (
     video_provider_binding_fingerprint,
 )
 from lumen_core.volcano_assets import (
-    VOLCANO_ASSET_CREATE_QPM,
-    VOLCANO_ASSET_CREATE_WINDOW_SECONDS,
     VOLCANO_ASSET_OPERATION_TTL_SECONDS,
-    VolcanoAssetCreateRateLimited,
-    VolcanoAssetQuotaKey,
     VolcanoAssetRedisUnavailable,
     volcano_asset_operation_key,
 )
@@ -48,17 +42,11 @@ class QueueOperationDependencies:
     get_redis: Callable[[], Any]
     hash_email: Callable[[str], str]
     request_ip_hash: Callable[[Request], str]
-    acquire_rate_limit: Callable[..., Awaitable[None]]
-    quota_key: Callable[[VideoProviderDefinition], VolcanoAssetQuotaKey]
     redis_set_operation: Callable[[Any, dict[str, Any]], Awaitable[None]]
     redis_get_operation: Callable[[Any, str], Awaitable[dict[str, Any] | None]]
     same_operation_intent: Callable[
         [dict[str, Any], dict[str, Any]],
         bool,
-    ]
-    release_admission_slot: Callable[
-        [Any, VolcanoAssetQuotaKey, str],
-        Awaitable[None],
     ]
     enqueue_operation: Callable[[dict[str, Any]], Awaitable[None]]
     mark_enqueue_failed: Callable[
@@ -67,7 +55,6 @@ class QueueOperationDependencies:
     ]
     audit_write_best_effort: Callable[..., Awaitable[None]]
     operation_out: Callable[[dict[str, Any]], VideoAssetOperationOut]
-    rate_limit_http: Callable[[VolcanoAssetCreateRateLimited], HTTPException]
     http_error: HttpError
     logger: logging.Logger
 
@@ -184,28 +171,6 @@ async def enqueue_operation(
     await retry_call(enqueue)
 
 
-async def release_admission_slot(
-    redis: Any,
-    quota_key: VolcanoAssetQuotaKey,
-    member: str,
-    *,
-    release_rate_limit: Callable[..., Awaitable[None]],
-    logger: logging.Logger,
-) -> None:
-    try:
-        await release_rate_limit(
-            redis,
-            quota_key,
-            bucket="admission",
-            operation_id=member,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "video_asset.admission_release_failed",
-            exc_info=True,
-        )
-
-
 async def mark_enqueue_failed(
     redis: Any,
     operation: dict[str, Any],
@@ -284,27 +249,6 @@ async def queue_operation(
         "error": None,
     }
     redis = deps.get_redis()
-    quota_key: VolcanoAssetQuotaKey | None = None
-    admission_member: str | None = None
-    if action == "create_asset":
-        quota_key = deps.quota_key(provider)
-        admission_member = operation_id
-        try:
-            await deps.acquire_rate_limit(
-                redis,
-                quota_key,
-                bucket="admission",
-                operation_id=admission_member,
-                now_ms=int(time.time() * 1000),
-            )
-        except VolcanoAssetCreateRateLimited as exc:
-            raise deps.rate_limit_http(exc) from exc
-        except Exception as exc:  # noqa: BLE001
-            raise deps.http_error(
-                "video_asset_queue_unavailable",
-                "video asset operation queue is unavailable",
-                503,
-            ) from exc
 
     try:
         await deps.redis_set_operation(redis, operation)
@@ -319,12 +263,6 @@ async def queue_operation(
             or stored.get("status") != "queued"
             or max(1, int(stored.get("attempt") or 1)) != 1
         ):
-            if quota_key is not None and admission_member is not None:
-                await deps.release_admission_slot(
-                    redis,
-                    quota_key,
-                    admission_member,
-                )
             raise deps.http_error(
                 "video_asset_queue_unavailable",
                 "video asset operation queue is unavailable",
@@ -349,12 +287,6 @@ async def queue_operation(
                 operation_id,
                 action,
                 exc_info=True,
-            )
-        if quota_key is not None and admission_member is not None:
-            await deps.release_admission_slot(
-                redis,
-                quota_key,
-                admission_member,
             )
 
     await deps.audit_write_best_effort(
@@ -385,21 +317,3 @@ async def queue_operation(
         },
     )
     return deps.operation_out(operation)
-
-
-def rate_limit_http(
-    exc: VolcanoAssetCreateRateLimited,
-    *,
-    http_error: HttpError,
-) -> HTTPException:
-    retry_after_seconds = max(1, math.ceil(exc.retry_after_ms / 1000))
-    return http_error(
-        "volcano_asset_create_rate_limited",
-        "CreateAsset is limited to 3 requests per 60 seconds",
-        429,
-        headers={"Retry-After": str(retry_after_seconds)},
-        retry_after_ms=exc.retry_after_ms,
-        retry_after_seconds=retry_after_seconds,
-        limit=VOLCANO_ASSET_CREATE_QPM,
-        window_seconds=VOLCANO_ASSET_CREATE_WINDOW_SECONDS,
-    )

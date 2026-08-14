@@ -134,7 +134,10 @@ def video_reference_variant_quota_bytes(
     if not isinstance(raw, dict):
         return 0
     try:
-        return max(0, int(raw.get("size_bytes") or 0))
+        return max(0, int(raw.get("size_bytes") or 0)) + max(
+            0,
+            int(raw.get("poster_size_bytes") or 0),
+        )
     except (TypeError, ValueError, OverflowError):
         return 0
 

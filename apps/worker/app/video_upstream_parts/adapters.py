@@ -18,6 +18,7 @@ from .contracts import (
     CancelResult,
     PollResult,
     SubmitResult,
+    VIDEO_RESULT_READ_TIMEOUT_S,
     VideoReferenceMedia,
     VideoSubmitRequest,
     VideoUpstreamError,
@@ -481,7 +482,10 @@ class VolcanoNewApiVideoAdapter(VolcanoSeedanceAdapter):
         )
         timeout = self.runtime.httpx.Timeout(
             connect=self.runtime.settings.upstream_connect_timeout_s,
-            read=self.runtime.settings.upstream_read_timeout_s,
+            read=min(
+                self.runtime.settings.upstream_read_timeout_s,
+                VIDEO_RESULT_READ_TIMEOUT_S,
+            ),
             write=self.runtime.settings.upstream_write_timeout_s,
             pool=30.0,
         )
