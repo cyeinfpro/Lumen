@@ -329,6 +329,7 @@ else
                             emit_done self_update_scripts 0
                             export LUMEN_UPDATE_SELF_UPDATED=$((self_update_hops + 1))
                             export LUMEN_UPDATE_RESUME=1
+                            export LUMEN_UPDATE_API_OPERATION_ID="${OPERATION_ID}"
                             export OPERATION_ID
                             exec bash "${CURRENT_RELEASE}/scripts/update.sh" "$@"
                         fi

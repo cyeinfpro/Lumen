@@ -724,7 +724,10 @@ _lumen_self_update_scripts_locked() {
             done
         fi
         if [ "${include_update_dependencies}" -eq 1 ]; then
-            for dependency in "${update_dependency_files[@]}"; do
+            for dependency in \
+                    install/bootstrap_transaction.py \
+                    update/entry_lock.py \
+                    "${update_dependency_files[@]}"; do
                 present=0
                 for requested in "${files[@]}"; do
                     if [ "${requested}" = "${dependency}" ]; then
