@@ -112,15 +112,22 @@ class FakeGitHubCommand:
         self,
         tags: Sequence[str],
         manifests: dict[str, str] | None = None,
+        *,
+        rest_empty: bool = False,
     ) -> None:
         self.tags = tuple(tags)
         self.manifests = manifests or {}
+        self.rest_empty = rest_empty
         self.commands: list[tuple[str, ...]] = []
 
     def run(self, args: Sequence[str]) -> CommandResult:
         command = tuple(args)
         self.commands.append(command)
         if command[:2] == ("api", "--paginate"):
+            if self.rest_empty:
+                return CommandResult(0, "", "")
+            return CommandResult(0, "\n".join(self.tags) + "\n", "")
+        if command[:2] == ("release", "list"):
             return CommandResult(0, "\n".join(self.tags) + "\n", "")
         if command[:2] == ("release", "download"):
             tag = command[2]
@@ -129,6 +136,34 @@ class FakeGitHubCommand:
                 return CommandResult(1, "", "manifest missing")
             return CommandResult(0, manifest, "")
         raise AssertionError(f"unexpected fake GitHub command: {command}")
+
+
+def test_release_source_falls_back_to_graphql_when_rest_list_is_empty() -> None:
+    github = FakeGitHubCommand(("v1.2.123",), rest_empty=True)
+    source = GitHubReleaseSource(github, "cyeinfpro/Lumen")
+
+    assert source.published_tags() == ["v1.2.123"]
+    assert github.commands == [
+        (
+            "api",
+            "--paginate",
+            "repos/cyeinfpro/Lumen/releases?per_page=100",
+            "--jq",
+            ".[] | select(.draft == false) | .tag_name",
+        ),
+        (
+            "release",
+            "list",
+            "--repo",
+            "cyeinfpro/Lumen",
+            "--limit",
+            "1000",
+            "--json",
+            "tagName,isDraft",
+            "--jq",
+            ".[] | select(.isDraft == false) | .tagName",
+        ),
+    ]
 
 
 class FakePackageCommand:
