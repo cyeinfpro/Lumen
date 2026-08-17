@@ -204,6 +204,7 @@ async def test_result_download_accepts_valid_image_body_with_soft_404(
         url: str,
         **kwargs: Any,
     ) -> PublicHttpStagedDownload:
+        assert kwargs["capture_status_codes"] == (404,)
         destination = kwargs["destination"]
         destination.write_bytes(raw)
         return PublicHttpStagedDownload(
