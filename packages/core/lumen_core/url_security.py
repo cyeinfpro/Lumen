@@ -594,6 +594,7 @@ async def download_public_http_url_to_file(
     dns_timeout_s: float = 2.0,
     timeout: Any = None,
     headers: Mapping[str, str] | None = None,
+    capture_status_codes: Sequence[int] = (),
 ) -> PublicHttpStagedDownload:
     """Stream a DNS-pinned public response to a bounded staging file."""
 
@@ -612,6 +613,7 @@ async def download_public_http_url_to_file(
     }
     request_headers["Accept-Encoding"] = "identity"
     request_timeout = timeout or httpx.Timeout(30.0, connect=5.0)
+    captured_statuses = frozenset(int(status) for status in capture_status_codes)
     current_url = url.strip()
     redirects = 0
 
@@ -659,7 +661,10 @@ async def download_public_http_url_to_file(
                     redirects += 1
                     continue
 
-                if not 200 <= status_code < 300:
+                if (
+                    not 200 <= status_code < 300
+                    and status_code not in captured_statuses
+                ):
                     return PublicHttpStagedDownload(
                         url=target.url,
                         status_code=status_code,

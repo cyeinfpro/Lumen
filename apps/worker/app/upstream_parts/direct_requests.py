@@ -199,6 +199,7 @@ async def _fetch_image_url_as_bytes(
                 pool=services.infrastructure.settings.upstream_connect_timeout_s,
             ),
             headers={"User-Agent": "lumen-worker"},
+            capture_status_codes=(404,),
         )
     except services.infrastructure.PublicHttpBodyTooLarge as exc:
         destination.unlink(missing_ok=True)

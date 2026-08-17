@@ -397,6 +397,40 @@ async def test_download_public_http_url_to_file_streams_without_body_buffer(
 
 
 @pytest.mark.asyncio
+async def test_download_public_http_url_to_file_captures_selected_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    body_stream = _ChunkStream([b"png-", b"bytes"])
+
+    async def fake_resolve(url: str, **_kwargs: Any) -> PublicHttpTarget:
+        return PublicHttpTarget(url, ("93.184.216.34",))
+
+    monkeypatch.setattr(url_security, "resolve_public_http_target", fake_resolve)
+    monkeypatch.setattr(
+        url_security,
+        "pinned_async_http_transport",
+        lambda *_args, **_kwargs: httpx.MockTransport(
+            lambda _request: httpx.Response(404, stream=body_stream)
+        ),
+    )
+    destination = tmp_path / "soft-404.part"
+
+    result = await download_public_http_url_to_file(
+        "https://cdn.example/soft-404.png",
+        destination=destination,
+        max_bytes=16,
+        capture_status_codes=(404,),
+    )
+
+    assert result.status_code == 404
+    assert result.size == 9
+    assert result.sha256 == url_security.hashlib.sha256(b"png-bytes").hexdigest()
+    assert destination.read_bytes() == b"png-bytes"
+    assert body_stream.closed is True
+
+
+@pytest.mark.asyncio
 async def test_download_public_http_url_rejects_private_redirect_before_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
