@@ -23,6 +23,13 @@ _RECOVERY_SCAN_LIMIT = 500
 _QUEUED_STALE_SECONDS = 90
 _RUNNING_STALE_SECONDS = 30
 _LEGACY_AMBIGUOUS_STALE_SECONDS = 30
+_LEGACY_RATE_LIMIT_STALE_SECONDS = 5
+_RATE_LIMIT_ERROR_CODES = frozenset(
+    {
+        "volcano_asset_create_rate_limited",
+        "volcano_asset_rate_limited",
+    }
+)
 _RELEASE_LOCK_SCRIPT = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -84,6 +91,29 @@ def _legacy_ambiguous_is_recoverable(
     )
 
 
+def _legacy_rate_limit_is_recoverable(
+    operation: dict[str, Any],
+    *,
+    now: datetime,
+) -> bool:
+    error = operation.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else None
+    return bool(
+        operation.get("action") == "create_asset"
+        and operation.get("status") == "failed"
+        and error_code in _RATE_LIMIT_ERROR_CODES
+        and (
+            operation.get("retryable")
+            or isinstance(error, dict)
+            and error.get("retryable")
+        )
+        and not operation.get("submit_started_at")
+        and not operation.get("submit_outcome_uncertain")
+        and _operation_age_seconds(operation, now)
+        >= _LEGACY_RATE_LIMIT_STALE_SECONDS
+    )
+
+
 async def _recovery_stage(
     redis: Any,
     operation: dict[str, Any],
@@ -91,6 +121,8 @@ async def _recovery_stage(
     now: datetime,
 ) -> str | None:
     status = str(operation.get("status") or "")
+    if _legacy_rate_limit_is_recoverable(operation, now=now):
+        return "waiting_rate_limit"
     if _legacy_ambiguous_is_recoverable(operation, now=now):
         return "reconciling_submit"
     if status == "queued":

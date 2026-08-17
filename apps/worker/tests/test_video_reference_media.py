@@ -2436,7 +2436,7 @@ async def test_seedance_submit_forwards_smart_duration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_seedance_25_submit_accepts_thirty_second_duration() -> None:
+async def test_seedance_25_submit_accepts_thirty_seconds_at_1080p() -> None:
     provider = VideoProviderDefinition(
         name="volcano",
         kind="volcano",
@@ -2457,13 +2457,14 @@ async def test_seedance_25_submit_accepts_thirty_second_duration() -> None:
             upstream_model="doubao-seedance-2-5-260628",
             prompt="a continuous thirty second scene",
             duration_s=30,
-            resolution="720p",
+            resolution="1080p",
             aspect_ratio="16:9",
             generate_audio=True,
         )
     )
 
     assert client.body["duration"] == 30
+    assert client.body["resolution"] == "1080p"
 
 
 @pytest.mark.asyncio

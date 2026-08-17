@@ -151,6 +151,41 @@ async def test_recovery_resumes_legacy_ambiguous_create(
 
 
 @pytest.mark.asyncio
+async def test_recovery_resumes_legacy_terminal_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tasks import volcano_asset_recovery as recovery
+
+    await _install_cas(monkeypatch, recovery)
+    redis = _Redis(
+        [
+            _operation(
+                status="failed",
+                progress_stage="failed",
+                completed_at="2026-08-14T00:01:00+00:00",
+                submit_started_at=None,
+                submit_outcome_uncertain=False,
+                error={
+                    "code": "volcano_asset_rate_limited",
+                    "message": "rate limited",
+                    "retryable": True,
+                },
+            )
+        ]
+    )
+
+    recovered = await recovery.reconcile_volcano_asset_operations({"redis": redis})
+
+    assert recovered == 1
+    stored = redis.operation("operation-1")
+    assert stored["status"] == "queued"
+    assert stored["progress_stage"] == "waiting_rate_limit"
+    assert stored["delivery_generation"] == 1
+    assert stored["delivery_enqueued"] is True
+    assert redis.enqueued[0][0] == "process_volcano_asset_operation"
+
+
+@pytest.mark.asyncio
 async def test_recovery_requeues_stale_unconfirmed_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

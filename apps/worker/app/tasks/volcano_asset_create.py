@@ -76,6 +76,7 @@ _RUNTIME = VolcanoAssetRuntimeSlot(
             "_source_url_for_submit",
             "_utc_iso",
             "acquire_volcano_create_rate_limit",
+            "defer_volcano_create_rate_limit",
             "normalize_asset",
             "normalize_asset_list",
             "normalize_volcano_asset_name",
@@ -599,10 +600,7 @@ async def _wait_for_submit_slot(
             state.redis,
             state.quota_key,
             bucket="submit",
-            operation_id=(
-                f"{state.operation_id}:"
-                f"{max(1, int(state.operation.get('attempt') or 1))}"
-            ),
+            operation_id=_rate_limit_member(state),
             now_ms=int(time.time() * 1000),
         )
     except runtime.VolcanoAssetCreateRateLimited as exc:
@@ -619,6 +617,13 @@ async def _wait_for_submit_slot(
             "retry_after_ms": exc.retry_after_ms,
         }
     return None
+
+
+def _rate_limit_member(state: _CreateAssetState) -> str:
+    return (
+        f"{state.operation_id}:"
+        f"{max(1, int(state.operation.get('attempt') or 1))}"
+    )
 
 
 async def _request_asset(
@@ -647,7 +652,17 @@ async def _request_asset(
                 submit_outcome_uncertain=False,
                 baseline_asset_ids=[],
             )
-            raise mapped_failure from exc
+            retry_after_ms = await runtime.defer_volcano_create_rate_limit(
+                state.redis,
+                state.quota_key,
+                bucket="submit",
+                operation_id=_rate_limit_member(state),
+                retry_after_ms=exc.retry_after_ms,
+                now_ms=int(time.time() * 1000),
+            )
+            raise runtime.VolcanoAssetCreateRateLimited(
+                retry_after_ms=retry_after_ms,
+            ) from exc
         if mapped_failure.retryable:
             await _confirm_intent_lock(state)
             recovered = await runtime._reconcile_ambiguous_submit(
@@ -756,6 +771,7 @@ async def _run_create_asset(
     state: _CreateAssetState,
     failure: Any | None,
 ) -> dict[str, Any]:
+    runtime = _runtime()
     if failure is not None:
         raise failure
     await _prepare_scope(state)
@@ -768,7 +784,20 @@ async def _run_create_asset(
     deferred = await _wait_for_submit_slot(state)
     if deferred is not None:
         return deferred
-    return await _submit_asset(state, public_url)
+    try:
+        return await _submit_asset(state, public_url)
+    except runtime.VolcanoAssetCreateRateLimited as exc:
+        await runtime._defer_for_rate_limit(
+            state.persistence,
+            state.operation,
+            exc,
+        )
+        state.deferred = True
+        return {
+            "status": "deferred",
+            "operation_id": state.operation_id,
+            "retry_after_ms": exc.retry_after_ms,
+        }
 
 
 def _failure_from_exception(state: _CreateAssetState, exc: Exception) -> Any:

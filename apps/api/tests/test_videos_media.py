@@ -959,7 +959,7 @@ async def test_video_options_exposes_seedance_25_official_contract(
     )
     estimate_keys = {
         f"{resolution}:{duration_s}": 100_000 + duration_s
-        for resolution in ("480p", "720p")
+        for resolution in ("480p", "720p", "1080p")
         for duration_s in range(4, 31)
     }
 
@@ -998,7 +998,7 @@ async def test_video_options_exposes_seedance_25_official_contract(
                 "reference_image",
                 "reference_video",
             )
-            for resolution in ("480p", "720p")
+            for resolution in ("480p", "720p", "1080p")
         ]
 
     monkeypatch.setattr(videos, "_video_enabled", enabled)
@@ -1017,7 +1017,7 @@ async def test_video_options_exposes_seedance_25_official_contract(
     assert model.model == "seedance-2.5"
     assert set(model.actions) == {"t2v", "i2v", "reference"}
     assert model.durations_s == [-1, *range(4, 31)]
-    assert model.resolutions == ["480p", "720p"]
+    assert model.resolutions == ["480p", "720p", "1080p"]
     assert model.reference_media_limits == {
         "image": 30,
         "video": 10,

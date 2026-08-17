@@ -176,7 +176,11 @@ def test_seedance_capabilities_add_25_without_changing_20() -> None:
     seedance_20 = "doubao-seedance-2-0-260128"
 
     assert seedance_allowed_actions(seedance_25) == VIDEO_ACTIONS
-    assert seedance_allowed_resolutions(seedance_25) == ("480p", "720p")
+    assert seedance_allowed_resolutions(seedance_25) == (
+        "480p",
+        "720p",
+        "1080p",
+    )
     assert seedance_duration_is_valid(-1, seedance_25)
     assert seedance_duration_is_valid(4, seedance_25)
     assert seedance_duration_is_valid(30, seedance_25)

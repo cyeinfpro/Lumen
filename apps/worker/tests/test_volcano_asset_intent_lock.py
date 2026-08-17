@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import pytest
 from arq import Retry
 from lumen_core.video_providers import VideoProviderDefinition
-from lumen_core.volcano_assets import (
-    VolcanoAssetServiceError,
-    volcano_asset_operation_key,
-)
+from lumen_core.volcano_assets import VolcanoAssetServiceError
 
 from apps.worker.tests.volcano_asset_test_support import (
     Redis as _Redis,
@@ -53,6 +49,9 @@ def _install_runtime(
     async def noop(*_args: Any, **_kwargs: Any) -> None:
         return None
 
+    async def defer_rate_limit(*_args: Any, **kwargs: Any) -> int:
+        return max(60_000, int(kwargs.get("retry_after_ms") or 0))
+
     async def no_receipt(
         _operation: dict[str, Any],
         **_kwargs: Any,
@@ -72,13 +71,18 @@ def _install_runtime(
     monkeypatch.setattr(volcano_assets, "reserve_volcano_asset_quota", noop)
     monkeypatch.setattr(volcano_assets, "release_volcano_asset_quota", noop)
     monkeypatch.setattr(volcano_assets, "acquire_volcano_create_rate_limit", noop)
+    monkeypatch.setattr(
+        volcano_assets,
+        "defer_volcano_create_rate_limit",
+        defer_rate_limit,
+    )
     monkeypatch.setattr(volcano_assets, "_write_audit", noop)
     monkeypatch.setattr(volcano_assets, "_read_success_receipt", no_receipt)
     monkeypatch.setattr(volcano_assets, "_write_success_receipt", write_receipt)
 
 
 @pytest.mark.asyncio
-async def test_http_429_clears_uncertain_state_and_allows_retry(
+async def test_http_429_queues_shared_cooldown_and_retries_automatically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.tasks import volcano_asset_orchestrator as volcano_assets
@@ -127,35 +131,27 @@ async def test_http_429_clears_uncertain_state_and_allows_retry(
         0,
     )
 
-    assert first["status"] == "failed"
-    assert first["error"]["code"] == "volcano_asset_rate_limited"
-    failed = redis.operation()
-    assert failed["retryable"] is True
-    assert failed["retry_after_seconds"] == 5
-    assert failed["submit_started_at"] is None
-    assert failed["submit_outcome_uncertain"] is False
-    assert failed["baseline_asset_ids"] == []
+    assert first["status"] == "deferred"
+    queued = redis.operation()
+    assert queued["status"] == "queued"
+    assert queued["progress_stage"] == "waiting_rate_limit"
+    assert queued["retryable"] is True
+    assert queued["retry_after_seconds"] == 60
+    assert queued["submit_started_at"] is None
+    assert queued["submit_outcome_uncertain"] is False
+    assert queued["baseline_asset_ids"] == []
+    assert queued["delivery_generation"] == 1
+    assert queued["delivery_enqueued"] is True
+    assert len(redis.enqueued) == 1
     assert filtered_list_calls == 1
     assert receipts == []
     assert not any(key.startswith(_INTENT_LOCK_PREFIX) for key in redis.values)
 
-    failed.update(
-        {
-            "status": "queued",
-            "progress_stage": "queued",
-            "attempt": 2,
-            "completed_at": None,
-            "result": None,
-            "error": None,
-        }
-    )
-    redis.values[volcano_asset_operation_key("operation-1")] = json.dumps(failed)
-
     second = await volcano_assets.process_volcano_asset_operation(
         {"redis": redis},
         "operation-1",
-        2,
-        0,
+        1,
+        queued["delivery_generation"],
     )
 
     assert second["status"] == "succeeded"
