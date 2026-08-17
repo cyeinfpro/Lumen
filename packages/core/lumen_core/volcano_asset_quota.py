@@ -16,6 +16,11 @@ VOLCANO_ASSET_MAX_GROUPS = 50
 VOLCANO_ASSET_MAX_ASSETS = 50
 VOLCANO_ASSET_CREATE_QPM = 3
 VOLCANO_ASSET_CREATE_WINDOW_SECONDS = 60
+VOLCANO_ASSET_CREATE_INTERVAL_MS = (
+    VOLCANO_ASSET_CREATE_WINDOW_SECONDS * 1000 // VOLCANO_ASSET_CREATE_QPM
+) + 500
+VOLCANO_ASSET_CREATE_DEFAULT_COOLDOWN_MS = 60 * 1000
+VOLCANO_ASSET_CREATE_SCHEDULE_TTL_SECONDS = 2 * 60 * 60
 VOLCANO_ASSET_OPERATION_TTL_SECONDS = 7 * 24 * 60 * 60
 VOLCANO_ASSET_RESERVATION_TTL_SECONDS = 45 * 60
 
@@ -45,29 +50,96 @@ redis.call('EXPIRE', key, ttl)
 return {1, other_reservations}
 """
 _REDIS_RATE_LIMIT_SCRIPT = """
-local key = KEYS[1]
+local schedule_key = KEYS[1]
+local cooldown_key = KEYS[2]
 local now_ms = tonumber(ARGV[1])
-local window_ms = tonumber(ARGV[2])
-local hard_limit = tonumber(ARGV[3])
-local member = ARGV[4]
-redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
-local existing = redis.call('ZSCORE', key, member)
+local interval_ms = tonumber(ARGV[2])
+local member = ARGV[3]
+local ttl_ms = tonumber(ARGV[4])
+redis.call(
+  'ZREMRANGEBYSCORE',
+  schedule_key,
+  '-inf',
+  now_ms - interval_ms * 2
+)
+local cooldown_until = tonumber(redis.call('GET', cooldown_key) or '0')
+if cooldown_until <= now_ms then
+  redis.call('DEL', cooldown_key)
+  cooldown_until = 0
+end
+local existing = redis.call('ZSCORE', schedule_key, member)
 if existing then
-  redis.call('PEXPIRE', key, window_ms * 2)
+  local slot_ms = tonumber(existing)
+  if cooldown_until > slot_ms then
+    redis.call('ZREM', schedule_key, member)
+    local newest = redis.call(
+      'ZRANGE',
+      schedule_key,
+      -1,
+      -1,
+      'WITHSCORES'
+    )
+    slot_ms = math.max(now_ms, cooldown_until)
+    if newest[2] then
+      slot_ms = math.max(slot_ms, tonumber(newest[2]) + interval_ms)
+    end
+    redis.call('ZADD', schedule_key, slot_ms, member)
+  end
+  redis.call('PEXPIRE', schedule_key, ttl_ms)
+  if slot_ms <= now_ms then
+    return {1, 0}
+  end
+  return {0, math.max(1, slot_ms - now_ms)}
+end
+local newest = redis.call(
+  'ZRANGE',
+  schedule_key,
+  -1,
+  -1,
+  'WITHSCORES'
+)
+local slot_ms = math.max(now_ms, cooldown_until)
+if newest[2] then
+  slot_ms = math.max(slot_ms, tonumber(newest[2]) + interval_ms)
+end
+redis.call('ZADD', schedule_key, slot_ms, member)
+redis.call('PEXPIRE', schedule_key, ttl_ms)
+if slot_ms <= now_ms then
   return {1, 0}
 end
-local count = redis.call('ZCARD', key)
-if count >= hard_limit then
-  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
-  local retry_ms = window_ms
-  if oldest[2] then
-    retry_ms = math.max(1, tonumber(oldest[2]) + window_ms - now_ms)
+return {0, math.max(1, slot_ms - now_ms)}
+"""
+_REDIS_RATE_LIMIT_COOLDOWN_SCRIPT = """
+local schedule_key = KEYS[1]
+local cooldown_key = KEYS[2]
+local now_ms = tonumber(ARGV[1])
+local requested_retry_ms = tonumber(ARGV[2])
+local interval_ms = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl_ms = tonumber(ARGV[5])
+local cooldown_until = now_ms + math.max(requested_retry_ms, interval_ms)
+local existing_cooldown = tonumber(redis.call('GET', cooldown_key) or '0')
+cooldown_until = math.max(cooldown_until, existing_cooldown)
+redis.call('SET', cooldown_key, cooldown_until, 'PX', ttl_ms)
+
+local entries = redis.call(
+  'ZRANGEBYSCORE',
+  schedule_key,
+  '(' .. now_ms,
+  '+inf',
+  'WITHSCORES'
+)
+local next_slot = cooldown_until
+for index = 1, #entries, 2 do
+  local queued_member = entries[index]
+  if queued_member ~= member then
+    redis.call('ZADD', schedule_key, next_slot, queued_member)
+    next_slot = next_slot + interval_ms
   end
-  return {0, retry_ms}
 end
-redis.call('ZADD', key, now_ms, member)
-redis.call('PEXPIRE', key, window_ms * 2)
-return {1, 0}
+redis.call('ZADD', schedule_key, next_slot, member)
+redis.call('PEXPIRE', schedule_key, ttl_ms)
+return {0, math.max(1, next_slot - now_ms)}
 """
 _REDIS_OPERATION_CAS_SCRIPT = """
 local key = KEYS[1]
@@ -175,6 +247,17 @@ def volcano_asset_rate_limit_key(
     return f"video-assets:quota:{volcano_asset_quota_scope(key)}:create-asset:{bucket}"
 
 
+def volcano_asset_rate_limit_cooldown_key(
+    key: VolcanoAssetQuotaKey,
+    *,
+    bucket: str,
+) -> str:
+    return (
+        f"video-assets:quota:{volcano_asset_quota_scope(key)}:"
+        f"create-asset:{bucket}:cooldown"
+    )
+
+
 def _redis_pair(value: Any) -> tuple[int, int]:
     if not isinstance(value, (list, tuple)) or len(value) < 2:
         raise RuntimeError("invalid Redis quota response")
@@ -264,12 +347,13 @@ async def acquire_volcano_create_rate_limit(
     result = await _retry_redis_call(
         lambda: redis.eval(
             _REDIS_RATE_LIMIT_SCRIPT,
-            1,
+            2,
             volcano_asset_rate_limit_key(key, bucket=bucket),
+            volcano_asset_rate_limit_cooldown_key(key, bucket=bucket),
             now_ms,
-            VOLCANO_ASSET_CREATE_WINDOW_SECONDS * 1000,
-            VOLCANO_ASSET_CREATE_QPM,
+            VOLCANO_ASSET_CREATE_INTERVAL_MS,
             operation_id,
+            VOLCANO_ASSET_CREATE_SCHEDULE_TTL_SECONDS * 1000,
         )
     )
     accepted, retry_after_ms = _redis_pair(result)
@@ -277,6 +361,40 @@ async def acquire_volcano_create_rate_limit(
         raise VolcanoAssetCreateRateLimited(
             retry_after_ms=max(1, retry_after_ms),
         )
+
+
+async def defer_volcano_create_rate_limit(
+    redis: Any,
+    key: VolcanoAssetQuotaKey,
+    *,
+    bucket: str,
+    operation_id: str,
+    retry_after_ms: int | None,
+    now_ms: int,
+) -> int:
+    requested_retry_ms = max(
+        1,
+        int(
+            retry_after_ms
+            if retry_after_ms is not None
+            else VOLCANO_ASSET_CREATE_DEFAULT_COOLDOWN_MS
+        ),
+    )
+    result = await _retry_redis_call(
+        lambda: redis.eval(
+            _REDIS_RATE_LIMIT_COOLDOWN_SCRIPT,
+            2,
+            volcano_asset_rate_limit_key(key, bucket=bucket),
+            volcano_asset_rate_limit_cooldown_key(key, bucket=bucket),
+            now_ms,
+            requested_retry_ms,
+            VOLCANO_ASSET_CREATE_INTERVAL_MS,
+            operation_id,
+            VOLCANO_ASSET_CREATE_SCHEDULE_TTL_SECONDS * 1000,
+        )
+    )
+    _accepted, effective_retry_ms = _redis_pair(result)
+    return max(1, effective_retry_ms)
 
 
 async def release_volcano_create_rate_limit(
@@ -349,7 +467,10 @@ async def compare_and_set_volcano_asset_operation(
 
 
 __all__ = [
+    "VOLCANO_ASSET_CREATE_DEFAULT_COOLDOWN_MS",
+    "VOLCANO_ASSET_CREATE_INTERVAL_MS",
     "VOLCANO_ASSET_CREATE_QPM",
+    "VOLCANO_ASSET_CREATE_SCHEDULE_TTL_SECONDS",
     "VOLCANO_ASSET_CREATE_WINDOW_SECONDS",
     "VOLCANO_ASSET_MAX_ASSETS",
     "VOLCANO_ASSET_MAX_GROUPS",
@@ -362,12 +483,14 @@ __all__ = [
     "VolcanoAssetRedisUnavailable",
     "acquire_volcano_create_rate_limit",
     "compare_and_set_volcano_asset_operation",
+    "defer_volcano_create_rate_limit",
     "release_volcano_asset_quota",
     "release_volcano_create_rate_limit",
     "reserve_volcano_asset_quota",
     "volcano_asset_operation_key",
     "volcano_asset_quota_key",
     "volcano_asset_quota_scope",
+    "volcano_asset_rate_limit_cooldown_key",
     "volcano_asset_rate_limit_key",
     "volcano_asset_reservation_key",
 ]

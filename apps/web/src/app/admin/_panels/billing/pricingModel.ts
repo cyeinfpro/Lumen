@@ -121,6 +121,17 @@ const VIDEO_OFFICIAL_PRICE_PRESETS: {
   note: string;
 }[] = [
   {
+    model: "seedance-2.5",
+    prices: {
+      t2v: { "480p": 70, "720p": 70, "1080p": 77 },
+      i2v: { "480p": 70, "720p": 70, "1080p": 77 },
+      reference_image: { "480p": 70, "720p": 70, "1080p": 77 },
+      reference_video: { "480p": 42, "720p": 42, "1080p": 46 },
+      reference: { "480p": 70, "720p": 70, "1080p": 77 },
+    },
+    note: "火山官方刊例价（2026-08-17）：480/720P 无视频 70、含视频 42；1080P 无视频 77、含视频 46 元/百万 token。1080P 的限时折扣不固化到长期默认规则。",
+  },
+  {
     model: "seedance-2.0",
     prices: {
       t2v: { "480p": 46, "720p": 46, "1080p": 51, "4k": 26 },

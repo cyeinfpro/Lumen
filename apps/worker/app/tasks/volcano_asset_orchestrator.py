@@ -31,6 +31,7 @@ from lumen_core.volcano_assets import (
     VolcanoAssetRedisUnavailable,
     VolcanoAssetServiceError,
     acquire_volcano_create_rate_limit,  # noqa: F401 - compatibility runtime export
+    defer_volcano_create_rate_limit,  # noqa: F401 - compatibility runtime export
     normalize_asset,  # noqa: F401 - compatibility runtime export
     normalize_asset_group,
     normalize_asset_group_list,  # noqa: F401 - compatibility runtime export
@@ -174,6 +175,7 @@ _RUNTIME_DEPENDENCY_FACTORIES = MappingProxyType(
         "_utc_iso": lambda: _utc_iso,
         "_write_audit": lambda: _write_audit,
         "acquire_volcano_create_rate_limit": lambda: acquire_volcano_create_rate_limit,
+        "defer_volcano_create_rate_limit": lambda: defer_volcano_create_rate_limit,
         "normalize_asset": lambda: normalize_asset,
         "normalize_asset_list": lambda: normalize_asset_list,
         "normalize_volcano_asset_name": lambda: normalize_volcano_asset_name,
@@ -655,7 +657,7 @@ async def _defer_for_rate_limit(
         operation,
         progress_stage="waiting_rate_limit",
         error_code="volcano_asset_create_rate_limited",
-        error_message="CreateAsset is waiting for the 3 per 60 seconds limit",
+        error_message="CreateAsset is queued behind the shared Volcano rate limit",
         retry_after_seconds=max(1, math.ceil(exc.retry_after_ms / 1000)),
     )
 

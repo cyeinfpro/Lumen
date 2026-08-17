@@ -8,6 +8,8 @@ import pytest
 
 from lumen_core.video_providers import VideoProviderDefinition
 from lumen_core.volcano_assets import (
+    VOLCANO_ASSET_CREATE_DEFAULT_COOLDOWN_MS,
+    VOLCANO_ASSET_CREATE_INTERVAL_MS,
     VolcanoAssetClient,
     VolcanoAssetCreateRateLimited,
     VolcanoAssetOperationOwnershipError,
@@ -16,6 +18,7 @@ from lumen_core.volcano_assets import (
     VolcanoAssetServiceError,
     acquire_volcano_create_rate_limit,
     compare_and_set_volcano_asset_operation,
+    defer_volcano_create_rate_limit,
     normalize_asset,
     normalize_volcano_asset_name,
     release_volcano_create_rate_limit,
@@ -199,7 +202,33 @@ async def test_redis_create_rate_limit_returns_precise_retry_after() -> None:
     assert "ZREMRANGEBYSCORE" in script
     assert "ZRANGE" in script
     assert "ZADD" in script
-    assert script.index("ZSCORE") < script.index("ZCARD")
+    assert "ZCARD" not in script
+    assert script.index("ZSCORE") < script.index("ZRANGE")
+    assert redis.calls[0][1] == 2
+    assert redis.calls[0][5] == VOLCANO_ASSET_CREATE_INTERVAL_MS
+
+
+@pytest.mark.asyncio
+async def test_redis_upstream_rate_limit_applies_shared_cooldown() -> None:
+    redis = _Redis([0, 63_500])
+
+    retry_after_ms = await defer_volcano_create_rate_limit(
+        redis,
+        _key(),
+        bucket="submit",
+        operation_id="operation-3",
+        retry_after_ms=None,
+        now_ms=1_000_000,
+    )
+
+    assert retry_after_ms == 63_500
+    script = str(redis.calls[0][0])
+    assert "ZRANGEBYSCORE" in script
+    assert "cooldown_until" in script
+    assert "queued_member ~= member" in script
+    assert redis.calls[0][1] == 2
+    assert redis.calls[0][5] == VOLCANO_ASSET_CREATE_DEFAULT_COOLDOWN_MS
+    assert redis.calls[0][6] == VOLCANO_ASSET_CREATE_INTERVAL_MS
 
 
 @pytest.mark.asyncio

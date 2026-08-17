@@ -618,7 +618,7 @@ def test_video_create_schema_applies_seedance_25_capabilities() -> None:
     for duration_s in (-1, 4, 30):
         body = VideoCreateIn(**{**base, "duration_s": duration_s})
         assert body.duration_s == duration_s
-    for resolution in ("480p", "720p"):
+    for resolution in ("480p", "720p", "1080p"):
         body = VideoCreateIn(**{**base, "resolution": resolution})
         assert body.resolution == resolution
 
@@ -702,7 +702,6 @@ def test_video_create_schema_applies_seedance_25_capabilities() -> None:
     invalid_overrides = (
         {"duration_s": 3},
         {"duration_s": 31},
-        {"resolution": "1080p"},
         {"resolution": "4k"},
         {
             "action": "reference",
